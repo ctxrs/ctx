@@ -880,6 +880,7 @@ fn codex_root_revision_v0(session_root: &Path) -> CodexSourceBackedResultV0<[u8;
     Ok(revision.finalize().into())
 }
 
+#[cfg(test)]
 pub(crate) fn writer_base_sources(
     writer: &GenerationWriter,
 ) -> HashMap<SourceKey, CertifiedSource> {

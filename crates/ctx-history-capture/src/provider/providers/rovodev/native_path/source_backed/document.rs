@@ -176,31 +176,22 @@ impl RovoDevTreeAuthority {
     ) -> RovoDevSourceBackedResult<RovoDevBoundDocument> {
         let source = self.source(leaf)?;
         let header = document_header_from_snapshot(source, snapshot)?;
-        let mut lineage = self
-            .lineage
-            .lock()
-            .map_err(|_| RovoDevSourceBackedError::LineageCacheUnavailable)?;
-        register_document_header(&mut lineage, leaf.source_index, header.clone())?;
+        if header != leaf.header {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
         let parent_session_id = header
             .parent_provider_session_id
             .as_deref()
             .map(provider_thread_session_identity)
             .transpose()?;
-        let root_session_id =
-            resolve_root_session(&mut lineage, &self.sources, &header.provider_session_id)?;
         Ok(RovoDevBoundDocument {
             source_key: header.source_key,
             provider_session_id: header.provider_session_id,
             session_id: header.session_id,
             parent_session_id,
-            root_session_id,
+            root_session_id: leaf.root_session_id,
             unique_message_ids: unique_message_ids(snapshot),
         })
-    }
-
-    pub(super) fn revalidate_opening(&self) -> RovoDevSourceBackedResult<()> {
-        self.authority.revalidate()?;
-        Ok(())
     }
 }
 
@@ -332,7 +323,7 @@ fn register_document_header(
     Ok(())
 }
 
-fn ensure_document_header(
+pub(super) fn ensure_document_header(
     lineage: &mut RovoDevLineageCache,
     sources: &[RovoDevOpenedSource],
     source_index: usize,
@@ -392,7 +383,7 @@ fn find_document_header(
     Ok(None)
 }
 
-fn resolve_root_session(
+pub(super) fn resolve_root_session(
     lineage: &mut RovoDevLineageCache,
     sources: &[RovoDevOpenedSource],
     provider_session_id: &str,

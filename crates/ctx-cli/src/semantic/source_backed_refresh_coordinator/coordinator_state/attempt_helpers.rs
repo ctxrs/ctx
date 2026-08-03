@@ -8,7 +8,8 @@ pub(super) fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Optio
                 SourceBackedRouteErrorKind::InvalidSource => Some("malformed_source"),
                 SourceBackedRouteErrorKind::Unavailable => Some("source_unavailable"),
                 SourceBackedRouteErrorKind::SourceChanged => Some("source_changed"),
-                SourceBackedRouteErrorKind::Internal => None,
+                SourceBackedRouteErrorKind::ResourceUnavailable
+                | SourceBackedRouteErrorKind::Internal => None,
             };
         }
         let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =

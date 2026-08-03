@@ -1,4 +1,5 @@
 use super::*;
+use ctx_history_core::SourceFrontier;
 
 pub(super) fn revisioned_receipt_route(revision: u8) -> (SourceBackedRoute, CertifiedSource) {
     let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 91);

@@ -2,11 +2,21 @@ use std::{fs, path::Path, sync::Arc};
 
 use super::super::JsonlReader;
 use super::*;
-use ctx_history_core::{CoreRecord, SourceAnchor};
-use ctx_history_index::{CommitReceipt, GenerationWriter, WriterOptions};
+use crate::provider::source_backed::{
+    SourceBackedLogicalSourceFailures, SourceBackedRecordRejections, SourceBackedRouteResources,
+};
+use ctx_history_core::{
+    derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
+    NativeSessionKey, SessionIdentityInput, SourceAnchor,
+};
+use ctx_history_index::{CommitReceipt, GenerationWriter, SourceRouteIdentity, WriterOptions};
 
 const TEST_SOURCE_FORMAT: &str = "terminal_witness_jsonl";
 const TEST_SCHEMA: &str = "terminal-witness-v1";
+
+fn test_route_identity() -> SourceRouteIdentity {
+    SourceRouteIdentity::from_sha256("00".repeat(32)).unwrap()
+}
 
 struct TestAdapter;
 
@@ -199,6 +209,98 @@ impl JsonlFamilyAdapter for ParallelTestAdapter {
     }
 }
 
+struct EmissionTestAdapter;
+
+struct EmissionTestProjector {
+    source: SourceKey,
+}
+
+impl JsonlFamilyProjector for EmissionTestProjector {
+    fn project(
+        &mut self,
+        record: JsonlRecordRef<'_>,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
+        let ordinal = record.evidence().physical_ordinal();
+        let session_key = NativeSessionKey::native_id(
+            "session",
+            TypedKey::utf8("session").map_err(contract_error)?,
+        )
+        .map_err(contract_error)?;
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &self.source,
+            logical_session_kind: "session",
+            native_session_key: &session_key,
+        })
+        .map_err(contract_error)?;
+        let native_item_key =
+            NativeItemKey::native_id("message", TypedKey::U64(ordinal)).map_err(contract_error)?;
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &self.source,
+            session_id,
+            logical_item_kind: "message",
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .map_err(contract_error)?;
+        let mut projected = CoreRecord::new_selected(
+            event_id,
+            session_id,
+            session_id,
+            self.source.clone(),
+            ordinal,
+            "message",
+            "primary",
+            true,
+            "jsonl-emission-test-v1",
+            "bounded",
+        )
+        .map_err(contract_error)?;
+        projected.provider_session_id = Some("session".to_owned());
+        projected.native_event_id = Some(TypedKey::U64(ordinal));
+        projected.occurred_at_unix_ms = Some(ordinal as i64);
+        projected.role = Some("user".to_owned());
+        emit(projected)
+    }
+}
+
+impl JsonlFamilyAdapter for EmissionTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "emission-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        TestAdapter.discover(root)
+    }
+
+    fn projector(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Ok(Box::new(EmissionTestProjector {
+            source: leaf.source().clone(),
+        }))
+    }
+}
+
 struct CheckpointTestAdapter;
 
 struct CheckpointTestProjector {
@@ -318,13 +420,19 @@ fn capture_parallel_test_generation(
     .unwrap();
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
+    let mut logical_source_failures = SourceBackedLogicalSourceFailures::default();
+    let mut record_rejections = SourceBackedRecordRejections::default();
     {
         let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: writer.core_record_preparer(),
             writer: &mut writer,
             owners: &mut owners,
             complete_inventories: &mut complete_inventories,
             route_index: 0,
-            leaf_worker_budget: workers,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(workers),
+            logical_source_failures: &mut logical_source_failures,
+            record_rejections: &mut record_rejections,
             applied_removals: &mut Vec::new(),
             record_progress: None,
             current_source_progress: None,
@@ -356,13 +464,19 @@ fn capture_checkpoint_test_generation(
     .unwrap();
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
+    let mut logical_source_failures = SourceBackedLogicalSourceFailures::default();
+    let mut record_rejections = SourceBackedRecordRejections::default();
     {
         let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: writer.core_record_preparer(),
             writer: &mut writer,
             owners: &mut owners,
             complete_inventories: &mut complete_inventories,
             route_index: 0,
-            leaf_worker_budget: workers,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(workers),
+            logical_source_failures: &mut logical_source_failures,
+            record_rejections: &mut record_rejections,
             applied_removals: &mut Vec::new(),
             record_progress: None,
             current_source_progress: None,
@@ -540,12 +654,18 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
     .unwrap();
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
+    let mut logical_source_failures = SourceBackedLogicalSourceFailures::default();
+    let mut record_rejections = SourceBackedRecordRejections::default();
     let mut sink = SourceBackedGenerationSink {
+        core_record_preparer: writer.core_record_preparer(),
         writer: &mut writer,
         owners: &mut owners,
         complete_inventories: &mut complete_inventories,
         route_index: 0,
-        leaf_worker_budget: 4,
+        route_identity: test_route_identity(),
+        resources: SourceBackedRouteResources::production(4),
+        logical_source_failures: &mut logical_source_failures,
+        record_rejections: &mut record_rejections,
         applied_removals: &mut Vec::new(),
         record_progress: None,
         current_source_progress: None,
@@ -566,6 +686,55 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
         "the production JSONL route must keep all four selected scanners active"
     );
     assert_eq!(resident.lock().unwrap().terminal_sources.len(), 8);
+}
+
+#[test]
+fn serial_and_parallel_jsonl_emission_preserve_resource_unavailable() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    for index in 0..4 {
+        fs::write(
+            root.join(format!("{index}.jsonl")),
+            b"{\"message\":\"bounded\"}\n",
+        )
+        .unwrap();
+    }
+
+    for workers in [1, 4] {
+        let resident = Mutex::new(FamilyResident::default());
+        let mut writer = GenerationWriter::open(
+            temp.path().join(format!("index-{workers}")),
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+        )
+        .unwrap();
+        let mut owners = HashMap::new();
+        let mut complete_inventories = Vec::new();
+        let mut logical_source_failures = SourceBackedLogicalSourceFailures::default();
+        let mut record_rejections = SourceBackedRecordRejections::default();
+        let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: writer.core_record_preparer(),
+            writer: &mut writer,
+            owners: &mut owners,
+            complete_inventories: &mut complete_inventories,
+            route_index: 0,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::for_test(workers, 1, u64::MAX),
+            logical_source_failures: &mut logical_source_failures,
+            record_rejections: &mut record_rejections,
+            applied_removals: &mut Vec::new(),
+            record_progress: None,
+            current_source_progress: None,
+        };
+
+        let error = with_family_scanner_workers(workers, || {
+            capture(&EmissionTestAdapter, &root, &resident, &mut sink).unwrap_err()
+        });
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+    }
 }
 
 #[test]

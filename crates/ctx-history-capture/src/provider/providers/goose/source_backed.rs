@@ -238,12 +238,17 @@ impl ReplacementDocumentTree for GooseSourceBackedAdapterV0 {
         };
         let snapshot = take_snapshot(&authority.snapshot, "Goose")?;
         sink.begin_source(self.source.clone())?;
+        let mut sink_failure = None;
         let terminal = scan_goose_logical_snapshot(
             snapshot.connection().map_err(route_error)?,
             &self.source,
             sink,
-        )
-        .map_err(route_error)?;
+            &mut sink_failure,
+        );
+        if let Some(error) = sink_failure {
+            return Err(error);
+        }
+        let terminal = terminal.map_err(route_error)?;
         snapshot.revalidate().map_err(route_error)?;
         authority.retained.revalidate()?;
         restore_snapshot(&authority.snapshot, snapshot, "Goose")?;
@@ -412,6 +417,7 @@ fn scan_goose_logical_snapshot(
     connection: &Connection,
     source: &SourceKey,
     sink: &mut ChangedDocumentSink<'_, '_>,
+    sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> GooseSourceBackedResultV0<DocumentSourceTerminal> {
     let schema = GooseNativeSchema::probe(connection)?;
     let limits = GooseNativePageLimits::default();
@@ -497,7 +503,11 @@ fn scan_goose_logical_snapshot(
                 ))?;
             let event_sequence = goose_event_sequence(&mut next_event_sequence)?;
             sink.emit_core_record(goose_core_record(source, session, event, event_sequence)?)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                .map_err(|error| {
+                    let detail = error.to_string();
+                    *sink_failure = Some(error);
+                    CaptureError::InvalidPayload(detail)
+                })?;
             retained_records = checked_add(retained_records, 1)?;
         }
     }

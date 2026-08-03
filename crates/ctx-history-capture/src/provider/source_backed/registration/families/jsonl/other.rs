@@ -154,6 +154,7 @@ pub fn register_custom_history_source_backed_route(
         move |sink| {
             let base = sink.base_source(&claimed_source).cloned();
             let mut staging_started = false;
+            let mut sink_failure = None;
             let outcome = scan_custom_history_source_backed_explicit(
                 &scan_input,
                 base.as_ref(),
@@ -162,9 +163,10 @@ pub fn register_custom_history_source_backed_route(
                         match disposition {
                             CustomHistorySourceBackedDisposition::Unchanged
                             | CustomHistorySourceBackedDisposition::Append => {
-                                let staged = sink
-                                    .begin_source_append(claimed_source.clone())
-                                    .map_err(capture_coordinator_error)?;
+                                let staged =
+                                    sink.begin_source_append(claimed_source.clone()).map_err(
+                                        |error| capture_coordinator_error(&mut sink_failure, error),
+                                    )?;
                                 if base.as_ref() != Some(staged) {
                                     return Err(CaptureError::InvalidPayload(
                                         "Custom History append base changed before staging"
@@ -175,20 +177,24 @@ pub fn register_custom_history_source_backed_route(
                             }
                             CustomHistorySourceBackedDisposition::Cold
                             | CustomHistorySourceBackedDisposition::Replacement => {
-                                sink.begin_source(claimed_source.clone())
-                                    .map_err(capture_coordinator_error)?;
+                                sink.begin_source(claimed_source.clone()).map_err(|error| {
+                                    capture_coordinator_error(&mut sink_failure, error)
+                                })?;
                             }
                         }
                         staging_started = true;
                     }
                     for record in page.records {
                         sink.add_core_record(record)
-                            .map_err(capture_coordinator_error)?;
+                            .map_err(|error| capture_coordinator_error(&mut sink_failure, error))?;
                     }
                     Ok(())
                 },
-            )
-            .map_err(custom_history_route_error)?;
+            );
+            if let Some(error) = sink_failure {
+                return Err(error);
+            }
+            let outcome = outcome.map_err(custom_history_route_error)?;
             let receipt = match outcome {
                 CustomHistorySourceBackedOutcome::Missing {
                     inventory,

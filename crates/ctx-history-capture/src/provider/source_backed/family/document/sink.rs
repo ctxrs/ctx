@@ -1,6 +1,10 @@
-use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 
 use super::*;
+use crate::provider::source_backed::{
+    ParallelLeafScanEmitError, SourceBackedRouteByteReservation, SourceBackedRouteResourceKind,
+    SourceBackedRouteResources,
+};
 
 /// One logical source may stage no more Core records than the provider-neutral
 /// source-inventory entry ceiling.
@@ -22,11 +26,14 @@ pub(crate) struct ChangedDocumentSink<'sink, 'writer> {
     logical_base: Option<CertifiedSource>,
     source: Option<SourceKey>,
     emitted_core_records: u64,
+    record_rejections: SourceBackedRecordRejectionDrafts,
 }
 
 struct DeferredCoreRecords {
     file: std::fs::File,
     budget: DeferredCoreRecordBudget,
+    resources: SourceBackedRouteResources,
+    scratch: Vec<SourceBackedRouteByteReservation>,
     #[cfg(test)]
     cleanup_path: Option<tempfile::TempPath>,
 }
@@ -132,57 +139,8 @@ impl DeferredCoreRecordBudget {
     }
 }
 
-struct BoundedDeferredWriter<'writer> {
-    file: &'writer mut std::fs::File,
-    budget: &'writer mut DeferredCoreRecordBudget,
-    admission_error: Option<DeferredCoreRecordAdmissionError>,
-}
-
-impl BoundedDeferredWriter<'_> {
-    fn reject(&mut self, error: DeferredCoreRecordAdmissionError) -> std::io::Error {
-        self.admission_error = Some(error);
-        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-    }
-
-    fn check(&mut self, bytes: usize) -> std::io::Result<()> {
-        self.budget
-            .check_encoded_bytes(bytes)
-            .map(|_| ())
-            .map_err(|error| self.reject(error))
-    }
-
-    fn commit(&mut self, bytes: usize) -> std::io::Result<()> {
-        self.budget
-            .commit_encoded_bytes(bytes)
-            .map_err(|error| self.reject(error))
-    }
-
-    fn take_admission_error(&mut self) -> Option<DeferredCoreRecordAdmissionError> {
-        self.admission_error.take()
-    }
-}
-
-impl Write for BoundedDeferredWriter<'_> {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.check(buffer.len())?;
-        let written = self.file.write(buffer)?;
-        self.commit(written)?;
-        Ok(written)
-    }
-
-    fn write_all(&mut self, buffer: &[u8]) -> std::io::Result<()> {
-        self.check(buffer.len())?;
-        self.file.write_all(buffer)?;
-        self.commit(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
 impl DeferredCoreRecords {
-    fn new() -> SourceBackedRouteResult<Self> {
+    fn new(resources: SourceBackedRouteResources) -> SourceBackedRouteResult<Self> {
         let file = tempfile::tempfile().map_err(|error| {
             document_internal(format!(
                 "could not create private logical-snapshot staging file: {error}"
@@ -191,6 +149,8 @@ impl DeferredCoreRecords {
         Ok(Self {
             file,
             budget: DeferredCoreRecordBudget::new(DeferredCoreRecordLimits::PRODUCTION),
+            resources,
+            scratch: Vec::new(),
             #[cfg(test)]
             cleanup_path: None,
         })
@@ -200,6 +160,7 @@ impl DeferredCoreRecords {
     fn test_with_limits(
         directory: &std::path::Path,
         limits: DeferredCoreRecordLimits,
+        resources: SourceBackedRouteResources,
     ) -> SourceBackedRouteResult<(Self, std::path::PathBuf)> {
         let named = tempfile::NamedTempFile::new_in(directory).map_err(|error| {
             document_internal(format!(
@@ -212,39 +173,46 @@ impl DeferredCoreRecords {
             Self {
                 file,
                 budget: DeferredCoreRecordBudget::new(limits),
+                resources,
+                scratch: Vec::new(),
                 cleanup_path: Some(cleanup_path),
             },
             path,
         ))
     }
 
-    fn push(&mut self, record: &CoreRecord) -> SourceBackedRouteResult<()> {
+    fn push(&mut self, record: CoreRecord) -> SourceBackedRouteResult<()> {
         self.budget
             .admit_core_record()
             .map_err(document_spool_admission_error)?;
-        let mut writer = BoundedDeferredWriter {
-            file: &mut self.file,
-            budget: &mut self.budget,
-            admission_error: None,
-        };
-        let encoded = serde_json::to_writer(&mut writer, record);
-        if let Some(error) = writer.take_admission_error() {
-            return Err(document_spool_admission_error(error));
-        }
-        encoded.map_err(|error| {
-            document_internal(format!(
+        let encoded = record.encode_stored().map_err(|error| {
+            document_contract_error(format!(
                 "could not encode logical-snapshot staging Core record: {error}"
             ))
         })?;
-        let delimited = writer.write_all(b"\n");
-        if let Some(error) = writer.take_admission_error() {
-            return Err(document_spool_admission_error(error));
-        }
-        delimited.map_err(|error| {
-            document_internal(format!(
-                "could not delimit logical-snapshot staging Core record: {error}"
-            ))
-        })
+        let framed = encoded
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| document_internal("logical-snapshot staging length overflowed"))?;
+        self.budget
+            .check_encoded_bytes(framed)
+            .map_err(document_spool_admission_error)?;
+        let scratch = self
+            .resources
+            .reserve(SourceBackedRouteResourceKind::LogicalSourceScratch, framed)?;
+        self.file
+            .write_all(&encoded)
+            .and_then(|()| self.file.write_all(b"\n"))
+            .map_err(|error| {
+                document_internal(format!(
+                    "could not write logical-snapshot staging Core record: {error}"
+                ))
+            })?;
+        self.budget
+            .commit_encoded_bytes(framed)
+            .map_err(document_spool_admission_error)?;
+        self.scratch.push(scratch);
+        Ok(())
     }
 
     fn replay(
@@ -263,15 +231,47 @@ impl DeferredCoreRecords {
         })?;
         #[cfg(test)]
         let _cleanup_path = self.cleanup_path.take();
-        let reader = BufReader::new(self.file);
-        for record in serde_json::Deserializer::from_reader(reader).into_iter::<CoreRecord>() {
-            let record = record.map_err(|error| {
+        let scratch = std::mem::take(&mut self.scratch);
+        let reserved_scratch_bytes = scratch.iter().try_fold(0_u64, |total, reservation| {
+            total
+                .checked_add(reservation.bytes())
+                .ok_or_else(|| document_internal("logical-snapshot scratch accounting overflowed"))
+        })?;
+        let physical_bytes = self.file.metadata().map_err(|error| {
+            document_internal(format!(
+                "could not measure logical-snapshot staging file: {error}"
+            ))
+        })?;
+        if physical_bytes.len() != reserved_scratch_bytes {
+            return Err(document_internal(
+                "logical-snapshot physical scratch did not match its exact reservations",
+            ));
+        }
+        let mut reader = BufReader::new(self.file);
+        let mut encoded = Vec::new();
+        loop {
+            encoded.clear();
+            let read = reader.read_until(b'\n', &mut encoded).map_err(|error| {
+                document_internal(format!(
+                    "could not read logical-snapshot staging Core record: {error}"
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+            if encoded.pop() != Some(b'\n') {
+                return Err(document_internal(
+                    "logical-snapshot staging Core record is missing its delimiter",
+                ));
+            }
+            let record = CoreRecord::decode_stored(&encoded).map_err(|error| {
                 document_internal(format!(
                     "could not decode logical-snapshot staging Core record: {error}"
                 ))
             })?;
             emit(record)?;
         }
+        drop(scratch);
         Ok(())
     }
 }
@@ -279,12 +279,20 @@ impl DeferredCoreRecords {
 fn document_spool_admission_error(
     error: DeferredCoreRecordAdmissionError,
 ) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
+    let kind = match error {
+        DeferredCoreRecordAdmissionError::Bounds { .. } => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        DeferredCoreRecordAdmissionError::Arithmetic { .. } => SourceBackedRouteErrorKind::Internal,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
 }
 
 enum ChangedDocumentTarget<'sink, 'writer> {
     Generation(&'sink mut SourceBackedGenerationSink<'writer>),
-    Parallel(&'sink mut ParallelLeafScanEmitter<'writer, CertifiedSource, SourceBackedRouteError>),
+    Parallel(
+        &'sink mut ParallelLeafScanEmitter<'writer, DocumentLeafCompletion, SourceBackedRouteError>,
+    ),
 }
 
 impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
@@ -295,35 +303,40 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             logical_base: None,
             source: None,
             emitted_core_records: 0,
+            record_rejections: Default::default(),
         }
     }
 
     pub(super) fn logical(
         sink: &'sink mut SourceBackedGenerationSink<'writer>,
     ) -> SourceBackedRouteResult<Self> {
+        let deferred = DeferredCoreRecords::new(sink.route_resources())?;
         Ok(Self {
             target: ChangedDocumentTarget::Generation(sink),
-            deferred: Some(DeferredCoreRecords::new()?),
+            deferred: Some(deferred),
             logical_base: None,
             source: None,
             emitted_core_records: 0,
+            record_rejections: Default::default(),
         })
     }
 
     pub(super) fn parallel_logical(
         emitter: &'sink mut ParallelLeafScanEmitter<
             'writer,
-            CertifiedSource,
+            DocumentLeafCompletion,
             SourceBackedRouteError,
         >,
         logical_base: Option<CertifiedSource>,
     ) -> SourceBackedRouteResult<Self> {
+        let deferred = DeferredCoreRecords::new(emitter.route_resources())?;
         Ok(Self {
             target: ChangedDocumentTarget::Parallel(emitter),
-            deferred: Some(DeferredCoreRecords::new()?),
+            deferred: Some(deferred),
             logical_base,
             source: None,
             emitted_core_records: 0,
+            record_rejections: Default::default(),
         })
     }
 
@@ -359,7 +372,7 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             ));
         }
         if let Some(deferred) = self.deferred.as_mut() {
-            deferred.push(&record)?;
+            deferred.push(record)?;
         } else {
             match &mut self.target {
                 ChangedDocumentTarget::Generation(sink) => {
@@ -367,9 +380,9 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                         .map_err(route_coordinator_error)?;
                 }
                 ChangedDocumentTarget::Parallel(emitter) => {
-                    emitter.emit_core_record(record).map_err(|_| {
-                        document_internal("independent document leaf scan was cancelled")
-                    })?;
+                    emitter
+                        .emit_core_record(record)
+                        .map_err(document_emit_error)?;
                 }
             }
         }
@@ -378,6 +391,14 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             .checked_add(1)
             .ok_or_else(|| document_internal("document emission count overflowed"))?;
         Ok(())
+    }
+
+    pub(crate) fn record_rejections(&mut self, rejections: SourceBackedRecordRejectionDrafts) {
+        self.record_rejections.merge(rejections);
+    }
+
+    pub(super) fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        std::mem::take(&mut self.record_rejections)
     }
 
     pub(crate) fn report_completed_bytes(&mut self, bytes: u64) -> SourceBackedRouteResult<()> {
@@ -440,20 +461,29 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                 ChangedDocumentTarget::Parallel(_) => None,
             });
         let retain_core_records = self.deferred.is_some()
-            && logical_base
-                .as_ref()
-                .is_some_and(|base| terminal_matches_base(base, &terminal));
+            && logical_base.as_ref().is_some_and(|base| {
+                terminal_matches_base(base, &terminal)
+                    && replay_fingerprint.is_none_or(|fingerprint| {
+                        document_frontier_fingerprint(base) == Some(fingerprint)
+                    })
+            });
         let certificate = terminal.certify(replay_fingerprint)?;
         if let Some(deferred) = self.deferred.take() {
             if retain_core_records {
+                let completion = DocumentLeafCompletion {
+                    certificate: certificate.clone(),
+                    record_rejections: std::mem::take(&mut self.record_rejections),
+                };
                 match &mut self.target {
-                    ChangedDocumentTarget::Generation(sink) => sink
-                        .retain_source(certificate.clone())
-                        .map_err(route_coordinator_error)?,
+                    ChangedDocumentTarget::Generation(sink) => {
+                        sink.retain_source(certificate.clone())
+                            .map_err(route_coordinator_error)?;
+                        sink.record_rejections(completion.record_rejections);
+                    }
                     ChangedDocumentTarget::Parallel(emitter) => emitter
                         .complete(ParallelLeafScanComplete::retain(
                             certificate.clone(),
-                            certificate.clone(),
+                            completion,
                         ))
                         .map_err(|_| {
                             document_internal("independent document leaf scan was cancelled")
@@ -462,6 +492,10 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                 return Ok(certificate);
             }
             let source = certificate.observation().source().clone();
+            let completion = DocumentLeafCompletion {
+                certificate: certificate.clone(),
+                record_rejections: std::mem::take(&mut self.record_rejections),
+            };
             match &mut self.target {
                 ChangedDocumentTarget::Generation(sink) => {
                     sink.begin_source(source).map_err(route_coordinator_error)?;
@@ -471,6 +505,7 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                     })?;
                     sink.certify_source(certificate.clone())
                         .map_err(route_coordinator_error)?;
+                    sink.record_rejections(completion.record_rejections);
                 }
                 ChangedDocumentTarget::Parallel(emitter) => {
                     emitter
@@ -479,14 +514,14 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
                             document_internal("independent document leaf scan was cancelled")
                         })?;
                     deferred.replay(|record| {
-                        emitter.emit_core_record(record).map_err(|_| {
-                            document_internal("independent document leaf scan was cancelled")
-                        })
+                        emitter
+                            .emit_core_record(record)
+                            .map_err(document_emit_error)
                     })?;
                     emitter
                         .complete(ParallelLeafScanComplete::replace(
                             certificate.clone(),
-                            certificate.clone(),
+                            completion,
                         ))
                         .map_err(|_| {
                             document_internal("independent document leaf scan was cancelled")
@@ -495,18 +530,33 @@ impl<'sink, 'writer> ChangedDocumentSink<'sink, 'writer> {
             }
             return Ok(certificate);
         }
+        let completion = DocumentLeafCompletion {
+            certificate: certificate.clone(),
+            record_rejections: std::mem::take(&mut self.record_rejections),
+        };
         match &mut self.target {
-            ChangedDocumentTarget::Generation(sink) => sink
-                .certify_source(certificate.clone())
-                .map_err(route_coordinator_error)?,
+            ChangedDocumentTarget::Generation(sink) => {
+                sink.certify_source(certificate.clone())
+                    .map_err(route_coordinator_error)?;
+                sink.record_rejections(completion.record_rejections);
+            }
             ChangedDocumentTarget::Parallel(emitter) => emitter
                 .complete(ParallelLeafScanComplete::replace(
                     certificate.clone(),
-                    certificate.clone(),
+                    completion,
                 ))
                 .map_err(|_| document_internal("independent document leaf scan was cancelled"))?,
         }
         Ok(certificate)
+    }
+}
+
+fn document_emit_error(error: ParallelLeafScanEmitError) -> SourceBackedRouteError {
+    match error {
+        ParallelLeafScanEmitError::Route(error) => error,
+        ParallelLeafScanEmitError::Cancelled(_) => {
+            document_internal("independent document leaf scan was cancelled")
+        }
     }
 }
 
@@ -575,7 +625,7 @@ mod tests {
     }
 
     fn encoded_frame_bytes(record: &CoreRecord) -> usize {
-        serde_json::to_vec(record).unwrap().len() + 1
+        record.encode_stored().unwrap().len() + 1
     }
 
     #[test]
@@ -587,14 +637,15 @@ mod tests {
                 core_records: 2,
                 encoded_bytes: 1024 * 1024,
             },
+            SourceBackedRouteResources::for_test(2, u64::MAX, u64::MAX),
         )
         .unwrap();
-        spool.push(&core_record(1, "first")).unwrap();
-        spool.push(&core_record(2, "second")).unwrap();
+        spool.push(core_record(1, "first")).unwrap();
+        spool.push(core_record(2, "second")).unwrap();
         let admitted_bytes = std::fs::metadata(&path).unwrap().len();
 
-        let error = spool.push(&core_record(3, "not admitted")).unwrap_err();
-        assert_eq!(error.kind, SourceBackedRouteErrorKind::InvalidSource);
+        let error = spool.push(core_record(3, "not admitted")).unwrap_err();
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
         assert!(error.detail.contains(
             "logical-snapshot Core-record spool core-record-count bound exceeded: \
              maximum 2, observed 3"
@@ -616,27 +667,25 @@ mod tests {
                 core_records: 1,
                 encoded_bytes: encoded_record_bytes,
             },
+            SourceBackedRouteResources::for_test(1, u64::MAX, u64::MAX),
         )
         .unwrap();
 
-        let error = spool.push(&record).unwrap_err();
-        assert_eq!(error.kind, SourceBackedRouteErrorKind::InvalidSource);
+        let error = spool.push(record).unwrap_err();
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
         assert!(error.detail.contains(&format!(
             "logical-snapshot Core-record spool encoded-byte bound exceeded: maximum \
              {encoded_record_bytes}, observed {}",
             encoded_record_bytes + 1
         )));
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            encoded_record_bytes as u64
-        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 
         drop(spool);
         assert!(!path.exists());
     }
 
     #[test]
-    fn logical_spool_arithmetic_error_is_invalid_source_and_cleans_up() {
+    fn logical_spool_arithmetic_error_is_systemic_internal_and_cleans_up() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let (mut spool, path) = DeferredCoreRecords::test_with_limits(
             temp.path(),
@@ -644,12 +693,13 @@ mod tests {
                 core_records: 1,
                 encoded_bytes: usize::MAX,
             },
+            SourceBackedRouteResources::for_test(1, u64::MAX, u64::MAX),
         )
         .unwrap();
         spool.budget.encoded_bytes = usize::MAX;
 
-        let error = spool.push(&core_record(1, "overflow")).unwrap_err();
-        assert_eq!(error.kind, SourceBackedRouteErrorKind::InvalidSource);
+        let error = spool.push(core_record(1, "overflow")).unwrap_err();
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::Internal);
         assert_eq!(
             error.detail,
             "logical-snapshot Core-record spool encoded-byte accounting overflowed"
@@ -658,6 +708,55 @@ mod tests {
 
         drop(spool);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn aggregate_physical_scratch_rejects_exactly_one_over_without_shrinking_peer_files() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let first_record = core_record(1, "first physical spool");
+        let second_record = core_record(2, "second physical spool");
+        let first_bytes = encoded_frame_bytes(&first_record);
+        let second_bytes = encoded_frame_bytes(&second_record);
+        let resources = SourceBackedRouteResources::for_test(
+            4,
+            u64::MAX,
+            u64::try_from(first_bytes + second_bytes - 1).unwrap(),
+        );
+        let limits = DeferredCoreRecordLimits {
+            core_records: 1,
+            encoded_bytes: first_bytes.max(second_bytes),
+        };
+        let (mut first, first_path) =
+            DeferredCoreRecords::test_with_limits(temp.path(), limits, resources.clone()).unwrap();
+        let (mut second, second_path) =
+            DeferredCoreRecords::test_with_limits(temp.path(), limits, resources.clone()).unwrap();
+
+        first.push(first_record).unwrap();
+        let error = second.push(second_record).unwrap_err();
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+        assert!(error.detail.contains(&format!(
+            "maximum {}, observed {}",
+            first_bytes + second_bytes - 1,
+            first_bytes + second_bytes
+        )));
+        assert_eq!(
+            std::fs::metadata(&first_path).unwrap().len(),
+            first_bytes as u64
+        );
+        assert_eq!(std::fs::metadata(&second_path).unwrap().len(), 0);
+        assert_eq!(
+            resources.live_bytes(SourceBackedRouteResourceKind::LogicalSourceScratch),
+            first_bytes as u64
+        );
+
+        drop(first);
+        drop(second);
+        assert_eq!(
+            resources.live_bytes(SourceBackedRouteResourceKind::LogicalSourceScratch),
+            0
+        );
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
     }
 
     #[test]
@@ -674,10 +773,11 @@ mod tests {
                 core_records: records.len(),
                 encoded_bytes: expected_bytes,
             },
+            SourceBackedRouteResources::for_test(2, u64::MAX, u64::MAX),
         )
         .unwrap();
         for record in &records {
-            spool.push(record).unwrap();
+            spool.push(record.clone()).unwrap();
         }
         assert_eq!(spool.budget.core_records, records.len());
         assert_eq!(spool.budget.encoded_bytes, expected_bytes);

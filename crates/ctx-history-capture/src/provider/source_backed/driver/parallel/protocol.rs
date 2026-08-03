@@ -7,9 +7,14 @@ use std::{
 };
 
 use ctx_history_core::{CertifiedSource, CertifiedSourceAppend, CoreRecord, SourceKey};
+use ctx_history_index::CoreRecordPreparer;
 use thiserror::Error;
 
-use super::super::{SourceBackedCoordinatorError, SourceBackedGenerationSink};
+use super::super::{
+    CoreRecordEmission, SourceBackedCoordinatorError, SourceBackedGenerationSink,
+    SourceBackedLogicalSourceFailureFact, SourceBackedRecordRejectionDrafts,
+    SourceBackedRouteError, SourceBackedRouteResources, SourceBackedSourceOutcome,
+};
 
 #[derive(Debug)]
 pub struct ParallelLeafScanJob<L> {
@@ -55,47 +60,76 @@ impl ParallelLeafScanBegin {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ParallelLeafScanComplete<R> {
     Replace {
-        certificate: CertifiedSource,
+        certificate: Box<CertifiedSource>,
         result: R,
     },
     Append {
-        append: CertifiedSourceAppend,
+        append: Box<CertifiedSourceAppend>,
         result: R,
     },
     Retain {
-        certificate: CertifiedSource,
+        certificate: Box<CertifiedSource>,
         result: R,
     },
     Skipped {
         result: R,
+    },
+    SourceFailure {
+        failure: Box<SourceBackedLogicalSourceFailureFact>,
     },
 }
 
 impl<R> ParallelLeafScanComplete<R> {
     pub fn replace(certificate: CertifiedSource, result: R) -> Self {
         Self::Replace {
-            certificate,
+            certificate: Box::new(certificate),
             result,
         }
     }
 
     pub fn append(append: CertifiedSourceAppend, result: R) -> Self {
-        Self::Append { append, result }
+        Self::Append {
+            append: Box::new(append),
+            result,
+        }
     }
 
     pub fn retain(certificate: CertifiedSource, result: R) -> Self {
         Self::Retain {
-            certificate,
+            certificate: Box::new(certificate),
             result,
         }
     }
 
     pub fn skipped(result: R) -> Self {
         Self::Skipped { result }
+    }
+
+    pub fn source_failure(
+        source: SourceKey,
+        base: Option<CertifiedSource>,
+        failure: SourceBackedRouteError,
+    ) -> Self {
+        Self::source_failure_with_rejections(source, base, failure, Default::default())
+    }
+
+    pub(crate) fn source_failure_with_rejections(
+        source: SourceKey,
+        base: Option<CertifiedSource>,
+        failure: SourceBackedRouteError,
+        record_rejections: SourceBackedRecordRejectionDrafts,
+    ) -> Self {
+        Self::SourceFailure {
+            failure: Box::new(SourceBackedLogicalSourceFailureFact {
+                source,
+                retained: base,
+                failure,
+                record_rejections,
+            }),
+        }
     }
 }
 
@@ -107,6 +141,7 @@ pub enum ParallelLeafScanMessageKind {
     CompleteReplace,
     CompleteAppend,
     CompleteRetain,
+    CompleteSourceFailure,
 }
 
 impl std::fmt::Display for ParallelLeafScanMessageKind {
@@ -118,6 +153,7 @@ impl std::fmt::Display for ParallelLeafScanMessageKind {
             Self::CompleteReplace => formatter.write_str("replacement completion"),
             Self::CompleteAppend => formatter.write_str("append completion"),
             Self::CompleteRetain => formatter.write_str("retained completion"),
+            Self::CompleteSourceFailure => formatter.write_str("source-failure completion"),
         }
     }
 }
@@ -128,6 +164,7 @@ pub enum ParallelLeafScanMode {
     Append,
     Retain,
     Skipped,
+    SourceFailure,
 }
 
 impl std::fmt::Display for ParallelLeafScanMode {
@@ -137,6 +174,7 @@ impl std::fmt::Display for ParallelLeafScanMode {
             Self::Append => formatter.write_str("append"),
             Self::Retain => formatter.write_str("retained"),
             Self::Skipped => formatter.write_str("skipped"),
+            Self::SourceFailure => formatter.write_str("source failure"),
         }
     }
 }
@@ -166,6 +204,10 @@ pub enum ParallelLeafScanProtocolError {
     },
     #[error("parallel leaf job {job_index} was skipped after beginning")]
     SkippedAfterBegin { job_index: usize },
+    #[error("parallel leaf job {job_index} reported a non-local failure as a source outcome")]
+    InvalidSourceFailureKind { job_index: usize },
+    #[error("parallel leaf job {job_index} retained a mismatched base after source failure")]
+    SourceFailureBaseMismatch { job_index: usize },
     #[error("parallel leaf job {job_index} returned without one completion")]
     MissingCompletion { job_index: usize },
     #[error("parallel leaf job {job_index} returned more than once")]
@@ -193,6 +235,8 @@ pub enum ParallelLeafScanProtocolError {
     TransportDisconnected { unfinished_jobs: usize },
     #[error("parallel leaf transport referenced unknown job {job_index}")]
     UnknownJob { job_index: usize },
+    #[error("parallel leaf API received a logical-source failure without requesting outcomes")]
+    UnexpectedSourceFailure,
     #[error(
         "parallel leaf job {job_index} was assigned to worker {expected_worker} but emitted from \
          worker {observed_worker}"
@@ -228,6 +272,15 @@ where
     }
 }
 
+impl From<ParallelLeafScanEmitError> for ParallelLeafScanWorkerError<SourceBackedRouteError> {
+    fn from(error: ParallelLeafScanEmitError) -> Self {
+        match error {
+            ParallelLeafScanEmitError::Cancelled(cancelled) => Self::Cancelled(cancelled),
+            ParallelLeafScanEmitError::Route(error) => Self::Provider(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParallelLeafSinkOperation {
     BeginReplace,
@@ -236,6 +289,7 @@ pub enum ParallelLeafSinkOperation {
     CompleteReplace,
     CompleteAppend,
     RetainSource,
+    RecordSourceFailure,
 }
 
 impl std::fmt::Display for ParallelLeafSinkOperation {
@@ -247,6 +301,7 @@ impl std::fmt::Display for ParallelLeafSinkOperation {
             Self::CompleteReplace => formatter.write_str("complete replacement"),
             Self::CompleteAppend => formatter.write_str("complete append"),
             Self::RetainSource => formatter.write_str("retain source"),
+            Self::RecordSourceFailure => formatter.write_str("record source failure"),
         }
     }
 }
@@ -299,21 +354,19 @@ where
     },
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(super) enum ParallelLeafProtocolMessage<R> {
-    Begin(ParallelLeafScanBegin),
-    CoreRecord(CoreRecord),
-    Complete(ParallelLeafScanComplete<R>),
+    Begin(Box<ParallelLeafScanBegin>),
+    CoreRecord(Box<CoreRecordEmission>),
+    Complete(Box<ParallelLeafScanComplete<R>>),
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(super) enum ParallelLeafWorkerEvent<R, E> {
     Protocol {
         worker_index: usize,
         job_index: usize,
-        message: ParallelLeafProtocolMessage<R>,
+        message: Box<ParallelLeafProtocolMessage<R>>,
     },
     Returned {
         worker_index: usize,
@@ -339,29 +392,53 @@ pub struct ParallelLeafScanEmitter<'sender, R, E> {
     pub(super) job_index: usize,
     pub(super) sender: &'sender SyncSender<ParallelLeafWorkerEvent<R, E>>,
     pub(super) cancellation: &'sender AtomicBool,
+    pub(super) resources: SourceBackedRouteResources,
+    pub(super) core_record_preparer: CoreRecordPreparer,
+}
+
+#[derive(Debug, Error)]
+pub enum ParallelLeafScanEmitError {
+    #[error(transparent)]
+    Cancelled(#[from] ParallelLeafScanCancelled),
+    #[error(transparent)]
+    Route(#[from] SourceBackedRouteError),
 }
 
 impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
     pub fn begin(&mut self, begin: ParallelLeafScanBegin) -> Result<(), ParallelLeafScanCancelled> {
-        self.send(ParallelLeafProtocolMessage::Begin(begin))
+        self.send(ParallelLeafProtocolMessage::Begin(Box::new(begin)))
     }
 
     pub fn emit_core_record(
         &mut self,
         record: CoreRecord,
-    ) -> Result<(), ParallelLeafScanCancelled> {
-        self.send(ParallelLeafProtocolMessage::CoreRecord(record))
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        let emission =
+            CoreRecordEmission::new(record, &self.resources, &self.core_record_preparer)?;
+        self.emit_core_record_emission(emission)
+    }
+
+    pub(crate) fn emit_core_record_emission(
+        &mut self,
+        emission: CoreRecordEmission,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        self.send(ParallelLeafProtocolMessage::CoreRecord(Box::new(emission)))?;
+        Ok(())
     }
 
     pub fn complete(
         &mut self,
         completion: ParallelLeafScanComplete<R>,
     ) -> Result<(), ParallelLeafScanCancelled> {
-        self.send(ParallelLeafProtocolMessage::Complete(completion))
+        self.send(ParallelLeafProtocolMessage::Complete(Box::new(completion)))
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn route_resources(&self) -> SourceBackedRouteResources {
+        self.resources.clone()
     }
 
     fn send(
@@ -375,7 +452,7 @@ impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
             .send(ParallelLeafWorkerEvent::Protocol {
                 worker_index: self.worker_index,
                 job_index: self.job_index,
-                message,
+                message: Box::new(message),
             })
             .map_err(|_| ParallelLeafScanCancelled)
     }
@@ -456,19 +533,19 @@ pub(super) fn apply_parallel_leaf_message<R, E>(
     job_index: usize,
     message: ParallelLeafProtocolMessage<R>,
     states: &mut [ParallelLeafJobState],
-    results: &mut [Option<R>],
+    results: &mut [Option<SourceBackedSourceOutcome<R>>],
 ) -> Result<(), ParallelLeafScanError<E>>
 where
     E: StdError + 'static,
 {
     let state = state_mut(states, job_index)?;
     match message {
-        ParallelLeafProtocolMessage::Begin(begin) => apply_begin(sink, job_index, state, begin),
+        ParallelLeafProtocolMessage::Begin(begin) => apply_begin(sink, job_index, state, *begin),
         ParallelLeafProtocolMessage::CoreRecord(record) => {
-            apply_core_record(sink, job_index, state, record)
+            apply_core_record(sink, job_index, state, *record)
         }
         ParallelLeafProtocolMessage::Complete(completion) => {
-            let result = apply_completion(sink, job_index, state, completion)?;
+            let result = apply_completion(sink, job_index, state, *completion)?;
             let slot = results.get_mut(job_index).ok_or({
                 ParallelLeafScanProtocolError::TransportDisconnected {
                     unfinished_jobs: states.len(),
@@ -549,7 +626,7 @@ fn apply_core_record<E>(
     sink: &mut SourceBackedGenerationSink<'_>,
     job_index: usize,
     state: &mut ParallelLeafJobState,
-    record: CoreRecord,
+    emission: CoreRecordEmission,
 ) -> Result<(), ParallelLeafScanError<E>>
 where
     E: StdError + 'static,
@@ -565,9 +642,9 @@ where
         job_index,
         ParallelLeafScanMessageKind::CoreRecord,
         source,
-        &record.source,
+        emission.source(),
     )?;
-    sink.add_core_record(record).map_err(|error| {
+    sink.add_core_record_emission(emission).map_err(|error| {
         sink_error(
             job_index,
             source,
@@ -582,7 +659,7 @@ fn apply_completion<R, E>(
     job_index: usize,
     state: &mut ParallelLeafJobState,
     completion: ParallelLeafScanComplete<R>,
-) -> Result<R, ParallelLeafScanError<E>>
+) -> Result<SourceBackedSourceOutcome<R>, ParallelLeafScanError<E>>
 where
     E: StdError + 'static,
 {
@@ -606,7 +683,7 @@ where
                 source,
                 certificate.observation().source(),
             )?;
-            sink.certify_source(certificate).map_err(|error| {
+            sink.certify_source(*certificate).map_err(|error| {
                 sink_error(
                     job_index,
                     source,
@@ -615,7 +692,7 @@ where
                 )
             })?;
             state.completion = Some(ParallelLeafScanMode::Replace);
-            Ok(result)
+            Ok(SourceBackedSourceOutcome::Success(result))
         }
         ParallelLeafScanComplete::Append { append, result } => {
             require_begin_mode(job_index, state, ParallelLeafScanMode::Append)?;
@@ -653,7 +730,7 @@ where
                         .into(),
                 );
             }
-            sink.certify_source_append(append).map_err(|error| {
+            sink.certify_source_append(*append).map_err(|error| {
                 sink_error(
                     job_index,
                     source,
@@ -662,7 +739,7 @@ where
                 )
             })?;
             state.completion = Some(ParallelLeafScanMode::Append);
-            Ok(result)
+            Ok(SourceBackedSourceOutcome::Success(result))
         }
         ParallelLeafScanComplete::Retain {
             certificate,
@@ -682,7 +759,7 @@ where
                 source,
                 certificate.observation().source(),
             )?;
-            sink.retain_source(certificate).map_err(|error| {
+            sink.retain_source(*certificate).map_err(|error| {
                 sink_error(
                     job_index,
                     source,
@@ -691,14 +768,71 @@ where
                 )
             })?;
             state.completion = Some(ParallelLeafScanMode::Retain);
-            Ok(result)
+            Ok(SourceBackedSourceOutcome::Success(result))
         }
         ParallelLeafScanComplete::Skipped { result } => {
             if state.begin.is_some() {
                 return Err(ParallelLeafScanProtocolError::SkippedAfterBegin { job_index }.into());
             }
             state.completion = Some(ParallelLeafScanMode::Skipped);
-            Ok(result)
+            Ok(SourceBackedSourceOutcome::Success(result))
+        }
+        ParallelLeafScanComplete::SourceFailure { failure } => {
+            let mut failure = failure;
+            if state.begin.is_some() {
+                return Err(ParallelLeafScanProtocolError::SkippedAfterBegin { job_index }.into());
+            }
+            if !failure.failure.kind.is_logical_source_failure() {
+                return Err(
+                    ParallelLeafScanProtocolError::InvalidSourceFailureKind { job_index }.into(),
+                );
+            }
+            let bound = bound_source(
+                job_index,
+                ParallelLeafScanMessageKind::CompleteSourceFailure,
+                state,
+            )?;
+            validate_source(
+                job_index,
+                ParallelLeafScanMessageKind::CompleteSourceFailure,
+                bound,
+                &failure.source,
+            )?;
+            let carried_forward = if let Some(base) = failure.retained.as_ref() {
+                if base.observation().source() != bound {
+                    return Err(ParallelLeafScanProtocolError::SourceFailureBaseMismatch {
+                        job_index,
+                    }
+                    .into());
+                }
+                sink.retain_source(base.clone()).map_err(|error| {
+                    sink_error(
+                        job_index,
+                        bound,
+                        ParallelLeafSinkOperation::RetainSource,
+                        error,
+                    )
+                })?;
+                true
+            } else {
+                false
+            };
+            sink.record_logical_source_failure(
+                failure.source.clone(),
+                failure.failure.clone(),
+                carried_forward,
+            )
+            .map_err(|error| {
+                sink_error(
+                    job_index,
+                    bound,
+                    ParallelLeafSinkOperation::RecordSourceFailure,
+                    error,
+                )
+            })?;
+            sink.record_rejections(std::mem::take(&mut failure.record_rejections));
+            state.completion = Some(ParallelLeafScanMode::SourceFailure);
+            Ok(SourceBackedSourceOutcome::Failed(failure))
         }
     }
 }

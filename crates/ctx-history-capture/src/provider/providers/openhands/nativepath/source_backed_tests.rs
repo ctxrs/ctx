@@ -143,7 +143,7 @@ fn cold_projection_preserves_complete_bodies_outcomes_and_core_semantics() {
     assert_eq!(first.role.as_deref(), Some("assistant"));
     assert_eq!(
         projection.source.parser_revision(),
-        "openhands-source-backed-v3"
+        "openhands-source-backed-v4"
     );
 }
 
@@ -325,7 +325,9 @@ fn unchanged_plan_reads_zero_bodies_and_changed_group_reads_each_leaf_once() {
             .groups()
             .map(|group| {
                 let plan = adapter.bind_group(group).unwrap();
-                adapter.exact_replay_matches(base.get(group.group_key()).unwrap(), &plan)
+                let certified = base.get(group.group_key()).unwrap();
+                certified.observation() == &plan.opening
+                    && certified.parser_revision() == "openhands-source-backed-v4"
             })
             .collect::<Vec<_>>()
     });
@@ -343,7 +345,10 @@ fn unchanged_plan_reads_zero_bodies_and_changed_group_reads_each_leaf_once() {
         let mut replaced = Vec::new();
         for group in inventory.groups() {
             let plan = adapter.bind_group(group).unwrap();
-            if adapter.exact_replay_matches(base.get(group.group_key()).unwrap(), &plan) {
+            let certified = base.get(group.group_key()).unwrap();
+            if certified.observation() == &plan.opening
+                && certified.parser_revision() == "openhands-source-backed-v4"
+            {
                 continue;
             }
             let certificate = project_group(group, &plan, |_| Ok(())).unwrap();
@@ -447,6 +452,46 @@ fn duplicate_and_cross_conversation_native_ids_are_scoped_correctly() {
 }
 
 #[test]
+fn malformed_leaf_is_rejected_without_hiding_valid_conversation_peers() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("profile");
+    write_event(
+        &root,
+        "conversation",
+        "0001.json",
+        message("event-1", "first"),
+    );
+    let malformed = write_event(
+        &root,
+        "conversation",
+        "0002.json",
+        message("event-2", "unused"),
+    );
+    fs::write(malformed, b"{not-json").unwrap();
+    write_event(
+        &root,
+        "conversation",
+        "0003.json",
+        message("event-3", "third"),
+    );
+
+    let projection = project(&root).unwrap().remove(0);
+    assert_eq!(projection.source.counts().complete_records, 3);
+    assert_eq!(projection.source.counts().retained_records, 2);
+    assert_eq!(projection.source.counts().rejected_records, 1);
+    assert_eq!(projection.source.counts().ignored_records, 0);
+    assert_eq!(projection.source.counts().indexed_documents, 2);
+    assert_eq!(
+        projection
+            .records
+            .iter()
+            .map(|record| (record.event_sequence, body(record)))
+            .collect::<Vec<_>>(),
+        vec![(0, "first"), (2, "third")]
+    );
+}
+
+#[test]
 fn exact_empty_missing_and_current_cli_sources_remain_typed() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("profile");
@@ -467,14 +512,6 @@ fn exact_empty_missing_and_current_cli_sources_remain_typed() {
     let adapter = OpenHandsEventFileAdapterV2::new(&empty);
     let inventory = adapter.open_inventory().unwrap();
     assert!(inventory.is_empty());
-    assert_eq!(
-        adapter
-            .plan_inventory(&inventory)
-            .unwrap()
-            .complete_inventory()
-            .observed_sources(),
-        0
-    );
 
     let missing_error = OpenHandsEventFileAdapterV2::new(temp.path().join("missing"))
         .open_inventory()

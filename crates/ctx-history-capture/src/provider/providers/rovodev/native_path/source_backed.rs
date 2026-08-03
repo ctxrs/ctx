@@ -9,7 +9,6 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 
 use ctx_history_core::{
@@ -42,8 +41,9 @@ use crate::{
         },
         source_backed::{
             family::document::{
-                ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
-                DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
+                ChangedDocumentSink, CompleteDocumentTree, DocumentLeafExecutionPolicy,
+                DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf,
+                ReplacementDocumentTree,
             },
             SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
         },
@@ -63,14 +63,14 @@ const LOGICAL_SESSION_KIND: &str = "rovodev-session";
 const LOGICAL_EVENT_KIND: &str = "rovodev-event";
 const SOURCE_SCHEMA_VARIANT: &str = "rovodev-session-json-tree-v1";
 const SOURCE_REVISION_KIND: &str = "rovodev-session-tree-revision-v1";
-const PARSER_REVISION: &str = "rovodev-source-backed-v2";
+const PARSER_REVISION: &str = "rovodev-source-backed-v3";
 const RELATIVE_CONTEXT_FILE: &str = "session_context.json";
 const MESSAGE_OBJECT_KIND: &str = "message_history";
 const FILE_HASH_BUFFER_BYTES: usize = 64 * 1024;
 const SOURCE_BACKED_MAX_JSON_DEPTH: usize = 128;
 const SOURCE_BACKED_MAX_COLLECTION_ELEMENTS: usize = 65_536;
 const SOURCE_BACKED_MAX_FAILURE_BYTES: usize = 4 * 1024;
-const LEAF_FINGERPRINT_DOMAIN: &[u8] = b"ctx.rovodev.document-leaf.v2\0";
+const LEAF_FINGERPRINT_DOMAIN: &[u8] = b"ctx.rovodev.document-leaf.v3\0";
 const TREE_FINGERPRINT_DOMAIN: &[u8] = b"ctx.rovodev.document-tree.v1\0";
 
 #[derive(Debug, Error)]
@@ -89,8 +89,6 @@ pub(crate) enum RovoDevSourceBackedError {
     DuplicateSession(String),
     #[error("Rovo Dev session lineage contains a cycle at provider thread {0:?}")]
     LineageCycle(String),
-    #[error("Rovo Dev lineage cache is unavailable")]
-    LineageCacheUnavailable,
     #[error("Rovo Dev source-backed scan counts do not reconcile")]
     CountMismatch,
     #[error("Rovo Dev source-backed event coordinate exceeds its supported range")]
@@ -495,10 +493,34 @@ impl RovoDevOpenedFiles {
     }
 }
 
+impl RovoDevTreeAuthority {
+    fn revalidate_terminal_inventory(&self) -> RovoDevSourceBackedResult<()> {
+        self.authority.revalidate()?;
+        let discovery = authoritative_discovery(self.authority.named_path())?;
+        if discovery.sources().len() != self.sources.len() {
+            return Err(CaptureError::SourceChangedDuringCapture.into());
+        }
+        for (current, opened) in discovery.sources().iter().zip(&self.sources) {
+            if current.session_dir != opened.source.session_dir
+                || current.context_path != opened.source.context_path
+                || current.metadata_path != opened.source.metadata_path
+                || current.provider_session_id != opened.source.provider_session_id
+            {
+                return Err(CaptureError::SourceChangedDuringCapture.into());
+            }
+            opened.revalidate_current()?;
+        }
+        self.authority.revalidate()?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RovoDevDocumentLeaf {
     source_index: usize,
     proof: RovoDevDocumentProof,
+    header: RovoDevDocumentHeader,
+    root_session_id: StableEntityId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,7 +573,6 @@ impl RovoDevLineageCache {
 pub(crate) struct RovoDevTreeAuthority {
     authority: ProviderSourceRoot,
     sources: Vec<RovoDevOpenedSource>,
-    lineage: Mutex<RovoDevLineageCache>,
 }
 
 type RovoDevDocumentTree = CompleteDocumentTree<RovoDevDocumentLeaf, RovoDevTreeAuthority>;
@@ -630,21 +651,36 @@ fn bind_document_tree(
         sources.push(opened);
     }
     authority.revalidate()?;
-    let observed = sources
-        .iter()
-        .enumerate()
-        .map(|(source_index, source)| observed_rovodev_leaf(source_index, source))
-        .collect::<RovoDevSourceBackedResult<Vec<_>>>()?;
+    // Resolve the complete transitive lineage before replay admission. A
+    // leaf's projected root_session_id depends on ancestor headers outside
+    // that leaf, so the resolved root identity is part of its durable replay
+    // fingerprint rather than mutable scan-order context.
+    let mut lineage = RovoDevLineageCache::new(&sources);
+    let mut observed = Vec::with_capacity(sources.len());
+    for source_index in 0..sources.len() {
+        document::ensure_document_header(&mut lineage, &sources, source_index)?;
+    }
+    for (source_index, source) in sources.iter().enumerate() {
+        let header = lineage
+            .headers
+            .get(source_index)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(RovoDevSourceBackedError::CountMismatch)?;
+        let root_session_id =
+            document::resolve_root_session(&mut lineage, &sources, &header.provider_session_id)?;
+        observed.push(observed_rovodev_leaf(
+            source_index,
+            source,
+            header,
+            root_session_id,
+        )?);
+    }
     let tree_fingerprint = rovodev_tree_fingerprint(&authority, &observed);
-    let lineage = RovoDevLineageCache::new(&sources);
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
         observed,
-        RovoDevTreeAuthority {
-            authority,
-            sources,
-            lineage: Mutex::new(lineage),
-        },
+        RovoDevTreeAuthority { authority, sources },
     ))
 }
 
@@ -717,6 +753,8 @@ fn provider_thread_session_identity(
 fn observed_rovodev_leaf(
     source_index: usize,
     source: &RovoDevOpenedSource,
+    header: RovoDevDocumentHeader,
+    root_session_id: StableEntityId,
 ) -> RovoDevSourceBackedResult<ObservedDocumentLeaf<RovoDevDocumentLeaf>> {
     let proof = source.proof()?;
     let mut digest = Sha256::new();
@@ -731,11 +769,16 @@ fn observed_rovodev_leaf(
     }
     digest.update(proof.opening.revision_authority());
     digest.update(proof.certified_bytes.to_be_bytes());
+    let encoded_root = root_session_id.encode_canonical()?;
+    digest.update((encoded_root.len() as u64).to_be_bytes());
+    digest.update(encoded_root);
     Ok(ObservedDocumentLeaf::new(
         DocumentLeafFingerprint::new(digest.finalize().into()),
         RovoDevDocumentLeaf {
             source_index,
             proof,
+            header,
+            root_session_id,
         },
     ))
 }
@@ -799,6 +842,19 @@ impl ReplacementDocumentTree for RovoDevDocumentTreeAdapter {
         owns_rovodev_source(source)
     }
 
+    fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
+        DocumentLeafExecutionPolicy::Independent
+    }
+
+    fn independent_leaf_source(
+        &self,
+        authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<SourceKey> {
+        authority.source(leaf).map_err(rovodev_route_error)?;
+        Ok(leaf.header.source_key.clone())
+    }
+
     fn discover_complete(&self) -> SourceBackedRouteResult<RovoDevDocumentTree> {
         match discover_rovodev_source_backed(&self.root).map_err(rovodev_route_error)? {
             RovoDevSourceBackedDisposition::Complete(tree) => Ok(*tree),
@@ -820,15 +876,9 @@ impl ReplacementDocumentTree for RovoDevDocumentTreeAdapter {
 
     fn revalidate_complete(&self, tree: &RovoDevDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {
         tree.authority
-            .revalidate_opening()
+            .revalidate_terminal_inventory()
             .map_err(rovodev_route_error)?;
-        match discover_rovodev_source_backed(&self.root).map_err(rovodev_route_error)? {
-            RovoDevSourceBackedDisposition::Complete(tree) => Ok(tree.tree_fingerprint),
-            RovoDevSourceBackedDisposition::Unavailable => Err(SourceBackedRouteError::new(
-                SourceBackedRouteErrorKind::SourceChanged,
-                "Rovo Dev sessions root disappeared before terminal revalidation",
-            )),
-        }
+        Ok(tree.tree_fingerprint)
     }
 }
 

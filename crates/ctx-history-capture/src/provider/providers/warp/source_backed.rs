@@ -198,12 +198,17 @@ impl ReplacementDocumentTree for WarpReplacementTreeAdapter {
         };
         let snapshot = take_warp_snapshot(authority)?;
         sink.begin_source(self.source.clone())?;
+        let mut sink_failure = None;
         let terminal = scan_warp_logical_snapshot(
             snapshot.connection().map_err(route_error)?,
             &self.source,
             sink,
-        )
-        .map_err(route_error)?;
+            &mut sink_failure,
+        );
+        if let Some(error) = sink_failure {
+            return Err(error);
+        }
+        let terminal = terminal.map_err(route_error)?;
         snapshot.revalidate().map_err(route_error)?;
         authority.retained.revalidate()?;
         restore_warp_snapshot(authority, snapshot)?;
@@ -482,12 +487,13 @@ fn scan_warp_logical_snapshot(
     connection: &Connection,
     source: &SourceKey,
     sink: &mut ChangedDocumentSink<'_, '_>,
+    sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> WarpSourceBackedResultV0<DocumentSourceTerminal> {
     let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
         .map_err(|_| WarpSourceBackedErrorV0::CountOverflow)?;
     connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    let mut projection = WarpProjectionSink::new(source.clone(), sink);
+    let mut projection = WarpProjectionSink::new(source.clone(), sink, sink_failure);
     let native_scan = scan_warp_source_backed_connection(connection, &mut projection)?;
     let counts = scan_counts(&native_scan, &projection)?;
     let content_digest = parse_hex_digest(&native_scan.source_integrity_digest)?;
@@ -508,10 +514,11 @@ fn scan_warp_logical_snapshot(
     })
 }
 
-struct WarpProjectionSink<'changed, 'sink, 'writer> {
+struct WarpProjectionSink<'failure, 'changed, 'sink, 'writer> {
     source: SourceKey,
     session_lineage: BTreeMap<String, WarpSessionLineage>,
     sink: &'changed mut ChangedDocumentSink<'sink, 'writer>,
+    sink_failure: &'failure mut Option<SourceBackedRouteError>,
     indexed_documents: u64,
     rejected_records: u64,
     ignored_records: u64,
@@ -522,12 +529,17 @@ struct WarpSessionLineage {
     root_conversation_id: String,
 }
 
-impl<'changed, 'sink, 'writer> WarpProjectionSink<'changed, 'sink, 'writer> {
-    fn new(source: SourceKey, sink: &'changed mut ChangedDocumentSink<'sink, 'writer>) -> Self {
+impl<'failure, 'changed, 'sink, 'writer> WarpProjectionSink<'failure, 'changed, 'sink, 'writer> {
+    fn new(
+        source: SourceKey,
+        sink: &'changed mut ChangedDocumentSink<'sink, 'writer>,
+        sink_failure: &'failure mut Option<SourceBackedRouteError>,
+    ) -> Self {
         Self {
             source,
             session_lineage: BTreeMap::new(),
             sink,
+            sink_failure,
             indexed_documents: 0,
             rejected_records: 0,
             ignored_records: 0,
@@ -535,7 +547,7 @@ impl<'changed, 'sink, 'writer> WarpProjectionSink<'changed, 'sink, 'writer> {
     }
 }
 
-impl WarpNativeSink for WarpProjectionSink<'_, '_, '_> {
+impl WarpNativeSink for WarpProjectionSink<'_, '_, '_, '_> {
     fn push_page(&mut self, page: WarpNativePage) -> CaptureResult<()> {
         let WarpNativePage {
             sessions,
@@ -584,9 +596,11 @@ impl WarpNativeSink for WarpProjectionSink<'_, '_, '_> {
                 ))?;
             let document =
                 core_record(&self.source, lineage, event).map_err(source_backed_capture_error)?;
-            self.sink
-                .emit_core_record(document)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            self.sink.emit_core_record(document).map_err(|error| {
+                let detail = error.to_string();
+                *self.sink_failure = Some(error);
+                CaptureError::InvalidPayload(detail)
+            })?;
             self.indexed_documents =
                 self.indexed_documents
                     .checked_add(1)
@@ -739,7 +753,7 @@ fn warp_source_key(selection: &WarpSourceSelectionV0) -> WarpSourceBackedResultV
 
 fn scan_counts(
     native_scan: &WarpNativeSourceBackedScan,
-    sink: &WarpProjectionSink<'_, '_, '_>,
+    sink: &WarpProjectionSink<'_, '_, '_, '_>,
 ) -> WarpSourceBackedResultV0<ScannedSourceCounts> {
     let retained_records = sink.indexed_documents;
     if retained_records != native_scan.counters.retained_events

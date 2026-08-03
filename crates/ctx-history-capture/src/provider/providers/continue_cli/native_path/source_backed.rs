@@ -185,12 +185,18 @@ fn scan_continue_document(
             ));
         }
     };
-    project_changed_stream(&mut stream, sink).map_err(route_error)
+    let mut sink_failure = None;
+    let projected = project_changed_stream(&mut stream, sink, &mut sink_failure);
+    if let Some(error) = sink_failure {
+        return Err(error);
+    }
+    projected.map_err(route_error)
 }
 
 fn project_changed_stream(
     stream: &mut ContinueSourcePageStream,
     sink: &mut ChangedDocumentSink<'_, '_>,
+    sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> ContinueSourceBackedResult<DocumentSourceTerminal> {
     let mut active = None;
     let mut terminal = None;
@@ -200,7 +206,7 @@ fn project_changed_stream(
         if terminal.is_some() {
             return Err(ContinueSourceBackedError::CountMismatch);
         }
-        terminal = project_changed_page(&mut active, page, sink)?;
+        terminal = project_changed_page(&mut active, page, sink, sink_failure)?;
     }
     if active.is_some() {
         return Err(ContinueSourceBackedError::UnterminatedSource);
@@ -212,14 +218,18 @@ fn project_changed_page(
     active: &mut Option<ActiveSource>,
     mut page: ContinuePreparedPage,
     sink: &mut ChangedDocumentSink<'_, '_>,
+    sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> ContinueSourceBackedResult<Option<DocumentSourceTerminal>> {
     if let Some(prepared) = page.source.take() {
         if active.is_some() {
             return Err(ContinueSourceBackedError::OverlappingSource);
         }
         let started = start_source(*prepared)?;
-        sink.begin_source(started.source.clone())
-            .map_err(|error| ContinueSourceBackedError::ProjectionFailure(error.to_string()))?;
+        sink.begin_source(started.source.clone()).map_err(|error| {
+            let detail = error.to_string();
+            *sink_failure = Some(error);
+            ContinueSourceBackedError::ProjectionFailure(detail)
+        })?;
         *active = Some(started);
     }
     let current = active
@@ -238,8 +248,11 @@ fn project_changed_page(
             .checked_add(1)
             .ok_or(ContinueSourceBackedError::CountOverflow)?;
         let document = project_event(current, event)?;
-        sink.emit_core_record(document)
-            .map_err(|error| ContinueSourceBackedError::ProjectionFailure(error.to_string()))?;
+        sink.emit_core_record(document).map_err(|error| {
+            let detail = error.to_string();
+            *sink_failure = Some(error);
+            ContinueSourceBackedError::ProjectionFailure(detail)
+        })?;
         current.emitted_documents = current
             .emitted_documents
             .checked_add(1)

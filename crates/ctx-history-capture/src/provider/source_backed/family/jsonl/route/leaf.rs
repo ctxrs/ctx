@@ -47,6 +47,7 @@ fn scan_leaf_serial(
 ) -> SourceBackedRouteResult<TerminalSourceEvidence> {
     let mut staging_started = false;
     let mut append_staging = false;
+    let mut sink_failure = None;
     let prepared = prepare_leaf(
         adapter,
         leaf,
@@ -60,7 +61,7 @@ fn scan_leaf_serial(
                     })?;
                     let staged = sink
                         .begin_source_append(leaf.source().clone())
-                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                        .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
                     if staged != expected {
                         return Err(CaptureError::InvalidPayload(
                             "JSONL append base changed before staging".to_owned(),
@@ -68,7 +69,7 @@ fn scan_leaf_serial(
                     }
                 } else {
                     sink.begin_source(leaf.source().clone())
-                        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                        .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
                 }
                 staging_started = true;
                 append_staging = append;
@@ -79,12 +80,15 @@ fn scan_leaf_serial(
             }
             for record in core_records {
                 sink.add_core_record(record)
-                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                    .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
             }
             Ok(())
         },
-    )
-    .map_err(route_invalid)?;
+    );
+    if let Some(error) = sink_failure {
+        return Err(error);
+    }
+    let prepared = prepared.map_err(route_invalid)?;
 
     let PreparedLeaf {
         certificate,
@@ -181,6 +185,7 @@ pub(super) fn scan_leaves(
             let leaf = &job.leaf().leaf;
             let mut staging_started = false;
             let mut append_staging = false;
+            let mut emission_failure = None;
             let prepared = prepare_leaf(
                 adapter,
                 leaf,
@@ -211,17 +216,19 @@ pub(super) fn scan_leaves(
                         ));
                     }
                     for record in core_records {
-                        emitter.emit_core_record(record).map_err(|_| {
-                            CaptureError::SystemInvariant(
-                                "JSONL parallel scan was cancelled during replacement",
-                            )
+                        emitter.emit_core_record(record).map_err(|error| {
+                            preserve_parallel_emit_error(&mut emission_failure, error)
                         })?;
                     }
                     Ok(())
                 },
-            )
-            .map_err(route_invalid)
-            .map_err(ParallelLeafScanWorkerError::provider)?;
+            );
+            if let Some(error) = emission_failure {
+                return Err(ParallelLeafScanWorkerError::provider(error));
+            }
+            let prepared = prepared
+                .map_err(route_invalid)
+                .map_err(ParallelLeafScanWorkerError::provider)?;
 
             let PreparedLeaf {
                 certificate,
@@ -600,6 +607,39 @@ fn decode_checkpoint(
         ));
     }
     Ok(checkpoint)
+}
+
+fn preserve_coordinator_error(
+    failure: &mut Option<SourceBackedRouteError>,
+    error: crate::provider::source_backed::SourceBackedCoordinatorError,
+) -> CaptureError {
+    preserve_route_error(
+        failure,
+        crate::provider::source_backed::registration::route_coordinator_error(error),
+    )
+}
+
+fn preserve_route_error(
+    failure: &mut Option<SourceBackedRouteError>,
+    error: SourceBackedRouteError,
+) -> CaptureError {
+    let detail = error.to_string();
+    *failure = Some(error);
+    CaptureError::InvalidPayload(detail)
+}
+
+fn preserve_parallel_emit_error(
+    failure: &mut Option<SourceBackedRouteError>,
+    error: crate::provider::source_backed::ParallelLeafScanEmitError,
+) -> CaptureError {
+    match error {
+        crate::provider::source_backed::ParallelLeafScanEmitError::Route(error) => {
+            preserve_route_error(failure, error)
+        }
+        crate::provider::source_backed::ParallelLeafScanEmitError::Cancelled(_) => {
+            CaptureError::SystemInvariant("JSONL parallel scan was cancelled during replacement")
+        }
+    }
 }
 
 pub(super) fn physical_identity(

@@ -86,6 +86,9 @@ where
 }
 
 fn crush_route_error(error: CrushSourceBackedErrorV0) -> SourceBackedRouteError {
+    if let CrushSourceBackedErrorV0::Route(error) = error {
+        return error;
+    }
     let kind = match &error {
         CrushSourceBackedErrorV0::SqliteSourceChanged => SourceBackedRouteErrorKind::SourceChanged,
         _ => SourceBackedRouteErrorKind::InvalidSource,

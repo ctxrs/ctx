@@ -175,6 +175,45 @@ pub fn refresh_source_backed_generation(
     refresh_source_backed_generation_with_progress(index_root, registry, writer_options, |_| Ok(()))
 }
 
+#[cfg(test)]
+pub(crate) fn refresh_source_backed_generation_with_work_budget_for_test(
+    index_root: impl AsRef<Path>,
+    registry: &SourceBackedProviderRegistry,
+    writer_options: WriterOptions,
+    work_budget: usize,
+) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+        index_root,
+        registry,
+        writer_options,
+        Duration::ZERO,
+        work_budget,
+        SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
+        |_| Ok(()),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn refresh_source_backed_generation_with_resource_limits_for_test(
+    index_root: impl AsRef<Path>,
+    registry: &SourceBackedProviderRegistry,
+    writer_options: WriterOptions,
+    maximum_live_output_bytes: u64,
+    maximum_physical_scratch_bytes: u64,
+) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let work_budget = source_backed_refresh_work_budget(writer_options.indexer_threads);
+    refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+        index_root,
+        registry,
+        writer_options,
+        Duration::ZERO,
+        work_budget,
+        SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All)
+            .with_resource_limits(maximum_live_output_bytes, maximum_physical_scratch_bytes),
+        |_| Ok(()),
+    )
+}
+
 pub fn refresh_source_backed_generation_with_progress(
     index_root: impl AsRef<Path>,
     registry: &SourceBackedProviderRegistry,
@@ -313,6 +352,8 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     let scan_started = Instant::now();
     let index_root = index_root.as_ref();
     let mut failed_routes = BTreeMap::<SourceRouteIdentity, SourceBackedFailedRoute>::new();
+    let mut logical_source_failures = SourceBackedLogicalSourceFailures::default();
+    let mut record_rejections = SourceBackedRecordRejections::default();
     let mut carried_unselected_route_ids = BTreeSet::new();
 
     let (commit, applied_removals, commit_duration, base_route_content) = {
@@ -379,6 +420,9 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             .map_err(SourceBackedCoordinatorError::Progress)?;
             writer.begin_source_route_stage(route_identity.clone())?;
             let removal_checkpoint = applied_removals.len();
+            let logical_failure_checkpoint =
+                logical_source_failures.checkpoint(route_identity.clone());
+            let record_rejection_checkpoint = record_rejections.checkpoint();
             let current_source = route.metadata.source.path.display().to_string();
             let record_progress = std::cell::RefCell::new(SourceRecordProgress::default());
             let progress_failure = std::cell::RefCell::new(None::<SourceBackedRouteError>);
@@ -441,13 +485,18 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                         }
                     }
                 };
+                let core_record_preparer = writer.core_record_preparer();
                 let mut sink = SourceBackedGenerationSink {
                     writer: &mut writer,
+                    core_record_preparer,
                     owners: &mut owners,
                     complete_inventories: &mut complete_inventory_owners,
                     applied_removals: &mut applied_removals,
                     route_index,
-                    leaf_worker_budget: work_budget,
+                    route_identity: route_identity.clone(),
+                    resources: plan.route_resources(work_budget),
+                    logical_source_failures: &mut logical_source_failures,
+                    record_rejections: &mut record_rejections,
                     record_progress: Some(&mut report_record_progress),
                     current_source_progress: Some(&mut report_current_source_progress),
                 };
@@ -507,6 +556,9 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                         owners.retain(|_, owner| owner.route_index != route_index);
                         complete_inventory_owners.retain(|owner| owner.route_index != route_index);
                         applied_removals.truncate(removal_checkpoint);
+                        logical_source_failures.truncate(logical_failure_checkpoint);
+                        record_rejections
+                            .truncate(record_rejection_checkpoint.0, record_rejection_checkpoint.1);
                         let carried_forward =
                             writer.carry_failed_source_route_from_base(route_identity)?;
                         attempt_carried.insert(route_identity.clone());
@@ -532,6 +584,9 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                     owners.retain(|_, owner| owner.route_index != route_index);
                     complete_inventory_owners.retain(|owner| owner.route_index != route_index);
                     applied_removals.truncate(removal_checkpoint);
+                    logical_source_failures.truncate(logical_failure_checkpoint);
+                    record_rejections
+                        .truncate(record_rejection_checkpoint.0, record_rejection_checkpoint.1);
                     let carried_forward =
                         writer.carry_failed_source_route_from_base(route_identity)?;
                     attempt_carried.insert(route_identity.clone());
@@ -652,11 +707,16 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             })
         });
         let has_successful_source = owners.values().any(|owner| owner.present);
-        if !failed_routes.is_empty()
+        if (!failed_routes.is_empty() || !logical_source_failures.is_empty())
             && !has_carried_source
             && !has_successful_retained_source
             && !has_successful_source
         {
+            if failed_routes.is_empty() {
+                return Err(SourceBackedCoordinatorError::NoUsableLogicalSources {
+                    failed_sources: logical_source_failures.clone(),
+                });
+            }
             return Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
                 failed_routes: bounded_source_failures(failed_routes.values()),
             });
@@ -713,6 +773,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         .iter()
         .cloned()
         .map(|route_identity| SourceBackedSuccessfulRouteOutcome {
+            logical_source_failure_total: logical_source_failures.route_total(&route_identity),
             changed: base_route_content.get(&route_identity)
                 != Some(&source_route_content_fingerprint(
                     Some(commit.manifest()),
@@ -775,6 +836,8 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             .map(|failure| failure.route_identity.clone())
             .collect(),
         source_failures,
+        logical_source_failures,
+        record_rejections,
         failed_routes: failed_routes
             .values()
             .map(SourceBackedFailedRouteOutcome::from)

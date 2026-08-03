@@ -108,6 +108,30 @@ fn fixture_route(
     source_format: &'static str,
     lineage: u8,
 ) -> SourceBackedRoute {
+    fixture_route_with_body(
+        provider,
+        source_format,
+        lineage,
+        format!("{} body", provider.as_str()),
+    )
+}
+
+fn fixture_route_with_body(
+    provider: CaptureProvider,
+    source_format: &'static str,
+    lineage: u8,
+    body: String,
+) -> SourceBackedRoute {
+    fixture_route_with_body_and_rejections(provider, source_format, lineage, body, 0)
+}
+
+fn fixture_route_with_body_and_rejections(
+    provider: CaptureProvider,
+    source_format: &'static str,
+    lineage: u8,
+    body: String,
+    rejected_records: u64,
+) -> SourceBackedRoute {
     let source = SourceKey::derive(
         provider.as_str(),
         source_format,
@@ -135,7 +159,7 @@ fn fixture_route(
         "primary",
         true,
         "coordinator-test-v1",
-        format!("{} body", provider.as_str()),
+        body,
     )
     .unwrap();
     record.provider_session_id = Some("session".to_owned());
@@ -151,8 +175,9 @@ fn fixture_route(
         "coordinator-test-v1",
         revision_digest,
         ScannedSourceCounts {
-            complete_records: 1,
+            complete_records: 1 + rejected_records,
             retained_records: 1,
+            rejected_records,
             indexed_documents: 1,
             certified_bytes: 1,
             ..ScannedSourceCounts::default()

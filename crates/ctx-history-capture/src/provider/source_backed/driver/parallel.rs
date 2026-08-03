@@ -14,8 +14,9 @@ use std::{
     time::Duration,
 };
 
-use super::SourceBackedGenerationSink;
+use super::{SourceBackedGenerationSink, SourceBackedSourceOutcome};
 use ctx_history_core::SourceKey;
+use ctx_history_index::CoreRecordPreparer;
 
 mod protocol;
 
@@ -28,7 +29,7 @@ use protocol::{
 #[allow(unused_imports)]
 pub use protocol::{
     ParallelLeafScanBegin, ParallelLeafScanCancelled, ParallelLeafScanComplete,
-    ParallelLeafScanEmitter, ParallelLeafScanError, ParallelLeafScanJob,
+    ParallelLeafScanEmitError, ParallelLeafScanEmitter, ParallelLeafScanError, ParallelLeafScanJob,
     ParallelLeafScanMessageKind, ParallelLeafScanMode, ParallelLeafScanProtocolError,
     ParallelLeafScanWorkerError, ParallelLeafSinkOperation,
 };
@@ -38,6 +39,12 @@ const INDEXER_THREAD_CAP: usize = 8;
 const RUNTIME_THREAD_RESERVATION: usize = 2;
 const SOURCE_WORKER_THREAD_PREFIX: &str = "ctx-src-scan";
 const WORKER_FAILURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Clone)]
+struct ParallelLeafWorkerContext {
+    resources: super::SourceBackedRouteResources,
+    core_record_preparer: CoreRecordPreparer,
+}
 
 #[cfg(test)]
 thread_local! {
@@ -93,7 +100,7 @@ impl SourceBackedGenerationSink<'_> {
     /// Recommends the production scanner count after reserving the clamped
     /// Tantivy indexer budget and two runtime threads.
     pub fn recommended_leaf_workers(&self, leaf_count: usize) -> usize {
-        leaf_count.min(self.leaf_worker_budget)
+        leaf_count.min(self.resources.leaf_worker_budget())
     }
 
     /// Runs provider-owned leaf scans on scoped workers while this caller
@@ -104,6 +111,38 @@ impl SourceBackedGenerationSink<'_> {
         worker_count: usize,
         scan: F,
     ) -> Result<Vec<R>, ParallelLeafScanError<E>>
+    where
+        L: Send,
+        R: Send,
+        E: StdError + Send + 'static,
+        F: Fn(
+                &ParallelLeafScanJob<L>,
+                &mut ParallelLeafScanEmitter<'_, R, E>,
+            ) -> Result<(), ParallelLeafScanWorkerError<E>>
+            + Sync,
+    {
+        self.run_parallel_leaf_scans_inner(
+            jobs,
+            worker_count,
+            |job| Some(job.source().clone()),
+            scan,
+        )?
+        .into_iter()
+        .map(|outcome| match outcome {
+            SourceBackedSourceOutcome::Success(result) => Ok(result),
+            SourceBackedSourceOutcome::Failed(_) => Err(ParallelLeafScanError::Protocol(
+                ParallelLeafScanProtocolError::UnexpectedSourceFailure,
+            )),
+        })
+        .collect()
+    }
+
+    pub(crate) fn run_parallel_leaf_scans_with_source_outcomes<L, R, E, F>(
+        &mut self,
+        jobs: Vec<ParallelLeafScanJob<L>>,
+        worker_count: usize,
+        scan: F,
+    ) -> Result<Vec<SourceBackedSourceOutcome<R>>, ParallelLeafScanError<E>>
     where
         L: Send,
         R: Send,
@@ -141,7 +180,15 @@ impl SourceBackedGenerationSink<'_> {
             ) -> Result<(), ParallelLeafScanWorkerError<E>>
             + Sync,
     {
-        self.run_parallel_leaf_scans_inner(leaves, worker_count, |_| None, scan)
+        self.run_parallel_leaf_scans_inner(leaves, worker_count, |_| None, scan)?
+            .into_iter()
+            .map(|outcome| match outcome {
+                SourceBackedSourceOutcome::Success(result) => Ok(result),
+                SourceBackedSourceOutcome::Failed(_) => Err(ParallelLeafScanError::Protocol(
+                    ParallelLeafScanProtocolError::UnexpectedSourceFailure,
+                )),
+            })
+            .collect()
     }
 
     fn run_parallel_leaf_scans_inner<J, R, E, F, S>(
@@ -150,7 +197,7 @@ impl SourceBackedGenerationSink<'_> {
         worker_count: usize,
         expected_source: S,
         scan: F,
-    ) -> Result<Vec<R>, ParallelLeafScanError<E>>
+    ) -> Result<Vec<SourceBackedSourceOutcome<R>>, ParallelLeafScanError<E>>
     where
         J: Send,
         R: Send,
@@ -171,8 +218,10 @@ impl SourceBackedGenerationSink<'_> {
             });
         }
 
-        let worker_count =
-            bounded_leaf_worker_count(jobs.len(), worker_count.min(self.leaf_worker_budget));
+        let worker_count = bounded_leaf_worker_count(
+            jobs.len(),
+            worker_count.min(self.resources.leaf_worker_budget()),
+        );
         if worker_count == 0 {
             return Err(ParallelLeafScanError::InvalidWorkerCount {
                 job_count: jobs.len(),
@@ -188,6 +237,10 @@ impl SourceBackedGenerationSink<'_> {
         let mut results = (0..jobs.len()).map(|_| None).collect::<Vec<_>>();
         let stripes = stripe_leaf_jobs(jobs, worker_count);
         let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_context = ParallelLeafWorkerContext {
+            resources: self.resources.clone(),
+            core_record_preparer: self.core_record_preparer.clone(),
+        };
 
         thread::scope(|scope| {
             // Each worker gets one rendezvous lane. The caller drains the lane
@@ -204,6 +257,7 @@ impl SourceBackedGenerationSink<'_> {
                 receivers.push(worker_receiver);
                 let worker_cancellation = Arc::clone(&cancellation);
                 let worker_failure_sender = failure_sender.clone();
+                let worker_context = worker_context.clone();
                 let scan = &scan;
                 let worker_name = source_worker_thread_name(worker_index);
                 let spawn = if worker_spawn_failure_is_injected(worker_index) {
@@ -220,6 +274,7 @@ impl SourceBackedGenerationSink<'_> {
                                 &worker_sender,
                                 &worker_failure_sender,
                                 &worker_cancellation,
+                                worker_context,
                                 scan,
                             );
                         })
@@ -294,7 +349,7 @@ impl SourceBackedGenerationSink<'_> {
         receivers: &[Receiver<ParallelLeafWorkerEvent<R, E>>],
         failure_receiver: &Receiver<ParallelLeafWorkerEvent<R, E>>,
         states: &mut [ParallelLeafJobState],
-        results: &mut [Option<R>],
+        results: &mut [Option<SourceBackedSourceOutcome<R>>],
     ) -> Result<(), ParallelLeafScanError<E>>
     where
         E: StdError + 'static,
@@ -335,7 +390,7 @@ impl SourceBackedGenerationSink<'_> {
                     message,
                 } => {
                     validate_worker(states, job_index, worker_index)?;
-                    apply_parallel_leaf_message(self, job_index, message, states, results)?;
+                    apply_parallel_leaf_message(self, job_index, *message, states, results)?;
                 }
                 ParallelLeafWorkerEvent::Returned {
                     worker_index,
@@ -412,6 +467,7 @@ fn run_leaf_worker<J, R, E, F>(
     sender: &SyncSender<ParallelLeafWorkerEvent<R, E>>,
     failure_sender: &SyncSender<ParallelLeafWorkerEvent<R, E>>,
     cancellation: &AtomicBool,
+    context: ParallelLeafWorkerContext,
     scan: &F,
 ) where
     F: Fn(&J, &mut ParallelLeafScanEmitter<'_, R, E>) -> Result<(), ParallelLeafScanWorkerError<E>>,
@@ -426,6 +482,8 @@ fn run_leaf_worker<J, R, E, F>(
             job_index: *job_index,
             sender,
             cancellation,
+            resources: context.resources.clone(),
+            core_record_preparer: context.core_record_preparer.clone(),
         };
         let outcome = catch_unwind(AssertUnwindSafe(|| scan(job, &mut emitter)));
         match outcome {

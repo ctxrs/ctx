@@ -38,6 +38,171 @@ fn core_records(index: &VerifiedIndex) -> Vec<CoreRecord> {
 }
 
 #[test]
+fn registered_codex_parent_and_exact_subdirectory_keep_parent_source_ownership() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let exact_subdirectory = sessions.join("2026/08/02");
+    fs::create_dir_all(&exact_subdirectory).unwrap();
+    let root_session_id = "019facf0-1111-7777-8888-000000000001";
+    let nested_session_id = "019facf0-2222-7777-8888-000000000002";
+    fs::write(
+        sessions.join(format!("rollout-{root_session_id}.jsonl")),
+        codex_rollout_bytes(root_session_id, &["parent root"]),
+    )
+    .unwrap();
+    let nested_path = exact_subdirectory.join(format!("rollout-{nested_session_id}.jsonl"));
+    fs::write(
+        &nested_path,
+        codex_rollout_bytes(nested_session_id, &["nested old"]),
+    )
+    .unwrap();
+
+    let mut parent_registry = SourceBackedProviderRegistry::new();
+    super::super::register_codex_session_tree_routes(
+        &mut parent_registry,
+        vec![fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        )],
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    let index = temp.path().join("index");
+    let cold = refresh_source_backed_generation(&index, &parent_registry, WriterOptions::default())
+        .unwrap();
+    let parent_route_identity = cold.successful_route_ids[0].clone();
+    assert_eq!(
+        cold.commit
+            .manifest()
+            .source_route(&parent_route_identity)
+            .unwrap()
+            .sources()
+            .len(),
+        2
+    );
+
+    let mut combined_registry = SourceBackedProviderRegistry::new();
+    super::super::register_codex_session_tree_routes(
+        &mut combined_registry,
+        vec![fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        )],
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    super::super::register_codex_session_tree_routes(
+        &mut combined_registry,
+        vec![fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Explicit,
+            &exact_subdirectory,
+        )],
+        SourceBackedRouteSelection::ExplicitManual,
+    )
+    .unwrap();
+    let route_identities = combined_registry
+        .routes()
+        .map(|route| route.route_identity.clone().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(route_identities.len(), 2);
+    assert_eq!(route_identities[0], parent_route_identity);
+    let exact_route_identity = route_identities[1].clone();
+
+    let append_bytes = codex_rollout_bytes(nested_session_id, &["discarded", "nested append"]);
+    OpenOptions::new()
+        .append(true)
+        .open(&nested_path)
+        .unwrap()
+        .write_all(
+            append_bytes
+                .split_inclusive(|byte| *byte == b'\n')
+                .nth(2)
+                .unwrap(),
+        )
+        .unwrap();
+    let refreshed =
+        refresh_source_backed_generation(&index, &combined_registry, WriterOptions::default())
+            .unwrap();
+
+    assert!(
+        refreshed.failed_routes.is_empty(),
+        "unexpected route failures: {:#?}",
+        refreshed.source_failures.failures()
+    );
+    assert_eq!(refreshed.successful_route_ids.len(), 2);
+    assert!(refreshed.logical_source_failures.is_empty());
+    let parent_snapshot = refreshed
+        .commit
+        .manifest()
+        .source_route(&parent_route_identity)
+        .unwrap();
+    assert_eq!(parent_snapshot.sources().len(), 2);
+    let parent_sources = parent_snapshot.sources().to_vec();
+    assert!(refreshed
+        .commit
+        .manifest()
+        .source_route(&exact_route_identity)
+        .unwrap()
+        .sources()
+        .is_empty());
+    assert_eq!(refreshed.sources.len(), 2);
+    let bodies = core_records(&VerifiedIndex::open(&index).unwrap())
+        .into_iter()
+        .filter_map(|record| record.content.normalized_body)
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, vec!["parent root", "nested old"]);
+
+    let caught_up =
+        refresh_source_backed_generation(&index, &combined_registry, WriterOptions::default())
+            .unwrap();
+    assert_ne!(
+        caught_up.commit.generation_id,
+        refreshed.commit.generation_id
+    );
+    let bodies = core_records(&VerifiedIndex::open(&index).unwrap())
+        .into_iter()
+        .filter_map(|record| record.content.normalized_body)
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, vec!["parent root", "nested old", "nested append"]);
+    assert_eq!(
+        caught_up
+            .commit
+            .manifest()
+            .source_route(&parent_route_identity)
+            .unwrap()
+            .sources(),
+        parent_sources
+    );
+    assert!(caught_up
+        .commit
+        .manifest()
+        .source_route(&exact_route_identity)
+        .unwrap()
+        .sources()
+        .is_empty());
+
+    let replay =
+        refresh_source_backed_generation(&index, &combined_registry, WriterOptions::default())
+            .unwrap();
+    assert_eq!(replay.commit.generation_id, caught_up.commit.generation_id);
+    assert_eq!(
+        replay
+            .commit
+            .manifest()
+            .source_route(&parent_route_identity)
+            .unwrap()
+            .sources(),
+        parent_sources
+    );
+}
+
+#[test]
 fn codex_history_and_sessions_publish_self_contained_core_across_lifecycle() {
     let temp = tempdir().unwrap();
     let home = temp.path().join("home");
