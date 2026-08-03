@@ -15,7 +15,8 @@ mod root_handle;
 )]
 pub(crate) use root_handle::{
     is_non_regular_source_rejection, open_provider_source_file, open_provider_source_path,
-    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot,
+    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory,
+    ProviderSourceRoot,
 };
 
 /// Maximum directories admitted by one provider JSONL inventory.
