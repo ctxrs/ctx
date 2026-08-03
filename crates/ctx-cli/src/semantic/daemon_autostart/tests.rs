@@ -1,7 +1,10 @@
 use super::*;
 use crate::config::CONFIG_FILE;
 use crate::semantic::paths_status::DaemonLock;
-use std::sync::{Arc, Barrier};
+use std::{
+    cell::Cell,
+    sync::{Arc, Barrier},
+};
 
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
 const DAEMON_ENV_PROBE_EXPECTED_CHANNEL: &str = "CTX_DAEMON_ENV_PROBE_EXPECTED_CHANNEL";
@@ -985,6 +988,111 @@ fn enabled_daemon_handoff_is_bounded_to_five_seconds() {
         .checked_mul(u32::try_from(pauses).unwrap())
         .unwrap();
     assert_eq!(maximum_wait, StdDuration::from_secs(5));
+    assert_eq!(DAEMON_SETUP_HANDOFF_TIMEOUT, maximum_wait);
+}
+
+fn test_daemon_owner(owner_id: &str, pid: u32) -> DaemonOwnerIdentity {
+    DaemonOwnerIdentity {
+        owner_id: owner_id.to_owned(),
+        pid,
+        started_at_ms: 1_000,
+        binary_sha256: "0123456789abcdef".to_owned(),
+    }
+}
+
+#[test]
+fn hung_listener_is_terminated_only_after_bounded_unusable_owner_proof() -> Result<()> {
+    let owner = test_daemon_owner("hung-owner", 41);
+    let current_checks = Cell::new(0);
+    let active_checks = Cell::new(0);
+    let endpoint_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &owner,
+        || {
+            current_checks.set(current_checks.get() + 1);
+            Ok(Some(owner.clone()))
+        },
+        || {
+            active_checks.set(active_checks.get() + 1);
+            false
+        },
+        || {
+            endpoint_checks.set(endpoint_checks.get() + 1);
+            Ok(false)
+        },
+        |owner_id| {
+            assert_eq!(owner_id, "hung-owner");
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(terminated);
+    assert_eq!(current_checks.get(), 2);
+    assert_eq!(active_checks.get(), 2);
+    assert_eq!(endpoint_checks.get(), 1);
+    assert_eq!(terminations.get(), 1);
+    Ok(())
+}
+
+#[test]
+fn concurrent_recovery_never_terminates_a_replacement_owner() -> Result<()> {
+    let unusable_owner = test_daemon_owner("unusable-owner", 41);
+    let replacement_owner = test_daemon_owner("replacement-owner", 42);
+    let current_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &unusable_owner,
+        || {
+            let check = current_checks.get();
+            current_checks.set(check + 1);
+            Ok(Some(if check == 0 {
+                unusable_owner.clone()
+            } else {
+                replacement_owner.clone()
+            }))
+        },
+        || false,
+        || Ok(false),
+        |_| {
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(!terminated);
+    assert_eq!(current_checks.get(), 2);
+    assert_eq!(terminations.get(), 0);
+    Ok(())
+}
+
+#[test]
+fn active_refresh_prevents_unusable_endpoint_termination() -> Result<()> {
+    let owner = test_daemon_owner("refresh-owner", 41);
+    let endpoint_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &owner,
+        || Ok(Some(owner.clone())),
+        || true,
+        || {
+            endpoint_checks.set(endpoint_checks.get() + 1);
+            Ok(false)
+        },
+        |_| {
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(!terminated);
+    assert_eq!(endpoint_checks.get(), 0);
+    assert_eq!(terminations.get(), 0);
+    Ok(())
 }
 
 #[test]

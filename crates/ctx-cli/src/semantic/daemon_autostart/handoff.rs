@@ -2,7 +2,9 @@ use super::*;
 
 mod termination;
 use termination::terminate_identity_verified_legacy_daemon;
-pub(super) use termination::terminate_identity_verified_residual_daemon;
+pub(super) use termination::{
+    terminate_identity_verified_residual_daemon, terminate_identity_verified_residual_daemon_owner,
+};
 
 pub(in crate::semantic) fn terminate_current_executable_daemon(data_root: &Path) -> Result<()> {
     let executable = env::current_exe().context("resolve current ctx executable")?;

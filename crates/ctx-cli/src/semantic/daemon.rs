@@ -366,6 +366,7 @@ pub(super) fn run_daemon_inner(
                 "activate daemon control service: {activation_error}"
             ));
         }
+        ensure_daemon_ipc_services_healthy(query_service.as_ref(), refresh_service.as_ref())?;
         #[cfg(test)]
         fail_daemon_before_ready_for_test(data_root)?;
         if !runtime.config.daemon.mode.runs_only_source_refresh() {
@@ -452,6 +453,7 @@ pub(super) fn run_daemon_inner(
                 )?;
                 break;
             }
+            ensure_daemon_ipc_services_healthy(query_service.as_ref(), refresh_service.as_ref())?;
             install_source_watch_ingress(&wakeup, refresh_service.as_ref());
             if runtime.config.daemon.mode.runs_only_source_refresh() {
                 // A live mode change must not carry a previously prepared

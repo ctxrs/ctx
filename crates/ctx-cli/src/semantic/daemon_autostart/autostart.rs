@@ -30,67 +30,208 @@ pub(crate) fn autostart_daemon_and_wait(
         super::super::daemon_supervisor::ensure_daemon_supervisor(data_root)
             .context("establish persistent ctx daemon supervision")?;
     }
-    let request = request_daemon_autostart(data_root, config, trigger).map_err(|error| {
-        if error.is::<BinaryIdentityHandoffError>() {
-            error
-        } else {
-            anyhow!(
-                "ctx daemon did not start: {error:#}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
-            )
-        }
-    })?;
-    let (mut child, pending_restart_request) = match request {
-        DaemonAutostartRequest::Existing => (None, None),
-        DaemonAutostartRequest::Deferred(path) => (None, Some(path)),
-        DaemonAutostartRequest::Spawned(child) => (Some(child), None),
-        DaemonAutostartRequest::Suppressed(reason) => {
-            return Err(anyhow!(
-                "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
-            ));
-        }
-    };
-    let expected_failure_pid = child.as_ref().map(Child::id);
-    wait_for_daemon_handoff_with(
-        DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS,
-        || {
-            if pending_restart_request
-                .as_ref()
-                .is_some_and(|path| path.exists())
-            {
-                DaemonHandoffObservation::Pending
+    let mut recovery_attempted = false;
+    loop {
+        let request = request_daemon_autostart(data_root, config, trigger).map_err(|error| {
+            if error.is::<BinaryIdentityHandoffError>() {
+                error
             } else {
-                daemon_handoff_observation(data_root, expected_failure_pid, config)
+                anyhow!(
+                    "ctx daemon did not start: {error:#}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
+                )
             }
-        },
-        || {
-            let Some(child) = child.as_mut() else {
-                return Ok(None);
-            };
-            let Some(exit) = child.try_wait()? else {
-                return Ok(None);
-            };
-            let detail = read_daemon_status(data_root)
-                .and_then(|status| {
-                    (status.get("pid").and_then(Value::as_u64)
-                        == Some(u64::from(child.id())))
-                    .then(|| {
-                        status
-                            .get("last_error")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
+        })?;
+        let (mut child, pending_restart_request, existing_owner) = match request {
+            DaemonAutostartRequest::Existing(owner) => (None, None, Some(owner)),
+            DaemonAutostartRequest::Deferred(path) => (None, Some(path), None),
+            DaemonAutostartRequest::Spawned(child) => (Some(child), None, None),
+            DaemonAutostartRequest::Suppressed(reason) => {
+                return Err(anyhow!(
+                    "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
+                ));
+            }
+        };
+        let expected_failure_pid = child.as_ref().map(Child::id);
+        let deadline = Instant::now() + DAEMON_SETUP_HANDOFF_TIMEOUT;
+        let handoff = wait_for_daemon_handoff_with(
+            DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS,
+            || {
+                if pending_restart_request
+                    .as_ref()
+                    .is_some_and(|path| path.exists())
+                {
+                    DaemonHandoffObservation::Pending
+                } else {
+                    daemon_handoff_observation(
+                        data_root,
+                        expected_failure_pid,
+                        config,
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(DAEMON_HEALTH_TIMEOUT),
+                    )
+                }
+            },
+            || {
+                let Some(child) = child.as_mut() else {
+                    return Ok(None);
+                };
+                let Some(exit) = child.try_wait()? else {
+                    return Ok(None);
+                };
+                let detail = read_daemon_status(data_root)
+                    .and_then(|status| {
+                        (status.get("pid").and_then(Value::as_u64) == Some(u64::from(child.id())))
+                            .then(|| {
+                                status
+                                    .get("last_error")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .flatten()
                     })
-                    .flatten()
-                })
-                .unwrap_or_else(|| format!("daemon process exited with {exit}"));
-            Ok(Some(detail))
-        },
-        || std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL),
+                    .unwrap_or_else(|| format!("daemon process exited with {exit}"));
+                Ok(Some(detail))
+            },
+            || {
+                std::thread::sleep(
+                    DAEMON_UPGRADE_POLL_INTERVAL
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                )
+            },
+        );
+        match handoff {
+            Ok(handoff) => return Ok(handoff),
+            Err(error)
+                if !recovery_attempted
+                    && daemon_autostart_suppression_reason().is_none()
+                    && error.is::<DaemonHandoffTimeout>()
+                    && existing_owner.is_some() =>
+            {
+                let Some(existing_owner) = existing_owner.as_ref() else {
+                    return Err(anyhow!("daemon owner identity disappeared before recovery"));
+                };
+                recover_unusable_daemon_owner(data_root, existing_owner)?;
+                recovery_attempted = true;
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "ctx daemon did not become ready: {error}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
+                ));
+            }
+        }
+    }
+}
+
+fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIdentity>> {
+    if !daemon_lock_is_active(data_root) {
+        return Ok(None);
+    }
+    let Some(value) = read_pid_lock_json(&daemon_lock_path(data_root)) else {
+        return Ok(None);
+    };
+    let Some(pid) = pid_from_lock_json(&value) else {
+        return Ok(None);
+    };
+    let Some(owner_id) = value
+        .get("owner_id")
+        .and_then(Value::as_str)
+        .filter(|owner_id| !owner_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(started_at_ms) = value
+        .get("started_at_ms")
+        .and_then(Value::as_i64)
+        .filter(|started_at_ms| *started_at_ms > 0)
+    else {
+        return Ok(None);
+    };
+    let Some(binary_sha256) = value
+        .get("binary_sha256")
+        .and_then(Value::as_str)
+        .filter(|digest| !digest.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !daemon_lock_is_owned_by(data_root, pid) {
+        return Ok(None);
+    }
+    Ok(Some(DaemonOwnerIdentity {
+        owner_id: owner_id.to_owned(),
+        pid,
+        started_at_ms,
+        binary_sha256: binary_sha256.to_owned(),
+    }))
+}
+
+fn daemon_owner_has_active_refresh(data_root: &Path, observed_owner: &DaemonOwnerIdentity) -> bool {
+    let status = read_daemon_status(data_root);
+    let refresh_job = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
+    daemon_owned_source_refresh_is_active(
+        status.as_ref(),
+        refresh_job.as_ref(),
+        Some(observed_owner.pid),
+        utc_now().timestamp_millis(),
     )
-    .map_err(|error| {
-        anyhow!(
-            "ctx daemon did not become ready: {error}. Run `ctx daemon status --format json`, then `ctx daemon run` for details"
-        )
-    })
+}
+
+fn recover_unusable_daemon_owner(
+    data_root: &Path,
+    observed_owner: &DaemonOwnerIdentity,
+) -> Result<()> {
+    let executable = daemon_autostart_exe()?;
+    let terminated = recover_unusable_daemon_owner_with(
+        observed_owner,
+        || read_daemon_owner_identity(data_root),
+        || daemon_owner_has_active_refresh(data_root, observed_owner),
+        || {
+            Ok(daemon_source_refresh_endpoint_is_usable(
+                data_root,
+                observed_owner.pid,
+                DAEMON_HEALTH_TIMEOUT,
+            ))
+        },
+        |owner_id| {
+            super::handoff::terminate_identity_verified_residual_daemon_owner(
+                data_root,
+                &executable,
+                Some(owner_id),
+            )
+        },
+    )?;
+    if terminated {
+        let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
+        while read_daemon_owner_identity(data_root)?.as_ref() == Some(observed_owner)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn recover_unusable_daemon_owner_with(
+    observed_owner: &DaemonOwnerIdentity,
+    mut current_owner: impl FnMut() -> Result<Option<DaemonOwnerIdentity>>,
+    mut active_refresh: impl FnMut() -> bool,
+    mut endpoint_usable: impl FnMut() -> Result<bool>,
+    mut terminate: impl FnMut(&str) -> Result<()>,
+) -> Result<bool> {
+    if current_owner()?.as_ref() != Some(observed_owner) || active_refresh() {
+        return Ok(false);
+    }
+    if endpoint_usable()? {
+        return Ok(false);
+    }
+    // The health probe can race a supervisor or another foreground recovery.
+    // Revalidate the complete advisory-lock owner identity after the bounded
+    // probe, and re-check active work, before any destructive action.
+    if current_owner()?.as_ref() != Some(observed_owner) || active_refresh() {
+        return Ok(false);
+    }
+    terminate(&observed_owner.owner_id)?;
+    Ok(true)
 }
 
 pub(super) fn request_daemon_autostart(
@@ -104,14 +245,22 @@ pub(super) fn request_daemon_autostart(
     if config.daemon.enabled && daemon_lock_is_active(data_root) {
         let executable = daemon_autostart_exe()?;
         if daemon_lock_matches_executable(data_root, &executable)? {
-            return Ok(DaemonAutostartRequest::Existing);
+            return Ok(DaemonAutostartRequest::Existing(
+                read_daemon_owner_identity(data_root)?.ok_or_else(|| {
+                    anyhow!("active ctx daemon lock has no stable owner identity")
+                })?,
+            ));
         }
         if daemon_autostart_suppression_reason().is_some() {
             return Err(binary_identity_handoff_error());
         }
         handoff_mismatched_daemon_owner(data_root, &executable)?;
         if daemon_lock_is_active(data_root) {
-            return Ok(DaemonAutostartRequest::Existing);
+            return Ok(DaemonAutostartRequest::Existing(
+                read_daemon_owner_identity(data_root)?.ok_or_else(|| {
+                    anyhow!("active replacement ctx daemon has no stable owner identity")
+                })?,
+            ));
         }
     }
     if let Some(reason) = daemon_autostart_suppression_reason() {
@@ -135,7 +284,11 @@ pub(super) fn request_daemon_autostart(
         let executable = daemon_autostart_exe()?;
         handoff_mismatched_daemon_owner(data_root, &executable)?;
         if daemon_lock_is_active(data_root) {
-            return Ok(DaemonAutostartRequest::Existing);
+            return Ok(DaemonAutostartRequest::Existing(
+                read_daemon_owner_identity(data_root)?.ok_or_else(|| {
+                    anyhow!("active replacement ctx daemon has no stable owner identity")
+                })?,
+            ));
         }
     }
     let exe = match daemon_autostart_exe() {
@@ -268,6 +421,7 @@ fn daemon_handoff_observation(
     data_root: &Path,
     expected_failure_pid: Option<u32>,
     expected_config: &AppConfig,
+    health_timeout: StdDuration,
 ) -> DaemonHandoffObservation {
     let status = read_daemon_status(data_root);
     let lock_pid = super::super::paths_status::read_pid_lock_file(&daemon_lock_path(data_root));
@@ -296,7 +450,10 @@ fn daemon_handoff_observation(
         return observation;
     }
     let endpoint_usable = lock_active
-        && lock_pid.is_some_and(|pid| daemon_source_refresh_endpoint_is_usable(data_root, pid));
+        && !health_timeout.is_zero()
+        && lock_pid.is_some_and(|pid| {
+            daemon_source_refresh_endpoint_is_usable(data_root, pid, health_timeout)
+        });
     complete_daemon_handoff_observation(
         observation,
         status.as_ref(),
@@ -421,14 +578,18 @@ pub(super) fn daemon_live_endpoint_observation_from(
     })
 }
 
-fn daemon_source_refresh_endpoint_is_usable(data_root: &Path, expected_pid: u32) -> bool {
+fn daemon_source_refresh_endpoint_is_usable(
+    data_root: &Path,
+    expected_pid: u32,
+    timeout: StdDuration,
+) -> bool {
     daemon_source_refresh_request(
         data_root,
         compact_json(json!({
             "schema_version": 1,
             "op": "ping",
         })),
-        DAEMON_HEALTH_TIMEOUT,
+        timeout,
         DAEMON_HEALTH_RESPONSE_MAX_BYTES,
     )
     .ok()
@@ -567,9 +728,7 @@ pub(super) fn wait_for_daemon_handoff_with(
             pause();
         }
     }
-    Err(anyhow!(
-        "timed out waiting for running status, heartbeat, and process ownership"
-    ))
+    Err(DaemonHandoffTimeout.into())
 }
 
 pub(super) fn daemon_autostart_command(

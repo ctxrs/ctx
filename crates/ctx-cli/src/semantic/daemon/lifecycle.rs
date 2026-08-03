@@ -40,6 +40,21 @@ pub(super) fn daemon_services_can_begin_idle_shutdown(
     false
 }
 
+pub(super) fn ensure_daemon_ipc_services_healthy(
+    query_service: Option<&DaemonQueryService>,
+    refresh_service: Option<&DaemonQueryService>,
+) -> Result<()> {
+    for service in [refresh_service, query_service].into_iter().flatten() {
+        if service.listener_finished() {
+            return Err(anyhow!(
+                "daemon {} IPC listener exited unexpectedly",
+                service.service.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn daemon_should_attempt_finite_idle_shutdown(
     idle_exit: Option<StdDuration>,
     idle_since: Option<Instant>,

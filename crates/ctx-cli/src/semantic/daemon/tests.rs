@@ -31,6 +31,40 @@ use ctx_history_core::{
 use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, WriterOptions};
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
+#[test]
+fn completed_ipc_listener_is_a_fatal_daemon_health_failure() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let service =
+        crate::semantic::query_service::start_daemon_source_refresh_service_with_request_timeout(
+            root.path(),
+            SharedSemanticRuntime::default(),
+            StdDuration::from_millis(100),
+        )?;
+    assert!(daemon_service_endpoint_path(root.path(), DaemonIpcService::SourceRefresh).exists());
+
+    service.terminate_listener_for_test();
+    let deadline = Instant::now() + StdDuration::from_secs(2);
+    while !service.listener_finished() && Instant::now() < deadline {
+        std::thread::sleep(StdDuration::from_millis(5));
+    }
+
+    assert!(service.listener_finished(), "listener thread did not exit");
+    assert!(
+        !daemon_service_endpoint_path(root.path(), DaemonIpcService::SourceRefresh).exists(),
+        "dead listener retained its published endpoint"
+    );
+    let error = ensure_daemon_ipc_services_healthy(None, Some(&service))
+        .expect_err("daemon must fail when a retained IPC listener has exited");
+    assert!(
+        error
+            .to_string()
+            .contains("source-refresh IPC listener exited unexpectedly"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
 fn daemon_watch_test_catalog(path: PathBuf) -> SourceBackedWatchCatalog {
     daemon_watch_test_catalog_for_paths([path])
 }

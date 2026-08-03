@@ -156,6 +156,126 @@ fn concurrent_unix_roundtrips_wait_for_readiness_and_collect_partial_responses()
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn unix_connect_obeys_the_roundtrip_deadline_when_the_accept_queue_is_full() -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let (_socket_root, socket_path) = short_test_query_socket_path()?;
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
+    if unsafe { libc::listen(listener.as_raw_fd(), 1) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // Linux admits backlog + 1 established AF_UNIX clients. With neither
+    // accepted, a third nonblocking connect must remain EAGAIN until its one
+    // caller-provided deadline expires.
+    let _queued_one = UnixStream::connect(&socket_path)?;
+    let _queued_two = UnixStream::connect(&socket_path)?;
+    let endpoint = DaemonQueryEndpoint::Unix {
+        path: socket_path,
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+
+    let timeout = StdDuration::from_millis(80);
+    let started = Instant::now();
+    let error = daemon_query_roundtrip(&endpoint, b"{}\n", timeout, 1024)
+        .expect_err("a full non-accepting socket queue must time out");
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::TimedOut),
+        "{error:#}"
+    );
+    assert!(elapsed >= StdDuration::from_millis(40), "{elapsed:?}");
+    assert!(elapsed < StdDuration::from_millis(400), "{elapsed:?}");
+    drop(listener);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unix_connect_and_response_read_share_one_absolute_deadline() -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let (_socket_root, socket_path) = short_test_query_socket_path()?;
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
+    if unsafe { libc::listen(listener.as_raw_fd(), 1) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let queued_one = UnixStream::connect(&socket_path)?;
+    let queued_two = UnixStream::connect(&socket_path)?;
+    let server = std::thread::spawn(move || -> Result<()> {
+        std::thread::sleep(StdDuration::from_millis(35));
+        drop(listener.accept()?.0);
+        drop(listener.accept()?.0);
+        let (mut stream, _) = listener.accept()?;
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request)?;
+        assert_eq!(request, b"{}\n");
+        std::thread::sleep(StdDuration::from_millis(55));
+        let _ = stream.write_all(b"{}\n");
+        Ok(())
+    });
+    let endpoint = DaemonQueryEndpoint::Unix {
+        path: socket_path,
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+
+    let started = Instant::now();
+    let error = daemon_query_roundtrip(&endpoint, b"{}\n", StdDuration::from_millis(70), 1024)
+        .expect_err("connect and response phases must not receive separate budgets");
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::TimedOut),
+        "{error:#}"
+    );
+    assert!(elapsed < StdDuration::from_millis(350), "{elapsed:?}");
+    drop(queued_one);
+    drop(queued_two);
+    server.join().expect("query server panicked")?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unix_request_write_obeys_the_same_absolute_deadline() -> Result<()> {
+    let (_socket_root, socket_path) = short_test_query_socket_path()?;
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path)?;
+    let server = std::thread::spawn(move || -> Result<()> {
+        let (_stream, _) = listener.accept()?;
+        std::thread::sleep(StdDuration::from_millis(180));
+        Ok(())
+    });
+    let endpoint = DaemonQueryEndpoint::Unix {
+        path: socket_path,
+        token: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+    let request = vec![b'x'; 8 * 1024 * 1024];
+
+    let started = Instant::now();
+    let error = daemon_query_roundtrip(&endpoint, &request, StdDuration::from_millis(60), 1024)
+        .expect_err("a non-reading peer must not receive an unbounded request write");
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::TimedOut),
+        "{error:#}"
+    );
+    assert!(elapsed < StdDuration::from_millis(350), "{elapsed:?}");
+    server.join().expect("query server panicked")?;
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn partial_unix_response_obeys_one_aggregate_read_deadline() -> Result<()> {
