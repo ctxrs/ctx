@@ -84,11 +84,11 @@ upsert explicit custom ctx_history_jsonl_v1 route
 daemon-owned Core refresh + terminal receipt
 ```
 
-The provider-owned custom JSONL file remains source authority. The immutable
-Core/Tantivy generation stores complete policy-selected normalized records for
-lexical search and typed presentation plus stable source identity; optional
-semantic data is a disposable derivative. Query-time presentation does not
-reopen the provider-owned JSONL file.
+The provider-owned custom JSONL file remains the acquisition authority for
+refresh. The immutable Core/Tantivy generation stores complete policy-selected
+normalized records for lexical search and typed presentation plus stable source
+identity; optional semantic data is a disposable derivative. Query-time
+presentation does not reopen the provider-owned JSONL file.
 
 The shared custom JSONL route handles cold builds, no-ops, appends, rewrites,
 replacement, deletion, source certification, and crash-safe publication.
@@ -110,8 +110,8 @@ ctx import --history-source-manifest ./ctx-history-plugin.json
 
 Selection must resolve to one source. Search filters use the canonical
 `provider_key/source_id` identity from the provider file. Once imported,
-`ctx show` resolves the Core identity back to exact provider-owned JSONL
-records.
+`ctx show` reads the complete policy-selected normalized records stored in the
+active Core/Tantivy generation.
 
 ## Failure And Trust Model
 

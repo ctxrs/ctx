@@ -1,20 +1,8 @@
 use std::{fmt, str::FromStr};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::{sync::SyncMetadata, CoreError};
-
-text_enum! {
-    pub enum CaptureSourceKind {
-        ProviderImport => "provider_import",
-        ProviderHook => "provider_hook",
-        DirectCli => "direct_cli",
-        Manual => "manual",
-    }
-    default Manual
-}
+use crate::CoreError;
 
 text_enum! {
     pub enum CaptureProvider {
@@ -67,37 +55,4 @@ text_enum! {
         MiMoCode => "mimocode",
     }
     default Unknown
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CaptureSourceDescriptor {
-    pub kind: CaptureSourceKind,
-    pub provider: CaptureProvider,
-    pub machine_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process_id: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_source_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_format: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_root: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_identity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CaptureSource {
-    pub id: Uuid,
-    #[serde(flatten)]
-    pub descriptor: CaptureSourceDescriptor,
-    pub started_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<DateTime<Utc>>,
-    #[serde(flatten)]
-    pub sync: SyncMetadata,
 }

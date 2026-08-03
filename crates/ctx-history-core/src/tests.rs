@@ -1,12 +1,8 @@
 use std::{env, path::PathBuf};
 
-use serde_json::json;
-use uuid::Uuid;
-
 use crate::{
     config_path, default_data_root, device_path, history_dir, logs_dir, managed_data_root,
-    CaptureProvider, Confidence, Fidelity, HistoryRecord, Session, SyncMetadata, SyncOutboxItem,
-    SyncState, Visibility,
+    CaptureProvider, Confidence, Fidelity,
 };
 
 #[test]
@@ -19,14 +15,7 @@ fn obsolete_content_reference_surface_is_absent() {
 
 #[test]
 fn enum_string_roundtrips_and_defaults() {
-    let visibility: Visibility = serde_json::from_str("\"sync_metadata\"").unwrap();
-    assert_eq!(visibility, Visibility::SyncMetadata);
-    assert_eq!(visibility.to_string(), "sync_metadata");
-    assert!("not_valid".parse::<Visibility>().is_err());
-
-    assert_eq!(Visibility::default(), Visibility::LocalOnly);
     assert_eq!(Fidelity::default(), Fidelity::Partial);
-    assert_eq!(SyncState::default(), SyncState::LocalOnly);
     assert_eq!(Confidence::default(), Confidence::Unknown);
     assert_eq!(
         serde_json::from_str::<CaptureProvider>("\"copilot_cli\"").unwrap(),
@@ -76,52 +65,6 @@ fn enum_string_roundtrips_and_defaults() {
         serde_json::from_str::<CaptureProvider>("\"mimocode\"").unwrap(),
         CaptureProvider::MiMoCode
     );
-
-    let sync: SyncMetadata = serde_json::from_value(json!({})).unwrap();
-    assert_eq!(sync.visibility, Visibility::LocalOnly);
-    assert_eq!(sync.fidelity, Fidelity::Partial);
-    assert_eq!(sync.sync_state, SyncState::LocalOnly);
-    assert_eq!(sync.sync_version, 0);
-    assert_eq!(sync.metadata, json!({}));
-
-    let outbox: SyncOutboxItem = serde_json::from_value(json!({
-        "id": "018f45d0-0000-7000-8000-000000000010",
-        "local_table": "history_records",
-        "local_id": "018f45d0-0000-7000-8000-000000000001",
-        "operation": "insert",
-        "device_id": "device-1",
-        "created_at": "2026-06-22T00:00:00Z",
-        "updated_at": "2026-06-22T00:00:00Z"
-    }))
-    .unwrap();
-    assert_eq!(outbox.sync_state, SyncState::Pending);
-}
-
-#[test]
-fn history_record_json_names_are_public_names() {
-    let record_id = Uuid::parse_str("018f45d0-0000-7000-8000-000000000001").unwrap();
-    let session: Session = serde_json::from_value(json!({
-        "id": "018f45d0-0000-7000-8000-000000000002",
-        "history_record_id": record_id,
-        "provider": "codex",
-        "agent_type": "primary",
-        "status": "imported",
-        "started_at": "2026-06-22T00:00:00Z",
-        "created_at": "2026-06-22T00:00:00Z",
-        "updated_at": "2026-06-22T00:00:00Z"
-    }))
-    .unwrap();
-
-    assert_eq!(session.history_record_id, Some(record_id));
-    let value = serde_json::to_value(&session).unwrap();
-    assert_eq!(value["history_record_id"], record_id.to_string());
-}
-
-#[test]
-fn generated_ids_are_uuid_v7() {
-    let record = HistoryRecord::new("Task", "body", Vec::new(), "task", None);
-
-    assert_eq!(record.id.get_version_num(), 7);
 }
 
 #[test]

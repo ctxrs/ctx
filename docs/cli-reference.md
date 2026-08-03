@@ -1,9 +1,10 @@
 # CLI Reference
 
 ctx is a local CLI for importing and searching agent session history. Provider
-histories remain authoritative. Core/Tantivy lexical search lives under
-`search/lexical`, optional flat-F32 semantic data lives under
-`search/semantic`, and typed presentation reads complete stored Core records.
+histories remain the acquisition authority for import and refresh. Core/Tantivy
+lexical search lives under `search/lexical`, optional flat-F32 semantic data
+lives under `search/semantic`, and typed presentation reads complete stored Core
+records.
 
 ## Global Options
 
