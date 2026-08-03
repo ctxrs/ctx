@@ -344,89 +344,6 @@ impl CoreEventRangeSelection {
         }
     }
 
-    fn accepts_indexed(
-        &self,
-        segment: &SegmentReader,
-        doc: DocId,
-        fields: Fields,
-        source_token: Option<&str>,
-    ) -> Result<bool> {
-        let filters = &self.filters;
-        if let Some(source_token) = source_token {
-            let term = Term::from_field_text(fields.source_key, source_token);
-            if !indexed_term_matches(segment, doc, fields.source_key, &term)? {
-                return Ok(false);
-            }
-        }
-        if !filters.providers.is_empty()
-            && !filters
-                .providers
-                .iter()
-                .try_fold(false, |matched, provider| {
-                    Ok::<_, IndexError>(
-                        matched
-                            || indexed_term_matches(
-                                segment,
-                                doc,
-                                fields.provider,
-                                &Term::from_field_text(fields.provider, provider),
-                            )?,
-                    )
-                })?
-        {
-            return Ok(false);
-        }
-        for (field, expected) in [
-            (fields.source_format, filters.source_format.clone()),
-            (
-                fields.provider_session_id,
-                filters.provider_session_id.clone(),
-            ),
-            (
-                fields.session_id,
-                filters.session_id.map(|value| value.to_string()),
-            ),
-            (
-                fields.parent_session_id,
-                filters.parent_session_id.map(|value| value.to_string()),
-            ),
-            (
-                fields.root_session_id,
-                filters.root_session_id.map(|value| value.to_string()),
-            ),
-            (fields.branch, filters.branch.clone()),
-            (fields.event_type, filters.event_type.clone()),
-            (fields.role, filters.role.clone()),
-            (fields.agent_type, filters.agent_type.clone()),
-            (fields.custom_provider_key, filters.provider_key.clone()),
-            (fields.custom_source_id, filters.source_id.clone()),
-        ] {
-            if let Some(expected) = expected.as_deref() {
-                let term = Term::from_field_text(field, expected);
-                if !indexed_term_matches(segment, doc, field, &term)? {
-                    return Ok(false);
-                }
-            }
-        }
-        if let Some((provider_key, source_id)) = self.history_source_parts.as_ref() {
-            let provider_term = Term::from_field_text(fields.custom_provider_key, provider_key);
-            let source_term = Term::from_field_text(fields.custom_source_id, source_id);
-            if !indexed_term_matches(segment, doc, fields.custom_provider_key, &provider_term)?
-                || !indexed_term_matches(segment, doc, fields.custom_source_id, &source_term)?
-            {
-                return Ok(false);
-            }
-        }
-        if filters.scope != CoreEventRangeScope::All {
-            let expected = u64::from(filters.scope == CoreEventRangeScope::Primary);
-            let term = Term::from_field_u64(fields.is_primary, expected);
-            if !indexed_term_matches(segment, doc, fields.is_primary, &term)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     fn accepts_record(&self, event: &CoreEventRecord) -> bool {
         let filters = &self.filters;
         let record = &event.core_record;
@@ -855,12 +772,6 @@ impl VerifiedIndex {
             let Some(address) = address else {
                 continue;
             };
-            let segment = segments.get(address.segment_ord as usize).ok_or(
-                IndexError::InvalidStoredDocumentField(EVENT_RANGE_ORDER_FIELD),
-            )?;
-            if !selection.accepts_indexed(segment, address.doc_id, fields, source_token)? {
-                continue;
-            }
             let (record, actual_encoded_bytes) =
                 stored_core_event_record_with_size(&self.searcher, address, fields)?;
             let actual_content_bytes = core_content_bytes(&record.core_record.content)?;
@@ -1230,19 +1141,6 @@ fn parse_history_source(value: &str) -> CoreEventRangeResult<(String, String)> {
         });
     }
     Ok((provider.to_owned(), source.to_owned()))
-}
-
-fn indexed_term_matches(
-    segment: &SegmentReader,
-    doc: DocId,
-    field: tantivy::schema::Field,
-    term: &Term,
-) -> Result<bool> {
-    let inverted = segment.inverted_index(field)?;
-    let Some(mut postings) = inverted.read_postings(term, IndexRecordOption::Basic)? else {
-        return Ok(false);
-    };
-    Ok(postings.seek(doc) == doc)
 }
 
 fn selection_digest(domain: CoreEventRangeDomain, filters: &CoreEventRangeFilters) -> [u8; 32] {

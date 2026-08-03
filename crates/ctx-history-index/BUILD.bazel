@@ -1,7 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
-load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
 load("//tools/bazel:gates.bzl", "loc_check_inputs")
 
 package(default_visibility = ["//visibility:public"])
@@ -38,6 +38,26 @@ rust_library(
     deps = all_crate_deps(normal = True) + CTX_HISTORY_INDEX_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_binary(
+    name = "event_range_benchmark",
+    testonly = True,
+    srcs = ["examples/event_range_benchmark.rs"],
+    crate_name = "event_range_benchmark",
+    crate_root = "examples/event_range_benchmark.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        ":lib",
+        "//crates/ctx-history-core:lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    tags = [
+        "benchmark",
+        "manual",
+    ],
 )
 
 ctx_rust_test(

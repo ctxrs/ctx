@@ -1096,13 +1096,33 @@ fn incompatible_schema_generation_is_rebuilt_without_interpretation() {
 
 #[test]
 fn schema_without_encoded_core_size_is_rebuilt_without_fallback() {
-    assert_eq!(LEXICAL_SCHEMA_VERSION, 16);
+    assert_eq!(LEXICAL_SCHEMA_VERSION, 17);
     assert_active_meta_incompatibility_is_rebuilt(
         "encoded-size-schema-rebuild.jsonl",
         |meta| {
             let schema = meta["schema"].as_array_mut().unwrap();
             let current_fields = schema.len();
             schema.retain(|field| field["name"] != "core_record_encoded_bytes");
+            assert_eq!(schema.len() + 1, current_fields);
+        },
+        |error| {
+            assert!(matches!(
+                error,
+                IndexError::SchemaMismatch(LEXICAL_SCHEMA_VERSION)
+            ));
+        },
+    );
+}
+
+#[test]
+fn schema_without_event_range_order_is_rebuilt_without_fallback() {
+    assert_eq!(LEXICAL_SCHEMA_VERSION, 17);
+    assert_active_meta_incompatibility_is_rebuilt(
+        "event-range-order-schema-rebuild.jsonl",
+        |meta| {
+            let schema = meta["schema"].as_array_mut().unwrap();
+            let current_fields = schema.len();
+            schema.retain(|field| field["name"] != "event_range_order");
             assert_eq!(schema.len() + 1, current_fields);
         },
         |error| {
