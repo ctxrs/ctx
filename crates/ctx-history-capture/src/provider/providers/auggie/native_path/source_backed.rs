@@ -469,6 +469,9 @@ fn scan_changed_auggie_document(
         content_digest,
         session,
         events,
+        complete_records,
+        ignored_records,
+        rejected_records,
     } = parsed;
     if !leaf.matches(&stamp) {
         return Err(route_error(CaptureError::SourceChangedDuringCapture));
@@ -502,10 +505,10 @@ fn scan_changed_auggie_document(
         parser_revision: AUGGIE_PARSER_REVISION,
         content_digest,
         counts: ScannedSourceCounts {
-            complete_records: indexed_documents,
+            complete_records,
             retained_records: indexed_documents,
-            rejected_records: 0,
-            ignored_records: 0,
+            rejected_records,
+            ignored_records,
             indexed_documents,
             certified_bytes,
         },

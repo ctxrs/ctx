@@ -47,7 +47,7 @@ const WARP_NATIVE_ITEM_NAMESPACE: &str = "warp.task-message";
 const WARP_LOGICAL_SESSION_KIND: &str = "warp-conversation";
 const WARP_LOGICAL_ITEM_KIND: &str = "warp-task-message";
 const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
-const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v2";
+const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v3";
 const WARP_SCHEMA_EVIDENCE: &[u8] = b"agent_conversations+agent_tasks+unique-task-id-v1";
 const WARP_MISSING_TREE_DOMAIN: &[u8] = b"ctx.warp.missing-logical-tree.v1\0";
 const WARP_LOGICAL_LEAF_DOMAIN: &[u8] = b"ctx.warp.logical-leaf.v1\0";
@@ -755,9 +755,10 @@ fn scan_counts(
     {
         return Err(WarpSourceBackedErrorV0::ScanCountMismatch);
     }
+    let ignored_records = accounted_ignored_records(native_scan, sink.ignored_records)?;
     let complete_records = retained_records
         .checked_add(sink.rejected_records)
-        .and_then(|count| count.checked_add(sink.ignored_records))
+        .and_then(|count| count.checked_add(ignored_records))
         .ok_or(WarpSourceBackedErrorV0::CountOverflow)?;
     let conversation_bytes = native_scan
         .counters
@@ -773,12 +774,21 @@ fn scan_counts(
         complete_records,
         retained_records,
         rejected_records: sink.rejected_records,
-        ignored_records: sink.ignored_records,
+        ignored_records,
         indexed_documents: retained_records,
         certified_bytes: conversation_bytes
             .checked_add(task_bytes)
             .ok_or(WarpSourceBackedErrorV0::CountOverflow)?,
     })
+}
+
+fn accounted_ignored_records(
+    native_scan: &WarpNativeSourceBackedScan,
+    projected_ignored_records: u64,
+) -> WarpSourceBackedResultV0<u64> {
+    projected_ignored_records
+        .checked_add(native_scan.counters.ignored_messages)
+        .ok_or(WarpSourceBackedErrorV0::CountOverflow)
 }
 
 fn missing_tree_fingerprint(source: &SourceKey) -> [u8; 32] {
@@ -860,9 +870,23 @@ fn source_backed_capture_error(error: WarpSourceBackedErrorV0) -> CaptureError {
 
 #[cfg(test)]
 mod result_tests {
+    use super::super::nativepath::WarpNativeCounters;
     use super::*;
     use crate::{record_evidence::RecordDigest, OutputOutcome};
     use ctx_history_core::{EventRole, EventType};
+
+    #[test]
+    fn scan_accounting_includes_unknown_message_units() {
+        let native_scan = WarpNativeSourceBackedScan {
+            source_integrity_digest: "00".repeat(32),
+            counters: WarpNativeCounters {
+                sessions_retained: 1,
+                ignored_messages: 1,
+                ..WarpNativeCounters::default()
+            },
+        };
+        assert_eq!(accounted_ignored_records(&native_scan, 1).unwrap(), 2);
+    }
 
     #[test]
     fn core_projection_keeps_success_failure_unknown_and_large_result_bodies_once() {

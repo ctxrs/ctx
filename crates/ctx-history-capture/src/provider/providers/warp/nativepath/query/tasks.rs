@@ -333,7 +333,9 @@ fn hydrate_task_candidate(
                 counters.result_events_created = counters.result_events_created.saturating_add(1);
                 unit.push_event(event)?;
             }
-            WarpDecodedMessagePayload::Excluded => {}
+            WarpDecodedMessagePayload::Excluded => {
+                counters.ignored_messages = counters.ignored_messages.saturating_add(1);
+            }
         }
         builder.push(
             unit,

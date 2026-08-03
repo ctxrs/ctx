@@ -125,7 +125,7 @@ fn c0_shapes_retain_conversation_summaries_calls_and_results() {
 }
 
 #[test]
-fn compacted_payloads_and_future_result_aliases_retain_known_result_content() {
+fn compacted_payloads_and_known_result_aliases_retain_known_result_content() {
     let contents = [
         session_meta("shape-owner"),
         jsonl(json!({
@@ -162,4 +162,84 @@ fn compacted_payloads_and_future_result_aliases_retain_known_result_content() {
     assert_eq!(sink.rows[1].lexical_body, "future result survives");
     assert_eq!(scan.counters.native_result_records, 2);
     assert_eq!(scan.counters.retained_json_parses, 1);
+}
+
+#[test]
+fn unknown_result_like_discriminators_are_ignored_without_losing_neighbors_or_bodies() {
+    let binary_body = "iVBORw0KGgo=issue-247-binary-body";
+    let unknown_body = "future-result-body-must-not-be-indexed";
+    let contents = [
+        session_meta("unknown-result-like-owner"),
+        message("user", "valid before unknown records"),
+        jsonl(json!({
+            "timestamp": "2026-05-31T20:33:10Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "call_id": "ig-issue-247",
+                "status": "generating",
+                "revised_prompt": "a red square",
+                "result": binary_body,
+                "saved_path": "/tmp/repro/img.png"
+            }
+        })),
+        jsonl(json!({
+            "timestamp": "2026-05-31T20:33:11Z",
+            "type": "response_item",
+            "payload": {
+                "type": "future_tool_result",
+                "result": unknown_body
+            }
+        })),
+        jsonl(json!({
+            "timestamp": "2026-05-31T20:33:12Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "future_tool_response",
+                "output": unknown_body
+            }
+        })),
+        jsonl(json!({
+            "timestamp": "2026-05-31T20:33:13Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "future_tool_end",
+                "result": unknown_body
+            }
+        })),
+        message("assistant", "valid after unknown records"),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "unknown-result-like-owner"), None);
+
+    assert_eq!(
+        sink.rows
+            .iter()
+            .map(|row| (row.raw_ordinal, row.lexical_body.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, "valid before unknown records"),
+            (6, "valid after unknown records")
+        ]
+    );
+    assert_eq!(scan.counters.complete_records, 7);
+    assert_eq!(scan.counters.retained_records, 2);
+    assert_eq!(scan.counters.ignored_records, 4);
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(scan.counters.native_result_records, 0);
+    assert_eq!(scan.counters.prefiltered_records, 4);
+    assert_eq!(scan.complete_prefix_end, contents.len() as u64);
+    assert_eq!(scan.next_raw_ordinal, 7);
+    for row in &sink.rows {
+        assert!(!row.lexical_body.contains(binary_body));
+        assert!(!row.lexical_body.contains(unknown_body));
+        let structured = row
+            .structured_content
+            .as_ref()
+            .map(Value::to_string)
+            .unwrap_or_default();
+        assert!(!structured.contains(binary_body));
+        assert!(!structured.contains(unknown_body));
+    }
 }

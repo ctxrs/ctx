@@ -327,7 +327,10 @@ Imports always commit valid records and report rejected records. An unreadable
 or structurally incompatible input fails that source, while ctx-owned storage
 or index failures abort the command. A source with only rejected records is a
 failure; a source with valid content and rejections completes with an explicit
-`completed_with_rejections` outcome.
+`completed_with_rejections` outcome. A structurally valid record with an
+unrecognized provider-native discriminator is retained generically, counted as
+ignored, or rejected at record scope; it does not make an otherwise compatible
+source unreadable.
 
 Import results report `change: changed|no_op` independently from import and
 skip counters. `change: changed` remains truthful even when a source projects

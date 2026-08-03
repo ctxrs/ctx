@@ -316,6 +316,183 @@ fn codex_mixed_session_replay_preserves_source_backed_rejection_counts() {
 }
 
 #[test]
+fn junie_all_unknown_session_is_published_with_ignored_accounting() {
+    let temp = finite_daemon_test_root();
+    let sessions = temp.path().join("junie-all-unknown");
+    let session_id = "session-unknown-247";
+    let session = sessions.join(session_id);
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        sessions.join("index.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "sessionId": session_id,
+                "createdAt": 1_786_000_000_000_i64,
+                "projectDir": "/workspace/junie-unknown"
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        session.join("events.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"kind": "FutureTopLevelEvent", "value": 1}),
+            serde_json::json!({
+                "kind": "SessionA2uxEvent",
+                "event": {"agentEvent": {"kind": "FutureAgentEvent", "value": 2}}
+            })
+        ),
+    )
+    .unwrap();
+
+    let report = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "junie",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    let source =
+        assert_source_backed_publication(&report, "junie", "junie_session_events_jsonl_tree", 0);
+    assert_eq!(source["current_source_count"], 1, "{report:#}");
+    assert_eq!(source["current_indexed_documents"], 0, "{report:#}");
+    assert_eq!(source["current_complete_records"], 2, "{report:#}");
+    assert_eq!(source["current_retained_records"], 0, "{report:#}");
+    assert_eq!(source["current_ignored_records"], 2, "{report:#}");
+}
+
+#[test]
+fn auggie_unknown_node_is_published_with_ignored_accounting() {
+    let temp = finite_daemon_test_root();
+    let session = temp.path().join("auggie-unknown-node.json");
+    let unknown_body = "auggie-unknown-node-body-must-not-be-indexed";
+    fs::write(
+        &session,
+        serde_json::to_vec(&serde_json::json!({
+            "sessionId": "auggie-unknown-node-247",
+            "created": "2026-07-04T20:00:00Z",
+            "chatHistory": [{
+                "exchange": {
+                    "request_nodes": [{
+                        "type": 71,
+                        "text_node": {"content": unknown_body}
+                    }]
+                }
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let report = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "auggie",
+        "--path",
+        session.to_str().unwrap(),
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    let source = assert_source_backed_publication(&report, "auggie", "auggie_session_json", 0);
+    assert_eq!(source["current_source_count"], 1, "{report:#}");
+    assert_eq!(source["current_indexed_documents"], 0, "{report:#}");
+    assert_eq!(source["current_complete_records"], 1, "{report:#}");
+    assert_eq!(source["current_retained_records"], 0, "{report:#}");
+    assert_eq!(source["current_ignored_records"], 1, "{report:#}");
+    assert!(provider_core_records(&data_root(&temp), "auggie").is_empty());
+}
+
+#[test]
+fn codex_unknown_result_like_events_preserve_neighbors_on_fresh_and_warm_import() {
+    let temp = finite_daemon_test_root();
+    let session = temp.path().join("codex-unknown-result-like.jsonl");
+    let binary_body = "iVBORw0KGgo=issue-247-cli-body";
+    let future_body = "future-cli-result-body-must-not-be-indexed";
+    fs::write(
+        &session,
+        format!(
+            concat!(
+                r#"{{"timestamp":"2026-05-31T20:33:07.000Z","type":"session_meta","payload":{{"id":"codex-unknown-result-like","timestamp":"2026-05-31T20:33:07.000Z","cwd":"/tmp/repro","originator":"codex_cli_rs","cli_version":"0.0.0","source":"cli","model_provider":"openai"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-05-31T20:33:08.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"issue 247 valid before unknown"}}]}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-05-31T20:33:10.000Z","type":"event_msg","payload":{{"type":"image_generation_end","call_id":"ig_repro","status":"generating","revised_prompt":"a red square","result":"{binary_body}","saved_path":"/tmp/repro/img.png"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-05-31T20:33:11.000Z","type":"response_item","payload":{{"type":"future_tool_result","result":"{future_body}"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-05-31T20:33:12.000Z","type":"event_msg","payload":{{"type":"future_tool_response","output":"{future_body}"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-05-31T20:33:13.000Z","type":"event_msg","payload":{{"type":"future_tool_end","result":"{future_body}"}}}}"#,
+                "\n",
+                r#"{{"timestamp":"2026-05-31T20:33:14.000Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"issue 247 valid after unknown"}}]}}}}"#,
+                "\n"
+            ),
+            binary_body = binary_body,
+            future_body = future_body,
+        ),
+    )
+    .unwrap();
+    let path = session.to_str().unwrap();
+
+    let mut generation = None;
+    for resume in [false, true] {
+        let mut command = ctx(&temp);
+        command.args([
+            "import",
+            "--provider",
+            "codex",
+            "--path",
+            path,
+            "--format=json",
+            "--progress",
+            "none",
+        ]);
+        if resume {
+            command.arg("--resume");
+        }
+        let report = json_output(&mut command);
+        let source = assert_source_backed_publication(&report, "codex", "codex_session_jsonl", 0);
+        assert_eq!(source["current_indexed_documents"], 2, "{report:#}");
+        assert_eq!(source["current_complete_records"], 7, "{report:#}");
+        assert_eq!(source["current_retained_records"], 2, "{report:#}");
+        assert_eq!(source["current_ignored_records"], 5, "{report:#}");
+        if let Some(generation) = generation.as_ref() {
+            assert_eq!(source["change"], "no_op", "{report:#}");
+            assert_eq!(source["generation_changed"], false, "{report:#}");
+            assert_eq!(source["published_generation"], *generation, "{report:#}");
+        } else {
+            generation = source["published_generation"].as_str().map(str::to_owned);
+        }
+    }
+
+    for query in [
+        "issue 247 valid before unknown",
+        "issue 247 valid after unknown",
+    ] {
+        let search = json_output(ctx(&temp).args([
+            "search",
+            query,
+            "--provider",
+            "codex",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+        assert_search_provider_oracle(&search, "codex", query, 1, "message");
+    }
+    let records = provider_core_records(&data_root(&temp), "codex");
+    let encoded = serde_json::to_string(&records).unwrap();
+    assert!(!encoded.contains(binary_body));
+    assert!(!encoded.contains(future_body));
+}
+
+#[test]
 fn corrected_manifested_file_retries_rejected_row_idempotently() {
     let temp = finite_daemon_test_root();
     let project = temp.path().join("claude-project");

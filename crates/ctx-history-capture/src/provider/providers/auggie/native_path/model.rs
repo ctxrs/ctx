@@ -3,7 +3,7 @@ use ctx_history_core::{EventRole, EventType};
 
 use super::source::AuggieFileStamp;
 
-pub(super) const AUGGIE_PARSER_REVISION: &str = "auggie-nativepath-json-v1";
+pub(super) const AUGGIE_PARSER_REVISION: &str = "auggie-nativepath-json-v2";
 pub(super) const AUGGIE_MAX_DISCOVERED_FILES: usize = 4_096;
 
 pub(super) struct ParsedAuggieSource {
@@ -11,6 +11,9 @@ pub(super) struct ParsedAuggieSource {
     pub(super) content_digest: [u8; 32],
     pub(super) session: ParsedAuggieSession,
     pub(super) events: Vec<ParsedAuggieEvent>,
+    pub(super) complete_records: u64,
+    pub(super) ignored_records: u64,
+    pub(super) rejected_records: u64,
 }
 
 pub(super) struct ParsedAuggieSession {

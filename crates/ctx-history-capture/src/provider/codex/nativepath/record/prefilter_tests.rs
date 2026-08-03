@@ -229,6 +229,30 @@ fn prefilter_probes_result_envelopes_for_complete_content() {
     }
 }
 
+#[test]
+fn prefilter_ignores_unknown_result_like_discriminators_by_construction() {
+    let ignored = [
+        r#"{"type":"event_msg","payload":{"type":"image_generation_end","result":"iVBORw0KGgo="}}"#,
+        r#"{"type":"response_item","payload":{"type":"future_tool_result","result":"x"}}"#,
+        r#"{"type":"event_msg","payload":{"type":"future_tool_response","output":"x"}}"#,
+        r#"{"type":"event_msg","payload":{"type":"future_tool_end","result":"x"}}"#,
+        r#"{"type":"response_item","payload":{"type":"command_output","output":"x"}}"#,
+    ];
+    for raw in ignored {
+        let probe = classify_codex_record(raw.as_bytes()).unwrap();
+        assert_eq!(
+            codex_skip_projection(probe.class),
+            Some(CodexSkipProjection::Ignored)
+        );
+        assert_eq!(probe.output, None);
+        assert_eq!(
+            prefilter_codex_record(raw.as_bytes()),
+            CodexRecordAdmission::NoProjection(CodexSkipProjection::Ignored),
+            "unknown discriminator should stay on the bounded ignored path: {raw}"
+        );
+    }
+}
+
 /// Classes that reach parsed state are never skipped.
 #[test]
 fn prefilter_always_probes_materialized_classes() {

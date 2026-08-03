@@ -40,7 +40,6 @@ struct RuntimeState {
     started_at_ms: i64,
     last_ts_ms: i64,
     cwd: Option<String>,
-    saw_supported_event: bool,
 }
 
 impl RuntimeState {
@@ -50,7 +49,6 @@ impl RuntimeState {
             started_at_ms: started_at.timestamp_millis(),
             last_ts_ms: started_at.timestamp_millis(),
             cwd: meta.project_dir.clone(),
-            saw_supported_event: false,
         }
     }
 
@@ -70,15 +68,10 @@ pub(super) struct JunieProjection {
     turn_start: u64,
     next_event_index: u64,
     rejected_records: u64,
-    require_supported_events: bool,
 }
 
 impl JunieProjection {
-    pub(super) fn new(
-        meta: &JunieIndexMeta,
-        require_supported_events: bool,
-        imported_at: DateTime<Utc>,
-    ) -> Self {
+    pub(super) fn new(meta: &JunieIndexMeta, imported_at: DateTime<Utc>) -> Self {
         Self {
             state: RuntimeState::fresh(meta, imported_at),
             buffer: JunieAssistantBuffer::default(),
@@ -86,7 +79,6 @@ impl JunieProjection {
             turn_start: 0,
             next_event_index: 0,
             rejected_records: 0,
-            require_supported_events,
         }
     }
 
@@ -127,7 +119,6 @@ impl JunieProjection {
                 )?;
                 let prompt = value.get("prompt").and_then(Value::as_str).unwrap_or("");
                 if !prompt.trim().is_empty() {
-                    self.state.saw_supported_event = true;
                     rows.push(EventDraft {
                         event_index: self.next_event_index,
                         event_type: EventType::Message,
@@ -183,14 +174,12 @@ impl JunieProjection {
                             return Ok(Vec::new());
                         }
                         self.retained_turn_bytes = retained.unwrap_or_default();
-                        if junie_merge_buffered_agent_event(
+                        junie_merge_buffered_agent_event(
                             &mut self.buffer,
                             agent,
                             evidence.physical_ordinal().saturating_add(1),
                             self.state.last_ts(),
-                        ) {
-                            self.state.saw_supported_event = true;
-                        }
+                        );
                     }
                     _ => {}
                 }
@@ -208,14 +197,6 @@ impl JunieProjection {
             &mut self.next_event_index,
             &mut rows,
         )?;
-        if self.require_supported_events
-            && !self.state.saw_supported_event
-            && self.rejected_records == 0
-        {
-            return Err(CaptureError::InvalidPayload(
-                "Junie events.jsonl contained no supported session events".to_owned(),
-            ));
-        }
         Ok(rows)
     }
 
@@ -463,12 +444,38 @@ mod result_tests {
     }
 
     #[test]
+    fn structurally_valid_unknown_events_finish_as_an_empty_projection() {
+        let meta = JunieIndexMeta {
+            session_id: "session-unknown-test".to_owned(),
+            ..JunieIndexMeta::default()
+        };
+        let mut projection = JunieProjection::new(&meta, DateTime::<Utc>::UNIX_EPOCH);
+        for (ordinal, value) in [
+            json!({"kind": "FutureTopLevelEvent", "payload": {"version": 2}}),
+            json!({
+                "kind": "SessionA2uxEvent",
+                "event": {"agentEvent": {"kind": "FutureAgentEvent", "value": 1}}
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(projection
+                .project(JsonlRecordRef::for_test(&bytes, ordinal as u64))
+                .unwrap()
+                .is_empty());
+        }
+        assert!(projection.finish().unwrap().is_empty());
+    }
+
+    #[test]
     fn retains_complete_success_failure_unknown_and_abstains_on_malformed_output() {
         let meta = JunieIndexMeta {
             session_id: "session-result-test".to_owned(),
             ..JunieIndexMeta::default()
         };
-        let mut projection = JunieProjection::new(&meta, true, DateTime::<Utc>::UNIX_EPOCH);
+        let mut projection = JunieProjection::new(&meta, DateTime::<Utc>::UNIX_EPOCH);
         let complete_success = format!("{}junie-oversized-tail", "j".repeat(9 * 1024 * 1024));
         for (ordinal, event) in [
             json!({
