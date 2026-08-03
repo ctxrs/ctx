@@ -460,19 +460,25 @@ fn junie_official_root_uses_junie_home_and_ignores_retired_sessions_override() {
 }
 
 #[test]
-fn factory_official_root_is_the_fixed_sessions_directory_on_supported_platforms() {
+fn factory_supported_default_is_the_sessions_directory_on_supported_platforms() {
     let temp = tempdir();
     let base = context(&temp, DiscoveryPlatform::Linux);
     let sessions = base.home().join(".factory/sessions");
 
-    let missing = resolve_provider(&base, CaptureProvider::FactoryAiDroid);
-    assert_eq!(paths(&missing), std::slice::from_ref(&sessions));
-    assert_eq!(missing.sources[0].status, ProviderSourceStatus::Missing);
-    assert_eq!(
-        missing.sources[0].source_format,
-        "factory_ai_droid_sessions_jsonl"
-    );
-    assert!(missing.issues.is_empty());
+    for platform in [
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatform::MacOS,
+        DiscoveryPlatform::Windows,
+    ] {
+        let missing = resolve_provider(&context(&temp, platform), CaptureProvider::FactoryAiDroid);
+        assert_eq!(paths(&missing), std::slice::from_ref(&sessions));
+        assert_eq!(missing.sources[0].status, ProviderSourceStatus::Missing);
+        assert_eq!(
+            missing.sources[0].source_format,
+            "factory_ai_droid_sessions_jsonl"
+        );
+        assert!(missing.issues.is_empty());
+    }
 
     fs::create_dir_all(sessions.join("-Users-example-project")).unwrap();
     fs::write(
@@ -525,7 +531,7 @@ fn forgecode_official_root_preserves_raw_cwd_semantics_and_exists_winner() {
 }
 
 #[test]
-fn simple_lane_has_thirteen_reviewed_winner_only_policies() {
+fn simple_lane_has_fourteen_reviewed_winner_only_policies() {
     let temp = tempdir();
     let context = context(&temp, DiscoveryPlatform::Linux);
     let providers = [
@@ -541,9 +547,10 @@ fn simple_lane_has_thirteen_reviewed_winner_only_policies() {
         CaptureProvider::Cursor,
         CaptureProvider::KimiCodeCli,
         CaptureProvider::Junie,
+        CaptureProvider::FactoryAiDroid,
         CaptureProvider::ForgeCode,
     ];
-    assert_eq!(providers.len(), 13);
+    assert_eq!(providers.len(), 14);
     for provider in providers {
         let report = resolve_provider(&context, provider);
         let expected = if provider == CaptureProvider::Codex {

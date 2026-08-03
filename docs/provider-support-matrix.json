@@ -1182,7 +1182,7 @@
         }
       ],
       "history_locations": [
-        "Fixed: `~/.factory/sessions/<project>/<session-id>.jsonl`."
+        "Supported default: `~/.factory/sessions/<project>/<session-id>.jsonl`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,

@@ -34,7 +34,7 @@ const CODEX_COMPRESSION_SCAN_REASON: &str =
     "bounded Codex compressed-history detection could not complete; use an exact --path for compressed rollouts";
 const MAX_CODEX_COMPRESSION_ENTRIES: usize = 10_000;
 
-/// Official winner-only custom-root policy for the thirteen scalar/fixed-root
+/// Winner-only custom-root policy for the fourteen scalar/fixed-root
 /// providers owned by the simple resolver lane.
 pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
     match spec.provider {
