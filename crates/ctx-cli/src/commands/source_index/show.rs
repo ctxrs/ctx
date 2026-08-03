@@ -189,6 +189,9 @@ fn run_show_inner(
             local_usage.set_measured_output_bytes(result.output_bytes);
             Ok(())
         }
+        ShowTarget::Events(_) => {
+            unreachable!("show events is handled by the compact show command router")
+        }
     }
 }
 
@@ -649,6 +652,9 @@ pub(super) fn validate_show_target(target: &ShowTarget) -> Result<()> {
             validate_session_selector(args.id.as_deref(), args.provider_session.as_deref())
         }
         ShowTarget::Event(args) => validate_ctx_id(&args.id, "event").map(|_| ()),
+        ShowTarget::Events(_) => {
+            unreachable!("show events is validated by the compact show command router")
+        }
     }
 }
 

@@ -323,10 +323,11 @@ impl CliUsage {
             CommandRoot::Sources(_) => (Some("sources"), TargetType::NotApplicable),
             CommandRoot::Import(_) => (Some("import"), TargetType::NotApplicable),
             CommandRoot::Show(args) => (
-                Some(match &args.target {
-                    ShowTarget::Session(_) => "show_session",
-                    ShowTarget::Event(_) => "show_event",
-                }),
+                match &args.target {
+                    ShowTarget::Session(_) => Some("show_session"),
+                    ShowTarget::Event(_) => Some("show_event"),
+                    ShowTarget::Events(_) => Some("show_event"),
+                },
                 TargetType::NotApplicable,
             ),
             CommandRoot::Locate(_) => (Some("locate"), TargetType::NotApplicable),
@@ -493,6 +494,7 @@ impl McpInvocation {
             "search" => "search",
             "show_session" => "show_session",
             "show_event" => "show_event",
+            "query_events" => "show_event",
             "pro_status" => "pro_status",
             "blame" => "blame",
             _ => return None,

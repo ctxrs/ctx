@@ -297,8 +297,10 @@ impl McpLifecycle {
                     self.counts.tool_failures = self.counts.tool_failures.saturating_add(1);
                 }
                 let mut result = result_metadata(tool, response);
-                if matches!(tool, McpToolV1::ShowSession | McpToolV1::ShowEvent)
-                    && response.get("result").is_some()
+                if matches!(
+                    tool,
+                    McpToolV1::ShowSession | McpToolV1::ShowEvent | McpToolV1::QueryEvents
+                ) && response.get("result").is_some()
                 {
                     result.response_bound = Some(
                         if response
@@ -421,6 +423,12 @@ fn result_metadata(tool: McpToolV1, response: &Value) -> McpResultMetadataV1 {
             }
             metadata.events_truncated =
                 result.pointer("/truncated/events").and_then(Value::as_bool);
+        }
+        McpToolV1::QueryEvents => {
+            if let Some(count) = result.get("events").and_then(Value::as_array).map(Vec::len) {
+                metadata = metadata.with_result_count(count);
+            }
+            metadata.result_truncated = result.get("truncated").and_then(Value::as_bool);
         }
         McpToolV1::Blame | McpToolV1::ProStatus => {
             // MCP owns protocol and delivery telemetry. Pro-host telemetry owns

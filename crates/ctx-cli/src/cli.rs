@@ -7,7 +7,7 @@ use crate::{
     commands::{
         locate::LocateArgs,
         search::RefreshArg,
-        show::{ShowEventArgs, ShowSessionArgs},
+        show::{ShowEventArgs, ShowEventsArgs, ShowSessionArgs},
     },
     docs, integrations, mcp,
     output::JsonOutputFormat,
@@ -284,6 +284,8 @@ pub(crate) enum ShowTarget {
     Session(ShowSessionArgs),
     #[command(about = "Show one event or a surrounding event window")]
     Event(ShowEventArgs),
+    #[command(about = "Query deterministic Core event pages")]
+    Events(ShowEventsArgs),
 }
 
 #[derive(Debug, Args)]

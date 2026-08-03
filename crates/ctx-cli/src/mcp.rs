@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 mod arguments;
 mod input;
 mod pro;
+mod query_events;
 mod response;
 mod response_bound;
 mod show;
@@ -28,16 +29,23 @@ use pro::{
     pro_blame_tool, required_blame_target, tool_pro_blame, tool_pro_status,
     MCP_BLAME_MAX_OUTPUT_BYTES,
 };
+use query_events::tool_query_events;
 use response::{
     error_response, invalid_request_response, invalid_tool_request, json_rpc_error,
     success_response, tool_error_result, tool_result,
 };
 use response_bound::{
-    bound_blame_mcp_response, bound_show_mcp_response, is_blame_tool_call, is_show_tool_call,
+    bound_blame_mcp_response, bound_query_events_mcp_response, bound_show_mcp_response,
+    is_blame_tool_call, is_query_events_tool_call, is_show_tool_call,
 };
 use show::{tool_show_event, tool_show_session};
 use telemetry::{McpHandled, McpTelemetry, RequestDescriptor};
 use text::render_tool_text;
+
+#[cfg(test)]
+pub(crate) fn query_events_for_test(arguments: &Value, data_root: &Path) -> Result<Value> {
+    tool_query_events(arguments, data_root)
+}
 
 use super::{
     compact_json, config, discovered_plugin_sources_json, search_has_intent, sources_json,
@@ -81,16 +89,6 @@ pub(crate) fn run(args: McpArgs, data_root: PathBuf) -> Result<()> {
 }
 
 fn serve_stdio(data_root: PathBuf) -> Result<()> {
-    let daemon_config = config::AppConfig::load(&data_root)?;
-    if daemon_config.daemon.enabled
-        && crate::semantic::daemon_autostart_suppression_reason().is_none()
-    {
-        let _ = crate::semantic::autostart_daemon_and_wait(
-            &data_root,
-            &daemon_config,
-            crate::DaemonTriggerCommandArg::Search,
-        );
-    }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdin = stdin.lock();
@@ -99,12 +97,14 @@ fn serve_stdio(data_root: PathBuf) -> Result<()> {
     let mut usage_recorder = McpUsageRecorder::start(data_root.clone());
     let started = Instant::now();
     let mut initialized = false;
+    let mut startup_recovery_attempted = false;
 
     let result = serve_stdio_loop(
         &data_root,
         &mut stdin,
         &mut stdout,
         &mut initialized,
+        &mut startup_recovery_attempted,
         &mut telemetry,
         &mut usage_recorder,
     );
@@ -126,6 +126,7 @@ fn serve_stdio_loop(
     stdin: &mut impl BufRead,
     stdout: &mut impl Write,
     initialized: &mut bool,
+    startup_recovery_attempted: &mut bool,
     telemetry: &mut McpTelemetry,
     usage_recorder: &mut McpUsageRecorder,
 ) -> std::result::Result<(), McpServeFailure> {
@@ -147,8 +148,12 @@ fn serve_stdio_loop(
                 match serde_json::from_str::<Value>(line) {
                     Ok(message) => {
                         let descriptor = RequestDescriptor::from_message(&message);
-                        let (handled, usage_invocation) =
-                            handle_message(message, data_root, initialized);
+                        let (handled, usage_invocation) = handle_message_with_recovery(
+                            message,
+                            data_root,
+                            initialized,
+                            startup_recovery_attempted,
+                        );
                         (handled, descriptor, usage_invocation)
                     }
                     Err(err) => (
@@ -246,10 +251,20 @@ fn serve_stdio_loop(
     }
 }
 
+#[cfg(test)]
 fn handle_message(
     message: Value,
     data_root: &Path,
     initialized: &mut bool,
+) -> (McpHandled<Option<Value>>, Option<McpInvocation>) {
+    handle_message_with_recovery(message, data_root, initialized, &mut false)
+}
+
+fn handle_message_with_recovery(
+    message: Value,
+    data_root: &Path,
+    initialized: &mut bool,
+    startup_recovery_attempted: &mut bool,
 ) -> (McpHandled<Option<Value>>, Option<McpInvocation>) {
     let Some(object) = message.as_object() else {
         return (
@@ -270,6 +285,7 @@ fn handle_message(
     }
     let bound_show = is_show_tool_call(&message);
     let bound_blame = is_blame_tool_call(&message);
+    let bound_query_events = is_query_events_tool_call(&message);
     let id = message
         .as_object()
         .and_then(|object| object.get("id"))
@@ -328,7 +344,9 @@ fn handle_message(
             Ok(McpHandled::plain(json!({ "tools": tool_definitions() }))),
             None,
         ),
-        "tools/call" => handle_tools_call(params, data_root),
+        "tools/call" => {
+            handle_tools_call_with_recovery(params, data_root, startup_recovery_attempted)
+        }
         _ => (Err(json_rpc_error(-32601, "Method not found", None)), None),
     };
     let response_id = id.clone();
@@ -360,6 +378,12 @@ fn handle_message(
                 bound_show_mcp_response(response, response_id, MCP_PRESENTATION_MAX_OUTPUT_BYTES)
             } else if bound_blame {
                 bound_blame_mcp_response(response, response_id, MCP_BLAME_MAX_OUTPUT_BYTES)
+            } else if bound_query_events {
+                bound_query_events_mcp_response(
+                    response,
+                    response_id,
+                    MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+                )
             } else {
                 response
             }),
@@ -397,9 +421,18 @@ fn negotiate_protocol_version(params: &Value) -> &'static str {
         .unwrap_or(MCP_PROTOCOL_VERSION)
 }
 
+#[cfg(test)]
 fn handle_tools_call(
     params: Value,
     data_root: &Path,
+) -> (Result<McpHandled<Value>, Value>, Option<McpInvocation>) {
+    handle_tools_call_with_recovery(params, data_root, &mut false)
+}
+
+fn handle_tools_call_with_recovery(
+    params: Value,
+    data_root: &Path,
+    startup_recovery_attempted: &mut bool,
 ) -> (Result<McpHandled<Value>, Value>, Option<McpInvocation>) {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return (
@@ -453,6 +486,14 @@ fn handle_tools_call(
         }
     }
 
+    // The stdio server cannot know its first tool before reading JSON-RPC.
+    // Preserve historical recovery for ordinary tools, but keep a
+    // query_events-only process strictly read-only and daemon-silent.
+    if name != "query_events" && !*startup_recovery_attempted {
+        recover_enabled_daemon_before_search(data_root);
+        *startup_recovery_attempted = true;
+    }
+
     let handled = match name {
         "status" => McpHandled::plain(tool_status(data_root)),
         "sources" => McpHandled::plain(tool_sources(data_root)),
@@ -467,6 +508,7 @@ fn handle_tools_call(
         },
         "show_session" => McpHandled::plain(tool_show_session(&arguments, data_root)),
         "show_event" => McpHandled::plain(tool_show_event(&arguments, data_root)),
+        "query_events" => McpHandled::plain(tool_query_events(&arguments, data_root)),
         "pro_status" => tool_pro_status(data_root),
         "blame" => {
             let parsed_target = required_blame_target(&arguments);
@@ -700,6 +742,54 @@ fn tool_definitions() -> Vec<Value> {
                 "after": { "type": "integer", "minimum": 0, "default": 0 },
                 "window": { "type": "integer", "minimum": 0 }
             }), vec!["ctx_event_id"]),
+            "annotations": { "readOnlyHint": true },
+        }),
+        json!({
+            "name": "query_events",
+            "title": "Query Events",
+            "description": "Return one bounded deterministic page from the pinned normalized Core event corpus without refreshing history or waking the daemon.",
+            "inputSchema": object_schema(json!({
+                "since": { "type": "string", "description": "Inclusive millisecond-aligned absolute RFC3339 lower bound; requires until." },
+                "until": { "type": "string", "description": "Exclusive millisecond-aligned absolute RFC3339 upper bound; requires since." },
+                "providers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "source": { "type": "string", "description": "Exact public ctx source UUID." },
+                "history_source": { "type": "string" },
+                "provider_key": { "type": "string" },
+                "source_id": { "type": "string" },
+                "source_format": { "type": "string" },
+                "provider_session": { "type": "string" },
+                "session": { "type": "string", "description": "Exact public ctx session UUID." },
+                "parent_session": { "type": "string", "description": "Exact public parent ctx session UUID." },
+                "root_session": { "type": "string", "description": "Exact public root ctx session UUID." },
+                "branch": { "type": "string" },
+                "workspace": { "type": "string" },
+                "event_type": { "type": "string", "description": "Exact open event type string." },
+                "role": { "type": "string" },
+                "agent_type": { "type": "string" },
+                "scope": { "type": "string", "enum": ["all", "primary", "subagent"], "default": "all" },
+                "file": { "type": "string" },
+                "direction": { "type": "string", "enum": ["ascending", "descending"], "default": "ascending" },
+                "cursor": { "type": "string", "description": "Opaque next_cursor from the preceding page of this exact selection and generation." },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": crate::commands::show::events::MAX_EVENT_QUERY_LIMIT,
+                    "default": crate::commands::show::events::DEFAULT_EVENT_QUERY_LIMIT
+                },
+                "max_items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": ctx_history_index::MAX_CORE_EVENT_RANGE_PAGE_ITEMS,
+                    "default": crate::commands::show::events::DEFAULT_EVENT_QUERY_PAGE_ITEMS
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "minimum": crate::commands::show::events::MIN_EVENT_QUERY_BYTE_BUDGET,
+                    "maximum": crate::commands::show::events::MAX_EVENT_QUERY_BYTE_BUDGET,
+                    "default": crate::commands::show::events::DEFAULT_EVENT_QUERY_BYTE_BUDGET
+                },
+                "content": { "type": "string", "enum": ["full", "text", "none"], "default": "full" }
+            }), vec![]),
             "annotations": { "readOnlyHint": true },
         }),
         json!({

@@ -1024,6 +1024,11 @@ fn nonterminal_cursor_reuses_admitted_key_without_reserializing_maximum_record()
         "trimmed-page cursor must reuse the same admitted key"
     );
     assert_eq!(
+        page.usage_for_prefix(1).unwrap(),
+        Some((page.encoded_core_bytes, page.content_bytes)),
+        "trimmed-page accounting must reuse admitted key sizes"
+    );
+    assert_eq!(
         crate::query::event_range_cursor_record_reserializations(),
         0
     );

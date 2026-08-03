@@ -8,6 +8,27 @@ use serde_json::{json, Map};
 use tempfile::TempDir;
 
 use super::*;
+
+#[test]
+fn query_events_telemetry_uses_only_bounded_page_metadata() {
+    let response = json!({
+        "result": {
+            "structuredContent": {
+                "payload_type": "event_range_page",
+                "events": [{}, {}],
+                "truncated": true,
+                "next_cursor": "opaque-and-never-recorded"
+            }
+        }
+    });
+    let metadata = result_metadata(McpToolV1::QueryEvents, &response);
+    assert_eq!(
+        metadata.result_count,
+        Some(crate::analytics::count_bucket(2))
+    );
+    assert_eq!(metadata.zero_result, Some(false));
+    assert_eq!(metadata.result_truncated, Some(true));
+}
 use crate::analytics::{
     pro_operation_event, OperationPayloadV1, ProHostOperationV1, ProStatusTelemetryV1,
     ProSurfaceV1, RuntimeObservationKindV1,
@@ -236,6 +257,7 @@ fn response_flush_precedes_one_local_blame_increment_and_remote_submissions() {
         trace: Arc::clone(&trace),
     };
     let mut initialized = true;
+    let mut startup_recovery_attempted = false;
     let mut usage_recorder = crate::local_usage::McpUsageRecorder::start(temp.path().to_path_buf());
     usage_recorder.set_test_trace(Arc::clone(&trace));
 
@@ -244,6 +266,7 @@ fn response_flush_precedes_one_local_blame_increment_and_remote_submissions() {
         &mut stdin,
         &mut stdout,
         &mut initialized,
+        &mut startup_recovery_attempted,
         &mut telemetry,
         &mut usage_recorder,
     );
@@ -299,6 +322,7 @@ fn failed_response_flush_does_not_record_local_usage() {
     let mut stdin = Cursor::new(format!("{request}\n").into_bytes());
     let mut stdout = FailingFlushWriter;
     let mut initialized = true;
+    let mut startup_recovery_attempted = false;
     let mut telemetry = McpTelemetry::start(temp.path().to_path_buf());
     let mut usage_recorder = crate::local_usage::McpUsageRecorder::start(temp.path().to_path_buf());
 
@@ -307,6 +331,7 @@ fn failed_response_flush_does_not_record_local_usage() {
         &mut stdin,
         &mut stdout,
         &mut initialized,
+        &mut startup_recovery_attempted,
         &mut telemetry,
         &mut usage_recorder,
     )

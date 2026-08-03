@@ -189,6 +189,18 @@ impl ClientOperationDraft {
                     )),
                     events_returned: None,
                 }),
+                ShowTarget::Events(args) => ClientOperationV1::Show(ShowTelemetry {
+                    target_kind: TargetKind::Events,
+                    transcript_mode: None,
+                    output_format: match args.format {
+                        crate::commands::show::EventQueryFormat::Json => RenderFormat::Json,
+                        crate::commands::show::EventQueryFormat::Jsonl => RenderFormat::Jsonl,
+                    },
+                    writes_out_file: false,
+                    provider_lookup: !args.provider.is_empty(),
+                    window: None,
+                    events_returned: None,
+                }),
             },
             CommandRoot::Locate(args) => match &args.target {
                 LocateTarget::Session(args) => ClientOperationV1::Locate(LocateTelemetry {

@@ -563,6 +563,28 @@ impl CoreEventRangePage {
             })
             .transpose()
     }
+
+    /// Returns exact Core byte usage for the first `item_count` records from
+    /// the order keys already verified during traversal.
+    pub fn usage_for_prefix(
+        &self,
+        item_count: usize,
+    ) -> CoreEventRangeResult<Option<(usize, usize)>> {
+        let Some(order_keys) = self.order_keys.get(..item_count) else {
+            return Ok(None);
+        };
+        let mut encoded_core_bytes = 0_usize;
+        let mut content_bytes = 0_usize;
+        for order in order_keys {
+            encoded_core_bytes = encoded_core_bytes
+                .checked_add(order.encoded_core_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+            content_bytes = content_bytes
+                .checked_add(order.content_bytes())
+                .ok_or(IndexError::CountOverflow)?;
+        }
+        Ok(Some((encoded_core_bytes, content_bytes)))
+    }
 }
 
 impl VerifiedIndex {

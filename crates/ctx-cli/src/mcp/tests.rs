@@ -102,6 +102,79 @@ fn sql_is_neither_advertised_nor_handled_as_an_mcp_tool() {
     );
 }
 
+#[test]
+fn query_events_is_advertised_as_one_read_only_bounded_page_with_canonical_args() {
+    let tool = tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "query_events")
+        .expect("query_events tool definition");
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+    let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+    for canonical in ["parent_session", "root_session", "max_items", "max_bytes"] {
+        assert!(properties.contains_key(canonical), "missing {canonical}");
+    }
+    for compatibility_alias in ["parent", "root", "page_items", "byte_budget"] {
+        assert!(!properties.contains_key(compatibility_alias));
+    }
+    assert_eq!(properties["limit"]["default"], 10_000);
+    assert_eq!(properties["max_items"]["default"], 100);
+}
+
+#[test]
+fn query_events_compatibility_aliases_are_accepted_but_cannot_be_duplicated() {
+    let temp = tempfile::tempdir().unwrap();
+    let (accepted, _) = handle_tools_call(
+        json!({
+            "name": "query_events",
+            "arguments": {
+                "parent": "01234567-89ab-4def-8123-456789abcdef",
+                "root": "01234567-89ab-4def-8123-456789abcdef",
+                "page_items": 1,
+                "byte_budget": 512
+            }
+        }),
+        temp.path(),
+    );
+    let accepted = accepted.unwrap().value;
+    assert_ne!(
+        accepted["structuredContent"]["error_code"],
+        "invalid_request"
+    );
+
+    let (duplicated, _) = handle_tools_call(
+        json!({
+            "name": "query_events",
+            "arguments": {"max_items": 1, "page_items": 1}
+        }),
+        temp.path(),
+    );
+    let duplicated = duplicated.unwrap().value;
+    assert_eq!(duplicated["isError"], true);
+    assert_eq!(
+        duplicated["structuredContent"]["error_code"],
+        "invalid_request"
+    );
+}
+
+#[test]
+fn query_events_skips_startup_daemon_recovery_and_data_root_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut startup_recovery_attempted = false;
+    let (handled, usage) = handle_tools_call_with_recovery(
+        json!({"name": "query_events", "arguments": {}}),
+        temp.path(),
+        &mut startup_recovery_attempted,
+    );
+
+    assert!(handled.is_ok());
+    assert!(usage.is_some());
+    assert!(!startup_recovery_attempted);
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "query_events must not initialize or mutate the data root"
+    );
+}
+
 fn run_one_status_response(
     failure: OutputFailure,
 ) -> (
@@ -130,6 +203,7 @@ fn run_one_status_response(
         trace: trace.clone(),
     };
     let mut initialized = true;
+    let mut startup_recovery_attempted = false;
     let mut telemetry = McpTelemetry::start(root.path().to_path_buf());
     let mut usage = McpUsageRecorder::start(root.path().to_path_buf());
     usage.set_test_trace(trace.clone());
@@ -139,6 +213,7 @@ fn run_one_status_response(
         &mut input,
         &mut output,
         &mut initialized,
+        &mut startup_recovery_attempted,
         &mut telemetry,
         &mut usage,
     );

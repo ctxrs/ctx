@@ -580,6 +580,7 @@ fn show_json_output(args: &ShowArgs) -> bool {
     match &args.target {
         ShowTarget::Session(args) => args.format == OutputFormat::Json,
         ShowTarget::Event(args) => args.format == OutputFormat::Json,
+        ShowTarget::Events(_) => true,
     }
 }
 
@@ -599,7 +600,7 @@ fn command_machine_readable_output(command: &CommandRoot, json_output: bool) -> 
                 &args.target,
                 ShowTarget::Event(args)
                     if matches!(args.format, OutputFormat::Jsonl | OutputFormat::Markdown)
-            )
+            ) || matches!(&args.target, ShowTarget::Events(_))
         }
         CommandRoot::Mcp(_) => true,
         _ => false,
