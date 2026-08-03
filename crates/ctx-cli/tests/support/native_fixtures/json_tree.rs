@@ -1110,3 +1110,94 @@ pub(crate) fn write_native_continue_fixture(temp: &TempDir, query: &str) -> Stri
     .unwrap();
     root.to_str().unwrap().to_owned()
 }
+
+/// Writes a Kimi Code CLI wire tree in the shape the CLI actually journals:
+/// the assistant reply exists only as streamed `content.part` loop events.
+pub(crate) fn write_native_kimi_code_cli_wire_fixture(temp: &TempDir, query: &str) -> String {
+    let root = temp.path().join("native-kimi-code-cli/.kimi-code");
+    let session_dir = root.join("sessions/wd_workspace_abc123/session-real-shape");
+    let agent_dir = session_dir.join("agents/main");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        root.join("session_index.jsonl"),
+        format!(
+            "{}\n",
+            json!({
+                "sessionId": "session-real-shape",
+                "sessionDir": session_dir,
+                "workDir": "/workspace/kimi"
+            })
+        ),
+    )
+    .unwrap();
+    fs::write(
+        session_dir.join("state.json"),
+        json!({
+            "createdAt": "2026-07-17T12:00:00Z",
+            "updatedAt": "2026-07-17T12:00:10Z",
+            "title": "Kimi wire real shape",
+            "agents": {"main": {"type": "main", "parentAgentId": null}},
+            "workDir": "/workspace/kimi"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let records = [
+        json!({"type": "metadata", "protocol_version": "1.4", "created_at": 1_783_170_000_000_i64}),
+        json!({
+            "type": "turn.prompt",
+            "time": 1_783_170_001_000_i64,
+            "input": [{"type": "text", "text": "kimi wire real shape prompt"}],
+            "origin": {"kind": "user"}
+        }),
+        json!({
+            "type": "context.append_loop_event",
+            "time": 1_783_170_002_000_i64,
+            "event": {"type": "step.begin", "uuid": "step-1", "turnId": "0", "step": 1}
+        }),
+        json!({
+            "type": "context.append_loop_event",
+            "time": 1_783_170_003_000_i64,
+            "event": {
+                "type": "content.part",
+                "uuid": "part-1",
+                "turnId": "0",
+                "step": 1,
+                "stepUuid": "step-1",
+                "part": {"type": "text", "text": query}
+            }
+        }),
+        json!({
+            "type": "context.append_loop_event",
+            "time": 1_783_170_004_000_i64,
+            "event": {
+                "type": "tool.call",
+                "turnId": "0",
+                "step": 1,
+                "stepUuid": "step-1",
+                "toolCallId": "call_1",
+                "name": "Read",
+                "args": {"path": "src/kimi_wire.txt"}
+            }
+        }),
+        json!({
+            "type": "context.append_loop_event",
+            "time": 1_783_170_005_000_i64,
+            "event": {
+                "type": "tool.result",
+                "turnId": "0",
+                "toolCallId": "call_1",
+                "result": {"output": "kimi wire real shape tool output", "isError": false}
+            }
+        }),
+    ];
+    fs::write(
+        agent_dir.join("wire.jsonl"),
+        records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    root.to_str().unwrap().to_owned()
+}
