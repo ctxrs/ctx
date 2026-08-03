@@ -539,6 +539,63 @@ struct SourceBackedRefreshRouteCoverageCertificate {
     admitted_watermark: EventWatermark,
 }
 
+/// Opaque authority for one exact route boundary in a verified publication.
+///
+/// Only the coordinator can construct this value, after binding the terminal
+/// request to its retained verified generation and comparing the generation's
+/// route observation with a post-publication sample. The dirty-route ledger
+/// may inspect the route and watermark, but cannot mint the proof from raw
+/// strings or a globally latest watcher position.
+#[derive(Debug)]
+pub(in crate::semantic) struct VerifiedSourceRefreshRouteBoundary<'a> {
+    _request_id: &'a str,
+    _published_generation: &'a str,
+    route: &'a SourceRouteIdentity,
+    covered_through: EventWatermark,
+    _observation: &'a str,
+}
+
+impl<'a> VerifiedSourceRefreshRouteBoundary<'a> {
+    fn new(
+        request_id: &'a str,
+        published_generation: &'a str,
+        route: &'a SourceRouteIdentity,
+        covered_through: EventWatermark,
+        observation: &'a str,
+    ) -> Option<Self> {
+        (!request_id.is_empty() && !published_generation.is_empty() && !observation.is_empty())
+            .then_some(Self {
+                _request_id: request_id,
+                _published_generation: published_generation,
+                route,
+                covered_through,
+                _observation: observation,
+            })
+    }
+
+    pub(in crate::semantic) fn route(&self) -> &SourceRouteIdentity {
+        self.route
+    }
+
+    pub(in crate::semantic) fn covered_through(&self) -> EventWatermark {
+        self.covered_through
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn for_test(
+        route: &'a SourceRouteIdentity,
+        covered_through: EventWatermark,
+    ) -> Self {
+        Self {
+            _request_id: "test-request",
+            _published_generation: "test-generation",
+            route,
+            covered_through,
+            _observation: "test-observation",
+        }
+    }
+}
+
 struct PostPublicationRouteCoverageFence {
     seen_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
     sampled_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
@@ -1181,27 +1238,43 @@ impl CoreRefreshEngine {
                     }
                 }
             } else if result.outcome.is_success() {
-                if state.dirty_routes.acknowledge(&admission) {
+                let verified_boundary = attempt.as_ref().and_then(|attempt| {
+                    let observation = attempt.route_observations.get(admission.route())?;
+                    let admitted_watermark = predecessor_event_watermarks
+                        .get(admission.route())
+                        .copied()?;
+                    let published_generation = attempt.published_generation.as_deref()?;
+                    let covered_through =
+                        post_publication_fence.map_or(admitted_watermark, |fence| {
+                            fence.certified_boundary(
+                                admission.route(),
+                                admitted_watermark,
+                                observation,
+                            )
+                        });
+                    VerifiedSourceRefreshRouteBoundary::new(
+                        request_id,
+                        published_generation,
+                        admission.route(),
+                        covered_through,
+                        observation,
+                    )
+                    .map(|boundary| (boundary, observation.clone()))
+                });
+                let acknowledged = match verified_boundary.as_ref() {
+                    Some((boundary, _)) => state
+                        .dirty_routes
+                        .acknowledge_generation_coverage(&admission, boundary),
+                    None => state.dirty_routes.acknowledge(&admission),
+                };
+                if acknowledged {
                     covered_route_results.insert(admission.route().clone(), result.clone());
-                    if let (Some(observation), Some(admitted_watermark)) = (
-                        attempt
-                            .as_ref()
-                            .and_then(|attempt| attempt.route_observations.get(admission.route())),
-                        predecessor_event_watermarks.get(admission.route()).copied(),
-                    ) {
-                        let admitted_watermark =
-                            post_publication_fence.map_or(admitted_watermark, |fence| {
-                                fence.certified_boundary(
-                                    admission.route(),
-                                    admitted_watermark,
-                                    observation,
-                                )
-                            });
+                    if let Some((boundary, observation)) = verified_boundary {
                         certified_routes.insert(
                             admission.route().clone(),
                             SourceBackedRefreshRouteCoverageCertificate {
-                                observation: observation.clone(),
-                                admitted_watermark,
+                                observation,
+                                admitted_watermark: boundary.covered_through(),
                             },
                         );
                     }
@@ -1373,6 +1446,42 @@ mod coverage_certificate_tests {
         assert_eq!(
             indeterminate.certified_boundary(&route, admitted, &observation),
             admitted
+        );
+    }
+
+    #[test]
+    fn verified_boundary_acknowledges_during_capture_event_but_not_post_fence_event() {
+        let route = SourceRouteIdentity::from_sha256("83".repeat(32)).unwrap();
+        let admitted = EventWatermark::new(6, 1);
+        let seen_fence = EventWatermark::new(6, 2);
+        let event_after_fence = EventWatermark::new(6, 3);
+        let observation = "93".repeat(32);
+        let mut ledger = DirtySourceRoutes::default();
+
+        assert!(ledger.record_event(route.clone(), admitted, 0));
+        let admission = ledger.admit_next(250).unwrap();
+        assert!(ledger.record_event(route.clone(), seen_fence, 300));
+        let fence = PostPublicationRouteCoverageFence {
+            seen_watermarks: BTreeMap::from([(route.clone(), seen_fence)]),
+            sampled_observations: BTreeMap::from([(route.clone(), Some(observation.clone()))]),
+        };
+        let boundary = VerifiedSourceRefreshRouteBoundary::new(
+            "request",
+            "generation",
+            &route,
+            fence.certified_boundary(&route, admitted, &observation),
+            &observation,
+        )
+        .unwrap();
+
+        assert!(ledger.acknowledge_generation_coverage(&admission, &boundary));
+        assert!(ledger.is_empty());
+
+        assert!(ledger.record_event(route.clone(), event_after_fence, 350));
+        assert_eq!(ledger.next_due_at_ms(), Some(600));
+        assert_eq!(
+            ledger.admit_next(600).unwrap().watermark(),
+            event_after_fence
         );
     }
 }

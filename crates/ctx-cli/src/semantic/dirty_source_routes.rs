@@ -5,6 +5,8 @@ use std::{
 
 use ctx_history_index::SourceRouteIdentity;
 
+use super::source_backed_refresh_coordinator::VerifiedSourceRefreshRouteBoundary;
+
 const DEBOUNCE_MS: u64 = 250;
 const MAX_EVENT_LATENCY_MS: u64 = 2_000;
 const RETRY_BASE_MS: u64 = 10_000;
@@ -50,35 +52,6 @@ impl DirtySourceRouteAdmission {
     #[cfg(test)]
     pub(super) fn watermark(&self) -> EventWatermark {
         self.watermark
-    }
-}
-
-/// Successful route coverage proven at one verified generation boundary.
-///
-/// There is intentionally no runtime constructor on this branch. Issue #281
-/// must expose its verified generation/route-boundary certificate, after which
-/// this seam can accept that typed authority directly. A generation ID string
-/// is not evidence and must never construct this value.
-#[derive(Debug)]
-#[allow(dead_code)] // Runtime construction arrives with the issue #281 certificate type.
-pub(super) struct VerifiedGenerationRouteBoundary<'a> {
-    route: &'a SourceRouteIdentity,
-    covered_through: EventWatermark,
-    _authority: VerifiedGenerationRouteBoundaryAuthority,
-}
-
-#[derive(Debug)]
-#[allow(dead_code)] // Kept private so raw route/generation data cannot mint authority.
-struct VerifiedGenerationRouteBoundaryAuthority;
-
-impl<'a> VerifiedGenerationRouteBoundary<'a> {
-    #[cfg(test)]
-    fn for_test(route: &'a SourceRouteIdentity, covered_through: EventWatermark) -> Self {
-        Self {
-            route,
-            covered_through,
-            _authority: VerifiedGenerationRouteBoundaryAuthority,
-        }
     }
 }
 
@@ -440,16 +413,16 @@ impl DirtySourceRoutes {
     /// delivered after the coordinator read the handoff fence has a greater
     /// watermark and remains dirty. Admission identity still fences stale or
     /// duplicate completions.
-    #[allow(dead_code)] // Called by the issue #281 coordinator integration branch.
     pub(super) fn acknowledge_generation_coverage(
         &mut self,
         admission: &DirtySourceRouteAdmission,
-        coverage: &VerifiedGenerationRouteBoundary<'_>,
+        coverage: &VerifiedSourceRefreshRouteBoundary<'_>,
     ) -> bool {
-        if coverage.route != &admission.route || coverage.covered_through < admission.watermark {
+        if coverage.route() != &admission.route || coverage.covered_through() < admission.watermark
+        {
             return false;
         }
-        self.acknowledge_through(admission, coverage.covered_through, true)
+        self.acknowledge_through(admission, coverage.covered_through(), true)
     }
 
     /// Records a retryable failure and returns its bounded backoff delay.
@@ -801,7 +774,7 @@ mod tests {
         let admission = ledger.admit_next(250).unwrap();
         ledger.record_event(route.clone(), watermark(1, 2), 300);
         let handoff_fence = ledger.seen_watermark(&route).unwrap();
-        let coverage = VerifiedGenerationRouteBoundary::for_test(&route, handoff_fence);
+        let coverage = VerifiedSourceRefreshRouteBoundary::for_test(&route, handoff_fence);
 
         assert!(ledger.acknowledge_generation_coverage(&admission, &coverage));
         assert_eq!(ledger.covered_watermark(&route), Some(watermark(1, 2)));
@@ -819,7 +792,7 @@ mod tests {
         ledger.record_event(route.clone(), watermark(3, 2), 300);
         let handoff_fence = ledger.seen_watermark(&route).unwrap();
         ledger.record_event(route.clone(), watermark(3, 3), 350);
-        let coverage = VerifiedGenerationRouteBoundary::for_test(&route, handoff_fence);
+        let coverage = VerifiedSourceRefreshRouteBoundary::for_test(&route, handoff_fence);
 
         assert!(!ledger.acknowledge_generation_coverage(&admission, &coverage));
         assert_eq!(ledger.covered_watermark(&route), Some(watermark(3, 2)));
@@ -836,9 +809,9 @@ mod tests {
 
         ledger.record_event(selected_route.clone(), watermark(2, 5), 0);
         let admission = ledger.admit_next(250).unwrap();
-        let wrong_route = VerifiedGenerationRouteBoundary::for_test(&other, watermark(2, 5));
+        let wrong_route = VerifiedSourceRefreshRouteBoundary::for_test(&other, watermark(2, 5));
         assert!(!ledger.acknowledge_generation_coverage(&admission, &wrong_route));
-        let future = VerifiedGenerationRouteBoundary::for_test(&selected_route, watermark(2, 6));
+        let future = VerifiedSourceRefreshRouteBoundary::for_test(&selected_route, watermark(2, 6));
         assert!(!ledger.acknowledge_generation_coverage(&admission, &future));
         assert_eq!(ledger.covered_watermark(&selected_route), None);
         assert_eq!(ledger.len(), 1);
@@ -871,7 +844,7 @@ mod tests {
         ledger.record_event(route.clone(), watermark(1, 2), 300);
         assert!(!ledger.acknowledge(&stale));
         let current = ledger.admit_next(550).unwrap();
-        let coverage = VerifiedGenerationRouteBoundary::for_test(&route, watermark(1, 2));
+        let coverage = VerifiedSourceRefreshRouteBoundary::for_test(&route, watermark(1, 2));
 
         assert!(!ledger.acknowledge_generation_coverage(&stale, &coverage));
         assert_eq!(ledger.len(), 1);

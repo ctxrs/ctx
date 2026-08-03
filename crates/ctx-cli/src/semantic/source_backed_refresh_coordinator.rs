@@ -86,7 +86,7 @@ pub(crate) use coordinator_state::SourceBackedRefreshCatalogRouteOutcome;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
 #[allow(unused_imports)] // Consumed by #282's watcher integration seam.
 pub(in crate::semantic) use coordinator_state::{
-    CoreRefreshEngine, SourceBackedRefreshCoverageCertificate,
+    CoreRefreshEngine, SourceBackedRefreshCoverageCertificate, VerifiedSourceRefreshRouteBoundary,
 };
 pub(crate) use coordinator_state::{
     PinnedCorePublication, SourceBackedCurrentSourceProgress,
