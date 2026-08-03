@@ -187,9 +187,9 @@ impl VerifiedIndex {
             .transpose()?;
         let eligibility = SemanticEligibility::CURRENT;
         let eligible_total = self.semantic_eligible_event_count()?;
+        let fields = fields_from_schema(self.searcher.schema())?;
         let candidates = self.semantic_event_addresses_after(after, limit.saturating_add(1))?;
         let candidate_count = candidates.len();
-        let fields = fields_from_schema(self.searcher.schema())?;
         let mut items = Vec::with_capacity(limit.min(candidate_count));
         for candidate in candidates.into_iter().take(limit) {
             let record = stored_event_record(&self.searcher, candidate.address, fields)?;
@@ -197,7 +197,7 @@ impl VerifiedIndex {
                 || !eligibility.includes(&record)
             {
                 return Err(IndexError::InvalidStoredDocumentField(
-                    EVENT_IDENTITY_DIGEST_FIELD,
+                    SEMANTIC_EVENT_ORDER_FIELD,
                 ));
             }
             items.push(record);
@@ -210,6 +210,11 @@ impl VerifiedIndex {
                 .last()
                 .map(|event| SemanticEventCursor::new(self.generation_id.clone(), event.event_id))
         };
+        if !terminal && next_cursor.is_none() {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SEMANTIC_EVENT_ORDER_FIELD,
+            ));
+        }
         Ok(SemanticEventPage {
             generation_id: self.generation_id.clone(),
             eligibility,
@@ -230,10 +235,8 @@ impl VerifiedIndex {
         self.core_semantic_event_page_with_budget(cursor, limit, DEFAULT_CORE_EVENT_PAGE_BUDGET)
     }
 
-    /// Returns complete semantic candidates after address-only selection and
-    /// final-order decoding under retained Core byte bounds. Unlike exact-source
-    /// pages, semantic candidates do not have a source-prefix size lookup, so at
-    /// most one decoded non-fitting record is transiently considered.
+    /// Returns complete semantic candidates after neutral Core-order selection
+    /// and current semantic-policy filtering under retained Core byte bounds.
     pub fn core_semantic_event_page_with_budget(
         &self,
         cursor: Option<&SemanticEventCursor>,
@@ -252,25 +255,23 @@ impl VerifiedIndex {
             .transpose()?;
         let eligibility = SemanticEligibility::CURRENT;
         let eligible_total = self.semantic_eligible_event_count()?;
-        let candidates = self.semantic_event_addresses_after(after, limit.saturating_add(1))?;
-        let candidate_count = candidates.len();
         let fields = fields_from_schema(self.searcher.schema())?;
-        let mut items = Vec::with_capacity(limit.min(candidate_count));
+        let mut items = Vec::with_capacity(limit);
         let mut encoded_core_bytes = 0_usize;
         let mut content_bytes = 0_usize;
-        let mut consumed = 0_usize;
-        for candidate in candidates {
-            if items.len() == limit {
-                break;
-            }
-            let (record, record_encoded_core_bytes) =
-                stored_core_event_record_with_size(&self.searcher, candidate.address, fields)?;
-            let record_content_bytes = core_content_bytes(&record.core_record.content)?;
-            if record.event_id.digest() != candidate.identity_digest
-                || !eligibility.includes(&record.event)
+        let candidates = self.semantic_event_addresses_after(after, limit.saturating_add(1))?;
+        let candidate_count = candidates.len();
+        for candidate in candidates.into_iter().take(limit) {
+            let (fast_event_id, preflight_encoded_core_bytes, record_content_bytes) =
+                core_event_fast_preflight(&self.searcher, candidate.address)?;
+            if fast_event_id
+                != (CompactIdentity {
+                    digest: candidate.identity_digest,
+                })
+                .as_uuid()
             {
                 return Err(IndexError::InvalidStoredDocumentField(
-                    EVENT_IDENTITY_DIGEST_FIELD,
+                    SEMANTIC_EVENT_ORDER_FIELD,
                 ));
             }
             if !items.is_empty()
@@ -278,11 +279,25 @@ impl VerifiedIndex {
                     budget,
                     encoded_core_bytes,
                     content_bytes,
-                    record_encoded_core_bytes,
+                    preflight_encoded_core_bytes,
                     record_content_bytes,
                 )
             {
                 break;
+            }
+            let (record, record_encoded_core_bytes) =
+                stored_core_event_record_with_size(&self.searcher, candidate.address, fields)?;
+            if record.event_id.digest() != candidate.identity_digest
+                || !eligibility.includes(&record.event)
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SEMANTIC_EVENT_ORDER_FIELD,
+                ));
+            }
+            if core_content_bytes(&record.core_record.content)? != record_content_bytes
+                || record_encoded_core_bytes != preflight_encoded_core_bytes
+            {
+                return Err(IndexError::InvalidStoredDocumentField("core_record"));
             }
             encoded_core_bytes = encoded_core_bytes
                 .checked_add(record_encoded_core_bytes)
@@ -291,9 +306,8 @@ impl VerifiedIndex {
                 .checked_add(record_content_bytes)
                 .ok_or(IndexError::CountOverflow)?;
             items.push(record);
-            consumed = consumed.checked_add(1).ok_or(IndexError::CountOverflow)?;
         }
-        let terminal = consumed == candidate_count;
+        let terminal = items.len() == candidate_count;
         let next_cursor = if terminal {
             None
         } else {
@@ -301,6 +315,11 @@ impl VerifiedIndex {
                 .last()
                 .map(|event| SemanticEventCursor::new(self.generation_id.clone(), event.event_id))
         };
+        if !terminal && next_cursor.is_none() {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SEMANTIC_EVENT_ORDER_FIELD,
+            ));
+        }
         Ok(CoreSemanticEventPage {
             generation_id: self.generation_id.clone(),
             eligibility,
@@ -313,13 +332,10 @@ impl VerifiedIndex {
         })
     }
 
-    /// Returns the exact total for the current metadata candidate contract.
-    ///
-    /// The count is authenticated by this pin's immutable generation manifest;
-    /// no postings or stored Core records are visited.
+    /// Returns the exact count selected by the current semantic metadata
+    /// policy. Core owns only the neutral order; this count is derived and
+    /// cached by the semantic query contract.
     pub fn semantic_eligible_event_count(&self) -> Result<u64> {
-        let count = self.manifest.semantic_eligible_documents;
-        let _ = self.semantic_eligible_event_count.set(count);
-        Ok(*self.semantic_eligible_event_count.get().unwrap_or(&count))
+        Ok(self.semantic_eligibility_postings()?.total)
     }
 }

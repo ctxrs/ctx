@@ -21,7 +21,7 @@ mod writer_options;
 use digest::{decode_sha256_hex, is_sha256_hex};
 pub use writer_options::WriterOptions;
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 7;
+pub const GENERATION_MANIFEST_VERSION: u32 = 8;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 
@@ -164,6 +164,13 @@ pub enum IndexError {
     MissingSchemaField(&'static str),
     #[error("index memory {actual} is below the {minimum} byte minimum")]
     IndexMemoryTooSmall { actual: usize, minimum: usize },
+    #[error(
+        "logical verification scratch requires {required_bytes} bytes, exceeding the {maximum_bytes} byte ceiling"
+    )]
+    VerificationScratchLimitExceeded {
+        required_bytes: u64,
+        maximum_bytes: u64,
+    },
     #[error("source replacement has already started for {0}")]
     DuplicateSource(String),
     #[error("certified deletion for source {0} does not match its complete inventory")]
@@ -200,6 +207,8 @@ pub enum IndexError {
     SourceNotCertified(String),
     #[error("source certificate does not match the staged source")]
     SourceCertificateMismatch,
+    #[error("prepared Core record belongs to a different base-generation context")]
+    PreparedCoreRecordContextMismatch,
     #[error("source {source_id} certified {certified} documents but staged {staged}")]
     SourceDocumentCountMismatch {
         source_id: String,
@@ -342,14 +351,6 @@ pub enum IndexError {
     #[error("generation count overflow")]
     CountOverflow,
     #[error(
-        "semantic-eligible document count {eligible} exceeds indexed document count {indexed}"
-    )]
-    InvalidSemanticEligibleDocumentCount { eligible: u64, indexed: u64 },
-    #[error(
-        "semantic-eligible document count mismatch: manifest {manifest}, source aggregates {aggregates}"
-    )]
-    SemanticEligibleDocumentCountMismatch { manifest: u64, aggregates: u64 },
-    #[error(
         "exact replay inventory coverage is incomplete: prior source {source_id} was neither \
          replayed nor terminally removed"
     )]
@@ -383,14 +384,7 @@ pub enum IndexError {
     #[error("the active-generation rebuild marker is malformed")]
     InvalidActiveGenerationRebuildMarker,
     #[error(
-        "physical integrity receipt for generation {generation_id} is missing or invalid: {detail}"
-    )]
-    GenerationPhysicalIntegrityMismatch {
-        generation_id: String,
-        detail: String,
-    },
-    #[error(
-        "active lexical generation {generation_id} failed its physical integrity check and requires a source-authoritative rebuild: {detail}"
+        "active lexical generation {generation_id} failed physical integrity validation and requires a source-authoritative rebuild: {detail}"
     )]
     ActiveGenerationNeedsRebuild {
         generation_id: String,
@@ -651,7 +645,6 @@ pub struct GenerationManifest {
     pub lexical_analyzer_version: u32,
     pub policy_schema_hash: String,
     pub indexed_documents: u64,
-    pub semantic_eligible_documents: u64,
     pub certified_source_bytes: u64,
     pub sources: Vec<CertifiedSource>,
     pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
@@ -665,7 +658,6 @@ pub struct GenerationManifest {
 pub struct SourceCoreRecordAggregate {
     source_identity_digest: String,
     indexed_documents: u64,
-    semantic_eligible_documents: u64,
     core_record_accumulator: String,
 }
 
@@ -673,13 +665,11 @@ impl SourceCoreRecordAggregate {
     pub(crate) fn new(
         source_identity_digest: String,
         indexed_documents: u64,
-        semantic_eligible_documents: u64,
         core_record_accumulator: String,
     ) -> Result<Self> {
         let aggregate = Self {
             source_identity_digest,
             indexed_documents,
-            semantic_eligible_documents,
             core_record_accumulator,
         };
         aggregate.validate_contract()?;
@@ -692,10 +682,6 @@ impl SourceCoreRecordAggregate {
 
     pub fn indexed_documents(&self) -> u64 {
         self.indexed_documents
-    }
-
-    pub fn semantic_eligible_documents(&self) -> u64 {
-        self.semantic_eligible_documents
     }
 
     pub fn core_record_accumulator(&self) -> &str {
@@ -711,12 +697,6 @@ impl SourceCoreRecordAggregate {
             || !is_sha256_hex(&self.core_record_accumulator)
         {
             return Err(IndexError::InvalidGenerationId);
-        }
-        if self.semantic_eligible_documents > self.indexed_documents {
-            return Err(IndexError::InvalidSemanticEligibleDocumentCount {
-                eligible: self.semantic_eligible_documents,
-                indexed: self.indexed_documents,
-            });
         }
         Ok(())
     }
@@ -760,14 +740,10 @@ impl GenerationManifest {
                 .cmp(&right.source_identity_digest)
         });
         let mut indexed_documents = 0_u64;
-        let mut semantic_eligible_documents = 0_u64;
         let mut certified_source_bytes = 0_u64;
-        for (source, aggregate) in sources.iter().zip(&core_record_aggregates) {
+        for (source, _aggregate) in sources.iter().zip(&core_record_aggregates) {
             indexed_documents = indexed_documents
                 .checked_add(source.counts().indexed_documents)
-                .ok_or(IndexError::CountOverflow)?;
-            semantic_eligible_documents = semantic_eligible_documents
-                .checked_add(aggregate.semantic_eligible_documents)
                 .ok_or(IndexError::CountOverflow)?;
             certified_source_bytes = certified_source_bytes
                 .checked_add(source.counts().certified_bytes)
@@ -782,7 +758,6 @@ impl GenerationManifest {
             lexical_analyzer_version: LEXICAL_ANALYZER_VERSION,
             policy_schema_hash: current_source_generation_policy_hash()?,
             indexed_documents,
-            semantic_eligible_documents,
             certified_source_bytes,
             sources,
             core_record_aggregates,
@@ -872,7 +847,6 @@ impl GenerationManifest {
             }
         }
         let mut expected_documents = 0_u64;
-        let mut expected_semantic_eligible_documents = 0_u64;
         let mut expected_bytes = 0_u64;
         for (source_index, source) in self.sources.iter().enumerate() {
             source.validate_contract()?;
@@ -895,9 +869,6 @@ impl GenerationManifest {
             expected_documents = expected_documents
                 .checked_add(source.counts().indexed_documents)
                 .ok_or(IndexError::CountOverflow)?;
-            expected_semantic_eligible_documents = expected_semantic_eligible_documents
-                .checked_add(aggregate.semantic_eligible_documents)
-                .ok_or(IndexError::CountOverflow)?;
             expected_bytes = expected_bytes
                 .checked_add(source.counts().certified_bytes)
                 .ok_or(IndexError::CountOverflow)?;
@@ -906,12 +877,6 @@ impl GenerationManifest {
             return Err(IndexError::CoreRecordAggregateMismatch(
                 "manifest aggregate cardinality".to_owned(),
             ));
-        }
-        if self.semantic_eligible_documents != expected_semantic_eligible_documents {
-            return Err(IndexError::SemanticEligibleDocumentCountMismatch {
-                manifest: self.semantic_eligible_documents,
-                aggregates: expected_semantic_eligible_documents,
-            });
         }
         if self.indexed_documents != expected_documents
             || self.certified_source_bytes != expected_bytes
@@ -935,7 +900,6 @@ fn test_aggregates(sources: &[CertifiedSource]) -> Result<Vec<SourceCoreRecordAg
             SourceCoreRecordAggregate::new(
                 crate::source_token(source.observation().source()),
                 source.counts().indexed_documents,
-                0,
                 "00".repeat(32),
             )
         })

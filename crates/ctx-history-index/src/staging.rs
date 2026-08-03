@@ -9,7 +9,6 @@ pub(super) struct PendingSource {
     pub(super) source: SourceKey,
     pub(super) mode: PendingSourceMode,
     pub(super) staged_documents: u64,
-    pub(super) staged_semantic_eligible_documents: u64,
     pub(super) certificate: Option<CertifiedSource>,
     pub(super) core_record_accumulator: [u8; 32],
 }
@@ -61,12 +60,10 @@ impl GenerationWriter {
         self.pending.insert(
             token.clone(),
             super::PendingSource {
-                index_fields: IndexSourceFields::new(source, &token),
                 staged: PendingSource {
                     source: source.clone(),
                     mode: PendingSourceMode::Retain { base },
                     staged_documents: 0,
-                    staged_semantic_eligible_documents: 0,
                     certificate: Some(certificate),
                     core_record_accumulator: [0; 32],
                 },
@@ -117,13 +114,11 @@ pub(super) fn accumulate_core_record(accumulator: &mut [u8; 32], record_leaf_or_
 fn source_record_aggregate(
     source: &SourceKey,
     indexed_documents: u64,
-    semantic_eligible_documents: u64,
     core_record_accumulator: [u8; 32],
 ) -> Result<SourceCoreRecordAggregate> {
     SourceCoreRecordAggregate::new(
         source_token(source),
         indexed_documents,
-        semantic_eligible_documents,
         hex(&core_record_accumulator),
     )
 }
@@ -160,7 +155,6 @@ pub(super) fn manifest_record_aggregates(
             PendingSourceMode::Replace => source_record_aggregate(
                 &pending.source,
                 pending.staged_documents,
-                pending.staged_semantic_eligible_documents,
                 pending.core_record_accumulator,
             )?,
             PendingSourceMode::Retain { .. } => base_aggregates
@@ -187,18 +181,9 @@ pub(super) fn manifest_record_aggregates(
                     .indexed_documents()
                     .checked_add(pending.staged_documents)
                     .ok_or(IndexError::CountOverflow)?;
-                let semantic_eligible_documents = base_aggregate
-                    .semantic_eligible_documents()
-                    .checked_add(pending.staged_semantic_eligible_documents)
-                    .ok_or(IndexError::CountOverflow)?;
                 let mut accumulator = base_aggregate.accumulator_bytes()?;
                 accumulate_core_record(&mut accumulator, &pending.core_record_accumulator);
-                source_record_aggregate(
-                    &pending.source,
-                    indexed_documents,
-                    semantic_eligible_documents,
-                    accumulator,
-                )?
+                source_record_aggregate(&pending.source, indexed_documents, accumulator)?
             }
         };
         if aggregate.indexed_documents() != certificate.counts().indexed_documents {

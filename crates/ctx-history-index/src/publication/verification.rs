@@ -1,23 +1,43 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Barrier,
     },
 };
 
+use crc32fast::Hasher as Crc32;
+use sha2::{Digest, Sha256};
 use tantivy::{
+    directory::{footer::Footer, Directory as _},
+    index::SegmentComponent,
+    postings::Postings,
     schema::{Field, IndexRecordOption},
     termdict::TermMerger,
-    DocAddress, DocSet, Executor, InvertedIndexReader, Searcher, TERMINATED,
+    tokenizer::TokenStream,
+    DocAddress, DocSet, Executor, HasLen, InvertedIndexReader, Searcher, Term, TERMINATED,
 };
 use uuid::Uuid;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use crate::{
+    durable_directory::DurableMmapDirectory,
     fields_from_schema, hex,
-    query::{self, IdentityFieldRole},
+    query::{self, CompactIdentity, IdentityFieldRole},
     staging::accumulate_core_record,
     GenerationManifest, IndexError, Result, WriterOptions,
+};
+
+mod spill;
+
+use spill::{
+    ProjectionAccumulator, ProjectionDeltas, SpillVerificationIdentities, VerificationSpill,
+    VERIFICATION_SPILL_BUFFER_BYTES, VERIFICATION_SPILL_RECORD_BYTES,
 };
 
 #[derive(Default)]
@@ -29,6 +49,8 @@ struct SourceAggregate {
 struct SegmentVerification {
     document_count: u64,
     document_decodes: usize,
+    stored_core_bytes: u64,
+    body_tokens: u64,
     source_aggregates: BTreeMap<String, SourceAggregate>,
     parent_session_documents: u64,
 }
@@ -74,6 +96,16 @@ struct VerificationRunMetrics {
     max_buffered_segments: usize,
     max_buffered_event_identities: usize,
     max_buffered_session_identities: usize,
+    stored_core_bytes: u64,
+    body_tokens: u64,
+    verification_spill_bytes: u64,
+    verification_heap_payload_bound_bytes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHECKSUM_WALKS: Cell<usize> = const { Cell::new(0) };
+    static LOGICAL_PASSES: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn verify_searcher_structure(
@@ -90,62 +122,253 @@ pub(crate) fn verify_searcher_structure(
     Ok(())
 }
 
-/// Audits only the event-ID term dictionaries and live postings.
+pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
+    let worker_budget = verification_worker_budget(searcher.segment_readers().len());
+    verify_searcher_with_options(searcher, manifest, worker_budget, false, false).map(|_| ())
+}
+
+const PHYSICAL_INTEGRITY_DOMAIN: &[u8] = b"ctx-tantivy-physical-integrity-v1\0";
+const PHYSICAL_HASH_BUFFER_BYTES: usize = 64 * 1024;
+const TANTIVY_META_FILE: &str = "meta.json";
+
+#[derive(Debug)]
+struct PhysicalFileDigest {
+    path: String,
+    length: u64,
+    sha256: [u8; 32],
+}
+
+/// Computes one physical generation's canonical integrity digest.
 ///
-/// This publication gate deliberately avoids stored fields, Core records, and
-/// checksum-file reads while still rejecting missing or duplicate event IDs.
-pub(crate) fn verify_event_id_terms(
-    searcher: &Searcher,
-    manifest: &GenerationManifest,
+/// The domain-separated stream contains the exact active file count followed
+/// by each sorted UTF-8 relative path, file length, and SHA-256 of the complete
+/// file bytes. The sorted path set always includes `meta.json` and every segment
+/// file referenced by its active segment metadata. Managed bookkeeping, locks,
+/// and temporary files are deliberately excluded because queries do not read them.
+/// Segment bytes are streamed once and checked against their Tantivy CRC footer
+/// while their stronger SHA-256 is computed.
+pub(crate) fn physical_integrity_digest(
+    index: &tantivy::Index,
+    generation_path: &Path,
+) -> Result<String> {
+    #[cfg(test)]
+    CHECKSUM_WALKS.with(|count| count.set(count.get() + 1));
+    physical_integrity_digest_inner(index, generation_path)
+}
+
+fn physical_integrity_digest_inner(
+    index: &tantivy::Index,
+    generation_path: &Path,
+) -> Result<String> {
+    let directory =
+        DurableMmapDirectory::open(generation_path).map_err(|_| IndexError::ChecksumMismatch)?;
+    let mut paths = active_index_files(index)?;
+    paths.insert(PathBuf::from(TANTIVY_META_FILE));
+    let entries = paths
+        .into_iter()
+        .map(|path| {
+            hash_physical_file(
+                &directory,
+                generation_path,
+                &path,
+                path != Path::new(TANTIVY_META_FILE),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    canonical_physical_integrity_digest(&entries)
+}
+
+/// Verifies a generation against the physical authority in its pointer slot.
+pub(crate) fn verify_physical_integrity(
+    index: &tantivy::Index,
+    generation_path: &Path,
+    expected_digest: &str,
 ) -> Result<()> {
-    let event_id = fields_from_schema(searcher.schema())?.event_id;
-    let segments = searcher.segment_readers();
-    let inverted_indexes = segments
-        .iter()
-        .map(|segment| segment.inverted_index(event_id))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let streams = inverted_indexes
-        .iter()
-        .map(|inverted| inverted.terms().stream())
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let mut merged = TermMerger::new(streams);
-    let mut total_occurrences = 0_u64;
-    while merged.advance() {
-        let uuid = canonical_uuid_term(merged.key(), "event_id")?;
-        let mut term_occurrences = 0_u64;
-        for (segment_ord, term_info) in merged.current_segment_ords_and_term_infos() {
-            for_each_live_posting(
-                &inverted_indexes[segment_ord],
-                &term_info,
-                segment_ord,
-                &segments[segment_ord],
-                |_| {
-                    term_occurrences = term_occurrences
-                        .checked_add(1)
-                        .ok_or(IndexError::CountOverflow)?;
-                    if term_occurrences > 1 {
-                        return Err(IndexError::DuplicateEventIdentity(uuid.to_string()));
-                    }
-                    Ok(())
-                },
-            )?;
-        }
-        total_occurrences = total_occurrences
-            .checked_add(term_occurrences)
-            .ok_or(IndexError::CountOverflow)?;
-    }
-    if total_occurrences != manifest.indexed_documents {
-        return Err(IndexError::DocumentCountMismatch {
-            manifest: manifest.indexed_documents,
-            index: total_occurrences,
-        });
+    #[cfg(test)]
+    CHECKSUM_WALKS.with(|count| count.set(count.get() + 1));
+    let actual = physical_integrity_digest_inner(index, generation_path)?;
+    if actual != expected_digest {
+        return Err(IndexError::ChecksumMismatch);
     }
     Ok(())
 }
 
-pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
-    let worker_budget = verification_worker_budget(searcher.segment_readers().len());
-    verify_searcher_with_options(searcher, manifest, worker_budget, false, false).map(|_| ())
+fn hash_physical_file(
+    directory: &DurableMmapDirectory,
+    generation_path: &Path,
+    relative_path: &Path,
+    validate_tantivy_footer: bool,
+) -> Result<PhysicalFileDigest> {
+    if relative_path.components().count() != 1 {
+        return Err(IndexError::ChecksumMismatch);
+    }
+    let path = relative_path
+        .to_str()
+        .ok_or(IndexError::ChecksumMismatch)?
+        .to_owned();
+    let full_path = generation_path.join(relative_path);
+    let metadata = full_path
+        .metadata()
+        .map_err(|_| IndexError::ChecksumMismatch)?;
+    if !metadata.is_file() {
+        return Err(IndexError::ChecksumMismatch);
+    }
+    let length = metadata.len();
+    let footer_contract = if validate_tantivy_footer {
+        let slice = directory
+            .open_read(relative_path)
+            .map_err(|_| IndexError::ChecksumMismatch)?;
+        let (footer, body) =
+            Footer::extract_footer(slice).map_err(|_| IndexError::ChecksumMismatch)?;
+        Some((
+            u64::try_from(body.len()).map_err(|_| IndexError::CountOverflow)?,
+            footer.crc,
+        ))
+    } else {
+        None
+    };
+
+    let mut file = File::open(&full_path).map_err(|_| IndexError::ChecksumMismatch)?;
+    let mut sha256 = Sha256::new();
+    let mut crc32 = footer_contract.map(|_| Crc32::new());
+    let mut body_remaining = footer_contract.map_or(0, |(body_length, _)| body_length);
+    let mut bytes_read = 0_u64;
+    let mut buffer = [0_u8; PHYSICAL_HASH_BUFFER_BYTES];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| IndexError::ChecksumMismatch)?;
+        if count == 0 {
+            break;
+        }
+        let count_u64 = u64::try_from(count).map_err(|_| IndexError::CountOverflow)?;
+        bytes_read = bytes_read
+            .checked_add(count_u64)
+            .ok_or(IndexError::CountOverflow)?;
+        sha256.update(&buffer[..count]);
+        if let Some(crc32) = crc32.as_mut() {
+            let body_count = usize::try_from(body_remaining.min(count_u64))
+                .map_err(|_| IndexError::CountOverflow)?;
+            crc32.update(&buffer[..body_count]);
+            body_remaining -= u64::try_from(body_count).map_err(|_| IndexError::CountOverflow)?;
+        }
+    }
+    if bytes_read != length || body_remaining != 0 {
+        return Err(IndexError::ChecksumMismatch);
+    }
+    if let (Some(crc32), Some((_, expected_crc32))) = (crc32, footer_contract) {
+        if crc32.finalize() != expected_crc32 {
+            return Err(IndexError::ChecksumMismatch);
+        }
+    }
+    Ok(PhysicalFileDigest {
+        path,
+        length,
+        sha256: sha256.finalize().into(),
+    })
+}
+
+fn canonical_physical_integrity_digest(entries: &[PhysicalFileDigest]) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(PHYSICAL_INTEGRITY_DOMAIN);
+    digest.update(
+        u64::try_from(entries.len())
+            .map_err(|_| IndexError::CountOverflow)?
+            .to_be_bytes(),
+    );
+    for entry in entries {
+        let path = entry.path.as_bytes();
+        digest.update(
+            u64::try_from(path.len())
+                .map_err(|_| IndexError::CountOverflow)?
+                .to_be_bytes(),
+        );
+        digest.update(path);
+        digest.update(entry.length.to_be_bytes());
+        digest.update(entry.sha256);
+    }
+    Ok(hex(&digest.finalize()))
+}
+
+#[cfg(test)]
+#[test]
+fn sha256_physical_authority_distinguishes_stubbed_crc_collision() {
+    struct StubbedCrcFile<'a> {
+        path: &'a str,
+        bytes: &'a [u8],
+        crc32: u32,
+    }
+
+    let first = StubbedCrcFile {
+        path: "same.store",
+        bytes: b"certificate-A",
+        crc32: 0xfeed_beef,
+    };
+    let second = StubbedCrcFile {
+        path: "same.store",
+        bytes: b"certificate-B",
+        crc32: 0xfeed_beef,
+    };
+    assert_eq!(first.path, second.path);
+    assert_eq!(first.bytes.len(), second.bytes.len());
+    assert_eq!(first.crc32, second.crc32);
+
+    let entry = |file: &StubbedCrcFile<'_>| PhysicalFileDigest {
+        path: file.path.to_owned(),
+        length: u64::try_from(file.bytes.len()).unwrap(),
+        sha256: Sha256::digest(file.bytes).into(),
+    };
+    assert_ne!(
+        canonical_physical_integrity_digest(&[entry(&first)]).unwrap(),
+        canonical_physical_integrity_digest(&[entry(&second)]).unwrap()
+    );
+}
+
+fn active_index_files(index: &tantivy::Index) -> Result<BTreeSet<PathBuf>> {
+    let directory = index.directory();
+    let metas = index.load_metas()?;
+    let mut expected_files = BTreeSet::new();
+    for segment in &metas.segments {
+        for component in [
+            SegmentComponent::Postings,
+            SegmentComponent::FastFields,
+            SegmentComponent::FieldNorms,
+            SegmentComponent::Terms,
+            SegmentComponent::Store,
+        ] {
+            expected_files.insert(segment.relative_path(component));
+        }
+        let positions = segment.relative_path(SegmentComponent::Positions);
+        if directory
+            .exists(&positions)
+            .map_err(|_| IndexError::ChecksumMismatch)?
+        {
+            expected_files.insert(positions);
+        }
+        if segment.has_deletes() {
+            expected_files.insert(segment.relative_path(SegmentComponent::Delete));
+        }
+    }
+    Ok(expected_files)
+}
+
+/// Verifies the complete publication authority carried by one immutable searcher.
+///
+/// This is the shared publication/startup path: physical Tantivy checksums are
+/// checked before the exhaustive stored-Core, source aggregate, and identity
+/// audit.
+pub(crate) fn verify_complete_searcher(
+    searcher: &Searcher,
+    manifest: &GenerationManifest,
+    generation_path: &Path,
+    expected_physical_integrity_digest: &str,
+) -> Result<()> {
+    verify_physical_integrity(
+        searcher.index(),
+        generation_path,
+        expected_physical_integrity_digest,
+    )?;
+    verify_searcher(searcher, manifest)
 }
 
 fn verification_worker_budget(segment_count: usize) -> usize {
@@ -158,344 +381,7 @@ fn verification_worker_budget(segment_count: usize) -> usize {
         .min(WriterOptions::default().indexer_threads.max(1))
 }
 
-fn verify_searcher_with_options(
-    searcher: &Searcher,
-    manifest: &GenerationManifest,
-    requested_worker_budget: usize,
-    instrument: bool,
-    synchronize_first_wave: bool,
-) -> Result<VerificationRunMetrics> {
-    let fields = fields_from_schema(searcher.schema())?;
-    query::validate_verification_projection(fields)?;
-    let segment_count = searcher.segment_readers().len();
-    let worker_budget = requested_worker_budget.max(1).min(segment_count.max(1));
-    let executor = if worker_budget == 1 {
-        Executor::single_thread()
-    } else {
-        Executor::multi_thread(worker_budget, "ctx-generation-verify-")?
-    };
-    let counters = instrument.then(VerificationCounters::default);
-    let first_wave_size = worker_budget.min(segment_count);
-    let rendezvous =
-        (synchronize_first_wave && first_wave_size > 1).then(|| Barrier::new(first_wave_size));
-    let mut metrics = VerificationRunMetrics {
-        #[cfg(test)]
-        worker_budget,
-        ..VerificationRunMetrics::default()
-    };
-    let mut total_documents = 0_u64;
-    let mut parent_session_documents = 0_u64;
-    let mut source_aggregates = BTreeMap::<String, SourceAggregate>::new();
-
-    for wave_start in (0..segment_count).step_by(worker_budget) {
-        let wave_end = (wave_start + worker_budget).min(segment_count);
-        let wave_rendezvous = (wave_start == 0).then_some(rendezvous.as_ref()).flatten();
-        let segments = executor.map(
-            |segment_ord| {
-                Ok(verify_segment(
-                    searcher,
-                    segment_ord,
-                    wave_rendezvous,
-                    counters.as_ref(),
-                ))
-            },
-            wave_start..wave_end,
-        )?;
-        metrics.max_buffered_segments = metrics.max_buffered_segments.max(segments.len());
-        for segment in segments {
-            let segment = segment?;
-            metrics.segment_tasks += 1;
-            metrics.document_decodes = metrics
-                .document_decodes
-                .checked_add(segment.document_decodes)
-                .ok_or(IndexError::CountOverflow)?;
-            metrics.source_terms = metrics
-                .source_terms
-                .checked_add(segment.source_aggregates.len())
-                .ok_or(IndexError::CountOverflow)?;
-            total_documents = total_documents
-                .checked_add(segment.document_count)
-                .ok_or(IndexError::CountOverflow)?;
-            parent_session_documents = parent_session_documents
-                .checked_add(segment.parent_session_documents)
-                .ok_or(IndexError::CountOverflow)?;
-            merge_source_aggregates(&mut source_aggregates, segment.source_aggregates)?;
-        }
-    }
-
-    metrics.max_active_workers = counters
-        .as_ref()
-        .map(|counters| counters.max_active_workers.load(Ordering::SeqCst))
-        .unwrap_or(0);
-    if total_documents != manifest.indexed_documents {
-        return Err(IndexError::DocumentCountMismatch {
-            manifest: manifest.indexed_documents,
-            index: total_documents,
-        });
-    }
-    verify_event_identities(searcher, fields.event_id, total_documents)?;
-    verify_session_identities(
-        searcher,
-        [
-            (fields.session_id, IdentityFieldRole::Session),
-            (fields.parent_session_id, IdentityFieldRole::ParentSession),
-            (fields.root_session_id, IdentityFieldRole::RootSession),
-        ],
-        [total_documents, parent_session_documents, total_documents],
-    )?;
-    verify_manifest_aggregates(manifest, source_aggregates)?;
-    metrics.max_buffered_event_identities = usize::from(total_documents != 0);
-    metrics.max_buffered_session_identities = usize::from(total_documents != 0);
-    Ok(metrics)
-}
-
-fn verify_segment(
-    searcher: &Searcher,
-    segment_ord: usize,
-    rendezvous: Option<&Barrier>,
-    counters: Option<&VerificationCounters>,
-) -> Result<SegmentVerification> {
-    let _active_worker = ActiveVerificationWorker::enter(counters);
-    if let Some(rendezvous) = rendezvous {
-        rendezvous.wait();
-    }
-    let segment = searcher.segment_reader(segment_ord as u32);
-    let mut source_aggregates = BTreeMap::<String, SourceAggregate>::new();
-    let mut document_decodes = 0;
-    let mut parent_session_documents = 0_u64;
-    for doc_id in 0..segment.max_doc() {
-        if segment.is_deleted(doc_id) {
-            continue;
-        }
-        document_decodes += 1;
-        let record = query::stored_verification_record(
-            searcher,
-            DocAddress::new(segment_ord as u32, doc_id),
-        )?;
-        let source = source_aggregates.entry(record.source_owner).or_default();
-        source.count = source
-            .count
-            .checked_add(1)
-            .ok_or(IndexError::CountOverflow)?;
-        accumulate_core_record(&mut source.accumulator, &record.core_record_leaf);
-        parent_session_documents = parent_session_documents
-            .checked_add(u64::from(record.has_parent_session))
-            .ok_or(IndexError::CountOverflow)?;
-    }
-    Ok(SegmentVerification {
-        document_count: u64::from(segment.num_docs()),
-        document_decodes,
-        source_aggregates,
-        parent_session_documents,
-    })
-}
-
-fn merge_source_aggregates(
-    target: &mut BTreeMap<String, SourceAggregate>,
-    source: BTreeMap<String, SourceAggregate>,
-) -> Result<()> {
-    for (source_id, aggregate) in source {
-        let total = target.entry(source_id).or_default();
-        total.count = total
-            .count
-            .checked_add(aggregate.count)
-            .ok_or(IndexError::CountOverflow)?;
-        accumulate_core_record(&mut total.accumulator, &aggregate.accumulator);
-    }
-    Ok(())
-}
-
-fn verify_manifest_aggregates(
-    manifest: &GenerationManifest,
-    mut actual: BTreeMap<String, SourceAggregate>,
-) -> Result<()> {
-    for expected in &manifest.core_record_aggregates {
-        let source_id = expected.source_identity_digest().to_owned();
-        let observed = actual.remove(&source_id).unwrap_or_default();
-        if observed.count != expected.indexed_documents() {
-            return Err(IndexError::CoreRecordAggregateCountMismatch {
-                source_id,
-                manifest: expected.indexed_documents(),
-                index: observed.count,
-            });
-        }
-        if observed.accumulator != expected.accumulator_bytes()? {
-            return Err(IndexError::CoreRecordAggregateMismatch(source_id));
-        }
-    }
-    if let Some((source_id, aggregate)) = actual.into_iter().next() {
-        return Err(IndexError::SourceCountMismatch {
-            source_id,
-            manifest: 0,
-            index: aggregate.count,
-        });
-    }
-    Ok(())
-}
-
-fn verify_event_identities(searcher: &Searcher, field: Field, expected: u64) -> Result<()> {
-    let segments = searcher.segment_readers();
-    let inverted_indexes = segments
-        .iter()
-        .map(|segment| segment.inverted_index(field))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let streams = inverted_indexes
-        .iter()
-        .map(|inverted| inverted.terms().stream())
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let mut merged = TermMerger::new(streams);
-    let mut occurrences = 0_u64;
-    while merged.advance() {
-        let uuid = canonical_uuid_term(merged.key(), "event_id")?;
-        let mut digest = None;
-        for (segment_ord, term_info) in merged.current_segment_ords_and_term_infos() {
-            for_each_live_posting(
-                &inverted_indexes[segment_ord],
-                &term_info,
-                segment_ord,
-                &segments[segment_ord],
-                |address| {
-                    occurrences = occurrences
-                        .checked_add(1)
-                        .ok_or(IndexError::CountOverflow)?;
-                    let identity =
-                        query::stored_identity_record(searcher, address, IdentityFieldRole::Event)?
-                            .identity;
-                    if identity.as_uuid() != uuid {
-                        return Err(IndexError::InvalidStoredDocumentField("event_id"));
-                    }
-                    match digest {
-                        None => digest = Some(identity.digest()),
-                        Some(existing) if existing == identity.digest() => {
-                            return Err(IndexError::DuplicateEventIdentity(uuid.to_string()));
-                        }
-                        Some(existing) => {
-                            return Err(IndexError::CompactIdentityCollision {
-                                kind: "event",
-                                uuid,
-                                existing_digest: hex(&existing),
-                                new_digest: hex(&identity.digest()),
-                            });
-                        }
-                    }
-                    Ok(())
-                },
-            )?;
-        }
-    }
-    if occurrences != expected {
-        return Err(IndexError::InvalidStoredDocumentField("event_id"));
-    }
-    Ok(())
-}
-
-fn verify_session_identities(
-    searcher: &Searcher,
-    fields: [(Field, IdentityFieldRole); 3],
-    expected_occurrences: [u64; 3],
-) -> Result<()> {
-    let segments = searcher.segment_readers();
-    let mut mappings = Vec::with_capacity(fields.len() * segments.len());
-    let mut inverted_indexes = Vec::with_capacity(fields.len() * segments.len());
-    for (role_index, (field, role)) in fields.into_iter().enumerate() {
-        for (segment_ord, segment) in segments.iter().enumerate() {
-            inverted_indexes.push(segment.inverted_index(field)?);
-            mappings.push((segment_ord, role_index, role));
-        }
-    }
-    let streams = inverted_indexes
-        .iter()
-        .map(|inverted| inverted.terms().stream())
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let mut merged = TermMerger::new(streams);
-    let mut occurrences = [0_u64; 3];
-    while merged.advance() {
-        let uuid = canonical_uuid_term(merged.key(), "session_id")?;
-        let mut digest = None;
-        let mut owner = None::<String>;
-        for (stream_index, term_info) in merged.current_segment_ords_and_term_infos() {
-            let (segment_ord, role_index, role) = mappings[stream_index];
-            for_each_live_posting(
-                &inverted_indexes[stream_index],
-                &term_info,
-                segment_ord,
-                &segments[segment_ord],
-                |address| {
-                    occurrences[role_index] = occurrences[role_index]
-                        .checked_add(1)
-                        .ok_or(IndexError::CountOverflow)?;
-                    let record = query::stored_identity_record(searcher, address, role)?;
-                    if record.identity.as_uuid() != uuid {
-                        return Err(IndexError::InvalidStoredDocumentField("session_id"));
-                    }
-                    match digest {
-                        None => digest = Some(record.identity.digest()),
-                        Some(existing) if existing == record.identity.digest() => {}
-                        Some(existing) => {
-                            return Err(IndexError::CompactIdentityCollision {
-                                kind: "session",
-                                uuid,
-                                existing_digest: hex(&existing),
-                                new_digest: hex(&record.identity.digest()),
-                            });
-                        }
-                    }
-                    if let Some(candidate_owner) = record.source_owner {
-                        match owner.as_deref() {
-                            Some(existing) if existing != candidate_owner => {
-                                return Err(IndexError::DuplicateSessionIdentity(uuid.to_string()));
-                            }
-                            None => owner = Some(candidate_owner),
-                            _ => {}
-                        }
-                    }
-                    Ok(())
-                },
-            )?;
-        }
-    }
-    if occurrences != expected_occurrences {
-        return Err(IndexError::InvalidStoredDocumentField("session_id"));
-    }
-    Ok(())
-}
-
-fn for_each_live_posting(
-    inverted: &InvertedIndexReader,
-    term_info: &tantivy::postings::TermInfo,
-    segment_ord: usize,
-    segment: &tantivy::SegmentReader,
-    mut visit: impl FnMut(DocAddress) -> Result<()>,
-) -> Result<()> {
-    let mut postings = inverted.read_postings_from_terminfo(term_info, IndexRecordOption::Basic)?;
-    let segment_ord = u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
-    let mut doc_id = postings.doc();
-    while doc_id != TERMINATED {
-        if !segment.is_deleted(doc_id) {
-            visit(DocAddress::new(segment_ord, doc_id))?;
-        }
-        doc_id = postings.advance();
-    }
-    Ok(())
-}
-
-fn canonical_uuid_term(term: &[u8], field: &'static str) -> Result<Uuid> {
-    let term =
-        std::str::from_utf8(term).map_err(|_| IndexError::InvalidStoredDocumentField(field))?;
-    let uuid = Uuid::parse_str(term).map_err(|_| IndexError::InvalidStoredDocumentField(field))?;
-    if uuid.to_string() != term {
-        return Err(IndexError::InvalidStoredDocumentField(field));
-    }
-    Ok(uuid)
-}
-
-#[cfg(test)]
-pub(crate) fn verify_searcher_reference(
-    searcher: &Searcher,
-    manifest: &GenerationManifest,
-) -> Result<()> {
-    verify_searcher(searcher, manifest)
-}
+include!("verification/logical.rs");
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -508,6 +394,10 @@ pub(crate) struct VerificationMetrics {
     pub(crate) max_buffered_segments: usize,
     pub(crate) max_buffered_event_identities: usize,
     pub(crate) max_buffered_session_identities: usize,
+    pub(crate) stored_core_bytes: u64,
+    pub(crate) body_tokens: u64,
+    pub(crate) verification_spill_bytes: u64,
+    pub(crate) verification_heap_payload_bound_bytes: usize,
 }
 
 #[cfg(test)]
@@ -533,30 +423,23 @@ pub(crate) fn verify_searcher_with_metrics(
         max_buffered_segments: metrics.max_buffered_segments,
         max_buffered_event_identities: metrics.max_buffered_event_identities,
         max_buffered_session_identities: metrics.max_buffered_session_identities,
+        stored_core_bytes: metrics.stored_core_bytes,
+        body_tokens: metrics.body_tokens,
+        verification_spill_bytes: metrics.verification_spill_bytes,
+        verification_heap_payload_bound_bytes: metrics.verification_heap_payload_bound_bytes,
     })
 }
 
 #[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct ReferenceVerificationMetrics {
-    pub(crate) query_passes: usize,
-    pub(crate) segment_query_visits: usize,
-    pub(crate) document_decodes: usize,
+pub(crate) fn reset_verification_activity() {
+    CHECKSUM_WALKS.with(|count| count.set(0));
+    LOGICAL_PASSES.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-pub(crate) fn verify_searcher_reference_with_metrics(
-    searcher: &Searcher,
-    manifest: &GenerationManifest,
-) -> Result<ReferenceVerificationMetrics> {
-    verify_searcher(searcher, manifest)?;
-    let query_passes = manifest.sources.len() + 1;
-    Ok(ReferenceVerificationMetrics {
-        query_passes,
-        segment_query_visits: query_passes
-            .checked_mul(searcher.segment_readers().len())
-            .ok_or(IndexError::CountOverflow)?,
-        document_decodes: usize::try_from(searcher.num_docs())
-            .map_err(|_| IndexError::CountOverflow)?,
-    })
+pub(crate) fn verification_activity() -> (usize, usize) {
+    (
+        CHECKSUM_WALKS.with(Cell::get),
+        LOGICAL_PASSES.with(Cell::get),
+    )
 }

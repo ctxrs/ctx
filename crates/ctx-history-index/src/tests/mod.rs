@@ -221,7 +221,7 @@ fn indexed_document(record: CoreRecord) -> TantivyDocument {
     let encoded = record.encode_stored().unwrap();
     let content_bytes = core_content_bytes(&record.content).unwrap();
     let source_fields = IndexSourceFields::new(&record.source, &source_token(&record.source));
-    IndexDocument::from_core(fields, record, encoded, content_bytes, source_fields)
+    IndexDocument::from_core(fields, record, encoded.into(), content_bytes, source_fields)
         .unwrap()
         .into_tantivy_document()
 }
@@ -273,9 +273,17 @@ fn publish_unchecked_generation(
     for document in documents {
         writer.add_document(document).unwrap();
     }
+    writer.commit().unwrap();
+    writer.wait_merging_threads().unwrap();
+    let pointer = load_active_generation_pointer(root).unwrap().unwrap();
+    let generation_path = active_generation_path(root);
     let generation_id = manifest.generation_id().unwrap();
     write_manifest(root, &generation_id, &manifest).unwrap();
-    let mut prepared = writer.prepare_commit().unwrap();
+    let mut payload_writer = index
+        .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
+        .unwrap();
+    payload_writer.set_merge_policy(Box::<NoMergePolicy>::default());
+    let mut prepared = payload_writer.prepare_commit().unwrap();
     prepared.set_payload(
         &serde_json::to_string(&CommitPayload {
             version: COMMIT_PAYLOAD_VERSION,
@@ -284,10 +292,14 @@ fn publish_unchecked_generation(
         .unwrap(),
     );
     prepared.commit().unwrap();
-    writer.wait_merging_threads().unwrap();
-    let pointer = load_active_generation_pointer(root).unwrap().unwrap();
-    let active =
-        GenerationSlot::new(generation_id, pointer.active().directory().to_owned()).unwrap();
+    payload_writer.wait_merging_threads().unwrap();
+    let physical_integrity_digest = physical_integrity_digest(index, &generation_path).unwrap();
+    let active = GenerationSlot::new(
+        generation_id,
+        pointer.active().directory().to_owned(),
+        physical_integrity_digest,
+    )
+    .unwrap();
     publish_active_generation_pointer(root, &ActiveGenerationPointer::new(active, None).unwrap())
         .unwrap();
 }
@@ -309,6 +321,64 @@ fn active_generation_path(root: &Path) -> PathBuf {
     let pointer = load_active_generation_pointer(root).unwrap().unwrap();
     root.join(INDEX_GENERATIONS_DIRECTORY)
         .join(pointer.active().directory())
+}
+
+fn omit_managed_and_corrupt_body_projection(generation_path: &Path) -> PathBuf {
+    use std::{
+        collections::HashSet,
+        io::{Read, Seek, Write},
+    };
+
+    let managed_path = generation_path.join(".managed.json");
+    let mut managed = serde_json::from_slice::<HashSet<PathBuf>>(
+        &fs::read(&managed_path).expect("managed topology must be readable"),
+    )
+    .expect("managed topology must be valid");
+    let projection_path = fs::read_dir(generation_path)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|extension| extension == "pos")
+        })
+        .or_else(|| {
+            fs::read_dir(generation_path)
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_some_and(|extension| extension == "idx")
+                })
+        })
+        .expect("generation must contain a body-search projection file");
+    let relative = projection_path
+        .strip_prefix(generation_path)
+        .unwrap()
+        .to_path_buf();
+    assert!(
+        managed.remove(&relative),
+        "active body-search projection must begin in the managed topology"
+    );
+    fs::write(&managed_path, serde_json::to_vec(&managed).unwrap()).unwrap();
+
+    let mut projection = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&projection_path)
+        .unwrap();
+    let offset = projection.metadata().unwrap().len() / 2;
+    projection.seek(std::io::SeekFrom::Start(offset)).unwrap();
+    let mut byte = [0_u8; 1];
+    projection.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0x5a;
+    projection.seek(std::io::SeekFrom::Start(offset)).unwrap();
+    projection.write_all(&byte).unwrap();
+    projection.sync_all().unwrap();
+    projection_path
 }
 
 fn multisegment_fixture(

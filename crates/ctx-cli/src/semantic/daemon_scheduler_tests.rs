@@ -247,7 +247,7 @@ fn publish_semantic_catch_up_generation(data_root: &Path, event_count: u64) -> S
         )
         .unwrap();
     let receipt = writer.commit(|_| true).unwrap();
-    assert_eq!(receipt.semantic_eligible_documents, event_count);
+    assert_eq!(receipt.indexed_documents, event_count);
     receipt.generation_id
 }
 
@@ -740,7 +740,7 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
             calls.clone(),
             Some(json!({
                 "status": "budget_exhausted",
-                "source_records_scanned": MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+                "source_records_decoded": MAX_SEMANTIC_EVENT_PAGE_ITEMS,
                 "source_generation_ready": false,
                 "source_work_remaining": true,
             })),
@@ -761,7 +761,7 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
     let first_status = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
     assert_eq!(first_status["core_generation_id"], generation);
     assert_eq!(
-        first_status["source_records_scanned"],
+        first_status["source_records_decoded"],
         MAX_SEMANTIC_EVENT_PAGE_ITEMS
     );
     assert_eq!(first_status["source_work_remaining"], true);
@@ -771,7 +771,7 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
             calls.clone(),
             Some(json!({
                 "status": "ready",
-                "source_records_scanned": 1,
+                "source_records_decoded": 1,
                 "source_generation_ready": true,
                 "source_work_remaining": false,
             })),
@@ -792,7 +792,7 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
     let terminal_status = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
     assert_eq!(terminal_status["status"], "ready");
     assert_eq!(terminal_status["core_generation_id"], generation);
-    assert_eq!(terminal_status["source_records_scanned"], 1);
+    assert_eq!(terminal_status["source_records_decoded"], 1);
     assert_eq!(terminal_status["source_work_remaining"], false);
     assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
 

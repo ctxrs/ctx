@@ -39,6 +39,15 @@ fn pinned_generation_opens_the_exact_retained_previous_generation() {
     let source = source("pinned-previous.jsonl");
     let previous = publish_pinned_test_generation(temp.path(), &source, 1, "previous evidence");
     let active = publish_pinned_test_generation(temp.path(), &source, 2, "active replacement");
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let retained = pointer.previous().unwrap();
+    assert_eq!(retained.generation_id(), previous.generation_id);
+    assert_ne!(
+        retained.physical_integrity_digest(),
+        pointer.active().physical_integrity_digest()
+    );
 
     let index =
         VerifiedIndex::open_pinned_generation(temp.path(), &previous.generation_id).unwrap();
@@ -113,8 +122,12 @@ fn pinned_generation_rejects_a_pointer_payload_generation_mismatch() {
         .unwrap();
     let expected = "e".repeat(64);
     assert_ne!(expected, actual.generation_id);
-    let forged_active =
-        GenerationSlot::new(expected.clone(), pointer.active().directory().to_owned()).unwrap();
+    let forged_active = GenerationSlot::new(
+        expected.clone(),
+        pointer.active().directory().to_owned(),
+        pointer.active().physical_integrity_digest().to_owned(),
+    )
+    .unwrap();
     publish_active_generation_pointer(
         temp.path(),
         &ActiveGenerationPointer::new(forged_active, pointer.previous().cloned()).unwrap(),

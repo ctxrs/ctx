@@ -237,6 +237,7 @@ impl VerifiedIndex {
         capacity: usize,
     ) -> Result<Vec<EventAddressCandidate>> {
         let fields = fields_from_schema(self.searcher.schema())?;
+        let eligibility = self.semantic_eligibility_postings()?;
         let after_order = after.map(SemanticEventOrderKey::for_event).transpose()?;
         let segments = self.searcher.segment_readers();
         let inverted_indexes = segments
@@ -288,14 +289,71 @@ impl VerifiedIndex {
                 }
             }
             if let Some(address) = address {
-                candidates.push(EventAddressCandidate {
-                    identity_digest: order.event_digest(),
-                    address,
-                    source_order: None,
-                });
+                if eligibility.includes(address)? {
+                    candidates.push(EventAddressCandidate {
+                        identity_digest: order.event_digest(),
+                        address,
+                        source_order: None,
+                    });
+                }
             }
         }
         Ok(candidates)
+    }
+
+    fn semantic_eligibility_postings(&self) -> Result<&SemanticEligibilityPostings> {
+        if let Some(postings) = self.semantic_eligibility_postings.get() {
+            return Ok(postings);
+        }
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut total = 0_u64;
+        let mut selected_segments = Vec::with_capacity(self.searcher.segment_readers().len());
+        for segment in self.searcher.segment_readers() {
+            let max_doc =
+                usize::try_from(segment.max_doc()).map_err(|_| IndexError::CountOverflow)?;
+            let mut message_docs = vec![false; max_doc];
+            let mut selected_docs = vec![false; max_doc];
+            let event_types = segment.inverted_index(fields.event_type)?;
+            if let Some(term_info) =
+                event_types.get_term_info(&Term::from_field_text(fields.event_type, "message"))?
+            {
+                let mut postings = event_types
+                    .read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        message_docs[doc_id as usize] = true;
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+            let roles = segment.inverted_index(fields.role)?;
+            if let Some(term_info) =
+                roles.get_term_info(&Term::from_field_text(fields.role, "user"))?
+            {
+                let mut postings =
+                    roles.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) && message_docs[doc_id as usize] {
+                        selected_docs[doc_id as usize] = true;
+                        total = total.checked_add(1).ok_or(IndexError::CountOverflow)?;
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+            selected_segments.push(selected_docs);
+        }
+        let computed = SemanticEligibilityPostings {
+            total,
+            segments: selected_segments,
+        };
+        let _ = self.semantic_eligibility_postings.set(computed);
+        self.semantic_eligibility_postings
+            .get()
+            .ok_or(IndexError::WriterInvariant(
+                "semantic eligibility postings were not cached",
+            ))
     }
 
     fn event_record(&self, address: DocAddress, fields: Fields) -> Result<EventRecord> {

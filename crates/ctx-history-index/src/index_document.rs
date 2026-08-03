@@ -32,11 +32,12 @@ const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
 pub(crate) const SEMANTIC_EVENT_ORDER_KEY_LEN: usize = 32;
 const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
 
-/// Eligible-only global semantic order term.
+/// Core-owned global event order term.
 ///
 /// Every key is one full event-identity digest. All event identities have the
 /// same kind and identity-version prefix, so digest byte order is exactly the
-/// existing canonical `StableEntityId` order used by semantic cursors.
+/// canonical `StableEntityId` order. Semantic consumers filter this neutral
+/// immutable enumeration under their own current policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SemanticEventOrderKey([u8; SEMANTIC_EVENT_ORDER_KEY_LEN]);
 
@@ -385,8 +386,10 @@ pub(crate) fn core_content_bytes(content: &CoreContent) -> Result<usize> {
     }
     Ok(content_bytes)
 }
+#[cfg(test)]
 pub(super) struct SourceToken([u8; 64]);
 
+#[cfg(test)]
 impl SourceToken {
     pub(super) fn new(source_digest: &[u8; 32]) -> Self {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -411,6 +414,7 @@ pub(super) enum IndexValue {
     Text(String),
     SharedText(Arc<str>),
     Bytes(Vec<u8>),
+    SharedBytes(Arc<[u8]>),
     U64(u64),
     I64(i64),
 }
@@ -424,6 +428,7 @@ impl<'a> Value<'a> for &'a IndexValue {
             IndexValue::Text(value) => ReferenceValueLeaf::Str(value),
             IndexValue::SharedText(value) => ReferenceValueLeaf::Str(value),
             IndexValue::Bytes(value) => ReferenceValueLeaf::Bytes(value),
+            IndexValue::SharedBytes(value) => ReferenceValueLeaf::Bytes(value),
             IndexValue::U64(value) => ReferenceValueLeaf::U64(*value),
             IndexValue::I64(value) => ReferenceValueLeaf::I64(*value),
         };
@@ -454,6 +459,10 @@ impl IndexDocument {
         self.fields.push((field, IndexValue::Bytes(value.into())));
     }
 
+    pub(super) fn add_shared_bytes(&mut self, field: Field, value: Arc<[u8]>) {
+        self.fields.push((field, IndexValue::SharedBytes(value)));
+    }
+
     pub(super) fn add_u64(&mut self, field: Field, value: u64) {
         self.fields.push((field, IndexValue::U64(value)));
     }
@@ -470,6 +479,7 @@ impl IndexDocument {
                 IndexValue::Text(value) => document.add_text(field, value),
                 IndexValue::SharedText(value) => document.add_text(field, value),
                 IndexValue::Bytes(value) => document.add_bytes(field, &value),
+                IndexValue::SharedBytes(value) => document.add_bytes(field, &value),
                 IndexValue::U64(value) => document.add_u64(field, value),
                 IndexValue::I64(value) => document.add_i64(field, value),
             }
@@ -480,15 +490,12 @@ impl IndexDocument {
     pub(super) fn from_core(
         fields: Fields,
         record: CoreRecord,
-        core_record_bytes: Vec<u8>,
+        core_record_bytes: Arc<[u8]>,
         core_content_bytes: usize,
         source: IndexSourceFields,
     ) -> Result<Self> {
         let core_record_encoded_bytes = core_record_bytes.len();
-        let semantic_event_order =
-            crate::policy::is_semantic_candidate(&record.event_type, record.role.as_deref())
-                .then(|| SemanticEventOrderKey::for_event(record.event_id))
-                .transpose()?;
+        let semantic_event_order = SemanticEventOrderKey::for_event(record.event_id)?;
         let source_event_order = SourceEventOrderKey::for_document(
             &source,
             record.event_id.digest(),
@@ -597,15 +604,13 @@ impl IndexDocument {
                 IndexError::WriterInvariant("encoded Core record size does not fit u64")
             })?,
         );
-        target.add_bytes(fields.core_record, core_record_bytes);
+        target.add_shared_bytes(fields.core_record, core_record_bytes);
         target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
         target.add_bytes(fields.session_event_order, session_event_order.into_bytes());
-        if let Some(semantic_event_order) = semantic_event_order {
-            target.add_bytes(
-                fields.semantic_event_order,
-                semantic_event_order.into_bytes(),
-            );
-        }
+        target.add_bytes(
+            fields.semantic_event_order,
+            semantic_event_order.into_bytes(),
+        );
         Ok(target)
     }
 }

@@ -5,15 +5,12 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{
-    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
-};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::semantic::{
     health_search::{
         create_private_dir_all, secure_private_file_permissions, secure_semantic_vector_permissions,
     },
-    model_contract::semantic_model_contract_descriptor,
     runtime_limits::SEMANTIC_VECTOR_BUSY_TIMEOUT_MS,
     vector_store_schema::SemanticVectorStoreError,
 };
@@ -21,7 +18,6 @@ use crate::semantic::{
 pub(super) const CONTROL_FILE: &str = "state.sqlite";
 const CONTROL_APPLICATION_ID: i64 = 0x4354_584D; // "CTXM"
 const CONTROL_SCHEMA_VERSION: i64 = 5;
-const MODEL_CONTRACT_STATE: &str = "projection_model_contract";
 pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
 pub(in crate::semantic) fn open_writable(root: &Path) -> Result<Connection> {
@@ -143,32 +139,6 @@ fn prepare_schema(connection: &Connection) -> Result<()> {
         return Ok(());
     }
     validate_schema(connection)?;
-    let stored_contract = connection
-        .query_row(
-            "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
-            [MODEL_CONTRACT_STATE],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let expected_contract = semantic_model_contract_descriptor();
-    if stored_contract.as_deref() != Some(expected_contract.as_str()) {
-        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Exclusive)?;
-        transaction.execute("DELETE FROM semantic_dirty_events", [])?;
-        transaction.execute("DELETE FROM semantic_maintenance_state", [])?;
-        transaction.execute(
-            "UPDATE semantic_index_stats SET dirty_items = 0 WHERE id = 1",
-            [],
-        )?;
-        transaction.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)",
-            params![MODEL_CONTRACT_STATE, expected_contract],
-        )?;
-        transaction.execute(
-            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, 'true')",
-            [FULL_REBUILD_STATE],
-        )?;
-        transaction.commit()?;
-    }
     Ok(())
 }
 
@@ -194,10 +164,6 @@ fn create_schema(transaction: &Transaction<'_>, requires_full_rebuild: bool) -> 
             value TEXT NOT NULL
         );
         "#,
-    )?;
-    transaction.execute(
-        "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, ?2)",
-        params![MODEL_CONTRACT_STATE, semantic_model_contract_descriptor()],
     )?;
     if requires_full_rebuild {
         transaction.execute(
@@ -350,6 +316,16 @@ mod tests {
         let temporary = tempfile::tempdir()?;
         let connection = open_writable(temporary.path())?;
         assert_eq!(user_tables(&connection)?, V5_TABLES);
+        assert_eq!(
+            connection.query_row(
+                "SELECT COUNT(*) FROM semantic_maintenance_state
+                 WHERE key = 'projection_model_contract'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )?,
+            0,
+            "the mutable control database must not carry model identity"
+        );
         Ok(())
     }
 

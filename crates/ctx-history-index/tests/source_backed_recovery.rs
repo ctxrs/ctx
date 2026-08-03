@@ -113,6 +113,71 @@ fn process_death_after_commit_keeps_new_visibility_and_old_reader_pinning() {
 }
 
 #[test]
+fn version_one_pointer_refresh_rebuilds_atomically_without_compatibility_reading() {
+    let fixture = RecoveryFixture::new();
+    let pointer_path = fixture.root.join("active-generation.json");
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pointer_path).unwrap()).unwrap();
+    assert_eq!(pointer["version"], 2);
+    assert!(pointer["previous"].is_null());
+    let generation_id = pointer["active"]["generation_id"].as_str().unwrap();
+    let directory = pointer["active"]["directory"].as_str().unwrap();
+    let old_generation_path = fixture.root.join("index-generations").join(directory);
+    let old_manifest_path = fixture
+        .root
+        .join("ctx-generations")
+        .join(format!("{generation_id}.json"));
+    let version_one_pointer = format!(
+        "{{\"version\":1,\"active\":{{\"generation_id\":\"{generation_id}\",\"directory\":\"{directory}\"}},\"previous\":null}}"
+    )
+    .into_bytes();
+    fs::write(&pointer_path, &version_one_pointer).unwrap();
+
+    assert!(matches!(
+        VerifiedIndex::open(&fixture.root),
+        Err(IndexError::UnsupportedActiveGenerationPointer(1))
+    ));
+
+    let failed = staged_replacement(&fixture.root)
+        .commit(|_| false)
+        .unwrap_err();
+    assert!(matches!(failed, IndexError::SourceInvalidated(_)));
+    assert_eq!(fs::read(&pointer_path).unwrap(), version_one_pointer);
+    assert!(old_generation_path.is_dir());
+    assert!(old_manifest_path.is_file());
+    assert!(Index::open_in_dir(&old_generation_path)
+        .unwrap()
+        .validate_checksum()
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        VerifiedIndex::open(&fixture.root),
+        Err(IndexError::UnsupportedActiveGenerationPointer(1))
+    ));
+
+    let rebuilt = staged_replacement(&fixture.root).commit(|_| true).unwrap();
+    let published: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pointer_path).unwrap()).unwrap();
+    assert_eq!(published["version"], 2);
+    assert_eq!(
+        published["active"]["generation_id"].as_str(),
+        Some(rebuilt.generation_id.as_str())
+    );
+    assert!(published["active"]["physical_integrity_digest"]
+        .as_str()
+        .is_some_and(|digest| digest.len() == 64));
+    assert!(published["previous"].is_null());
+    assert!(!old_generation_path.exists());
+    assert!(!old_manifest_path.exists());
+    assert_generation(
+        &fixture.root,
+        &rebuilt.generation_id,
+        "candidate",
+        "previous",
+    );
+}
+
+#[test]
 fn stale_writer_lock_after_sigkill_is_recoverable() {
     let fixture = RecoveryFixture::new();
     let mut child = fixture.spawn_stopped_child("pause_after_writer_open", None);
@@ -983,7 +1048,7 @@ fn canonical_generation_manifests(directory: &Path) -> Vec<fs::DirEntry> {
 }
 
 #[test]
-fn recovery_manifest_selector_excludes_integrity_receipts_and_temporaries() {
+fn recovery_manifest_selector_excludes_sidecars_and_temporaries() {
     let directory = tempdir().unwrap();
     let generation_id = "ab".repeat(32);
     let canonical = directory.path().join(format!("{generation_id}.json"));
@@ -991,8 +1056,8 @@ fn recovery_manifest_selector_excludes_integrity_receipts_and_temporaries() {
     fs::write(
         directory
             .path()
-            .join(format!("generation-{generation_id}.integrity.json")),
-        b"receipt",
+            .join(format!("generation-{generation_id}.metadata.json")),
+        b"sidecar",
     )
     .unwrap();
     fs::write(

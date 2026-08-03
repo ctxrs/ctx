@@ -1,14 +1,14 @@
-//! Canonical policy for self-contained Core lexical and semantic generations.
+//! Canonical policies for self-contained Core and semantic generations.
 //!
 //! The compact JSON encoding of [`SourceGenerationPolicy`] is hashed into each
-//! lexical generation manifest. Any generation-affecting policy change must
-//! therefore change a field below (or its revision) so stale disposable
-//! projections fail closed instead of being read under a different contract.
+//! lexical generation manifest. It intentionally excludes semantic eligibility,
+//! chunking, and model policy: semantic state carries and validates that
+//! independent policy through [`SemanticGenerationPolicy`].
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 9;
+pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 10;
 pub const SOURCE_ROUTE_SNAPSHOT_REVISION: u32 = 1;
 pub const AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS: u32 = 3;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 16;
@@ -33,7 +33,6 @@ pub struct SourceGenerationPolicy {
     pub policy_version: u32,
     pub source_lifecycle: SourceLifecyclePolicy,
     pub lexical: LexicalGenerationPolicy,
-    pub semantic: SemanticGenerationPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +47,40 @@ impl SourceGenerationPolicy {
     pub fn canonical_sha256(&self) -> serde_json::Result<String> {
         let digest = Sha256::digest(serde_json::to_vec(self)?);
         Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+}
+
+impl SemanticGenerationPolicy {
+    /// Returns the SHA-256 of this semantic policy's compact declaration-order JSON.
+    pub fn canonical_sha256(&self) -> serde_json::Result<String> {
+        let digest = Sha256::digest(serde_json::to_vec(self)?);
+        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+
+    /// Returns whether current semantic metadata policy selects this stored
+    /// Core event. This decision is semantic-owned and never participates in
+    /// Core generation compatibility or identity.
+    pub fn includes_event(&self, event_type: &str, role: Option<&str>) -> bool {
+        let event_class = match event_type {
+            "message" => SourceEventClass::Message,
+            "tool_call" => SourceEventClass::ToolCall,
+            "tool_output" => SourceEventClass::ToolOutput,
+            "command_started" => SourceEventClass::CommandStarted,
+            "command_output" => SourceEventClass::CommandOutput,
+            "command_finished" => SourceEventClass::CommandFinished,
+            "file_touched" => SourceEventClass::FileTouched,
+            "vcs_change" => SourceEventClass::VcsChange,
+            "artifact" => SourceEventClass::Artifact,
+            "summary" => SourceEventClass::Summary,
+            "notice" => SourceEventClass::Notice,
+            _ => return false,
+        };
+        let role = match role {
+            Some("user") => SourceEventRole::User,
+            Some("assistant") => SourceEventRole::Assistant,
+            _ => return false,
+        };
+        self.candidate_event_classes.contains(&event_class) && self.candidate_roles.contains(&role)
     }
 }
 
@@ -144,6 +177,7 @@ pub enum SourceEventClass {
 #[serde(rename_all = "snake_case")]
 pub enum SourceEventRole {
     User,
+    Assistant,
 }
 
 pub fn current_source_generation_policy() -> SourceGenerationPolicy {
@@ -189,23 +223,6 @@ pub fn current_source_generation_policy() -> SourceGenerationPolicy {
             schema_revision: LEXICAL_SCHEMA_REVISION,
             tokenizer_revision: LEXICAL_TOKENIZER_REVISION,
         },
-        semantic: SemanticGenerationPolicy {
-            eligibility_revision: SEMANTIC_ELIGIBILITY_REVISION,
-            candidate_event_classes: [SourceEventClass::Message],
-            candidate_roles: [SourceEventRole::User],
-            core_content_filter: SemanticCoreContentFilter::PolicySelectedMeaningfulTextV1,
-            chunking_revision: SEMANTIC_CHUNKING_REVISION,
-            chunk_target_chars: SEMANTIC_CHUNK_TARGET_CHARS as u32,
-            chunk_overlap_chars: SEMANTIC_CHUNK_OVERLAP_CHARS as u32,
-            source_max_chars: SEMANTIC_SOURCE_MAX_CHARS as u32,
-            embedding: EmbeddingGenerationPolicy {
-                contract_revision: SEMANTIC_EMBEDDING_CONTRACT_REVISION,
-                model: SEMANTIC_EMBEDDING_MODEL.to_owned(),
-                model_revision: SEMANTIC_EMBEDDING_MODEL_REVISION.to_owned(),
-                dimensions: SEMANTIC_EMBEDDING_DIMENSIONS as u32,
-                normalization: SEMANTIC_EMBEDDING_NORMALIZATION.to_owned(),
-            },
-        },
     }
 }
 
@@ -213,8 +230,32 @@ pub fn current_source_generation_policy_hash() -> serde_json::Result<String> {
     current_source_generation_policy().canonical_sha256()
 }
 
+pub fn current_semantic_generation_policy() -> SemanticGenerationPolicy {
+    SemanticGenerationPolicy {
+        eligibility_revision: SEMANTIC_ELIGIBILITY_REVISION,
+        candidate_event_classes: [SourceEventClass::Message],
+        candidate_roles: [SourceEventRole::User],
+        core_content_filter: SemanticCoreContentFilter::PolicySelectedMeaningfulTextV1,
+        chunking_revision: SEMANTIC_CHUNKING_REVISION,
+        chunk_target_chars: SEMANTIC_CHUNK_TARGET_CHARS as u32,
+        chunk_overlap_chars: SEMANTIC_CHUNK_OVERLAP_CHARS as u32,
+        source_max_chars: SEMANTIC_SOURCE_MAX_CHARS as u32,
+        embedding: EmbeddingGenerationPolicy {
+            contract_revision: SEMANTIC_EMBEDDING_CONTRACT_REVISION,
+            model: SEMANTIC_EMBEDDING_MODEL.to_owned(),
+            model_revision: SEMANTIC_EMBEDDING_MODEL_REVISION.to_owned(),
+            dimensions: SEMANTIC_EMBEDDING_DIMENSIONS as u32,
+            normalization: SEMANTIC_EMBEDDING_NORMALIZATION.to_owned(),
+        },
+    }
+}
+
+pub fn current_semantic_generation_policy_hash() -> serde_json::Result<String> {
+    current_semantic_generation_policy().canonical_sha256()
+}
+
 pub(crate) fn is_semantic_candidate(event_type: &str, role: Option<&str>) -> bool {
-    event_type == "message" && role == Some("user")
+    current_semantic_generation_policy().includes_event(event_type, role)
 }
 
 #[cfg(test)]
@@ -245,7 +286,7 @@ mod tests {
         assert_eq!(first.lexical.schema_revision, 16);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "7cf28f766df7732d4a2d23afd9341349bd1c3a76926c1c82b6f8e5e5494915a8"
+            "7bcd30632200f8731a03ca71014fc826a7e7170f8b4c8b7222814c426ac43529"
         );
     }
 
@@ -258,6 +299,30 @@ mod tests {
         assert_ne!(
             current.canonical_sha256().unwrap(),
             changed.canonical_sha256().unwrap()
+        );
+    }
+
+    #[test]
+    fn semantic_policy_changes_do_not_change_core_generation_policy() {
+        let core_policy_hash = current_source_generation_policy_hash().unwrap();
+        let current_semantic = current_semantic_generation_policy();
+        let mut changed_semantic = current_semantic.clone();
+        changed_semantic.eligibility_revision += 1;
+
+        assert_ne!(
+            current_semantic.canonical_sha256().unwrap(),
+            changed_semantic.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            current_source_generation_policy_hash().unwrap(),
+            core_policy_hash
+        );
+        assert!(
+            serde_json::to_value(current_source_generation_policy())
+                .unwrap()
+                .get("semantic")
+                .is_none(),
+            "Core generation policy must not carry semantic compatibility identity"
         );
     }
 }

@@ -7,15 +7,14 @@ mod verification;
 pub use contract::*;
 use filtering::*;
 pub(crate) use records::stored_event_record;
-pub(crate) use records::validate_core_record_encoded_bytes;
 use records::{
     core_event_fast_preflight, stored_core_event_record, stored_core_event_record_with_size,
     EventAddressCandidate, SessionEventAddressCandidate,
 };
 
-pub(super) use verification::{
-    stored_identity_record, stored_verification_record, validate_verification_projection,
-    IdentityFieldRole,
+pub(crate) use verification::{
+    stored_verification_record, validate_verification_projection, CompactIdentity,
+    IdentityFieldRole, VerificationRecord,
 };
 
 #[cfg(test)]
@@ -68,6 +67,23 @@ const CORE_RECORD_ENCODED_BYTES_FIELD: &str = "core_record_encoded_bytes";
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
 const SEMANTIC_EVENT_ORDER_FIELD: &str = "semantic_event_order";
+
+pub(crate) struct SemanticEligibilityPostings {
+    total: u64,
+    segments: Vec<Vec<bool>>,
+}
+
+impl SemanticEligibilityPostings {
+    fn includes(&self, address: DocAddress) -> Result<bool> {
+        self.segments
+            .get(address.segment_ord as usize)
+            .and_then(|segment| segment.get(address.doc_id as usize))
+            .copied()
+            .ok_or(IndexError::InvalidStoredDocumentField(
+                SEMANTIC_EVENT_ORDER_FIELD,
+            ))
+    }
+}
 
 #[cfg(test)]
 thread_local! {

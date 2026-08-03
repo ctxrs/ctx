@@ -386,7 +386,7 @@ fn annotate_source_backed_semantic_progress(
     job: &mut Value,
     outcome: &SourceBackedSemanticOutcome,
 ) {
-    job["source_records_scanned"] = json!(outcome.records_scanned);
+    job["source_records_decoded"] = json!(outcome.records_decoded);
     job["source_records_embedded"] = json!(outcome.records_embedded);
     job["source_records_reused"] = json!(outcome.records_reused);
     job["source_records_filtered"] = json!(outcome.records_filtered);

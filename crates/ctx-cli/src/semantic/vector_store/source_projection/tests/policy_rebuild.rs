@@ -1,28 +1,51 @@
 use super::*;
 
 #[test]
-fn policy_model_or_chunk_revision_forces_full_rebuild() -> Result<()> {
+fn descriptor_only_model_change_rebuilds_every_vector_from_unchanged_core() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let index = fixture.publish("revision", &[(0, bodies("first", 130))])?;
+    let core_generation_id = index.generation_id().to_owned();
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
-    let chunks_before = embedder.chunks;
+    let baseline_generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
+    let baseline_contract = baseline_generation.contract_fingerprint.clone();
     store.reset_flat_active_event_snapshot_count();
 
-    let mut revised = SourceBackedSemanticGeneration::from_verified_index(&index)?;
-    revised.semantic_policy_fingerprint = "f".repeat(64);
+    let descriptor = crate::semantic::model_contract::semantic_model_contract_descriptor();
+    let revised_descriptor =
+        descriptor.replacen("max_sequence_length=512", "max_sequence_length=513", 1);
+    assert_ne!(descriptor, revised_descriptor);
+    let revised = SourceBackedSemanticGeneration::from_verified_index_with_authority(
+        &index,
+        current_semantic_generation_policy(),
+        revised_descriptor,
+    )?;
+    assert_ne!(revised.contract_fingerprint, baseline_contract);
     builder.calls.clear();
     let rebuilt = reconcile_generation(&mut store, &index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(rebuilt.records_read, 130);
+    assert_eq!(rebuilt.records_decoded, 130);
     assert_eq!(rebuilt.records_embedded, 130);
+    assert_eq!(rebuilt.records_reused, 0);
     assert_eq!(builder.calls.len(), 130);
-    assert!(embedder.chunks > chunks_before);
+    assert_eq!(
+        store
+            .source_acknowledgement()?
+            .expect("descriptor rebuild acknowledgement")
+            .contract_fingerprint,
+        revised.contract_fingerprint
+    );
     assert_eq!(
         store.flat_active_event_snapshot_count(),
         0,
         "policy replacement must remain source-local"
+    );
+    assert_eq!(index.generation_id(), core_generation_id);
+    assert_eq!(
+        VerifiedIndex::open(fixture.data_root.join("index-revision"))?.generation_id(),
+        core_generation_id,
+        "a semantic-model-only rebuild must leave committed Core active"
     );
     Ok(())
 }
@@ -42,8 +65,13 @@ fn policy_rebuild_persists_linear_source_traversal_across_restart() -> Result<()
         &mut MarkerEmbedder::default(),
     )?;
 
-    let mut revised = SourceBackedSemanticGeneration::from_verified_index(&index)?;
-    revised.semantic_policy_fingerprint = "e".repeat(64);
+    let mut revised_policy = current_semantic_generation_policy();
+    revised_policy.chunking_revision = revised_policy
+        .chunking_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("semantic chunking revision overflow"))?;
+    let revised =
+        SourceBackedSemanticGeneration::from_verified_index_with_policy(&index, revised_policy)?;
     let mut builder = CoreBuilder {
         fail_after: Some(3),
         ..CoreBuilder::default()
@@ -65,7 +93,7 @@ fn policy_rebuild_persists_linear_source_traversal_across_restart() -> Result<()
     builder.fail_after = None;
     builder.calls.clear();
     let resumed = reconcile_generation(&mut store, &index, &revised, &mut builder, &mut embedder)?;
-    assert_eq!(resumed.records_read, 5);
+    assert_eq!(resumed.records_decoded, 5);
     assert_eq!(builder.calls.len(), 5);
     assert!(builder
         .calls
@@ -103,7 +131,7 @@ fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     store.reset_flat_active_event_snapshot_count();
     let rebuilt = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
-    assert_eq!(rebuilt.records_read, 3);
+    assert_eq!(rebuilt.records_decoded, 3);
     assert_eq!(rebuilt.records_embedded, 3);
     assert_eq!(
         first_drain.deleted_chunks + rebuilt.deleted_chunks,

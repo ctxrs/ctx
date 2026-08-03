@@ -5,7 +5,10 @@ use ctx_history_core::{
     EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, StableEntityId, TypedKey,
 };
-use ctx_history_index::{CoreEventRecord, GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_history_index::{
+    current_semantic_generation_policy, CoreEventRecord, GenerationWriter, SourceEventRole,
+    VerifiedIndex, WriterOptions,
+};
 use tempfile::TempDir;
 
 use super::*;
@@ -291,8 +294,7 @@ fn bodies(prefix: &str, count: usize) -> Vec<String> {
 }
 
 fn merge(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutcome) {
-    total.records_read = total.records_read.saturating_add(next.records_read);
-    total.records_scanned = total.records_scanned.saturating_add(next.records_scanned);
+    total.records_decoded = total.records_decoded.saturating_add(next.records_decoded);
     total.records_embedded = total.records_embedded.saturating_add(next.records_embedded);
     total.records_reused = total.records_reused.saturating_add(next.records_reused);
     total.records_filtered = total.records_filtered.saturating_add(next.records_filtered);
@@ -442,17 +444,17 @@ fn projection_snapshot(store: &SemanticVectorStore) -> Result<ProjectionSnapshot
 }
 
 #[test]
-fn semantic_generation_mirrors_exact_per_source_core_aggregates() -> Result<()> {
+fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_totals() -> Result<()>
+{
     let fixture = Fixture::new(2)?;
     let index = fixture.publish(
         "aggregate",
         &[(0, bodies("stable", 3)), (1, bodies("changed", 2))],
     )?;
     let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
-    assert_eq!(SOURCE_CONTRACT_VERSION, 10);
+    assert_eq!(SOURCE_CONTRACT_VERSION, 11);
     assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 16);
-    assert_eq!(index.manifest().semantic_eligible_documents, 5);
-    assert_eq!(generation.semantic_documents, 5);
+    assert_eq!(index.semantic_eligible_event_count()?, 5);
     assert_eq!(generation.core_generation_id, index.generation_id());
     assert_eq!(generation.sources.len(), 2);
     assert_eq!(
@@ -500,10 +502,9 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
     let index = VerifiedIndex::open(root)?;
 
     assert_eq!(index.manifest().indexed_documents, 2);
-    assert_eq!(index.manifest().semantic_eligible_documents, 1);
     let source_aggregate = &index.manifest().core_record_aggregates[0];
     assert_eq!(source_aggregate.indexed_documents(), 2);
-    assert_eq!(source_aggregate.semantic_eligible_documents(), 1);
+    assert_eq!(index.semantic_eligible_event_count()?, 1);
     let core_page = index.core_source_event_page(&fixture_source.source, None, 2)?;
     assert!(core_page.terminal);
     assert_eq!(core_page.items.len(), 2);
@@ -517,8 +518,7 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
-    assert_eq!(outcome.records_read, 2);
-    assert_eq!(outcome.records_scanned, 2);
+    assert_eq!(outcome.records_decoded, 2);
     assert_eq!(outcome.records_embedded, 1);
     assert_eq!(outcome.records_filtered, 0);
     assert_eq!(builder.calls, vec![user.event_id.as_uuid()]);
@@ -534,6 +534,83 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
     };
     assert_eq!(pin.stats().active_events, 1);
     assert_eq!(pin.active_events()[0].event_id, user.event_id.as_uuid());
+    Ok(())
+}
+
+#[test]
+fn role_policy_transition_rebuilds_semantic_state_without_reingesting_core() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let user = fixture.record_with_role(0, 1, "eligible user question", EventRole::User)?;
+    let assistant = fixture.record_with_role(
+        0,
+        2,
+        "newly eligible assistant answer",
+        EventRole::Assistant,
+    )?;
+    let root = fixture.data_root.join("index-role-policy-transition");
+    let fixture_source = &fixture.sources[0];
+    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?;
+    writer.begin_source(fixture_source.source.clone())?;
+    writer.add_core_record(user.clone())?;
+    writer.add_core_record(assistant.clone())?;
+    let observation = SourceObservation::new(
+        fixture_source.source.clone(),
+        "fixture-role-policy-transition",
+        b"role-policy-transition".to_vec(),
+    )?;
+    writer.certify_source(CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "fixture-parser-v1",
+        [1; 32],
+        ScannedSourceCounts {
+            complete_records: 2,
+            retained_records: 2,
+            indexed_documents: 2,
+            certified_bytes: 100,
+            ..ScannedSourceCounts::default()
+        },
+    )?)?;
+    writer.commit(|_| true)?;
+    let index = VerifiedIndex::open(&root)?;
+    let core_generation_id = index.generation_id().to_owned();
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
+    assert_eq!(builder.calls, vec![user.event_id.as_uuid()]);
+
+    let mut assistant_policy = current_semantic_generation_policy();
+    assistant_policy.candidate_roles = [SourceEventRole::Assistant];
+    let revised =
+        SourceBackedSemanticGeneration::from_verified_index_with_policy(&index, assistant_policy)?;
+    builder.calls.clear();
+    let rebuilt = reconcile_generation(&mut store, &index, &revised, &mut builder, &mut embedder)?;
+    assert_eq!(rebuilt.records_decoded, 2);
+    assert_eq!(rebuilt.records_embedded, 1);
+    assert_eq!(rebuilt.records_reused, 0);
+    assert_eq!(builder.calls, vec![assistant.event_id.as_uuid()]);
+
+    assert_eq!(
+        store
+            .source_acknowledgement()?
+            .expect("revised semantic policy acknowledgement")
+            .semantic_policy_fingerprint,
+        revised.semantic_policy_fingerprint
+    );
+    let pin = store
+        .flat_pin_generation()?
+        .ok_or_else(|| anyhow!("revised semantic policy did not publish its Flat generation"))?;
+    assert_eq!(
+        pin.active_events()[0].event_id,
+        assistant.event_id.as_uuid()
+    );
+    assert_eq!(index.generation_id(), core_generation_id);
+    assert_eq!(
+        VerifiedIndex::open(root)?.generation_id(),
+        core_generation_id
+    );
     Ok(())
 }
 
@@ -596,7 +673,7 @@ fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<(
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     assert_eq!(
-        reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?.records_read,
+        reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?.records_decoded,
         103
     );
     let stable_digest = fixture.source_digest(&initial, 0)?;
@@ -609,7 +686,7 @@ fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<(
     builder.calls.clear();
     store.reset_flat_active_event_snapshot_count();
     let no_op = reconcile_all(&mut store, &unchanged, &mut builder, &mut embedder)?;
-    assert_eq!(no_op.records_read, 0);
+    assert_eq!(no_op.records_decoded, 0);
     assert!(builder.calls.is_empty());
     assert_eq!(embedder.chunks, embedded_chunks);
     assert_eq!(source_rows(&store, &stable_digest)?, stable_rows);
@@ -623,8 +700,7 @@ fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<(
     builder.calls.clear();
     store.reset_flat_active_event_snapshot_count();
     let outcome = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
-    assert_eq!(outcome.records_read, 4);
-    assert_eq!(outcome.records_scanned, 4);
+    assert_eq!(outcome.records_decoded, 4);
     assert_eq!(builder.calls.len(), 4);
     assert_eq!(outcome.vectors_touched, 1);
     assert_eq!(outcome.vector_bytes_touched, SEMANTIC_DIMENSIONS as u64 * 4);
@@ -670,7 +746,7 @@ fn sequence_only_core_change_updates_authority_without_embedding() -> Result<()>
     let embedded_before = embedder.chunks;
 
     let outcome = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
-    assert_eq!(outcome.records_read, 1);
+    assert_eq!(outcome.records_decoded, 1);
     assert_eq!(outcome.records_reused, 1);
     assert_eq!(outcome.records_embedded, 0);
     assert_eq!(outcome.vectors_touched, 0);
@@ -715,7 +791,7 @@ fn multi_page_reconciliation_constructs_one_flat_view() -> Result<()> {
 
     store.reset_flat_active_event_snapshot_count();
     let outcome = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
-    assert_eq!(outcome.records_read, record_count);
+    assert_eq!(outcome.records_decoded, record_count);
     assert_eq!(outcome.records_embedded, record_count);
     assert_eq!(outcome.records_reused, 0);
     let pin = store
@@ -780,7 +856,7 @@ fn multipage_source_scales_independently_of_hundreds_of_global_descriptors() -> 
         &mut CoreBuilder::default(),
         &mut MarkerEmbedder::default(),
     )?;
-    assert_eq!(outcome.records_read, changed_records);
+    assert_eq!(outcome.records_decoded, changed_records);
     assert_eq!(store.flat.global_manifest_parse_count(), 1);
     assert_eq!(store.flat.global_manifest_serialization_count(), 1);
     assert_eq!(store.flat.source_publication_count(), 1);
@@ -827,7 +903,7 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
     assert!(restarted.flat_pin_generation()?.is_none());
     restarted.reset_flat_active_event_snapshot_count();
     let resumed = reconcile_all(&mut restarted, &index, &mut builder, &mut embedder)?;
-    assert_eq!(resumed.records_read, 4);
+    assert_eq!(resumed.records_decoded, 4);
     assert_eq!(resumed.records_embedded, 4);
     assert_eq!(resumed.vectors_touched, 4);
     assert_eq!(
@@ -1003,7 +1079,7 @@ fn threshold_compaction_rewrites_only_the_changed_source() -> Result<()> {
         )?;
         threshold = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
     }
-    assert_eq!(threshold.records_read, 2);
+    assert_eq!(threshold.records_decoded, 2);
     assert_eq!(threshold.records_embedded, 2);
     assert_eq!(
         threshold.vectors_touched, 4,
@@ -1056,21 +1132,21 @@ fn append_rewrite_and_removal_touch_only_owned_source() -> Result<()> {
     let retained_rows = source_rows(&store, &retained_digest)?;
 
     let appended = reconcile_all(&mut store, &append, &mut builder, &mut embedder)?;
-    assert_eq!(appended.records_read, 4);
+    assert_eq!(appended.records_decoded, 4);
     assert_eq!(appended.records_reused, 3);
     assert_eq!(appended.records_embedded, 1);
     assert_eq!(source_rows(&store, &retained_digest)?, retained_rows);
     assert_eq!(active_events(&store)?, 9);
 
     let rewritten = reconcile_all(&mut store, &rewrite, &mut builder, &mut embedder)?;
-    assert_eq!(rewritten.records_read, 2);
+    assert_eq!(rewritten.records_decoded, 2);
     assert_eq!(rewritten.records_embedded, 2);
     assert!(rewritten.deleted_chunks >= 2);
     assert_eq!(source_rows(&store, &retained_digest)?, retained_rows);
     assert_eq!(active_events(&store)?, 7);
 
     let removed_outcome = reconcile_all(&mut store, &removed, &mut builder, &mut embedder)?;
-    assert_eq!(removed_outcome.records_read, 0);
+    assert_eq!(removed_outcome.records_decoded, 0);
     assert!(removed_outcome.deleted_chunks >= 2);
     assert_eq!(source_rows(&store, &retained_digest)?, retained_rows);
     assert_eq!(active_events(&store)?, 5);
@@ -1113,7 +1189,7 @@ fn large_multipage_lifecycle_replays_each_source_catalog_once() -> Result<()> {
 
     store.reset_flat_active_event_snapshot_count();
     let append = reconcile_all(&mut store, &appended, &mut builder, &mut embedder)?;
-    assert_eq!(append.records_read, mutable_count + 1);
+    assert_eq!(append.records_decoded, mutable_count + 1);
     assert_eq!(append.records_reused, mutable_count);
     assert_eq!(append.records_embedded, 1);
     assert_eq!(store.flat.source_catalog_load_count(), 0);
@@ -1123,7 +1199,7 @@ fn large_multipage_lifecycle_replays_each_source_catalog_once() -> Result<()> {
 
     store.reset_flat_active_event_snapshot_count();
     let rewrite = reconcile_all(&mut store, &rewritten, &mut builder, &mut embedder)?;
-    assert_eq!(rewrite.records_read, mutable_count + 1);
+    assert_eq!(rewrite.records_decoded, mutable_count + 1);
     assert_eq!(rewrite.records_reused, 0);
     assert_eq!(rewrite.records_embedded, mutable_count + 1);
     assert_eq!(store.flat.source_catalog_load_count(), 0);
@@ -1133,7 +1209,7 @@ fn large_multipage_lifecycle_replays_each_source_catalog_once() -> Result<()> {
 
     store.reset_flat_active_event_snapshot_count();
     let removal = reconcile_all(&mut store, &removed, &mut builder, &mut embedder)?;
-    assert_eq!(removal.records_read, 0);
+    assert_eq!(removal.records_decoded, 0);
     assert_eq!(removal.deleted_chunks, mutable_count + 1);
     assert_eq!(store.flat.source_catalog_load_count(), 0);
     assert_eq!(store.flat.source_catalog_records_replayed(), 0);
@@ -1182,7 +1258,7 @@ fn frontier_commit_manifest_rollback_replays_sequence_and_same_id_rewrite() -> R
 
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     let replayed = reconcile_all(&mut store, &sequence_only, &mut builder, &mut embedder)?;
-    assert_eq!(replayed.records_read, 1);
+    assert_eq!(replayed.records_decoded, 1);
     assert_eq!(replayed.records_reused, 0);
     assert_eq!(replayed.records_embedded, 1);
     assert_eq!(embedder.chunks, embedded_initial + 1);
@@ -1224,7 +1300,7 @@ fn frontier_commit_manifest_rollback_replays_sequence_and_same_id_rewrite() -> R
 
     let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
     let replayed = reconcile_all(&mut store, &rewrite, &mut builder, &mut embedder)?;
-    assert_eq!(replayed.records_read, 1);
+    assert_eq!(replayed.records_decoded, 1);
     assert_eq!(replayed.records_embedded, 1);
     assert_eq!(embedder.chunks, embedded_initial + 3);
     assert_ne!(source_rows(&store, &source_digest)?, sequence_rows);
@@ -1247,183 +1323,4 @@ fn frontier_commit_manifest_rollback_replays_sequence_and_same_id_rewrite() -> R
     Ok(())
 }
 
-#[test]
-fn two_lost_candidate_publications_rebuild_from_flat_authority() -> Result<()> {
-    let fixture = Fixture::new(1)?;
-    let initial = fixture.publish("two-loss-a", &[(0, bodies("initial", 3))])?;
-    let middle = fixture.publish("two-loss-b", &[(0, bodies("middle", 3))])?;
-    let target = fixture.publish("two-loss-c", &[(0, bodies("target", 4))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-    let mut builder = CoreBuilder::default();
-    let mut embedder = MarkerEmbedder::default();
-    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
-    reconcile_all(&mut store, &middle, &mut builder, &mut embedder)?;
-    reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
-    let expected = projection_snapshot(&store)?;
-    let newest = store.flat.rollback_active_manifest()?;
-    let preceding = store.flat.rollback_active_manifest()?;
-    assert!(newest.generation > preceding.generation);
-    drop(store);
-
-    builder.calls.clear();
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
-    reconcile_all(&mut restarted, &target, &mut builder, &mut embedder)?;
-    assert!(
-        !builder.calls.is_empty(),
-        "lost candidates must trigger a rebuild"
-    );
-    assert_eq!(projection_snapshot(&restarted)?, expected);
-    Ok(())
-}
-
-#[test]
-fn same_generation_wrong_hash_fails_closed() -> Result<()> {
-    let fixture = Fixture::new(1)?;
-    let index = fixture.publish("wrong-hash", &[(0, bodies("hash", 2))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-    store.flat.fail_after_source_frontier_commit_once();
-    let error = store
-        .reconcile_source_backed_index(
-            &index,
-            &mut CoreBuilder::default(),
-            &mut MarkerEmbedder::default(),
-        )
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("injected failure after semantic source frontier commit"));
-    let mut frontier = store
-        .source_frontier()?
-        .ok_or_else(|| anyhow!("staged page lost its frontier"))?;
-    frontier.flat_publication.generation_hash = Some("0".repeat(64));
-    store.store_source_frontier(&frontier)?;
-    drop(store);
-
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
-    let error = restarted
-        .reconcile_source_backed_index(
-            &index,
-            &mut CoreBuilder::default(),
-            &mut MarkerEmbedder::default(),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("different manifest hash"));
-    Ok(())
-}
-
-#[test]
-fn disagreeing_retained_candidate_fails_closed() -> Result<()> {
-    let fixture = Fixture::new(1)?;
-    let index = fixture.publish("candidate-hash", &[(0, bodies("candidate", 2))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-    store.flat.fail_after_source_finalization_once();
-    let error = store
-        .reconcile_source_backed_index(
-            &index,
-            &mut CoreBuilder::default(),
-            &mut MarkerEmbedder::default(),
-        )
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("injected failure after semantic source finalization"));
-    store
-        .flat
-        .corrupt_retained_source_candidate_hash()
-        .map_err(anyhow::Error::new)?;
-    drop(store);
-
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
-    let error = restarted
-        .reconcile_source_backed_index(
-            &index,
-            &mut CoreBuilder::default(),
-            &mut MarkerEmbedder::default(),
-        )
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("retained Flat source candidate disagrees"));
-    Ok(())
-}
-
-#[test]
-fn full_compaction_preserves_receipts_and_readiness_exactly() -> Result<()> {
-    let fixture = Fixture::new(2)?;
-    let index = fixture.publish(
-        "full-compaction",
-        &[(0, bodies("first", 3)), (1, bodies("second", 2))],
-    )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-    reconcile_all(
-        &mut store,
-        &index,
-        &mut CoreBuilder::default(),
-        &mut MarkerEmbedder::default(),
-    )?;
-    let before = projection_snapshot(&store)?;
-    let compacted = store.flat.compact().map_err(anyhow::Error::new)?;
-    assert!(compacted.published);
-    assert_eq!(projection_snapshot(&store)?, before);
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(index.generation_id(), 5)?,
-        SourceBackedGenerationPin::Ready(_)
-    ));
-    Ok(())
-}
-
-#[test]
-fn core_advance_mid_catch_up_never_pins_mixed_generation() -> Result<()> {
-    let fixture = Fixture::new(2)?;
-    let initial = fixture.publish(
-        "advance-a",
-        &[(0, bodies("stable", 2)), (1, vec!["version a".to_owned()])],
-    )?;
-    let middle = fixture.publish(
-        "advance-b",
-        &[(0, bodies("stable", 2)), (1, vec!["version b".to_owned()])],
-    )?;
-    let newest = fixture.publish(
-        "advance-c",
-        &[
-            (0, bodies("stable-new", 2)),
-            (1, vec!["version a".to_owned()]),
-        ],
-    )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
-    let mut builder = CoreBuilder::default();
-    let mut embedder = MarkerEmbedder::default();
-    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
-
-    builder.calls.clear();
-    builder.fail_after = Some(0);
-    let error = store
-        .reconcile_source_backed_index(&middle, &mut builder, &mut embedder)
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("forced Core projection interruption"));
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(initial.generation_id(), 3)?,
-        SourceBackedGenerationPin::NotReady
-    ));
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(middle.generation_id(), 3)?,
-        SourceBackedGenerationPin::NotReady
-    ));
-
-    builder.fail_after = None;
-    builder.calls.clear();
-    let completed = reconcile_all(&mut store, &newest, &mut builder, &mut embedder)?;
-    assert_eq!(completed.records_read, 2);
-    assert_eq!(builder.calls.len(), 2);
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(newest.generation_id(), 3)?,
-        SourceBackedGenerationPin::Ready(_)
-    ));
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(middle.generation_id(), 3)?,
-        SourceBackedGenerationPin::NotReady
-    ));
-    Ok(())
-}
+include!("tests/generation_recovery.rs");

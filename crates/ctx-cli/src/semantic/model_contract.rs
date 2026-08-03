@@ -358,7 +358,7 @@ impl std::error::Error for SemanticProvisioningRequired {}
 
 pub(super) fn semantic_model_contract_descriptor() -> String {
     let mut descriptor = format!(
-        "ctx-semantic-e5-v{}|model={SEMANTIC_MODEL_ID}|revision={SEMANTIC_MODEL_REVISION}|dimensions={SEMANTIC_DIMENSIONS}|max_sequence_length={SEMANTIC_MAX_SEQUENCE_LENGTH}|pooling={SEMANTIC_POOLING}|normalization={SEMANTIC_NORMALIZATION}|query_prefix={SEMANTIC_QUERY_PREFIX}|passage_prefix={SEMANTIC_PASSAGE_PREFIX}|language=unicode-global",
+        "ctx-semantic-e5-v{}|backend={SEMANTIC_BACKEND}|model_key={SEMANTIC_MODEL_KEY}|model={SEMANTIC_MODEL_ID}|revision={SEMANTIC_MODEL_REVISION}|dimensions={SEMANTIC_DIMENSIONS}|max_sequence_length={SEMANTIC_MAX_SEQUENCE_LENGTH}|pooling={SEMANTIC_POOLING}|normalization={SEMANTIC_NORMALIZATION}|query_prefix={SEMANTIC_QUERY_PREFIX}|passage_prefix={SEMANTIC_PASSAGE_PREFIX}|language=unicode-global",
         SEMANTIC_MODEL_CONTRACT_VERSION,
     );
     for variant in [
@@ -378,6 +378,60 @@ pub(super) fn semantic_model_contract_descriptor() -> String {
             .expect("writing to String cannot fail");
         }
     }
+    for backend in [
+        SemanticBackendKind::Cpu,
+        SemanticBackendKind::CoreMl,
+        SemanticBackendKind::OrtCuda,
+        SemanticBackendKind::WindowsMl,
+    ] {
+        use std::fmt::Write as _;
+        write!(
+            descriptor,
+            "|backend_variant={}:{}:{}",
+            backend.as_str(),
+            backend.execution_provider(),
+            backend.contract_id(),
+        )
+        .expect("writing to String cannot fail");
+    }
+    let coreml = COREML_BUNDLE_CONTRACT;
+    use std::fmt::Write as _;
+    write!(
+        descriptor,
+        "|coreml_artifact_url={}|coreml_artifact_name={}|coreml_archive_sha256={}|coreml_manifest_sha256={}|coreml_bundle_id={}|coreml_bundle_version={}|coreml_schema_version={}|coreml_model_id={}|coreml_source_revision={}|coreml_embedding_space_id={}|coreml_precision={}|coreml_minimum_macos={}|coreml_inputs={}:{};{}:{};{}:{}|coreml_output={}:{}|coreml_document_batch_size={}|coreml_query_batch_size={:?}|coreml_max_sequence_length={}|coreml_dimensions={}|coreml_document_prefix={}|coreml_query_prefix={}|coreml_pooling={}|coreml_normalization={}|coreml_tokenizer_artifact={}|coreml_document_model_artifact={}|coreml_query_model_artifact={}",
+        coreml.artifact_url,
+        coreml.artifact_name,
+        coreml.archive_sha256,
+        coreml.manifest_sha256,
+        coreml.bundle_id,
+        coreml.bundle_version,
+        coreml.schema_version,
+        coreml.model_id,
+        coreml.source_revision,
+        coreml.embedding_space_id,
+        coreml.precision,
+        coreml.minimum_macos,
+        coreml.inputs[0].0,
+        coreml.inputs[0].1,
+        coreml.inputs[1].0,
+        coreml.inputs[1].1,
+        coreml.inputs[2].0,
+        coreml.inputs[2].1,
+        coreml.output_name,
+        coreml.output_dtype,
+        coreml.document_batch_size,
+        coreml.query_batch_size,
+        coreml.max_sequence_length,
+        coreml.embedding_dimensions,
+        coreml.document_prefix,
+        coreml.query_prefix,
+        coreml.pooling,
+        coreml.normalization,
+        coreml.tokenizer_artifact,
+        coreml.document_model_artifact,
+        coreml.query_model_artifact,
+    )
+    .expect("writing to String cannot fail");
     descriptor
 }
 
@@ -434,5 +488,60 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["LICENSE", "manifest.json"]
         );
+    }
+
+    #[test]
+    fn semantic_generation_descriptor_covers_every_runtime_and_artifact_authority() {
+        let descriptor = semantic_model_contract_descriptor();
+        for required in [
+            format!("max_sequence_length={SEMANTIC_MAX_SEQUENCE_LENGTH}"),
+            format!("pooling={SEMANTIC_POOLING}"),
+            format!("query_prefix={SEMANTIC_QUERY_PREFIX}"),
+            format!("passage_prefix={SEMANTIC_PASSAGE_PREFIX}"),
+            format!(
+                "coreml_manifest_sha256={}",
+                COREML_BUNDLE_CONTRACT.manifest_sha256
+            ),
+            format!(
+                "coreml_inputs={}:{}",
+                COREML_BUNDLE_CONTRACT.inputs[0].0, COREML_BUNDLE_CONTRACT.inputs[0].1
+            ),
+            format!(
+                "coreml_output={}:{}",
+                COREML_BUNDLE_CONTRACT.output_name, COREML_BUNDLE_CONTRACT.output_dtype
+            ),
+        ] {
+            assert!(
+                descriptor.contains(&required),
+                "missing descriptor authority: {required}"
+            );
+        }
+        for variant in [
+            SemanticOrtModelVariant::CpuFp32,
+            SemanticOrtModelVariant::AcceleratorO4Fp16,
+        ] {
+            for file in variant.required_files() {
+                assert!(descriptor.contains(&format!(
+                    "variant={}|file={}:{}:{}",
+                    variant.as_str(),
+                    file.path,
+                    file.size,
+                    file.sha256
+                )));
+            }
+        }
+        for backend in [
+            SemanticBackendKind::Cpu,
+            SemanticBackendKind::CoreMl,
+            SemanticBackendKind::OrtCuda,
+            SemanticBackendKind::WindowsMl,
+        ] {
+            assert!(descriptor.contains(&format!(
+                "backend_variant={}:{}:{}",
+                backend.as_str(),
+                backend.execution_provider(),
+                backend.contract_id()
+            )));
+        }
     }
 }
