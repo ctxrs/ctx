@@ -181,7 +181,10 @@ impl CodexSourceScan {
         self.incomplete_tail.is_none()
     }
 
-    pub(crate) fn checkpoint(&self) -> Option<CodexNativeCheckpoint> {
+    pub(crate) fn checkpoint(
+        &self,
+        lineage_dependency_sha256: [u8; 32],
+    ) -> Option<CodexNativeCheckpoint> {
         Some(CodexNativeCheckpoint::new(
             self.after_observation.clone(),
             self.full_revision_sha256,
@@ -193,6 +196,7 @@ impl CodexSourceScan {
                 .map(|tail| (tail.byte_len, tail.sha256)),
             &self.pending_tool_authorities,
             self.owner.clone()?,
+            lineage_dependency_sha256,
         ))
     }
 
@@ -208,7 +212,7 @@ impl CodexSourceScan {
             self.source.source_path.clone(),
         )?;
         Ok(self
-            .checkpoint()
+            .checkpoint([0; 32])
             .map(|checkpoint| CodexAppendProof::new(identity, generation, checkpoint)))
     }
 }

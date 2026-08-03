@@ -7,6 +7,18 @@ use super::*;
 use crate::ProviderCatalogSupport;
 
 #[test]
+fn lineage_working_set_failures_are_route_systemic() {
+    assert_eq!(
+        codex_ingestion_route_error(CodexSourceBackedErrorV0::LineageWorkingSetExhausted).kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable,
+    );
+    assert_eq!(
+        codex_ingestion_route_error(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable).kind,
+        SourceBackedRouteErrorKind::Internal,
+    );
+}
+
+#[test]
 fn active_source_family_contract_prompt_history_terminal_inventory_accepts_deferred_append() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let history = temp.path().join("history.jsonl");

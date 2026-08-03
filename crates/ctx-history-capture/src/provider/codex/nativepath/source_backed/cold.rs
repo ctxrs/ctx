@@ -110,6 +110,7 @@ pub(super) struct ChangedSourceV0 {
     pub(super) native_session_id: String,
     pub(super) base: Option<CertifiedSource>,
     pub(super) proof: Option<CodexAppendProof>,
+    pub(super) lineage_dependency_sha256: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -118,6 +119,7 @@ struct ColdSourcePlanV0 {
     native_session_id: String,
     session_id: StableEntityId,
     base: Option<CertifiedSource>,
+    lineage_dependency_sha256: [u8; 32],
 }
 
 struct ColdSourceJobV0 {
@@ -280,6 +282,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             native_session_id,
             base,
             proof,
+            lineage_dependency_sha256,
         } = source;
         let session_id = codex_session_identity(&source_key, &native_session_id)?;
         plans.push(ColdSourcePlanV0 {
@@ -287,6 +290,7 @@ pub(super) fn ingest_codex_cold_parallel_v0(
             native_session_id: native_session_id.clone(),
             session_id,
             base: base.clone(),
+            lineage_dependency_sha256,
         });
         let lane_index = source_index % worker_count;
         lane_source_indices[lane_index].push(source_index);
@@ -822,6 +826,7 @@ fn consume_cold_lanes_v0(
                             None,
                             complete.staged_documents,
                             scan_counters,
+                            plan.lineage_dependency_sha256,
                         )?;
                         writer.certify_source(current)?;
                         if plan.base.is_some() {
@@ -842,6 +847,7 @@ fn consume_cold_lanes_v0(
                             Some(base),
                             complete.staged_documents,
                             scan_counters,
+                            plan.lineage_dependency_sha256,
                         )?;
                         let base_frontier = base
                             .frontier()

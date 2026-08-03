@@ -58,7 +58,8 @@ impl CodexNativeScanner {
             ));
         }
         if let Some(mut replay) = self.replay.take() {
-            let current = observed_opened_file(&replay.source, &self.opened)?;
+            let current = opened_file_observation(&replay.source.source_path, self.opened.file())?;
+            self.opened.revalidate_same_object()?;
             if current != replay.before_observation {
                 revalidate_opened_prefix(
                     self.opened.file(),
@@ -73,7 +74,8 @@ impl CodexNativeScanner {
 
         let full_revision_sha256: [u8; 32] = self.full_hasher.finalize().into();
         let complete_prefix_sha256 = self.complete_hasher.finalize().into();
-        let current = observed_opened_file(&self.source, &self.opened)?;
+        let current = opened_file_observation(&self.source.source_path, self.opened.file())?;
+        self.opened.revalidate_same_object()?;
         if current != self.before {
             revalidate_opened_prefix(self.opened.file(), self.before.len, full_revision_sha256)?;
             self.opened.revalidate_same_object()?;

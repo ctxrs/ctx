@@ -57,8 +57,8 @@ const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
-const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v7";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v10";
+const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v8";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v11";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
@@ -104,6 +104,10 @@ pub enum CodexSourceBackedErrorV0 {
     ScanCountMismatch,
     #[error("Codex source count overflow")]
     CountOverflow,
+    #[error("Codex lineage working set exceeded its bounded task-local capacity")]
+    LineageWorkingSetExhausted,
+    #[error("Codex lineage working set is unavailable")]
+    LineageWorkingSetUnavailable,
     #[error("Codex cold scanner lane {lane} disconnected before completing its sources")]
     ColdLaneDisconnected { lane: usize },
     #[error("Codex cold scanner lane {lane} panicked")]

@@ -524,7 +524,10 @@ pub(super) fn observed_opened_file(
             "Codex catalog observation changed before NativePath admission".to_owned(),
         ));
     }
-    Ok(current)
+    // Discovery admitted this ordinary-file identity and froze this refresh's
+    // EOF. Growth after that observation is deferred to the next refresh;
+    // broadening the boundary here would give one source two authorities.
+    Ok(source.catalog_observation.clone())
 }
 
 pub(crate) fn revalidate_codex_source_observation(

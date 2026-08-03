@@ -75,6 +75,19 @@ fn run_after_explicit_codex_stage_hook(counters: CodexSourceBackedCountersV0) {
     }
 }
 
+fn codex_ingestion_route_error(error: CodexSourceBackedErrorV0) -> SourceBackedRouteError {
+    let kind = match &error {
+        CodexSourceBackedErrorV0::LineageWorkingSetExhausted => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        CodexSourceBackedErrorV0::LineageWorkingSetUnavailable => {
+            SourceBackedRouteErrorKind::Internal
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
+}
+
 #[derive(Clone)]
 struct CodexSessionTreeTerminalEvidence {
     inventory: CertifiedSourceInventory,
@@ -269,7 +282,7 @@ fn register_codex_session_tree_route_with_indexer_threads(
                 indexer_threads,
                 None,
             )
-            .map_err(route_error)?;
+            .map_err(codex_ingestion_route_error)?;
             #[cfg(test)]
             run_after_codex_session_tree_stage_hook(counters);
             let mut deletions = Vec::new();
@@ -504,7 +517,7 @@ pub(super) fn register_codex_explicit_session_route(
                 &mut timings,
                 &mut counters,
             )
-            .map_err(route_error)?;
+            .map_err(codex_ingestion_route_error)?;
             #[cfg(test)]
             run_after_explicit_codex_stage_hook(counters);
             let closing = observe_codex_explicit_session_source_backed_v0(&scan_input)
