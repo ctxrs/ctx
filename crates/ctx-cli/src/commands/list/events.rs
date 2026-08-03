@@ -2,13 +2,11 @@ use std::{io::Write, path::Path, path::PathBuf};
 
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, SecondsFormat, Utc};
-use ctx_history_core::{
-    CoreContentPolicyStatus, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
-};
+use chrono::DateTime;
+use ctx_history_core::{MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
 use ctx_history_index::{
     CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeError, CoreEventRangeFilters,
-    CoreEventRangePage, CoreEventRangeSelection, CoreEventRecord, IndexError, VerifiedIndex,
+    CoreEventRangePage, CoreEventRangeSelection, IndexError, VerifiedIndex,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -21,10 +19,13 @@ use crate::{
     ui::Ui,
 };
 
+mod render;
 mod request;
 
 #[cfg(test)]
 use ctx_history_index::{CoreEventRangeDirection, CoreEventRangeScope};
+use render::format_timestamp;
+pub(crate) use render::render_event;
 pub(crate) use request::{
     EventContentProjection, EventQueryFormat, EventQueryWireRequest, ListEventsArgs,
 };
@@ -683,80 +684,6 @@ impl Write for CountingWriter<'_> {
     }
 }
 
-pub(crate) fn render_event(
-    event: &CoreEventRecord,
-    projection: EventContentProjection,
-) -> std::result::Result<Value, EventQueryError> {
-    let record = &event.core_record;
-    let content = &record.content;
-    let (policy_status, policy_reason, complete) = match &content.policy_status {
-        CoreContentPolicyStatus::Selected => ("selected", None, true),
-        CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), false),
-        CoreContentPolicyStatus::Omitted { reason } => ("omitted", Some(reason.as_str()), false),
-    };
-    let text = (projection != EventContentProjection::None)
-        .then_some(content.normalized_body.as_ref())
-        .flatten();
-    let structured_content = (projection == EventContentProjection::Full)
-        .then_some(content.structured_content.as_ref())
-        .flatten();
-    let occurred_at = format_timestamp(event.occurred_at_unix_ms);
-    Ok(json!({
-        "schema_version": EVENT_QUERY_SCHEMA_VERSION,
-        "record_version": record.record_version,
-        "ctx_event_id": event.event_id.as_uuid(),
-        "ctx_source_id": event.source.identity().as_uuid(),
-        "ctx_session_id": event.session_id.as_uuid(),
-        "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
-        "root_ctx_session_id": event.root_session_id.as_uuid(),
-        "occurred_at": occurred_at,
-        "occurred_at_ms": event.occurred_at_unix_ms,
-        "sequence": event.event_sequence,
-        "provider": event.provider,
-        "source_format": event.source_format,
-        "source": event.source,
-        "provider_session_id": event.provider_session_id,
-        "native_event_id": event.native_event_id,
-        "branch": event.branch,
-        "agent_type": event.agent_type,
-        "agent_scope": if event.is_primary { "primary" } else { "subagent" },
-        "is_primary": event.is_primary,
-        "event_type": event.event_type,
-        "role": event.role,
-        "workspace": event.workspace,
-        "cwd": event.cwd,
-        "touched_files": event.touched_files,
-        "parser_revision": record.parser_revision,
-        "normalization_revision": record.normalization_revision,
-        "text": text,
-        "structured_content": structured_content,
-        "content": {
-            "complete": complete,
-            "policy_revision": content.policy_revision,
-            "policy_status": policy_status,
-            "policy_reason": policy_reason,
-        },
-        "citations": [{
-            "target_type": "event",
-            "ctx_event_id": event.event_id.as_uuid(),
-            "ctx_session_id": event.session_id.as_uuid(),
-            "label": event.event_type,
-            "time": occurred_at,
-            "provider": event.provider,
-            "session_id": event.provider_session_id,
-            "event_seq": event.event_sequence,
-        }],
-        "metadata": record.metadata,
-        "repository_candidate_evidence": record.repository_candidate_evidence,
-        "repository_bindings": record.repository_bindings,
-        "repository_abstentions": record.repository_abstentions,
-        "repository_file_invocation_evidence": record.repository_file_invocation_evidence,
-        "repository_file_observations": record.repository_file_observations,
-        "repository_vcs_observations": record.repository_vcs_observations,
-        "content_projection": projection.as_str(),
-    }))
-}
-
 fn event_query_receipt<'a>(
     index: &VerifiedIndex,
     request: &'a EventQueryWireRequest,
@@ -867,12 +794,6 @@ pub(crate) fn parse_uuid(
             })
         })
         .transpose()
-}
-
-fn format_timestamp(value: Option<i64>) -> Option<String> {
-    value
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 pub(crate) fn event_query_error_value(error: &EventQueryError) -> Value {
