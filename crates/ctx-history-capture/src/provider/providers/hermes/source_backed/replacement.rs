@@ -183,10 +183,38 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
 }
 
 fn hermes_route_error(error: HermesSourceBackedError) -> SourceBackedRouteError {
-    match error {
-        HermesSourceBackedError::Route(error) => error,
-        error => default_route_error(error),
-    }
+    let error = match error {
+        HermesSourceBackedError::Route(error) => return error,
+        error => error,
+    };
+    let kind = match &error {
+        HermesSourceBackedError::SqliteSource(error) if error.is_source_changed() => {
+            SourceBackedRouteErrorKind::SourceChanged
+        }
+        HermesSourceBackedError::SqliteSource(error) if error.is_systemic_resource_failure() => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        HermesSourceBackedError::SqliteSource(error) if error.is_ctx_owned_corruption() => {
+            SourceBackedRouteErrorKind::Internal
+        }
+        HermesSourceBackedError::Capture(CaptureError::Io(error))
+            if crate::provider_sources::resource_exhaustion_io_error(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        HermesSourceBackedError::Capture(CaptureError::SystemIo { source, .. })
+            if crate::provider_sources::resource_exhaustion_io_error(source) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        HermesSourceBackedError::Capture(CaptureError::Sqlite(error))
+            if crate::provider_sources::rusqlite_resource_failure(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        _ => return default_route_error(error),
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
 }
 
 fn take_snapshot(
@@ -230,4 +258,47 @@ fn hermes_changed(detail: impl Into<String>) -> SourceBackedRouteError {
 
 fn hermes_internal(detail: impl Into<String>) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::provider_sources::SqliteRetryDecision;
+    use rusqlite::ffi;
+
+    #[test]
+    fn real_hermes_projection_full_failure_is_systemic() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(directory.path().join("full.sqlite")).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA page_size=512;
+                 PRAGMA max_page_count=2;
+                 CREATE TABLE payload(value BLOB)",
+            )
+            .unwrap();
+        let sqlite = (0..128)
+            .find_map(|_| {
+                connection
+                    .execute("INSERT INTO payload VALUES (zeroblob(4096))", [])
+                    .err()
+            })
+            .unwrap();
+        let diagnosed = diagnose_hermes_query_error(
+            HermesSourceBackedError::Capture(CaptureError::Sqlite(sqlite)),
+            SqliteFailurePhase::Projection,
+        );
+        let HermesSourceBackedError::SqliteSource(source) = &diagnosed else {
+            panic!("unexpected Hermes error: {diagnosed:?}");
+        };
+        let diagnostic = source.diagnostic().unwrap();
+        assert_eq!(diagnostic.phase, SqliteFailurePhase::Projection);
+        assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateBackup);
+        assert_eq!(diagnostic.sqlite_primary_code, Some(ffi::SQLITE_FULL));
+        assert_eq!(diagnostic.retry, SqliteRetryDecision::RouteFatalResource);
+        assert_eq!(
+            hermes_route_error(diagnosed).kind,
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        );
+    }
 }

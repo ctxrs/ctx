@@ -1,6 +1,11 @@
 #[cfg(unix)]
 use std::process::Command;
-use std::{fs, path::Path};
+use std::{
+    ffi::OsStr,
+    fs::{self, OpenOptions},
+    io::{Seek, SeekFrom, Write},
+    path::Path,
+};
 
 use ctx_history_core::{
     CaptureProvider, EventRole, EventType, RepositoryFileInvocationKind, TypedKey,
@@ -23,13 +28,17 @@ use super::ordering::{
 };
 use super::*;
 use crate::{
+    common::io::ProviderSourceRoot,
     provider::source_backed::{
         refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
         refresh_source_backed_generation_with_progress, SourceBackedCoordinatorError,
         SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
-    provider_sources::{provider_source_for_path, SqliteRetryDecision},
+    provider_sources::{
+        open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test,
+        provider_source_for_path, retain_sqlite_source_directory_authority, SqliteRetryDecision,
+    },
 };
 
 mod current_schema;
@@ -197,40 +206,57 @@ fn schema_and_projection_sqlite_failures_have_distinct_stable_diagnostics() {
         assert!(rendered.contains("cleanup_status=not_required"));
         assert_eq!(
             adapter::route_error(error).kind,
-            SourceBackedRouteErrorKind::InvalidSource
+            SourceBackedRouteErrorKind::Internal
         );
     }
 }
 
 #[test]
-fn private_backup_full_is_route_fatal_with_copied_progress() {
-    let source = SqliteSourceAccessError::SqliteControl {
-        operation: "copying the pinned logical SQLite snapshot",
-        code: rusqlite::ffi::SQLITE_FULL,
+fn real_schema_and_projection_full_failures_are_route_fatal() {
+    for (phase, error) in [
+        (
+            SqliteFailurePhase::Schema,
+            OpenCodeSourceBackedError::Capture(CaptureError::Sqlite(actual_sqlite_full_error())),
+        ),
+        (
+            SqliteFailurePhase::Projection,
+            OpenCodeSourceBackedError::Sqlite(actual_sqlite_full_error()),
+        ),
+    ] {
+        let error = diagnose_provider_query_error(error, phase);
+        let OpenCodeSourceBackedError::SqliteSource(source) = &error else {
+            panic!("unexpected diagnosed OpenCode error: {error:?}");
+        };
+        let diagnostic = source.diagnostic().unwrap();
+        assert_eq!(diagnostic.phase, phase);
+        assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateBackup);
+        assert_eq!(
+            diagnostic.sqlite_primary_code,
+            Some(rusqlite::ffi::SQLITE_FULL)
+        );
+        assert_eq!(diagnostic.retry, SqliteRetryDecision::RouteFatalResource);
+        assert_eq!(
+            adapter::route_error(error).kind,
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        );
     }
-    .with_diagnostic(
-        SqliteFailurePhase::OnlineBackup,
-        SqliteArtifactKind::PrivateBackup,
-        17,
-        69_632,
-        SqliteCleanupStatus::NotRequired,
-    );
-    let diagnostic = source.diagnostic().unwrap();
-    assert_eq!(
-        diagnostic.sqlite_primary_code,
-        Some(rusqlite::ffi::SQLITE_FULL)
-    );
-    assert_eq!(
-        diagnostic.sqlite_extended_code,
-        Some(rusqlite::ffi::SQLITE_FULL)
-    );
-    assert_eq!(diagnostic.copied_pages, 17);
-    assert_eq!(diagnostic.copied_bytes, 69_632);
-    assert_eq!(diagnostic.retry, SqliteRetryDecision::RouteFatalResource);
-    assert_eq!(
-        adapter::route_error(OpenCodeSourceBackedError::SqliteSource(source)).kind,
-        SourceBackedRouteErrorKind::ResourceUnavailable
-    );
+}
+
+fn actual_sqlite_full_error() -> rusqlite::Error {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("full.sqlite");
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA page_size=512; PRAGMA max_page_count=2; CREATE TABLE payload(value BLOB)",
+        )
+        .unwrap();
+    for _ in 0..128 {
+        if let Err(error) = connection.execute("INSERT INTO payload VALUES (zeroblob(4096))", []) {
+            return error;
+        }
+    }
+    panic!("bounded SQLite fixture did not produce SQLITE_FULL")
 }
 
 #[test]
@@ -257,6 +283,53 @@ fn provider_and_private_backup_corruption_take_distinct_routes() {
             expected
         );
     }
+}
+
+#[test]
+fn injected_private_source_copy_corruption_routes_internal() {
+    let provider = tempfile::tempdir().unwrap();
+    let database = provider.path().join("opencode.db");
+    let writer = write_current_schema(&database, provider.path(), &json!({"type": "text"}));
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    writer.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+    writer
+        .execute(
+            "INSERT INTO event VALUES ('private-copy-route', 'current-session', 99, 'history.updated', '{}')",
+            [],
+        )
+        .unwrap();
+    let root = ProviderSourceRoot::open(provider.path()).unwrap();
+    let directory = root.directory().unwrap();
+    let parent_handle = directory.try_clone_authority_handle().unwrap();
+    let authority = retain_sqlite_source_directory_authority(
+        crate::test_provider_sqlite_data_root(),
+        &parent_handle,
+        provider.path(),
+    )
+    .unwrap();
+
+    let source = open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test(
+        &authority,
+        OsStr::new("opencode.db"),
+        |source_copy| {
+            let mut copy = OpenOptions::new().write(true).open(source_copy).unwrap();
+            copy.seek(SeekFrom::Start(0)).unwrap();
+            copy.write_all(&[0_u8; 100]).unwrap();
+            copy.sync_all().unwrap();
+        },
+    )
+    .unwrap_err();
+    let diagnostic = source.diagnostic().unwrap();
+    assert_eq!(diagnostic.phase, SqliteFailurePhase::SourceValidation);
+    assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateSourceCopy);
+    assert!(source.is_ctx_owned_corruption());
+    assert_eq!(
+        adapter::route_error(OpenCodeSourceBackedError::SqliteSource(source)).kind,
+        SourceBackedRouteErrorKind::Internal
+    );
 }
 
 fn scan_current_schema(

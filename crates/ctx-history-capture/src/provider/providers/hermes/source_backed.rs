@@ -29,9 +29,10 @@ use crate::{
         sqlite::sqlite_schema_fingerprint,
     },
     provider_sources::{
-        retain_sqlite_source_directory_authority, ProviderSource, SqliteLogicalSnapshot,
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-        SqliteSourceProgressError, SqliteSourceReadSnapshot,
+        retain_sqlite_source_directory_authority, ProviderSource, SqliteArtifactKind,
+        SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot, SqliteSourceAccessError,
+        SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceProgressError,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, HERMES_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -122,9 +123,15 @@ fn project_hermes_snapshot_with_progress(
     ))?;
     let sqlite_user_version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-    let schema = HermesSchema::detect(conn)?;
+        .map_err(CaptureError::from)
+        .map_err(HermesSourceBackedError::from)
+        .map_err(|error| diagnose_hermes_query_error(error, SqliteFailurePhase::Schema))?;
+    let schema_fingerprint = sqlite_schema_fingerprint(conn)
+        .map_err(HermesSourceBackedError::from)
+        .map_err(|error| diagnose_hermes_query_error(error, SqliteFailurePhase::Schema))?;
+    let schema = HermesSchema::detect(conn)
+        .map_err(HermesSourceBackedError::from)
+        .map_err(|error| diagnose_hermes_query_error(error, SqliteFailurePhase::Schema))?;
     let schema_evidence = hermes_schema_evidence(sqlite_user_version, &schema_fingerprint);
     emit(HermesSnapshotProjectionOutput::Progress(
         hermes_logical_progress(
@@ -134,7 +141,9 @@ fn project_hermes_snapshot_with_progress(
         ),
     ))?;
 
-    let mut reader = HermesRowReader::new(conn, &schema)?;
+    let mut reader = HermesRowReader::new(conn, &schema)
+        .map_err(HermesSourceBackedError::from)
+        .map_err(|error| diagnose_hermes_query_error(error, SqliteFailurePhase::Projection))?;
     let mut context_memo = HermesSessionContextMemo::new(conn, &schema, &candidate.source);
     let operation: HermesSourceBackedResult<(ScannedSourceCounts, [u8; 32], u64, u64, u64)> =
         (|| {
@@ -288,7 +297,8 @@ fn project_hermes_snapshot_with_progress(
     drop(reader);
     drop(context_memo);
 
-    let (counts, content_digest, decoded_rows, emitted_pages, peak_buffered_records) = operation?;
+    let (counts, content_digest, decoded_rows, emitted_pages, peak_buffered_records) = operation
+        .map_err(|error| diagnose_hermes_query_error(error, SqliteFailurePhase::Projection))?;
     let certificate = SqliteLogicalSnapshot::new(
         HERMES_SOURCE_PARSER_REVISION,
         &schema_evidence,
@@ -316,6 +326,32 @@ fn project_hermes_snapshot_with_progress(
         peak_context_cache_rows: context_counters.peak_cache_rows,
         peak_context_cache_bytes: context_counters.peak_cache_bytes,
     })
+}
+
+fn diagnose_hermes_query_error(
+    error: HermesSourceBackedError,
+    phase: SqliteFailurePhase,
+) -> HermesSourceBackedError {
+    match error {
+        HermesSourceBackedError::Capture(CaptureError::Sqlite(source)) => {
+            SqliteSourceAccessError::Sqlite {
+                operation: match phase {
+                    SqliteFailurePhase::Schema => "probing the Hermes SQLite schema",
+                    _ => "projecting the Hermes SQLite snapshot",
+                },
+                source,
+            }
+            .with_diagnostic(
+                phase,
+                SqliteArtifactKind::PrivateBackup,
+                0,
+                0,
+                SqliteCleanupStatus::NotRequired,
+            )
+            .into()
+        }
+        error => error,
+    }
 }
 
 fn checked_add(left: u64, right: u64) -> HermesSourceBackedResult<u64> {

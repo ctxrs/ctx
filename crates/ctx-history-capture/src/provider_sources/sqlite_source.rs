@@ -226,6 +226,12 @@ pub(crate) enum SqliteSourceAccessError {
         #[source]
         source: std::io::Error,
     },
+    #[error("ctx-owned SQLite cleanup failed during {operation}: {source}")]
+    CleanupUnavailable {
+        operation: &'static str,
+        #[source]
+        source: Box<SqliteSourceAccessError>,
+    },
     #[error("SQLite source control {operation} failed with code {code}")]
     SqliteControl { operation: &'static str, code: i32 },
     #[error("SQLite source connection is not read-only")]
@@ -288,26 +294,30 @@ impl SqliteSourceAccessError {
         }
     }
 
-    pub(crate) fn is_retryable_resource_unavailable(&self) -> bool {
+    pub(crate) fn is_systemic_resource_failure(&self) -> bool {
         matches!(
             self,
             Self::ResourceUnavailable { .. }
                 | Self::ScratchSqliteUnavailable { .. }
                 | Self::ScratchIoUnavailable { .. }
+                | Self::CleanupUnavailable { .. }
                 | Self::SnapshotTooLarge { .. }
-        ) || matches!(
-            self,
-            Self::SqliteControl { code, .. }
-                if matches!(
-                    code & 0xff,
-                    ffi::SQLITE_FULL
-                        | ffi::SQLITE_NOMEM
-                        | ffi::SQLITE_IOERR
-                        | ffi::SQLITE_CANTOPEN
-                        | ffi::SQLITE_PERM
-                        | ffi::SQLITE_READONLY
-                )
-        ) || matches!(self, Self::Diagnosed { source, .. } if source.is_retryable_resource_unavailable())
+        ) || matches!(self, Self::Io { source, .. } if resource_exhaustion_io_error(source))
+            || matches!(self, Self::Sqlite { source, .. } if rusqlite_resource_failure(source))
+            || matches!(self, Self::SqliteControl { code, .. } if sqlite_resource_code(*code))
+            || matches!(self, Self::Diagnosed { source, .. } if source.is_systemic_resource_failure())
+    }
+
+    pub(crate) fn is_ctx_owned_corruption(&self) -> bool {
+        self.diagnostic().is_some_and(|diagnostic| {
+            matches!(
+                diagnostic.artifact,
+                SqliteArtifactKind::PrivateSourceCopy | SqliteArtifactKind::PrivateBackup
+            ) && matches!(
+                diagnostic.sqlite_primary_code,
+                Some(ffi::SQLITE_CORRUPT) | Some(ffi::SQLITE_NOTADB)
+            )
+        })
     }
 
     pub(crate) fn diagnostic(&self) -> Option<&SqliteFailureDiagnostic> {
@@ -331,7 +341,7 @@ impl SqliteSourceAccessError {
         cleanup: SqliteCleanupStatus,
     ) -> Self {
         let (primary, extended) = self.sqlite_codes();
-        let retry = if self.is_retryable_resource_unavailable() {
+        let retry = if self.is_systemic_resource_failure() {
             SqliteRetryDecision::RouteFatalResource
         } else if matches!(self, Self::SourceChanged) {
             SqliteRetryDecision::RetrySourceTransition
@@ -370,6 +380,7 @@ impl SqliteSourceAccessError {
                 ..
             } => Some(error.extended_code),
             Self::SqliteControl { code, .. } => Some(*code),
+            Self::CleanupUnavailable { source, .. } => return source.sqlite_codes(),
             Self::Diagnosed { source, .. } => return source.sqlite_codes(),
             _ => None,
         };
@@ -397,15 +408,67 @@ impl SqliteSourceAccessError {
     }
 }
 
+pub(crate) fn rusqlite_resource_failure(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, _) if sqlite_resource_code(error.extended_code)
+    )
+}
+
+fn sqlite_resource_code(code: i32) -> bool {
+    matches!(
+        code & 0xff,
+        ffi::SQLITE_FULL
+            | ffi::SQLITE_NOMEM
+            | ffi::SQLITE_IOERR
+            | ffi::SQLITE_CANTOPEN
+            | ffi::SQLITE_PERM
+            | ffi::SQLITE_READONLY
+    )
+}
+
+pub(crate) fn resource_exhaustion_io_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::OutOfMemory
+            | std::io::ErrorKind::StorageFull
+            | std::io::ErrorKind::QuotaExceeded
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error().is_some_and(|code| {
+        matches!(
+            code,
+            libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOSPC | libc::EDQUOT
+        )
+    }) {
+        return true;
+    }
+    // Win32 ERROR_TOO_MANY_OPEN_FILES, ERROR_NOT_ENOUGH_MEMORY,
+    // ERROR_OUTOFMEMORY, and ERROR_DISK_FULL. Keep the numeric mapping local
+    // so this crate does not need a Windows-only dependency for classification.
+    #[cfg(windows)]
+    if error
+        .raw_os_error()
+        .is_some_and(|code| matches!(code, 4 | 8 | 14 | 112))
+    {
+        return true;
+    }
+    false
+}
+
 pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SqliteValidationMeasurement {
     pub(crate) pages: u64,
     pub(crate) bytes: u64,
+    #[cfg(test)]
     pub(crate) elapsed_ms: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SqliteSnapshotCertification {
     pub(crate) source: SqliteValidationMeasurement,
@@ -454,6 +517,8 @@ pub(crate) struct SqliteSourceSnapshotCounters {
     logical_noops: u64,
     #[cfg(test)]
     logical_replacements: u64,
+    #[cfg(test)]
+    logical_source_transition_retries: u64,
     terminal_fences: u64,
     terminal_revalidations: u64,
     active_snapshots: u64,
@@ -509,6 +574,11 @@ impl SqliteSourceSnapshotCounters {
         self.logical_replacements
     }
 
+    #[cfg(test)]
+    pub(crate) const fn logical_source_transition_retries(self) -> u64 {
+        self.logical_source_transition_retries
+    }
+
     pub(crate) const fn terminal_fences(self) -> u64 {
         self.terminal_fences
     }
@@ -560,6 +630,17 @@ impl SqliteSourceSnapshotContext {
             counters.logical_online_backup_bytes,
             bytes,
             "logical online-backup bytes",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn record_logical_source_transition_retry(&self) -> SqliteSourceAccessResult<()> {
+        let mut counters = self.lock();
+        counters.logical_source_transition_retries = checked_counter_add(
+            counters.logical_source_transition_retries,
+            1,
+            "logical source-transition retries",
         )?;
         Ok(())
     }
@@ -909,7 +990,6 @@ struct SqliteSourceTerminalFenceInner {
     native_evidence: SqliteFamilyEvidence,
     evidence: SqliteSourceEvidence,
     policy: SqliteSourceSnapshotPolicy,
-    _retained_snapshot_directory: Option<TempDir>,
     snapshot_context: Arc<SqliteSourceSnapshotContext>,
 }
 
@@ -1016,7 +1096,7 @@ pub(crate) struct SqliteSourceReadSnapshot {
     evidence: SqliteSourceEvidence,
     policy: SqliteSourceSnapshotPolicy,
     admitted_revision_is_replay_safe: bool,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     certification: Option<SqliteSnapshotCertification>,
     #[cfg(test)]
     strategy: SqliteSourceSnapshotStrategy,
@@ -1112,28 +1192,27 @@ impl SqliteSourceReadSnapshot {
     /// Ends this read snapshot and retains its exact physical source-family
     /// authority for cheap commit-time revalidation.
     pub(crate) fn seal(mut self) -> SqliteSourceAccessResult<SqliteSourceTerminalFence> {
-        self.revalidate()?;
-        let connection = self
-            .connection
-            .as_ref()
-            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
-        clear_snapshot_authorizer(connection)?;
-        connection
-            .execute_batch("ROLLBACK")
-            .map_err(|source| sqlite_error("ending the provider read snapshot", source))?;
-        self.connection.take();
-        let family = self
-            .family
-            .take()
-            .ok_or(SqliteSourceAccessError::SnapshotNotActive)?;
+        if let Err(error) = self.revalidate() {
+            return match self.cleanup_snapshot_storage() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(cleanup),
+            };
+        }
+        let family = match self.family.take() {
+            Some(family) => family,
+            None => {
+                let error = SqliteSourceAccessError::SnapshotNotActive;
+                return match self.cleanup_snapshot_storage() {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(cleanup),
+                };
+            }
+        };
         let approved_parent_path = family.approved_parent_path().to_path_buf();
         let database_name = family.database_name().to_os_string();
         let data_root = self.snapshot_context.data_root.clone();
         drop(family);
-        let retained_snapshot_directory = match self.policy {
-            SqliteSourceSnapshotPolicy::StrictPhysicalFamily => None,
-            SqliteSourceSnapshotPolicy::LogicalOnlineBackup => self._snapshot_directory.take(),
-        };
+        self.cleanup_snapshot_storage()?;
         let fence = SqliteSourceTerminalFence {
             inner: Arc::new(SqliteSourceTerminalFenceInner {
                 data_root,
@@ -1142,16 +1221,38 @@ impl SqliteSourceReadSnapshot {
                 native_evidence: self.native_evidence.clone(),
                 evidence: self.evidence.clone(),
                 policy: self.policy,
-                _retained_snapshot_directory: retained_snapshot_directory,
                 snapshot_context: Arc::clone(&self.snapshot_context),
             }),
         };
         fence.revalidate()?;
         self.terminal_fence_slot.install(fence.clone())?;
         self.snapshot_context.record_terminal_fence()?;
-        drop(self.snapshot_activity.take());
-        drop(self._snapshot_directory.take());
         Ok(fence)
+    }
+
+    fn cleanup_snapshot_storage(&mut self) -> SqliteSourceAccessResult<()> {
+        let artifact = match self.policy {
+            SqliteSourceSnapshotPolicy::LogicalOnlineBackup => SqliteArtifactKind::PrivateBackup,
+            SqliteSourceSnapshotPolicy::StrictPhysicalFamily
+                if self._snapshot_directory.is_some() =>
+            {
+                SqliteArtifactKind::PrivateSourceCopy
+            }
+            SqliteSourceSnapshotPolicy::StrictPhysicalFamily => {
+                SqliteArtifactKind::ProviderDatabase
+            }
+        };
+        let close_connection = self.connection.take().map_or(Ok(()), |connection| {
+            close_snapshot_read_connection(connection, artifact)
+        });
+        let close_directory = self._snapshot_directory.take().map_or(Ok(()), |directory| {
+            snapshot::close_private_snapshot_directory(directory, artifact, 0, 0)
+        });
+        drop(self.snapshot_activity.take());
+        match (close_connection, close_directory) {
+            (_, Err(error)) | (Err(error), Ok(())) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
     /// Compatibility path for callers that need only closing evidence.
@@ -1166,11 +1267,52 @@ impl SqliteSourceReadSnapshot {
 
 impl Drop for SqliteSourceReadSnapshot {
     fn drop(&mut self) {
-        if let Some(connection) = self.connection.as_ref() {
-            let _ = clear_snapshot_authorizer(connection);
-            let _ = connection.execute_batch("ROLLBACK");
+        if let Err(error) = self.cleanup_snapshot_storage() {
+            eprintln!("ctx SQLite snapshot fallback cleanup failed: {error}");
         }
-        self.connection.take();
+    }
+}
+
+fn close_snapshot_read_connection(
+    connection: Connection,
+    artifact: SqliteArtifactKind,
+) -> SqliteSourceAccessResult<()> {
+    let clear = clear_snapshot_authorizer(&connection).map_err(|source| {
+        SqliteSourceAccessError::CleanupUnavailable {
+            operation: "clearing the SQLite snapshot authorizer",
+            source: Box::new(source),
+        }
+        .with_diagnostic(
+            SqliteFailurePhase::Cleanup,
+            artifact,
+            0,
+            0,
+            SqliteCleanupStatus::Failed,
+        )
+    });
+    let rollback = connection.execute_batch("ROLLBACK").map_err(|source| {
+        SqliteSourceAccessError::ScratchSqliteUnavailable {
+            operation: "ending the private SQLite read snapshot",
+            source,
+        }
+        .with_diagnostic(
+            SqliteFailurePhase::Cleanup,
+            artifact,
+            0,
+            0,
+            SqliteCleanupStatus::Failed,
+        )
+    });
+    let close = snapshot::close_private_sqlite_connection(
+        connection,
+        "closing the private SQLite read snapshot",
+        artifact,
+        0,
+        0,
+    );
+    match (clear, rollback, close) {
+        (_, _, Err(error)) | (_, Err(error), Ok(())) | (Err(error), Ok(()), Ok(())) => Err(error),
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
     }
 }
 
@@ -1188,6 +1330,8 @@ use family::{
 };
 pub(crate) use logical::SqliteLogicalSnapshot;
 use snapshot::open_root_handle_sqlite_source_logical_snapshot_with_progress;
+#[cfg(test)]
+pub(crate) use snapshot::open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test;
 #[cfg(test)]
 use snapshot::open_root_handle_sqlite_source_snapshot_with_policy;
 #[cfg(test)]

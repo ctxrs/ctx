@@ -381,10 +381,11 @@ pub(super) fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRou
             SourceBackedRouteErrorKind::ResourceUnavailable,
             error.to_string(),
         ),
-        KiroSourceBackedErrorV0::SqliteSource(error)
-            if error.is_retryable_resource_unavailable() =>
-        {
-            SourceBackedRouteError::new(SourceBackedRouteErrorKind::Unavailable, error.to_string())
+        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_systemic_resource_failure() => {
+            SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::ResourceUnavailable,
+                error.to_string(),
+            )
         }
         error => route_error(error),
     }

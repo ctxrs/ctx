@@ -41,7 +41,7 @@ fn private_scratch_cleanup_failure_is_explicit_and_typed_unavailable() {
                 }
             )
     ));
-    assert!(error.is_retryable_resource_unavailable());
+    assert!(error.is_systemic_resource_failure());
     fs::remove_file(
         data_root
             .join("tmp/provider-sqlite-scratch")

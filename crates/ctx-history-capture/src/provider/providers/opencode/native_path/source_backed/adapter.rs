@@ -31,8 +31,8 @@ use crate::{
         SourceBackedRouteSelection,
     },
     provider_sources::{
-        SqliteArtifactKind, SqliteFailurePhase, SqliteSourceAccessError,
-        SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+        SqliteSourceReadSnapshot,
     },
     CaptureError, ProviderSource,
 };
@@ -533,53 +533,55 @@ pub(super) fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRoute
         OpenCodeSourceBackedError::Route(error) => return error,
         error => error,
     };
-    let kind =
-        match &error {
-            OpenCodeSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture) => {
-                SourceBackedRouteErrorKind::SourceChanged
-            }
-            OpenCodeSourceBackedError::SqliteSource(error) if error.is_source_changed() => {
-                SourceBackedRouteErrorKind::SourceChanged
-            }
-            OpenCodeSourceBackedError::Capture(CaptureError::Io(error))
-                if unavailable_io(error.kind()) =>
-            {
-                SourceBackedRouteErrorKind::Unavailable
-            }
-            OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::Io {
-                source, ..
-            }) if unavailable_io(source.kind()) => SourceBackedRouteErrorKind::Unavailable,
-            OpenCodeSourceBackedError::SqliteSource(
-                SqliteSourceAccessError::SnapshotUnavailable { .. }
-                | SqliteSourceAccessError::UnsupportedSidecarIdentity { .. },
-            ) => SourceBackedRouteErrorKind::Unavailable,
-            OpenCodeSourceBackedError::SqliteSource(error)
-                if private_backup_validation_corruption(error) =>
-            {
-                SourceBackedRouteErrorKind::Internal
-            }
-            OpenCodeSourceBackedError::SqliteSource(
-                SqliteSourceAccessError::ResourceUnavailable { .. },
-            ) => SourceBackedRouteErrorKind::ResourceUnavailable,
-            OpenCodeSourceBackedError::SqliteSource(error)
-                if error.is_retryable_resource_unavailable() =>
-            {
-                SourceBackedRouteErrorKind::ResourceUnavailable
-            }
-            _ => SourceBackedRouteErrorKind::InvalidSource,
-        };
+    let kind = match &error {
+        OpenCodeSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture) => {
+            SourceBackedRouteErrorKind::SourceChanged
+        }
+        OpenCodeSourceBackedError::SqliteSource(error) if error.is_source_changed() => {
+            SourceBackedRouteErrorKind::SourceChanged
+        }
+        OpenCodeSourceBackedError::Capture(CaptureError::Io(error))
+            if crate::provider_sources::resource_exhaustion_io_error(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        OpenCodeSourceBackedError::Capture(CaptureError::SystemIo { source, .. })
+            if crate::provider_sources::resource_exhaustion_io_error(source) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        OpenCodeSourceBackedError::Capture(CaptureError::Sqlite(error))
+        | OpenCodeSourceBackedError::Sqlite(error)
+            if crate::provider_sources::rusqlite_resource_failure(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        OpenCodeSourceBackedError::Capture(CaptureError::Io(error))
+            if unavailable_io(error.kind()) =>
+        {
+            SourceBackedRouteErrorKind::Unavailable
+        }
+        OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::Io { source, .. })
+            if unavailable_io(source.kind()) =>
+        {
+            SourceBackedRouteErrorKind::Unavailable
+        }
+        OpenCodeSourceBackedError::SqliteSource(
+            SqliteSourceAccessError::SnapshotUnavailable { .. }
+            | SqliteSourceAccessError::UnsupportedSidecarIdentity { .. },
+        ) => SourceBackedRouteErrorKind::Unavailable,
+        OpenCodeSourceBackedError::SqliteSource(error) if error.is_ctx_owned_corruption() => {
+            SourceBackedRouteErrorKind::Internal
+        }
+        OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::ResourceUnavailable {
+            ..
+        }) => SourceBackedRouteErrorKind::ResourceUnavailable,
+        OpenCodeSourceBackedError::SqliteSource(error) if error.is_systemic_resource_failure() => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
     SourceBackedRouteError::new(kind, error.to_string())
-}
-
-fn private_backup_validation_corruption(error: &SqliteSourceAccessError) -> bool {
-    error.diagnostic().is_some_and(|diagnostic| {
-        diagnostic.phase == SqliteFailurePhase::BackupValidation
-            && diagnostic.artifact == SqliteArtifactKind::PrivateBackup
-            && matches!(
-                diagnostic.sqlite_primary_code,
-                Some(rusqlite::ffi::SQLITE_CORRUPT) | Some(rusqlite::ffi::SQLITE_NOTADB)
-            )
-    })
 }
 
 fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {

@@ -84,9 +84,36 @@ pub(in crate::provider_sources::sqlite_source) fn open_root_handle_sqlite_source
     match open_logical_online_backup_snapshot_with_progress(
         authority,
         family,
-        || {},
-        || {},
-        after_online_backup,
+        LogicalSnapshotHooks {
+            after_database_copy: || {},
+            after_private_source_copy: ignore_snapshot_path,
+            before_source_revalidation: || {},
+            after_online_backup,
+        },
+        SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+        &mut |_| Ok::<(), std::convert::Infallible>(()),
+    ) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(SqliteSourceProgressError::Source(error)) => Err(error),
+        Err(SqliteSourceProgressError::Progress(never)) => match never {},
+    }
+}
+
+pub(crate) fn open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test(
+    authority: &SqliteSourceDirectoryAuthority,
+    database_name: &OsStr,
+    after_private_source_copy: impl FnOnce(&Path),
+) -> SqliteSourceAccessResult<SqliteSourceReadSnapshot> {
+    let family = SqliteSourceFamily::open(authority, database_name, || {})?;
+    match open_logical_online_backup_snapshot_with_progress(
+        authority,
+        family,
+        LogicalSnapshotHooks {
+            after_database_copy: || {},
+            after_private_source_copy,
+            before_source_revalidation: || {},
+            after_online_backup: ignore_snapshot_path,
+        },
         SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
         &mut |_| Ok::<(), std::convert::Infallible>(()),
     ) {
