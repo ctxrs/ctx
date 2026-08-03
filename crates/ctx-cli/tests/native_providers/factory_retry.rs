@@ -86,6 +86,82 @@ fn factory_event_ids(temp: &TempDir) -> BTreeMap<String, String> {
         .collect()
 }
 
+fn factory_record_ids(temp: &TempDir) -> BTreeSet<(String, String)> {
+    provider_core_records(&data_root(temp), "factory_ai_droid")
+        .into_iter()
+        .map(|record| (record.session_id.to_string(), record.event_id.to_string()))
+        .collect()
+}
+
+#[test]
+fn factory_droid_default_source_imports_searches_and_reimports_without_identity_drift() {
+    let temp = tempdir();
+    let query = "factory-default-discovery-oracle";
+    let generated = PathBuf::from(write_native_factory_droid_fixture(&temp, query));
+    let default_root = temp.path().join(".factory/sessions");
+    copy_dir_all(&generated, &default_root);
+    let _daemon = start_isolated_provider_daemon(&temp);
+
+    let sources = json_output(ctx(&temp).args([
+        "sources",
+        "--provider",
+        "factory-ai-droid",
+        "--format=json",
+    ]));
+    let source = source_by_path(&sources, "factory_ai_droid", &default_root);
+    assert_eq!(source["status"], "available");
+    assert_eq!(source["source_format"], "factory_ai_droid_sessions_jsonl");
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
+    assert_eq!(source["importable"], true);
+
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "factory-ai-droid",
+        "--no-daemon",
+        "--progress",
+        "none",
+        "--format=json",
+    ]));
+    assert_authoritative_provider_publication(&first);
+    assert_eq!(first["totals"]["current_rejected_records"], 0);
+    wait_for_imported_core(&temp, &first);
+    assert_eq!(
+        provider_core_counts(&data_root(&temp), "factory_ai_droid"),
+        (1, 2)
+    );
+    let first_ids = factory_record_ids(&temp);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "factory-ai-droid",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "factory_ai_droid", query, 1, "message");
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "factory-ai-droid",
+        "--no-daemon",
+        "--progress",
+        "none",
+        "--format=json",
+    ]));
+    assert_authoritative_provider_publication(&second);
+    assert_noop_publication(&second);
+    assert_eq!(
+        provider_core_counts(&data_root(&temp), "factory_ai_droid"),
+        (1, 2)
+    );
+    assert_eq!(factory_record_ids(&temp), first_ids);
+}
+
 #[test]
 fn factory_droid_retry_lifecycle_keeps_native_ids_stable() {
     let temp = tempdir();

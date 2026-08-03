@@ -567,12 +567,15 @@ fn legacy_vector_apis_are_exact_report_source_projections() {
         discover_provider_sources_for_provider(temp.path(), CaptureProvider::Codex),
         provider_report.sources
     );
-    for provider in [CaptureProvider::FactoryAiDroid, CaptureProvider::Firebender] {
-        assert!(all_report.issues.iter().any(|issue| {
-            issue.provider == provider
-                && issue.kind == DiscoveryIssueKind::InsufficientOfficialEvidence
-        }));
-    }
+    assert!(all_report.issues.iter().any(|issue| {
+        issue.provider == CaptureProvider::Firebender
+            && issue.kind == DiscoveryIssueKind::InsufficientOfficialEvidence
+    }));
+    assert!(all_report.sources.iter().any(|source| {
+        source.provider == CaptureProvider::FactoryAiDroid
+            && source.path == temp.path().join(".factory/sessions")
+            && source.status == ProviderSourceStatus::Missing
+    }));
     assert!(provider_report.issues.is_empty());
 }
 

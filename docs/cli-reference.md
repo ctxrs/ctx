@@ -286,7 +286,7 @@ ctx import --provider cursor
 ctx import --provider zed
 ctx import --provider kiro-cli
 ctx import --provider copilot-cli
-ctx import --provider factory-ai-droid --path /path/to/factory/sessions
+ctx import --provider factory-ai-droid
 ctx import --provider qwen-code
 ctx import --provider kimi-code-cli
 ctx import --provider windsurf
