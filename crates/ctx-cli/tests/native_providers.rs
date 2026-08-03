@@ -850,6 +850,107 @@ fn personal_agent_provider_imports_are_idempotent_and_incremental() {
 }
 
 #[test]
+fn factory_droid_import_retains_retried_records_that_reuse_one_native_id() {
+    // Factory AI Droid rewrites a message id when a tool execution is
+    // cancelled and retried, so one native record id repeats in a session.
+    let temp = tempdir();
+    let root = temp.path().join("native-droid-retry/sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    let session_file = root.join("droid-retry.jsonl");
+    let shared_id = "droid-retry-shared-message";
+    let header = json!({
+        "type": "session_start",
+        "id": "droid-retry-session",
+        "timestamp": "2026-07-14T09:30:00Z",
+        "cwd": "/workspace",
+        "model": "factory/droid"
+    });
+    let result = |call: &str, is_error: bool, content: &str| {
+        json!({
+            "type": "message",
+            "id": shared_id,
+            "timestamp": "2026-07-14T09:30:13Z",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": call,
+                    "is_error": is_error,
+                    "content": content
+                }],
+                "visibility": "user_only"
+            },
+            "parentId": shared_id
+        })
+    };
+    fs::write(
+        &session_file,
+        format!(
+            "{}\n{}\n{}\n",
+            header,
+            result("Execute_117", false, "factory-retry-initial-oracle"),
+            result("Execute_118", true, "factory-retry-cancelled-oracle"),
+        ),
+    )
+    .unwrap();
+    let path = root.parent().unwrap().display().to_string();
+    let _daemon = start_isolated_provider_daemon(&temp);
+
+    let first = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "factory-ai-droid",
+        "--path",
+        &path,
+        "--no-daemon",
+        "--format=json",
+    ]));
+    assert_explicit_source_publication(
+        &first,
+        "factory_ai_droid",
+        "factory_ai_droid_sessions_jsonl",
+    );
+    wait_for_imported_core(&temp, &first);
+    let initial = provider_core_records(&data_root(&temp), "factory_ai_droid").len();
+    assert_eq!(initial, 3, "{first:#}");
+
+    // A certified-suffix append that reuses the same native id keeps refreshing.
+    use std::io::Write as _;
+    let mut handle = fs::OpenOptions::new()
+        .append(true)
+        .open(&session_file)
+        .unwrap();
+    writeln!(
+        handle,
+        "{}",
+        result("Execute_119", false, "factory-retry-appended-oracle")
+    )
+    .unwrap();
+    drop(handle);
+
+    let second = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "factory-ai-droid",
+        "--path",
+        &path,
+        "--no-daemon",
+        "--format=json",
+    ]));
+    assert_explicit_source_publication(
+        &second,
+        "factory_ai_droid",
+        "factory_ai_droid_sessions_jsonl",
+    );
+    wait_for_imported_core(&temp, &second);
+    assert_eq!(
+        provider_core_records(&data_root(&temp), "factory_ai_droid").len(),
+        initial + 1,
+        "{second:#}"
+    );
+}
+
+#[test]
 fn openclaw_import_accepts_explicit_session_jsonl_file() {
     let temp = tempdir();
     let query = "openclaw-explicit-file-oracle";

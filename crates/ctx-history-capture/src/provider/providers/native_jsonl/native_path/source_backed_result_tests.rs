@@ -63,6 +63,7 @@ fn project(provider: CaptureProvider, value: &Value) -> (Vec<CoreRecord>, u64) {
         session_id,
         projector: direct,
         rejected_records: 0,
+        event_identities: DirectJsonlEventIdentityState::default(),
     };
     let encoded = serde_json::to_vec(value).unwrap();
     let mut records = Vec::new();
@@ -86,6 +87,118 @@ fn native_subrecord_index(record: &CoreRecord) -> u64 {
         panic!("direct JSONL result identity has no subrecord index");
     };
     *index
+}
+
+fn project_all(provider: CaptureProvider, values: &[Value]) -> Vec<CoreRecord> {
+    let adapter = adapter(provider);
+    let session = session(provider);
+    let (source, session_id) = adapter
+        .session_identity(&session.native_session_id)
+        .unwrap();
+    let direct = DirectJsonlProjector::new(
+        provider,
+        adapter.source_format,
+        Path::new("direct-jsonl-identity-contract.jsonl"),
+        None,
+        DateTime::<Utc>::UNIX_EPOCH,
+        Some(session.clone()),
+    )
+    .unwrap();
+    let mut projector = DirectJsonlFamilyProjector {
+        adapter,
+        source,
+        bound_session: session,
+        session_id,
+        projector: direct,
+        rejected_records: 0,
+        event_identities: DirectJsonlEventIdentityState::default(),
+    };
+    let mut records = Vec::new();
+    for (ordinal, value) in values.iter().enumerate() {
+        let encoded = serde_json::to_vec(value).unwrap();
+        JsonlFamilyProjector::project(
+            &mut projector,
+            JsonlRecordRef::for_test(&encoded, ordinal as u64),
+            &mut |record| {
+                records.push(record);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+    records
+}
+
+#[test]
+fn factory_droid_reused_record_ids_mint_distinct_stable_event_identities() {
+    // Factory AI Droid rewrites a message id when a tool execution is
+    // cancelled and retried, so one native record id can repeat in a session.
+    let shared_id = "199d5bdc-5644-4185-b970-1ede80d0d374";
+    let first = json!({
+        "type": "message",
+        "id": shared_id,
+        "timestamp": "2026-07-14T09:30:13.764Z",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "Execute_117",
+                "is_error": false,
+                "content": "first attempt output"
+            }]
+        }
+    });
+    let retried = json!({
+        "type": "message",
+        "id": shared_id,
+        "timestamp": "2026-07-14T09:30:23.825Z",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "Execute_118",
+                "is_error": true,
+                "content": "Error: Tool execution cancelled by user"
+            }],
+            "visibility": "user_only"
+        },
+        "parentId": shared_id
+    });
+
+    let records = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[first.clone(), retried.clone()],
+    );
+    assert_eq!(records.len(), 2);
+    assert_ne!(records[0].event_id, records[1].event_id);
+
+    // The first occurrence keeps the identity minted before disambiguation.
+    let single = project_all(CaptureProvider::FactoryAiDroid, std::slice::from_ref(&first));
+    assert_eq!(single[0].event_id, records[0].event_id);
+
+    // Replays assign the same occurrences in file order.
+    let replayed = project_all(CaptureProvider::FactoryAiDroid, &[first, retried]);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>(),
+        replayed
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>()
+    );
+
+    // Only the retried occurrence carries the occurrence marker.
+    let Some(TypedKey::Composite(first_parts)) = records[0].native_event_id.as_ref() else {
+        panic!("first occurrence has no composite native event identity");
+    };
+    let Some(TypedKey::Composite(retried_parts)) = records[1].native_event_id.as_ref() else {
+        panic!("retried occurrence has no composite native event identity");
+    };
+    assert_eq!(first_parts.len(), 2);
+    assert_eq!(retried_parts.len(), 3);
+    assert_eq!(retried_parts[2], TypedKey::U64(1));
 }
 
 #[test]

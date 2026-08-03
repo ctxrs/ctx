@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,6 +12,7 @@ use ctx_history_core::{
     ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
     SubrecordSelector, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -250,6 +252,24 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
             .map(|projector| Box::new(projector) as Box<dyn JsonlFamilyProjector>)
             .map_err(capture_error)
     }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "JSONL adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
+        DirectJsonlFamilyProjector::with_base_lookup(*self, leaf, imported_at, base_event_lookup)
+            .map(|projector| Box::new(projector) as Box<dyn JsonlFamilyProjector>)
+            .map_err(capture_error)
+    }
 }
 
 #[derive(Default)]
@@ -474,6 +494,18 @@ struct DirectJsonlFamilyProjector {
     session_id: StableEntityId,
     projector: DirectJsonlProjector,
     rejected_records: u64,
+    event_identities: DirectJsonlEventIdentityState,
+}
+
+/// Occurrence state for provider records that reuse one native record identity
+/// inside a single session (Factory AI Droid rewrites a message id when a tool
+/// execution is cancelled and retried). Occurrence zero keeps the identity
+/// minted before this disambiguation existed, so previously imported events
+/// never move.
+#[derive(Default)]
+struct DirectJsonlEventIdentityState {
+    base_lookup: Option<BaseEventIdentityLookup>,
+    next_occurrences: BTreeMap<(String, u32), u64>,
 }
 
 impl DirectJsonlFamilyProjector {
@@ -481,6 +513,15 @@ impl DirectJsonlFamilyProjector {
         adapter: DirectJsonlFamilyAdapter,
         leaf: &JsonlFamilyLeaf,
         imported_at: DateTime<Utc>,
+    ) -> DirectJsonlAdapterResult<Self> {
+        Self::with_base_lookup(adapter, leaf, imported_at, None)
+    }
+
+    fn with_base_lookup(
+        adapter: DirectJsonlFamilyAdapter,
+        leaf: &JsonlFamilyLeaf,
+        imported_at: DateTime<Utc>,
+        base_lookup: Option<BaseEventIdentityLookup>,
     ) -> DirectJsonlAdapterResult<Self> {
         let binding = decode_binding(leaf)?;
         let (source, session_id) = adapter.session_identity(&binding.session.native_session_id)?;
@@ -500,7 +541,80 @@ impl DirectJsonlFamilyProjector {
             session_id,
             projector,
             rejected_records: 0,
+            event_identities: DirectJsonlEventIdentityState {
+                base_lookup,
+                next_occurrences: BTreeMap::new(),
+            },
         })
+    }
+
+    fn next_event_occurrence(&mut self, event: &DirectJsonlEvent) -> DirectJsonlAdapterResult<u64> {
+        let Some(native_record_id) = event.native_record_id.as_deref() else {
+            return Ok(0);
+        };
+        let key = (native_record_id.to_owned(), event.sub_ordinal);
+        let occurrence = match self.event_identities.next_occurrences.get(&key).copied() {
+            Some(occurrence) => occurrence,
+            None => self.first_unused_base_occurrence(event)?,
+        };
+        let next = occurrence
+            .checked_add(1)
+            .ok_or(DirectJsonlAdapterError::CountMismatch)?;
+        self.event_identities.next_occurrences.insert(key, next);
+        Ok(occurrence)
+    }
+
+    fn first_unused_base_occurrence(
+        &self,
+        event: &DirectJsonlEvent,
+    ) -> DirectJsonlAdapterResult<u64> {
+        let Some(base_lookup) = self.event_identities.base_lookup.as_ref() else {
+            return Ok(0);
+        };
+        if !self.base_occurrence_exists(base_lookup, event, 0)? {
+            return Ok(0);
+        }
+        let mut present = 0_u64;
+        let mut missing = 1_u64;
+        while self.base_occurrence_exists(base_lookup, event, missing)? {
+            present = missing;
+            missing = match missing.checked_mul(2) {
+                Some(next) => next,
+                None if missing != u64::MAX => u64::MAX,
+                None => return Err(DirectJsonlAdapterError::CountMismatch),
+            };
+        }
+        while present.saturating_add(1) < missing {
+            let candidate = present + (missing - present) / 2;
+            if self.base_occurrence_exists(base_lookup, event, candidate)? {
+                present = candidate;
+            } else {
+                missing = candidate;
+            }
+        }
+        Ok(missing)
+    }
+
+    fn base_occurrence_exists(
+        &self,
+        base_lookup: &BaseEventIdentityLookup,
+        event: &DirectJsonlEvent,
+        occurrence: u64,
+    ) -> DirectJsonlAdapterResult<bool> {
+        let candidate = direct_jsonl_event_id(
+            self.adapter,
+            &self.source,
+            self.session_id,
+            event.native_record_id.as_deref(),
+            event.raw_ordinal,
+            event.sub_ordinal,
+            occurrence,
+        )?;
+        // The pinned lookup also rejects duplicate base identities. Propagate
+        // that error so an ambiguous base can never select a new occurrence.
+        Ok(base_lookup
+            .contains(candidate.as_uuid())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?)
     }
 
     fn validate_session(&self) -> DirectJsonlAdapterResult<&DirectJsonlSession> {
@@ -536,9 +650,17 @@ impl JsonlFamilyProjector for DirectJsonlFamilyProjector {
         }
         let session = self.validate_session().map_err(capture_error)?.clone();
         for event in projected.events {
+            let occurrence = self.next_event_occurrence(&event).map_err(capture_error)?;
             emit(
-                project_event(self.adapter, &self.source, self.session_id, &session, event)
-                    .map_err(capture_error)?,
+                project_event(
+                    self.adapter,
+                    &self.source,
+                    self.session_id,
+                    &session,
+                    event,
+                    occurrence,
+                )
+                .map_err(capture_error)?,
             )?;
         }
         Ok(())
@@ -567,42 +689,88 @@ fn same_session_identity(left: &DirectJsonlSession, right: &DirectJsonlSession) 
         && left.root_provider_session_id == right.root_provider_session_id
 }
 
+fn direct_jsonl_native_item_key(
+    provider: CaptureProvider,
+    native_record_id: Option<&str>,
+    raw_ordinal: u64,
+    occurrence: u64,
+) -> DirectJsonlAdapterResult<NativeItemKey> {
+    let Some(native_record_id) = native_record_id else {
+        return Ok(NativeItemKey::certified_position(
+            format!("{}.direct-jsonl-ordinal", provider.as_str()),
+            TypedKey::U64(raw_ordinal),
+            PositionStability::AppendStable,
+        )?);
+    };
+    let key = if occurrence == 0 {
+        TypedKey::utf8(native_record_id)?
+    } else {
+        TypedKey::composite(vec![
+            TypedKey::utf8(native_record_id)?,
+            TypedKey::U64(occurrence),
+        ])?
+    };
+    Ok(NativeItemKey::native_id(
+        format!("{}.direct-jsonl-event", provider.as_str()),
+        key,
+    )?)
+}
+
+fn direct_jsonl_subrecord_selector(
+    sub_ordinal: u32,
+) -> DirectJsonlAdapterResult<Option<SubrecordSelector>> {
+    (sub_ordinal != 0)
+        .then(|| {
+            SubrecordSelector::certified_position(
+                "direct-jsonl-subrecord",
+                TypedKey::U64(u64::from(sub_ordinal)),
+                PositionStability::StableSlot,
+            )
+        })
+        .transpose()
+        .map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn direct_jsonl_event_id(
+    adapter: DirectJsonlFamilyAdapter,
+    source: &SourceKey,
+    session_id: StableEntityId,
+    native_record_id: Option<&str>,
+    raw_ordinal: u64,
+    sub_ordinal: u32,
+    occurrence: u64,
+) -> DirectJsonlAdapterResult<StableEntityId> {
+    let native_item_key =
+        direct_jsonl_native_item_key(adapter.provider, native_record_id, raw_ordinal, occurrence)?;
+    let subrecord_selector = direct_jsonl_subrecord_selector(sub_ordinal)?;
+    Ok(derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "direct-jsonl-event",
+        native_item_key: &native_item_key,
+        subrecord_selector: subrecord_selector.as_ref(),
+    })?)
+}
+
 fn project_event(
     adapter: DirectJsonlFamilyAdapter,
     source: &SourceKey,
     session_id: StableEntityId,
     session: &DirectJsonlSession,
     event: DirectJsonlEvent,
+    occurrence: u64,
 ) -> DirectJsonlAdapterResult<CoreRecord> {
-    let native_item_key = if let Some(native_record_id) = event.native_record_id.as_deref() {
-        NativeItemKey::native_id(
-            format!("{}.direct-jsonl-event", adapter.provider.as_str()),
-            TypedKey::utf8(native_record_id)?,
-        )?
-    } else {
-        NativeItemKey::certified_position(
-            format!("{}.direct-jsonl-ordinal", adapter.provider.as_str()),
-            TypedKey::U64(event.raw_ordinal),
-            PositionStability::AppendStable,
-        )?
-    };
-    let subrecord_selector = (event.sub_ordinal != 0)
-        .then(|| {
-            SubrecordSelector::certified_position(
-                "direct-jsonl-subrecord",
-                TypedKey::U64(u64::from(event.sub_ordinal)),
-                PositionStability::StableSlot,
-            )
-        })
-        .transpose()?;
-    let event_id = derive_event_id(EventIdentityInput {
+    let event_id = direct_jsonl_event_id(
+        adapter,
         source,
         session_id,
-        logical_item_kind: "direct-jsonl-event",
-        native_item_key: &native_item_key,
-        subrecord_selector: subrecord_selector.as_ref(),
-    })?;
-    let native_event_key = TypedKey::composite(vec![
+        event.native_record_id.as_deref(),
+        event.raw_ordinal,
+        event.sub_ordinal,
+        occurrence,
+    )?;
+    let mut native_event_parts = vec![
         event
             .native_record_id
             .as_deref()
@@ -610,7 +778,11 @@ fn project_event(
             .transpose()?
             .unwrap_or(TypedKey::U64(event.raw_ordinal)),
         TypedKey::U64(u64::from(event.sub_ordinal)),
-    ])?;
+    ];
+    if occurrence != 0 {
+        native_event_parts.push(TypedKey::U64(occurrence));
+    }
+    let native_event_key = TypedKey::composite(native_event_parts)?;
     let parent_session_id = session
         .parent_provider_session_id
         .as_deref()
