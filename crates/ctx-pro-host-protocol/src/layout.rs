@@ -11,7 +11,7 @@ pub const PRO_INSTALLATION_ID_FILE_NAME: &str = "install.json";
 pub const PRO_ROOT_DIRECTORY_NAME: &str = "pro";
 pub const PRO_BIN_DIRECTORY_NAME: &str = "bin";
 pub const PRO_DOWNLOADS_DIRECTORY_NAME: &str = "downloads";
-pub const PRO_GRAPH_FILE_NAME: &str = "ctx-pro.db";
+pub const PRO_GRAPH_DIRECTORY_NAME: &str = "graph";
 pub const PRO_LIFECYCLE_LOCK_FILE_NAME: &str = ".ctx-pro.lifecycle.lock";
 pub const PRO_PRESERVED_DATA_MARKER_FILE_NAME: &str = ".ctx-pro.data-preserved";
 
@@ -32,6 +32,118 @@ pub const PRO_ROLLBACK_HELPER_FILE_NAME: &str = ".ctx-pro.rollback.helper";
 pub const PRO_ROLLBACK_MARKER_FILE_NAME: &str = ".ctx-pro.rollback.marker";
 pub const PRO_GRAPH_RECORD_ID_DOMAIN: &str = "ctx-pro-installation-graph-v1";
 pub const PRO_CLOCK_RECORD_ID_DOMAIN: &str = "ctx-pro-entitlement-clock-v1";
+
+const PRO_GRAPH_CONTROL_FILES: [&[u8]; 4] = [
+    b"graph-manifest.ctxm",
+    b".graph-materializer-control.ctxc",
+    b"graph-manifest.publication-lock",
+    b"graph-materializer.lock",
+];
+
+/// Returns whether `name` is one exact current Flat/FST graph artifact name.
+///
+/// This is the public lifecycle inventory contract. Prefixes and extensions
+/// that merely resemble a current artifact intentionally fail closed.
+#[must_use]
+pub fn is_pro_graph_artifact_file_name(name: &[u8]) -> bool {
+    PRO_GRAPH_CONTROL_FILES.contains(&name)
+        || matches_hashed_name(name, b".graph-manifest-", &[64], b".candidate")
+        || matches_hashed_name(name, b".graph-materializer-control-", &[64], b".candidate")
+        || is_manifest_scratch_file_name(name)
+        || is_materializer_scratch_file_name(name)
+        || matches_hashed_name(name, b"graph-segment-", &[64, 8], b".ctxs")
+        || matches_hashed_name(name, b".graph-materializer-journal-", &[64, 64], b".ctxj")
+        || matches_hashed_name(name, b".graph-materializer-pack-", &[64, 64], b".ctxp")
+}
+
+fn is_manifest_scratch_file_name(name: &[u8]) -> bool {
+    let Some(body) = name
+        .strip_prefix(b".graph-manifest-open-")
+        .and_then(|body| body.strip_suffix(b".encrypted-tmp"))
+    else {
+        return false;
+    };
+    let Some(separator) = body.iter().position(|byte| *byte == b'-') else {
+        return false;
+    };
+    let (pid, sequence_with_separator) = body.split_at(separator);
+    let sequence = &sequence_with_separator[1..];
+    is_canonical_decimal(pid)
+        && pid != b"0"
+        && decimal_fits(pid, u32::MAX as u64)
+        && is_canonical_decimal(sequence)
+        && decimal_fits(sequence, u64::MAX)
+}
+
+fn is_materializer_scratch_file_name(name: &[u8]) -> bool {
+    let Some(body) = name
+        .strip_prefix(b".graph-materializer-open-")
+        .and_then(|body| body.strip_suffix(b".encrypted-tmp"))
+    else {
+        return false;
+    };
+    let Some((object, sequence_with_separator)) = body.split_at_checked(64) else {
+        return false;
+    };
+    let Some(sequence) = sequence_with_separator.strip_prefix(b"-") else {
+        return false;
+    };
+    object.iter().copied().all(is_lower_hex)
+        && is_canonical_decimal(sequence)
+        && decimal_fits(sequence, u64::MAX)
+}
+
+fn is_canonical_decimal(value: &[u8]) -> bool {
+    !value.is_empty()
+        && (value.len() == 1 || value[0] != b'0')
+        && value.iter().all(u8::is_ascii_digit)
+}
+
+fn decimal_fits(value: &[u8], maximum: u64) -> bool {
+    value
+        .iter()
+        .try_fold(0_u64, |parsed, byte| {
+            parsed
+                .checked_mul(10)?
+                .checked_add(u64::from(*byte - b'0'))
+                .filter(|parsed| *parsed <= maximum)
+        })
+        .is_some()
+}
+
+fn matches_hashed_name(
+    name: &[u8],
+    prefix: &[u8],
+    hex_field_bytes: &[usize],
+    suffix: &[u8],
+) -> bool {
+    let Some(mut remaining) = name
+        .strip_prefix(prefix)
+        .and_then(|body| body.strip_suffix(suffix))
+    else {
+        return false;
+    };
+    for (index, field_bytes) in hex_field_bytes.iter().copied().enumerate() {
+        let Some((field, tail)) = remaining.split_at_checked(field_bytes) else {
+            return false;
+        };
+        if !field.iter().copied().all(is_lower_hex) {
+            return false;
+        }
+        remaining = tail;
+        if index + 1 < hex_field_bytes.len() {
+            let Some(tail) = remaining.strip_prefix(b"-") else {
+                return false;
+            };
+            remaining = tail;
+        }
+    }
+    remaining.is_empty()
+}
+
+const fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (byte >= b'a' && byte <= b'f')
+}
 
 /// Accepts only the canonical lower-case hyphenated representation of a
 /// non-nil UUID. This keeps the root identity opaque and its derived native
@@ -119,8 +231,8 @@ impl<'a> ProFilesystemLayout<'a> {
     }
 
     #[must_use]
-    pub fn graph_path(self) -> PathBuf {
-        self.pro_root().join(PRO_GRAPH_FILE_NAME)
+    pub fn graph_dir(self) -> PathBuf {
+        self.pro_root().join(PRO_GRAPH_DIRECTORY_NAME)
     }
 
     #[must_use]
@@ -206,7 +318,7 @@ mod tests {
         assert_eq!(layout.installation_id_path(), root.join("install.json"));
         assert_eq!(layout.pro_root(), root.join("pro"));
         assert_eq!(layout.bin_dir(), root.join("pro/bin"));
-        assert_eq!(layout.graph_path(), root.join("pro/ctx-pro.db"));
+        assert_eq!(layout.graph_dir(), root.join("pro/graph"));
         assert_eq!(
             layout.lifecycle_lock_path(),
             root.join("pro/.ctx-pro.lifecycle.lock")
@@ -222,6 +334,43 @@ mod tests {
             layout.transaction_journal_path(),
             root.join("pro/bin/.ctx-pro.transaction.json")
         );
+    }
+
+    #[test]
+    fn flat_graph_inventory_accepts_only_current_exact_artifact_names() {
+        let object = "a".repeat(64);
+        let materialization = "b".repeat(64);
+        let sequence = "b".repeat(8);
+        for name in [
+            "graph-manifest.ctxm".to_owned(),
+            ".graph-materializer-control.ctxc".to_owned(),
+            "graph-manifest.publication-lock".to_owned(),
+            "graph-materializer.lock".to_owned(),
+            format!(".graph-manifest-{object}.candidate"),
+            format!(".graph-materializer-control-{object}.candidate"),
+            ".graph-manifest-open-1-0.encrypted-tmp".to_owned(),
+            format!(".graph-materializer-open-{object}-0.encrypted-tmp"),
+            format!("graph-segment-{object}-{sequence}.ctxs"),
+            format!(".graph-materializer-journal-{materialization}-{object}.ctxj"),
+            format!(".graph-materializer-pack-{materialization}-{object}.ctxp"),
+        ] {
+            assert!(is_pro_graph_artifact_file_name(name.as_bytes()), "{name}");
+        }
+
+        for name in [
+            "ctx-pro.db".to_owned(),
+            "segments".to_owned(),
+            ".graph-manifest-deadbeef.candidate".to_owned(),
+            format!(".graph-manifest-{}.candidate", "A".repeat(64)),
+            format!(".graph-manifest-{object}.candidate.extra"),
+            ".graph-manifest-open-0-0.encrypted-tmp".to_owned(),
+            ".graph-manifest-open-01-0.encrypted-tmp".to_owned(),
+            format!(".graph-materializer-open-{object}-00.encrypted-tmp"),
+            format!("graph-segment-{object}-{}.ctxs", "0".repeat(7)),
+            format!(".graph-materializer-pack-{materialization}-{object}.ctxp.extra"),
+        ] {
+            assert!(!is_pro_graph_artifact_file_name(name.as_bytes()), "{name}");
+        }
     }
 
     #[test]

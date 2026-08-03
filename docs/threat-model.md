@@ -44,10 +44,12 @@ Pro initialization evidence is persisted before the first commercial vault
 write. Deletion uses only opaque record IDs derived from that root's
 installation identity and its recorded production/staging thumbprints; it does
 not broadly enumerate another installation's credentials. This also covers
-graph keys created before the first graph database file. Corrupt thumbprint
-inventory fails before deletion. A bounded nonsecret root-local cleanup phase
-is durably published before graph-key deletion and retained through credential
-and helper verification, so retry does not depend on credential records that a
+graph keys created before the first graph publication. Corrupt thumbprint or
+unexpected graph-artifact inventory fails before deletion. A bounded nonsecret
+root-local cleanup phase is durably published before graph-artifact deletion.
+The exact current Flat/FST artifacts are deleted and verified absent before the
+selected graph key; the phase is retained through graph-key, credential, and
+helper verification, so retry does not depend on credential records that a
 prior attempt already removed. Setup and preservation are blocked while this
 phase remains; successful deletion removes it.
 Users deleting the Core data root must run the identity-aware

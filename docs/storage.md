@@ -45,7 +45,7 @@ Default root:
   usage.sqlite
   config.toml
   pro/
-    ctx-pro.db  # when Local Pro is installed
+    graph/  # encrypted Flat/FST artifacts when Local Pro is installed
   runtime/
     onnxruntime/
       <runtime-version>/
@@ -165,9 +165,10 @@ never checkpoint or write provider data.
 - `search/semantic` contains generation-bound flat-F32 vectors, hashes, and
   offsets derived from eligible Core content; it does not persist separate
   plaintext transcript chunks.
-- `pro/ctx-pro.db`, when Local Pro is installed, is an encrypted derived facts
-  graph advanced from a pinned Core generation through the bounded Pro
-  materialization protocol. It is independent of semantic readiness and is not
+- `pro/graph`, when Local Pro is installed, contains the encrypted immutable
+  Flat/FST derived-facts graph advanced from a pinned Core generation through
+  the bounded Pro materialization protocol. Its authenticated manifest selects
+  the current publication. It is independent of semantic readiness and is not
   Core search authority.
 - `usage.sqlite` contains only the bounded content-free aggregates documented
   above. It is product state, not history or search authority.
@@ -221,17 +222,18 @@ by their owner.
 Local Pro uses one public, exact root-relative layout: the root identity is
 `install.json`, the signed helper pair and transaction files are under
 `pro/bin`, downloads are staged under `pro/downloads`, the encrypted derived
-graph is `pro/ctx-pro.db`, and the persistent installer coordination lock is
-`pro/.ctx-pro.lifecycle.lock`. The private, nonsecret
+Flat/FST graph is under `pro/graph`, and the persistent installer coordination
+lock is `pro/.ctx-pro.lifecycle.lock`. The private, nonsecret
 `pro/.ctx-pro.initialized` marker is durably published before setup or account
 management may write credential-store records, so interrupted initialization
-remains deletable even when no helper or graph file was created. Destructive
-uninstall durably publishes the bounded, nonsecret, installation-bound
-`pro/.ctx-pro.graph-key-cleanup.json` phase before deleting any recorded graph
-key. It retains only the exact root identity and sorted public-key thumbprints,
-survives interrupted graph-key, credential, or helper cleanup, and is removed
-only after those deletion phases verify. Setup and keep-data uninstall fail
-closed while that deletion phase remains. A separate nonsecret
+remains deletable even when no helper or graph publication was created.
+Destructive uninstall durably publishes the bounded, nonsecret, installation-bound
+`pro/.ctx-pro.graph-key-cleanup.json` phase before deleting graph artifacts or
+any recorded graph key. It retains only the exact root identity and sorted
+public-key thumbprints, survives interrupted graph, graph-key, credential, or
+helper cleanup, and is removed only after those deletion phases verify. Setup
+and keep-data uninstall fail closed while that deletion phase remains. A
+separate nonsecret
 `pro/.ctx-pro.data-preserved` lifecycle marker distinguishes deliberate
 keep-data uninstall from first use, but it is created only when encrypted graph
 data actually exists. Provider history and Core generations remain separate
@@ -274,11 +276,16 @@ It does not need the helper and remains available after an earlier
 `--keep-data` uninstall. Initialization or helper evidence causes deletion to
 derive only this root identity's production/staging record IDs, collect the
 thumbprints recorded in its installation-key and entitlement records, and
-delete and verify those graph keys even when no graph file was completed. A
-corrupt record makes that inventory unverifiable and fails the operation before
-any graph key or graph file is deleted. Once the cleanup phase is published, a
-retry uses its exact thumbprints instead of broad vault enumeration or
-now-deleted credential records.
+delete and verify those graph keys even when no graph publication was completed.
+Before any deletion, uninstall validates the complete `pro/graph` directory
+against the exact current manifest, materializer, segment, journal, pack, and
+scratch artifact families. An unexpected or near-miss entry fails closed before
+either graph or key deletion. It then deletes and verifies all graph artifacts
+and the graph directory before deleting and verifying the selected graph-key
+records. A corrupt credential record likewise makes the key inventory
+unverifiable before deletion. Once the cleanup phase is published, an
+interrupted retry uses its exact thumbprints instead of broad vault enumeration
+or now-deleted credential records.
 Interactive use asks whether to delete; noninteractive callers must explicitly
 choose `--delete-data` or `--keep-data`. Neither form deletes provider history
 or Core's derived search generations.

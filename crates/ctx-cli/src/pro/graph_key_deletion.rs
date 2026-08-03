@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use ctx_pro_host_protocol::ProFilesystemLayout;
 #[cfg(any(
     target_os = "linux",
@@ -15,7 +15,7 @@ use ctx_pro_host_protocol::ProFilesystemLayout;
 ))]
 use sha2::{Digest as _, Sha256};
 
-use super::credential_vault::{CredentialVaultError, CredentialVaultNamespace};
+use super::credential_vault::CredentialVaultError;
 
 #[cfg(target_os = "macos")]
 #[path = "graph_key_deletion/macos.rs"]
@@ -62,12 +62,31 @@ const NATIVE_SELECTION: &[u8; 12] = b"CTXKSB01KEYC";
 #[cfg(target_os = "windows")]
 const NATIVE_SELECTION: &[u8; 12] = b"CTXKSB01WCRM";
 
-pub(super) fn delete_selected(
-    data_root: &Path,
-    namespace: CredentialVaultNamespace,
-    installation_key_thumbprint: &str,
+pub(super) fn delete_selected(data_root: &Path, graph_id: &str) -> Result<()> {
+    delete_selected_with(|| delete(data_root, graph_id))
+}
+
+fn delete_selected_with(
+    mut delete_record: impl FnMut() -> Result<(), CredentialVaultError>,
 ) -> Result<()> {
-    super::client::delete_graph_key(data_root, namespace, installation_key_thumbprint)
+    match delete_record() {
+        Ok(()) | Err(CredentialVaultError::NotFound) => {}
+        Err(error) => return Err(deletion_error(error)),
+    }
+    match delete_record() {
+        Err(CredentialVaultError::NotFound) => Ok(()),
+        Ok(()) => bail!("key_store_unavailable: graph-key deletion could not be verified"),
+        Err(error) => Err(deletion_error(error)),
+    }
+}
+
+fn deletion_error(error: CredentialVaultError) -> anyhow::Error {
+    let code = if matches!(error, CredentialVaultError::Locked) {
+        "key_store_locked"
+    } else {
+        "key_store_unavailable"
+    };
+    anyhow!("{code}: {error}")
 }
 
 pub(super) fn delete(data_root: &Path, graph_id: &str) -> Result<(), CredentialVaultError> {
@@ -150,6 +169,7 @@ fn native_graph_record_id(graph_id: &str) -> String {
 mod tests {
     #[cfg(target_os = "freebsd")]
     use std::cell::RefCell;
+    use std::collections::VecDeque;
 
     use super::*;
 
@@ -168,6 +188,37 @@ mod tests {
             delete(root, "graph\0suffix"),
             Err(CredentialVaultError::Backend)
         ));
+    }
+
+    #[test]
+    fn selected_deletion_requires_a_verified_not_found_result() {
+        let mut outcomes = VecDeque::from([Ok(()), Err(CredentialVaultError::NotFound)]);
+        delete_selected_with(|| outcomes.pop_front().unwrap()).unwrap();
+        assert!(outcomes.is_empty());
+
+        let mut already_absent = 0;
+        delete_selected_with(|| {
+            already_absent += 1;
+            Err(CredentialVaultError::NotFound)
+        })
+        .unwrap();
+        assert_eq!(already_absent, 2);
+
+        let error = delete_selected_with(|| Ok(())).unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("key_store_unavailable: graph-key deletion could not be verified"));
+    }
+
+    #[test]
+    fn selected_deletion_preserves_stable_key_store_errors() {
+        let locked = delete_selected_with(|| Err(CredentialVaultError::Locked)).unwrap_err();
+        assert!(locked.to_string().starts_with("key_store_locked:"));
+
+        let unavailable = delete_selected_with(|| Err(CredentialVaultError::Backend)).unwrap_err();
+        assert!(unavailable
+            .to_string()
+            .starts_with("key_store_unavailable:"));
     }
 
     #[cfg(target_os = "freebsd")]

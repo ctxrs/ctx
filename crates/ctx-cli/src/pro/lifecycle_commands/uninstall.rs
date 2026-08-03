@@ -56,9 +56,10 @@ pub(super) fn run_uninstall(
                 let service = service.ok_or_else(|| {
                     anyhow::anyhow!("key_store_unavailable: local deletion service is unavailable")
                 })?;
-                // The public delete-only adapter destroys the exact native key record
-                // and then removes all graph-family files. It does not launch or retain
-                // the private helper and remains available after an ordinary uninstall.
+                // The public delete-only adapter verifies and removes the exact current
+                // graph inventory before destroying its native key record. It does not
+                // launch or retain the private helper and remains available after an
+                // ordinary uninstall.
                 service.delete_graph_data(data_root)?;
                 service.delete_commercial_credentials(data_root)?;
                 let helper_removed = delete_helper_files(data_root)?;

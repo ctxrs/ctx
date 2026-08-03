@@ -74,10 +74,11 @@ uploads transcript or repository content, or requires a hosted research agent.
   Pro-state-only: `pro_uninstall` remains an eligible Core foreground operation,
   so default-on local usage reporting may create or increment `usage.sqlite`.
   Interrupted initialization remains identity-aware and deletable before a
-  helper or graph file exists. Destructive uninstall fails before deletion on
-  corrupt credential inventory and persists an exact-root cleanup phase so
-  retries remain verifiable after graph-key or credential records are already
-  absent.
+  helper or graph publication exists. Destructive uninstall fails before
+  deletion on corrupt credential inventory or an unexpected current Flat/FST
+  artifact, persists an exact-root cleanup phase, and verifies graph absence
+  before deleting the selected key. Retries remain verifiable after graph data,
+  graph-key records, or credential records are already absent.
 - Local Pro credentials prefer the platform vault: Secret Service on Linux,
   Keychain Services on macOS, and Credential Manager on Windows. A pristine
   canonical root may durably select the supported owner-private file backend

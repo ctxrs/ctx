@@ -438,14 +438,17 @@ already-empty root instead reports
 `local_pro_data: "absent"` and has no next action. Setup records root-scoped
 initialization before its first credential-store write, so `--delete-data` also
 cleans and verifies credentials and recorded graph keys after an interrupted
-artifact fetch or helper start, even if no graph database exists. The `absent`
+artifact fetch or helper start, even if no graph publication exists. The `absent`
 result describes that filesystem graph state, not whether credential-store
 cleanup work was required. Before deleting a graph key, uninstall durably
 records the exact installation identity and bounded thumbprints in a nonsecret
-local cleanup phase. Corrupt inventory fails before deletion; late failures
-retain that phase so the next `--delete-data` can verify already-absent keys and
-credentials without enumerating another installation. Setup and `--keep-data`
-refuse to proceed until an interrupted deletion is completed.
+local cleanup phase. Uninstall validates the complete current Flat/FST graph
+artifact inventory, fails closed on unexpected or near-miss entries, deletes
+and verifies graph artifacts before the selected graph key, and retains the
+phase after late failures so the next `--delete-data` can verify already-absent
+graph data, keys, and credentials without enumerating another installation.
+Setup and `--keep-data` refuse to proceed until an interrupted deletion is
+completed.
 
 Subscription lock does not delete `ctx.db`, the encrypted graph, or its key.
 After renewal or resubscription, `ctx pro` refreshes authorization and restores
@@ -467,7 +470,7 @@ activity; there is no `setup --repo` option.
 Each root-local installation identity and production/staging environment is an
 independent Local Pro credential-store namespace. Moving or renaming a complete
 ctx data root preserves that identity and its selected backend; copying
-`ctx-pro.db` alone does not.
+`pro/graph` alone does not.
 
 The public Pro query surface is:
 
