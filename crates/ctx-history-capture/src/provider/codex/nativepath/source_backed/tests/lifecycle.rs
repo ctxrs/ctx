@@ -146,8 +146,8 @@ fn unknown_codex_events_publish_fresh_and_replay_warm_without_indexing_bodies() 
     let index = temp.path().join("global-index");
     fs::create_dir_all(&sessions).unwrap();
     let native_session_id = "019fa000-0000-7000-8000-000000000247";
-    let binary_body = "iVBORw0KGgo=issue-247-source-backed-body";
-    let future_body = "future-source-backed-body-must-not-be-indexed";
+    let binary_body = "iVBORw0KGgo=issue-247-import-body";
+    let future_body = "future-import-body-must-not-be-indexed";
     write_session(
         &sessions,
         native_session_id,
