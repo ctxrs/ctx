@@ -8,6 +8,7 @@ use crate::{
     cli::{CommandRoot, DaemonCommand, DaemonTriggerCommandArg, ImportArgs, ShowArgs, ShowTarget},
     commands::{
         doctor::run_doctor,
+        export::run_export,
         import::{run_import, ProviderRefreshCollector},
         index::run_index,
         locate::run_locate,
@@ -339,6 +340,7 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut local_usage_draft,
             &mut ui,
         ),
+        CommandRoot::Export(args) => run_export(args, data_root.clone(), &mut ui),
         CommandRoot::Pro(args) => {
             let validation = args.validate_invocation();
             if validation.is_err() && !data_root.exists() {
@@ -553,6 +555,7 @@ fn command_json_output(command: &CommandRoot) -> bool {
             crate::LocateTarget::Event(args) => args.format.is_json(),
         },
         CommandRoot::Search(args) => args.format.is_json(),
+        CommandRoot::Export(_) => true,
         CommandRoot::Pro(args) => args.json_output(),
         CommandRoot::Referral(args) => args.json_output(),
         CommandRoot::Blame(args) => args.json_output(),

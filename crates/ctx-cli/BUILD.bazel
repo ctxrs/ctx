@@ -376,6 +376,17 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "export_events_tests",
+    src = "tests/export_events.rs",
+    extra_deps = ["//crates/ctx-history-core:lib"],
+    tags = ["cli-contract"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
+)
+
+ctx_cli_integration_test(
     name = "history_source_plugins_tests",
     src = "tests/history_source_plugins.rs",
 )

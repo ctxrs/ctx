@@ -101,6 +101,8 @@ pub(crate) enum CommandRoot {
     Locate(LocateArgs),
     #[command(about = "Search indexed agent history")]
     Search(SearchArgs),
+    #[command(about = "Export bounded data from one immutable Core generation")]
+    Export(commands::export::ExportArgs),
     #[command(
         about = "Set up, resume, repair, manage, or remove local ctx Pro",
         long_about = "Set up, resume, repair, manage, or remove local ctx Pro. Bare `ctx pro` runs the idempotent setup path; `ctx pro setup` is an explicit synonym. `ctx status` does not mutate canonical history or graph data; entitlement authorization may advance nonsecret anti-clock-rollback metadata.",

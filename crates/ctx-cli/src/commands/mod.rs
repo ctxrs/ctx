@@ -1,5 +1,6 @@
 pub(crate) mod blame;
 pub(crate) mod doctor;
+pub(crate) mod export;
 pub(crate) mod import;
 pub(crate) mod index;
 mod index_dashboard;

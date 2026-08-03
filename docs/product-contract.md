@@ -48,6 +48,11 @@ uploads transcript or repository content, or requires a hosted research agent.
   They do not reopen provider history at query time.
   `ctx show session --out` writes transcript artifacts. Search/show expose the
   provider-owned session ID when known; for Codex, it is the resume UUID.
+- `ctx export events` enumerates complete timestamped Core events for one
+  half-open RFC3339 range in deterministic timestamp/sequence/event-ID order.
+  JSON returns one bounded resumable page; JSONL traverses one immutable
+  generation to completion. Export includes subagents by default, performs no
+  provider lookup or refresh, and writes no state.
 - `ctx pro` starts or resumes an anonymous 14-day trial without an account,
   authentication, or payment method, installs or repairs the signed
   target-specific helper, and catches the encrypted graph up. The official
