@@ -7,6 +7,8 @@ use crate::{
     provider::file_touches::normalized_key, WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
 };
 
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v4";
+
 pub(crate) fn windsurf_event_type(value: &Value) -> EventType {
     match value.get("type").and_then(Value::as_str) {
         Some("user_input" | "planner_response") => EventType::Message,
@@ -159,5 +161,6 @@ pub(crate) const fn windsurf_source_backed_adapter() -> super::DirectJsonlFamily
         CaptureProvider::Windsurf,
         WINDSURF_CASCADE_HOOK_TRANSCRIPT_SOURCE_FORMAT,
         "windsurf-direct-native-jsonl-v1",
+        PARSER_REVISION,
     )
 }

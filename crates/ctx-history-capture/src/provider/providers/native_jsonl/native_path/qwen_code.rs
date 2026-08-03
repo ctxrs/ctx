@@ -14,11 +14,14 @@ use super::super::result_content::{
     extract_direct_result_content, NativeJsonlResultExtractionError, NativeJsonlResultSubrecord,
 };
 
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v4";
+
 pub(crate) const fn qwen_code_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
     super::DirectJsonlFamilyAdapter::new(
         CaptureProvider::QwenCode,
         QWEN_CODE_SOURCE_FORMAT,
         "qwen-code-direct-native-jsonl-v1",
+        PARSER_REVISION,
     )
 }
 

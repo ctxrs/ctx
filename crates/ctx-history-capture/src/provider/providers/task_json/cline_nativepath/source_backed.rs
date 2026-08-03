@@ -47,7 +47,6 @@ use support::*;
 const SOURCE_ANCHOR_NAMESPACE: &str = "task-directory-id";
 const SOURCE_SCHEMA_VARIANT: &str = "task-directory-v1";
 const SOURCE_REVISION_KIND: &str = "task-directory-compound-v1";
-const PARSER_REVISION: &str = "task-json-source-backed-v3";
 const LOGICAL_SESSION_KIND: &str = "task-json-thread";
 const LOGICAL_EVENT_KIND: &str = "task-json-event";
 const NATIVE_SESSION_NAMESPACE: &str = "task-json-task-id";
@@ -181,7 +180,7 @@ impl ReplacementDocumentTree for TaskJsonDocumentTreeAdapter {
     type TreeAuthority = TaskJsonTreeAuthority;
 
     fn parser_revision(&self) -> &'static str {
-        PARSER_REVISION
+        self.dialect.parser_revision
     }
 
     fn owns_source(&self, source: &SourceKey) -> bool {
@@ -617,7 +616,7 @@ fn project_event(
         event_kind(event.kind),
         AgentType::Primary.as_str(),
         true,
-        PARSER_REVISION,
+        dialect.parser_revision,
         lexical_event_body(&event),
     )?;
     record.provider_session_id = Some(provider_session_id.to_owned());
@@ -687,7 +686,7 @@ fn task_terminal(
         source: task.source,
         opening: task.observation.clone(),
         closing: task.observation,
-        parser_revision: PARSER_REVISION,
+        parser_revision: dialect.parser_revision,
         content_digest: task.content_digest.finalize().into(),
         counts: task.counts,
     })
@@ -718,4 +717,105 @@ fn task_route_error(error: TaskJsonSourceBackedError) -> SourceBackedRouteError 
         _ => SourceBackedRouteErrorKind::InvalidSource,
     };
     SourceBackedRouteError::new(kind, error.to_string())
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use ctx_history_core::core_record_leaf_sha256;
+
+    use super::super::normalize::{
+        ClineEventComponent, ClineEventContext, ClineNativeItemKey, ClineSourceRecordEvidence,
+        ClineTaskIdentity,
+    };
+
+    fn project_replay_record(dialect: TaskJsonNativeDialect) -> CoreRecord {
+        let source = SourceKey::derive(
+            dialect.provider.as_str(),
+            dialect.source_format,
+            SOURCE_SCHEMA_VARIANT,
+            1,
+            SourceAnchor::provider_native(
+                SOURCE_ANCHOR_NAMESPACE,
+                TypedKey::utf8("task-json-replay-task").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let task = ClineTaskIdentity::new("task-json-replay-task");
+        let item = ClineNativeItemKey::NativeId {
+            native_id: "task-json-replay-event".into(),
+            occurrence: 0,
+        };
+        let mut event = ClineEventRow::message(
+            ClineEventContext {
+                task: &task,
+                component: ClineEventComponent::ApiHistory,
+                item: &item,
+                item_index: 3,
+                role: ClineEventRole::Assistant,
+                occurred_at_millis: Some(1_754_227_696_000),
+            },
+            0,
+            ClineEventKind::Message,
+            "task-json replay body".to_owned(),
+        );
+        event.source_record = Some(ClineSourceRecordEvidence {
+            native_index: 3,
+            byte_start: 128,
+            byte_length: 64,
+            record_digest: [0x3c; 32],
+        });
+        let session_id = derive_task_session_id(&source, task.as_str()).unwrap();
+        project_event(
+            dialect,
+            &source,
+            [0xa5; 32],
+            session_id,
+            task.as_str(),
+            Some("/workspace/replay"),
+            event,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cline_and_roo_replay_preserve_current_revision_ids_and_records() {
+        let cases = [
+            (
+                TaskJsonNativeDialect::CLINE,
+                "f29a3a4b-8b02-8b15-ad30-22b8d3e245e5",
+                "985dcf50-7cf6-85de-87cb-79a03269ff1e",
+                "13ba5b2e-3b34-8fbd-97c7-6647718d8504",
+                "516c346633985902b1066ea05d5e402ca500a2ab9802aa64356e263c3b70f9d3",
+            ),
+            (
+                TaskJsonNativeDialect::ROO,
+                "095b0fe0-c153-8364-b970-22637e99ce3e",
+                "15349de7-8b56-8e85-b075-3a9d9e01d7a1",
+                "7e7f3701-2c21-83b6-b6df-d9e4a7a4d805",
+                "7c9736643bb87876f755c9095ef3935610e7705e8729c0f9dbdc1727eb6d5d42",
+            ),
+        ];
+        for (dialect, event_id, session_id, source_id, record_leaf) in cases {
+            let adapter = TaskJsonDocumentTreeAdapter::new(dialect, &[]);
+            assert_eq!(
+                ReplacementDocumentTree::parser_revision(&adapter),
+                "task-json-source-backed-v3"
+            );
+            let initial = project_replay_record(dialect);
+            let replay = project_replay_record(dialect);
+            assert_eq!(replay, initial);
+            assert_eq!(initial.parser_revision, "task-json-source-backed-v3");
+            assert_eq!(initial.event_id.to_string(), event_id);
+            assert_eq!(initial.session_id.to_string(), session_id);
+            assert_eq!(initial.source.identity().to_string(), source_id);
+            assert_eq!(
+                core_record_leaf_sha256(&initial).unwrap(),
+                record_leaf,
+                "{:?}",
+                dialect.provider
+            );
+        }
+    }
 }

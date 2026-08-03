@@ -14,11 +14,14 @@ use super::super::result_content::{
     extract_direct_result_content, NativeJsonlResultExtractionError, NativeJsonlResultSubrecord,
 };
 
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v4";
+
 pub(crate) const fn factory_droid_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
     super::DirectJsonlFamilyAdapter::new(
         CaptureProvider::FactoryAiDroid,
         FACTORY_DROID_SOURCE_FORMAT,
         "factory-droid-direct-native-jsonl-v1",
+        PARSER_REVISION,
     )
 }
 

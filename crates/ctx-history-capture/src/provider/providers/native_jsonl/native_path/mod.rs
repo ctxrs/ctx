@@ -23,7 +23,7 @@ pub(super) use factory_ai_droid::{
 };
 pub(crate) use model::{
     DirectJsonlEvent, DirectJsonlRejection, DirectJsonlRetryDiscriminator, DirectJsonlSession,
-    DirectJsonlSourceRecord, DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    DirectJsonlSourceRecord, DirectJsonlTouch,
 };
 pub(crate) use qoder::qoder_source_backed_adapter;
 pub(crate) use qwen_code::{qwen_code_file_is_selected, qwen_code_source_backed_adapter};

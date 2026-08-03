@@ -3,11 +3,14 @@ use serde_json::Value;
 
 use crate::TABNINE_CLI_SOURCE_FORMAT;
 
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v4";
+
 pub(crate) const fn tabnine_source_backed_adapter() -> super::DirectJsonlFamilyAdapter {
     super::DirectJsonlFamilyAdapter::new(
         CaptureProvider::Tabnine,
         TABNINE_CLI_SOURCE_FORMAT,
         "tabnine-direct-native-jsonl-v1",
+        PARSER_REVISION,
     )
 }
 

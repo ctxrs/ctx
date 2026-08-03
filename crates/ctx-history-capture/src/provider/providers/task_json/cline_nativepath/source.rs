@@ -36,6 +36,7 @@ pub(crate) struct TaskJsonNativeDialect {
     pub(crate) provider: CaptureProvider,
     pub(crate) source_format: &'static str,
     pub(crate) display_name: &'static str,
+    pub(crate) parser_revision: &'static str,
     metadata_files: &'static [(&'static str, ClineComponent)],
     message_files: &'static [(&'static str, ClineComponent)],
     root_index_file: Option<&'static str>,
@@ -46,6 +47,7 @@ impl TaskJsonNativeDialect {
         provider: CaptureProvider::Cline,
         source_format: CLINE_TASK_JSON_SOURCE_FORMAT,
         display_name: "Cline",
+        parser_revision: "task-json-source-backed-v3",
         metadata_files: &[(METADATA_FILE, ClineComponent::TaskMetadata)],
         message_files: &[
             (API_FILE, ClineComponent::ApiHistory),
@@ -58,6 +60,7 @@ impl TaskJsonNativeDialect {
         provider: CaptureProvider::RooCode,
         source_format: ROO_TASK_JSON_SOURCE_FORMAT,
         display_name: "Roo Code",
+        parser_revision: "task-json-source-backed-v3",
         // Roo's history item is the strongest identity/workspace authority.
         // `_index.json` fills metadata when the history item is absent.
         metadata_files: &[
