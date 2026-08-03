@@ -41,6 +41,7 @@ Each SDK exposes typed operation-specific responses for:
 - `search`
 - `showEvent`
 - `showSession`
+- `queryEvents`
 - version metadata
 - structured errors
 
@@ -54,6 +55,14 @@ Responses include the common `agent-history-v1` envelope fields:
 Payloads include typed agent history data such as freshness, citations,
 sessions, events, and provider-owned session IDs. For Codex,
 `providerSessionId` is the resume UUID.
+
+`queryEvents` uses the same typed selection and `full`, `text`, or `none`
+content projection as `ctx show events`. Local SDK iterators consume CLI JSONL
+on demand with a bounded parser buffer and stderr tail, validate one terminal
+completion record and one pinned generation, and kill and reap the child on
+cancellation or early disposal. Explicit page materialization retains only the
+requested bounded page. Language wrappers do not reopen provider data, add a
+query language, or turn jq predicates into indexed work.
 
 ## Local and hosted backends
 
@@ -70,7 +79,7 @@ structured `not_supported` error.
 Each SDK includes a fake-by-default toy app or example that exercises the agent history
 workflow without reading private local history:
 
-`status -> init -> import/sync -> search -> showEvent -> showSession`
+`status -> init -> import/sync -> search -> showEvent -> showSession -> queryEvents`
 
 The examples can be pointed at a real local ctx binary explicitly when the
 language toolchain is installed and an isolated `CTX_DATA_ROOT` is provided.
@@ -123,5 +132,6 @@ CTX_SDK_STRICT_TOOLCHAINS=1 ./scripts/check-sdks.sh
 ## Related docs
 
 - [`contracts/agent-history-v1/README.md`](../contracts/agent-history-v1/README.md)
+- [`docs/event-queries.md`](event-queries.md)
 - [`docs/sdk-production-readiness.md`](sdk-production-readiness.md)
 - [`docs/agent-skill-install.md`](agent-skill-install.md)

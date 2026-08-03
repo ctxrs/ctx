@@ -703,6 +703,8 @@ ctx show session <ctx-session-id> --format markdown --out transcript.md
 ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
 ctx show event <ctx-event-id> --window 3 --format text
 ctx show event <ctx-event-id> --before 5 --after 10 --format json
+ctx show events --provider codex --content text --limit 1000 --format jsonl
+ctx show events --since 2026-08-01T00:00:00Z --until 2026-08-02T00:00:00Z --format json
 ```
 
 `show session` renders one transcript by ctx-owned session ID. It defaults to
@@ -719,7 +721,18 @@ the bounded presentation limit require `--max-events`; the value is capped at
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
 
-Both commands read complete policy-selected normalized records from the active
+`show events` is the deterministic machine-oriented enumeration surface. It
+accepts exact provider/source/session and parent/root-session filters,
+provider-session and source-format filters, event type, role, agent type,
+scope, branch, indexed workspace/file filters, and a paired half-open
+`--since`/`--until` range. `--direction` controls the complete deterministic
+order. `--content full|text|none`, `--max-items`, `--max-bytes`, and the global
+`--limit` keep output and internal hydration bounded. JSON returns one page;
+JSONL streams bounded pages and ends with exactly one completion record. Opaque
+cursors are bound to the exact selection and immutable Core generation. See
+[`event-queries.md`](event-queries.md) for the wire contract and jq examples.
+
+All show commands read complete policy-selected normalized records from the active
 verified Core/Tantivy generation. They do not reopen provider history at query
 time. Show preserves event order and never expands payload classes excluded by
 import policy, such as binary data or provider-private blobs.

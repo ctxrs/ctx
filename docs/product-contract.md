@@ -43,9 +43,12 @@ uploads transcript or repository content, or requires a hosted research agent.
   embedding models. Hybrid uses semantic evidence only after sidecar coverage
   is complete and dirty work is drained; explicit semantic search may query
   partial coverage for diagnostics.
-- `ctx show session` and `ctx show event` resolve ctx-owned IDs and read complete
+- `ctx show session`, `ctx show event`, and `ctx show events` resolve or filter
+  ctx-owned identities and read complete
   policy-selected normalized records from the active Core/Tantivy generation.
-  They do not reopen provider history at query time.
+  They do not reopen provider history at query time. `show events` provides
+  typed indexed selection, deterministic bounded pages, and streaming JSONL;
+  it is not a general expression language or another persistent database.
   `ctx show session --out` writes transcript artifacts. Search/show expose the
   provider-owned session ID when known; for Codex, it is the resume UUID.
 - `ctx export events` enumerates complete timestamped Core events for one

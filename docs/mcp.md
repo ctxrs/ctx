@@ -27,7 +27,20 @@ fixed documented count. Core tools include:
   semantic generation;
 - `show_session`, read a stored Core session transcript by ctx session ID;
 - `show_event`, read a stored Core event and optional surrounding window
-  by ctx event ID.
+  by ctx event ID;
+- `query_events`, read one bounded deterministic page selected from normalized
+  Core events.
+
+`query_events` accepts the same typed identity, relationship, source, role,
+event, workspace/file, chronology, order, and content-projection inputs as
+`ctx show events`, plus an opaque continuation cursor. It returns one
+`event_range_page` in `structuredContent`, including events, the pinned Core
+generation, request selection, page usage, freshness/frontier state,
+terminal/truncation state, and `next_cursor` when more results remain. It is
+strictly read-only and does not perform the MCP startup daemon wake. Its page
+is additionally subject to the aggregate MCP response limit; lower
+`max_bytes`, select `content=text` or `content=none`, or use CLI JSONL for a
+large stream.
 
 `show_session` accepts an optional transcript mode plus resumable `limit` and
 `cursor` inputs. Mode is applied before the page limit. `limit` defaults to 200

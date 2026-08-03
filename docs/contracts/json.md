@@ -467,6 +467,32 @@ not an MCP pagination envelope.
 Event JSON remains one `event_window` object with `target: "event"`, `format`,
 `event`, and `events[]`.
 
+Event-range JSON from `ctx show events --format json` is one
+`event_range_page` with `schema_version: 1`, the pinned `generation_id`, the
+normalized request domain/filters/direction, `content`, bounded
+`events[]`, page limits and usage, `terminal`, `truncated`, `next_cursor`, and
+explicit freshness/frontier metadata. The cursor is present exactly when the
+page can continue. It is opaque and bound to the complete selection and pinned
+generation.
+
+Event-range JSONL emits zero or more `event_range_event` records followed by
+exactly one `event_range_completion`. Each event record includes
+`schema_version`, `record_type`, `generation_id`, a contiguous zero-based
+`ordinal`, and one normalized `event`. The completion echoes the normalized
+selection, content projection and requested limits, reports aggregate usage,
+and records terminal/truncated/cursor and freshness/frontier state. A consumer
+must reject EOF, a second completion, an event after completion, mixed
+generations, or noncontiguous ordinals. Diagnostics and typed failures are on
+stderr; stdout has only the selected JSON or JSONL.
+
+Event-range event rows expose exact ctx event/source/session and parent/root
+session identities, provider and provider-session identity when present,
+source format, native identity, sequence and chronology, role/event/agent
+fields, content-policy state, selected text/structured content, citations, and
+normalized repository evidence already in Core. Event type is an open string;
+unknown normalized values are preserved. See
+[`event-queries.md`](../event-queries.md) for selection details and jq examples.
+
 `session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
 `provider_session_id` when known. For Codex, `provider_session_id` is the resume
 UUID. `event` and `events[]` rows include `ctx_event_id`, `record_type`,
