@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    reader::DirectJsonlProjector, DirectJsonlEvent, DirectJsonlRejection, DirectJsonlSession,
-    DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    reader::DirectJsonlProjector, DirectJsonlEvent, DirectJsonlRejection,
+    DirectJsonlRetryDiscriminator, DirectJsonlSession, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
 };
 use crate::{
     common::io::{
@@ -586,15 +586,20 @@ fn project_event(
             PositionStability::AppendStable,
         )?
     };
-    let subrecord_selector = (event.sub_ordinal != 0)
-        .then(|| {
-            SubrecordSelector::certified_position(
-                "direct-jsonl-subrecord",
-                TypedKey::U64(u64::from(event.sub_ordinal)),
-                PositionStability::StableSlot,
-            )
-        })
-        .transpose()?;
+    let subrecord_selector = match &event.stable_retry_discriminator {
+        Some(DirectJsonlRetryDiscriminator::FactoryDroidToolResult { tool_use_id }) => {
+            Some(SubrecordSelector::native_id(
+                "factory-ai-droid.retry-tool-result",
+                TypedKey::utf8(tool_use_id)?,
+            )?)
+        }
+        None if event.sub_ordinal != 0 => Some(SubrecordSelector::certified_position(
+            "direct-jsonl-subrecord",
+            TypedKey::U64(u64::from(event.sub_ordinal)),
+            PositionStability::StableSlot,
+        )?),
+        None => None,
+    };
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
@@ -602,15 +607,22 @@ fn project_event(
         native_item_key: &native_item_key,
         subrecord_selector: subrecord_selector.as_ref(),
     })?;
-    let native_event_key = TypedKey::composite(vec![
-        event
-            .native_record_id
-            .as_deref()
-            .map(TypedKey::utf8)
-            .transpose()?
-            .unwrap_or(TypedKey::U64(event.raw_ordinal)),
-        TypedKey::U64(u64::from(event.sub_ordinal)),
-    ])?;
+    let native_record_key = event
+        .native_record_id
+        .as_deref()
+        .map(TypedKey::utf8)
+        .transpose()?
+        .unwrap_or(TypedKey::U64(event.raw_ordinal));
+    let native_subrecord_key = match &event.stable_retry_discriminator {
+        Some(DirectJsonlRetryDiscriminator::FactoryDroidToolResult { tool_use_id }) => {
+            TypedKey::composite(vec![
+                TypedKey::utf8("factory-ai-droid.retry-tool-result")?,
+                TypedKey::utf8(tool_use_id)?,
+            ])?
+        }
+        None => TypedKey::U64(u64::from(event.sub_ordinal)),
+    };
+    let native_event_key = TypedKey::composite(vec![native_record_key, native_subrecord_key])?;
     let parent_session_id = session
         .parent_provider_session_id
         .as_deref()

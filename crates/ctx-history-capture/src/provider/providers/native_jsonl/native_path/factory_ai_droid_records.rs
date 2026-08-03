@@ -114,10 +114,60 @@ pub(in crate::provider::providers::native_jsonl) fn enumerate_factory_droid_resu
     let content = value
         .get("content")
         .or_else(|| value.pointer("/message/content"));
-    if reject_redacted(value).is_err() {
-        return placeholder_results(content);
+    let results = if reject_redacted(value).is_err() {
+        placeholder_results(content)?
+    } else {
+        enumerate_content_results(content, value)?
+    };
+    for result in &results {
+        factory_droid_retry_discriminator(value, result.subrecord_index)?;
     }
-    enumerate_content_results(content, value)
+    Ok(results)
+}
+
+pub(in crate::provider::providers::native_jsonl) fn factory_droid_retry_discriminator(
+    value: &Value,
+    subrecord_index: u32,
+) -> std::result::Result<
+    Option<super::super::DirectJsonlRetryDiscriminator>,
+    NativeJsonlResultExtractionError,
+> {
+    let Some(message_id) = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(parent_id) = value
+        .get("parentId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    if parent_id != message_id {
+        return Ok(None);
+    }
+    let index = usize::try_from(subrecord_index)
+        .map_err(|_| NativeJsonlResultExtractionError::InvalidShape)?;
+    let result = value
+        .get("content")
+        .or_else(|| value.pointer("/message/content"))
+        .and_then(Value::as_array)
+        .and_then(|content| content.get(index))
+        .filter(|result| result.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .ok_or(NativeJsonlResultExtractionError::InvalidShape)?;
+    let tool_use_id = result
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or(NativeJsonlResultExtractionError::InvalidShape)?;
+    Ok(Some(
+        super::super::DirectJsonlRetryDiscriminator::FactoryDroidToolResult {
+            tool_use_id: tool_use_id.to_owned(),
+        },
+    ))
 }
 
 fn factory_droid_content_has(value: &Value, expected: &str) -> bool {

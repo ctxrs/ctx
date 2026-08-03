@@ -404,11 +404,22 @@ fn direct_event(
 
     let positional_event_index = direct_jsonl_event_sequence(raw_ordinal, sub_ordinal)?;
     let native_record_id = direct_jsonl_native_event_identity(provider, value);
+    let stable_retry_discriminator = match provider {
+        CaptureProvider::FactoryAiDroid if result.is_some() => {
+            factory_droid_retry_discriminator(value, sub_ordinal).map_err(|_| {
+                CaptureError::SystemInvariant(
+                    "validated Factory Droid retry result lost its native discriminator",
+                )
+            })?
+        }
+        _ => None,
+    };
     let provider_event_sequence_index = positional_event_index;
     let provider_event_hash = crate::compute_payload_hash(&json!({
         "event_type": event_type.as_str(),
         "role": role.as_str(),
         "native_record_id": native_record_id,
+        "stable_retry_discriminator": stable_retry_discriminator,
         "sub_ordinal": sub_ordinal,
         "lexical_text": lexical_text,
         "tool_result": tool_result.clone(),
@@ -418,6 +429,7 @@ fn direct_event(
         raw_ordinal,
         sub_ordinal,
         native_record_id,
+        stable_retry_discriminator,
         provider_event_sequence_index,
         provider_event_hash,
         event_type,

@@ -18,12 +18,12 @@ pub(crate) use factory_ai_droid::factory_droid_source_backed_adapter;
 pub(super) use factory_ai_droid::{
     enumerate_factory_droid_results, factory_droid_event_identity, factory_droid_event_text,
     factory_droid_event_type, factory_droid_file_is_selected, factory_droid_header_cwd,
-    factory_droid_header_session_id, factory_droid_model, factory_droid_role,
-    factory_droid_session_relationships,
+    factory_droid_header_session_id, factory_droid_model, factory_droid_retry_discriminator,
+    factory_droid_role, factory_droid_session_relationships,
 };
 pub(crate) use model::{
-    DirectJsonlEvent, DirectJsonlRejection, DirectJsonlSession, DirectJsonlSourceRecord,
-    DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
+    DirectJsonlEvent, DirectJsonlRejection, DirectJsonlRetryDiscriminator, DirectJsonlSession,
+    DirectJsonlSourceRecord, DirectJsonlTouch, DIRECT_JSONL_NATIVEPATH_PARSER_REVISION,
 };
 pub(crate) use qoder::qoder_source_backed_adapter;
 pub(crate) use qwen_code::{qwen_code_file_is_selected, qwen_code_source_backed_adapter};
