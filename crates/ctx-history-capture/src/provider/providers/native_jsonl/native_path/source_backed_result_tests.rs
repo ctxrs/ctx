@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -86,6 +86,261 @@ fn native_subrecord_index(record: &CoreRecord) -> u64 {
         panic!("direct JSONL result identity has no subrecord index");
     };
     *index
+}
+
+fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>, u64) {
+    let adapter = adapter(provider);
+    let session = session(provider);
+    let (source, session_id) = adapter
+        .session_identity(&session.native_session_id)
+        .unwrap();
+    let direct = DirectJsonlProjector::new(
+        provider,
+        adapter.source_format,
+        Path::new("direct-jsonl-identity-contract.jsonl"),
+        None,
+        DateTime::<Utc>::UNIX_EPOCH,
+        Some(session.clone()),
+    )
+    .unwrap();
+    let mut projector = DirectJsonlFamilyProjector {
+        adapter,
+        source,
+        bound_session: session,
+        session_id,
+        projector: direct,
+        rejected_records: 0,
+    };
+    let mut records = Vec::new();
+    for (ordinal, value) in values.iter().enumerate() {
+        let encoded = serde_json::to_vec(value).unwrap();
+        JsonlFamilyProjector::project(
+            &mut projector,
+            JsonlRecordRef::for_test(&encoded, ordinal as u64),
+            &mut |record| {
+                records.push(record);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+    (records, projector.rejected_records())
+}
+
+fn event_ids_by_body(records: &[CoreRecord]) -> BTreeMap<String, String> {
+    records
+        .iter()
+        .map(|record| {
+            (
+                record.content.normalized_body.clone().unwrap(),
+                record.event_id.to_string(),
+            )
+        })
+        .collect()
+}
+
+fn factory_result(id: &str, parent_id: Option<&str>, call_id: &str, body: &str) -> Value {
+    let mut value = json!({
+        "type": "message",
+        "id": id,
+        "timestamp": "2026-07-14T09:30:13Z",
+        "message": {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": call_id,
+                "content": body,
+                "is_error": false
+            }]
+        }
+    });
+    if let Some(parent_id) = parent_id {
+        value["parentId"] = json!(parent_id);
+    }
+    value
+}
+
+#[test]
+fn factory_retry_identities_use_stable_native_evidence_not_order_or_content() {
+    let anchor = factory_result("shared", None, "Execute_anchor", "anchor");
+    let retry_one = factory_result("shared", Some("shared"), "Execute_retry_1", "retry one");
+    let retry_two = factory_result("shared", Some("shared"), "Execute_retry_2", "retry two");
+
+    let (anchor_only, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        std::slice::from_ref(&anchor),
+    );
+    assert_eq!(rejected, 0);
+    let (initial, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[anchor.clone(), retry_one.clone(), retry_two.clone()],
+    );
+    assert_eq!(rejected, 0);
+    assert_eq!(initial.len(), 3);
+    assert_eq!(anchor_only[0].event_id, initial[0].event_id);
+    assert_eq!(
+        initial[0].native_event_id,
+        Some(TypedKey::Composite(vec![
+            TypedKey::Utf8("shared".to_owned()),
+            TypedKey::U64(0),
+        ]))
+    );
+    assert_eq!(
+        initial[1].native_event_id,
+        Some(TypedKey::Composite(vec![
+            TypedKey::Utf8("shared".to_owned()),
+            TypedKey::Composite(vec![
+                TypedKey::Utf8("factory-ai-droid.retry-tool-result".to_owned()),
+                TypedKey::Utf8("Execute_retry_1".to_owned()),
+            ]),
+        ]))
+    );
+
+    let baseline = event_ids_by_body(&initial);
+    let (reordered, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[retry_two.clone(), anchor.clone(), retry_one.clone()],
+    );
+    assert_eq!(rejected, 0);
+    assert_eq!(event_ids_by_body(&reordered), baseline);
+
+    let inserted = factory_result(
+        "shared",
+        Some("shared"),
+        "Execute_inserted",
+        "inserted retry",
+    );
+    let (with_insert, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[
+            retry_two.clone(),
+            inserted,
+            anchor.clone(),
+            retry_one.clone(),
+        ],
+    );
+    assert_eq!(rejected, 0);
+    let with_insert = event_ids_by_body(&with_insert);
+    for (body, event_id) in &baseline {
+        assert_eq!(with_insert.get(body), Some(event_id));
+    }
+
+    let (after_delete, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[retry_two.clone(), anchor.clone()],
+    );
+    assert_eq!(rejected, 0);
+    let after_delete = event_ids_by_body(&after_delete);
+    assert_eq!(after_delete.get("anchor"), baseline.get("anchor"));
+    assert_eq!(after_delete.get("retry two"), baseline.get("retry two"));
+    assert!(!after_delete.values().any(|id| id == &baseline["retry one"]));
+
+    let rewritten = factory_result(
+        "shared",
+        Some("shared"),
+        "Execute_retry_1",
+        "rewritten retry one",
+    );
+    let (rewritten, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[anchor, rewritten, retry_two],
+    );
+    assert_eq!(rejected, 0);
+    assert_eq!(
+        event_ids_by_body(&rewritten)["rewritten retry one"],
+        baseline["retry one"]
+    );
+}
+
+#[test]
+fn factory_retry_multi_subrecords_keep_ids_when_content_blocks_reorder() {
+    let record = |content: Vec<Value>| {
+        json!({
+            "type": "message",
+            "id": "shared",
+            "parentId": "shared",
+            "timestamp": "2026-07-14T09:30:23Z",
+            "message": {"role": "user", "content": content}
+        })
+    };
+    let first = json!({
+        "type": "tool_result",
+        "tool_use_id": "Execute_A",
+        "content": "result a"
+    });
+    let second = json!({
+        "type": "tool_result",
+        "tool_use_id": "Execute_B",
+        "content": "result b"
+    });
+    let text = json!({"type": "text", "text": "interleaved"});
+    let (original, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[record(vec![first.clone(), text.clone(), second.clone()])],
+    );
+    assert_eq!(rejected, 0);
+    let (reordered, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[record(vec![second, first, text])],
+    );
+    assert_eq!(rejected, 0);
+    assert_eq!(event_ids_by_body(&original), event_ids_by_body(&reordered));
+}
+
+#[test]
+fn factory_retry_ambiguity_and_missing_evidence_fail_closed() {
+    let duplicate = factory_result("shared", Some("shared"), "Execute_same", "duplicate");
+    let (records, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[duplicate.clone(), duplicate],
+    );
+    assert_eq!(rejected, 0);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].event_id, records[1].event_id);
+
+    let missing_tool_use_id = json!({
+        "type": "message",
+        "id": "shared",
+        "parentId": "shared",
+        "timestamp": "2026-07-14T09:30:23Z",
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "content": "missing linkage"}]
+        }
+    });
+    let (records, rejected) = project_all(CaptureProvider::FactoryAiDroid, &[missing_tool_use_id]);
+    assert!(records.is_empty());
+    assert_eq!(rejected, 1);
+
+    for parent_id in [None, Some("contradictory-parent")] {
+        let anchor = factory_result("shared", None, "Execute_anchor", "anchor");
+        let ambiguous = factory_result("shared", parent_id, "Execute_other", "ambiguous");
+        let (records, rejected) =
+            project_all(CaptureProvider::FactoryAiDroid, &[anchor, ambiguous]);
+        assert_eq!(rejected, 0);
+        assert_eq!(records[0].event_id, records[1].event_id);
+    }
+
+    let qoder = |call_id: &str, body: &str| {
+        json!({
+            "type": "user",
+            "uuid": "shared-qoder-id",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": body
+                }]
+            }
+        })
+    };
+    let (records, rejected) = project_all(
+        CaptureProvider::Qoder,
+        &[qoder("call-a", "qoder a"), qoder("call-b", "qoder b")],
+    );
+    assert_eq!(rejected, 0);
+    assert_eq!(records[0].event_id, records[1].event_id);
 }
 
 #[test]

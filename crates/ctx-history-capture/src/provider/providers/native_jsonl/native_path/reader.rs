@@ -29,9 +29,10 @@ use super::super::{
 };
 use super::{
     copilot, enumerate_factory_droid_results, factory_droid_event_identity,
-    factory_droid_event_text, factory_droid_event_type, factory_droid_model, factory_droid_role,
-    qoder_parser, qwen_code, tabnine, windsurf, DirectJsonlEvent, DirectJsonlRejection,
-    DirectJsonlSession, DirectJsonlSourceRecord, DirectJsonlTouch,
+    factory_droid_event_text, factory_droid_event_type, factory_droid_model,
+    factory_droid_retry_discriminator, factory_droid_role, qoder_parser, qwen_code, tabnine,
+    windsurf, DirectJsonlEvent, DirectJsonlRejection, DirectJsonlSession, DirectJsonlSourceRecord,
+    DirectJsonlTouch,
 };
 
 #[path = "reader_projection.rs"]

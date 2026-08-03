@@ -2,6 +2,8 @@ mod support;
 
 use support::{daemon_test_root as tempdir, *};
 
+#[path = "native_providers/factory_retry.rs"]
+mod factory_retry;
 #[path = "support/native_providers/daemon.rs"]
 mod provider_daemon;
 #[path = "support/native_providers/sqlite_sources.rs"]
