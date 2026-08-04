@@ -6,12 +6,10 @@ use std::{
     },
 };
 
-use sha2::{Digest, Sha256};
-
 use super::*;
+use crate::provider::codex::nativepath::record::codex_lineage_call_id_digest;
 
 pub(crate) const CODEX_LINEAGE_EXHAUSTED_SENTINEL: &str = "Codex lineage working set exhausted";
-const CODEX_LINEAGE_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-lineage-call-id/v1\0";
 const MAX_LINEAGE_FACTS_PER_TASK: usize = 262_144;
 const MAX_LINEAGE_FACT_BYTES_PER_TASK: usize = 64 * 1024 * 1024;
 const LINEAGE_FACT_GROWTH: usize = 64;
@@ -135,6 +133,11 @@ impl CodexLineageFactsV0 {
             CodexLineageRecordEvidence::Ambiguous(call_id) => {
                 self.push(CodexLineageFactKindV0::Ambiguous, call_id)?;
             }
+            CodexLineageRecordEvidence::AmbiguousDigests(digests) => {
+                for digest in digests {
+                    self.push_digest(CodexLineageFactKindV0::Ambiguous, *digest)?;
+                }
+            }
         }
         Ok(())
     }
@@ -201,8 +204,8 @@ impl CodexLineageFactsV0 {
         if origin_call_id.is_empty() || result_call_id.is_empty() {
             return CodexLineageFactPresenceV0::Unproven;
         }
-        let origin = call_id_digest(origin_call_id);
-        let result = call_id_digest(result_call_id);
+        let origin = codex_lineage_call_id_digest(origin_call_id);
+        let result = codex_lineage_call_id_digest(result_call_id);
         let has_call = self.contains(origin, CodexLineageFactKindV0::Call);
         let has_result = self.contains(result, CodexLineageFactKindV0::Result);
         let ambiguous = self.has_unattributed_ambiguity
@@ -219,6 +222,14 @@ impl CodexLineageFactsV0 {
 
     fn push(&mut self, kind: CodexLineageFactKindV0, call_id: &str) -> Result<()> {
         if call_id.is_empty() || self.sealed {
+            self.has_unattributed_ambiguity = true;
+            return Ok(());
+        }
+        self.push_digest(kind, codex_lineage_call_id_digest(call_id))
+    }
+
+    fn push_digest(&mut self, kind: CodexLineageFactKindV0, digest: [u8; 32]) -> Result<()> {
+        if self.sealed {
             self.has_unattributed_ambiguity = true;
             return Ok(());
         }
@@ -263,7 +274,7 @@ impl CodexLineageFactsV0 {
             self.charged_facts = self.charged_facts.saturating_add(actual_facts);
         }
         self.facts.push(CodexLineageFactV0 {
-            call_id_sha256: call_id_digest(call_id),
+            call_id_sha256: digest,
             kind,
         });
         Ok(())
@@ -291,14 +302,6 @@ pub(crate) enum CodexLineageFactPresenceV0 {
     Present,
     Absent,
     Unproven,
-}
-
-fn call_id_digest(call_id: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(CODEX_LINEAGE_CALL_ID_DOMAIN);
-    hasher.update((call_id.len() as u64).to_le_bytes());
-    hasher.update(call_id.as_bytes());
-    hasher.finalize().into()
 }
 
 fn lineage_exhausted() -> CaptureError {
