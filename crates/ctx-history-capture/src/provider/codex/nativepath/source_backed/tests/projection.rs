@@ -302,7 +302,7 @@ fn codex_success_without_binding_and_failed_or_mismatched_results_fail_closed() 
     let index = temp.path().join("global-index");
     let missing = temp.path().join("not-a-repository");
     fs::create_dir_all(&sessions).unwrap();
-    fs::create_dir(&missing).unwrap();
+    fs::write(&missing, b"not a directory\n").unwrap();
     let native_session_id = "019fa000-0000-7000-8000-000000000101";
     let oid = "1111111111111111111111111111111111111111";
     write_session(
@@ -805,7 +805,7 @@ fn codex_production_path_persists_complete_native_input_and_certified_binding() 
     let control = temp.path().join("control");
     let repository = temp.path().join("repo");
     fs::create_dir_all(&sessions).unwrap();
-    fs::create_dir(&control).unwrap();
+    fs::write(&control, b"not a directory\n").unwrap();
     fs::create_dir(&repository).unwrap();
     for arguments in [
         vec!["init", "-q"],
@@ -836,7 +836,6 @@ fn codex_production_path_persists_complete_native_input_and_certified_binding() 
             .unwrap()
             .success());
     }
-
     let native_session_id = "019fa000-0000-7000-8000-000000000099";
     let secret = "CTX_SECRET_TOKEN_7f3a9d";
     let arguments = serde_json::json!({

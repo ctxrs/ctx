@@ -461,6 +461,7 @@ fn moved_local_root_reuses_only_exact_prior_event_time_certificates() {
         ));
     }
 
+    fs::write(&old, b"not a directory\n").unwrap();
     let never_seen_file = attributor.attribute(AttributionInput {
         activity_at_unix_ms: Some(110),
         file_observations: vec![UnscopedFileObservation {
