@@ -43,10 +43,13 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
         assert!(route.unsupported_reason.is_none());
     }
 
-    for spec in crate::provider_source_specs()
-        .iter()
-        .filter(|spec| spec.import_support.is_importable())
-    {
+    for spec in crate::provider_source_specs() {
+        assert_eq!(
+            spec.import_support,
+            ProviderImportSupport::Native,
+            "{} must participate in ordinary automatic discovery",
+            spec.provider.as_str()
+        );
         let routes = LANDED_SOURCE_BACKED_ROUTES
             .iter()
             .filter(|route| route.provider == spec.provider)
@@ -59,6 +62,13 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
         assert!(
             source_backed_route_constructor(spec.provider).is_some(),
             "{} must have a mechanical driver constructor",
+            spec.provider.as_str()
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.automatic && route.unsupported_reason.is_none()),
+            "{} must have at least one supported automatic source route",
             spec.provider.as_str()
         );
         for location in spec.default_locations {

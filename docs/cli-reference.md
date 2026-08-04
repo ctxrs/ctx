@@ -227,9 +227,9 @@ Current rows include:
 - Codex session trees at `~/.codex/sessions`;
 - Codex prompt history at `~/.codex/history.jsonl`;
 - Pi session JSONL files under `~/.pi/agent/sessions`;
-- automatic or unsupported-detection rows for supported providers whose matrix
-  entry has a bounded current location; providers with an empty
-  `history_locations` list remain available through exact compatible
+- automatic or unsupported-detection rows for every supported provider, using
+  the bounded current location or strategy documented in the provider matrix;
+  unregistered alternate roots remain available through exact compatible
   `--path` imports;
 - AstrBot `data_v4.db` history when those files exist;
 - NanoClaw project stores from exact CWD or official launchd/systemd service
