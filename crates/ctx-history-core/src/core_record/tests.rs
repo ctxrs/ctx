@@ -1092,6 +1092,28 @@ fn prior_repository_certificate_is_bound_to_exact_generation_inputs() {
 }
 
 #[test]
+fn streamed_repository_reuse_fingerprint_matches_canonical_json() {
+    let mut record = record();
+    record.content.structured_content = Some(serde_json::json!({
+        "escaped": "line one\nline two",
+        "unicode": "snowman ☃"
+    }));
+    record.content.mcp_exchange = Some(mcp_exchange());
+
+    let encoded = serde_json::to_vec(&RepositoryReuseInput::from(&record)).unwrap();
+    let mut expected = Sha256::new();
+    expected.update(CORE_REPOSITORY_REUSE_INPUT_DOMAIN);
+    expected.update(CORE_REPOSITORY_CONTRACT_REVISION.to_be_bytes());
+    expected.update(u64::try_from(encoded.len()).unwrap().to_be_bytes());
+    expected.update(encoded);
+
+    assert_eq!(
+        record.repository_reuse_input_fingerprint().unwrap(),
+        <[u8; 32]>::from(expected.finalize())
+    );
+}
+
+#[test]
 fn logical_repository_binding_can_abstain_from_local_checkout_identity() {
     let mut record = record();
     let mut moved = binding();

@@ -655,13 +655,13 @@ impl CoreRecord {
     }
 
     fn repository_reuse_input_fingerprint(&self) -> Option<[u8; 32]> {
-        let encoded = serde_json::to_vec(&RepositoryReuseInput::from(self)).ok()?;
-        let encoded_len = u64::try_from(encoded.len()).ok()?;
+        let input = RepositoryReuseInput::from(self);
+        let encoded_len = u64::try_from(count_encoded_json_bytes(&input).ok()?).ok()?;
         let mut digest = Sha256::new();
         digest.update(CORE_REPOSITORY_REUSE_INPUT_DOMAIN);
         digest.update(CORE_REPOSITORY_CONTRACT_REVISION.to_be_bytes());
         digest.update(encoded_len.to_be_bytes());
-        digest.update(encoded);
+        update_digest_with_encoded_json(&mut digest, &input).ok()?;
         Some(digest.finalize().into())
     }
 
@@ -948,6 +948,19 @@ impl Write for EncodedJsonByteCounter {
     }
 }
 
+struct EncodedJsonDigestWriter<'a>(&'a mut Sha256);
+
+impl Write for EncodedJsonDigestWriter<'_> {
+    fn write(&mut self, encoded: &[u8]) -> io::Result<usize> {
+        self.0.update(encoded);
+        Ok(encoded.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn count_encoded_json_bytes<T>(value: &T) -> CoreRecordResult<usize>
 where
     T: Serialize + ?Sized,
@@ -958,6 +971,14 @@ where
         return Err(CoreRecordError::EncodedLengthOverflow);
     }
     Ok(counter.bytes)
+}
+
+fn update_digest_with_encoded_json<T>(digest: &mut Sha256, value: &T) -> CoreRecordResult<()>
+where
+    T: Serialize + ?Sized,
+{
+    serde_json::to_writer(EncodedJsonDigestWriter(digest), value)?;
+    Ok(())
 }
 
 #[cfg(test)]
