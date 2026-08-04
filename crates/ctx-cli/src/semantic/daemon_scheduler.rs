@@ -672,6 +672,17 @@ pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
         || daemon_consumer_retry_due(runtime)
 }
 
+pub(super) fn daemon_scheduled_refresh_due(
+    runtime: &DaemonRuntime,
+    source_refresh: Option<&CoreRefreshEngine>,
+    now: Instant,
+    route_now_ms: u64,
+) -> bool {
+    runtime.background_refresh_cadence.ready(now)
+        && source_refresh.and_then(|refresh| refresh.next_dirty_route_due_in_ms(route_now_ms))
+            == Some(0)
+}
+
 fn core_refresh_failed_job(data_root: &Path, message: String) -> Value {
     core_scheduler_job(data_root, "failed", None, Some(message))
 }

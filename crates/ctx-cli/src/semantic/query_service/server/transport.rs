@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Arc, time::Duration as StdDuration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration as StdDuration,
+};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
@@ -6,8 +10,6 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
-#[cfg(unix)]
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::{env, fs};
 
@@ -46,6 +48,24 @@ fn source_refresh_coordinator(
     _service: DaemonIpcService,
 ) -> Result<Arc<CoreRefreshEngine>> {
     Ok(Arc::new(CoreRefreshEngine::new()))
+}
+
+struct DaemonServiceThreadExit {
+    data_root: PathBuf,
+    service: DaemonIpcService,
+    activity: Arc<DaemonQueryActivity>,
+    wakeup: Option<Arc<DaemonWakeup>>,
+}
+
+impl Drop for DaemonServiceThreadExit {
+    fn drop(&mut self) {
+        remove_daemon_service_endpoint(&self.data_root, self.service);
+        if !self.activity.stopping() {
+            if let Some(wakeup) = self.wakeup.as_ref() {
+                wakeup.signal_ipc();
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -235,6 +255,12 @@ fn start_daemon_service_with_request_timeout(
     let spawn_result = std::thread::Builder::new()
         .name("ctx-daemon-query".to_owned())
         .spawn(move || {
+            let _exit = DaemonServiceThreadExit {
+                data_root: thread_data_root.clone(),
+                service,
+                activity: Arc::clone(&thread_activity),
+                wakeup: thread_wakeup.clone(),
+            };
             while !thread_activity.stopping() {
                 match wait_for_unix_listener_or_shutdown(&listener, &shutdown_reader) {
                     Ok(true) => {}
@@ -456,6 +482,12 @@ fn start_daemon_service_with_request_timeout(
     let spawn_result = std::thread::Builder::new()
         .name("ctx-daemon-query".to_owned())
         .spawn(move || {
+            let _exit = DaemonServiceThreadExit {
+                data_root: thread_data_root.clone(),
+                service,
+                activity: Arc::clone(&thread_activity),
+                wakeup: thread_wakeup.clone(),
+            };
             let mut next_stream = Some(first_stream);
             while !thread_activity.stopping() {
                 let stream = match next_stream.take() {

@@ -260,6 +260,20 @@ fn sync_core_feed_with_launch<C: CoreMaterializationConsumer>(
     consumer: &mut C,
     selection: CoreWorkerLaunchSelection,
 ) -> Result<CoreMaterializationSyncReport> {
+    match sync_core_feed_attempt_with_launch(index, prior_receipt, consumer, selection) {
+        Err(error) if crate::pro::stable_error_code(&error) == Some("needs_rebuild") => {
+            sync_core_feed_attempt_with_launch(index, prior_receipt, consumer, selection)
+        }
+        result => result,
+    }
+}
+
+fn sync_core_feed_attempt_with_launch<C: CoreMaterializationConsumer>(
+    index: &VerifiedIndex,
+    prior_receipt: Option<&CoreMaterializationReceipt>,
+    consumer: &mut C,
+    selection: CoreWorkerLaunchSelection,
+) -> Result<CoreMaterializationSyncReport> {
     let options = selection.execution_options();
     let credits = Arc::new(EncodedPageCredits::new(CORE_PREFETCH_ENCODED_BYTE_BUDGET));
     let instrumentation = Arc::new(CorePrefetchInstrumentation::default());
@@ -365,19 +379,20 @@ fn sync_core_feed_with_launch<C: CoreMaterializationConsumer>(
                             "invalid_response: Core reconciliations repeat a stable source identity"
                         );
                     }
+                    let current_source = sources
+                        .binary_search_by_key(&source_id, |state| state.source.identity().digest())
+                        .ok()
+                        .map(|index| &sources[index]);
                     match &reconciliation.delta {
                         CoreSourceDelta::Present(state) => {
-                            if !sources.iter().any(|current| current == state) {
+                            if current_source != Some(state) {
                                 bail!(
                                     "invalid_response: Core reconciliation carries a stale current source"
                                 );
                             }
                         }
-                        CoreSourceDelta::Removed(removal) => {
-                            if sources.iter().any(|current| {
-                                current.source.identity().digest()
-                                    == removal.source.identity().digest()
-                            }) {
+                        CoreSourceDelta::Removed(_) => {
+                            if current_source.is_some() {
                                 bail!(
                                     "invalid_response: Core reconciliation removes a current source"
                                 );

@@ -80,6 +80,16 @@ fn protect_pro_directory(path: &std::path::Path) {
 #[cfg(not(unix))]
 fn protect_pro_directory(_path: &std::path::Path) {}
 
+#[cfg(unix)]
+fn protect_pro_file(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, PermissionsExt::from_mode(0o600)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn protect_pro_file(_path: &std::path::Path) {}
+
 #[test]
 fn ctx_status_has_one_actionable_pro_machine_contract() {
     let root = tempdir().unwrap();
@@ -132,8 +142,12 @@ fn ordinary_uninstall_is_local_without_commercial_configuration_or_vault() {
     fs::create_dir_all(helper.parent().unwrap()).unwrap();
     protect_pro_directory(&root.path().join("pro"));
     fs::write(&helper, b"helper").unwrap();
-    let graph = root.path().join("pro").join("ctx-pro.db");
+    let graph_dir = root.path().join("pro").join("graph");
+    fs::create_dir(&graph_dir).unwrap();
+    protect_pro_directory(&graph_dir);
+    let graph = graph_dir.join("graph-manifest.ctxm");
     fs::write(&graph, b"encrypted graph").unwrap();
+    protect_pro_file(&graph);
 
     let output = Command::cargo_bin("ctx")
         .unwrap()
@@ -318,8 +332,12 @@ fn delete_data_fails_closed_without_local_deletion_identity() {
     fs::create_dir_all(helper.parent().unwrap()).unwrap();
     protect_pro_directory(&root.path().join("pro"));
     fs::write(&helper, b"helper").unwrap();
-    let graph = root.path().join("pro").join("ctx-pro.db");
+    let graph_dir = root.path().join("pro").join("graph");
+    fs::create_dir(&graph_dir).unwrap();
+    protect_pro_directory(&graph_dir);
+    let graph = graph_dir.join("graph-manifest.ctxm");
     fs::write(&graph, b"encrypted graph").unwrap();
+    protect_pro_file(&graph);
 
     let output = Command::cargo_bin("ctx")
         .unwrap()

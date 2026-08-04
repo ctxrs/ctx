@@ -468,7 +468,7 @@ impl ProStorageEvidence {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.graph_manifest_schema != 3
             || self.flat_format_version != 2
-            || self.materializer_checkpoint_version != 3
+            || self.materializer_checkpoint_version != 4
             || self.journal_pack_format_version != 3
             || self.legacy_journals_written != 0
         {

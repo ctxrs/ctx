@@ -1,5 +1,6 @@
 mod archive;
 mod durability;
+mod hosted_transaction;
 mod lock;
 mod lock_fs;
 #[cfg(test)]
@@ -16,6 +17,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::{bail, Result};
 
+pub(in crate::upgrade) use hosted_transaction::{
+    run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,
+};
 pub(in crate::upgrade) use marker::classify_install_marker_at;
 pub(crate) use marker::is_valid_install_attempt_id;
 pub(super) use marker::InstallFingerprint;

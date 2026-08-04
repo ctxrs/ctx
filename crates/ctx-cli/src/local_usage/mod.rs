@@ -347,7 +347,9 @@ impl CliUsage {
                 DaemonCommand::Disable(_) => (Some("daemon_disable"), TargetType::NotApplicable),
                 DaemonCommand::Run(_) => (None, TargetType::NotApplicable),
             },
-            CommandRoot::Upgrade(args) if !args.replacement_helper => {
+            CommandRoot::Upgrade(args)
+                if !args.replacement_helper && args.hosted_transaction.is_none() =>
+            {
                 (Some("upgrade"), TargetType::NotApplicable)
             }
             CommandRoot::Upgrade(_) => (None, TargetType::NotApplicable),

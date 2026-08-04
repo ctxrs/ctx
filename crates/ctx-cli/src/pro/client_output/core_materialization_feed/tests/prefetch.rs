@@ -190,7 +190,7 @@ fn ordered_prefetch_is_byte_exact_and_bounded_across_workers_and_skew() {
         assert_eq!(sequential.encoded_credit_final_bytes, 0);
         assert!(sequential.encoded_credit_high_water_bytes <= CORE_PREFETCH_ENCODED_BYTE_BUDGET);
         assert_eq!(sequential.planned_pages, sequential.materialized_pages);
-        assert_eq!(sequential.hashed_records, record_count);
+        assert_eq!(sequential.decoded_records, record_count);
 
         for parallelism in [2, 4, 8] {
             let (actual_bytes, actual_digest, prefetch) =
@@ -218,12 +218,12 @@ fn ordered_prefetch_is_byte_exact_and_bounded_across_workers_and_skew() {
                         prefetch.encoded_credit_high_water_bytes,
                         CORE_PREFETCH_ENCODED_BYTE_BUDGET
                     );
-                    assert!(prefetch.hashed_records >= record_count);
-                    assert!(prefetch.hashed_records < record_count + prefetch.workers_launched);
+                    assert!(prefetch.decoded_records >= record_count);
+                    assert!(prefetch.decoded_records < record_count + prefetch.workers_launched);
                     assert!(prefetch.maximum_active_workers <= prefetch.workers_launched);
                 }
                 PrefetchFixture::ManyTiny | PrefetchFixture::Balanced => {
-                    assert_eq!(prefetch.hashed_records, record_count);
+                    assert_eq!(prefetch.decoded_records, record_count);
                     assert_eq!(prefetch.workers_launched, parallelism.min(source_count));
                     assert!(prefetch.maximum_active_workers <= prefetch.workers_launched);
                 }
@@ -268,7 +268,7 @@ fn later_maximum_singleton_cannot_block_an_earlier_oversized_source_successor() 
     assert!(prefetch.maximum_active_workers <= 2);
     assert_eq!(prefetch.planned_pages, 3);
     assert_eq!(prefetch.materialized_pages, 3);
-    assert_eq!(prefetch.hashed_records, 3);
+    assert_eq!(prefetch.decoded_records, 3);
     assert_eq!(prefetch.encoded_credit_final_bytes, 0);
     assert_eq!(
         prefetch.encoded_credit_high_water_bytes,

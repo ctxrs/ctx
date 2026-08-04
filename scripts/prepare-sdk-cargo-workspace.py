@@ -12,7 +12,8 @@ import sys
 import tomllib
 
 
-SDK_DEPENDENCIES = ("serde", "serde_json", "tempfile", "thiserror")
+SDK_WORKSPACE_DEPENDENCIES = ("serde", "serde_json", "tempfile", "thiserror")
+SDK_VENDOR_ROOTS = SDK_WORKSPACE_DEPENDENCIES + ("windows-sys",)
 WORKSPACE_PACKAGE_KEYS = (
     "edition",
     "license",
@@ -147,14 +148,14 @@ def main() -> None:
             json.dumps({"files": {}, "package": checksum}, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        if name in SDK_DEPENDENCIES:
+        if name in SDK_VENDOR_ROOTS:
             vendored_by_name[name] = (vendored, version)
 
     available_names = {name for name, _version in source_roots}
     for vendored in vendor_dir.iterdir():
         remove_unavailable_optional_dependencies(vendored / "Cargo.toml", available_names)
 
-    missing = sorted(set(SDK_DEPENDENCIES) - set(vendored_by_name))
+    missing = sorted(set(SDK_VENDOR_ROOTS) - set(vendored_by_name))
     if missing:
         fail("missing declared crate sources: " + ", ".join(missing))
 
@@ -174,7 +175,7 @@ def main() -> None:
         f"{key} = {quote(str(workspace_package[key]))}" for key in WORKSPACE_PACKAGE_KEYS
     )
     lines.extend(["", "[workspace.dependencies]"])
-    for name in SDK_DEPENDENCIES:
+    for name in SDK_WORKSPACE_DEPENDENCIES:
         vendored, version = vendored_by_name[name]
         lines.append(
             dependency_line(

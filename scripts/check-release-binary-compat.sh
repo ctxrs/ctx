@@ -52,7 +52,8 @@ usage() {
 Usage: scripts/check-release-binary-compat.sh PLATFORM BINARY [DECLARED_LLVM_READOBJ]
 
 Checks the executable format, architecture, loader, shared-library, ABI,
-minimum-OS, and stripped-symbol contract for one public ctx release binary.
+minimum-OS, exploit-mitigation, and stripped-symbol contract for one public
+ctx release binary.
 Platforms: linux-x64, linux-aarch64, macos-arm64, macos-x64, windows-x64,
 freebsd-x64.
 USAGE
@@ -223,6 +224,60 @@ elf_interpreter() {
     | head -n 1
 }
 
+elf_program_header_block() {
+  local wanted_type="$1"
+  printf '%s\n' "${readobj_output}" | awk -v wanted_type="${wanted_type}" '
+    /^[[:space:]]*ProgramHeader[[:space:]]*\{/ {
+      in_header=1
+      matches=0
+      block=$0 ORS
+      next
+    }
+    in_header {
+      block=block $0 ORS
+      if ($0 ~ "^[[:space:]]*Type:[[:space:]]*" wanted_type "([^[:alnum:]_]|$)") {
+        matches=1
+      }
+      if ($0 ~ /^[[:space:]]*\}[[:space:]]*$/) {
+        if (matches) printf "%s", block
+        in_header=0
+      }
+    }
+  '
+}
+
+check_elf_hardening() {
+  local relro_count stack_count stack_header
+  relro_count="$(printf '%s\n' "${readobj_output}" | awk '
+    /^[[:space:]]*Type:[[:space:]]*PT_GNU_RELRO([^[:alnum:]_]|$)/ { count++ }
+    END { print count + 0 }
+  ')"
+  [[ "${relro_count}" == "1" ]] \
+    || fail "expected exactly one GNU_RELRO program header"
+
+  stack_count="$(printf '%s\n' "${readobj_output}" | awk '
+    /^[[:space:]]*Type:[[:space:]]*PT_GNU_STACK([^[:alnum:]_]|$)/ { count++ }
+    END { print count + 0 }
+  ')"
+  [[ "${stack_count}" == "1" ]] \
+    || fail "expected exactly one GNU_STACK program header"
+  stack_header="$(elf_program_header_block PT_GNU_STACK)"
+  grep -Eq '^[[:space:]]*PF_R([^[:alnum:]_]|$)' <<<"${stack_header}" \
+    || fail "GNU_STACK is missing read permission"
+  grep -Eq '^[[:space:]]*PF_W([^[:alnum:]_]|$)' <<<"${stack_header}" \
+    || fail "GNU_STACK is missing write permission"
+  if grep -Eq '^[[:space:]]*PF_X([^[:alnum:]_]|$)' <<<"${stack_header}"; then
+    fail "GNU_STACK is executable"
+  fi
+
+  grep -Eq \
+    '^[[:space:]]*0x[0-9A-Fa-f]+[[:space:]]+FLAGS[[:space:]]+.*[[:space:]]BIND_NOW([[:space:]]|$)' \
+    <<<"${readobj_output}" || fail "missing BIND_NOW dynamic flag"
+  grep -Eq \
+    '^[[:space:]]*0x[0-9A-Fa-f]+[[:space:]]+FLAGS_1[[:space:]]+.*[[:space:]]PIE([[:space:]]|$)' \
+    <<<"${readobj_output}" || fail "missing PIE dynamic flag"
+}
+
 check_linux() {
   local expected_machine expected_interpreter expected_needed
   if [[ "${platform}" == "linux-x64" ]]; then
@@ -251,6 +306,7 @@ libm.so.6"
     || fail "expected a position-independent ELF executable"
   grep -Eq "Machine:[[:space:]]+${expected_machine}([^[:alnum:]_]|$)" <<<"${readobj_output}" \
     || fail "expected ${expected_machine}"
+  check_elf_hardening
 
   local interpreter
   interpreter="$(elf_interpreter)"
@@ -369,6 +425,13 @@ check_windows() {
     || fail "expected PE32+ optional header"
   grep -Eq 'IMAGE_FILE_EXECUTABLE_IMAGE([^[:alnum:]_]|$)' <<<"${readobj_output}" \
     || fail "expected a PE executable image"
+  for mitigation in \
+    IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE \
+    IMAGE_DLL_CHARACTERISTICS_NX_COMPAT \
+    IMAGE_DLL_CHARACTERISTICS_HIGH_ENTROPY_VA; do
+    grep -Eq "^[[:space:]]*${mitigation}([^[:alnum:]_]|$)" <<<"${readobj_output}" \
+      || fail "missing PE mitigation ${mitigation}"
+  done
   grep -Eq 'Subsystem:[[:space:]]+IMAGE_SUBSYSTEM_WINDOWS_CUI([^[:alnum:]_]|$)' <<<"${readobj_output}" \
     || fail "expected Windows console subsystem"
 
@@ -402,6 +465,7 @@ check_freebsd() {
     || fail "expected a position-independent FreeBSD executable"
   grep -Eq 'Machine:[[:space:]]+EM_X86_64([^[:alnum:]_]|$)' <<<"${readobj_output}" \
     || fail "expected EM_X86_64"
+  check_elf_hardening
   grep -Eq 'OS/ABI:[[:space:]]+(FreeBSD|UNIX - FreeBSD)' <<<"${readobj_output}" \
     || fail "expected FreeBSD ELF ABI"
   assert_exact_lines "DT_NEEDED libraries" "$(elf_needed_libraries)" "libc.so.7
@@ -452,4 +516,10 @@ case "${platform}" in
   freebsd-x64) check_freebsd ;;
 esac
 
-printf 'release binary compatibility ok: %s %s\n' "${platform}" "${binary}"
+scanner_authority="authoritative-package-root:${LLVM_TOOL_ROOT:-declared-release-runfile}"
+scanner_inputs="llvm-readobj=${LLVM_READOBJ}"
+if [[ -n "${LLVM_OBJDUMP}" ]]; then
+  scanner_inputs="${scanner_inputs},llvm-objdump=${LLVM_OBJDUMP}"
+fi
+printf 'release binary compatibility ok: %s %s scanner-inputs=%s scanner-authority=%s\n' \
+  "${platform}" "${binary}" "${scanner_inputs}" "${scanner_authority}"

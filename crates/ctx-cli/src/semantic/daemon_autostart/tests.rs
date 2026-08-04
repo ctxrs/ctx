@@ -1,7 +1,10 @@
 use super::*;
 use crate::config::CONFIG_FILE;
 use crate::semantic::paths_status::DaemonLock;
-use std::sync::{Arc, Barrier};
+use std::{
+    cell::Cell,
+    sync::{Arc, Barrier},
+};
 
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
 const DAEMON_ENV_PROBE_EXPECTED_CHANNEL: &str = "CTX_DAEMON_ENV_PROBE_EXPECTED_CHANNEL";
@@ -813,7 +816,7 @@ fn setup_handoff_accepts_a_slow_healthy_daemon_owned_first_build() {
     });
     let refresh_job = json!({
         "owner": "daemon",
-        "kind": "source_backed",
+        "kind": "core_refresh",
         "status": "running",
         "request_id": "cold-build",
         "request_state": "running",
@@ -832,8 +835,14 @@ fn setup_handoff_accepts_a_slow_healthy_daemon_owned_first_build() {
         Some(&expected),
         1_050,
     );
-    let active_refresh =
-        daemon_owned_source_refresh_is_active(Some(&status), Some(&refresh_job), Some(41), 1_050);
+    let active_refresh = daemon_owned_source_refresh_is_active(
+        Some(&status),
+        Some(&refresh_job),
+        Some(41),
+        None,
+        None,
+        1_050,
+    );
 
     assert!(active_refresh);
     assert_eq!(
@@ -943,7 +952,7 @@ fn setup_handoff_rejects_real_daemon_and_refresh_failures() {
     });
     let failed_refresh = json!({
         "owner": "daemon",
-        "kind": "source_backed",
+        "kind": "core_refresh",
         "status": "failed",
         "request_id": "failed-build",
         "request_state": "failed",
@@ -955,6 +964,8 @@ fn setup_handoff_rejects_real_daemon_and_refresh_failures() {
         Some(&running_status),
         Some(&failed_refresh),
         Some(44),
+        None,
+        None,
         4_010,
     ));
     assert_eq!(
@@ -985,6 +996,186 @@ fn enabled_daemon_handoff_is_bounded_to_five_seconds() {
         .checked_mul(u32::try_from(pauses).unwrap())
         .unwrap();
     assert_eq!(maximum_wait, StdDuration::from_secs(5));
+    assert_eq!(DAEMON_SETUP_HANDOFF_TIMEOUT, maximum_wait);
+}
+
+fn test_daemon_owner(owner_id: &str, pid: u32) -> DaemonOwnerIdentity {
+    DaemonOwnerIdentity {
+        owner_id: owner_id.to_owned(),
+        pid,
+        started_at_ms: 1_000,
+        binary_sha256: "0123456789abcdef".to_owned(),
+    }
+}
+
+#[test]
+fn hung_listener_is_terminated_only_after_bounded_unusable_owner_proof() -> Result<()> {
+    let owner = test_daemon_owner("hung-owner", 41);
+    let current_checks = Cell::new(0);
+    let active_checks = Cell::new(0);
+    let endpoint_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &owner,
+        || {
+            current_checks.set(current_checks.get() + 1);
+            Ok(Some(owner.clone()))
+        },
+        || {
+            active_checks.set(active_checks.get() + 1);
+            false
+        },
+        || {
+            endpoint_checks.set(endpoint_checks.get() + 1);
+            Ok(false)
+        },
+        |owner_id| {
+            assert_eq!(owner_id, "hung-owner");
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(terminated);
+    assert_eq!(current_checks.get(), 2);
+    assert_eq!(active_checks.get(), 2);
+    assert_eq!(endpoint_checks.get(), 1);
+    assert_eq!(terminations.get(), 1);
+    Ok(())
+}
+
+#[test]
+fn concurrent_recovery_never_terminates_a_replacement_owner() -> Result<()> {
+    let unusable_owner = test_daemon_owner("unusable-owner", 41);
+    let replacement_owner = test_daemon_owner("replacement-owner", 42);
+    let current_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &unusable_owner,
+        || {
+            let check = current_checks.get();
+            current_checks.set(check + 1);
+            Ok(Some(if check == 0 {
+                unusable_owner.clone()
+            } else {
+                replacement_owner.clone()
+            }))
+        },
+        || false,
+        || Ok(false),
+        |_| {
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(!terminated);
+    assert_eq!(current_checks.get(), 2);
+    assert_eq!(terminations.get(), 0);
+    Ok(())
+}
+
+fn running_refresh_status(heartbeat_at_ms: i64) -> (Value, Value) {
+    (
+        json!({
+            "status": "running",
+            "pid": 41,
+            "started_at_ms": 1_000,
+            "heartbeat_at_ms": heartbeat_at_ms,
+        }),
+        json!({
+            "owner": "daemon",
+            "kind": "core_refresh",
+            "status": "running",
+            "request_id": "slow-refresh",
+            "request_state": "running",
+            "last_run_at_ms": 2_000,
+            "progress": {
+                "phase": "refreshing",
+                "completed_sources": 800,
+                "total_sources": 5_781,
+            },
+        }),
+    )
+}
+
+#[test]
+fn stale_running_refresh_does_not_suppress_bounded_owner_takeover() -> Result<()> {
+    let owner = test_daemon_owner("stale-refresh-owner", 41);
+    let now_ms = 100_000;
+    let stale_at_ms = now_ms - DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS - 1;
+    let (status, refresh_job) = running_refresh_status(stale_at_ms);
+    let endpoint_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &owner,
+        || Ok(Some(owner.clone())),
+        || {
+            daemon_owned_source_refresh_is_active(
+                Some(&status),
+                Some(&refresh_job),
+                Some(owner.pid),
+                Some(owner.started_at_ms),
+                Some(stale_at_ms),
+                now_ms,
+            )
+        },
+        || {
+            endpoint_checks.set(endpoint_checks.get() + 1);
+            Ok(false)
+        },
+        |owner_id| {
+            assert_eq!(owner_id, "stale-refresh-owner");
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(terminated);
+    assert_eq!(endpoint_checks.get(), 1);
+    assert_eq!(terminations.get(), 1);
+    Ok(())
+}
+
+#[test]
+fn fresh_slow_refresh_progress_prevents_unusable_endpoint_takeover() -> Result<()> {
+    let owner = test_daemon_owner("refresh-owner", 41);
+    let now_ms = 100_000;
+    let stale_heartbeat_at_ms = now_ms - DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS - 1;
+    let (status, refresh_job) = running_refresh_status(stale_heartbeat_at_ms);
+    let endpoint_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &owner,
+        || Ok(Some(owner.clone())),
+        || {
+            daemon_owned_source_refresh_is_active(
+                Some(&status),
+                Some(&refresh_job),
+                Some(owner.pid),
+                Some(owner.started_at_ms),
+                Some(now_ms),
+                now_ms,
+            )
+        },
+        || {
+            endpoint_checks.set(endpoint_checks.get() + 1);
+            Ok(false)
+        },
+        |_| {
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(!terminated);
+    assert_eq!(endpoint_checks.get(), 0);
+    assert_eq!(terminations.get(), 0);
+    Ok(())
 }
 
 #[test]

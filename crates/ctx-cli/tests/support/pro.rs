@@ -182,7 +182,7 @@ def status_body(requested_generation):
       'storage_evidence': {
         'graph_manifest_schema': 3,
         'flat_format_version': 2,
-        'materializer_checkpoint_version': 3,
+        'materializer_checkpoint_version': 4,
         'journal_pack_format_version': 3,
         'legacy_journals_written': 0,
         'journal_pages_written': 1,
@@ -357,10 +357,14 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
         },
         "metadata": {},
         "repository_candidate_evidence": {
-            "repository_observation_revision": 2,
-            "bounded_shell_subset_revision": 1,
-            "association_policy_revision": 4,
-            "outcome_capture_revision": 2,
+            "repository_observation_revision":
+                ctx_history_core::CORE_REPOSITORY_OBSERVATION_REVISION,
+            "bounded_shell_subset_revision":
+                ctx_history_core::CORE_BOUNDED_SHELL_SUBSET_REVISION,
+            "association_policy_revision":
+                ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+            "outcome_capture_revision":
+                ctx_history_core::CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             "candidates": [
                 {"kind": "session_cwd", "path": "/fixture/repository"},
                 {"kind": "file_activity_path", "path": "/fixture/repository/src/lib.rs"},
@@ -372,6 +376,9 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
         "repository_vcs_observations": [],
     }))
     .unwrap();
+    record
+        .validate_contract()
+        .expect("provider-neutral Pro fixture must use the exact Core repository contract");
     let source = record.source.clone();
     let observation = serde_json::json!({
         "source": source,
@@ -483,7 +490,7 @@ receipt = {
 storage_evidence = {
   'graph_manifest_schema':3,
   'flat_format_version':2,
-  'materializer_checkpoint_version':3,
+  'materializer_checkpoint_version':4,
   'journal_pack_format_version':3,
   'legacy_journals_written':0,
   'journal_pages_written':2,
@@ -649,7 +656,7 @@ def status_body(request):
       'storage_evidence':{
         'graph_manifest_schema':3,
         'flat_format_version':2,
-        'materializer_checkpoint_version':3,
+        'materializer_checkpoint_version':4,
         'journal_pack_format_version':3,
         'legacy_journals_written':0,
         'journal_pages_written':2,

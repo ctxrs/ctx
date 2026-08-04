@@ -109,6 +109,7 @@ def _release_route_impl(ctx):
         ctx.file.cargo_lock,
         ctx.file.license_materials,
         ctx.file.rustc,
+        ctx.file.rust_objcopy,
         ctx.file.sbom_inventory,
         ctx.file.target_matrix,
         ctx.executable.sbom_tool,
@@ -121,6 +122,7 @@ def _release_route_impl(ctx):
         "{}/packager".format(route_root): ctx.executable.packager,
         "{}/release-targets-v1.json".format(route_root): ctx.file.target_matrix,
         "{}/rustc".format(route_root): ctx.file.rustc,
+        "{}/rust-objcopy".format(route_root): ctx.file.rust_objcopy,
         "{}/sbom-tool".format(route_root): ctx.executable.sbom_tool,
         "{}/sbom-inventory.txt".format(route_root): ctx.file.sbom_inventory,
     }
@@ -136,6 +138,9 @@ def _release_route_impl(ctx):
     )
     runfiles = runfiles.merge(ctx.attr.advisory_gate[DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.attr.packager[DefaultInfo].default_runfiles)
+    runfiles = runfiles.merge(
+        ctx.attr.rust_objcopy[0][DefaultInfo].default_runfiles,
+    )
     runfiles = runfiles.merge(ctx.attr.sbom_tool[DefaultInfo].default_runfiles)
     return [
         DefaultInfo(executable = launcher, runfiles = runfiles),
@@ -178,6 +183,11 @@ _release_route = rule(
             cfg = _route_transition,
             mandatory = True,
         ),
+        "rust_objcopy": attr.label(
+            allow_single_file = True,
+            cfg = _route_transition,
+            mandatory = True,
+        ),
         "sbom_inventory": attr.label(
             allow_single_file = True,
             cfg = _route_transition,
@@ -202,6 +212,7 @@ def public_cli_release_route(
         advisory_gate,
         artifact,
         rustc,
+        rust_objcopy,
         packager,
         sbom_inventory,
         license_materials,
@@ -219,6 +230,7 @@ def public_cli_release_route(
         llvm_readobj = llvm_readobj,
         packager = packager,
         rustc = rustc,
+        rust_objcopy = rust_objcopy,
         sbom_inventory = sbom_inventory,
         sbom_tool = sbom_tool,
         target_id = target_id,

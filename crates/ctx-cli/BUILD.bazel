@@ -539,6 +539,7 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "pro_test_support_tests",
     src = "tests/pro_test_support.rs",
+    extra_deps = ["//crates/ctx-history-core:lib"],
     test_support = [
         "base",
         "pro",

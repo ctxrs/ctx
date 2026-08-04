@@ -50,8 +50,10 @@ pub(super) use hydration::{
     SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
 };
 pub(crate) use query::SourceSearchRequest;
-pub(super) use query::{index_search_filters, NormalizedSearchQuery};
-use query::{normalize_search_request, resolve_source_search_backend, validate_search_request};
+pub(super) use query::{
+    index_search_filters, resolve_source_search_backend, NormalizedSearchQuery,
+};
+use query::{normalize_search_request, validate_search_request};
 
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
@@ -173,6 +175,7 @@ fn run_search_inner(
     let requested_backend = resolve_source_search_backend(&request, &config)?;
     request.backend = Some(requested_backend);
     request.semantic_enabled = config.semantic_search_enabled();
+    request.semantic_daemon_enabled = config.daemon.enabled;
     let semantic_weight = request.semantic_weight;
     let json_output = args.format == JsonOutputFormat::Json;
     if request.refresh == RefreshArg::Background
@@ -326,6 +329,7 @@ pub(crate) fn mcp_search(
     let config = config::AppConfig::load(data_root)?;
     request.backend = Some(resolve_source_search_backend(&request, &config)?);
     request.semantic_enabled = config.semantic_search_enabled();
+    request.semantic_daemon_enabled = config.daemon.enabled;
     let semantic_weight = request.semantic_weight;
     let refresh = refresh_for_search(&request, data_root)?;
     let (value, collection, index, _, _) =
@@ -505,7 +509,7 @@ pub(super) fn collect_search_hits_with_backend(
                 );
             }
             let pin = semantic_pin
-                .as_ref()
+                .as_mut()
                 .ok_or_else(|| anyhow!("source-backed semantic query pin is unavailable"))?;
             PinnedSourceBackedGeneration::semantic_candidates_for_pinned_source_generation(
                 index,
@@ -553,11 +557,18 @@ where
         collection.semantic_weight = 0.0;
         return Ok(collection);
     }
-    if !request.semantic_enabled {
-        let not_ready = SourceBackedSemanticNotReady::new(
-            "semantic_disabled",
-            "local semantic retrieval is disabled",
-        );
+    if !request.semantic_enabled || !request.semantic_daemon_enabled {
+        let not_ready = if request.semantic_enabled {
+            SourceBackedSemanticNotReady::new(
+                "semantic_daemon_disabled",
+                "local semantic retrieval is unavailable because the ctx daemon is disabled",
+            )
+        } else {
+            SourceBackedSemanticNotReady::new(
+                "semantic_disabled",
+                "local semantic retrieval is disabled",
+            )
+        };
         if requested_backend == SearchBackendArg::Semantic {
             return Err(anyhow::Error::new(not_ready));
         }
@@ -572,7 +583,11 @@ where
         collection.requested_backend = requested_backend;
         collection.effective_backend = SearchBackendArg::Lexical;
         collection.semantic_weight = semantic_weight;
-        collection.semantic_status = "disabled";
+        collection.semantic_status = if request.semantic_enabled {
+            "unavailable"
+        } else {
+            "disabled"
+        };
         collection.semantic_fallback = Some(fallback.clone());
         collection.semantic_diagnostics = Some(json!({
             "query_count": queries.len(),

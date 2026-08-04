@@ -113,14 +113,7 @@ fn structural_verification_fault_never_switches_the_active_pointer() {
     }));
     let error = candidate.commit(|_| true).unwrap_err();
     assert!(
-        matches!(
-            error,
-            IndexError::DocumentCountMismatch {
-                manifest: 1,
-                index: 0
-            } | IndexError::CandidateDeletionDensityExceeded { .. }
-                | IndexError::ChecksumMismatch
-        ),
+        matches!(error, IndexError::ConcurrentGenerationChange),
         "{error:?}"
     );
     assert_eq!(
@@ -171,6 +164,80 @@ fn omitted_managed_body_projection_fault_before_pointer_switch_keeps_previous_ge
     assert_eq!(still_active.generation_id(), baseline.generation_id);
     assert_eq!(still_active.count_term("baseline").unwrap(), 1);
     assert_eq!(still_active.count_term("candidate").unwrap(), 0);
+}
+
+fn assert_incremental_segment_corruption_is_rejected(corrupt_retained_segment: bool) {
+    let temp = tempdir().unwrap();
+    let source = source(if corrupt_retained_segment {
+        "retained-segment-corruption.jsonl"
+    } else {
+        "changed-segment-corruption.jsonl"
+    });
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "uncorrupted retained body"))
+        .unwrap();
+    initial
+        .certify_source(appendable_certificate(&source, 1, 1, 10))
+        .unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+    let base_segment_ids = {
+        let (searcher, _) = open_unverified_generation(temp.path());
+        searcher
+            .segment_readers()
+            .iter()
+            .map(|segment| segment.segment_id().uuid_string())
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let base = append.begin_source_append(source.clone()).unwrap().clone();
+    append
+        .add_core_record(document(&source, 2, "uncorrupted changed body"))
+        .unwrap();
+    append
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&source, 2, 2, 20),
+                10,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    append.before_pointer_switch = Some(Box::new(move |candidate_path| {
+        corrupt_candidate_segment_store(
+            candidate_path,
+            &base_segment_ids,
+            corrupt_retained_segment,
+        );
+    }));
+
+    assert!(matches!(
+        append.commit(|_| true),
+        Err(IndexError::ChecksumMismatch)
+    ));
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), baseline.generation_id);
+    assert_eq!(retained.count_term("retained").unwrap(), 1);
+    assert_eq!(retained.count_term("changed").unwrap(), 0);
+}
+
+#[test]
+fn final_candidate_hash_rejects_changed_segment_byte_corruption() {
+    assert_incremental_segment_corruption_is_rejected(false);
+}
+
+#[test]
+fn final_candidate_hash_rejects_retained_segment_byte_corruption() {
+    assert_incremental_segment_corruption_is_rejected(true);
 }
 
 #[test]
@@ -244,7 +311,7 @@ fn stored_core_aggregate_fault_before_pointer_switch_keeps_the_previous_generati
 
     assert!(matches!(
         candidate.commit(|_| true),
-        Err(IndexError::CoreRecordAggregateMismatch(_))
+        Err(IndexError::ConcurrentGenerationChange)
     ));
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
@@ -517,7 +584,7 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
 
         assert!(matches!(
             candidate.commit(|_| true),
-            Err(IndexError::InvalidStoredDocumentField(_))
+            Err(IndexError::ConcurrentGenerationChange)
         ));
         assert_eq!(
             fs::read(temp.path().join("active-generation.json")).unwrap(),

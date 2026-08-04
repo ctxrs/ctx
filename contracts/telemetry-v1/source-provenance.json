@@ -14,7 +14,7 @@
     "crates/ctx-cli/src/analytics/provider.rs": "21a9a670ca9958df30b9af3b2bf7bc875cd28c03781000e25ade1bf09c78a1ed",
     "crates/ctx-cli/src/analytics/product.rs": "90c84843faf1550d417da4e7e77134c6a2fc9d6425018b6b0c458be74e358387",
     "crates/ctx-cli/src/analytics/sender.rs": "9436f22e2e0d0a000730b9503a60649e7278d7ed8ded1313bc762d879e9cc0ed",
-    "crates/ctx-cli/src/upgrade/command.rs": "61c1c2ddc26febb832c50354e1f32d4da0af03e534ce0a7fb182066a459b8325",
+    "crates/ctx-cli/src/upgrade/command.rs": "ae95b91d83102841ff8340aecfcbc749342e0b1e8f9c67f61766e8eb4a21698a",
     "crates/ctx-cli/src/upgrade/command/daemon.rs": "e0006c93dbf400be045cce25515a30e7f5226d579c15169bb5043820f390dd24",
     "crates/ctx-cli/src/upgrade/state.rs": "f289f488c4131477729e100d58f262bfb44fa2abfbcbf68f8c7c54e5f2a538d7"
   }

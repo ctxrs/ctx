@@ -8,9 +8,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput, SourceAnchor,
-    SourceKey, StableEntityId, TypedKey,
+    NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
+    TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -19,9 +20,12 @@ use super::*;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::normalization::provider_explicit_result_value_text,
-    provider::source_backed::family::jsonl::{
-        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjector, JsonlRecordRef,
+    provider::source_backed::{
+        family::jsonl::{
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
+        },
+        FallbackEventIdentityState,
     },
     CaptureError, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -30,10 +34,11 @@ const SOURCE_SCHEMA_VARIANT: &str = "meta-json-messages-jsonl-v1";
 const SOURCE_ANCHOR_NAMESPACE: &str = "mistral-vibe-session-id";
 const NATIVE_SESSION_NAMESPACE: &str = "mistral-vibe-session";
 const NATIVE_EVENT_NAMESPACE: &str = "mistral-vibe-message";
-const NATIVE_EVENT_POSITION_KIND: &str = "mistral-vibe-messages-jsonl-ordinal";
 const LOGICAL_SESSION_KIND: &str = "mistral-vibe-session";
 const LOGICAL_EVENT_KIND: &str = "mistral-vibe-event";
 const PARSER_REVISION: &str = "mistral-vibe-source-backed-v3";
+const EVENT_IDENTITY_REVISION: &str = "mistral-vibe-content-occurrence-v1";
+const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.mistral-vibe.fallback-event-fingerprint.v1\0";
 const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.mistral-vibe.source-revision.v1\0";
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +93,10 @@ impl JsonlFamilyAdapter for MistralVibeJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn event_identity_revision(&self) -> &'static str {
+        EVENT_IDENTITY_REVISION
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
@@ -188,12 +197,46 @@ impl JsonlFamilyAdapter for MistralVibeJsonlAdapter {
     fn projector(
         &self,
         leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
         _source_file: Arc<OpenedProviderSourceFile>,
         _imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "Mistral Vibe adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
+        let binding = decode_binding(leaf)?;
         Ok(Box::new(MistralProjector {
             source: leaf.source().clone(),
-            binding: decode_binding(leaf)?,
+            fallback_identities: FallbackEventIdentityState::new(
+                leaf.source().clone(),
+                binding.session_id,
+                LOGICAL_EVENT_KIND,
+                "mistral-vibe.message.fallback",
+                EVENT_IDENTITY_REVISION,
+                mode.into(),
+                base_event_lookup,
+            )?,
+            binding,
         }))
     }
 }
@@ -201,6 +244,7 @@ impl JsonlFamilyAdapter for MistralVibeJsonlAdapter {
 struct MistralProjector {
     source: SourceKey,
     binding: Binding,
+    fallback_identities: FallbackEventIdentityState,
 }
 
 impl JsonlFamilyProjector for MistralProjector {
@@ -209,16 +253,26 @@ impl JsonlFamilyProjector for MistralProjector {
         record: JsonlRecordRef<'_>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
-        if let Some(document) = core_record(&self.source, &self.binding, record)? {
+        if let Some(document) = core_record(
+            &self.source,
+            &self.binding,
+            &mut self.fallback_identities,
+            record,
+        )? {
             emit(document)?;
         }
         Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.fallback_identities.finish()
     }
 }
 
 fn core_record(
     source: &SourceKey,
     binding: &Binding,
+    fallback_identities: &mut FallbackEventIdentityState,
     record: JsonlRecordRef<'_>,
 ) -> Result<Option<CoreRecord>> {
     let bytes = record.bytes();
@@ -250,18 +304,22 @@ fn core_record(
     let evidence = record.evidence();
     let ordinal = evidence.physical_ordinal();
     let native_event_id = provider_native_event_id(&value);
-    let native_item_key = match native_event_id.as_deref() {
-        Some(id) => NativeItemKey::native_id(
-            NATIVE_EVENT_NAMESPACE,
-            TypedKey::utf8(id).map_err(contract)?,
-        )
-        .map_err(contract)?,
-        None => NativeItemKey::certified_position(
-            NATIVE_EVENT_POSITION_KIND,
-            TypedKey::U64(ordinal),
-            PositionStability::AppendStable,
-        )
-        .map_err(contract)?,
+    let (native_item_key, native_event_id) = match native_event_id {
+        Some(id) => {
+            let native_event_id = TypedKey::utf8(id).map_err(contract)?;
+            (
+                NativeItemKey::native_id(NATIVE_EVENT_NAMESPACE, native_event_id.clone())
+                    .map_err(contract)?,
+                native_event_id,
+            )
+        }
+        None => {
+            let assignment = fallback_identities.assign(fallback_fingerprint(bytes)?, None)?;
+            (
+                assignment.native_item_key().clone(),
+                assignment.native_event_id().clone(),
+            )
+        }
     };
     let event_id = derive_event_id(EventIdentityInput {
         source,
@@ -271,11 +329,6 @@ fn core_record(
         subrecord_selector: None,
     })
     .map_err(contract)?;
-    let native_event_id = native_event_id
-        .map(TypedKey::utf8)
-        .transpose()
-        .map_err(contract)?
-        .unwrap_or(TypedKey::U64(ordinal));
     let role = crate::provider::normalization::provider_role(Some(role));
     let touched_files = collect_touched_paths(&value)?;
     let linkage = output
@@ -332,6 +385,14 @@ fn core_record(
     record.content.structured_content = structured_content;
     record.validate_contract().map_err(contract)?;
     Ok(Some(record))
+}
+
+fn fallback_fingerprint(bytes: &[u8]) -> Result<TypedKey> {
+    let mut digest = Sha256::new();
+    digest.update(FALLBACK_FINGERPRINT_DOMAIN);
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+    TypedKey::bytes(digest.finalize().to_vec()).map_err(contract)
 }
 
 struct AdmittedMetadata {
@@ -540,7 +601,9 @@ fn contract(error: impl std::fmt::Display) -> CaptureError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::source_backed::family::jsonl::JsonlRecordRef;
+    use crate::provider::source_backed::{
+        family::jsonl::JsonlRecordRef, FallbackEventIdentityMode,
+    };
 
     fn binding() -> (SourceKey, Binding) {
         let source = source_key("session").unwrap();
@@ -562,9 +625,23 @@ mod tests {
         )
     }
 
+    fn fallback_identities(source: &SourceKey, binding: &Binding) -> FallbackEventIdentityState {
+        FallbackEventIdentityState::new(
+            source.clone(),
+            binding.session_id,
+            LOGICAL_EVENT_KIND,
+            "mistral-vibe.message.fallback",
+            EVENT_IDENTITY_REVISION,
+            FallbackEventIdentityMode::Cold,
+            None,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn tool_results_keep_all_outcomes_complete_linkage_and_large_content() {
         let (source, binding) = binding();
+        let mut fallback_identities = fallback_identities(&source, &binding);
         for (status, expected) in [
             (Some("success"), "success"),
             (Some("failure"), "failure"),
@@ -580,9 +657,14 @@ mod tests {
                 value["status"] = Value::String(status.to_owned());
             }
             let bytes = serde_json::to_vec(&value).unwrap();
-            let record = core_record(&source, &binding, JsonlRecordRef::for_test(&bytes, 0))
-                .unwrap()
-                .unwrap();
+            let record = core_record(
+                &source,
+                &binding,
+                &mut fallback_identities,
+                JsonlRecordRef::for_test(&bytes, 0),
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(
                 record.content.meaningful_text(),
                 format!("complete-{expected}")
@@ -605,9 +687,14 @@ mod tests {
             "tool_call_id": "large",
         }))
         .unwrap();
-        let record = core_record(&source, &binding, JsonlRecordRef::for_test(&bytes, 1))
-            .unwrap()
-            .unwrap();
+        let record = core_record(
+            &source,
+            &binding,
+            &mut fallback_identities,
+            JsonlRecordRef::for_test(&bytes, 1),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(record.content.meaningful_text().len(), 9 * 1024 * 1024 + 4);
         assert!(record.content.meaningful_text().ends_with("tail"));
 
@@ -617,6 +704,12 @@ mod tests {
             "output": "two",
         }))
         .unwrap();
-        assert!(core_record(&source, &binding, JsonlRecordRef::for_test(&bytes, 2)).is_err());
+        assert!(core_record(
+            &source,
+            &binding,
+            &mut fallback_identities,
+            JsonlRecordRef::for_test(&bytes, 2),
+        )
+        .is_err());
     }
 }

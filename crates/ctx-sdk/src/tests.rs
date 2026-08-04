@@ -3,6 +3,40 @@ use std::fs;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::process::Child;
+#[cfg(unix)]
+use std::{thread, time::Instant};
+
+#[cfg(unix)]
+fn spawn_json_shell(body: &str) -> Child {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", body])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_configured(&mut command).unwrap()
+}
+
+#[cfg(unix)]
+fn spawn_mcp_shell(body: &str) -> Child {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", body])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_configured(&mut command).unwrap()
+}
+
+#[cfg(unix)]
+fn make_test_executable(path: &Path) {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    // Bazel's sandbox can briefly report ETXTBSY immediately after publishing
+    // a generated executable. Keep that filesystem race out of subprocess tests.
+    thread::sleep(Duration::from_millis(25));
+}
 
 #[test]
 fn reads_shared_search_fixture() {
@@ -116,7 +150,7 @@ printf '%s\n' '{"session":{"ctx_session_id":"session-1"},"events":[],"mode":"lit
     )
     .unwrap();
     #[cfg(unix)]
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    make_test_executable(&script);
 
     let client = AgentHistoryClient::local(LocalBackendConfig {
         ctx_binary: script,
@@ -143,6 +177,375 @@ printf '%s\n' '{"session":{"ctx_session_id":"session-1"},"events":[],"mode":"lit
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn local_json_collector_drains_complete_stdout_beyond_pipe_capacity() {
+    const PADDING_BYTES: usize = 2 * 1024 * 1024;
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "x".repeat(CHUNK_BYTES);
+    let body = format!(
+        r#"printf '%s' '{{"session":{{"ctx_session_id":"session-1"}},"events":[{{"ctx_event_id":"event-1","ctx_session_id":"session-1","text":"'
+chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk"
+  i=$((i + 1))
+done
+printf '%s\n' '"}}],"mode":"lite","format":"json"}}'"#,
+        PADDING_BYTES / CHUNK_BYTES
+    );
+    let raw = collect_ctx_json(spawn_json_shell(&body), Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        raw["events"][0]["text"].as_str().unwrap().len(),
+        PADDING_BYTES
+    );
+    let session = normalize(
+        AgentHistoryOperation::ShowSession,
+        BackendInfo::local(None),
+        raw,
+    )
+    .unwrap()
+    .session
+    .unwrap();
+    assert_eq!(session.events.len(), 1);
+    assert_eq!(
+        session.events[0].text.as_ref().unwrap().len(),
+        PADDING_BYTES
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn local_json_collector_drains_large_stderr_with_bounded_retention() {
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "diagnostic".repeat(CHUNK_BYTES / "diagnostic".len());
+    let body = format!(
+        r#"chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk" >&2
+  i=$((i + 1))
+done
+printf '%s\n' '{{"initialized":true,"local_only":true}}'"#,
+        (MAX_RETAINED_SUBPROCESS_STDERR_BYTES * 4) / chunk.len()
+    );
+    let raw = collect_ctx_json(spawn_json_shell(&body), Duration::from_secs(5)).unwrap();
+    assert_eq!(raw["initialized"], true);
+    let retained = read_bounded_pipe(
+        std::io::Cursor::new(vec![b'x'; MAX_RETAINED_SUBPROCESS_STDERR_BYTES * 2]),
+        MAX_RETAINED_SUBPROCESS_STDERR_BYTES,
+    )
+    .unwrap();
+    assert_eq!(retained.len(), MAX_RETAINED_SUBPROCESS_STDERR_BYTES);
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_collector_rejects_oversized_stdout_without_partial_json() {
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "x".repeat(CHUNK_BYTES);
+    let body = format!(
+        r#"cat >/dev/null
+printf '%s' '{{"jsonrpc":"2.0","id":2,"result":{{"padding":"'
+chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk"
+  i=$((i + 1))
+done
+printf '%s\n' '"}}}}'"#,
+        MAX_RETAINED_MCP_STDOUT_BYTES / CHUNK_BYTES + 1
+    );
+    let error = collect_ctx_mcp_output(spawn_mcp_shell(&body), Vec::new(), Duration::from_secs(10))
+        .unwrap_err();
+
+    assert_eq!(error.body.code, AgentHistoryErrorCode::AdapterError);
+    assert_eq!(
+        error.body.message,
+        format!(
+            "ctx MCP stdout exceeded the {}-byte response limit",
+            MAX_RETAINED_MCP_STDOUT_BYTES
+        )
+    );
+    assert!(error.body.cause.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_collector_drains_oversized_stderr_with_bounded_retention() {
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "e".repeat(CHUNK_BYTES);
+    let body = format!(
+        r#"cat >/dev/null
+chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk" >&2
+  i=$((i + 1))
+done
+exit 7"#,
+        (MAX_RETAINED_SUBPROCESS_STDERR_BYTES * 4) / CHUNK_BYTES
+    );
+    let output =
+        collect_ctx_mcp_output(spawn_mcp_shell(&body), Vec::new(), Duration::from_secs(5)).unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(output.stderr.len(), MAX_RETAINED_SUBPROCESS_STDERR_BYTES);
+    assert!(output.stderr.iter().all(|byte| *byte == b'e'));
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_nonzero_exit_prefers_typed_stderr_to_invalid_stdout() {
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "x".repeat(CHUNK_BYTES);
+    let oversized = format!(
+        r#"cat >/dev/null
+printf '%s' '{{"jsonrpc":"2.0","id":2,"result":{{"padding":"'
+chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk"
+  i=$((i + 1))
+done
+printf '%s\n' '"}}}}'
+printf '%s\n' 'not found: fixture session' >&2
+exit 7"#,
+        MAX_RETAINED_MCP_STDOUT_BYTES / CHUNK_BYTES + 1
+    );
+    let cases = [
+        (
+            "malformed",
+            "cat >/dev/null\nprintf '%s\\n' '{\"jsonrpc\":'\nprintf '%s\\n' 'not found: fixture session' >&2\nexit 7"
+                .to_owned(),
+        ),
+        ("oversized", oversized),
+    ];
+
+    for (case, body) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join(format!("ctx-mcp-{case}"));
+        fs::write(&script, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+        make_test_executable(&script);
+        let client = AgentHistoryClient::local(LocalBackendConfig {
+            ctx_binary: script,
+            data_root: Some(temp.path().to_path_buf()),
+            env: BTreeMap::new(),
+            timeout: Duration::from_secs(10),
+        });
+
+        let error = client
+            .show_session(
+                "session-1",
+                ShowSessionOptions {
+                    mode: "log".to_owned(),
+                    limit: Some(1),
+                    cursor: None,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.body.code, AgentHistoryErrorCode::NotFound, "{case}");
+        assert_eq!(error.body.message, "not found: fixture session", "{case}");
+        assert!(!error.body.retryable, "{case}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn local_json_timeout_kills_and_reaps_the_child() {
+    let child = spawn_json_shell("while :; do :; done");
+    let pid = child.id().to_string();
+    let error = collect_ctx_json(child, Duration::from_millis(100)).unwrap_err();
+    assert_eq!(error.body.code, AgentHistoryErrorCode::Timeout);
+    assert!(
+        !Path::new("/proc").join(&pid).exists(),
+        "timed-out ctx child {pid} was not reaped"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn local_json_wrapper_with_inherited_stream_descendant_is_bounded_and_cleaned() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("ctx-inherited-streams");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$$" > "$CTX_DATA_ROOT/wrapper.pid"
+sleep 30 &
+printf '%s\n' "$!" > "$CTX_DATA_ROOT/descendant.pid"
+printf '%s\n' '{"initialized":true,"local_only":true}'
+"#,
+    )
+    .unwrap();
+    make_test_executable(&script);
+
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: script,
+        data_root: Some(temp.path().to_path_buf()),
+        env: BTreeMap::new(),
+        timeout: Duration::from_millis(200),
+    });
+    assert_inherited_stream_timeout(temp.path(), move || client.status());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mcp_wrapper_with_inherited_stream_descendant_is_bounded_and_cleaned() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("ctx-mcp-inherited-streams");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$$" > "$CTX_DATA_ROOT/wrapper.pid"
+sleep 30 &
+printf '%s\n' "$!" > "$CTX_DATA_ROOT/descendant.pid"
+cat >/dev/null
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"ctx"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[],"structuredContent":{"schema_version":1,"target":"session","payload_type":"session_transcript","ctx_session_id":"session-1","mode":"log","format":"json","session":{"ctx_session_id":"session-1"},"events":[]}}}'
+"#,
+    )
+    .unwrap();
+    make_test_executable(&script);
+
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: script,
+        data_root: Some(temp.path().to_path_buf()),
+        env: BTreeMap::new(),
+        timeout: Duration::from_millis(200),
+    });
+    assert_inherited_stream_timeout(temp.path(), move || {
+        client.show_session(
+            "session-1",
+            ShowSessionOptions {
+                mode: "log".to_owned(),
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn assert_inherited_stream_timeout(
+    data_root: &Path,
+    operation: impl FnOnce() -> Result<AgentHistoryEnvelope, AgentHistoryError> + Send + 'static,
+) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let started = Instant::now();
+        let result = operation();
+        sender.send((started.elapsed(), result)).unwrap();
+    });
+
+    let wrapper_pid = wait_for_test_pid(&data_root.join("wrapper.pid"));
+    let mut cleanup = ProcessGroupCleanup(Some(wrapper_pid));
+    let descendant_pid = wait_for_test_pid(&data_root.join("descendant.pid"));
+    let (elapsed, result) = match receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(err) => {
+            drop(cleanup);
+            let _ = receiver.recv_timeout(Duration::from_secs(2));
+            drop(worker);
+            panic!("SDK collection exceeded its bounded deadline: {err}");
+        }
+    };
+    worker.join().unwrap();
+
+    let error = result.unwrap_err();
+    assert_eq!(error.body.code, AgentHistoryErrorCode::Timeout);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "inherited stream handles delayed return for {elapsed:?}"
+    );
+    wait_for_process_termination(wrapper_pid);
+    wait_for_process_termination(descendant_pid);
+    cleanup.0 = None;
+}
+
+#[cfg(target_os = "linux")]
+struct ProcessGroupCleanup(Option<u32>);
+
+#[cfg(target_os = "linux")]
+impl Drop for ProcessGroupCleanup {
+    fn drop(&mut self) {
+        let Some(process_group) = self.0 else {
+            return;
+        };
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{process_group}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_test_pid(path: &Path) -> u32 {
+    let started = Instant::now();
+    loop {
+        if let Ok(raw) = fs::read_to_string(path) {
+            return raw.trim().parse().unwrap();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_process_termination(pid: u32) {
+    let process_status = Path::new("/proc").join(pid.to_string()).join("stat");
+    let started = Instant::now();
+    while fs::read_to_string(&process_status)
+        .ok()
+        .and_then(|status| {
+            status
+                .rsplit_once(") ")
+                .and_then(|(_, fields)| fields.chars().next())
+        })
+        .is_some_and(|state| !matches!(state, 'Z' | 'X'))
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "task-owned process {pid} remained live after collection cleanup"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn local_json_nonzero_exit_preserves_typed_error() {
+    let child = spawn_json_shell("printf '%s\\n' 'not found: fixture session' >&2\nexit 7");
+    let error = collect_ctx_json(child, Duration::from_secs(5)).unwrap_err();
+    assert_eq!(error.body.code, AgentHistoryErrorCode::NotFound);
+    assert_eq!(error.body.message, "not found: fixture session");
+    assert!(!error.body.retryable);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_json_malformed_stdout_preserves_decode_error() {
+    let child = spawn_json_shell("printf '%s\\n' '{\"initialized\":'");
+    let error = collect_ctx_json(child, Duration::from_secs(5)).unwrap_err();
+    assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+    assert_eq!(error.body.message, "failed to decode ctx JSON");
+    assert!(error.body.cause.is_some());
+    assert!(!error.body.retryable);
+}
+
 #[test]
 fn show_session_limit_and_cursor_use_existing_mcp_paging_contract() {
     let temp = tempfile::tempdir().unwrap();
@@ -159,7 +562,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[],"structuredContent
     )
     .unwrap();
     #[cfg(unix)]
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    make_test_executable(&script);
 
     let client = AgentHistoryClient::local(LocalBackendConfig {
         ctx_binary: script,
@@ -391,7 +794,7 @@ printf '%s\n' '{"initialized":true,"local_only":true}'
     )
     .unwrap();
     #[cfg(unix)]
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    make_test_executable(&script);
 
     let client = AgentHistoryClient::local(LocalBackendConfig {
         ctx_binary: script,
@@ -444,7 +847,7 @@ exit 2
     )
     .unwrap();
     #[cfg(unix)]
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    make_test_executable(&script);
 
     let client = AgentHistoryClient::local(LocalBackendConfig {
         ctx_binary: script,
@@ -588,7 +991,7 @@ exit 2
     )
     .unwrap();
     #[cfg(unix)]
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    make_test_executable(&script);
 
     let data_root = temp.path().join("data-root");
     let client = AgentHistoryClient::local(LocalBackendConfig {

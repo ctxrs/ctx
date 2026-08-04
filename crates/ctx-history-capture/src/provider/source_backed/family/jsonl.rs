@@ -30,7 +30,7 @@ pub(crate) use revalidation::{
 pub(crate) use revalidation::{observe_opened_file, revalidate_frozen_prefix};
 pub(crate) use route::{
     jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
-    JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
+    JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
 };
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-direct-jsonl-nativepath-prefix-v1\0";
 const PAGE_MAX_RECORDS: usize = 64;

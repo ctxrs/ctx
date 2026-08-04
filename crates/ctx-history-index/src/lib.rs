@@ -56,31 +56,32 @@ pub use policy::{
     SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
 };
 pub use preparation::{CoreRecordPreparer, PreparedCoreRecord};
-#[cfg(test)]
-pub(crate) use publication::manifest_path;
 pub(crate) use publication::{
     canonical_commit_payload, create_candidate_generation, load_active_generation_pointer,
     load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
-    physical_integrity_digest, publish_active_generation_pointer,
-    reclaim_inactive_generation_directories, reclaim_unreferenced_manifests,
-    reconcile_commit_error, searcher_generation, sync_directory, sync_generation,
-    verify_complete_searcher, verify_physical_integrity, verify_searcher,
+    physical_integrity_audit, publish_active_generation_pointer,
+    reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
+    reclaim_unreferenced_manifests, reconcile_commit_error, scrub_and_certify_physical_integrity,
+    searcher_generation, sync_directory, sync_generation, verify_or_certify_physical_integrity,
+    verify_physical_integrity, verify_publication_candidate, verify_searcher,
     verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
-    INDEX_GENERATIONS_DIRECTORY,
+    PhysicalIntegrityAudit, INDEX_GENERATIONS_DIRECTORY,
 };
+#[cfg(test)]
+pub(crate) use publication::{manifest_path, physical_integrity_digest};
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
     CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters, CoreEventRangePage,
     CoreEventRangeScope, CoreEventRangeSelection, CoreEventRecord, CoreSemanticEventPage,
     CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan, EventRecord,
     EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits,
-    SemanticEligibility, SemanticEventCursor, SemanticEventPage, SessionEventCoordinate,
-    SessionEventCursor, SessionRecord, SourceEventCursor, SourceEventPage, StoredCoreEventRecord,
-    StoredCoreRecordJson, StoredCoreSourceEventPage, DEFAULT_CORE_EVENT_PAGE_BUDGET,
-    LEXICAL_QUERY_LIMITS, MAX_CORE_EVENT_RANGE_PAGE_ITEMS, MAX_LEXICAL_QUERY_RESULTS,
-    MAX_SEMANTIC_EVENT_PAGE_ITEMS, MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS,
-    MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS, MAX_SESSION_EVENT_PAGE_ITEMS,
-    MAX_SOURCE_EVENT_PAGE_ITEMS,
+    SemanticEligibility, SemanticEventCursor, SemanticEventPage, SemanticFilterProjection,
+    SessionEventCoordinate, SessionEventCursor, SessionRecord, SourceEventCursor, SourceEventPage,
+    StoredCoreEventRecord, StoredCoreRecordJson, StoredCoreSourceEventPage,
+    DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS, MAX_CORE_EVENT_RANGE_PAGE_ITEMS,
+    MAX_LEXICAL_QUERY_RESULTS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+    MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
+    MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
 pub use reader::VerifiedIndex;
 #[cfg(test)]
@@ -299,6 +300,7 @@ impl GenerationWriter {
                 .map(|slot| slot.generation_id().to_owned())
                 .collect::<Vec<_>>();
             reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
+            reclaim_unreferenced_certifications(&root, active_pointer.as_ref())?;
         }
 
         let rebuild_marked = if pointer_requires_rebuild {

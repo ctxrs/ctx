@@ -161,6 +161,7 @@ fn request(refresh: RefreshArg) -> SourceSearchRequest {
         backend: Some(SearchBackendArg::Lexical),
         semantic_weight: 0.35,
         semantic_enabled: true,
+        semantic_daemon_enabled: true,
         refresh,
     }
 }

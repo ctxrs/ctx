@@ -67,10 +67,18 @@ def _rust_toolchain_file_impl(ctx):
             files = [toolchain.cargo, toolchain.rustc],
             transitive_files = toolchain.rustc_lib,
         )
-    else:
+    elif ctx.attr.tool == "rustc":
         executable = toolchain.rustc
         runfiles = ctx.runfiles(
             files = [toolchain.rustc],
+            transitive_files = toolchain.rustc_lib,
+        )
+    else:
+        executable = toolchain.rust_objcopy
+        if executable == None:
+            fail("configured Rust toolchain does not declare rust-objcopy")
+        runfiles = ctx.runfiles(
+            files = [executable, toolchain.rustc],
             transitive_files = toolchain.rustc_lib,
         )
 
@@ -80,7 +88,14 @@ def _rust_toolchain_file_impl(ctx):
 rust_toolchain_file = rule(
     implementation = _rust_toolchain_file_impl,
     attrs = {
-        "tool": attr.string(mandatory = True, values = ["cargo", "rustc"]),
+        "tool": attr.string(
+            mandatory = True,
+            values = [
+                "cargo",
+                "rust-objcopy",
+                "rustc",
+            ],
+        ),
     },
     toolchains = [str(Label("@rules_rust//rust:toolchain_type"))],
 )

@@ -14,7 +14,7 @@ struct RecordingBackend {
     fail_graph_key_verification: bool,
     fail_commercial_credentials_after_delete: bool,
     require_cleanup_phase_for_graph_delete: Option<PathBuf>,
-    make_root_unsafe_on_graph_delete: Option<PathBuf>,
+    require_graph_absent_for_graph_delete: Option<PathBuf>,
     deleted: RefCell<Vec<String>>,
     deletion_thumbprints: RefCell<Vec<String>>,
     deletion_namespaces: RefCell<Vec<GraphKeyCredentialNamespace>>,
@@ -49,15 +49,16 @@ impl DeletionBackend for RecordingBackend {
                 }
             }
         }
+        if let Some(graph) = &self.require_graph_absent_for_graph_delete {
+            if graph.exists() {
+                bail!("key_store_unavailable: graph artifacts still existed before key deletion");
+            }
+        }
         self.deleted.borrow_mut().push(graph_id.to_owned());
         self.deletion_thumbprints
             .borrow_mut()
             .push(target.installation_key_thumbprint.clone());
         self.deletion_namespaces.borrow_mut().push(target.namespace);
-        if let Some(root) = &self.make_root_unsafe_on_graph_delete {
-            make_private_directory_unsafe(root)
-                .context("key_store_unavailable: make graph root unsafe")?;
-        }
         if self.fail_graph_key_verification {
             bail!("key_store_unavailable: simulated graph-key verification failure");
         }
@@ -188,30 +189,51 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     let pro = ProFilesystemLayout::new(root.path()).pro_root();
     fs::create_dir(&pro).unwrap();
     restrict_private_directory(&pro).unwrap();
-    fs::write(pro.join(PRO_GRAPH_FILE_NAME), "ciphertext").unwrap();
+    create_current_graph(&pro);
     (root, pro)
 }
 
-#[cfg(unix)]
-fn make_private_directory_unsafe(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+fn graph_dir(pro: &Path) -> PathBuf {
+    pro.join(ctx_pro_host_protocol::PRO_GRAPH_DIRECTORY_NAME)
 }
 
-#[cfg(windows)]
-fn make_private_directory_unsafe(path: &Path) -> std::io::Result<()> {
-    let status = std::process::Command::new("icacls.exe")
-        .arg(path)
-        .args(["/grant", "*S-1-1-0:F"])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(
-            "failed to make Windows Pro directory ACL unsafe",
-        ))
-    }
+fn graph_manifest(pro: &Path) -> PathBuf {
+    graph_dir(pro).join("graph-manifest.ctxm")
+}
+
+fn create_current_graph(pro: &Path) {
+    let graph = graph_dir(pro);
+    fs::create_dir(&graph).unwrap();
+    restrict_private_directory(&graph).unwrap();
+    write_private_graph_file(&graph_manifest(pro));
+}
+
+fn write_private_graph_file(path: &Path) {
+    fs::write(path, "ciphertext").unwrap();
+    restrict_private_file(path).unwrap();
+}
+
+fn exact_graph_artifact_paths(pro: &Path) -> Vec<PathBuf> {
+    let graph = graph_dir(pro);
+    let object = "a".repeat(64);
+    let materialization = "b".repeat(64);
+    vec![
+        graph.join("graph-manifest.ctxm"),
+        graph.join(".graph-materializer-control.ctxc"),
+        graph.join("graph-manifest.publication-lock"),
+        graph.join("graph-materializer.lock"),
+        graph.join(format!(".graph-manifest-{object}.candidate")),
+        graph.join(format!(".graph-materializer-control-{object}.candidate")),
+        graph.join(".graph-manifest-open-1-0.encrypted-tmp"),
+        graph.join(format!(".graph-materializer-open-{object}-0.encrypted-tmp")),
+        graph.join(format!("graph-segment-{object}-bbbbbbbb.ctxs")),
+        graph.join(format!(
+            ".graph-materializer-journal-{materialization}-{object}.ctxj"
+        )),
+        graph.join(format!(
+            ".graph-materializer-pack-{materialization}-{object}.ctxp"
+        )),
+    ]
 }
 
 #[test]
@@ -224,7 +246,7 @@ fn direct_deletion_accepts_an_already_missing_graph_key() {
     };
     let mut service = LocalDeletionService::with_backend_for_test(backend);
     service.delete_graph_data(root.path()).unwrap();
-    assert!(!pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(!graph_dir(&pro).exists());
     assert_eq!(service.backend.deleted.borrow().len(), 1);
 }
 
@@ -264,7 +286,7 @@ fn mixed_valid_and_corrupt_namespace_inventory_deletes_nothing() {
     assert!(error.to_string().starts_with("key_store_unavailable:"));
     assert_eq!(service.backend.inventory_reads.get(), 1);
     assert!(service.backend.deleted.borrow().is_empty());
-    assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(graph_manifest(&pro).exists());
     assert!(!local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
 }
 
@@ -318,7 +340,58 @@ fn helperless_graphless_bootstrap_skips_helper_ipc_and_cleans_credentials() {
 }
 
 #[test]
-fn helperless_bootstrap_retry_validates_legacy_cleanup_identity_without_helper_ipc() {
+fn initialized_empty_graph_directory_is_removed_without_key_inventory() {
+    let root = tempdir().unwrap();
+    crate::identity::installation_id(root.path()).unwrap();
+    let layout = ProFilesystemLayout::new(root.path());
+    fs::create_dir(&layout.pro_root()).unwrap();
+    restrict_private_directory(&layout.pro_root()).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    fs::create_dir(layout.graph_dir()).unwrap();
+    restrict_private_directory(&layout.graph_dir()).unwrap();
+    let backend = RecordingBackend {
+        corrupt_inventory: true,
+        ..RecordingBackend::default()
+    };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
+
+    service.delete_graph_data(root.path()).unwrap();
+
+    assert!(!layout.graph_dir().exists());
+    assert_eq!(service.backend.inventory_reads.get(), 0);
+    assert!(service.backend.deleted.borrow().is_empty());
+}
+
+#[test]
+fn flat_graph_is_deleted_before_graph_key_and_verified_absent() {
+    let root = tempdir().unwrap();
+    crate::identity::installation_id(root.path()).unwrap();
+    let pro = ProFilesystemLayout::new(root.path()).pro_root();
+    fs::create_dir(&pro).unwrap();
+    restrict_private_directory(&pro).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    let graph = pro.join("graph");
+    fs::create_dir(&graph).unwrap();
+    restrict_private_directory(&graph).unwrap();
+    let manifest = graph.join("graph-manifest.ctxm");
+    fs::write(&manifest, b"encrypted manifest").unwrap();
+    restrict_private_file(&manifest).unwrap();
+    let backend = RecordingBackend {
+        targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 24)]),
+        require_graph_absent_for_graph_delete: Some(graph.clone()),
+        ..RecordingBackend::default()
+    };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
+
+    service.delete_graph_data(root.path()).unwrap();
+
+    assert!(!graph.exists());
+    assert_eq!(service.backend.inventory_reads.get(), 1);
+    assert_eq!(service.backend.deleted.borrow().len(), 1);
+}
+
+#[test]
+fn interrupted_graph_delete_retries_recorded_targets_without_helper_ipc() {
     let root = tempdir().unwrap();
     let installation_id = crate::identity::installation_id(root.path()).unwrap();
     let pro = ProFilesystemLayout::new(root.path()).pro_root();
@@ -339,7 +412,7 @@ fn helperless_bootstrap_retry_validates_legacy_cleanup_identity_without_helper_i
 
     service.delete_graph_data(root.path()).unwrap();
     assert_eq!(service.backend.inventory_reads.get(), 0);
-    assert!(service.backend.deleted.borrow().is_empty());
+    assert_eq!(service.backend.deleted.borrow().len(), 1);
     service.delete_commercial_credentials(root.path()).unwrap();
     service.finish_deletion(root.path()).unwrap();
     assert!(!local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
@@ -418,7 +491,7 @@ fn helper_present_without_graph_deletes_recorded_graph_keys() {
         expected_namespaces
     );
     assert!(layout.helper_path().exists());
-    assert!(!layout.graph_path().exists());
+    assert!(!layout.graph_dir().exists());
 }
 
 #[test]
@@ -472,7 +545,7 @@ fn late_failure_retries_from_cleanup_phase_after_records_are_gone() {
     };
     let mut first = LocalDeletionService::with_backend_for_test(first_backend);
     first.delete_graph_data(root.path()).unwrap();
-    assert!(!pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(!graph_dir(&pro).exists());
     assert!(first.delete_commercial_credentials(root.path()).is_err());
     assert!(*first.backend.credentials_deleted.borrow());
     assert!(local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
@@ -505,7 +578,7 @@ fn cleanup_phase_cannot_cross_installation_identities() {
     let error = service.delete_graph_data(root.path()).unwrap_err();
     assert!(error.to_string().starts_with("key_store_unavailable:"));
     assert!(service.backend.deleted.borrow().is_empty());
-    assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(graph_manifest(&pro).exists());
 }
 
 #[test]
@@ -519,14 +592,15 @@ fn empty_cleanup_phase_cannot_delete_graph_artifacts() {
     let error = service.delete_graph_data(root.path()).unwrap_err();
     assert!(error.to_string().starts_with("key_store_unavailable:"));
     assert!(service.backend.deleted.borrow().is_empty());
-    assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(graph_manifest(&pro).exists());
 }
 
 #[test]
 fn graph_family_and_interrupted_rebuild_files_are_all_removed() {
     let (root, pro) = fixture();
-    for path in graph_paths(&pro) {
-        fs::write(path, "ciphertext").unwrap();
+    let paths = exact_graph_artifact_paths(&pro);
+    for path in &paths {
+        write_private_graph_file(path);
     }
     let backend = RecordingBackend {
         targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 4)]),
@@ -534,11 +608,33 @@ fn graph_family_and_interrupted_rebuild_files_are_all_removed() {
     };
     let mut service = LocalDeletionService::with_backend_for_test(backend);
     service.delete_graph_data(root.path()).unwrap();
-    assert!(graph_paths(&pro).iter().all(|path| !path.exists()));
+    assert!(paths.iter().all(|path| !path.exists()));
+    assert!(!graph_dir(&pro).exists());
 }
 
 #[test]
-fn failed_authoritative_key_inventory_verification_preserves_graph_files() {
+fn unexpected_near_miss_blocks_all_graph_and_key_deletion() {
+    let (root, pro) = fixture();
+    let near_miss = graph_dir(&pro).join(".graph-manifest-deadbeef.candidate");
+    write_private_graph_file(&near_miss);
+    let backend = RecordingBackend {
+        targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 25)]),
+        ..RecordingBackend::default()
+    };
+    let mut service = LocalDeletionService::with_backend_for_test(backend);
+
+    let error = service.delete_graph_data(root.path()).unwrap_err();
+
+    assert!(error.to_string().starts_with("invalid_request:"));
+    assert_eq!(service.backend.inventory_reads.get(), 0);
+    assert!(service.backend.deleted.borrow().is_empty());
+    assert!(graph_manifest(&pro).exists());
+    assert!(near_miss.exists());
+    assert!(!local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
+}
+
+#[test]
+fn failed_graph_key_verification_keeps_retry_phase_after_graph_removal() {
     let (root, pro) = fixture();
     let backend = RecordingBackend {
         targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 5)]),
@@ -547,23 +643,8 @@ fn failed_authoritative_key_inventory_verification_preserves_graph_files() {
     };
     let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
-    assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
-}
-
-#[cfg(any(unix, windows))]
-#[test]
-fn graph_root_is_reverified_immediately_before_file_removal() {
-    let (root, pro) = fixture();
-    let graph = pro.join(PRO_GRAPH_FILE_NAME);
-    let backend = RecordingBackend {
-        targets: BTreeSet::from([test_target(GraphKeyCredentialNamespace::Production, 6)]),
-        make_root_unsafe_on_graph_delete: Some(pro.clone()),
-        ..RecordingBackend::default()
-    };
-    let mut service = LocalDeletionService::with_backend_for_test(backend);
-    assert!(service.delete_graph_data(root.path()).is_err());
-    assert_eq!(service.backend.deleted.borrow().len(), 1);
-    assert!(graph.exists());
+    assert!(!graph_dir(&pro).exists());
+    assert!(local_pro_graph_key_cleanup_phase_exists(root.path()).unwrap());
 }
 
 #[cfg(unix)]
@@ -595,12 +676,12 @@ fn symlink_graph_or_graph_root_fails_before_key_deletion() {
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )
     .unwrap();
-    let outside_file = outside.path().join("graph");
-    fs::write(&outside_file, "outside").unwrap();
-    symlink(&outside_file, pro_root.join(PRO_GRAPH_FILE_NAME)).unwrap();
+    let outside_graph = outside.path().join("graph");
+    fs::create_dir(&outside_graph).unwrap();
+    symlink(&outside_graph, graph_dir(&pro_root)).unwrap();
     assert!(service.delete_graph_data(root.path()).is_err());
     assert!(service.backend.deleted.borrow().is_empty());
-    assert_eq!(fs::read(outside_file).unwrap(), b"outside");
+    assert!(outside_graph.is_dir());
 }
 
 #[cfg(unix)]
@@ -617,7 +698,7 @@ fn shared_graph_root_fails_before_key_deletion() {
     let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
     assert!(service.backend.deleted.borrow().is_empty());
-    assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(graph_manifest(&pro).exists());
 }
 
 #[cfg(windows)]
@@ -632,7 +713,7 @@ fn shared_graph_root_fails_before_key_derivation_on_windows() {
     let mut service = LocalDeletionService::with_backend_for_test(backend);
     assert!(service.delete_graph_data(root.path()).is_err());
     assert!(service.backend.deleted.borrow().is_empty());
-    assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(graph_manifest(&pro).exists());
 }
 
 #[test]
@@ -653,5 +734,5 @@ fn missing_identity_fails_closed_while_ciphertext_remains() {
         .unwrap_err()
         .to_string()
         .starts_with("key_store_unavailable:"));
-    assert!(pro.join(PRO_GRAPH_FILE_NAME).exists());
+    assert!(graph_manifest(&pro).exists());
 }

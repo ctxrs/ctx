@@ -138,7 +138,7 @@ unavailable:
    their sticky owner-private file backends.
 2. Import canonical NativePath history, materialize Core plus Pro, restart the daemon,
    and run `ctx blame`; verify Core Tantivy retrieval never depends on either
-   credential namespace and the SQLCipher graph remains derived-facts,
+   credential namespace and the encrypted Flat/FST graph remains derived-facts,
    source-rebuildable state.
 3. Upgrade the same root to the candidate pair, restart the daemon and helper,
    and repeat materialization and blame. Verify neither namespace changes its

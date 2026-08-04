@@ -618,6 +618,7 @@ fn tool_search(
             backend,
             semantic_weight,
             semantic_enabled: false,
+            semantic_daemon_enabled: false,
             refresh: RefreshArg::Off,
         },
         data_root,

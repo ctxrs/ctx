@@ -41,6 +41,23 @@ fn session(provider: CaptureProvider) -> DirectJsonlSession {
     }
 }
 
+fn fallback_identities(
+    adapter: DirectJsonlFamilyAdapter,
+    source: &SourceKey,
+    session_id: StableEntityId,
+) -> FallbackEventIdentityState {
+    FallbackEventIdentityState::new(
+        source.clone(),
+        session_id,
+        "direct-jsonl-event",
+        format!("{}.direct-jsonl-fallback", adapter.provider.as_str()),
+        DIRECT_JSONL_EVENT_IDENTITY_REVISION,
+        JsonlFamilyProjectionMode::Cold.into(),
+        None,
+    )
+    .unwrap()
+}
+
 fn project(provider: CaptureProvider, value: &Value) -> (Vec<CoreRecord>, u64) {
     let adapter = adapter(provider);
     let session = session(provider);
@@ -58,6 +75,7 @@ fn project(provider: CaptureProvider, value: &Value) -> (Vec<CoreRecord>, u64) {
     .unwrap();
     let mut projector = DirectJsonlFamilyProjector {
         adapter,
+        fallback_identities: fallback_identities(adapter, &source, session_id),
         source,
         bound_session: session,
         session_id,
@@ -110,6 +128,7 @@ fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>,
     .unwrap();
     let mut projector = DirectJsonlFamilyProjector {
         adapter,
+        fallback_identities: fallback_identities(adapter, &source, session_id),
         source,
         bound_session: session,
         session_id,
@@ -142,6 +161,49 @@ fn event_ids_by_body(records: &[CoreRecord]) -> BTreeMap<String, String> {
             )
         })
         .collect()
+}
+
+#[test]
+fn tabnine_fallback_ids_ignore_earlier_position_changes() {
+    let event = |body: &str| json!({"type": "user", "content": body});
+    let baseline_values = [event("anchor"), event("target"), event("suffix")];
+    let (baseline, rejected) = project_all(CaptureProvider::Tabnine, &baseline_values);
+    assert_eq!(rejected, 0);
+    let baseline = event_ids_by_body(&baseline);
+
+    let (inserted, rejected) = project_all(
+        CaptureProvider::Tabnine,
+        &[
+            event("inserted"),
+            event("anchor"),
+            event("target"),
+            event("suffix"),
+        ],
+    );
+    assert_eq!(rejected, 0);
+    let inserted = event_ids_by_body(&inserted);
+    for body in ["anchor", "target", "suffix"] {
+        assert_eq!(inserted.get(body), baseline.get(body));
+    }
+
+    let (deleted, rejected) = project_all(
+        CaptureProvider::Tabnine,
+        &[event("target"), event("suffix")],
+    );
+    assert_eq!(rejected, 0);
+    let deleted = event_ids_by_body(&deleted);
+    assert_eq!(deleted.get("target"), baseline.get("target"));
+    assert_eq!(deleted.get("suffix"), baseline.get("suffix"));
+
+    let (rewritten, rejected) = project_all(
+        CaptureProvider::Tabnine,
+        &[event("anchor"), event("rewritten"), event("suffix")],
+    );
+    assert_eq!(rejected, 0);
+    let rewritten = event_ids_by_body(&rewritten);
+    assert_eq!(rewritten.get("anchor"), baseline.get("anchor"));
+    assert_eq!(rewritten.get("suffix"), baseline.get("suffix"));
+    assert_ne!(rewritten.get("rewritten"), baseline.get("target"));
 }
 
 #[test]

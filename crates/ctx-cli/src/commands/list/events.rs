@@ -131,8 +131,8 @@ fn execute(
     if let Some(cursor) = &cursor {
         cursor.validate_selection(&selection)?;
     }
-    let index = open_event_range_index(data_root, cursor.as_ref())?;
     let limit = validated_limit(args.limit)?;
+    let index = open_event_range_index(data_root, cursor.as_ref())?;
     let request = EventQueryWireRequest::from_selection(&selection, args.content, limit);
     match args.format {
         EventQueryFormat::Json => {

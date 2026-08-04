@@ -13,6 +13,7 @@ publish = false
 base64.workspace = true
 crc32fast = "1.5"
 ctx-history-core = { path = "../ctx-history-core" }
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -20,3 +21,6 @@ tantivy.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

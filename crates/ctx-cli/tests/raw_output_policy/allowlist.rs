@@ -61,6 +61,16 @@ const SOURCE_INDEX_STREAM: TestOwner = TestOwner::behavioral(
     &["src/commands/source_index/show.rs"],
     &["stream_cli_session", "events_returned", "from_slice"],
 );
+const LIST_EVENTS_STREAM: TestOwner = TestOwner::behavioral(
+    "src/commands/list/events/tests.rs::jsonl_flushes_each_event_before_fetching_the_next_page_and_completes_once",
+    &["src/commands/list/events.rs"],
+    &["write_jsonl_pages", "flush_offsets", "completion"],
+);
+const LIST_EVENTS_ERROR: TestOwner = TestOwner::behavioral(
+    "src/commands/list/events/tests.rs::run_writes_typed_resource_errors_only_to_the_selected_machine_stderr",
+    &["src/commands/list/events.rs"],
+    &["run", "stderr_copy", "from_slice"],
+);
 const STATS: TestOwner = TestOwner::behavioral(
     "src/commands/stats.rs::stats_plain_output_matches_ansi_stripped_output",
     &["src/commands/stats.rs"],
@@ -126,6 +136,11 @@ const UPGRADE: TestOwner = TestOwner::behavioral(
     ],
     &["auto_mode_json"],
 );
+const HOSTED_TRANSACTION_RECEIPT: TestOwner = TestOwner::behavioral(
+    "src/upgrade/install/hosted_transaction/tests.rs::hosted_transaction_receipts_keep_the_stable_machine_schema",
+    &["src/upgrade/install/hosted_transaction.rs"],
+    &["install_receipt", "uninstall_receipt", "install_value"],
+);
 const WINDOWS_READINESS: TestOwner = TestOwner::behavioral(
     "src/upgrade/install/transaction/windows/tests.rs::readiness_receipt_is_exact_and_bounded",
     &["src/upgrade/install/transaction/windows/helper.rs"],
@@ -169,6 +184,7 @@ const BUILD: &str = "build.rs";
 const ANALYTICS_SENDER: &str = "src/analytics/sender.rs";
 const BLAME: &str = "src/commands/blame.rs";
 const INDEX_COMMAND: &str = "src/commands/index.rs";
+const LIST_EVENTS: &str = "src/commands/list/events.rs";
 const SOURCE_INDEX_SHOW: &str = "src/commands/source_index/show.rs";
 const SOURCE_INDEX_SHARED: &str = "src/commands/source_index/shared.rs";
 const STATS_COMMAND: &str = "src/commands/stats.rs";
@@ -196,6 +212,7 @@ const UI_MODULE: &str = "src/ui/mod.rs";
 const UI_WRITER: &str = "src/ui/writer.rs";
 const UPGRADE_HUMAN: &str = "src/upgrade/command/human.rs";
 const UPGRADE_STATUS: &str = "src/upgrade/command/status.rs";
+const HOSTED_TRANSACTION: &str = "src/upgrade/install/hosted_transaction.rs";
 const WINDOWS_HELPER: &str = "src/upgrade/install/transaction/windows/helper.rs";
 
 pub(super) const ALLOWLIST: &[AllowEntry] = &[
@@ -217,7 +234,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BUILD,
-        "main#3@148f1a006bdde4df",
+        "main#3@885cbe6e55e728c7",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -225,7 +242,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BUILD,
-        "main#4@885cbe6e55e728c7",
+        "main#4@cfdf571c6929ef24",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -233,7 +250,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BUILD,
-        "main#5@cfdf571c6929ef24",
+        "main#5@56760ef03ecfb333",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -241,7 +258,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BUILD,
-        "main#6@56760ef03ecfb333",
+        "main#6@0acadf523050c898",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -249,7 +266,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BUILD,
-        "main#7@0acadf523050c898",
+        "main#7@17e10d71b62c3756",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -257,15 +274,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         BUILD,
-        "main#8@17e10d71b62c3756",
-        PrintMacro,
-        MachineProtocol,
-        CARGO_DIRECTIVE,
-        GATE
-    ),
-    allow!(
-        BUILD,
-        "main#9@7eb64b1c42785964",
+        "main#8@7eb64b1c42785964",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -302,6 +311,54 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         Infrastructure,
         SPECIALIZED_STREAM,
         INDEX
+    ),
+    allow!(
+        LIST_EVENTS,
+        "run#1@75fb49cf76ccc9aa",
+        UiRawWriter,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIST_EVENTS_STREAM
+    ),
+    allow!(
+        LIST_EVENTS,
+        "run#1@4304839f9eecc9a1",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        LIST_EVENTS_ERROR
+    ),
+    allow!(
+        LIST_EVENTS,
+        "run#2@4fcd3f430927aff6",
+        UiRawWriter,
+        Infrastructure,
+        RAW_INFRASTRUCTURE,
+        LIST_EVENTS_ERROR
+    ),
+    allow!(
+        LIST_EVENTS,
+        "execute#1@5f7779205b7edc27",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        LIST_EVENTS_STREAM
+    ),
+    allow!(
+        LIST_EVENTS,
+        "write_jsonl_pages#1@3e567be51ce81a14",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        LIST_EVENTS_STREAM
+    ),
+    allow!(
+        LIST_EVENTS,
+        "write_jsonl_pages#2@a58701092e0a06cc",
+        DirectWrite,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        LIST_EVENTS_STREAM
     ),
     allow!(
         INDEX_COMMAND,
@@ -1110,6 +1167,22 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         MachineProtocol,
         JSON_PROTOCOL,
         UPGRADE
+    ),
+    allow!(
+        HOSTED_TRANSACTION,
+        "install#1@953d9c197658b947",
+        PrintMacro,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        HOSTED_TRANSACTION_RECEIPT
+    ),
+    allow!(
+        HOSTED_TRANSACTION,
+        "print_uninstall_receipt#1@77194866b863aaa6",
+        PrintMacro,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        HOSTED_TRANSACTION_RECEIPT
     ),
     allow!(
         WINDOWS_HELPER,

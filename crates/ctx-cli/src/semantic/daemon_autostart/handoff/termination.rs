@@ -17,10 +17,20 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     data_root: &Path,
     expected_executable: &Path,
 ) -> Result<()> {
+    terminate_identity_verified_residual_daemon_owner(data_root, expected_executable, None)
+}
+
+#[cfg(unix)]
+pub(in crate::semantic) fn terminate_identity_verified_residual_daemon_owner(
+    data_root: &Path,
+    expected_executable: &Path,
+    expected_owner_id: Option<&str>,
+) -> Result<()> {
     terminate_identity_verified_unix_daemon(
         data_root,
         expected_executable,
         ResidualDaemonIdentityPolicy::CurrentDigest,
+        expected_owner_id,
     )
 }
 
@@ -33,6 +43,7 @@ pub(super) fn terminate_identity_verified_legacy_daemon(
         data_root,
         expected_executable,
         ResidualDaemonIdentityPolicy::LegacyV025,
+        None,
     )
 }
 
@@ -51,25 +62,36 @@ fn terminate_identity_verified_unix_daemon(
     data_root: &Path,
     expected_executable: &Path,
     identity_policy: ResidualDaemonIdentityPolicy,
+    expected_owner_id: Option<&str>,
 ) -> Result<()> {
     let lock_path = daemon_lock_path(data_root);
     let value = read_pid_lock_json(&lock_path)
         .ok_or_else(|| anyhow!("active ctx daemon lock has no readable identity"))?;
     let pid = pid_from_lock_json(&value)
         .ok_or_else(|| anyhow!("active ctx daemon lock has no process identity"))?;
+    let observed_owner_id = value.get("owner_id").and_then(Value::as_str);
+    if expected_owner_id.is_some() && observed_owner_id != expected_owner_id {
+        return Err(anyhow!(
+            "ctx daemon ownership changed after health verification; refusing to signal"
+        ));
+    }
+    let owner_id = expected_owner_id.or(observed_owner_id).map(str::to_owned);
     let signal_target = UnixSignalTarget::open(pid, identity_policy)?;
     verify_residual_daemon_identity(data_root, expected_executable, pid, &value, identity_policy)?;
     signal_target.signal(
         data_root,
         expected_executable,
         identity_policy,
+        owner_id.as_deref(),
         libc::SIGTERM,
     )?;
     let term_deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
-    while daemon_lock_is_active(data_root) && Instant::now() < term_deadline {
+    while daemon_lock_matches_termination_owner(data_root, pid, owner_id.as_deref())
+        && Instant::now() < term_deadline
+    {
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
     }
-    if !daemon_lock_is_active(data_root) {
+    if !daemon_lock_matches_termination_owner(data_root, pid, owner_id.as_deref()) {
         return Ok(());
     }
 
@@ -77,9 +99,25 @@ fn terminate_identity_verified_unix_daemon(
         data_root,
         expected_executable,
         identity_policy,
+        owner_id.as_deref(),
         libc::SIGKILL,
     )?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn daemon_lock_matches_termination_owner(
+    data_root: &Path,
+    expected_pid: u32,
+    expected_owner_id: Option<&str>,
+) -> bool {
+    daemon_lock_is_active(data_root)
+        && read_pid_lock_json(&daemon_lock_path(data_root)).is_some_and(|current| {
+            pid_from_lock_json(&current) == Some(expected_pid)
+                && expected_owner_id.is_none_or(|owner_id| {
+                    current.get("owner_id").and_then(Value::as_str) == Some(owner_id)
+                })
+        })
 }
 
 #[cfg(unix)]
@@ -113,6 +151,7 @@ impl UnixSignalTarget {
         data_root: &Path,
         expected_executable: &Path,
         identity_policy: ResidualDaemonIdentityPolicy,
+        expected_owner_id: Option<&str>,
         signal: libc::c_int,
     ) -> Result<()> {
         let pid = match self {
@@ -120,7 +159,13 @@ impl UnixSignalTarget {
             Self::PidFd(pidfd) => pidfd.pid,
             Self::ReverifiedPid(pid) => *pid,
         };
-        reverify_residual_daemon_identity(data_root, expected_executable, pid, identity_policy)?;
+        reverify_residual_daemon_identity(
+            data_root,
+            expected_executable,
+            pid,
+            identity_policy,
+            expected_owner_id,
+        )?;
         match self {
             #[cfg(target_os = "linux")]
             Self::PidFd(pidfd) => pidfd.signal(signal),
@@ -194,10 +239,18 @@ fn reverify_residual_daemon_identity(
     expected_executable: &Path,
     expected_pid: u32,
     identity_policy: ResidualDaemonIdentityPolicy,
+    expected_owner_id: Option<&str>,
 ) -> Result<()> {
     let current = read_pid_lock_json(&daemon_lock_path(data_root))
         .ok_or_else(|| anyhow!("ctx daemon identity disappeared before termination signal"))?;
     if pid_from_lock_json(&current) != Some(expected_pid) {
+        return Err(anyhow!(
+            "ctx daemon ownership changed before termination signal; refusing to signal"
+        ));
+    }
+    if expected_owner_id.is_some()
+        && current.get("owner_id").and_then(Value::as_str) != expected_owner_id
+    {
         return Err(anyhow!(
             "ctx daemon ownership changed before termination signal; refusing to signal"
         ));
@@ -317,6 +370,15 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     data_root: &Path,
     expected_executable: &Path,
 ) -> Result<()> {
+    terminate_identity_verified_residual_daemon_owner(data_root, expected_executable, None)
+}
+
+#[cfg(windows)]
+pub(in crate::semantic) fn terminate_identity_verified_residual_daemon_owner(
+    data_root: &Path,
+    expected_executable: &Path,
+    expected_owner_id: Option<&str>,
+) -> Result<()> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::Threading::{
@@ -329,6 +391,13 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
         .ok_or_else(|| anyhow!("active ctx daemon lock has no readable identity"))?;
     let pid = pid_from_lock_json(&value)
         .ok_or_else(|| anyhow!("active ctx daemon lock has no process identity"))?;
+    let observed_owner_id = value.get("owner_id").and_then(Value::as_str);
+    if expected_owner_id.is_some() && observed_owner_id != expected_owner_id {
+        return Err(anyhow!(
+            "ctx daemon ownership changed after health verification; refusing to terminate"
+        ));
+    }
+    let owner_id = expected_owner_id.or(observed_owner_id).map(str::to_owned);
     verify_residual_daemon_identity(data_root, expected_executable, pid, &value)?;
     let handle = unsafe {
         OpenProcess(
@@ -340,6 +409,20 @@ pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     if handle.is_null() {
         return Err(std::io::Error::last_os_error())
             .context("open identity-verified residual ctx daemon");
+    }
+    let owner_still_matches = read_pid_lock_json(&lock_path).is_some_and(|current| {
+        pid_from_lock_json(&current) == Some(pid)
+            && owner_id.as_ref().is_none_or(|expected| {
+                current.get("owner_id").and_then(Value::as_str) == Some(expected.as_str())
+            })
+    });
+    if !owner_still_matches {
+        unsafe {
+            CloseHandle(handle);
+        }
+        return Err(anyhow!(
+            "ctx daemon ownership changed before termination; refusing to terminate"
+        ));
     }
     let terminated = unsafe { TerminateProcess(handle, 0) };
     unsafe {
@@ -433,6 +516,17 @@ fn same_windows_path(left: &Path, right: &Path) -> bool {
 pub(in crate::semantic) fn terminate_identity_verified_residual_daemon(
     _data_root: &Path,
     _expected_executable: &Path,
+) -> Result<()> {
+    Err(anyhow!(
+        "this platform cannot identity-verify residual daemon termination"
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(in crate::semantic) fn terminate_identity_verified_residual_daemon_owner(
+    _data_root: &Path,
+    _expected_executable: &Path,
+    _expected_owner_id: Option<&str>,
 ) -> Result<()> {
     Err(anyhow!(
         "this platform cannot identity-verify residual daemon termination"

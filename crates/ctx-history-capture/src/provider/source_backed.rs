@@ -105,6 +105,7 @@ use crate::{
 
 mod discovery;
 mod driver;
+mod fallback_identity;
 pub(crate) mod family;
 mod inventory;
 mod publication;
@@ -113,6 +114,9 @@ mod watch;
 
 pub use discovery::*;
 pub use driver::*;
+#[cfg(test)]
+pub(crate) use fallback_identity::FallbackEventIdentityMode;
+pub(crate) use fallback_identity::FallbackEventIdentityState;
 pub use inventory::*;
 pub use publication::*;
 pub use registration::*;

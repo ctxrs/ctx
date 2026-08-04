@@ -22,6 +22,7 @@ mod native {
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
     const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(12);
     const QUIESCENT_WINDOW: Duration = Duration::from_secs(3);
+    const PERSISTENT_DAEMON_SESSION_ID: &str = "019c08d7-0000-7000-8000-000000000029";
     #[cfg(target_os = "linux")]
     const LINUX_IDLE_SOAK: Duration = Duration::from_secs(8);
     #[cfg(target_os = "linux")]
@@ -321,39 +322,90 @@ mod native {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-
             let retained_meta_path =
                 active_generation_meta_path(harness.root(), &append_generation);
             let retained_manifest_path =
                 generation_manifest_path(harness.root(), &append_generation);
             let retained_meta = snapshot_file(&retained_meta_path);
             let retained_manifest = snapshot_file(&retained_manifest_path);
-            let sessions_root = harness.home().join(".codex/sessions");
-            let original_mode = fs::metadata(&sessions_root).unwrap().permissions().mode();
-            fs::set_permissions(&sessions_root, fs::Permissions::from_mode(0o0)).unwrap();
-            let failed_job =
-                wait_for_job(&harness, "failed refresh with retained generation", |job| {
-                    (job["request_state"] == "failed"
-                        && (job["published_generation"] == append_generation
-                            || job["previous_generation"] == append_generation))
+            let fault_source = source.with_file_name("persistent-daemon-invalid-owner.jsonl");
+            fs::write(
+                &fault_source,
+                format!(
+                    "{}\n{}\n",
+                    json!({
+                        "timestamp": "not-rfc3339",
+                        "type": "session_meta",
+                        "payload": {"id": "019c08d7-0000-7000-8000-000000000030"}
+                    }),
+                    json!({
+                        "timestamp": "2026-07-29T12:02:00.000Z",
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "019c08d7-0000-7000-8000-000000000031",
+                            "timestamp": "2026-07-29T12:02:00.000Z",
+                            "cwd": "/repo/persistent-daemon",
+                            "source": "cli"
+                        }
+                    })
+                ),
+            )
+            .unwrap();
+            let failed_job = wait_for_job(
+                &harness,
+                "refresh with carried-forward Codex source failure",
+                |job| {
+                    (job["request_state"] == "published"
+                        && job["outcome"] == "completed_with_source_failures"
+                        && job["published_generation"] == append_generation
+                        && job["generation_changed"] == false)
                         .then_some(job)
-                });
+                },
+            );
             let retained_meta_after_failure = snapshot_file(&retained_meta_path);
             let retained_manifest_after_failure = snapshot_file(&retained_manifest_path);
             let failed_request_id = failed_job["request_id"]
                 .as_str()
                 .expect("failed refresh request id")
                 .to_owned();
-            fs::set_permissions(&sessions_root, fs::Permissions::from_mode(original_mode)).unwrap();
+            fs::remove_file(&fault_source).unwrap();
             assert_eq!(
-                failed_job["error_code"], "all_provider_terminal_coverage_unavailable",
+                failed_job["receipt"]["source_failure_total"], 0,
+                "the retained publication receipt must remain unchanged: {failed_job:#}"
+            );
+            let request_outcome = &failed_job["request_outcome"];
+            assert_eq!(request_outcome["source_failure_total"], 1, "{failed_job:#}");
+            assert_eq!(
+                request_outcome["source_failures_omitted"], 0,
                 "{failed_job:#}"
             );
+            let source_failure = request_outcome["route_results"]
+                .as_object()
+                .and_then(|routes| {
+                    routes.values().find_map(|route| {
+                        let fields = route.as_array()?;
+                        let details_index = match fields.first()?.as_str()? {
+                            "s" => 3,
+                            "f" => 4,
+                            _ => return None,
+                        };
+                        fields.get(details_index)?.as_array()?.first()
+                    })
+                })
+                .and_then(Value::as_array)
+                .expect("exact request-scoped source failure diagnostic");
+            assert_eq!(
+                source_failure.get(1),
+                Some(&json!("codex")),
+                "{failed_job:#}"
+            );
+            assert_eq!(source_failure.get(3), Some(&json!(true)), "{failed_job:#}");
             assert!(
-                failed_job["last_error"].as_str().is_some_and(|error| {
-                    error.contains("no current resolver-owning route family for codex")
-                }),
+                source_failure
+                    .get(5)
+                    .and_then(Value::as_str)
+                    .is_some_and(|error| error
+                        .contains("Codex catalog owner changed before NativePath admission")),
                 "{failed_job:#}"
             );
             assert_eq!(
@@ -366,12 +418,15 @@ mod native {
             );
             let recovered_job = wait_for_job_with_timeout(
                 &harness,
-                "refresh after provider root recovery",
+                "refresh after supported Codex source recovery",
                 OBSERVATION_TIMEOUT * 2,
                 |job| {
                     (job["request_state"] == "published"
-                        && job["request_id"].as_str() != Some(failed_request_id.as_str()))
-                    .then_some(job)
+                        && job["request_id"].as_str() != Some(failed_request_id.as_str())
+                        && job["outcome"] == "completed"
+                        && job["published_generation"] == append_generation
+                        && job["receipt"]["source_failure_total"] == 0)
+                        .then_some(job)
                 },
             );
             let recovered_generation = recovered_job["published_generation"]
@@ -402,8 +457,9 @@ mod native {
         let stopped_wakeup = read_json_file(&wakeup_path(harness.root()));
         assert_eq!(stopped_wakeup["status"], "stopped", "{stopped_wakeup:#}");
         assert_eq!(
-            stopped_wakeup["wakeup"]["timeout_wakeups"],
-            stopped_wakeup["wakeup"]["scheduled_retry_wakeups"],
+            counter(&stopped_wakeup, "timeout_wakeups"),
+            counter(&stopped_wakeup, "scheduled_retry_wakeups")
+                .saturating_add(counter(&stopped_wakeup, "scheduled_refresh_wakeups")),
             "bounded qualification observed an unclassified timeout wake: {stopped_wakeup:#}"
         );
         assert!(
@@ -831,7 +887,7 @@ mod native {
                     "timestamp": "2026-07-29T12:00:00.000Z",
                     "type": "session_meta",
                     "payload": {
-                        "id": "019c08d7-0000-7000-8000-000000000029",
+                        "id": PERSISTENT_DAEMON_SESSION_ID,
                         "timestamp": "2026-07-29T12:00:00.000Z",
                         "cwd": "/repo/persistent-daemon",
                         "originator": "codex-cli",

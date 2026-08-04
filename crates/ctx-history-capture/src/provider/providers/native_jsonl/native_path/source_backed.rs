@@ -11,6 +11,7 @@ use ctx_history_core::{
     ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
     SubrecordSelector, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -23,10 +24,13 @@ use crate::{
         open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
         ProviderSourceDirectory, ProviderSourceRoot,
     },
-    provider::source_backed::family::jsonl::{
-        observe_opened_file, probe_first_record, JsonlFamilyAdapter, JsonlFamilyAppendMode,
-        JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyRejectedLeaf,
-        JsonlRecordRef,
+    provider::source_backed::{
+        family::jsonl::{
+            observe_opened_file, probe_first_record, JsonlFamilyAdapter, JsonlFamilyAppendMode,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector,
+            JsonlFamilyRejectedLeaf, JsonlRecordRef,
+        },
+        FallbackEventIdentityState,
     },
     CaptureError, ProviderJsonlInventoryLimit, ProviderSourceFailureKind, Result,
     PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
@@ -35,6 +39,7 @@ use crate::{
 
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
 const DIRECT_JSONL_MAX_DIRECTORY_DEPTH: usize = 128;
+const DIRECT_JSONL_EVENT_IDENTITY_REVISION: &str = "direct-jsonl-content-occurrence-v1";
 
 #[derive(Debug, Error)]
 enum DirectJsonlAdapterError {
@@ -218,6 +223,10 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
         self.parser_revision
     }
 
+    fn event_identity_revision(&self) -> &'static str {
+        DIRECT_JSONL_EVENT_IDENTITY_REVISION
+    }
+
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         JsonlFamilyAppendMode::CertifiedSuffix
     }
@@ -249,7 +258,32 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
         _source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
-        DirectJsonlFamilyProjector::new(*self, leaf, imported_at)
+        DirectJsonlFamilyProjector::new(
+            *self,
+            leaf,
+            imported_at,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
+        .map(|projector| Box::new(projector) as Box<dyn JsonlFamilyProjector>)
+        .map_err(capture_error)
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "direct JSONL adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
+        DirectJsonlFamilyProjector::new(*self, leaf, imported_at, base_event_lookup, mode)
             .map(|projector| Box::new(projector) as Box<dyn JsonlFamilyProjector>)
             .map_err(capture_error)
     }
@@ -476,6 +510,7 @@ struct DirectJsonlFamilyProjector {
     bound_session: DirectJsonlSession,
     session_id: StableEntityId,
     projector: DirectJsonlProjector,
+    fallback_identities: FallbackEventIdentityState,
     rejected_records: u64,
 }
 
@@ -484,6 +519,8 @@ impl DirectJsonlFamilyProjector {
         adapter: DirectJsonlFamilyAdapter,
         leaf: &JsonlFamilyLeaf,
         imported_at: DateTime<Utc>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> DirectJsonlAdapterResult<Self> {
         let binding = decode_binding(leaf)?;
         let (source, session_id) = adapter.session_identity(&binding.session.native_session_id)?;
@@ -496,12 +533,22 @@ impl DirectJsonlFamilyProjector {
             imported_at,
             Some(binding.session.clone()),
         )?;
+        let fallback_identities = FallbackEventIdentityState::new(
+            source.clone(),
+            session_id,
+            "direct-jsonl-event",
+            format!("{}.direct-jsonl-fallback", adapter.provider.as_str()),
+            DIRECT_JSONL_EVENT_IDENTITY_REVISION,
+            mode.into(),
+            base_event_lookup,
+        )?;
         Ok(Self {
             adapter,
             source,
             bound_session: binding.session,
             session_id,
             projector,
+            fallback_identities,
             rejected_records: 0,
         })
     }
@@ -540,15 +587,23 @@ impl JsonlFamilyProjector for DirectJsonlFamilyProjector {
         let session = self.validate_session().map_err(capture_error)?.clone();
         for event in projected.events {
             emit(
-                project_event(self.adapter, &self.source, self.session_id, &session, event)
-                    .map_err(capture_error)?,
+                project_event(
+                    self.adapter,
+                    &self.source,
+                    self.session_id,
+                    &session,
+                    &mut self.fallback_identities,
+                    event,
+                )
+                .map_err(capture_error)?,
             )?;
         }
         Ok(())
     }
 
     fn finish(&mut self) -> Result<()> {
-        self.validate_session().map(|_| ()).map_err(capture_error)
+        self.validate_session().map_err(capture_error)?;
+        self.fallback_identities.finish()
     }
 
     fn rejected_records(&self) -> u64 {
@@ -575,20 +630,9 @@ fn project_event(
     source: &SourceKey,
     session_id: StableEntityId,
     session: &DirectJsonlSession,
+    fallback_identities: &mut FallbackEventIdentityState,
     event: DirectJsonlEvent,
 ) -> DirectJsonlAdapterResult<CoreRecord> {
-    let native_item_key = if let Some(native_record_id) = event.native_record_id.as_deref() {
-        NativeItemKey::native_id(
-            format!("{}.direct-jsonl-event", adapter.provider.as_str()),
-            TypedKey::utf8(native_record_id)?,
-        )?
-    } else {
-        NativeItemKey::certified_position(
-            format!("{}.direct-jsonl-ordinal", adapter.provider.as_str()),
-            TypedKey::U64(event.raw_ordinal),
-            PositionStability::AppendStable,
-        )?
-    };
     let subrecord_selector = match &event.stable_retry_discriminator {
         Some(DirectJsonlRetryDiscriminator::FactoryDroidToolResult { tool_use_id }) => {
             Some(SubrecordSelector::native_id(
@@ -603,6 +647,25 @@ fn project_event(
         )?),
         None => None,
     };
+    let (native_item_key, native_record_key) =
+        if let Some(native_record_id) = event.native_record_id.as_deref() {
+            (
+                NativeItemKey::native_id(
+                    format!("{}.direct-jsonl-event", adapter.provider.as_str()),
+                    TypedKey::utf8(native_record_id)?,
+                )?,
+                TypedKey::utf8(native_record_id)?,
+            )
+        } else {
+            let assignment = fallback_identities.assign(
+                TypedKey::utf8(&event.provider_event_hash)?,
+                subrecord_selector.as_ref(),
+            )?;
+            (
+                assignment.native_item_key().clone(),
+                assignment.native_event_id().clone(),
+            )
+        };
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
@@ -610,12 +673,6 @@ fn project_event(
         native_item_key: &native_item_key,
         subrecord_selector: subrecord_selector.as_ref(),
     })?;
-    let native_record_key = event
-        .native_record_id
-        .as_deref()
-        .map(TypedKey::utf8)
-        .transpose()?
-        .unwrap_or(TypedKey::U64(event.raw_ordinal));
     let native_subrecord_key = match &event.stable_retry_discriminator {
         Some(DirectJsonlRetryDiscriminator::FactoryDroidToolResult { tool_use_id }) => {
             TypedKey::composite(vec![

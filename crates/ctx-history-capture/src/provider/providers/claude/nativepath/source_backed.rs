@@ -39,7 +39,8 @@ use crate::{
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFileObservation, JsonlRecordRef,
+            JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFileObservation,
+            JsonlRecordRef,
         },
     },
     CaptureError, Result, CLAUDE_PROJECTS_SOURCE_FORMAT,
@@ -57,9 +58,11 @@ const PARSER_REVISION: &str = "claude-shared-jsonl-v6-pull-request-association";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
+mod binding;
 mod checkpoint;
 mod normalized_body;
 
+use binding::*;
 use checkpoint::*;
 use normalized_body::{event_kind, lexical_body};
 
@@ -68,14 +71,6 @@ struct ClaudeJsonlAdapter;
 
 fn claude_source_backed_adapter() -> Arc<dyn JsonlFamilyAdapter> {
     Arc::new(ClaudeJsonlAdapter)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Binding {
-    project_dir: PathBuf,
-    key: ClaudeSessionKey,
-    layout: SessionLayout,
 }
 
 impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
@@ -165,7 +160,14 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
-        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
     }
 
     fn projector_with_provider_checkpoint(
@@ -175,6 +177,7 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
         _imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         let identities = identities(&binding)?;
@@ -207,7 +210,11 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             pending_calls,
             linkage_capacity_exceeded,
             rejected_records: 0,
-            fallback_identities: FallbackEventIdentityState::new(base_event_lookup),
+            fallback_identities: FallbackEventIdentityState::new(
+                (mode == JsonlFamilyProjectionMode::CertifiedAppend)
+                    .then_some(base_event_lookup)
+                    .flatten(),
+            ),
         }))
     }
 }
@@ -962,22 +969,6 @@ fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<Typed
         TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
         TypedKey::U64(identity.duplicate_occurrence),
     ])
-}
-
-fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<Binding> {
-    let TypedKey::Bytes(bytes) = leaf.binding() else {
-        return Err(contract("Claude family binding is malformed"));
-    };
-    Ok(serde_json::from_slice(bytes)?)
-}
-
-fn relative_to_authority(authority: &ProviderSourceRoot, path: &Path) -> Result<PathBuf> {
-    path.strip_prefix(authority.named_path())
-        .map(Path::to_path_buf)
-        .map_err(|_| CaptureError::InvalidProviderTranscriptPath {
-            path: path.to_path_buf(),
-            reason: "Claude transcripts must remain below their selected authority",
-        })
 }
 
 fn contract(error: impl std::fmt::Display) -> CaptureError {

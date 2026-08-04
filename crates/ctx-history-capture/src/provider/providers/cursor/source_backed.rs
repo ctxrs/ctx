@@ -36,7 +36,7 @@ use crate::{
     common::io::OpenedProviderSourceFile,
     provider::source_backed::family::jsonl::{
         JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjector, JsonlRecordRef,
+        JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
     },
     CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -51,9 +51,11 @@ const PARSER_REVISION: &str = "cursor-shared-jsonl-v8-provider-neutral-file-invo
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 const MAX_CURSOR_TOOL_CONTEXTS: usize = 256;
 
+mod binding;
 mod checkpoint;
 mod file_observations;
 
+use binding::*;
 use checkpoint::*;
 use file_observations::preserve_cursor_ordinary_file_observations;
 
@@ -94,15 +96,6 @@ fn reset_cursor_base_identity_probes() {
 #[cfg(test)]
 fn cursor_base_identity_probes() -> u64 {
     CURSOR_BASE_IDENTITY_PROBES.get()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CursorBinding {
-    native_session_id: String,
-    logical_transcript_sha256: Option<[u8; 32]>,
-    selected_route_sha256: [u8; 32],
-    alias_route_sha256: Vec<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -214,7 +207,14 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
         source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
-        self.projector_with_provider_checkpoint(leaf, source_file, imported_at, None, None)
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
     }
 
     fn projector_with_provider_checkpoint(
@@ -224,6 +224,7 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
         _imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         validate_binding(leaf, &binding, source_file.as_ref())?;
@@ -242,7 +243,11 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts,
             linkage_capacity_exceeded,
-            event_identities: CursorEventIdentityState::new(base_event_lookup),
+            event_identities: CursorEventIdentityState::new(
+                (mode == JsonlFamilyProjectionMode::CertifiedAppend)
+                    .then_some(base_event_lookup)
+                    .flatten(),
+            ),
         }))
     }
 }
@@ -968,26 +973,6 @@ fn event_identity_key(event: &CursorNativeEvent, duplicate_occurrence: u64) -> R
         TypedKey::U64(duplicate_occurrence),
     ])
     .map_err(contract)
-}
-
-fn validate_binding(
-    leaf: &JsonlFamilyLeaf,
-    binding: &CursorBinding,
-    _source_file: &OpenedProviderSourceFile,
-) -> Result<()> {
-    if !source_key(&binding.native_session_id)?.exact_descriptor_eq(leaf.source())
-        || cursor_route_sha256(leaf.source_path()) != binding.selected_route_sha256
-    {
-        return Err(CaptureError::SourceChangedDuringCapture);
-    }
-    Ok(())
-}
-
-fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<CursorBinding> {
-    let TypedKey::Bytes(bytes) = leaf.binding() else {
-        return Err(contract("Cursor family binding is malformed"));
-    };
-    Ok(serde_json::from_slice(bytes)?)
 }
 
 fn contract(error: impl std::fmt::Display) -> CaptureError {

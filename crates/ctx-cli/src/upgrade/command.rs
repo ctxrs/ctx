@@ -93,6 +93,14 @@ pub struct UpgradeArgs {
     pub attempt_id: Option<String>,
     #[arg(long, hide = true)]
     pub parent_pid: Option<u32>,
+    #[arg(long, value_enum, hide = true)]
+    pub hosted_transaction: Option<super::install::HostedTransactionAction>,
+    #[arg(long, hide = true)]
+    pub marker_source: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    pub ownership_source: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    pub binary_sha256: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -133,6 +141,7 @@ impl UpgradeArgs {
                 Some(UpgradeCommand::Status(args)) if args.format.is_json()
             )
             || self.replacement_helper
+            || self.hosted_transaction.is_some()
     }
 
     pub fn operation(&self) -> &'static str {
@@ -199,6 +208,30 @@ pub fn run(
     telemetry: &mut UpgradeTelemetry,
     ui: &mut Ui,
 ) -> Result<()> {
+    if let Some(action) = args.hosted_transaction {
+        if args.command.is_some()
+            || args.channel.is_some()
+            || args.dry_run
+            || args.format != JsonOutputFormat::Text
+            || args.replacement_helper
+            || args.parent_pid.is_some()
+        {
+            return Err(anyhow!(
+                "hosted transaction cannot be combined with upgrade options"
+            ));
+        }
+        telemetry.suppress_event = true;
+        return super::install::run_hosted_transaction(super::install::HostedTransactionArgs {
+            action,
+            install_path: args
+                .install_path
+                .ok_or_else(|| anyhow!("hosted transaction missing --install-path"))?,
+            attempt_id: args.attempt_id,
+            marker_source: args.marker_source,
+            ownership_source: args.ownership_source,
+            binary_sha256: args.binary_sha256,
+        });
+    }
     #[cfg(windows)]
     if args.replacement_helper {
         let install_path = args

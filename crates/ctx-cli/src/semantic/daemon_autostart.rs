@@ -59,7 +59,7 @@ pub(crate) use autostart::{
 use autostart::{
     complete_daemon_handoff_observation, daemon_autostart_allowed, daemon_handoff_observation_from,
     daemon_live_endpoint_observation_from, daemon_owned_source_refresh_is_active,
-    wait_for_daemon_handoff_with,
+    recover_unusable_daemon_owner_with, wait_for_daemon_handoff_with,
 };
 use autostart::{
     configured_daemon_autostart_command, daemon_autostart_command, daemon_restart_allowed,
@@ -165,6 +165,7 @@ const DAEMON_UPGRADE_HANDOFF_TOKEN_ENV: &str = "CTX_DAEMON_UPGRADE_HANDOFF_TOKEN
 // potentially multi-root recovery horizon. It verifies one usable endpoint
 // promptly; durable supervisor recovery continues independently.
 const DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS: usize = 101;
+const DAEMON_SETUP_HANDOFF_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 const DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS: i64 = 30_000;
 const DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS: i64 = 5_000;
 const DAEMON_HEALTH_TIMEOUT: StdDuration = StdDuration::from_millis(500);
@@ -183,9 +184,29 @@ enum DaemonHandoffObservation {
     Failed(String),
 }
 
+#[derive(Debug)]
+struct DaemonHandoffTimeout;
+
+impl std::fmt::Display for DaemonHandoffTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("timed out waiting for running status, heartbeat, and process ownership")
+    }
+}
+
+impl std::error::Error for DaemonHandoffTimeout {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonOwnerIdentity {
+    owner_id: String,
+    pid: u32,
+    started_at_ms: i64,
+    binary_sha256: String,
+}
+
 enum DaemonAutostartRequest {
     Suppressed(&'static str),
-    Existing,
+    Existing(DaemonOwnerIdentity),
     Deferred(PathBuf),
     Spawned(Child),
 }

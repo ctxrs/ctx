@@ -12,6 +12,8 @@ pub(in crate::semantic) enum DaemonQueryEndpoint {
 #[cfg(unix)]
 mod unix_response;
 #[cfg(unix)]
+pub(in crate::semantic) use unix_response::daemon_query_roundtrip_unix;
+#[cfg(all(test, unix))]
 pub(in crate::semantic) use unix_response::read_daemon_query_response_unix;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -21,6 +23,13 @@ pub(in crate::semantic) enum DaemonIpcService {
 }
 
 impl DaemonIpcService {
+    pub(in crate::semantic) fn as_str(self) -> &'static str {
+        match self {
+            Self::SemanticQuery => "semantic-query",
+            Self::SourceRefresh => "source-refresh",
+        }
+    }
+
     fn endpoint_file(self) -> &'static str {
         match self {
             Self::SemanticQuery => DAEMON_QUERY_ENDPOINT_FILE,
@@ -364,17 +373,7 @@ pub(in crate::semantic) fn daemon_query_roundtrip(
             if max_response_bytes == 0 {
                 return Err(DaemonQueryResponseTooLarge::new(0).into());
             }
-            let mut stream = UnixStream::connect(path)
-                .with_context(|| format!("connect daemon query socket {}", path.display()))?;
-            stream
-                .set_write_timeout(Some(timeout))
-                .context("set daemon query write timeout")?;
-            stream
-                .write_all(request)
-                .context("write daemon query request")?;
-            let _ = stream.shutdown(Shutdown::Write);
-            let body = read_daemon_query_response_unix(&mut stream, max_response_bytes, timeout)
-                .context("read daemon query response")?;
+            let body = daemon_query_roundtrip_unix(path, request, timeout, max_response_bytes)?;
             String::from_utf8(body).context("daemon query response is not UTF-8")
         }
         #[cfg(windows)]
@@ -910,10 +909,7 @@ use std::{
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 #[cfg(unix)]
-use std::{
-    io::Write, net::Shutdown, os::unix::fs::OpenOptionsExt, os::unix::net::UnixStream,
-    time::Instant,
-};
+use std::{os::unix::fs::OpenOptionsExt, os::unix::net::UnixStream, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::platform_security::verify_private_directory;

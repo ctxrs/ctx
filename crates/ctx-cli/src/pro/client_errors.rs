@@ -20,6 +20,7 @@ pub(super) fn protocol_error(error: ProtocolError) -> anyhow::Error {
         ErrorClass::Ambiguous => "ambiguous",
         ErrorClass::Corrupt => "corrupt_graph",
         ErrorClass::InvalidRequest | ErrorClass::Bounds => "invalid_request",
+        ErrorClass::RebuildRequired => "needs_rebuild",
         ErrorClass::Sequence => "invalid_response",
         ErrorClass::Internal => "helper_crashed",
     };
@@ -104,6 +105,7 @@ mod tests {
             (ErrorClass::StaleFact, "stale_fact"),
             (ErrorClass::LineOutOfRange, "line_out_of_range"),
             (ErrorClass::StaleSnapshot, "stale_snapshot"),
+            (ErrorClass::RebuildRequired, "needs_rebuild"),
             (ErrorClass::Sequence, "invalid_response"),
             (ErrorClass::Internal, "helper_crashed"),
         ] {

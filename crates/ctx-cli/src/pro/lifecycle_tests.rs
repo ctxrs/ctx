@@ -56,6 +56,16 @@ impl EpochStorageFixture {
     }
 }
 
+fn write_current_graph(layout: ProFilesystemLayout<'_>) -> PathBuf {
+    let graph = layout.graph_dir();
+    fs::create_dir(&graph).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&graph).unwrap();
+    let manifest = graph.join("graph-manifest.ctxm");
+    fs::write(&manifest, b"encrypted graph data").unwrap();
+    ctx_history_core::platform_security::restrict_private_file(&manifest).unwrap();
+    manifest
+}
+
 const TEST_PRIVATE_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC4czAqM5XMipjl
 QxTatkq8VmeS13e2aEpqT1v/XGL17o43i624H80xEbvB5tV/YzpO5N8sb4wEUj9h
@@ -1101,8 +1111,7 @@ fn assert_explicit_setup_repairs_invalid_current_pair(case: InvalidCurrentPair) 
     assert!(!previous_helper.exists());
     assert!(!previous_marker.exists());
 
-    let graph = layout.graph_path();
-    fs::write(&graph, b"encrypted graph data").unwrap();
+    let graph = write_current_graph(layout);
     let epoch = EpochStorageFixture::write(temp.path());
     crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
 
@@ -1236,8 +1245,7 @@ fn assert_explicit_setup_repairs_invalid_rollback_pair(case: InvalidRollbackPair
         }
     }
 
-    let graph = layout.graph_path();
-    fs::write(&graph, b"encrypted graph data").unwrap();
+    let graph = write_current_graph(layout);
     let epoch = EpochStorageFixture::write(temp.path());
     crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
 
@@ -1357,8 +1365,7 @@ fn explicit_setup_repairs_an_unrecoverable_committed_journal() {
     };
     fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
 
-    let graph = layout.graph_path();
-    fs::write(&graph, b"encrypted graph data").unwrap();
+    let graph = write_current_graph(layout);
     let epoch = EpochStorageFixture::write(temp.path());
     crate::pro::local_deletion::write_local_pro_initialization_indicator(temp.path()).unwrap();
 

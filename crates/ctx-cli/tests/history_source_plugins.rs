@@ -168,23 +168,12 @@ fn durable_plugin_path_indexes_in_place_and_renders_complete_core_content() {
                 "--format=json",
             ]),
     );
-    assert_eq!(imported["outcome"], "success", "{imported:#}");
+    assert_explicit_source_publication(&imported, "custom", "example-agent-v1");
     assert_eq!(imported["sources"][0]["path"], json!(source_path));
     assert_eq!(imported["sources"][0]["provider_source_authority"], true);
     assert!(imported["totals"]["current_indexed_documents"]
         .as_u64()
         .is_some_and(|count| count >= 1));
-    for forbidden in [
-        "imported_sessions",
-        "imported_events",
-        "rejected_records",
-        "rejections",
-    ] {
-        assert!(
-            imported["totals"].get(forbidden).is_none(),
-            "{forbidden} was fabricated in {imported:#}"
-        );
-    }
     assert!(!data_root(&temp)
         .join("history-source-plugin-sources")
         .exists());

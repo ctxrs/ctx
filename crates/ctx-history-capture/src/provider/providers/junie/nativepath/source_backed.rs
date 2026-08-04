@@ -8,18 +8,23 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
-    EventType, NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput,
-    SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    EventType, NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey,
+    StableEntityId, TypedKey,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
         normalization::provider_local_preview,
-        source_backed::family::jsonl::{
-            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-            JsonlFamilyProjector, JsonlRecordRef,
+        source_backed::{
+            family::jsonl::{
+                JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
+            },
+            FallbackEventIdentityState,
         },
     },
     CaptureError, Result, JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
@@ -33,11 +38,12 @@ use super::projection::{EventDraft, JunieProjection};
 
 const SOURCE_ANCHOR_NAMESPACE: &str = "junie.session-events";
 const NATIVE_SESSION_NAMESPACE: &str = "junie.session";
-const NATIVE_EVENT_POSITION_KIND: &str = "junie.normalized-event-index";
 const LOGICAL_SESSION_KIND: &str = "junie-session";
 const LOGICAL_EVENT_KIND: &str = "junie-event";
 const SOURCE_SCHEMA_VARIANT: &str = "junie-session-events-v2";
 const PARSER_REVISION: &str = "junie-source-backed-v5";
+const EVENT_IDENTITY_REVISION: &str = "junie-content-occurrence-v1";
+const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.junie.fallback-event-fingerprint.v1\0";
 const METADATA_TEXT_MAX_CHARS: usize = 2_048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +76,10 @@ impl JsonlFamilyAdapter for JunieJsonlAdapter {
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn event_identity_revision(&self) -> &'static str {
+        EVENT_IDENTITY_REVISION
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
@@ -141,9 +151,33 @@ impl JsonlFamilyAdapter for JunieJsonlAdapter {
     fn projector(
         &self,
         leaf: &JsonlFamilyLeaf,
-        _source_file: Arc<OpenedProviderSourceFile>,
+        source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.projector_with_provider_checkpoint(
+            leaf,
+            source_file,
+            imported_at,
+            None,
+            None,
+            JsonlFamilyProjectionMode::Cold,
+        )
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<BaseEventIdentityLookup>,
+        mode: JsonlFamilyProjectionMode,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        if checkpoint.is_some() {
+            return Err(CaptureError::InvalidPayload(
+                "Junie adapter does not accept provider checkpoint state".to_owned(),
+            ));
+        }
         let binding = decode_binding(leaf)?;
         let workspace = binding
             .meta
@@ -151,11 +185,21 @@ impl JsonlFamilyAdapter for JunieJsonlAdapter {
             .as_deref()
             .map(|value| provider_local_preview(value, METADATA_TEXT_MAX_CHARS).0);
         let projection = JunieProjection::new(&binding.meta, imported_at);
+        let fallback_identities = FallbackEventIdentityState::new(
+            leaf.source().clone(),
+            binding.session_id,
+            LOGICAL_EVENT_KIND,
+            "junie.event.fallback",
+            EVENT_IDENTITY_REVISION,
+            mode.into(),
+            base_event_lookup,
+        )?;
         Ok(Box::new(JunieProjector {
             source: leaf.source().clone(),
             binding,
             workspace,
             projection,
+            fallback_identities,
         }))
     }
 }
@@ -165,6 +209,7 @@ struct JunieProjector {
     binding: JunieBinding,
     workspace: Option<String>,
     projection: JunieProjection,
+    fallback_identities: FallbackEventIdentityState,
 }
 
 impl JsonlFamilyProjector for JunieProjector {
@@ -179,13 +224,14 @@ impl JsonlFamilyProjector for JunieProjector {
 
     fn finish_projecting(&mut self, emit: &mut dyn FnMut(CoreRecord) -> Result<()>) -> Result<()> {
         let rows = self.projection.finish()?;
-        self.emit_rows(rows, emit)
+        self.emit_rows(rows, emit)?;
+        self.fallback_identities.finish()
     }
 }
 
 impl JunieProjector {
     fn emit_rows(
-        &self,
+        &mut self,
         rows: Vec<EventDraft>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
@@ -195,11 +241,16 @@ impl JunieProjector {
             .map(|value| provider_local_preview(value, METADATA_TEXT_MAX_CHARS).0)
             .or_else(|| self.workspace.clone());
         for row in rows {
+            let assignment = self
+                .fallback_identities
+                .assign(event_fingerprint(&row)?, None)?;
             emit(core_record(
                 &self.source,
                 &self.binding,
                 self.workspace.as_deref(),
                 cwd.as_deref(),
+                assignment.native_item_key().clone(),
+                assignment.native_event_id().clone(),
                 row,
             )?)?;
         }
@@ -241,14 +292,10 @@ fn core_record(
     binding: &JunieBinding,
     workspace: Option<&str>,
     cwd: Option<&str>,
+    native_item_key: NativeItemKey,
+    native_event_id: TypedKey,
     row: EventDraft,
 ) -> Result<CoreRecord> {
-    let native_item_key = NativeItemKey::certified_position(
-        NATIVE_EVENT_POSITION_KIND,
-        TypedKey::U64(row.event_index),
-        PositionStability::AppendStable,
-    )
-    .map_err(contract)?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id: binding.session_id,
@@ -292,7 +339,7 @@ fn core_record(
     )
     .map_err(contract)?;
     record.provider_session_id = Some(binding.provider_session_id.clone());
-    record.native_event_id = Some(TypedKey::U64(row.event_index));
+    record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(row.occurred_at.timestamp_millis());
     record.role = row.role.map(|role| role.as_str().to_owned());
     record.workspace = workspace.map(str::to_owned);
@@ -300,6 +347,23 @@ fn core_record(
     record.content.structured_content = structured_content;
     record.validate_contract().map_err(contract)?;
     Ok(record)
+}
+
+fn event_fingerprint(row: &EventDraft) -> Result<TypedKey> {
+    let role = row.role.map(|role| role.as_str());
+    let file_change = row.file_change.as_ref().map(|change| change.path.as_str());
+    let canonical = serde_json::to_vec(&serde_json::json!({
+        "event_type": row.event_type.as_str(),
+        "role": role,
+        "text": row.text,
+        "body": row.body,
+        "file_change": file_change,
+    }))?;
+    let mut digest = Sha256::new();
+    digest.update(FALLBACK_FINGERPRINT_DOMAIN);
+    digest.update((canonical.len() as u64).to_be_bytes());
+    digest.update(canonical);
+    TypedKey::bytes(digest.finalize().to_vec()).map_err(contract)
 }
 
 fn decode_binding(leaf: &JsonlFamilyLeaf) -> Result<JunieBinding> {

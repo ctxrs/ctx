@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{collections::HashSet, sync::atomic::Ordering};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
@@ -382,6 +382,64 @@ fn omit_managed_and_corrupt_body_projection(generation_path: &Path) -> PathBuf {
     projection_path
 }
 
+fn corrupt_candidate_segment_store(
+    generation_path: &Path,
+    base_segment_ids: &HashSet<String>,
+    corrupt_retained_segment: bool,
+) -> PathBuf {
+    use std::io::{Read, Seek, Write};
+
+    let directory = DurableMmapDirectory::open(generation_path).unwrap();
+    let index = Index::open(directory).unwrap();
+    let metas = index.load_metas().unwrap();
+    let segment = metas
+        .segments
+        .iter()
+        .find(|segment| {
+            base_segment_ids.contains(&segment.id().uuid_string()) == corrupt_retained_segment
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "candidate must contain a {} segment",
+                if corrupt_retained_segment {
+                    "retained"
+                } else {
+                    "changed"
+                }
+            )
+        });
+    let store_path =
+        generation_path.join(segment.relative_path(tantivy::index::SegmentComponent::Store));
+    drop(index);
+
+    if corrupt_retained_segment {
+        let private_copy = store_path.with_extension("store.ctx-corruption-copy");
+        fs::copy(&store_path, &private_copy).unwrap();
+        fs::remove_file(&store_path).unwrap();
+        fs::rename(private_copy, &store_path).unwrap();
+    }
+
+    let mut store = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&store_path)
+        .unwrap();
+    let length = store.metadata().unwrap().len();
+    assert!(
+        length > 0,
+        "segment store must contain a CRC-protected file"
+    );
+    let offset = length / 2;
+    store.seek(std::io::SeekFrom::Start(offset)).unwrap();
+    let mut byte = [0_u8; 1];
+    store.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0x5a;
+    store.seek(std::io::SeekFrom::Start(offset)).unwrap();
+    store.write_all(&byte).unwrap();
+    store.sync_all().unwrap();
+    store_path
+}
+
 fn multisegment_fixture(
     source_count: usize,
     documents_per_source: u64,
@@ -420,6 +478,7 @@ fn multisegment_fixture(
     (temp, sources)
 }
 
+mod integrity_certification;
 mod pinned_generation;
 mod publication_metadata;
 mod query;

@@ -132,10 +132,38 @@ pub(crate) fn assert_explicit_source_publication_with_rejections<'a>(
 }
 
 pub(crate) fn assert_authoritative_provider_publication(packet: &Value) -> &Value {
+    assert_authoritative_provider_publication_with_rejections(packet, 0)
+}
+
+pub(crate) fn assert_authoritative_provider_publication_with_rejections(
+    packet: &Value,
+    rejected_records: u64,
+) -> &Value {
     assert_eq!(packet["schema_version"], 2, "{packet:#}");
-    assert_eq!(packet["outcome"], "success", "{packet:#}");
-    assert_eq!(packet["failure_scope"], "none", "{packet:#}");
-    assert_eq!(packet["failure_type"], "none", "{packet:#}");
+    let has_rejections = rejected_records != 0;
+    assert_eq!(
+        packet["outcome"],
+        if has_rejections {
+            "completed_with_rejections"
+        } else {
+            "success"
+        },
+        "{packet:#}"
+    );
+    assert_eq!(
+        packet["failure_scope"],
+        if has_rejections { "record" } else { "none" },
+        "{packet:#}"
+    );
+    assert_eq!(
+        packet["failure_type"],
+        if has_rejections {
+            "record_rejection"
+        } else {
+            "none"
+        },
+        "{packet:#}"
+    );
     let sources = packet["sources"]
         .as_array()
         .unwrap_or_else(|| panic!("missing authoritative refresh receipt in {packet:#}"));
@@ -145,7 +173,15 @@ pub(crate) fn assert_authoritative_provider_publication(packet: &Value) -> &Valu
         source["source_format"], "provider_authoritative_all",
         "{packet:#}"
     );
-    assert_eq!(source["status"], "published", "{packet:#}");
+    assert_eq!(
+        source["status"],
+        if has_rejections {
+            "partial"
+        } else {
+            "published"
+        },
+        "{packet:#}"
+    );
     assert!(source["published_generation"].is_string(), "{packet:#}");
     for key in [
         "current_source_count",
@@ -169,12 +205,23 @@ pub(crate) fn assert_authoritative_provider_publication(packet: &Value) -> &Valu
         &["imported_sessions", "imported_events", "skipped_events"],
     );
     assert_eq!(packet["totals"]["failed_sources"], 0, "{packet:#}");
-    assert_eq!(packet["totals"]["rejected_records"], 0, "{packet:#}");
     assert_eq!(
-        packet["totals"]["sources_completed_with_rejections"], 0,
+        packet["totals"]["rejected_records"], rejected_records,
         "{packet:#}"
     );
-    assert!(packet["totals"]["rejections"].is_object(), "{packet:#}");
+    let rejected_sources = usize::from(has_rejections);
+    assert_eq!(
+        packet["totals"]["sources_completed_with_rejections"], rejected_sources,
+        "{packet:#}"
+    );
+    assert_eq!(
+        packet["totals"]["rejections"],
+        json!({
+            "rejected_records": rejected_records,
+            "sources_completed_with_rejections": rejected_sources,
+        }),
+        "{packet:#}"
+    );
     source
 }
 

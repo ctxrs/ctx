@@ -14,7 +14,6 @@ const IDENTITY_SPILL_RECORD_BYTES: usize = COMPACT_IDENTITY_BYTES * 3 + SOURCE_O
 const QUERY_PROJECTION_ACCUMULATOR_BYTES: usize = 32;
 pub(super) const VERIFICATION_SPILL_RECORD_BYTES: usize =
     IDENTITY_SPILL_RECORD_BYTES + QUERY_PROJECTION_ACCUMULATOR_BYTES;
-pub(super) const MAX_VERIFICATION_SPILL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERIFICATION_LAYOUT_HEAP_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -86,29 +85,18 @@ impl VerificationSpill {
     where
         I: Iterator<Item = u32> + Clone,
     {
-        Self::create_with_limit(segment_max_docs, MAX_VERIFICATION_SPILL_BYTES)
+        Self::create_with_witness(segment_max_docs, None)
     }
 
-    fn create_with_limit<I>(segment_max_docs: I, maximum_bytes: u64) -> Result<Self>
-    where
-        I: Iterator<Item = u32> + Clone,
-    {
-        Self::create_with_limit_and_witness(segment_max_docs, maximum_bytes, None)
-    }
-
-    fn create_with_limit_and_witness<I>(
+    fn create_with_witness<I>(
         max_docs: I,
-        maximum_bytes: u64,
         cleanup_witness: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Self>
     where
         I: Iterator<Item = u32> + Clone,
     {
-        let (segment_count, expected_logical_bytes) = preflight_spill_layout(
-            max_docs.clone(),
-            maximum_bytes,
-            MAX_VERIFICATION_LAYOUT_HEAP_BYTES,
-        )?;
+        let (segment_count, expected_logical_bytes) =
+            preflight_spill_layout(max_docs.clone(), MAX_VERIFICATION_LAYOUT_HEAP_BYTES)?;
         let mut segment_offsets = Vec::with_capacity(segment_count);
         let mut segment_max_docs = Vec::with_capacity(segment_count);
         let mut logical_bytes = 0_u64;
@@ -255,7 +243,6 @@ impl VerificationSpill {
 
 fn preflight_spill_layout(
     max_docs: impl Iterator<Item = u32>,
-    maximum_bytes: u64,
     maximum_layout_heap_bytes: usize,
 ) -> Result<(usize, u64)> {
     let mut segment_count = 0_usize;
@@ -267,12 +254,6 @@ fn preflight_spill_layout(
         logical_bytes = logical_bytes
             .checked_add(segment_spill_bytes(max_doc)?)
             .ok_or(IndexError::CountOverflow)?;
-        if logical_bytes > maximum_bytes {
-            return Err(IndexError::VerificationScratchLimitExceeded {
-                required_bytes: logical_bytes,
-                maximum_bytes,
-            });
-        }
         let layout_heap_bytes = segment_count
             .checked_mul(std::mem::size_of::<u64>() + std::mem::size_of::<u32>())
             .ok_or(IndexError::CountOverflow)?;
@@ -541,20 +522,10 @@ mod tests {
     }
 
     #[test]
-    fn scratch_limit_fails_before_creation_and_anonymous_file_is_cleaned_up() {
-        let error = VerificationSpill::create_with_limit(
-            [1].into_iter(),
-            (VERIFICATION_SPILL_RECORD_BYTES - 1) as u64,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            IndexError::VerificationScratchLimitExceeded { .. }
-        ));
+    fn anonymous_file_is_cleaned_up() {
         let cleaned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let spill = VerificationSpill::create_with_limit_and_witness(
+        let spill = VerificationSpill::create_with_witness(
             [1].into_iter(),
-            VERIFICATION_SPILL_RECORD_BYTES as u64,
             Some(std::sync::Arc::clone(&cleaned)),
         )
         .unwrap();
@@ -566,12 +537,7 @@ mod tests {
     #[test]
     fn layout_limit_rejects_segment_metadata_before_allocation() {
         let one_segment_bytes = std::mem::size_of::<u64>() + std::mem::size_of::<u32>();
-        let error = preflight_spill_layout(
-            [0, 0].into_iter(),
-            MAX_VERIFICATION_SPILL_BYTES,
-            one_segment_bytes,
-        )
-        .unwrap_err();
+        let error = preflight_spill_layout([0, 0].into_iter(), one_segment_bytes).unwrap_err();
         assert!(matches!(
             error,
             IndexError::VerificationScratchLimitExceeded {
@@ -580,6 +546,39 @@ mod tests {
             } if required_bytes == (one_segment_bytes * 2) as u64
                 && maximum_bytes == one_segment_bytes as u64
         ));
+    }
+
+    #[test]
+    fn logical_layout_has_no_fixed_four_million_slot_ceiling() {
+        const FIRST_SLOT_BEYOND_OLD_LIMIT: u32 = 4_036_624;
+
+        let spill = VerificationSpill::create([FIRST_SLOT_BEYOND_OLD_LIMIT].into_iter()).unwrap();
+        let final_doc_id = FIRST_SLOT_BEYOND_OLD_LIMIT - 1;
+        let mut writer = spill
+            .segment_range_writer(
+                0,
+                final_doc_id,
+                FIRST_SLOT_BEYOND_OLD_LIMIT,
+                FIRST_SLOT_BEYOND_OLD_LIMIT,
+            )
+            .unwrap();
+        writer
+            .write_record(final_doc_id, identities(), ProjectionAccumulator::default())
+            .unwrap();
+        writer.finish().unwrap();
+
+        assert_eq!(
+            spill.logical_bytes(),
+            u64::from(FIRST_SLOT_BEYOND_OLD_LIMIT) * VERIFICATION_SPILL_RECORD_BYTES as u64
+        );
+        assert_eq!(
+            spill
+                .record(DocAddress::new(0, final_doc_id), "test")
+                .unwrap()
+                .session
+                .digest,
+            [1; 32]
+        );
     }
 
     #[test]

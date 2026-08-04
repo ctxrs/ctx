@@ -24,6 +24,11 @@ mod unix;
 mod windows;
 
 #[cfg(windows)]
+pub(super) fn durable_replace_file(source: &Path, target: &Path) -> Result<()> {
+    windows::durable_replace_file(source, target)
+}
+
+#[cfg(windows)]
 pub(in crate::upgrade) use windows::HelperOutcome;
 
 #[cfg(windows)]

@@ -153,6 +153,44 @@ impl VerifiedIndex {
         self.materialize_event_candidates(candidates, fields)
     }
 
+    /// Selects semantic-eligible event IDs with the exact metadata predicate
+    /// used by lexical search, bound to this immutable generation.
+    ///
+    /// Selection reads indexed postings and event-ID fast fields only. It does
+    /// not decode stored Core records or reopen provider sources.
+    pub fn semantic_filter_projection(
+        &self,
+        filters: &EventSearchFilters,
+    ) -> Result<SemanticFilterProjection> {
+        validate_event_sort_fast_fields(&self.searcher)?;
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let semantic_eligibility = Box::new(BooleanQuery::intersection(vec![
+            Box::new(TermQuery::new(
+                Term::from_field_text(fields.event_type, "message"),
+                IndexRecordOption::Basic,
+            )),
+            Box::new(TermQuery::new(
+                Term::from_field_text(fields.role, "user"),
+                IndexRecordOption::Basic,
+            )),
+        ]));
+        let source_identity_query = self.source_identity_query(filters, fields)?;
+        let query =
+            filtered_event_query(semantic_eligibility, source_identity_query, filters, fields)?;
+        let addresses = self.searcher.search(query.as_ref(), &DocSetCollector)?;
+        let mut event_ids = HashSet::with_capacity(addresses.len());
+        for address in addresses {
+            let (event_id, _, _) = core_event_fast_preflight(&self.searcher, address)?;
+            if !event_ids.insert(event_id) {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        Ok(SemanticFilterProjection {
+            generation_id: self.generation_id.clone(),
+            event_ids,
+        })
+    }
+
     fn collect_event_candidate_addresses(
         &self,
         body_query: Box<dyn Query>,

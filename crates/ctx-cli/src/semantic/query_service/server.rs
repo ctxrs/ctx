@@ -45,6 +45,20 @@ pub(in crate::semantic) struct DaemonQueryService {
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_MAX_BYTES: usize = 256 * 1024;
 pub(in crate::semantic) const DAEMON_QUERY_REQUEST_READ_TIMEOUT: StdDuration =
     StdDuration::from_secs(2);
+
+impl DaemonQueryService {
+    pub(in crate::semantic) fn listener_finished(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(in crate::semantic) fn terminate_listener_for_test(&self) {
+        let _ = self.shutdown_stream.shutdown(Shutdown::Both);
+    }
+}
+
 impl Drop for DaemonQueryService {
     fn drop(&mut self) {
         self.activity.stop();

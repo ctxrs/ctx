@@ -190,6 +190,8 @@ pub(in crate::semantic) trait SourceBackedSemanticEmbedder {
 pub(in crate::semantic) struct SourceBackedSemanticOutcome {
     /// Exact number of complete Core records decoded from changed-source pages.
     pub(in crate::semantic) records_decoded: usize,
+    /// Exact stored Core JSON bytes decoded from changed-source pages.
+    pub(in crate::semantic) record_bytes_decoded: u64,
     pub(in crate::semantic) records_embedded: usize,
     pub(in crate::semantic) records_reused: usize,
     pub(in crate::semantic) records_filtered: usize,
@@ -204,6 +206,9 @@ pub(in crate::semantic) struct SourceBackedSemanticOutcome {
 
 fn merge_outcome(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutcome) {
     total.records_decoded = total.records_decoded.saturating_add(next.records_decoded);
+    total.record_bytes_decoded = total
+        .record_bytes_decoded
+        .saturating_add(next.record_bytes_decoded);
     total.records_embedded = total.records_embedded.saturating_add(next.records_embedded);
     total.records_reused = total.records_reused.saturating_add(next.records_reused);
     total.records_filtered = total.records_filtered.saturating_add(next.records_filtered);
@@ -522,6 +527,7 @@ impl SemanticVectorStore {
             cursor.as_ref(),
             MAX_SOURCE_EVENT_PAGE_ITEMS,
         )?;
+        let record_bytes_decoded = u64::try_from(core_page.encoded_core_bytes)?;
         let page = SourceBackedSemanticPage {
             core_generation_id: core_page.generation_id,
             source_identity_digest: source.aggregate.source_identity_digest().to_owned(),
@@ -530,6 +536,7 @@ impl SemanticVectorStore {
             terminal: core_page.terminal,
         };
         validate_page(frontier, &page)?;
+        let records_decoded = page.records.len();
         let page_documents = u64::try_from(page.records.len())?;
         let processed_documents = frontier
             .processed_source_documents
@@ -573,6 +580,8 @@ impl SemanticVectorStore {
             frontier.flat_staging = None;
             self.store_source_frontier(frontier)?;
             return Ok(SourceBackedSemanticOutcome {
+                records_decoded,
+                record_bytes_decoded,
                 work_remaining: true,
                 ..SourceBackedSemanticOutcome::default()
             });
@@ -594,7 +603,8 @@ impl SemanticVectorStore {
         let existing_lookup =
             FlatActiveEventLookup::from_events(existing_events.values().cloned().collect());
         let mut outcome = SourceBackedSemanticOutcome {
-            records_decoded: page.records.len(),
+            records_decoded,
+            record_bytes_decoded,
             ..SourceBackedSemanticOutcome::default()
         };
         let mut semantic_records = 0_u64;

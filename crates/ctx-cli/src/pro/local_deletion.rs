@@ -10,8 +10,9 @@ use ctx_history_core::platform_security::{
     restrict_private_file, verify_private_directory, verify_private_file,
 };
 use ctx_pro_host_protocol::{
-    decode_base64url, installation_key_thumbprint, pro_graph_record_id, valid_pro_installation_id,
-    ProFilesystemLayout, INSTALLATION_PUBLIC_KEY_BYTES, PRO_GRAPH_FILE_NAME,
+    decode_base64url, installation_key_thumbprint, is_pro_graph_artifact_file_name,
+    pro_graph_record_id, valid_pro_installation_id, ProFilesystemLayout,
+    INSTALLATION_PUBLIC_KEY_BYTES,
 };
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,6 @@ use super::{
     lifecycle::{replace_file, sync_parent_directory, ProDeletionService},
 };
 
-const GRAPH_VARIANTS: [&str; 3] = ["", ".next", ".previous"];
-const SQLITE_AUXILIARY_SUFFIXES: [&str; 5] = ["-journal", "-wal", "-shm", "-lock", ".lock"];
 const PRO_INITIALIZATION_MARKER_FILE_NAME: &str = ".ctx-pro.initialized";
 const PRO_INITIALIZATION_MARKER_CONTENT: &[u8] = b"ctx-local-pro-initialized-v1\n";
 const GRAPH_KEY_CLEANUP_PHASE_FILE_NAME: &str = ".ctx-pro.graph-key-cleanup.json";
@@ -138,7 +137,12 @@ impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
             .ok_or_else(|| {
                 anyhow!("key_store_unavailable: local Pro installation identity is missing")
             })?;
-        let helperless_bootstrap = initialization_recorded && !graph.any_present && !helper_present;
+        let helperless_bootstrap = initialization_recorded
+            && !graph.any_present
+            && !helper_present
+            && cleanup_phase
+                .as_ref()
+                .is_none_or(|phase| phase.targets.is_empty());
         let targets = match cleanup_phase {
             Some(phase) => {
                 let targets = phase.validated_targets(&installation_id)?;
@@ -165,6 +169,10 @@ impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
                 targets
             }
         };
+        graph.delete()?;
+        if GraphArtifacts::inspect(data_root)?.any_present {
+            bail!("key_store_unavailable: encrypted Pro graph deletion could not be verified");
+        }
         if !helperless_bootstrap {
             for target in &targets {
                 let graph_id =
@@ -177,10 +185,6 @@ impl<B: DeletionBackend> ProDeletionService for LocalDeletionService<B> {
                 self.backend
                     .delete_graph_record(data_root, target, &graph_id)?;
             }
-        }
-        graph.delete()?;
-        if GraphArtifacts::inspect(data_root)?.any_present {
-            bail!("key_store_unavailable: encrypted Pro graph deletion could not be verified");
         }
         self.helperless_bootstrap = helperless_bootstrap;
         Ok(())
@@ -437,14 +441,10 @@ impl DeletionBackend for PlatformDeletionBackend {
     fn delete_graph_record(
         &self,
         data_root: &Path,
-        target: &GraphKeyDeletionTarget,
-        _graph_id: &str,
+        _target: &GraphKeyDeletionTarget,
+        graph_id: &str,
     ) -> Result<()> {
-        graph_key_deletion::delete_selected(
-            data_root,
-            target.namespace.credential_vault_namespace(),
-            &target.installation_key_thumbprint,
-        )
+        graph_key_deletion::delete_selected(data_root, graph_id)
     }
 
     fn delete_partial_bootstrap_credentials(&self, data_root: &Path) -> Result<()> {
@@ -577,10 +577,9 @@ impl GraphArtifacts {
         validate_data_root(data_root)?;
         match data_root.symlink_metadata() {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let graph_root = ProFilesystemLayout::new(data_root).pro_root();
                 return Ok(Self {
                     existing_root: None,
-                    paths: graph_paths(&graph_root),
+                    paths: Vec::new(),
                     any_present: false,
                 });
             }
@@ -600,52 +599,53 @@ impl GraphArtifacts {
             bail!("invalid_request: ctx data root is not a safe directory");
         }
 
-        let supplied_root = ProFilesystemLayout::new(data_root).pro_root();
-        let (graph_root, existing_root) = match supplied_root.symlink_metadata() {
+        let supplied_pro_root = ProFilesystemLayout::new(data_root).pro_root();
+        let pro_root = match supplied_pro_root.symlink_metadata() {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                let canonical = supplied_root
+                let canonical = supplied_pro_root
                     .canonicalize()
                     .context("invalid_request: resolve Pro data directory")?;
-                (canonical.clone(), Some(canonical))
+                canonical
             }
             Ok(_) => bail!("invalid_request: Pro data directory is not a safe directory"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-                ProFilesystemLayout::new(&canonical_data_root).pro_root(),
-                None,
-            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    existing_root: None,
+                    paths: Vec::new(),
+                    any_present: false,
+                });
+            }
             Err(error) => return Err(error).context("invalid_request: inspect Pro data directory"),
         };
-        let paths = graph_paths(&graph_root);
-        let mut any_present = false;
-        if existing_root.is_some() {
-            for path in &paths {
-                match path.symlink_metadata() {
-                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                        any_present = true;
-                    }
-                    Ok(_) => bail!("invalid_request: Pro graph path is not a regular file"),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(error).context("invalid_request: inspect Pro graph file")
-                    }
-                }
+        let graph_root = pro_root.join(ctx_pro_host_protocol::PRO_GRAPH_DIRECTORY_NAME);
+        let metadata = match graph_root.symlink_metadata() {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => metadata,
+            Ok(_) => bail!("invalid_request: Pro graph path is not a safe directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    existing_root: None,
+                    paths: Vec::new(),
+                    any_present: false,
+                });
             }
-        }
-        if any_present {
-            let root = existing_root.as_ref().ok_or_else(|| {
-                anyhow!("invalid_request: Pro graph data exists without a Pro data directory")
-            })?;
-            let metadata = root
-                .symlink_metadata()
-                .context("invalid_request: inspect Pro data directory")?;
-            validate_graph_root_metadata(root, &metadata)?;
-            verify_private_directory(root)
-                .context("invalid_request: verify private Pro data directory")?;
-        }
+            Err(error) => {
+                return Err(error).context("invalid_request: inspect Pro graph directory")
+            }
+        };
+        let pro_metadata = pro_root
+            .symlink_metadata()
+            .context("invalid_request: inspect Pro data directory")?;
+        validate_graph_root_metadata(&pro_root, &pro_metadata)?;
+        verify_private_directory(&pro_root)
+            .context("invalid_request: verify private Pro data directory")?;
+        validate_graph_root_metadata(&graph_root, &metadata)?;
+        verify_private_directory(&graph_root)
+            .context("invalid_request: verify private Pro graph directory")?;
+        let paths = inventory_graph_files(&graph_root)?;
         Ok(Self {
-            existing_root,
+            existing_root: Some(graph_root),
+            any_present: !paths.is_empty(),
             paths,
-            any_present,
         })
     }
 
@@ -664,12 +664,52 @@ impl GraphArtifacts {
         }
         validate_graph_root_metadata(&root, &metadata)?;
         verify_private_directory(&root)
-            .context("invalid_request: reverify private Pro data directory")?;
-        for path in self.paths {
-            delete_regular_file(&path)?;
+            .context("invalid_request: reverify private Pro graph directory")?;
+        let current_paths = inventory_graph_files(&root)?;
+        if current_paths != self.paths {
+            bail!("invalid_request: Pro graph inventory changed during deletion");
         }
-        Ok(())
+        for path in &self.paths {
+            delete_regular_file(path)?;
+        }
+        if let Some(path) = self.paths.first() {
+            sync_parent_directory(path)?;
+        }
+        fs::remove_dir(&root).context("remove encrypted Pro graph directory")?;
+        sync_parent_directory(&root)?;
+        match root.symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) | Err(_) => {
+                bail!("invalid_request: encrypted Pro graph deletion could not be verified")
+            }
+        }
     }
+}
+
+fn inventory_graph_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(root).context("invalid_request: read Pro graph directory")? {
+        let entry = entry.context("invalid_request: read Pro graph entry")?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| anyhow!("invalid_request: Pro graph entry name is not UTF-8"))?;
+        if !is_pro_graph_artifact_file_name(name.as_bytes()) {
+            bail!("invalid_request: Pro graph directory contains an unexpected entry");
+        }
+        let path = root.join(name);
+        let metadata = path
+            .symlink_metadata()
+            .context("invalid_request: inspect Pro graph artifact")?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("invalid_request: Pro graph artifact is not a safe regular file");
+        }
+        validate_graph_file_metadata(&path, &metadata)?;
+        verify_private_file(&path).context("invalid_request: verify private Pro graph artifact")?;
+        paths.push(path);
+    }
+    paths.sort_unstable();
+    Ok(paths)
 }
 
 #[cfg(unix)]
@@ -691,6 +731,25 @@ fn validate_graph_root_metadata(_path: &Path, _metadata: &fs::Metadata) -> Resul
     Ok(())
 }
 
+#[cfg(unix)]
+fn validate_graph_file_metadata(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid || metadata.nlink() != 1 {
+        bail!(
+            "invalid_request: Pro graph artifact must be owned by the current user and have one link: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_graph_file_metadata(_path: &Path, _metadata: &fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
 fn validate_data_root(data_root: &Path) -> Result<()> {
     if !data_root.is_absolute()
         || data_root
@@ -700,25 +759,6 @@ fn validate_data_root(data_root: &Path) -> Result<()> {
         bail!("invalid_request: ctx data root must be a safe absolute path");
     }
     Ok(())
-}
-
-fn graph_paths(root: &Path) -> Vec<PathBuf> {
-    let mut paths =
-        Vec::with_capacity(GRAPH_VARIANTS.len() * (SQLITE_AUXILIARY_SUFFIXES.len() + 1));
-    for variant in GRAPH_VARIANTS {
-        let base = root.join(format!("{PRO_GRAPH_FILE_NAME}{variant}"));
-        paths.push(base.clone());
-        for suffix in SQLITE_AUXILIARY_SUFFIXES {
-            paths.push(path_with_suffix(&base, suffix));
-        }
-    }
-    paths
-}
-
-fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
 }
 
 fn delete_regular_file(path: &Path) -> Result<()> {

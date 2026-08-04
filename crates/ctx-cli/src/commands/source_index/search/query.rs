@@ -44,6 +44,7 @@ pub(crate) struct SourceSearchRequest {
     pub(crate) backend: Option<SearchBackendArg>,
     pub(crate) semantic_weight: f32,
     pub(crate) semantic_enabled: bool,
+    pub(crate) semantic_daemon_enabled: bool,
     pub(crate) refresh: RefreshArg,
 }
 
@@ -70,6 +71,7 @@ impl From<&SearchArgs> for SourceSearchRequest {
             backend: args.backend,
             semantic_weight: args.semantic_weight,
             semantic_enabled: false,
+            semantic_daemon_enabled: false,
             refresh: args.refresh,
         }
     }
@@ -214,7 +216,7 @@ fn normalized_source_identity_filters(
     })
 }
 
-pub(super) fn resolve_source_search_backend(
+pub(in crate::commands::source_index) fn resolve_source_search_backend(
     request: &SourceSearchRequest,
     config: &config::AppConfig,
 ) -> Result<SearchBackendArg> {
@@ -244,17 +246,6 @@ pub(super) fn resolve_source_search_backend(
                 "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical",
             ),
         )),
-        value
-            if semantic_enabled
-                && semantic_query_service_supported()
-                && !config.daemon.enabled
-                && !matches!(value, Some(SearchBackendArg::Lexical)) =>
-        {
-            Err(anyhow::Error::new(SourceBackedSemanticNotReady::new(
-                "semantic_daemon_disabled",
-                "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical",
-            )))
-        }
         Some(value) => Ok(value),
         None if semantic_enabled => Ok(SearchBackendArg::Hybrid),
         None => Ok(SearchBackendArg::Lexical),

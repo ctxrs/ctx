@@ -108,9 +108,9 @@ impl ProDeletionService for RecordingDeletion {
         if self.fail_graph_key_deletion {
             bail!("key_store_unavailable: simulated deletion failure");
         }
-        let graph = ctx_pro_host_protocol::ProFilesystemLayout::new(data_root).graph_path();
+        let graph = ctx_pro_host_protocol::ProFilesystemLayout::new(data_root).graph_dir();
         if graph.exists() {
-            fs::remove_file(graph)?;
+            fs::remove_dir_all(graph)?;
         }
         Ok(())
     }
@@ -177,8 +177,12 @@ fn fixture() -> LifecycleFixture {
     .unwrap();
     write_local_pro_initialization_indicator(root.path()).unwrap();
     fs::write(&helper, b"helper").unwrap();
-    let graph = ctx_pro_host_protocol::ProFilesystemLayout::new(root.path()).graph_path();
+    let graph_dir = ctx_pro_host_protocol::ProFilesystemLayout::new(root.path()).graph_dir();
+    fs::create_dir(&graph_dir).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&graph_dir).unwrap();
+    let graph = graph_dir.join("graph-manifest.ctxm");
     fs::write(&graph, b"encrypted graph").unwrap();
+    ctx_history_core::platform_security::restrict_private_file(&graph).unwrap();
     let epoch = EpochStorageFixture::write(root.path());
     LifecycleFixture {
         root,
@@ -252,7 +256,88 @@ fn ordinary_uninstall_preserves_local_pro_data_and_fresh_epoch_authority() {
 }
 
 #[test]
-fn delete_data_confirms_key_before_removing_graph_and_credentials() {
+fn flat_graph_uninstall_keep_reports_preserved_data() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = ProFilesystemLayout::new(root.path());
+    fs::create_dir_all(layout.bin_dir()).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&layout.pro_root()).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&layout.bin_dir()).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    fs::write(layout.helper_path(), b"helper").unwrap();
+    let graph = layout.pro_root().join("graph");
+    fs::create_dir(&graph).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&graph).unwrap();
+    let manifest = graph.join("graph-manifest.ctxm");
+    fs::write(&manifest, b"encrypted manifest").unwrap();
+    ctx_history_core::platform_security::restrict_private_file(&manifest).unwrap();
+
+    let value = run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap();
+
+    assert_eq!(value["local_pro_data"], "preserved");
+    assert_eq!(value["next_action"]["reason"], "restore_preserved_pro_data");
+    assert!(graph.is_dir());
+    assert!(preserved_data_marker_is_set(root.path()));
+}
+
+#[test]
+fn empty_flat_graph_directory_is_not_reported_as_preserved_data() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = ProFilesystemLayout::new(root.path());
+    fs::create_dir_all(layout.bin_dir()).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&layout.pro_root()).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&layout.bin_dir()).unwrap();
+    fs::write(layout.helper_path(), b"helper").unwrap();
+    fs::create_dir(layout.graph_dir()).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&layout.graph_dir()).unwrap();
+
+    let value = run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap();
+
+    assert_eq!(value["local_pro_data"], "absent");
+    assert!(value["next_action"].is_null());
+    assert!(!preserved_data_marker_is_set(root.path()));
+}
+
+#[test]
+fn flat_graph_keep_then_delete_removes_graph_and_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = ProFilesystemLayout::new(root.path());
+    fs::create_dir_all(layout.bin_dir()).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&layout.pro_root()).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&layout.bin_dir()).unwrap();
+    write_local_pro_initialization_indicator(root.path()).unwrap();
+    fs::write(layout.helper_path(), b"helper").unwrap();
+    let graph = layout.pro_root().join("graph");
+    fs::create_dir(&graph).unwrap();
+    ctx_history_core::platform_security::restrict_private_directory(&graph).unwrap();
+    let manifest = graph.join("graph-manifest.ctxm");
+    fs::write(&manifest, b"encrypted manifest").unwrap();
+    ctx_history_core::platform_security::restrict_private_file(&manifest).unwrap();
+
+    run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap();
+
+    let mut deletion = RecordingDeletion::default();
+    let value = run_uninstall(
+        root.path(),
+        Some(&mut deletion),
+        UninstallDataDisposition::Delete,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(value["local_pro_data"], "deleted");
+    assert_eq!(
+        deletion.calls,
+        [
+            "delete_graph_data",
+            "delete_commercial_credentials",
+            "finish_deletion",
+        ]
+    );
+    assert!(!graph.exists());
+}
+
+#[test]
+fn delete_data_removes_graph_and_key_before_commercial_credentials() {
     let LifecycleFixture {
         root,
         helper,
@@ -427,7 +512,7 @@ fn no_native_partial_bootstrap_delete_data_cleans_and_retries_without_helper_ipc
     );
     assert!(file_vault.is_dir());
     assert!(!default_helper_path(root.path()).exists());
-    assert!(!ProFilesystemLayout::new(root.path()).graph_path().exists());
+    assert!(!ProFilesystemLayout::new(root.path()).graph_dir().exists());
 
     let mut deletion = LocalDeletionService::production();
     let value = run_uninstall(
@@ -611,7 +696,7 @@ fn pro_status(access_state: &str) -> ProStatus {
         storage_evidence: Some(ProStorageEvidence {
             graph_manifest_schema: 3,
             flat_format_version: 2,
-            materializer_checkpoint_version: 3,
+            materializer_checkpoint_version: 4,
             journal_pack_format_version: 3,
             legacy_journals_written: 0,
             journal_pages_written: 2,
@@ -746,7 +831,7 @@ fn lifecycle_status_renders_repository_readiness_axes_independently() {
     assert_eq!(value["storage_evidence"]["flat_format_version"], 2);
     assert_eq!(
         value["storage_evidence"]["materializer_checkpoint_version"],
-        3
+        4
     );
     assert_eq!(value["storage_evidence"]["journal_pack_format_version"], 3);
     assert_eq!(value["storage_evidence"]["legacy_journals_written"], 0);

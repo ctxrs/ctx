@@ -558,6 +558,7 @@ public_cli_release_route(
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
+    rust_objcopy = "//tools/bazel:pinned_rust_objcopy",
     sbom_inventory = ":ctx_release_dependency_inventory",
     target_id = "linux-x64",
 )
@@ -569,6 +570,7 @@ public_cli_release_route(
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
+    rust_objcopy = "//tools/bazel:pinned_rust_objcopy",
     sbom_inventory = ":ctx_release_dependency_inventory",
     target_id = "linux-arm64",
 )
@@ -580,6 +582,7 @@ public_cli_release_route(
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
+    rust_objcopy = "//tools/bazel:pinned_rust_objcopy",
     sbom_inventory = ":ctx_release_dependency_inventory",
     target_id = "macos-arm64",
 )
@@ -591,6 +594,7 @@ public_cli_release_route(
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
+    rust_objcopy = "//tools/bazel:pinned_rust_objcopy",
     sbom_inventory = ":ctx_release_dependency_inventory",
     target_id = "macos-x64",
 )
@@ -602,6 +606,7 @@ public_cli_release_route(
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
+    rust_objcopy = "//tools/bazel:pinned_rust_objcopy",
     sbom_inventory = ":ctx_release_dependency_inventory",
     target_id = "windows-x64",
 )
@@ -613,6 +618,7 @@ public_cli_release_route(
     license_materials = ":ctx_release_license_materials",
     packager = ":ctx_release_packager",
     rustc = "//tools/bazel:pinned_rustc",
+    rust_objcopy = "//tools/bazel:pinned_rust_objcopy",
     sbom_inventory = ":ctx_release_dependency_inventory",
     target_id = "freebsd-x64",
 )
@@ -631,6 +637,10 @@ py_test(
 
 sh_test(
     name = "public_cli_bazel_release_contract",
+    args = [
+        "$(rootpath //tools/bazel:pinned_rustc)",
+        "$(rootpath //tools/bazel:pinned_rust_objcopy)",
+    ],
     srcs = ["scripts/tests/package-public-cli-bazel-release-test.sh"],
     data = [
         ".bazelversion",
@@ -657,6 +667,8 @@ sh_test(
         "tests/fixtures/custom-history-jsonl/basic.jsonl",
         "//crates/ctx-cli:Cargo.toml",
         "//crates/ctx-history-index:Cargo.toml",
+        "//tools/bazel:pinned_rust_objcopy",
+        "//tools/bazel:pinned_rustc",
     ],
     tags = ["release-gate"],
     target_compatible_with = ["@platforms//os:linux"],
@@ -664,8 +676,16 @@ sh_test(
 
 py_test(
     name = "detached_debug_symbols_tests",
+    args = [
+        "$(rootpath //tools/bazel:pinned_rustc)",
+        "$(rootpath //tools/bazel:pinned_rust_objcopy)",
+    ],
     srcs = ["scripts/tests/detached-debug-symbols-test.py"],
-    data = ["scripts/release/detached-debug-symbols.py"],
+    data = [
+        "scripts/release/detached-debug-symbols.py",
+        "//tools/bazel:pinned_rust_objcopy",
+        "//tools/bazel:pinned_rustc",
+    ],
     main = "scripts/tests/detached-debug-symbols-test.py",
     tags = [
         "release-gate",
@@ -722,7 +742,34 @@ py_test(
         "scripts/onnxruntime-sidecar/validate_sidecar.sh",
     ],
     main = "scripts/tests/onnxruntime-sidecar-tools-test.py",
-    tags = ["release-gate"],
+    tags = [
+        "release-gate",
+        "requires-zstd",
+    ],
+)
+
+# This test intentionally queries the complete live workspace graph. The
+# no-cache/no-sandbox execution requirements keep undeclared package additions
+# from being hidden by a stale test result.
+sh_test(
+    name = "test_tier_inventory_check",
+    srcs = ["scripts/tests/test-tier-inventory-test.sh"],
+    args = [
+        "$(rootpath BUILD.bazel)",
+        "$(rootpath //tools/bazel:test-tier-inventory.json)",
+        "$(rootpath //tools/bazel:check_test_tier_inventory.py)",
+    ],
+    data = [
+        "BUILD.bazel",
+        "scripts/bazelw",
+        "//tools/bazel:check_test_tier_inventory.py",
+        "//tools/bazel:test-tier-inventory.json",
+    ],
+    tags = [
+        "build-graph",
+        "no-cache",
+        "no-sandbox",
+    ],
 )
 
 sh_test(
@@ -776,6 +823,11 @@ non_rust_gate(
         "//crates/ctx-protocol:cargo_package_data",
         "//crates/ctx-sdk:cargo_package_data",
     ],
+)
+sh_test(
+    name = "sdk_no_publish_policy_tests",
+    srcs = ["scripts/tests/check-sdk-no-publish-test.sh"],
+    data = ["scripts/check-sdk-no-publish.sh"],
 )
 non_rust_gate(
     name = "sdk_package_dry_run",

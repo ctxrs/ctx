@@ -16,6 +16,7 @@ use crate::semantic::vector_store_search::scan_exact_generation;
 
 mod content;
 mod policy_rebuild;
+mod proportionality;
 mod recovery;
 
 const TAIL_TOKEN: &str = "semantic-tail-token-7f0d";
@@ -98,6 +99,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(source_count: usize) -> Result<Self> {
+        Self::new_with_source_format(source_count, "codex_session_jsonl_tree")
+    }
+
+    fn new_with_source_format(source_count: usize, source_format: &str) -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let data_root = temp.path().join("data");
         let mut sources = Vec::new();
@@ -105,7 +110,7 @@ impl Fixture {
             let anchor = u8::try_from(source_index + 1)?;
             let source = SourceKey::derive(
                 "codex",
-                "codex_session_jsonl_tree",
+                source_format,
                 "session",
                 1,
                 SourceAnchor::CatalogLineage([anchor; 32]),
@@ -295,6 +300,9 @@ fn bodies(prefix: &str, count: usize) -> Vec<String> {
 
 fn merge(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutcome) {
     total.records_decoded = total.records_decoded.saturating_add(next.records_decoded);
+    total.record_bytes_decoded = total
+        .record_bytes_decoded
+        .saturating_add(next.record_bytes_decoded);
     total.records_embedded = total.records_embedded.saturating_add(next.records_embedded);
     total.records_reused = total.records_reused.saturating_add(next.records_reused);
     total.records_filtered = total.records_filtered.saturating_add(next.records_filtered);
