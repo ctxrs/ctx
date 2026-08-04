@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
@@ -15,6 +16,9 @@ required_paths=(
   docs/contracts/json.md
   docs/storage.md
   docs/privacy-storage.md
+  docs/mcp-tool-call-attribution.md
+  docs/mcp-tool-call-attribution-evidence.md
+  docs/mcp-tool-call-attribution-capabilities.json
   docs/providers.md
   docs/provider-support.md
   docs/provider-support-matrix.json
@@ -34,6 +38,7 @@ required_paths=(
   plugins/ctx-agent-history-search/skills/ctx-agent-history-search/SKILL.md
   plugins/ctx-agent-history-search/commands/ctx-history.md
   scripts/sync-plugin-skills.sh
+  scripts/tests/test_mcp_tool_call_attribution_capabilities.py
 )
 
 for path in "${required_paths[@]}"; do
@@ -45,8 +50,11 @@ done
 
 if command -v jq >/dev/null 2>&1; then
   jq empty docs/provider-support-matrix.json
+  jq empty docs/mcp-tool-call-attribution-capabilities.json
 fi
 python3 scripts/check-provider-support-matrix.py
+python3 scripts/check-mcp-tool-call-attribution-capabilities.py
+python3 scripts/tests/test_mcp_tool_call_attribution_capabilities.py
 
 public_docs=(
   README.md
@@ -77,7 +85,10 @@ scan_docs() {
 }
 
 unsupported_surface_pattern='dashboard|shim|shims|pull request|pull-request|pr evidence|pr-evidence|ctx pr([^[:alnum:]_]|$)|ctx publish|ctx evidence|ctx skill (install|status)([^[:alnum:]_]|$)|ctx update|ctx uninstall|\bADE\b|automatic summar|\bMVP\b|recover prior decisions|ctx remembers everything|privacy-first|ctx context|ctx export|ctx validate|normalized-only|normalized only|normalized_import_only|normalized provider JSONL|CTX_PROVIDER_NORMALIZED_IMPORT_DEV|[W]ork Recorder|[w]ork recorder|\bwork-[r]ecord\b'
-private_path_pattern='/home/[d]addy|/home/[^[:space:]]+/(code|Documents|Desktop)|/Users/[^[:space:]]+/(code|Documents|Desktop)|ctx-[p]rivate|ctx-multi-repo-workspace|\.ctx/worktrees'
+private_path_pattern='/home/[^[:space:]/]+/(code|Documents|Desktop)|/Users/[^[:space:]/]+/(code|Documents|Desktop)'
+private_path_pattern+='|multi[-_]repo[-_]workspace'
+private_path_pattern+='|(conformance|internal)[^[:space:]/]*/[^[:space:]/]*(proof|evidence)[-_](packet|packets|bundle)'
+private_path_pattern+='|\.ctx/worktrees'
 
 if scan_docs "${unsupported_surface_pattern}" "${public_docs[@]}"; then
     printf 'public docs contain removed or unsupported product surface wording\n' >&2
@@ -95,6 +106,18 @@ if scan_docs "${private_path_pattern}" "${public_docs[@]}"; then
   printf 'public docs contain private host/workspace paths\n' >&2
   exit 1
 fi
+
+python3 - "${public_docs[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+from scripts.check_mcp_tool_call_attribution_capabilities_lib import public_boundary_violation
+
+for name in sys.argv[1:]:
+    violation = public_boundary_violation(Path(name).read_text(encoding="utf-8"))
+    if violation is not None:
+        raise SystemExit(f"{name} crosses the public documentation boundary: {violation}")
+PY
 
 if scan_docs 'analytics|telemetry' "${analytics_scope[@]}"; then
   printf 'public analytics copy must stay limited to docs/storage.md\n' >&2

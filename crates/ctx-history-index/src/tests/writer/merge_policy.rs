@@ -4,7 +4,10 @@ use super::*;
 fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
     let temp = tempdir().unwrap();
     let source = source("tiny-appends.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "tiny append 1"))
@@ -26,7 +29,10 @@ fn production_merge_policy_bounds_repeated_tiny_appends_amortized() {
 
     for append_ordinal in 1..=append_count {
         let sequence = append_ordinal as u64 + 1;
-        let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         let base = append.begin_source_append(source.clone()).unwrap().clone();
         append
             .add_core_record(document(
@@ -97,7 +103,10 @@ fn postcommit_delete_recommit_cannot_replace_the_active_generation() {
         indexer_threads: 1,
         memory_bytes: INDEX_MEMORY_MIN_PER_THREAD,
     };
-    let mut initial = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), options.clone())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(replaced.clone()).unwrap();
     for sequence in 1..=REPLACED_DOCUMENTS {
         initial
@@ -115,7 +124,10 @@ fn postcommit_delete_recommit_cannot_replace_the_active_generation() {
     let baseline = initial.commit(|_| true).unwrap();
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
 
-    let mut replacement = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), options.clone())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(replaced.clone()).unwrap();
     let deleted_candidate_event = document(&replaced, 1, "candidate replacement").event_id;
     for sequence in 1..=REPLACED_DOCUMENTS {
@@ -164,7 +176,10 @@ fn postcommit_delete_recommit_cannot_replace_the_active_generation() {
     );
     assert_eq!(still_active.count_term("candidate").unwrap(), 0);
 
-    let restarted = GenerationWriter::open(temp.path(), options).unwrap();
+    let restarted = GenerationWriter::open(temp.path(), options)
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert_eq!(
         restarted.base_manifest().unwrap().generation_id().unwrap(),
         baseline.generation_id
@@ -195,7 +210,10 @@ fn production_merge_policy_bounds_repeated_substantial_replacements() {
     let temp = tempdir().unwrap();
     let replaced = source("large-replaced-source.sqlite");
     let stable = source("stable-source.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(replaced.clone()).unwrap();
     for sequence in 1..=REPLACED_DOCUMENTS {
         initial
@@ -254,8 +272,10 @@ fn production_merge_policy_bounds_repeated_substantial_replacements() {
     let mut peak_segments = 0;
     let mut latest_generation = String::new();
     for revision in 2..=REPLACEMENTS + 1 {
-        let mut replacement =
-            GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         replacement.begin_source(replaced.clone()).unwrap();
         for sequence in 1..=REPLACED_DOCUMENTS {
             replacement
@@ -314,7 +334,10 @@ fn production_merge_policy_bounds_repeated_substantial_replacements() {
         REPLACEMENTS + 2,
         vec![replaced.clone(), stable.clone()],
     );
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let replay_constructions = Arc::clone(&replay.index_writer_constructions);
     let replaced_base = stage_exact_replay(&mut replay, &replaced);
     let stable_base = stage_exact_replay(&mut replay, &stable);

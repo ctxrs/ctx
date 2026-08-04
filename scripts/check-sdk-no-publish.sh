@@ -13,7 +13,7 @@ require_file_contains() {
   local file="$1"
   local pattern="$2"
   local message="$3"
-  if ! grep -Eq "$pattern" "$file"; then
+  if ! grep -Eq -- "$pattern" "$file"; then
     fail "$message"
   fi
 }
@@ -32,24 +32,44 @@ require_file_contains sdks/dotnet/src/Ctx.AgentHistory/Ctx.AgentHistory.csproj '
 publish_pattern='(^|[[:space:]])(npm publish|twine upload|cargo publish|dotnet nuget push|gradle publish|mvn deploy|swift package-registry publish)([[:space:]]|$)'
 publish_command_found=false
 publish_scan_failed=false
+publish_scan_manifest=""
 
-shopt -s globstar nullglob
-for file in **/*; do
+cleanup_publish_scan_manifest() {
+  if [[ -n "$publish_scan_manifest" ]]; then
+    rm -f -- "$publish_scan_manifest" || true
+  fi
+}
+trap cleanup_publish_scan_manifest EXIT
+
+if ! publish_scan_manifest="$(mktemp "${TMPDIR:-/tmp}/ctx-sdk-no-publish.XXXXXX")"; then
+  fail 'could not allocate SDK publish-policy traversal state'
+fi
+
+# Prune generated trees before descent. The remaining paths are NUL-delimited
+# so every valid filename, including spaces and newlines, is scanned exactly.
+if ! find . \
+  \( \
+    -path './.git' -o \
+    -path './.buildkite-cache' -o \
+    -path './target' -o \
+    -path './bazel-*' \
+  \) -prune -o -type f -print0 >"$publish_scan_manifest"; then
+  fail 'could not traverse every SDK publish-policy input'
+fi
+
+while IFS= read -r -d '' discovered_file; do
+  file="${discovered_file#./}"
   case "$file" in
     scripts/check-sdk-no-publish.sh | \
       contracts/agent-history-v1/README.md | \
       docs/sdk-production-readiness.md | \
       sdks/*/README.md | \
-      crates/ctx-sdk/README.md | \
-      target/* | \
-      bazel-* | \
-      bazel-*/*)
+      crates/ctx-sdk/README.md)
       continue
       ;;
   esac
-  [[ -f "$file" ]] || continue
 
-  if grep -nHE "$publish_pattern" "$file"; then
+  if grep -nHE "$publish_pattern" -- "$file"; then
     publish_command_found=true
   else
     status=$?
@@ -59,7 +79,7 @@ for file in **/*; do
       publish_scan_failed=true
     fi
   fi
-done
+done <"$publish_scan_manifest"
 
 if [[ "$publish_scan_failed" == true ]]; then
   fail 'could not inspect every SDK publish-policy input'

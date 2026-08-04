@@ -24,7 +24,7 @@ use std::sync::{
 
 use super::{
     observe_opened_file, revalidate_frozen_prefix, JsonlCheckpoint, JsonlFileObservation,
-    JsonlProbe, JsonlRecordRef,
+    JsonlOversizedRecordPolicy, JsonlProbe, JsonlRecordRef,
 };
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -213,6 +213,10 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         ""
     }
     fn append_mode(&self) -> JsonlFamilyAppendMode;
+
+    fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
+        JsonlOversizedRecordPolicy::RejectSource
+    }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory>;
 

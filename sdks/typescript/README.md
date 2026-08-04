@@ -68,6 +68,13 @@ For tests, pass a `runner` function to `LocalCliAdapter` or
 `createLocalAgentHistoryClient`. The runner receives `{ command, args, cwd, env,
 timeoutMs }` and returns `{ exitCode, stdout, stderr }`.
 
+The built-in adapter retains at most 64 MiB of stdout (the CLI presentation
+ceiling) and 256 KiB of stderr while continuing to drain both streams. On
+Windows 10 or newer it uses inbox Windows PowerShell to create the CLI directly
+inside a kill-on-close Job Object; startup fails closed if atomic Job assignment
+is unavailable. This prevents background descendants from escaping cleanup when
+the CLI root exits first.
+
 ## Hosted Placeholder
 
 `createHostedAgentHistoryClient()` and `createAgentHistoryClient({ hosted: true })` reserve

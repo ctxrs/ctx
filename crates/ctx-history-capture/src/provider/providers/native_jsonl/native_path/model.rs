@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use ctx_history_core::{AgentType, EventRole, EventType, FileChangeKind, SessionStatus};
+use ctx_history_core::{
+    AgentType, EventRole, EventType, FileChangeKind, McpToolCallAttribution, SessionStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -38,6 +40,8 @@ pub(crate) struct DirectJsonlEvent {
     pub(crate) event_type: EventType,
     pub(crate) role: EventRole,
     pub(crate) occurred_at: DateTime<Utc>,
+    #[serde(skip, default)]
+    pub(crate) mcp_tool_call: Option<McpToolCallAttribution>,
     #[serde(skip)]
     pub(crate) lexical_text: String,
     pub(crate) metadata: Value,

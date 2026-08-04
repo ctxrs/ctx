@@ -1,16 +1,33 @@
 use std::{
     collections::HashSet,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(windows)]
+use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::HANDLE,
+    Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    },
+};
+
 use serde::{Deserialize, Serialize};
-use tantivy::{directory::Directory, store::Compressor, Index, IndexSettings};
+use tantivy::{store::Compressor, Index, IndexSettings};
 use uuid::Uuid;
 
 use crate::{
-    analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory,
-    identity::is_generation_id, lexical_schema, sync_directory, IndexError, Result,
+    analyzer::register_body_analyzer,
+    durable_directory::{DurableAtomicWriteOutcome, DurableMmapDirectory},
+    identity::is_generation_id,
+    lexical_schema, sync_directory, IndexError, Result,
 };
 
 pub(crate) const ACTIVE_GENERATION_POINTER_FILE: &str = "active-generation.json";
@@ -131,6 +148,12 @@ pub(crate) struct CandidateGeneration {
     pub(crate) index: Index,
 }
 
+#[derive(Debug)]
+pub(crate) enum PointerPublicationOutcome {
+    Durable,
+    CommittedVisible { detail: String },
+}
+
 pub(crate) fn load_active_generation_pointer(
     root: &Path,
 ) -> Result<Option<ActiveGenerationPointer>> {
@@ -202,12 +225,18 @@ pub(crate) fn create_candidate_generation(
 pub(crate) fn publish_active_generation_pointer(
     root: &Path,
     pointer: &ActiveGenerationPointer,
-) -> Result<()> {
+) -> Result<PointerPublicationOutcome> {
     pointer.validate()?;
     let bytes = serde_json::to_vec(pointer)?;
     let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
-    directory.atomic_write(Path::new(ACTIVE_GENERATION_POINTER_FILE), &bytes)?;
-    Ok(())
+    match directory.atomic_write_with_outcome(Path::new(ACTIVE_GENERATION_POINTER_FILE), &bytes)? {
+        DurableAtomicWriteOutcome::Durable => Ok(PointerPublicationOutcome::Durable),
+        DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(error) => {
+            Ok(PointerPublicationOutcome::CommittedVisible {
+                detail: error.to_string(),
+            })
+        }
+    }
 }
 
 pub(crate) fn sync_generation(path: &Path) -> Result<()> {
@@ -245,13 +274,162 @@ pub(crate) fn reclaim_inactive_generation_directories(
             continue;
         };
         if is_generation_directory_name(&name) && !retained.contains(&name) {
-            fs::remove_dir_all(entry.path())?;
+            let candidate = RetainedGenerationDirectory::open(entry.path())?;
+            reclamation_checkpoint(ReclamationStage::AfterCandidateRetained, candidate.path())?;
+            candidate.validate_binding()?;
+            fs::remove_dir_all(candidate.path())?;
             removed = true;
         }
     }
     if removed {
         sync_directory(&generations)?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GenerationDirectoryIdentity {
+    first: u64,
+    second: u64,
+}
+
+struct RetainedGenerationDirectory {
+    path: PathBuf,
+    _file: File,
+    identity: GenerationDirectoryIdentity,
+}
+
+impl RetainedGenerationDirectory {
+    fn open(path: PathBuf) -> Result<Self> {
+        let file = open_generation_directory(&path)?;
+        let identity = generation_directory_identity(&file)?;
+        Ok(Self {
+            path,
+            _file: file,
+            identity,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn validate_binding(&self) -> Result<()> {
+        let named = open_generation_directory(&self.path)
+            .map_err(|_| IndexError::ConcurrentGenerationChange)?;
+        if generation_directory_identity(&named)? != self.identity {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn open_generation_directory(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn open_generation_directory(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn generation_directory_identity(file: &File) -> Result<GenerationDirectoryIdentity> {
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() {
+        return Err(IndexError::ConcurrentGenerationChange);
+    }
+    Ok(GenerationDirectoryIdentity {
+        first: metadata.dev(),
+        second: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn generation_directory_identity(file: &File) -> Result<GenerationDirectoryIdentity> {
+    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: `file` retains a live directory handle and `information` is a
+    // correctly sized writable out pointer for the duration of the call.
+    if unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as HANDLE, information.as_mut_ptr())
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the successful system call initialized the entire structure.
+    let information = unsafe { information.assume_init() };
+    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(IndexError::ConcurrentGenerationChange);
+    }
+    Ok(GenerationDirectoryIdentity {
+        first: u64::from(information.dwVolumeSerialNumber),
+        second: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReclamationStage {
+    AfterCandidateRetained,
+}
+
+#[cfg(not(test))]
+#[derive(Debug, Clone, Copy)]
+enum ReclamationStage {
+    AfterCandidateRetained,
+}
+
+#[cfg(test)]
+type ReclamationTestHook = Box<dyn FnMut(ReclamationStage, &Path) -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static RECLAMATION_TEST_HOOK: std::cell::RefCell<Option<ReclamationTestHook>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct ReclamationTestHookGuard(Option<ReclamationTestHook>);
+
+#[cfg(test)]
+impl ReclamationTestHookGuard {
+    pub(crate) fn set<F>(hook: F) -> Self
+    where
+        F: FnMut(ReclamationStage, &Path) -> Result<()> + 'static,
+    {
+        let previous = RECLAMATION_TEST_HOOK.with(|active| active.replace(Some(Box::new(hook))));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReclamationTestHookGuard {
+    fn drop(&mut self) {
+        RECLAMATION_TEST_HOOK.with(|active| active.replace(self.0.take()));
+    }
+}
+
+#[cfg(test)]
+fn reclamation_checkpoint(stage: ReclamationStage, path: &Path) -> Result<()> {
+    RECLAMATION_TEST_HOOK.with(|active| match active.borrow_mut().as_mut() {
+        Some(hook) => hook(stage, path),
+        None => Ok(()),
+    })
+}
+
+#[cfg(not(test))]
+fn reclamation_checkpoint(_stage: ReclamationStage, _path: &Path) -> Result<()> {
     Ok(())
 }
 

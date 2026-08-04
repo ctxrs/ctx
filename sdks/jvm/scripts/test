@@ -20,9 +20,9 @@ find src/main/java -name '*.java' | sort > build/tmp/main-sources.txt
 find src/test/java -name '*.java' | sort > build/tmp/test-sources.txt
 find examples -name '*.java' | sort > build/tmp/example-sources.txt
 
-javac --release 11 -d build/classes @build/tmp/main-sources.txt
-javac --release 11 -cp build/classes -d build/test-classes @build/tmp/test-sources.txt
-javac --release 11 -cp build/classes -d build/example-classes @build/tmp/example-sources.txt
+javac -encoding UTF-8 --release 11 -d build/classes @build/tmp/main-sources.txt
+javac -encoding UTF-8 --release 11 -cp build/classes -d build/test-classes @build/tmp/test-sources.txt
+javac -encoding UTF-8 --release 11 -cp build/classes -d build/example-classes @build/tmp/example-sources.txt
 
 CTX_ANALYTICS_ENABLED=true java -cp build/classes:build/test-classes rs.ctx.agenthistory.AgentHistoryClientTest
 java -cp build/classes:build/example-classes ToyAgentHistoryApp

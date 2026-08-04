@@ -1,5 +1,9 @@
 use serde_json::Value;
 
+use crate::commands::mcp_tool_call::{
+    append_mcp_tool_call_text, MCP_TOOL_CALL_STRUCTURED_GUIDANCE,
+};
+
 mod pro;
 
 use pro::{is_blame_result, render_blame_text};
@@ -557,6 +561,7 @@ fn push_event_summary(out: &mut String, index: usize, event: &Value) {
         "\n{index}. {sequence}{role} {event_type}{suffix}\n"
     ));
     push_indented_key_value(out, "ctx_event_id", event.get("ctx_event_id"));
+    append_mcp_tool_call_text(out, event, "   ", MCP_TOOL_CALL_STRUCTURED_GUIDANCE);
     if let Some(text) = value_field(event, "text").filter(|text| !text.is_empty()) {
         out.push_str(&format!(
             "   text: {}\n",
@@ -770,6 +775,40 @@ mod tests {
         assert!(rendered.contains("page: limit=2, returned=1, has_more=false\n"));
         assert!(rendered.contains("terminal page: no more events\n"));
         assert!(!rendered.contains("continue: call show_session"));
+    }
+
+    #[test]
+    fn show_fallback_text_safely_marks_bounded_mcp_identity() {
+        let server = format!(
+            "literal\\n\n# heading\u{202e}\u{1b}[2J{}",
+            "x".repeat(crate::commands::mcp_tool_call::MCP_TOOL_CALL_DISPLAY_MAX_CHARS)
+        );
+        let value = json!({
+            "payload_type": "event_window",
+            "ctx_event_id": "event-1",
+            "ctx_session_id": "session-1",
+            "event": {
+                "ctx_event_id": "event-1",
+                "sequence": 2,
+                "role": "tool",
+                "event_type": "tool_output",
+                "mcp_tool_call": {
+                    "server": server,
+                    "tool": "tool\\literal\t|`[]"
+                },
+                "text": "tool result"
+            },
+            "events": []
+        });
+
+        let rendered = render_tool_text(&value);
+        assert!(rendered.contains("mcp_server: literal\\\\n\\n# heading\\u{202e}\\x1b[2J"));
+        assert!(rendered.contains("mcp_tool: tool\\\\literal\\t|`[]"));
+        assert!(rendered.contains("mcp_display_truncated: true"));
+        assert!(rendered.contains(MCP_TOOL_CALL_STRUCTURED_GUIDANCE));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains("\n# heading"));
     }
 
     #[test]

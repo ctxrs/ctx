@@ -20,7 +20,10 @@ fn custom_source_filters_use_the_core_native_event_identity() {
     assert_eq!(record.native_event_id.as_ref(), Some(&native_event_id));
 
     let event_id = record.event_id;
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(record).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
@@ -79,7 +82,10 @@ fn bounded_core_event_batch_stops_after_one_large_record_exceeds_byte_budget() {
         .iter()
         .map(|document| document.event_id.as_uuid())
         .collect::<Vec<_>>();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for document in documents {
         writer.add_core_record(document).unwrap();
@@ -104,7 +110,10 @@ fn bounded_core_event_batch_stops_after_one_large_record_exceeds_byte_budget() {
 fn session_event_budget_declines_before_materializing_an_oversized_session() {
     let temp = tempdir().unwrap();
     let source = source("bounded-session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for sequence in 1..=3 {
         writer

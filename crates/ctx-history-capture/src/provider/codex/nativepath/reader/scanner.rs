@@ -1,4 +1,62 @@
+use super::project::{mcp_terminal_candidate_evidence, CodexMcpTerminalAuthority};
 use super::*;
+
+struct McpTerminalAuthorityPreflight {
+    authority: CodexMcpTerminalAuthority,
+    bytes_read: u64,
+    peak_record_bytes: usize,
+}
+
+fn preflight_mcp_terminal_authority(
+    opened: &OpenedProviderSourceFile,
+    frozen_len: u64,
+    certified_prefix_end: Option<u64>,
+) -> Result<McpTerminalAuthorityPreflight> {
+    let mut reader = BufReader::new(opened.file().try_clone()?);
+    reader.seek(SeekFrom::Start(0))?;
+    let mut offset = 0_u64;
+    let mut record_buffer = Vec::new();
+    let mut full_hasher = Sha256::new();
+    let mut complete_hasher = Sha256::new();
+    let mut authority = CodexMcpTerminalAuthority::default();
+    let mut peak_record_bytes = 0_usize;
+    while offset < frozen_len {
+        let Some(record_read) = read_bounded_record(
+            &mut reader,
+            &mut record_buffer,
+            &mut full_hasher,
+            &mut complete_hasher,
+            frozen_len.saturating_sub(offset),
+        )?
+        else {
+            break;
+        };
+        offset = offset
+            .checked_add(record_read.byte_len)
+            .ok_or(CaptureError::SystemInvariant(
+                "Codex authority preflight offset exceeds u64",
+            ))?;
+        peak_record_bytes = peak_record_bytes.max(record_read.stored_len);
+        if !record_read.complete {
+            break;
+        }
+        if record_read.oversized || record_read.terminal_nul_padding {
+            continue;
+        }
+        let record = trim_jsonl_terminator(&record_buffer[..record_read.stored_len]);
+        if let Some(evidence) = mcp_terminal_candidate_evidence(record) {
+            authority.observe(
+                &evidence,
+                certified_prefix_end.is_some_and(|prefix_end| offset <= prefix_end),
+            );
+        }
+    }
+    Ok(McpTerminalAuthorityPreflight {
+        authority,
+        bytes_read: offset,
+        peak_record_bytes,
+    })
+}
 
 impl CodexNativeScanner {
     #[cfg(test)]
@@ -101,6 +159,7 @@ impl CodexNativeScanner {
                 tool_contexts: BTreeMap::new(),
                 tool_authorities: BTreeMap::new(),
                 continuations: BTreeMap::new(),
+                mcp_terminal_authority: CodexMcpTerminalAuthority::default(),
                 complete_hasher: Sha256::new(),
                 full_hasher: Sha256::new(),
                 record_buffer: Vec::new(),
@@ -113,6 +172,23 @@ impl CodexNativeScanner {
                 exhausted: true,
             });
         }
+
+        let certified_prefix_end = proof.map(|proof| proof.checkpoint.complete_prefix_end());
+        let authority_preflight =
+            preflight_mcp_terminal_authority(&opened, before.len, certified_prefix_end)?;
+        if proof.is_some()
+            && before.len
+                > proof
+                    .map(|proof| proof.checkpoint.observation.len)
+                    .unwrap_or_default()
+            && authority_preflight.authority.append_requires_replacement()
+        {
+            return Err(invalid_checkpoint_proof(
+                "an appended MCP terminal reuses a certified native call ID",
+            ));
+        }
+        let authority_entries = authority_preflight.authority.entry_count();
+        let authority_bytes = authority_preflight.authority.estimated_owned_bytes();
 
         let (
             disposition,
@@ -191,6 +267,7 @@ impl CodexNativeScanner {
             tool_contexts,
             tool_authorities,
             continuations,
+            mcp_terminal_authority: authority_preflight.authority,
             complete_hasher: complete_hasher.clone(),
             full_hasher: complete_hasher,
             record_buffer: Vec::new(),
@@ -199,6 +276,10 @@ impl CodexNativeScanner {
                 bytes_read: validation_bytes,
                 checkpoint_validation_bytes: validation_bytes,
                 prefix_bytes_read: offset,
+                mcp_terminal_authority_bytes_read: authority_preflight.bytes_read,
+                peak_mcp_terminal_authority_entries: authority_entries,
+                peak_mcp_terminal_authority_bytes: authority_bytes,
+                peak_line_buffer_bytes: authority_preflight.peak_record_bytes,
                 ..CodexScanCounters::default()
             },
             lineage_facts,

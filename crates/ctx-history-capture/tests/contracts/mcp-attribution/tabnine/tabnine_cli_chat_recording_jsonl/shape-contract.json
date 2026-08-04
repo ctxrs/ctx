@@ -1,0 +1,20 @@
+{
+  "contract_schema_version": 1,
+  "classification": "route_schema_contract",
+  "provider": "tabnine",
+  "route": "native_import",
+  "source_format": "tabnine_cli_chat_recording_jsonl",
+  "format_schema": {
+    "kind": "structural_revision",
+    "revision": 1
+  },
+  "producer_domain": {
+    "kind": "discrete",
+    "versions": [
+      {
+        "kind": "unversioned_generation",
+        "generation": 1
+      }
+    ]
+  }
+}

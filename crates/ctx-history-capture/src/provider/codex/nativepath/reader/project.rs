@@ -1,5 +1,10 @@
 use super::*;
 
+mod mcp;
+
+use mcp::project_mcp_tool_call_attribution;
+pub(super) use mcp::{mcp_terminal_candidate_evidence, CodexMcpTerminalAuthority};
+
 impl CodexNativeScanner {
     pub(super) fn process_record(
         &mut self,
@@ -25,21 +30,38 @@ impl CodexNativeScanner {
 
         self.counters.structural_json_parses =
             self.counters.structural_json_parses.saturating_add(1);
-        let probe = match classify_codex_record(record) {
-            Ok(probe) => probe,
+        let (probe, lineage_already_recorded) = match classify_codex_record(record) {
+            Ok(probe) if !probe.lineage_malformed() => (probe, false),
+            Ok(probe) => {
+                if let Some(lineage_facts) = self.lineage_facts.as_mut() {
+                    lineage_facts.record(codex_lineage_record_evidence(&probe))?;
+                }
+                let Some(recovered) = classify_mcp_terminal_after_selector_ambiguity(record) else {
+                    self.reject(false);
+                    return Ok(CodexRecordProjection::default());
+                };
+                (recovered, true)
+            }
             Err(_) => {
-                self.reject(false);
+                let mut lineage_recorded = false;
                 if malformed_record_may_contain_lineage(record) {
                     if let Some(lineage_facts) = self.lineage_facts.as_mut() {
                         lineage_facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)?;
                     }
+                    lineage_recorded = true;
                 }
-                return Ok(CodexRecordProjection::default());
+                let Some(recovered) = classify_mcp_terminal_after_selector_ambiguity(record) else {
+                    self.reject(false);
+                    return Ok(CodexRecordProjection::default());
+                };
+                (recovered, lineage_recorded)
             }
         };
-        let lineage_evidence = codex_lineage_record_evidence(&probe);
-        if let Some(lineage_facts) = self.lineage_facts.as_mut() {
-            lineage_facts.record(lineage_evidence)?;
+        if !lineage_already_recorded {
+            let lineage_evidence = codex_lineage_record_evidence(&probe);
+            if let Some(lineage_facts) = self.lineage_facts.as_mut() {
+                lineage_facts.record(lineage_evidence)?;
+            }
         }
         if probe.lineage_malformed() {
             self.reject(false);
@@ -239,7 +261,7 @@ impl CodexNativeScanner {
         let decoded = decoded.as_ref().ok_or(CaptureError::SystemInvariant(
             "Codex output could not be decoded for complete Core publication",
         ))?;
-        let projected_output = match project_codex_output(probe, &decoded.payload) {
+        let mut projected_output = match project_codex_output(probe, &decoded.payload) {
             Ok(Some(projected)) => projected,
             Ok(None) => {
                 return Err(CaptureError::SystemInvariant(
@@ -255,6 +277,19 @@ impl CodexNativeScanner {
                     ..CodexRecordProjection::default()
                 });
             }
+        };
+        // Exact MCP attribution is qualified only for the unversioned
+        // generation-1 Codex lane. A present producer version is a separate,
+        // not-qualified lane and must not inherit attribution merely because
+        // its terminal record has the same shape.
+        let mcp_tool_call = if owner.cli_version.is_none() {
+            project_mcp_tool_call_attribution(
+                record,
+                &decoded.payload,
+                &self.mcp_terminal_authority,
+            )
+        } else {
+            None
         };
 
         if let (Some(call_id), Some(context)) = (call_id, context.as_ref()) {
@@ -296,11 +331,12 @@ impl CodexNativeScanner {
             )
         });
 
-        let structured_content = Some(projected_tool_result_content(
-            result_kind,
-            call_id,
-            &projected_output,
-        ));
+        let invocation = (decoded.payload.get("type").and_then(Value::as_str)
+            == Some("mcp_tool_call_end"))
+        .then(|| decoded.payload.get("invocation"))
+        .flatten();
+        let structured_content =
+            projected_tool_result_content(result_kind, call_id, &mut projected_output, invocation);
         let core_row = build_source_backed_sparse_output_row(
             self.raw_ordinal,
             provider_event_identity(&decoded.payload),
@@ -310,6 +346,7 @@ impl CodexNativeScanner {
             &structural.outcome,
             projected_output.normalized_body,
             structured_content,
+            mcp_tool_call,
             repository_result,
             context
                 .as_ref()
@@ -560,7 +597,6 @@ struct ProjectedCodexOutput {
     normalized_body: String,
     result_variant: Option<&'static str>,
     result_metadata: Option<Value>,
-    invocation: Option<Value>,
     duration: Option<Value>,
 }
 
@@ -584,33 +620,29 @@ fn project_codex_output(
         normalized_body,
         result_variant: None,
         result_metadata: projected.metadata,
-        invocation: None,
         duration: None,
     }))
 }
 
 fn project_mcp_tool_call_end(payload: &Value) -> std::result::Result<ProjectedCodexOutput, ()> {
+    let (result_variant, result_value, duration) = validated_mcp_tool_call_end_parts(payload)?;
+    let projected = codex_output_content(result_value);
+    Ok(ProjectedCodexOutput {
+        normalized_body: projected.text.into_owned(),
+        result_variant: Some(result_variant),
+        result_metadata: projected.metadata,
+        duration: Some(Value::Object(duration.clone())),
+    })
+}
+
+fn validated_mcp_tool_call_end_parts(
+    payload: &Value,
+) -> std::result::Result<(&'static str, &Value, &serde_json::Map<String, Value>), ()> {
     payload
         .get("call_id")
         .and_then(Value::as_str)
         .filter(|call_id| !call_id.is_empty() && call_id.len() <= MAX_CODEX_TOOL_CALL_ID_BYTES)
         .ok_or(())?;
-    let invocation = payload
-        .get("invocation")
-        .and_then(Value::as_object)
-        .ok_or(())?;
-    invocation
-        .get("server")
-        .and_then(Value::as_str)
-        .filter(|server| !server.is_empty())
-        .ok_or(())?;
-    invocation
-        .get("tool")
-        .and_then(Value::as_str)
-        .filter(|tool| !tool.is_empty())
-        .ok_or(())?;
-    invocation.get("arguments").ok_or(())?;
-
     let duration = payload
         .get("duration")
         .and_then(Value::as_object)
@@ -644,14 +676,7 @@ fn project_mcp_tool_call_end(payload: &Value) -> std::result::Result<ProjectedCo
         }
         _ => return Err(()),
     };
-    let projected = codex_output_content(result_value);
-    Ok(ProjectedCodexOutput {
-        normalized_body: projected.text.into_owned(),
-        result_variant: Some(result_variant),
-        result_metadata: projected.metadata,
-        invocation: Some(Value::Object(invocation.clone())),
-        duration: Some(Value::Object(duration.clone())),
-    })
+    Ok((result_variant, result_value, duration))
 }
 
 fn validate_mcp_call_tool_result(result: &Value) -> std::result::Result<(), ()> {
@@ -693,8 +718,9 @@ fn validate_mcp_call_tool_result(result: &Value) -> std::result::Result<(), ()> 
 fn projected_tool_result_content(
     result_kind: CodexResultKind,
     call_id: Option<&str>,
-    projected: &ProjectedCodexOutput,
-) -> Value {
+    projected: &mut ProjectedCodexOutput,
+    invocation: Option<&Value>,
+) -> Option<Value> {
     let mut result = serde_json::Map::from_iter([
         (
             "item_type".to_owned(),
@@ -716,16 +742,35 @@ fn projected_tool_result_content(
             Value::String(variant.to_owned()),
         );
     }
-    if let Some(metadata) = projected.result_metadata.clone() {
+    if let Some(metadata) = projected.result_metadata.take() {
         result.insert("result_metadata".to_owned(), metadata);
     }
-    if let Some(invocation) = projected.invocation.clone() {
-        result.insert("invocation".to_owned(), invocation);
-    }
-    if let Some(duration) = projected.duration.clone() {
+    if let Some(duration) = projected.duration.take() {
         result.insert("duration".to_owned(), duration);
     }
-    serde_json::json!({
+    let mut structured = serde_json::json!({
         "provider_native_tool_result": Value::Object(result),
-    })
+    });
+    let base_bytes = encoded_json_len(&structured)?;
+    if base_bytes > ctx_history_core::MAX_CORE_CONTENT_BYTES {
+        return None;
+    }
+    if let Some(invocation) = invocation {
+        // `provider_native_tool_result` is non-empty, so adding this member
+        // contributes one comma, the fixed encoded key, and the invocation
+        // value itself. Count first and clone only when Core can admit the
+        // complete structured representation.
+        let invocation_bytes = encoded_json_len(invocation)?;
+        let candidate_bytes = base_bytes
+            .checked_add(1)?
+            .checked_add(r#""invocation":"#.len())?
+            .checked_add(invocation_bytes)?;
+        if candidate_bytes <= ctx_history_core::MAX_CORE_CONTENT_BYTES {
+            structured
+                .get_mut("provider_native_tool_result")?
+                .as_object_mut()?
+                .insert("invocation".to_owned(), invocation.clone());
+        }
+    }
+    Some(structured)
 }

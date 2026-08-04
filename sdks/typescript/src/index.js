@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawnCommand } from "./subprocess.js";
 
 export const AGENT_HISTORY_V1_VERSION = "agent-history-v1";
 export const SDK_VERSION = "0.0.0";
@@ -99,24 +99,25 @@ export class LocalCliAdapter {
       ...options.env,
       CTX_ANALYTICS_ENABLED: "false",
     };
-    if (this.runner) {
-      return normalizeRunResult(
-        await this.runner({
+    const result = this.runner
+      ? await this.runner({
           command,
           args: argv,
           cwd: options.cwd ?? this.cwd,
           env,
           timeoutMs: options.timeoutMs ?? this.timeoutMs,
-        }),
-        command,
-        argv,
-      );
-    }
-    return spawnCommand(command, argv, {
-      cwd: options.cwd ?? this.cwd,
-      env: { ...process.env, ...env },
-      timeoutMs: options.timeoutMs ?? this.timeoutMs,
-    });
+        })
+      : await spawnCommand(
+          command,
+          argv,
+          {
+            cwd: options.cwd ?? this.cwd,
+            env: { ...process.env, ...env },
+            timeoutMs: options.timeoutMs ?? this.timeoutMs,
+          },
+          { CtxCliError, CtxParseError, CtxTimeoutError },
+        );
+    return normalizeRunResult(result, command, argv);
   }
 
   #argv(args) {
@@ -227,6 +228,7 @@ export class LocalAgentHistoryClient {
       if (validatesStatusCounters) {
         validateExactStatusCounterLexemes(result.stdout);
       }
+      validateNoDuplicateJSONMembers(result.stdout);
       return JSON.parse(result.stdout);
     } catch (cause) {
       if (cause instanceof CtxParseError) {
@@ -310,6 +312,122 @@ function validateExactStatusCounterLexemes(json) {
       );
     }
   }
+}
+
+function validateNoDuplicateJSONMembers(json) {
+  let index = 0;
+
+  const fail = (message) => {
+    throw new CtxParseError(`ctx returned invalid JSON: ${message}`, {
+      details: { offset: index },
+    });
+  };
+  const skipWhitespace = () => {
+    while (json[index] === " " || json[index] === "\n" || json[index] === "\r" || json[index] === "\t") {
+      index += 1;
+    }
+  };
+  const parseString = () => {
+    if (json[index] !== '"') fail("expected string");
+    const start = index;
+    index += 1;
+    while (index < json.length) {
+      const character = json[index];
+      index += 1;
+      if (character === '"') {
+        try {
+          return JSON.parse(json.slice(start, index));
+        } catch {
+          fail("invalid string");
+        }
+      }
+      if (character === "\\") {
+        if (index >= json.length) fail("unterminated escape");
+        index += 1;
+      }
+    }
+    fail("unterminated string");
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    if (json[index] === "{") {
+      parseObject();
+      return;
+    }
+    if (json[index] === "[") {
+      parseArray();
+      return;
+    }
+    if (json[index] === '"') {
+      parseString();
+      return;
+    }
+    const start = index;
+    while (
+      index < json.length &&
+      json[index] !== "," &&
+      json[index] !== "}" &&
+      json[index] !== "]" &&
+      !/\s/u.test(json[index])
+    ) {
+      index += 1;
+    }
+    if (start === index) fail("expected value");
+  };
+  const parseObject = () => {
+    index += 1;
+    const members = new Set();
+    skipWhitespace();
+    if (json[index] === "}") {
+      index += 1;
+      return;
+    }
+    while (index < json.length) {
+      skipWhitespace();
+      const member = parseString();
+      if (members.has(member)) {
+        throw new CtxParseError("ctx JSON contains a duplicate object member", {
+          details: { member },
+        });
+      }
+      members.add(member);
+      skipWhitespace();
+      if (json[index] !== ":") fail("expected colon");
+      index += 1;
+      parseValue();
+      skipWhitespace();
+      if (json[index] === "}") {
+        index += 1;
+        return;
+      }
+      if (json[index] !== ",") fail("expected comma");
+      index += 1;
+    }
+    fail("unterminated object");
+  };
+  const parseArray = () => {
+    index += 1;
+    skipWhitespace();
+    if (json[index] === "]") {
+      index += 1;
+      return;
+    }
+    while (index < json.length) {
+      parseValue();
+      skipWhitespace();
+      if (json[index] === "]") {
+        index += 1;
+        return;
+      }
+      if (json[index] !== ",") fail("expected comma");
+      index += 1;
+    }
+    fail("unterminated array");
+  };
+
+  parseValue();
+  skipWhitespace();
+  if (index !== json.length) fail("trailing data");
 }
 
 export class HostedAgentHistoryClient {
@@ -414,14 +532,14 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
     }
     case "showEvent":
       envelope.event = {
-        event: camelizeKeys(raw?.event ?? null),
-        events: camelizeKeys(raw?.events ?? []),
+        event: normalizeEventRecord(raw?.event ?? null),
+        events: normalizeEventRecords(raw?.events ?? []),
       };
       break;
     case "showSession":
       envelope.session = {
         session: camelizeKeys(raw?.session ?? null),
-        events: camelizeKeys(raw?.events ?? []),
+        events: normalizeEventRecords(raw?.events ?? []),
         mode: camelizeKeys(raw?.mode ?? null),
         format: camelizeKeys(raw?.format ?? null),
       };
@@ -432,6 +550,107 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
       });
   }
   return envelope;
+}
+
+const MAX_MCP_TOOL_CALL_COMPONENT_BYTES = 64 * 1024;
+
+function normalizeEventRecords(values) {
+  return Array.isArray(values)
+    ? values.map((value) => normalizeEventRecord(value))
+    : camelizeKeys(values);
+}
+
+function normalizeEventRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return camelizeKeys(value);
+  }
+
+  const hasSnake = Object.hasOwn(value, "mcp_tool_call");
+  const hasCamel = Object.hasOwn(value, "mcpToolCall");
+  if (hasSnake && hasCamel) {
+    throw invalidMcpToolCall("duplicate outer wire aliases");
+  }
+
+  const outer = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "mcp_tool_call" || key === "mcpToolCall") {
+      continue;
+    }
+    if (snakeToCamel(key) === "mcpToolCall") {
+      throw invalidMcpToolCall("outer member collides with the canonical mcpToolCall key", {
+        member: key,
+      });
+    }
+    outer[key] = item;
+  }
+
+  const event = camelizeKeys(outer);
+  if (hasSnake || hasCamel) {
+    event.mcpToolCall = validateMcpToolCall(
+      hasSnake ? value.mcp_tool_call : value.mcpToolCall,
+    );
+  }
+  return event;
+}
+
+function validateMcpToolCall(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw invalidMcpToolCall("expected an object");
+  }
+  const members = Object.keys(value).sort();
+  if (members.length !== 2 || members[0] !== "server" || members[1] !== "tool") {
+    throw invalidMcpToolCall("expected exactly server and tool", { members });
+  }
+  return {
+    server: validateMcpToolCallComponent(value.server, "server"),
+    tool: validateMcpToolCallComponent(value.tool, "tool"),
+  };
+}
+
+function validateMcpToolCallComponent(value, field) {
+  if (typeof value !== "string") {
+    throw invalidMcpToolCall("expected a string", { field: `mcpToolCall.${field}` });
+  }
+  let decodedBytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (!(low >= 0xdc00 && low <= 0xdfff)) {
+        throw invalidMcpToolCall("contains an invalid Unicode string", {
+          field: `mcpToolCall.${field}`,
+        });
+      }
+      decodedBytes += 4;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw invalidMcpToolCall("contains an invalid Unicode string", {
+        field: `mcpToolCall.${field}`,
+      });
+    } else if (codeUnit <= 0x7f) {
+      decodedBytes += 1;
+    } else if (codeUnit <= 0x7ff) {
+      decodedBytes += 2;
+    } else {
+      decodedBytes += 3;
+    }
+    if (decodedBytes > MAX_MCP_TOOL_CALL_COMPONENT_BYTES) {
+      throw invalidMcpToolCall(
+        `exceeds ${MAX_MCP_TOOL_CALL_COMPONENT_BYTES} decoded UTF-8 bytes`,
+        { field: `mcpToolCall.${field}` },
+      );
+    }
+  }
+  if (decodedBytes === 0) {
+    throw invalidMcpToolCall("must be nonempty", { field: `mcpToolCall.${field}` });
+  }
+  return value;
+}
+
+function invalidMcpToolCall(message, details = {}) {
+  return new CtxParseError(`agent-history-v1 MCP tool call ${message}`, {
+    details: { field: "mcpToolCall", ...details },
+  });
 }
 
 function normalizeStatus(raw) {
@@ -495,6 +714,16 @@ function camelizeKeys(value) {
     out[camelKey] = camelizeKeys(item);
   }
   return out;
+}
+
+function snakeToCamel(value) {
+  const parts = value.split("_");
+  if (parts.length === 1) {
+    return value;
+  }
+  return parts[0] + parts.slice(1).map((part) => (
+    part.length === 0 ? "" : part[0].toUpperCase() + part.slice(1)
+  )).join("");
 }
 
 function bridgeSearchPagination(search) {
@@ -637,70 +866,25 @@ function normalizeRunResult(result, command, args) {
     args: result.args ?? args,
     exitCode: result.exitCode ?? 0,
     signal: result.signal,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
+    stdout: decodeUtf8Output(result.stdout, "stdout"),
+    stderr: decodeUtf8Output(result.stderr, "stderr"),
   };
 }
 
-function spawnCommand(command, args, options) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timeout = setTimeout(() => {
-      settled = "timeout";
-      child.kill("SIGTERM");
-    }, options.timeoutMs);
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", (cause) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      reject(
-        new CtxCliError(`failed to start ${command}`, {
-          command,
-          args,
-          exitCode: undefined,
-          stdout,
-          stderr,
-          cause,
-        }),
-      );
-    });
-    child.on("close", (exitCode, signal) => {
-      if (settled === true) {
-        return;
-      }
-      if (settled === "timeout") {
-        settled = true;
-        clearTimeout(timeout);
-        reject(
-          new CtxTimeoutError(`ctx command timed out after ${options.timeoutMs}ms`, {
-            details: { command, args, exitCode, signal, stdout, stderr, timeoutMs: options.timeoutMs },
-          }),
-        );
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      resolve({ command, args, exitCode, signal, stdout, stderr });
-    });
-  });
+function decodeUtf8Output(value, stream) {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(value);
+    } catch (cause) {
+      throw new CtxParseError(`ctx returned invalid UTF-8 on ${stream}`, {
+        details: { stream },
+        cause,
+      });
+    }
+  }
+  return String(value);
 }
 
 function parseCtxVersion(raw) {

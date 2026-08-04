@@ -1,13 +1,13 @@
 use ctx_history_core::{
-    core_record_contract_fingerprint, CertifiedSource, CoreRecordError, ProjectionContractError,
-    SourceKey, CORE_RECORD_VERSION, IDENTITY_VERSION,
+    CertifiedSource, CoreRecordError, ProjectionContractError, SourceKey, CORE_RECORD_VERSION,
+    IDENTITY_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    hex,
+    current_core_record_contract_fingerprint, hex,
     identity::is_generation_id,
     policy::{
         current_source_generation_policy_hash, LEXICAL_SCHEMA_REVISION, LEXICAL_TOKENIZER_REVISION,
@@ -97,6 +97,22 @@ pub enum IndexError {
         "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
     )]
     CoreRecordContractMismatch { expected: String, actual: String },
+    #[error(
+        "allowlisted predecessor Core record contains the successor-only mcp_tool_call member"
+    )]
+    PredecessorCoreRecordShapeMismatch,
+    #[error("predecessor migration source topology is not authenticated: {0}")]
+    PredecessorMigrationSourceTopology(&'static str),
+    #[error("predecessor migration source has too many clone files: {actual}, maximum {maximum}")]
+    PredecessorMigrationFileLimit { actual: usize, maximum: usize },
+    #[error(
+        "predecessor migration source is too large to clone: {actual} bytes, maximum {maximum}"
+    )]
+    PredecessorMigrationByteLimit { actual: u64, maximum: u64 },
+    #[error(
+        "predecessor migration has insufficient filesystem headroom: {available} bytes available, {required} required"
+    )]
+    PredecessorMigrationInsufficientHeadroom { available: u64, required: u64 },
     #[error(
         "Core record revisions do not match the active generation policy: normalization {normalization}/{expected_normalization}, content {content}/{expected_content}"
     )]
@@ -415,6 +431,36 @@ pub enum IndexError {
     },
     #[error("manifest Core-record aggregate is invalid for source {0}")]
     CoreRecordAggregateMismatch(String),
+}
+
+/// A predecessor migration whose atomic pointer replacement became visible,
+/// but whose durability or subsequent pointer reconciliation was uncertain.
+///
+/// This is a committed outcome, not a failed migration: the successor is query
+/// authority. [`GenerationWriterOpenOutcome`](crate::GenerationWriterOpenOutcome)
+/// distinguishes a recovered usable writer from a state that still requires
+/// fix-forward recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedPredecessorMigrationRecovery {
+    generation_id: String,
+    detail: String,
+}
+
+impl CommittedPredecessorMigrationRecovery {
+    pub(crate) fn new(generation_id: String, detail: String) -> Self {
+        Self {
+            generation_id,
+            detail,
+        }
+    }
+
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
 }
 
 /// Non-zero number of consecutive certified route observations that found a
@@ -764,7 +810,7 @@ impl GenerationManifest {
             manifest_version: GENERATION_MANIFEST_VERSION,
             identity_version: IDENTITY_VERSION,
             core_record_version: CORE_RECORD_VERSION,
-            core_record_contract_fingerprint: core_record_contract_fingerprint(),
+            core_record_contract_fingerprint: current_core_record_contract_fingerprint(),
             lexical_schema_version: LEXICAL_SCHEMA_VERSION,
             lexical_analyzer_version: LEXICAL_ANALYZER_VERSION,
             policy_schema_hash: current_source_generation_policy_hash()?,

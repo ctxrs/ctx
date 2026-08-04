@@ -6,6 +6,7 @@
 mod analyzer;
 mod commit_contract;
 mod contracts;
+mod core_contract;
 mod durable_directory;
 mod identity;
 mod index_document;
@@ -17,6 +18,7 @@ mod query;
 mod reader;
 mod schema;
 mod staging;
+mod writer_deletion;
 mod writer_publication;
 mod writer_routes;
 mod writer_support;
@@ -33,11 +35,17 @@ pub(crate) use contracts::{
     MAX_DOCUMENT_METADATA_BYTES,
 };
 pub use contracts::{
-    ConsecutiveSourceMissingCount, GenerationManifest, IndexError, Result,
-    SourceCoreRecordAggregate, SourceMissingObservationPoint, SourceRouteIdentity,
-    SourceRouteMissingState, SourceRouteSnapshot, WriterOptions, GENERATION_MANIFEST_VERSION,
-    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
-    MAX_PUBLICATION_METADATA_BYTES,
+    CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount, GenerationManifest,
+    IndexError, Result, SourceCoreRecordAggregate, SourceMissingObservationPoint,
+    SourceRouteIdentity, SourceRouteMissingState, SourceRouteSnapshot, WriterOptions,
+    GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
+    LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_PUBLICATION_METADATA_BYTES,
+};
+#[cfg(test)]
+pub(crate) use core_contract::SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT;
+pub(crate) use core_contract::{
+    audit_searcher_core_contract, classify_core_contract_generation,
+    current_core_record_contract_fingerprint, CoreContractGeneration,
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{
@@ -56,19 +64,23 @@ pub use policy::{
     SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
 };
 pub use preparation::{CoreRecordPreparer, PreparedCoreRecord};
+#[cfg(test)]
+pub(crate) use publication::manifest_path;
+#[cfg(test)]
+pub(crate) use publication::republish_current_for_qualification;
 pub(crate) use publication::{
-    canonical_commit_payload, create_candidate_generation, load_active_generation_pointer,
-    load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
-    physical_integrity_audit, publish_active_generation_pointer,
+    best_effort_post_migration_cleanup, canonical_commit_payload, create_candidate_generation,
+    load_active_generation_pointer, load_publication_for_metas, meta_generation,
+    migrate_allowlisted_predecessor, open_slot_index, payload_generation_id,
+    physical_integrity_audit, physical_integrity_digest, publish_active_generation_pointer,
     reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
     reclaim_unreferenced_manifests, reconcile_commit_error, scrub_and_certify_physical_integrity,
     searcher_generation, sync_directory, sync_generation, verify_or_certify_physical_integrity,
     verify_physical_integrity, verify_publication_candidate, verify_searcher,
     verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
-    PhysicalIntegrityAudit, INDEX_GENERATIONS_DIRECTORY,
+    PhysicalIntegrityAudit, PointerPublicationOutcome, PredecessorMigrationOutcome,
+    INDEX_GENERATIONS_DIRECTORY,
 };
-#[cfg(test)]
-pub(crate) use publication::{manifest_path, physical_integrity_digest};
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
     CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters, CoreEventRangePage,
@@ -191,6 +203,9 @@ impl PendingDeletion {
 /// These errors describe versioned pointer, schema, policy, or physical index
 /// settings, not damaged control metadata. Callers must not read, clone,
 /// migrate, or otherwise interpret the incompatible generation.
+/// Core fingerprint mismatches are deliberately excluded: the exact
+/// same-epoch predecessor is handled by its read/migration bridge, while every
+/// unknown Core fingerprint fails closed without source reconstruction.
 pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
     matches!(
         error,
@@ -198,7 +213,6 @@ pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
             | IndexError::UnsupportedCommitPayload(_)
             | IndexError::UnsupportedManifest(_)
             | IndexError::GenerationContractMismatch { .. }
-            | IndexError::CoreRecordContractMismatch { .. }
             | IndexError::CoreRecordPolicyRevisionMismatch { .. }
             | IndexError::GenerationPolicyMismatch { .. }
             | IndexError::SchemaMismatch(_)
@@ -253,6 +267,42 @@ pub struct GenerationWriter {
     after_pointer_switch: Option<GenerationPathHook>,
 }
 
+/// Mandatory result of opening the generation writer across the narrow
+/// same-epoch predecessor transition.
+///
+/// Ordinary `Err` values mean no successor pointer became visible. A committed
+/// migration is always represented by one of the committed variants, so
+/// callers must explicitly acknowledge recovery before continuing.
+pub enum GenerationWriterOpenOutcome {
+    Ready(GenerationWriter),
+    RecoveredCommittedMigration {
+        writer: GenerationWriter,
+        recovery: CommittedPredecessorMigrationRecovery,
+    },
+    CommittedMigrationRecoveryRequired {
+        recovery: CommittedPredecessorMigrationRecovery,
+    },
+}
+
+impl GenerationWriterOpenOutcome {
+    pub fn committed_migration_recovery(&self) -> Option<&CommittedPredecessorMigrationRecovery> {
+        match self {
+            Self::Ready(_) => None,
+            Self::RecoveredCommittedMigration { recovery, .. }
+            | Self::CommittedMigrationRecoveryRequired { recovery } => Some(recovery),
+        }
+    }
+
+    pub fn into_writer(
+        self,
+    ) -> std::result::Result<GenerationWriter, CommittedPredecessorMigrationRecovery> {
+        match self {
+            Self::Ready(writer) | Self::RecoveredCommittedMigration { writer, .. } => Ok(writer),
+            Self::CommittedMigrationRecoveryRequired { recovery } => Err(recovery),
+        }
+    }
+}
+
 impl GenerationWriter {
     /// Captures an exact event-identity lookup pinned to this writer's base generation.
     pub fn base_event_identity_lookup(&self) -> BaseEventIdentityLookup {
@@ -262,7 +312,10 @@ impl GenerationWriter {
         }
     }
 
-    pub fn open(root: impl AsRef<Path>, options: WriterOptions) -> Result<Self> {
+    pub fn open(
+        root: impl AsRef<Path>,
+        options: WriterOptions,
+    ) -> Result<GenerationWriterOpenOutcome> {
         let indexer_threads = options.indexer_threads.clamp(1, 8);
         let minimum = INDEX_MEMORY_MIN_PER_THREAD.saturating_mul(indexer_threads);
         if options.memory_bytes < minimum {
@@ -271,6 +324,10 @@ impl GenerationWriter {
                 minimum,
             });
         }
+        let options = WriterOptions {
+            indexer_threads,
+            memory_bytes: options.memory_bytes,
+        };
         let requested_root = root.as_ref().to_path_buf();
         fs::create_dir_all(&requested_root)?;
         let directory =
@@ -286,12 +343,14 @@ impl GenerationWriter {
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
 
-        let (active_pointer, pointer_requires_rebuild) = match load_active_generation_pointer(&root)
-        {
-            Ok(pointer) => (pointer, false),
-            Err(error) if generation_incompatibility_requires_rebuild(&error) => (None, true),
-            Err(error) => return Err(error),
-        };
+        let (mut active_pointer, pointer_requires_rebuild) =
+            match load_active_generation_pointer(&root) {
+                Ok(pointer) => (pointer, false),
+                Err(error) if generation_incompatibility_requires_rebuild(&error) => (None, true),
+                Err(error) => return Err(error),
+            };
+        let mut committed_predecessor_migration_recovery = None;
+        let mut report_committed_predecessor_migration_recovery = false;
         if !pointer_requires_rebuild {
             reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
             let retained_generation_ids = active_pointer
@@ -301,190 +360,242 @@ impl GenerationWriter {
                 .collect::<Vec<_>>();
             reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
             reclaim_unreferenced_certifications(&root, active_pointer.as_ref())?;
-        }
 
-        let rebuild_marked = if pointer_requires_rebuild {
-            // The unsupported pointer remains the sole durable publication
-            // authority until a complete current candidate atomically replaces
-            // it. Its slots and manifests are intentionally not decoded or
-            // reclaimed during staging.
-            true
-        } else if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
-            if active_pointer.as_ref().is_some_and(|pointer| {
-                pointer.active().generation_id() == marker.generation_id
-                    && pointer.active().directory() == marker.directory
-            }) {
-                // The prior physical integrity check failed. Keep serving the
-                // old pointer until a fresh source-authoritative candidate is
-                // verified and atomically replaces it, but do not expose the
-                // corrupt generation as reusable base state.
-                true
-            } else {
-                // Publication completed after the marker was written but before
-                // its cleanup. It no longer applies to the active generation.
-                clear_active_generation_rebuild_marker(&root)?;
-                false
-            }
-        } else {
-            false
-        };
-
-        let reusable_generation = if !rebuild_marked {
-            active_pointer
-                .as_ref()
-                .map(|pointer| {
-                    let index = open_slot_index(&root, pointer.active())?;
-                    validate_schema(&index.schema())?;
-                    let fields = fields_from_schema(&index.schema())?;
-                    let metas = index.load_metas()?;
-                    let (manifest, publication_metadata, searcher) = if metas.payload.is_some() {
-                        let publication = load_publication_for_metas(&root, &metas)?;
-                        let manifest = publication.manifest;
-                        if pointer.active().generation_id() != manifest.generation_id()? {
-                            return Err(IndexError::InvalidActiveGenerationPointer);
-                        }
-                        let reader = index
-                            .reader_builder()
-                            .reload_policy(ReloadPolicy::Manual)
-                            .try_into()?;
-                        let searcher = reader.searcher();
-                        if searcher_generation(&searcher) != meta_generation(&metas) {
-                            return Err(IndexError::ConcurrentGenerationChange);
-                        }
-                        verify_searcher_structure(&searcher, &manifest)?;
-                        (Some(manifest), publication.metadata, Some(searcher))
-                    } else if metas.segments.is_empty() {
-                        (None, None, None)
-                    } else {
-                        return Err(IndexError::UnboundIndexState);
-                    };
-                    Ok((
-                        index,
-                        fields,
-                        manifest,
-                        metas.opstamp,
-                        searcher,
-                        publication_metadata,
-                    ))
-                })
-                .transpose()
-                .or_else(|error| {
-                    if generation_incompatibility_requires_rebuild(&error) {
-                        Ok(None)
-                    } else {
-                        Err(error)
+            if let Some(pointer) = active_pointer.clone() {
+                let outcome = migrate_allowlisted_predecessor(&root, &pointer, &options)?;
+                let migrated = match outcome {
+                    PredecessorMigrationOutcome::Unchanged(pointer) => pointer,
+                    PredecessorMigrationOutcome::Migrated(pointer) => {
+                        committed_predecessor_migration_recovery =
+                            Some(CommittedPredecessorMigrationRecovery::new(
+                                pointer.active().generation_id().to_owned(),
+                                "successor pointer published durably".to_owned(),
+                            ));
+                        pointer
                     }
-                })?
-        } else {
-            None
-        };
-
-        let (
-            index,
-            candidate_directory_name,
-            fields,
-            base_manifest,
-            base_opstamp,
-            base_searcher,
-            base_publication_metadata,
-        ) = if let Some((index, fields, manifest, opstamp, searcher, publication_metadata)) =
-            reusable_generation
-        {
-            (
-                index,
-                None,
-                fields,
-                manifest,
-                opstamp,
-                searcher,
-                publication_metadata,
-            )
-        } else {
-            // The active slot is absent, physically rejected, or belongs to
-            // an incompatible disposable generation. Build an empty current
-            // candidate and retain only the pointer as publication authority.
-            let candidate = create_candidate_generation(&root, None)?;
-            validate_schema(&candidate.index.schema())?;
-            let fields = fields_from_schema(&candidate.index.schema())?;
-            let metas = candidate.index.load_metas()?;
-            (
-                candidate.index,
-                Some(candidate.directory_name),
-                fields,
-                None,
-                metas.opstamp,
-                None,
-                None,
-            )
-        };
-        let preparation_base = active_pointer.as_ref().and_then(|pointer| {
-            base_searcher
-                .as_ref()
-                .filter(|_| base_manifest.is_some())
-                .map(|searcher| (root.clone(), pointer.active().clone(), searcher.clone()))
-        });
-        let core_record_preparer = CoreRecordPreparer::new(
-            fields,
-            active_pointer
-                .as_ref()
-                .map(|pointer| pointer.active().generation_id().to_owned()),
-            preparation_base,
-        );
-        let mut source_identities = HashMap::new();
-        if let Some(manifest) = &base_manifest {
-            for source in &manifest.sources {
-                register_compact_identity(
-                    &mut source_identities,
-                    source.observation().source().identity(),
-                    "source",
-                    false,
-                )?;
+                    PredecessorMigrationOutcome::CommittedVisible { pointer, recovery } => {
+                        report_committed_predecessor_migration_recovery = true;
+                        committed_predecessor_migration_recovery = Some(recovery);
+                        pointer
+                    }
+                    PredecessorMigrationOutcome::CommittedRecoveryRequired { recovery } => {
+                        return Ok(
+                            GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired {
+                                recovery,
+                            },
+                        );
+                    }
+                };
+                if migrated != pointer {
+                    active_pointer = Some(migrated.clone());
+                    best_effort_post_migration_cleanup(&root, &migrated);
+                }
             }
         }
-        Ok(Self {
-            root,
-            index,
-            active_pointer,
-            candidate_directory_name,
-            preflight_lock: Some(preflight_lock),
-            writer: None,
-            writer_options: WriterOptions {
-                indexer_threads,
-                memory_bytes: options.memory_bytes,
-            },
-            fields,
-            base_manifest,
-            base_opstamp,
-            base_searcher,
-            base_publication_metadata,
-            core_record_preparer,
-            complete_inventories: Vec::new(),
-            pending: HashMap::new(),
-            deletions: HashMap::new(),
-            route_deletions: HashSet::new(),
-            present_source_routes: None,
-            observed_missing_routes: HashMap::new(),
-            route_publication_revalidations: Vec::new(),
-            source_identities,
-            source_route_plan: None,
-            active_source_route_stage: None,
-            #[cfg(test)]
-            index_writer_constructions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            #[cfg(test)]
-            before_writer_handoff: None,
-            #[cfg(test)]
-            before_candidate_commit: None,
-            #[cfg(test)]
-            after_candidate_commit: None,
-            #[cfg(test)]
-            return_commit_error_after_visibility: false,
-            #[cfg(test)]
-            before_pointer_switch: None,
-            #[cfg(test)]
-            before_pointer_publication: None,
-            #[cfg(test)]
-            after_pointer_switch: None,
-        })
+
+        let writer = (|| -> Result<Self> {
+            let rebuild_marked = if pointer_requires_rebuild {
+                // The unsupported pointer remains the sole durable publication
+                // authority until a complete current candidate atomically replaces
+                // it. Its slots and manifests are intentionally not decoded or
+                // reclaimed during staging.
+                true
+            } else if let Some(marker) = load_active_generation_rebuild_marker(&root)? {
+                if active_pointer.as_ref().is_some_and(|pointer| {
+                    pointer.active().generation_id() == marker.generation_id
+                        && pointer.active().directory() == marker.directory
+                }) {
+                    // The prior physical integrity check failed. Keep serving the
+                    // old pointer until a fresh source-authoritative candidate is
+                    // verified and atomically replaces it, but do not expose the
+                    // corrupt generation as reusable base state.
+                    true
+                } else {
+                    // Publication completed after the marker was written but before
+                    // its cleanup. It no longer applies to the active generation.
+                    clear_active_generation_rebuild_marker(&root)?;
+                    false
+                }
+            } else {
+                false
+            };
+
+            let reusable_generation = if !rebuild_marked {
+                active_pointer
+                    .as_ref()
+                    .map(|pointer| {
+                        let index = open_slot_index(&root, pointer.active())?;
+                        validate_schema(&index.schema())?;
+                        let fields = fields_from_schema(&index.schema())?;
+                        let metas = index.load_metas()?;
+                        let (manifest, publication_metadata, searcher) = if metas.payload.is_some()
+                        {
+                            let publication = load_publication_for_metas(&root, &metas)?;
+                            let manifest = publication.manifest;
+                            if pointer.active().generation_id() != manifest.generation_id()? {
+                                return Err(IndexError::InvalidActiveGenerationPointer);
+                            }
+                            let reader = index
+                                .reader_builder()
+                                .reload_policy(ReloadPolicy::Manual)
+                                .try_into()?;
+                            let searcher = reader.searcher();
+                            if searcher_generation(&searcher) != meta_generation(&metas) {
+                                return Err(IndexError::ConcurrentGenerationChange);
+                            }
+                            verify_searcher_structure(&searcher, &manifest)?;
+                            (Some(manifest), publication.metadata, Some(searcher))
+                        } else if metas.segments.is_empty() {
+                            (None, None, None)
+                        } else {
+                            return Err(IndexError::UnboundIndexState);
+                        };
+                        Ok((
+                            index,
+                            fields,
+                            manifest,
+                            metas.opstamp,
+                            searcher,
+                            publication_metadata,
+                        ))
+                    })
+                    .transpose()
+                    .or_else(|error| {
+                        if generation_incompatibility_requires_rebuild(&error) {
+                            Ok(None)
+                        } else {
+                            Err(error)
+                        }
+                    })?
+            } else {
+                None
+            };
+
+            let (
+                index,
+                candidate_directory_name,
+                fields,
+                base_manifest,
+                base_opstamp,
+                base_searcher,
+                base_publication_metadata,
+            ) = if let Some((index, fields, manifest, opstamp, searcher, publication_metadata)) =
+                reusable_generation
+            {
+                (
+                    index,
+                    None,
+                    fields,
+                    manifest,
+                    opstamp,
+                    searcher,
+                    publication_metadata,
+                )
+            } else {
+                // The active slot is absent, physically rejected, or belongs to
+                // an incompatible disposable generation. Build an empty current
+                // candidate and retain only the pointer as publication authority.
+                let candidate = create_candidate_generation(&root, None)?;
+                validate_schema(&candidate.index.schema())?;
+                let fields = fields_from_schema(&candidate.index.schema())?;
+                let metas = candidate.index.load_metas()?;
+                (
+                    candidate.index,
+                    Some(candidate.directory_name),
+                    fields,
+                    None,
+                    metas.opstamp,
+                    None,
+                    None,
+                )
+            };
+            let preparation_base = active_pointer.as_ref().and_then(|pointer| {
+                base_searcher
+                    .as_ref()
+                    .filter(|_| base_manifest.is_some())
+                    .map(|searcher| (root.clone(), pointer.active().clone(), searcher.clone()))
+            });
+            let core_record_preparer = CoreRecordPreparer::new(
+                fields,
+                active_pointer
+                    .as_ref()
+                    .map(|pointer| pointer.active().generation_id().to_owned()),
+                preparation_base,
+            );
+            let mut source_identities = HashMap::new();
+            if let Some(manifest) = &base_manifest {
+                for source in &manifest.sources {
+                    register_compact_identity(
+                        &mut source_identities,
+                        source.observation().source().identity(),
+                        "source",
+                        false,
+                    )?;
+                }
+            }
+            Ok(Self {
+                root,
+                index,
+                active_pointer,
+                candidate_directory_name,
+                preflight_lock: Some(preflight_lock),
+                writer: None,
+                writer_options: options,
+                fields,
+                base_manifest,
+                base_opstamp,
+                base_searcher,
+                base_publication_metadata,
+                core_record_preparer,
+                complete_inventories: Vec::new(),
+                pending: HashMap::new(),
+                deletions: HashMap::new(),
+                route_deletions: HashSet::new(),
+                present_source_routes: None,
+                observed_missing_routes: HashMap::new(),
+                route_publication_revalidations: Vec::new(),
+                source_identities,
+                source_route_plan: None,
+                active_source_route_stage: None,
+                #[cfg(test)]
+                index_writer_constructions: std::sync::Arc::new(
+                    std::sync::atomic::AtomicUsize::new(0),
+                ),
+                #[cfg(test)]
+                before_writer_handoff: None,
+                #[cfg(test)]
+                before_candidate_commit: None,
+                #[cfg(test)]
+                after_candidate_commit: None,
+                #[cfg(test)]
+                return_commit_error_after_visibility: false,
+                #[cfg(test)]
+                before_pointer_switch: None,
+                #[cfg(test)]
+                before_pointer_publication: None,
+                #[cfg(test)]
+                after_pointer_switch: None,
+            })
+        })();
+        match (writer, committed_predecessor_migration_recovery) {
+            (Ok(writer), Some(recovery)) if report_committed_predecessor_migration_recovery => {
+                Ok(GenerationWriterOpenOutcome::RecoveredCommittedMigration { writer, recovery })
+            }
+            (Ok(writer), _) => Ok(GenerationWriterOpenOutcome::Ready(writer)),
+            (Err(error), Some(recovery)) => {
+                let generation_id = recovery.generation_id().to_owned();
+                let detail = format!(
+                    "{}; successor writer reload failed after pointer visibility: {error}",
+                    recovery.detail()
+                );
+                Ok(
+                    GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired {
+                        recovery: CommittedPredecessorMigrationRecovery::new(generation_id, detail),
+                    },
+                )
+            }
+            (Err(error), None) => Err(error),
+        }
     }
 
     /// Returns the base generation captured after this writer acquired
@@ -837,110 +948,6 @@ impl GenerationWriter {
         }
         pending.certificate = Some(append.into_current());
         Ok(())
-    }
-
-    pub fn delete_source(
-        &mut self,
-        proof: CertifiedSourceDeletion,
-        inventory: CertifiedSourceInventory,
-    ) -> Result<()> {
-        let deletion = PendingDeletion::new(proof, inventory)?;
-        let source = deletion.source();
-        self.reject_carried_source_mutation(source)?;
-        register_compact_identity(
-            &mut self.source_identities,
-            source.identity(),
-            "source",
-            false,
-        )?;
-        let token = source_token(source);
-        if self.pending.contains_key(&token) {
-            return Err(IndexError::DuplicateSource(source.identity().to_string()));
-        }
-        let source_key_field = self.fields.source_key;
-        self.writer_mut()?
-            .delete_term(Term::from_field_text(source_key_field, &token));
-        self.route_deletions.remove(source);
-        self.deletions.insert(source.clone(), deletion);
-        Ok(())
-    }
-
-    /// Advances durable grace for one whole route whose absence is
-    /// conclusive and can be revalidated immediately before publication.
-    pub fn observe_certified_missing_route<F>(
-        &mut self,
-        route_identity: SourceRouteIdentity,
-        observed_at_unix_ms: u64,
-        delete_after_consecutive_observations: u32,
-        revalidate_missing: F,
-    ) -> Result<CertifiedMissingRouteOutcome>
-    where
-        F: Fn() -> bool + Send + 'static,
-    {
-        if self.source_route_plan.is_some() {
-            self.require_active_source_route(&route_identity)?;
-        }
-        if delete_after_consecutive_observations < 2 {
-            return Err(IndexError::InvalidSourceRouteDeletionGraceThreshold);
-        }
-        if self.observed_missing_routes.contains_key(&route_identity)
-            || self
-                .route_publication_revalidations
-                .iter()
-                .any(|(candidate, _)| candidate == &route_identity)
-        {
-            return Err(IndexError::DuplicateSourceRouteMissingObservation(
-                route_identity.as_str().to_owned(),
-            ));
-        }
-        let Some(base) = self.base_manifest.as_ref() else {
-            return Ok(CertifiedMissingRouteOutcome {
-                retained_sources: Vec::new(),
-                deleted: false,
-            });
-        };
-        let Some(base_route) = base.source_route(&route_identity).cloned() else {
-            return Ok(CertifiedMissingRouteOutcome {
-                retained_sources: Vec::new(),
-                deleted: false,
-            });
-        };
-        if base_route.sources().is_empty() {
-            return Ok(CertifiedMissingRouteOutcome {
-                retained_sources: Vec::new(),
-                deleted: false,
-            });
-        }
-        let base_generation = base.generation_id()?;
-        let observation = SourceMissingObservationPoint::new(base_generation, observed_at_unix_ms)?;
-        let state = match base_route.missing_state() {
-            Some(previous) => previous.advance(observation)?,
-            None => SourceRouteMissingState::first(observation),
-        };
-        let retained_sources = base_route.sources().to_vec();
-        self.route_publication_revalidations
-            .push((route_identity.clone(), Box::new(revalidate_missing)));
-        if state.consecutive_missing().get() >= delete_after_consecutive_observations {
-            let source_key_field = self.fields.source_key;
-            for source in &retained_sources {
-                let token = source_token(source);
-                self.writer_mut()?
-                    .delete_term(Term::from_field_text(source_key_field, &token));
-                self.route_deletions.insert(source.clone());
-            }
-            return Ok(CertifiedMissingRouteOutcome {
-                retained_sources,
-                deleted: true,
-            });
-        }
-        let snapshot =
-            SourceRouteSnapshot::missing(route_identity.clone(), retained_sources.clone(), state)?;
-        self.observed_missing_routes
-            .insert(route_identity, snapshot);
-        Ok(CertifiedMissingRouteOutcome {
-            retained_sources,
-            deleted: false,
-        })
     }
 }
 

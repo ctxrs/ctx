@@ -24,7 +24,13 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
 
     let writer_options = WriterOptions::default();
     let phase_started = Instant::now();
-    let mut writer = GenerationWriter::open(global_index_root, writer_options.clone())?;
+    let mut writer = GenerationWriter::open(global_index_root, writer_options.clone())?
+        .into_writer()
+        .map_err(|recovery| IndexError::CommittedGenerationNeedsRecovery {
+            generation_id: recovery.generation_id().to_owned(),
+            stage: "predecessor migration recovery",
+            detail: recovery.detail().to_owned(),
+        })?;
     timings.writer_open = phase_started.elapsed();
     let base_sources = writer_base_sources(&writer);
     let session_roots = vec![session_root.to_path_buf()];

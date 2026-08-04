@@ -76,6 +76,8 @@ fn publish_empty_core_generation(data_root: &Path) -> String {
         ctx_history_index::WriterOptions::default(),
     )
     .unwrap()
+    .into_writer()
+    .unwrap()
     .commit(|_| true)
     .unwrap()
     .generation_id
@@ -86,6 +88,8 @@ mod refresh_retry;
 
 fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefreshPublication {
     let receipt = GenerationWriter::open(index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
         .unwrap()
         .commit(|_| true)
         .unwrap();
@@ -217,6 +221,8 @@ fn publish_semantic_catch_up_generation(data_root: &Path, event_count: u64) -> S
             memory_bytes: 32 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for sequence in 0..event_count {
@@ -286,6 +292,8 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
             memory_bytes: 32 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(readiness_record(&source)).unwrap();
@@ -438,6 +446,8 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
     GenerationWriter::open(data_root.join("search/lexical"), WriterOptions::default())
         .unwrap()
+        .into_writer()
+        .unwrap()
         .commit(|_| true)
         .unwrap();
     let route =
@@ -474,6 +484,8 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                 executor_release.wait();
             }
             let receipt = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+                .into_writer()
+                .map_err(crate::semantic::committed_generation_recovery_error)?
                 .commit(|_| true)?;
             let route_results = selected
                 .iter()

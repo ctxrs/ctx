@@ -223,6 +223,8 @@ fn append_fixture_event(data_root: &Path, event: EventRecord, revision: u8) {
             memory_bytes: 32 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(core_record).unwrap();
@@ -259,6 +261,8 @@ fn append_fixture_session(data_root: &Path, events: &[CoreEventRecord], revision
             memory_bytes: 32 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for event in events {

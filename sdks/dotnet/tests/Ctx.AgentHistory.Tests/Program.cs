@@ -1,10 +1,36 @@
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json.Nodes;
 using Ctx.AgentHistory;
 
 internal static class Program
 {
+    private const string RawResponseEnvironment = "CTX_AGENT_HISTORY_TEST_RAW_RESPONSE";
+    private const string RawResponseHexEnvironment = "CTX_AGENT_HISTORY_TEST_RAW_RESPONSE_HEX";
+    private const string ProcessFixtureMode = "CTX_MCP289_DOTNET_PROCESS_FIXTURE_MODE";
+    private const string ProcessFixtureRootPid = "CTX_MCP289_DOTNET_PROCESS_FIXTURE_ROOT_PID";
+    private const string ProcessFixtureDescendantPid = "CTX_MCP289_DOTNET_PROCESS_FIXTURE_DESCENDANT_PID";
+    private const int RetainedStdoutLimit = 64 * 1024 * 1024;
+    private const int RetainedStderrLimit = 16 * 1024 * 1024;
+    private const int LargeValidPayloadSize = 17 * 1024 * 1024;
+
     private static async Task<int> Main(string[] args)
     {
+        if (Environment.GetEnvironmentVariable(ProcessFixtureMode) is { } processFixture)
+        {
+            return await RunMcp289ProcessFixture(processFixture);
+        }
+        if (Environment.GetEnvironmentVariable(RawResponseHexEnvironment) is { } rawResponseHex)
+        {
+            await Console.OpenStandardOutput().WriteAsync(Convert.FromHexString(rawResponseHex));
+            return 0;
+        }
+        if (Environment.GetEnvironmentVariable(RawResponseEnvironment) is { } rawResponse)
+        {
+            Console.Write(rawResponse);
+            return 0;
+        }
+
         if (args.SequenceEqual(new[] { "status", "--format=json" }))
         {
             Console.WriteLine(new JsonObject
@@ -21,12 +47,23 @@ internal static class Program
             ("preserves legitimate source semantics", PreservesLegitimateSourceSemantics),
             ("builds local CLI operation arguments", BuildsOperationArguments),
             ("forces analytics off after ambient and user environment merging", ForcesAnalyticsOff),
+            ("preserves missing CLI launch errors", PreservesMissingCliLaunchError),
+            ("wraps unsupported local platforms as SDK errors", WrapsUnsupportedLocalPlatformError),
+            ("accepts valid CLI JSON above the legacy 16 MiB cap", DrainsLargeOutputWithinBound),
+            ("bounds retained local CLI output while continuing to drain", BoundsOutputWhileDraining),
+            ("rejects oversize successful output as a protocol failure", RejectsOversizeSuccessfulOutput),
+            ("owns and force-cleans ignored process-tree pipe owners", OwnsAndCleansProcessTree),
+            ("applies the deadline to EOF from a detached pipe owner", CleansDetachedPipeOwnerAtDeadline),
+            ("cleans closed-pipe descendants after successful root exit", CleansClosedPipeDescendantAfterSuccess),
             ("normalizes setup init status", NormalizesSetupInitStatus),
             ("enforces the exact status counter domain", EnforcesExactStatusCounterDomain),
             ("builds search flags", BuildsSearchFlags),
             ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
             ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show commands", WrapsShow),
+            ("exposes optional MCP tool-call metadata", ExposesOptionalMcpToolCallMetadata),
+            ("rejects raw MCP tool-call duplicate members", RejectsRawMcpToolCallDuplicateMembers),
+            ("strictly decodes spawned stdout UTF-8", StrictlyDecodesSpawnedStdoutUtf8),
             ("reports versioning metadata", ReportsVersioning),
             ("uses agent-history-v1 error codes", UsesAgentHistoryV1ErrorCodes),
             ("raises structured hosted placeholder errors", HostedPlaceholderError),
@@ -50,6 +87,114 @@ internal static class Program
         }
 
         return failures == 0 ? 0 : 1;
+    }
+
+    private static async Task<int> RunMcp289ProcessFixture(string mode)
+    {
+        switch (mode)
+        {
+            case "large-stdout":
+                var largeStdout = Console.OpenStandardOutput();
+                await largeStdout.WriteAsync("{\"payload\":\""u8.ToArray());
+                await WriteRepeatedAsync(largeStdout, (byte)'d', LargeValidPayloadSize);
+                await largeStdout.WriteAsync("\"}"u8.ToArray());
+                return 0;
+            case "oversize-nonzero":
+                await WriteRepeatedAsync(Console.OpenStandardOutput(), (byte)'o', RetainedStdoutLimit + 64 * 1024);
+                await WriteRepeatedAsync(Console.OpenStandardError(), (byte)'e', RetainedStderrLimit + 64 * 1024);
+                return 23;
+            case "oversize-success":
+                var oversizeStdout = Console.OpenStandardOutput();
+                await oversizeStdout.WriteAsync("{\"payload\":\""u8.ToArray());
+                await WriteRepeatedAsync(oversizeStdout, (byte)'s', RetainedStdoutLimit + 64 * 1024);
+                await oversizeStdout.WriteAsync("\"}"u8.ToArray());
+                return 0;
+            case "pipe-owner-tree":
+                return await RunPipeOwnerTreeFixture();
+            case "detached-pipe-owner":
+                return await RunDetachedPipeOwnerFixture();
+            case "closed-pipe-descendant":
+                return await RunClosedPipeDescendantFixture();
+            case "pipe-owner-descendant":
+                File.WriteAllText(RequiredFixturePath(ProcessFixtureDescendantPid), Environment.ProcessId.ToString());
+                await Task.Delay(Timeout.InfiniteTimeSpan);
+                return 0;
+            default:
+                return 64;
+        }
+    }
+
+    private static async Task<int> RunPipeOwnerTreeFixture()
+    {
+        File.WriteAllText(RequiredFixturePath(ProcessFixtureRootPid), Environment.ProcessId.ToString());
+        _ = StartFixtureDescendant(redirectOutput: false);
+        await Task.Delay(Timeout.InfiniteTimeSpan);
+        return 0;
+    }
+
+    private static async Task<int> RunDetachedPipeOwnerFixture()
+    {
+        File.WriteAllText(RequiredFixturePath(ProcessFixtureRootPid), Environment.ProcessId.ToString());
+        _ = StartFixtureDescendant(redirectOutput: false);
+        await WaitForFixtureFile(RequiredFixturePath(ProcessFixtureDescendantPid));
+        await Task.Delay(250);
+        return 0;
+    }
+
+    private static async Task<int> RunClosedPipeDescendantFixture()
+    {
+        File.WriteAllText(RequiredFixturePath(ProcessFixtureRootPid), Environment.ProcessId.ToString());
+        _ = StartFixtureDescendant(redirectOutput: true);
+        await WaitForFixtureFile(RequiredFixturePath(ProcessFixtureDescendantPid));
+        Console.Write("{\"completed\":true}");
+        return 0;
+    }
+
+    private static Process StartFixtureDescendant(bool redirectOutput)
+    {
+        var child = new ProcessStartInfo
+        {
+            FileName = TestExecutable(),
+            RedirectStandardOutput = redirectOutput,
+            RedirectStandardError = redirectOutput,
+            UseShellExecute = false
+        };
+        child.Environment[ProcessFixtureMode] = "pipe-owner-descendant";
+        child.Environment[ProcessFixtureDescendantPid] = RequiredFixturePath(ProcessFixtureDescendantPid);
+        return Process.Start(child)
+            ?? throw new InvalidOperationException("failed to start fixture descendant");
+    }
+
+    private static async Task WaitForFixtureFile(string path)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TimeSpan.FromSeconds(2))
+        {
+            if (File.Exists(path) && new FileInfo(path).Length > 0)
+            {
+                return;
+            }
+            await Task.Delay(10);
+        }
+        throw new InvalidOperationException($"fixture PID file was not written: {path}");
+    }
+
+    private static async Task WriteRepeatedAsync(Stream stream, byte value, int count)
+    {
+        var chunk = Enumerable.Repeat(value, 8 * 1024).ToArray();
+        while (count > 0)
+        {
+            var length = Math.Min(count, chunk.Length);
+            await stream.WriteAsync(chunk.AsMemory(0, length));
+            count -= length;
+        }
+        await stream.FlushAsync();
+    }
+
+    private static string RequiredFixturePath(string name)
+    {
+        return Environment.GetEnvironmentVariable(name)
+            ?? throw new InvalidOperationException($"missing process fixture path {name}");
     }
 
     private static async Task ForcesAnalyticsOff()
@@ -82,6 +227,289 @@ internal static class Program
         finally
         {
             Environment.SetEnvironmentVariable(analyticsEnabled, original);
+        }
+    }
+
+    private static async Task PreservesMissingCliLaunchError()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), $"ctx-missing-{Guid.NewGuid():N}");
+        var adapter = new LocalCliAdapter(new LocalAgentHistoryConfig { CtxBinary = missing });
+        try
+        {
+            await adapter.ExecuteJsonAsync("status", ["status"]);
+            throw new InvalidOperationException("expected a missing CLI launch to fail");
+        }
+        catch (CtxAgentHistoryCliException ex)
+        {
+            Equal("failed to execute ctx CLI", ex.Message);
+            Equal("adapter_error", ex.Code);
+            Equal(-1, ex.ExitCode);
+            Equal(missing, ex.Command[0]);
+        }
+    }
+
+    private static async Task WrapsUnsupportedLocalPlatformError()
+    {
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        var adapter = new LocalCliAdapter(new LocalAgentHistoryConfig
+        {
+            CtxBinary = "ctx-should-not-spawn"
+        });
+        try
+        {
+            await adapter.ExecuteJsonAsync("status", ["status"]);
+            throw new InvalidOperationException("expected the unsupported platform to fail closed");
+        }
+        catch (CtxAgentHistoryCliException ex)
+        {
+            Equal("failed to execute ctx CLI", ex.Message);
+            Equal("adapter_error", ex.Code);
+            Equal(-1, ex.ExitCode);
+            True(ex.InnerException is PlatformNotSupportedException,
+                "unsupported platform cause was not preserved");
+        }
+    }
+
+    private static async Task DrainsLargeOutputWithinBound()
+    {
+        var adapter = ProcessFixtureAdapter("large-stdout", TimeSpan.FromSeconds(15));
+
+        var output = await adapter.ExecuteJsonAsync("status", ["status"]);
+
+        Equal(LargeValidPayloadSize, output["payload"]!.GetValue<string>().Length);
+    }
+
+    private static async Task BoundsOutputWhileDraining()
+    {
+        var adapter = ProcessFixtureAdapter("oversize-nonzero", TimeSpan.FromSeconds(20));
+        var started = Stopwatch.StartNew();
+
+        try
+        {
+            await adapter.ExecuteJsonAsync("status", ["status"]);
+            throw new InvalidOperationException("expected oversized nonzero fixture to fail");
+        }
+        catch (CtxAgentHistoryCliException ex)
+        {
+            Equal(23, ex.ExitCode);
+            Equal(RetainedStdoutLimit, Encoding.UTF8.GetByteCount(ex.Stdout));
+            Equal(RetainedStderrLimit, Encoding.UTF8.GetByteCount(ex.Stderr));
+        }
+        True(started.Elapsed < TimeSpan.FromSeconds(18), $"oversize output drain took {started.Elapsed}");
+    }
+
+    private static async Task RejectsOversizeSuccessfulOutput()
+    {
+        var adapter = ProcessFixtureAdapter("oversize-success", TimeSpan.FromSeconds(20));
+        try
+        {
+            await adapter.ExecuteJsonAsync("status", ["status"]);
+            throw new InvalidOperationException("expected oversized successful output to fail closed");
+        }
+        catch (CtxAgentHistoryProtocolException ex)
+        {
+            Equal("decode_error", ex.Code);
+            Equal(RetainedStdoutLimit, ex.Details["maximumBytes"]!.GetValue<int>());
+        }
+    }
+
+    private static async Task OwnsAndCleansProcessTree()
+    {
+        var rootPidPath = Path.Combine(Path.GetTempPath(), $"ctx-mcp289-dotnet-root-{Guid.NewGuid():N}.pid");
+        var descendantPidPath = Path.Combine(Path.GetTempPath(), $"ctx-mcp289-dotnet-descendant-{Guid.NewGuid():N}.pid");
+        var adapter = ProcessFixtureAdapter(
+            "pipe-owner-tree",
+            TimeSpan.FromMilliseconds(600),
+            new Dictionary<string, string?>
+            {
+                [ProcessFixtureRootPid] = rootPidPath,
+                [ProcessFixtureDescendantPid] = descendantPidPath
+            });
+        var started = Stopwatch.StartNew();
+        try
+        {
+            try
+            {
+                await adapter.ExecuteJsonAsync("status", ["status"]);
+                throw new InvalidOperationException("expected pipe-owning process tree to time out");
+            }
+            catch (CtxAgentHistoryCliException ex)
+            {
+                Equal("timeout", ex.Code);
+                Equal(true, ex.Retryable);
+            }
+
+            True(started.Elapsed < TimeSpan.FromSeconds(4), $"absolute process/EOF deadline took {started.Elapsed}");
+            var rootPid = ReadFixturePid(rootPidPath);
+            var descendantPid = ReadFixturePid(descendantPidPath);
+            await AssertProcessStops(rootPid, "fixture root");
+            await AssertProcessStops(descendantPid, "pipe-owning descendant");
+        }
+        finally
+        {
+            ForceStopFixture(rootPidPath);
+            ForceStopFixture(descendantPidPath);
+            File.Delete(rootPidPath);
+            File.Delete(descendantPidPath);
+        }
+    }
+
+    private static async Task CleansDetachedPipeOwnerAtDeadline()
+    {
+        var rootPidPath = Path.Combine(Path.GetTempPath(), $"ctx-mcp289-dotnet-detached-root-{Guid.NewGuid():N}.pid");
+        var descendantPidPath = Path.Combine(Path.GetTempPath(), $"ctx-mcp289-dotnet-detached-descendant-{Guid.NewGuid():N}.pid");
+        var adapter = ProcessFixtureAdapter(
+            "detached-pipe-owner",
+            TimeSpan.FromMilliseconds(900),
+            new Dictionary<string, string?>
+            {
+                [ProcessFixtureRootPid] = rootPidPath,
+                [ProcessFixtureDescendantPid] = descendantPidPath
+            });
+        var started = Stopwatch.StartNew();
+        try
+        {
+            try
+            {
+                await adapter.ExecuteJsonAsync("status", ["status"]);
+                throw new InvalidOperationException("expected detached pipe owner to exhaust the EOF deadline");
+            }
+            catch (CtxAgentHistoryCliException ex)
+            {
+                Equal("timeout", ex.Code);
+                Equal(true, ex.Retryable);
+            }
+
+            True(started.Elapsed < TimeSpan.FromSeconds(4), $"detached EOF deadline took {started.Elapsed}");
+            await AssertProcessStops(ReadFixturePid(rootPidPath), "detached fixture root");
+            await AssertProcessStops(ReadFixturePid(descendantPidPath), "detached pipe owner");
+        }
+        finally
+        {
+            ForceStopFixture(rootPidPath);
+            ForceStopFixture(descendantPidPath);
+            File.Delete(rootPidPath);
+            File.Delete(descendantPidPath);
+        }
+    }
+
+    private static async Task CleansClosedPipeDescendantAfterSuccess()
+    {
+        var rootPidPath = Path.Combine(Path.GetTempPath(), $"ctx-mcp289-dotnet-success-root-{Guid.NewGuid():N}.pid");
+        var descendantPidPath = Path.Combine(Path.GetTempPath(), $"ctx-mcp289-dotnet-success-descendant-{Guid.NewGuid():N}.pid");
+        var adapter = ProcessFixtureAdapter(
+            "closed-pipe-descendant",
+            TimeSpan.FromSeconds(5),
+            new Dictionary<string, string?>
+            {
+                [ProcessFixtureRootPid] = rootPidPath,
+                [ProcessFixtureDescendantPid] = descendantPidPath
+            });
+        var started = Stopwatch.StartNew();
+        try
+        {
+            var result = await adapter.ExecuteJsonAsync("status", ["status"]);
+
+            Equal(true, result["completed"]!.GetValue<bool>());
+            True(started.Elapsed < TimeSpan.FromSeconds(4), $"successful tree cleanup took {started.Elapsed}");
+            await AssertProcessStops(ReadFixturePid(rootPidPath), "successful fixture root");
+            await AssertProcessStops(ReadFixturePid(descendantPidPath), "closed-pipe descendant");
+        }
+        finally
+        {
+            ForceStopFixture(rootPidPath);
+            ForceStopFixture(descendantPidPath);
+            File.Delete(rootPidPath);
+            File.Delete(descendantPidPath);
+        }
+    }
+
+    private static LocalCliAdapter ProcessFixtureAdapter(
+        string mode,
+        TimeSpan timeout,
+        IReadOnlyDictionary<string, string?>? extraEnvironment = null)
+    {
+        var environment = new Dictionary<string, string?>
+        {
+            [ProcessFixtureMode] = mode
+        };
+        if (extraEnvironment is not null)
+        {
+            foreach (var pair in extraEnvironment)
+            {
+                environment[pair.Key] = pair.Value;
+            }
+        }
+        return new LocalCliAdapter(new LocalAgentHistoryConfig
+        {
+            CtxBinary = TestExecutable(),
+            Environment = environment,
+            Timeout = timeout
+        });
+    }
+
+    private static string TestExecutable()
+    {
+        var executableName = OperatingSystem.IsWindows()
+            ? "Ctx.AgentHistory.Tests.exe"
+            : "Ctx.AgentHistory.Tests";
+        var executable = Path.Combine(AppContext.BaseDirectory, executableName);
+        True(File.Exists(executable), $"test helper executable not found: {executable}");
+        return executable;
+    }
+
+    private static int ReadFixturePid(string path)
+    {
+        True(File.Exists(path), $"fixture did not write PID file {path}");
+        return int.Parse(File.ReadAllText(path).Trim());
+    }
+
+    private static async Task AssertProcessStops(int pid, string label)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TimeSpan.FromSeconds(2))
+        {
+            if (!IsProcessAlive(pid))
+            {
+                return;
+            }
+            await Task.Delay(10);
+        }
+        throw new InvalidOperationException($"{label} remained alive: {pid}");
+    }
+
+    private static bool IsProcessAlive(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static void ForceStopFixture(string pidPath)
+    {
+        if (!File.Exists(pidPath) || !int.TryParse(File.ReadAllText(pidPath).Trim(), out var pid))
+        {
+            return;
+        }
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(2_000);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // The process was already gone.
         }
     }
 
@@ -299,11 +727,180 @@ internal static class Program
         await client.ShowSessionAsync("session-1", new ShowSessionOptions { Mode = "full" });
         await client.ShowSessionAsync(new ShowSessionOptions { Provider = "codex", ProviderSessionId = "provider-session", Mode = "lite" });
 
-        Equal("show event event-1 --format=json --window 2", Join(transport.Calls[0]));
-        Equal("show session session-1 --mode full --format=json", Join(transport.Calls[1]));
-        Equal("show session --provider codex --provider-session provider-session --mode lite --format=json", Join(transport.Calls[2]));
+        Equal("show event event-1 --format json --window 2", Join(transport.Calls[0]));
+        Equal("show session session-1 --mode full --format json", Join(transport.Calls[1]));
+        Equal("show session --provider codex --provider-session provider-session --mode lite --format json", Join(transport.Calls[2]));
 
         await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.ShowEventAsync(""));
+    }
+
+    private static async Task ExposesOptionalMcpToolCallMetadata()
+    {
+        var fixtures = FindFixtures();
+        var oldFixture = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(fixtures, "show-event.window.json")))!.AsObject();
+        var oldResponse = await ClientFor(oldFixture["event"]).ShowEventAsync("event-1");
+        var oldEvent = oldResponse.Event.Event
+            ?? throw new InvalidOperationException("legacy selected event did not decode");
+        Equal<McpToolCall?>(null, oldEvent.McpToolCall);
+        True(!oldEvent.ToJsonObject().ContainsKey("mcpToolCall"), "absent MCP metadata was serialized");
+
+        var newFixture = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(fixtures, "show-event.mcp-tool-call.json")))!.AsObject();
+        var fixturePayload = newFixture["event"]
+            ?? throw new InvalidOperationException("fixture omitted event payload");
+        var fixtureResponse = await ClientFor(fixturePayload).ShowEventAsync("event-1");
+        var newEvent = fixtureResponse.Event.Event
+            ?? throw new InvalidOperationException("fixture selected event did not decode");
+        var call = newEvent.McpToolCall
+            ?? throw new InvalidOperationException("fixture MCP tool call did not decode");
+        Equal("mcp-サーバー-🦀", call.Server);
+        Equal("検索/工具/🛠️", call.Tool);
+        Equal(true, newEvent.ToJsonObject()["futureEventField"]?["preserved"]?.GetValue<bool>() ?? false);
+
+        var normalizedRaw = JsonNode.Parse("""
+            {
+              "event": {
+                  "mcp_tool_call": {
+                    "server": "mcp-サーバー-🦀",
+                    "tool": "検索/工具/🛠️"
+                  },
+                  "future_event_field": true
+              },
+              "events": [{}]
+            }
+            """)!.AsObject();
+        var normalized = (await ClientFor(normalizedRaw).ShowEventAsync("event-1")).Event;
+        var normalizedEvent = normalized.Event
+            ?? throw new InvalidOperationException("normalized selected event did not decode");
+        var normalizedCall = normalizedEvent.McpToolCall
+            ?? throw new InvalidOperationException("normalized MCP tool call did not decode");
+        Equal("mcp-サーバー-🦀", normalizedCall.Server);
+        Equal("検索/工具/🛠️", normalizedCall.Tool);
+        Equal(true, normalizedEvent.ToJsonObject()["futureEventField"]?.GetValue<bool>() ?? false);
+        Equal<McpToolCall?>(null, normalized.Events[0].McpToolCall);
+
+        var exact = new JsonObject
+        {
+            ["event"] = new JsonObject
+            {
+                ["mcp_tool_call"] = new JsonObject
+                {
+                    ["server"] = " ",
+                    ["tool"] = string.Concat(Enumerable.Repeat("🦀", 16_384)),
+                },
+            },
+            ["events"] = new JsonArray(),
+        };
+        var exactEvent = (await ClientFor(exact).ShowEventAsync("event-1")).Event.Event
+            ?? throw new InvalidOperationException("exact-bound event did not decode");
+        var exactCall = exactEvent.McpToolCall
+            ?? throw new InvalidOperationException("exact-bound MCP tool call did not decode");
+        Equal(64 * 1024, Encoding.UTF8.GetByteCount(exactCall.Tool));
+
+        foreach (var invalid in new[]
+        {
+            "{\"event\":{\"mcp_tool_call\":{\"server\":\"only-server\"}},\"events\":[]}",
+            "{\"event\":{\"mcp_tool_call\":{\"tool\":\"only-tool\"}},\"events\":[]}",
+            "{\"event\":{\"mcp_tool_call\":{\"server\":\"server\",\"tool\":\"tool\",\"future\":true}},\"events\":[]}",
+            "{\"event\":{\"mcp_tool_call\":{\"server\":\"\",\"tool\":\"tool\"}},\"events\":[]}",
+            "{\"event\":{\"mcp_tool_call\":{\"server\":\"server\",\"tool\":7}},\"events\":[]}",
+            "{\"event\":{\"mcp_tool_call\":null},\"events\":[]}",
+            "{\"event\":{\"mcp_tool_call\":{\"server\":\"server\",\"tool\":\"" + new string('a', 64 * 1024 + 1) + "\"}},\"events\":[]}"
+        })
+        {
+            await ThrowsAsync<CtxAgentHistoryProtocolException>(
+                () => ClientFor(JsonNode.Parse(invalid)).ShowEventAsync("event-1"));
+        }
+    }
+
+    private static async Task RejectsRawMcpToolCallDuplicateMembers()
+    {
+        var fixtureDirectory = Path.Combine(FindFixtures(), "adversarial");
+        foreach (var name in new[]
+        {
+            "duplicate-event-mcp-tool-call-snake.json",
+            "duplicate-event-mcp-tool-call-camel.json",
+            "duplicate-mcp-tool-call-server.json",
+            "duplicate-mcp-tool-call-tool.json",
+            "invalid-mcp-tool-call-transformed-server.json",
+            "invalid-mcp-tool-call-transformed-tool.json",
+            "invalid-mcp-tool-call-transformed-collision.json",
+            "invalid-mcp-tool-call-outer-alias-collision.json",
+            "invalid-mcp-tool-call-outer-mixed-case.json",
+            "invalid-mcp-tool-call-outer-repeated-separator.json",
+            "invalid-mcp-tool-call-outer-trailing-separator.json",
+            "invalid-mcp-tool-call-outer-camel-snake.json"
+        })
+        {
+            var raw = File.ReadAllText(Path.Combine(fixtureDirectory, name));
+            await ThrowsAsync<CtxAgentHistoryProtocolException>(
+                () => LocalClientForRaw(raw).ShowEventAsync("event-1"));
+        }
+
+        var repeated = File.ReadAllText(
+            Path.Combine(fixtureDirectory, "valid-repeated-string-contents.json"));
+        var response = await LocalClientForRaw(repeated).ShowEventAsync("event-1");
+        Equal("server server", response.Event.Event?.McpToolCall?.Server ?? "");
+        Equal("tool tool", response.Event.Event?.McpToolCall?.Tool ?? "");
+
+        var aliases = File.ReadAllText(
+            Path.Combine(fixtureDirectory, "valid-mcp-tool-call-outer-aliases.json"));
+        var aliasResponse = await LocalClientForRaw(aliases).ShowEventAsync("event-1");
+        Equal("snake-server", aliasResponse.Event.Event?.McpToolCall?.Server ?? "");
+        Equal("snake-extra", aliasResponse.Event.Event?.ToJsonObject()["futureEventField"]?.GetValue<string>() ?? "");
+        Equal("camel-server", aliasResponse.Event.Events[0].McpToolCall?.Server ?? "");
+        Equal("camel-extra", aliasResponse.Event.Events[0].ToJsonObject()["futureEventField"]?.GetValue<string>() ?? "");
+    }
+
+    private static async Task StrictlyDecodesSpawnedStdoutUtf8()
+    {
+        var prefix = Encoding.UTF8.GetBytes("{\"event\":{\"mcp_tool_call\":{\"server\":\"");
+        var suffix = Encoding.UTF8.GetBytes("\",\"tool\":\"tool\"}},\"events\":[]}");
+        var invalid = new byte[prefix.Length + 1 + suffix.Length];
+        prefix.CopyTo(invalid, 0);
+        invalid[prefix.Length] = 0xff;
+        suffix.CopyTo(invalid, prefix.Length + 1);
+        await ThrowsAsync<CtxAgentHistoryProtocolException>(
+            () => LocalClientForRawBytes(invalid).ShowEventAsync("event-1"));
+
+        const string valid = "{\"event\":{\"mcp_tool_call\":{\"server\":\"�\",\"tool\":\"tool\"}},\"events\":[]}";
+        var response = await LocalClientForRawBytes(Encoding.UTF8.GetBytes(valid)).ShowEventAsync("event-1");
+        Equal("�", response.Event.Event?.McpToolCall?.Server ?? "");
+    }
+
+    private static AgentHistoryClient LocalClientForRaw(string raw)
+    {
+        var executableName = OperatingSystem.IsWindows()
+            ? "Ctx.AgentHistory.Tests.exe"
+            : "Ctx.AgentHistory.Tests";
+        var executable = Path.Combine(AppContext.BaseDirectory, executableName);
+        True(File.Exists(executable), $"test helper executable not found: {executable}");
+        return AgentHistoryClient.Local(new LocalAgentHistoryConfig
+        {
+            CtxBinary = executable,
+            Environment = new Dictionary<string, string?>
+            {
+                [RawResponseEnvironment] = raw
+            }
+        });
+    }
+
+    private static AgentHistoryClient LocalClientForRawBytes(byte[] raw)
+    {
+        var executableName = OperatingSystem.IsWindows()
+            ? "Ctx.AgentHistory.Tests.exe"
+            : "Ctx.AgentHistory.Tests";
+        var executable = Path.Combine(AppContext.BaseDirectory, executableName);
+        True(File.Exists(executable), $"test helper executable not found: {executable}");
+        return AgentHistoryClient.Local(new LocalAgentHistoryConfig
+        {
+            CtxBinary = executable,
+            Environment = new Dictionary<string, string?>
+            {
+                [RawResponseHexEnvironment] = Convert.ToHexString(raw)
+            }
+        });
     }
 
     private static async Task ReportsVersioning()

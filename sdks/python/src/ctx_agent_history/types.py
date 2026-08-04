@@ -185,6 +185,11 @@ class CoreContentMetadata(_CoreContentMetadataRequired, total=False):
     policyReason: Optional[str]
 
 
+class McpToolCall(TypedDict):
+    server: str
+    tool: str
+
+
 class Event(TypedDict, total=False):
     ctxEventId: Optional[str]
     ctxSessionId: Optional[str]
@@ -196,6 +201,7 @@ class Event(TypedDict, total=False):
     role: Optional[str]
     occurredAt: Optional[str]
     text: Optional[str]
+    mcpToolCall: McpToolCall
     content: CoreContentMetadata
     citations: list[Citation]
 

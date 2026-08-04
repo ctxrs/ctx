@@ -9,8 +9,8 @@ use std::{
 use clap::{CommandFactory, Parser};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceKey, SourceObservation, TypedKey,
+    McpToolCallAttribution, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
 use serde_json::{json, Value};
@@ -298,12 +298,16 @@ fn test_record(source: &SourceKey, nonce: u64, body: &str) -> CoreRecord {
 
 fn publish_fixture(data_root: &Path, bodies: &[String]) {
     let source = test_source();
-    let index_root = data_root.join("search/lexical");
     let records = bodies
         .iter()
         .enumerate()
         .map(|(index, body)| test_record(&source, index as u64, body))
         .collect::<Vec<_>>();
+    publish_records(data_root, source, records);
+}
+
+fn publish_records(data_root: &Path, source: SourceKey, records: Vec<CoreRecord>) {
+    let index_root = data_root.join("search/lexical");
     let observation = SourceObservation::new(source.clone(), "regular-file-v1", vec![1]).unwrap();
     let certificate = CertifiedSource::certify(
         observation.clone(),
@@ -319,7 +323,10 @@ fn publish_fixture(data_root: &Path, bodies: &[String]) {
         },
     )
     .unwrap();
-    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source).unwrap();
     for record in records {
         writer.add_core_record(record).unwrap();
@@ -485,6 +492,66 @@ fn event_projection_is_canonical_complete_and_not_duplicated() {
     assert!(none["events"][0]["text"].is_null());
     assert!(none["events"][0]["structured_content"].is_null());
     assert_eq!(none["events"][0]["content"]["policy_status"], "selected");
+}
+
+#[test]
+fn mcp_tool_call_is_exact_omitted_when_absent_and_projection_independent() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = test_source();
+    let exact = McpToolCallAttribution {
+        server: "server\n\u{202e}|`[]".to_owned(),
+        tool: "tool\\literal\t*#".to_owned(),
+    };
+    let exact_value = serde_json::to_value(&exact).unwrap();
+    let mut attributed = test_record(&source, 0, "attributed");
+    attributed.mcp_tool_call = Some(exact.clone());
+    attributed.validate_contract().unwrap();
+    let absent = test_record(&source, 1, "absent");
+    publish_records(temp.path(), source, vec![attributed, absent]);
+
+    let selection = all_selection(CoreEventRangeDirection::Ascending);
+    for projection in [
+        EventContentProjection::Full,
+        EventContentProjection::Text,
+        EventContentProjection::None,
+    ] {
+        let request = request(CoreEventRangeDirection::Ascending, 10, projection);
+        let json_page = page(temp.path(), &selection, None, &request);
+        assert_eq!(json_page["events"][0]["mcp_tool_call"], exact_value);
+        assert!(json_page["events"][1].get("mcp_tool_call").is_none());
+        if projection == EventContentProjection::None {
+            assert!(json_page["events"][0]["text"].is_null());
+            assert!(json_page["events"][0]["structured_content"].is_null());
+            assert_eq!(json_page["events"][0]["mcp_tool_call"], exact_value);
+        }
+        assert_eq!(
+            json_page["usage"]["bytes"].as_u64().unwrap() as usize,
+            serde_json::to_vec(&json_page).unwrap().len() + 1
+        );
+
+        let index = open_event_range_index(temp.path(), None).unwrap();
+        let mut jsonl = Vec::new();
+        write_jsonl_pages(&index, &selection, None, &request, &mut jsonl, || {}).unwrap();
+        let lines = jsonl
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines[0]["event"]["mcp_tool_call"], exact_value);
+        assert!(lines[1]["event"].get("mcp_tool_call").is_none());
+        assert_eq!(
+            lines.last().unwrap()["usage"]["bytes"].as_u64().unwrap() as usize,
+            jsonl.len()
+        );
+
+        let mcp_page = crate::mcp::query_events_for_test(
+            &json!({"content": projection.as_str()}),
+            temp.path(),
+        )
+        .unwrap();
+        assert_eq!(mcp_page["events"][0]["mcp_tool_call"], exact_value);
+        assert!(mcp_page["events"][1].get("mcp_tool_call").is_none());
+    }
 }
 
 #[derive(Default)]

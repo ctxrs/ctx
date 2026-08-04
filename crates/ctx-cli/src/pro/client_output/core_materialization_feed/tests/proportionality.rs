@@ -40,7 +40,10 @@ fn publish_source(
     revision: u8,
     bodies: &[String],
 ) -> VerifiedIndex {
-    let mut writer = GenerationWriter::open(root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, source, revision, bodies.to_vec());
     writer.commit(|_| true).unwrap();
     VerifiedIndex::open_pinned(root).unwrap()
@@ -175,7 +178,10 @@ fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() {
         )
         .unwrap();
         let deletion = CertifiedSourceDeletion::from_inventory(source.clone(), &inventory).unwrap();
-        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         writer.delete_source(deletion, inventory).unwrap();
         writer.commit(|_| true).unwrap();
         let removed = VerifiedIndex::open_pinned(temp.path()).unwrap();

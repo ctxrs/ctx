@@ -47,6 +47,7 @@ fn record() -> CoreRecord {
         event_sequence: 1,
         occurred_at_unix_ms: Some(1_700_000_000_000),
         event_type: "message".to_owned(),
+        mcp_tool_call: None,
         role: Some("user".to_owned()),
         agent_type: "primary".to_owned(),
         is_primary: true,
@@ -98,6 +99,7 @@ fn selected_constructor_defaults_the_active_core_contract() {
         CORE_CONTENT_POLICY_REVISION
     );
     assert_eq!(constructed.parser_revision, "provider-parser-v7");
+    assert!(constructed.mcp_tool_call.is_none());
     assert_eq!(
         constructed.content.normalized_body.as_deref(),
         Some("complete selected body")
@@ -105,6 +107,13 @@ fn selected_constructor_defaults_the_active_core_contract() {
     assert!(constructed.metadata.is_empty());
     assert!(constructed.repository_bindings.is_empty());
     assert!(constructed.repository_file_invocation_evidence.is_empty());
+}
+
+fn mcp_tool_call(server: impl Into<String>, tool: impl Into<String>) -> McpToolCallAttribution {
+    McpToolCallAttribution {
+        server: server.into(),
+        tool: tool.into(),
+    }
 }
 
 fn binding() -> RepositoryBinding {
@@ -184,6 +193,215 @@ fn complete_record_round_trips_stored_encoding() {
     assert!(!invocation.contains_key("preview"));
     assert!(!invocation.contains_key("text"));
     assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), record);
+}
+
+#[test]
+fn mcp_tool_call_uses_the_exact_optional_canonical_wire_shape() {
+    let absent = serde_json::to_value(record()).unwrap();
+    assert!(!absent.as_object().unwrap().contains_key("mcp_tool_call"));
+    assert!(
+        CoreRecord::decode_stored(&serde_json::to_vec(&absent).unwrap())
+            .unwrap()
+            .mcp_tool_call
+            .is_none()
+    );
+
+    let mut attributed = record();
+    attributed.mcp_tool_call = Some(mcp_tool_call("filesystem", "read_file"));
+    let encoded = attributed.encode_stored().unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        wire["mcp_tool_call"],
+        serde_json::json!({"server": "filesystem", "tool": "read_file"})
+    );
+    assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), attributed);
+
+    let mut explicit_null = absent.clone();
+    explicit_null
+        .as_object_mut()
+        .unwrap()
+        .insert("mcp_tool_call".to_owned(), serde_json::Value::Null);
+    assert!(matches!(
+        CoreRecord::decode_stored(&serde_json::to_vec(&explicit_null).unwrap()),
+        Err(CoreRecordError::Json(_))
+    ));
+
+    let mut unknown_field = absent;
+    unknown_field.as_object_mut().unwrap().insert(
+        "mcp_tool_call".to_owned(),
+        serde_json::json!({
+            "server": "filesystem",
+            "tool": "read_file",
+            "provider": "must-not-be-stored"
+        }),
+    );
+    assert!(matches!(
+        CoreRecord::decode_stored(&serde_json::to_vec(&unknown_field).unwrap()),
+        Err(CoreRecordError::Json(_))
+    ));
+
+    for incomplete in [
+        serde_json::json!({"tool": "read_file"}),
+        serde_json::json!({"server": "filesystem"}),
+    ] {
+        let mut wire = serde_json::to_value(record()).unwrap();
+        wire.as_object_mut()
+            .unwrap()
+            .insert("mcp_tool_call".to_owned(), incomplete);
+        assert!(matches!(
+            CoreRecord::decode_stored(&serde_json::to_vec(&wire).unwrap()),
+            Err(CoreRecordError::Json(_))
+        ));
+    }
+}
+
+#[test]
+fn mcp_tool_call_accepts_exact_unicode_control_delimiter_and_whitespace_values() {
+    let server = "\u{0000}\u{0001}\u{001f}\t\n\r /:\\@|,;=[]{}()<>?#!$%^&*+~`'\"—服务";
+    let tool = "\u{000b}\u{000c}\u{007f} tool::/\\@|,;=[]{}()<>?#!$%^&*+~`'\"—道具";
+    let mut record = record();
+    record.mcp_tool_call = Some(mcp_tool_call(server, tool));
+
+    let encoded = record.encode_stored().unwrap();
+    let decoded = CoreRecord::decode_stored(&encoded).unwrap();
+    assert_eq!(decoded.mcp_tool_call, record.mcp_tool_call);
+
+    record.mcp_tool_call = Some(mcp_tool_call(" \t\n", "\u{2003}"));
+    record.validate_contract().unwrap();
+}
+
+#[test]
+fn mcp_tool_call_requires_both_nonempty_components() {
+    for (server, tool, field) in [
+        ("", "read_file", "mcp_tool_call.server"),
+        ("filesystem", "", "mcp_tool_call.tool"),
+    ] {
+        let mut record = record();
+        record.mcp_tool_call = Some(mcp_tool_call(server, tool));
+        assert!(matches!(
+            record.validate_contract(),
+            Err(CoreRecordError::EmptyField { field: actual }) if actual == field
+        ));
+    }
+}
+
+#[test]
+fn redacted_and_omitted_core_policy_require_mcp_tool_call_to_be_absent() {
+    let mut redacted = record();
+    redacted.content.policy_status = CoreContentPolicyStatus::Redacted {
+        reason: "sensitive".to_owned(),
+    };
+    redacted.mcp_tool_call = Some(mcp_tool_call("sensitive-server", "sensitive-tool"));
+    assert!(matches!(
+        redacted.validate_contract(),
+        Err(CoreRecordError::InvalidContentPolicyState)
+    ));
+    let redacted_wire = serde_json::to_vec(&redacted).unwrap();
+    assert!(matches!(
+        CoreRecord::decode_stored(&redacted_wire),
+        Err(CoreRecordError::InvalidContentPolicyState)
+    ));
+    redacted.mcp_tool_call = None;
+    let redacted_wire = redacted.encode_stored().unwrap();
+    assert!(!serde_json::from_slice::<serde_json::Value>(&redacted_wire)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("mcp_tool_call"));
+
+    let mut omitted = record();
+    omitted.content.policy_status = CoreContentPolicyStatus::Omitted {
+        reason: "sensitive".to_owned(),
+    };
+    omitted.content.normalized_body = None;
+    omitted.content.structured_content = None;
+    omitted.mcp_tool_call = Some(mcp_tool_call("sensitive-server", "sensitive-tool"));
+    assert!(matches!(
+        omitted.validate_contract(),
+        Err(CoreRecordError::InvalidContentPolicyState)
+    ));
+    let omitted_wire = serde_json::to_vec(&omitted).unwrap();
+    assert!(matches!(
+        CoreRecord::decode_stored(&omitted_wire),
+        Err(CoreRecordError::InvalidContentPolicyState)
+    ));
+    omitted.mcp_tool_call = None;
+    let omitted_wire = omitted.encode_stored().unwrap();
+    assert!(!serde_json::from_slice::<serde_json::Value>(&omitted_wire)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("mcp_tool_call"));
+}
+
+#[test]
+fn mcp_tool_call_bounds_each_decoded_utf8_component_at_exact_64_kib() {
+    let exact_unicode = "🧰".repeat(MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES / 4);
+    assert_eq!(
+        exact_unicode.len(),
+        MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
+    );
+    let exact_ascii = "x".repeat(MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES);
+    let mut record = record();
+    record.mcp_tool_call = Some(mcp_tool_call(exact_unicode.clone(), exact_ascii));
+    let encoded = record.encode_stored().unwrap();
+    assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), record);
+
+    record.mcp_tool_call = Some(mcp_tool_call(format!("{exact_unicode}x"), "tool"));
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::FieldTooLarge {
+            field: "mcp_tool_call.server",
+            actual,
+            maximum: MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+        }) if actual == MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES + 1
+    ));
+
+    record.mcp_tool_call = Some(mcp_tool_call(
+        "server",
+        "x".repeat(MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES + 1),
+    ));
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::FieldTooLarge {
+            field: "mcp_tool_call.tool",
+            actual,
+            maximum: MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+        }) if actual == MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES + 1
+    ));
+}
+
+#[test]
+fn mcp_tool_call_changes_stored_payload_but_not_stable_identity() {
+    assert_eq!(CORE_RECORD_VERSION, 1);
+    assert_eq!(crate::IDENTITY_VERSION, 1);
+    assert_eq!(CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION, 1);
+
+    let baseline = record();
+    let mut attributed = baseline.clone();
+    attributed.mcp_tool_call = Some(mcp_tool_call("filesystem", "read_file"));
+
+    assert_eq!(attributed.event_id, baseline.event_id);
+    assert_eq!(attributed.session_id, baseline.session_id);
+    assert_eq!(attributed.root_session_id, baseline.root_session_id);
+    assert_eq!(attributed.source, baseline.source);
+    assert_ne!(
+        core_record_leaf_sha256(&attributed).unwrap(),
+        core_record_leaf_sha256(&baseline).unwrap()
+    );
+}
+
+#[test]
+fn core_record_annotation_defaults_mcp_tool_call_to_absent() {
+    let mut annotation = CoreRecordAnnotation::default();
+    assert!(annotation.mcp_tool_call.is_none());
+    annotation.mcp_tool_call = Some(mcp_tool_call("server", "tool"));
+    annotation
+        .mcp_tool_call
+        .as_ref()
+        .unwrap()
+        .validate_contract()
+        .unwrap();
 }
 
 #[test]
@@ -580,6 +798,10 @@ fn prior_repository_certificate_is_bound_to_exact_generation_inputs() {
         "provider_native_tool": {"command_sha256": "changed"}
     }));
     assert!(!changed_command_digest.reuse_prior_repository_certificate(&prior));
+
+    let mut changed_mcp_tool_call = missing();
+    changed_mcp_tool_call.mcp_tool_call = Some(mcp_tool_call("filesystem", "read_file"));
+    assert!(!changed_mcp_tool_call.reuse_prior_repository_certificate(&prior));
 
     let mut changed_candidate = missing();
     changed_candidate.repository_candidate_evidence = RepositoryCandidateEvidence::default();
@@ -1130,16 +1352,20 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "c5ad8c7bce69d5fd3f12d3b57e8e49403233db4a74f91882ed649a2bb117b19a"
+        "a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "83888531d7a9f6162b085bc9eb34e113b801138e1b7abd39fa24ac81d3818a22"
+        "1c78375413bf69dfd975d22e79740bde3de1c10ebabb1de4a5f9042350dd833a"
     );
     for changed in [
+        CoreContractRevisions {
+            mcp_tool_call_attribution: current.mcp_tool_call_attribution + 1,
+            ..current
+        },
         CoreContractRevisions {
             accumulator_identity: b"ctx-core-record-event-binding-v2\0",
             ..current

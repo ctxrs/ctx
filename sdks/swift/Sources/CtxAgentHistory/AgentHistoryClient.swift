@@ -175,6 +175,8 @@ public struct AgentHistoryClient: Sendable {
 
     private func decodeJSONObject(_ data: Data) throws -> JSONValue {
         do {
+            var scanner = ExactJSONScanner(data)
+            try scanner.validate()
             let value = try JSONDecoder().decode(JSONValue.self, from: data)
             guard case .object = value else {
                 throw CtxAgentHistorySDKError(code: .decodeError, message: "ctx returned a non-object JSON value")
@@ -198,13 +200,13 @@ public struct AgentHistoryClient: Sendable {
             return AgentHistoryEnvelope(
                 operation: operation,
                 backend: backendWithRawDataRoot(backend, raw),
-                status: try decodeTyped(normalizeStatus(raw), as: AgentHistoryStatus.self, context: "status")
+                status: try decodeTyped(try normalizeStatus(raw), as: AgentHistoryStatus.self, context: "status")
             )
         case .initialize:
             return AgentHistoryEnvelope(
                 operation: operation,
                 backend: backendWithRawDataRoot(backend, raw),
-                status: try decodeTyped(normalizeStatus(raw), as: AgentHistoryStatus.self, context: "status")
+                status: try decodeTyped(try normalizeStatus(raw), as: AgentHistoryStatus.self, context: "status")
             )
         case .sources:
             return AgentHistoryEnvelope(
@@ -228,13 +230,13 @@ public struct AgentHistoryClient: Sendable {
             return AgentHistoryEnvelope(
                 operation: operation,
                 backend: backendWithRawDataRoot(backend, raw),
-                event: try decodeTyped(normalizeEvent(raw), as: AgentHistoryEventResult.self, context: "event")
+                event: try decodeTyped(try normalizeEvent(raw), as: AgentHistoryEventResult.self, context: "event")
             )
         case .showSession:
             return AgentHistoryEnvelope(
                 operation: operation,
                 backend: backendWithRawDataRoot(backend, raw),
-                session: try decodeTyped(normalizeSession(raw), as: AgentHistorySessionResult.self, context: "session")
+                session: try decodeTyped(try normalizeSession(raw), as: AgentHistorySessionResult.self, context: "session")
             )
         case .error:
             throw CtxAgentHistorySDKError(code: .invalidRequest, message: "error is not a local CLI operation")
@@ -320,6 +322,154 @@ private func decodeTyped<T: Decodable>(_ value: JSONValue, as type: T.Type, cont
     }
 }
 
+private struct ExactJSONScanner {
+    private let bytes: [UInt8]
+    private var index = 0
+
+    init(_ data: Data) {
+        bytes = Array(data)
+    }
+
+    mutating func validate() throws {
+        try parseValue()
+        skipWhitespace()
+        guard index == bytes.count else {
+            throw ScanError.malformed("trailing JSON data")
+        }
+    }
+
+    private mutating func parseValue() throws {
+        skipWhitespace()
+        guard index < bytes.count else {
+            throw ScanError.malformed("unexpected end of JSON")
+        }
+        switch bytes[index] {
+        case UInt8(ascii: "{"):
+            try parseObject()
+        case UInt8(ascii: "["):
+            try parseArray()
+        case UInt8(ascii: "\""):
+            _ = try parseString()
+        default:
+            let start = index
+            while index < bytes.count,
+                  !Self.isWhitespace(bytes[index]),
+                  bytes[index] != UInt8(ascii: ","),
+                  bytes[index] != UInt8(ascii: "}"),
+                  bytes[index] != UInt8(ascii: "]")
+            {
+                index += 1
+            }
+            guard index > start else {
+                throw ScanError.malformed("expected JSON value")
+            }
+        }
+    }
+
+    private mutating func parseObject() throws {
+        index += 1
+        var members = Set<String>()
+        skipWhitespace()
+        if consume(UInt8(ascii: "}")) {
+            return
+        }
+        while index < bytes.count {
+            skipWhitespace()
+            let member = try parseString()
+            guard members.insert(member).inserted else {
+                throw ScanError.duplicate(member)
+            }
+            skipWhitespace()
+            guard consume(UInt8(ascii: ":")) else {
+                throw ScanError.malformed("expected colon")
+            }
+            try parseValue()
+            skipWhitespace()
+            if consume(UInt8(ascii: "}")) {
+                return
+            }
+            guard consume(UInt8(ascii: ",")) else {
+                throw ScanError.malformed("expected comma")
+            }
+        }
+        throw ScanError.malformed("unterminated object")
+    }
+
+    private mutating func parseArray() throws {
+        index += 1
+        skipWhitespace()
+        if consume(UInt8(ascii: "]")) {
+            return
+        }
+        while index < bytes.count {
+            try parseValue()
+            skipWhitespace()
+            if consume(UInt8(ascii: "]")) {
+                return
+            }
+            guard consume(UInt8(ascii: ",")) else {
+                throw ScanError.malformed("expected comma")
+            }
+        }
+        throw ScanError.malformed("unterminated array")
+    }
+
+    private mutating func parseString() throws -> String {
+        guard consume(UInt8(ascii: "\"")) else {
+            throw ScanError.malformed("expected string")
+        }
+        let start = index - 1
+        while index < bytes.count {
+            let byte = bytes[index]
+            index += 1
+            if byte == UInt8(ascii: "\"") {
+                let encoded = Data(bytes[start..<index])
+                return try JSONDecoder().decode(String.self, from: encoded)
+            }
+            if byte == UInt8(ascii: "\\") {
+                guard index < bytes.count else {
+                    throw ScanError.malformed("unterminated escape")
+                }
+                index += 1
+            }
+        }
+        throw ScanError.malformed("unterminated string")
+    }
+
+    private mutating func skipWhitespace() {
+        while index < bytes.count, Self.isWhitespace(bytes[index]) {
+            index += 1
+        }
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else {
+            return false
+        }
+        index += 1
+        return true
+    }
+
+    private static func isWhitespace(_ byte: UInt8) -> Bool {
+        byte == UInt8(ascii: " ") || byte == UInt8(ascii: "\n") ||
+            byte == UInt8(ascii: "\r") || byte == UInt8(ascii: "\t")
+    }
+
+    private enum ScanError: Error, CustomStringConvertible {
+        case duplicate(String)
+        case malformed(String)
+
+        var description: String {
+            switch self {
+            case let .duplicate(member):
+                return "duplicate JSON object member \(member)"
+            case let .malformed(message):
+                return message
+            }
+        }
+    }
+}
+
 private func parseCtxVersion(_ raw: String) -> String? {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -340,7 +490,7 @@ private func backendWithRawDataRoot(_ backend: AgentHistoryBackend, _ raw: JSONV
     return AgentHistoryBackend(kind: backend.kind, dataRoot: dataRoot, baseURL: backend.baseURL)
 }
 
-private func normalizeStatus(_ raw: JSONValue) -> JSONValue {
+private func normalizeStatus(_ raw: JSONValue) throws -> JSONValue {
     guard case let .object(current) = raw.camelizedPublicJSON().droppingNulls() else {
         return .object(["initialized": .bool(false), "localOnly": .bool(true)])
     }
@@ -355,6 +505,21 @@ private func normalizeStatus(_ raw: JSONValue) -> JSONValue {
         "indexedSources", "historyEpoch", "lexical", "refresh", "semantic", "daemon"
     ] {
         if let value = current[key] {
+            if ["indexedItems", "indexedSessions", "indexedEvents", "indexedSources"].contains(key) {
+                guard let counter = value.intValue,
+                      counter >= 0,
+                      counter <= AgentHistoryStatus.maximumExactCounter
+                else {
+                    throw CtxAgentHistorySDKError(
+                        code: .decodeError,
+                        message: "ctx status counter \(key) is outside the exact JSON integer domain",
+                        details: .object([
+                            "field": .string(key),
+                            "maximum": .number(Decimal(AgentHistoryStatus.maximumExactCounter))
+                        ])
+                    )
+                }
+            }
             status[key] = value
         }
     }
@@ -405,16 +570,63 @@ private func normalizeSearchHit(_ raw: JSONValue) -> JSONValue {
     raw.camelizedPublicJSON()
 }
 
-private func normalizeEvent(_ raw: JSONValue) -> JSONValue {
-    let event = raw["event"]?.camelizedPublicJSON().droppingNulls()
-    let events = raw["events"]?.arrayValue?.map { $0.camelizedPublicJSON().droppingNulls() } ?? []
-    return .object([
-        "event": event ?? .null,
-        "events": .array(events)
-    ]).droppingNulls()
+private func normalizeEvent(_ raw: JSONValue) throws -> JSONValue {
+    let event = try normalizeEventRecord(raw["event"])
+    let events = try (raw["events"]?.arrayValue ?? [])
+        .map { try normalizeEventRecord($0) }
+        .compactMap { $0 }
+    var result: [String: JSONValue] = ["events": .array(events)]
+    if let event {
+        result["event"] = event
+    }
+    return .object(result)
 }
 
-private func normalizeSession(_ raw: JSONValue) -> JSONValue {
+private func normalizeEventRecord(_ raw: JSONValue?) throws -> JSONValue? {
+    guard let raw else {
+        return nil
+    }
+    guard case let .object(eventObject) = raw else {
+        return raw.camelizedPublicJSON().droppingNulls()
+    }
+
+    let exactMCPWireKeys = Set(["mcp_tool_call", "mcpToolCall"])
+    if eventObject.keys.contains(where: {
+        !exactMCPWireKeys.contains($0) && JSONValue.camelizedPublicKey($0) == "mcpToolCall"
+    }) {
+        throw invalidMCPWire("transformed outer alias")
+    }
+
+    let hasSnake = eventObject["mcp_tool_call"] != nil
+    let hasCamel = eventObject["mcpToolCall"] != nil
+    if hasSnake && hasCamel {
+        throw invalidMCPWire("duplicate outer wire aliases")
+    }
+
+    var outer = eventObject
+    let call: JSONValue?
+    if let snake = outer.removeValue(forKey: "mcp_tool_call") {
+        call = snake
+    } else {
+        call = outer.removeValue(forKey: "mcpToolCall")
+    }
+    let normalized = JSONValue.object(outer)
+        .camelizedPublicJSON()
+        .droppingNulls()
+    guard case let .object(normalizedObject) = normalized else {
+        throw invalidMCPWire("event normalization did not produce an object")
+    }
+    var result = normalizedObject
+    if result["mcpToolCall"] != nil {
+        throw invalidMCPWire("outer member collides with canonical mcpToolCall")
+    }
+    if let call {
+        result["mcpToolCall"] = call
+    }
+    return .object(result)
+}
+
+private func normalizeSession(_ raw: JSONValue) throws -> JSONValue {
     var session = raw["session"]?.camelizedPublicJSON().objectValue ?? [:]
     if session["ctxSessionId"] == nil, let ctxSessionID = raw["ctx_session_id"] ?? raw["ctxSessionId"] {
         session["ctxSessionId"] = ctxSessionID
@@ -422,13 +634,28 @@ private func normalizeSession(_ raw: JSONValue) -> JSONValue {
     if session["providerSessionId"] == nil, let providerSessionID = raw["provider_session_id"] ?? raw["providerSessionId"] {
         session["providerSessionId"] = providerSessionID
     }
-    let events = raw["events"]?.arrayValue?.map { $0.camelizedPublicJSON().droppingNulls() } ?? []
-    return .object([
+    let events = try (raw["events"]?.arrayValue ?? [])
+        .map { try normalizeEventRecord($0) }
+        .compactMap { $0 }
+    var result: [String: JSONValue] = [
         "session": .object(session),
-        "events": .array(events),
-        "mode": raw["mode"] ?? .null,
-        "format": raw["format"] ?? .null
-    ]).droppingNulls()
+        "events": .array(events)
+    ]
+    if let mode = raw["mode"], mode != .null {
+        result["mode"] = mode
+    }
+    if let format = raw["format"], format != .null {
+        result["format"] = format
+    }
+    return .object(result)
+}
+
+private func invalidMCPWire(_ message: String) -> CtxAgentHistorySDKError {
+    CtxAgentHistorySDKError(
+        code: .decodeError,
+        message: "agent-history-v1 MCP tool call \(message)",
+        details: .object(["field": .string("mcpToolCall")])
+    )
 }
 
 private func copyFirst(

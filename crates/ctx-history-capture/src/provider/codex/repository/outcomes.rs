@@ -324,7 +324,7 @@ mod tests {
         CodexToolCallContext {
             tool_name: "exec_command".to_owned(),
             exact_command: Some(command.to_owned()),
-            session_cwd: Some("/home/daddy/code/ctx-multi-repo-workspace".to_owned()),
+            session_cwd: Some("/workspace/synthetic-project".to_owned()),
             declared_workdir: Some(workdir.to_owned()),
             origin_call_id: Some(call_id.to_owned()),
             origin_event_sequence: Some(7),

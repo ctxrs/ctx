@@ -1,0 +1,1 @@
+{"event":{"text":"repeated separator outer key must not forge attribution","mcp__tool_call":{"server":"forged-server","tool":"forged-tool"},"future_event_field":"unrelated-extension"},"events":[]}

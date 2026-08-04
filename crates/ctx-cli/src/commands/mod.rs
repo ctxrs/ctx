@@ -5,6 +5,7 @@ pub(crate) mod index;
 mod index_dashboard;
 pub(crate) mod list;
 pub(crate) mod locate;
+pub(crate) mod mcp_tool_call;
 pub(crate) mod search;
 pub(crate) mod setup;
 pub(crate) mod show;

@@ -3,7 +3,10 @@ fn stored_document_contains_exactly_one_canonical_core_record() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
     let expected = document(&source, 1, "body");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(expected.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
@@ -48,7 +51,10 @@ fn direct_core_record_is_the_canonical_locator_free_write_path() {
     let temp = tempdir().unwrap();
     let source = source("direct-core.jsonl");
     let expected = document(&source, 1, "direct Core body");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(expected.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
@@ -74,7 +80,10 @@ fn direct_core_record_rejects_noncurrent_policy_revisions() {
     let source = source("direct-core-policy.jsonl");
     let mut record = document(&source, 1, "direct Core body");
     record.normalization_revision += 1;
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source).unwrap();
 
     assert!(matches!(

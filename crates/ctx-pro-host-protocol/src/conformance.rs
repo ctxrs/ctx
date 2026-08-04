@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "c5ad8c7bce69d5fd3f12d3b57e8e49403233db4a74f91882ed649a2bb117b19a",
+            "fingerprint": "a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -325,6 +325,14 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
             "repository_pull_request_association_capture_revision": 3,
             "repository_outcome_capture_revision": 2,
             "repository_local_root_authorization_fingerprint_revision": 1,
+            "mcp_tool_call_attribution_revision": 1,
+            "mcp_tool_call_attribution": {
+                "wire_path": "CoreRecord.mcp_tool_call",
+                "presence": "optional_omitted_when_absent_explicit_null_rejected",
+                "shape": "exact_server_and_tool_string_pair",
+                "component_bound": "decoded_utf8_bytes",
+                "maximum_component_bytes": 65_536
+            },
             "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
             "repository_file_invocation_evidence_set": "strictly_sorted_unique_typed_request_intent_bound_to_repository_and_normalized_body"
         })
@@ -358,6 +366,64 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         ])
     );
     assert!(evidence.get("declared_tool_workdir").is_none());
+}
+
+#[test]
+fn inventory_freezes_mcp_tool_call_wire_contract() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    assert_eq!(
+        canonical["bounds"]["mcp_tool_call_attribution_component_bytes"],
+        serde_json::json!(65_536)
+    );
+    assert_eq!(
+        canonical["dto_fields"]["CoreRecord"]["optional"],
+        serde_json::json!(["mcp_tool_call"])
+    );
+    assert_eq!(
+        canonical["dto_fields"]["McpToolCallAttribution"],
+        serde_json::json!({"required": ["server", "tool"], "optional": []})
+    );
+
+    let frame = unhex(
+        value["golden_vectors"]["host_frames"]["apply_core_event_delta_page"]
+            .as_str()
+            .unwrap(),
+    );
+    let envelope: Value = serde_json::from_slice(&frame[FRAME_HEADER_BYTES..]).unwrap();
+    let absent = envelope["message"]["body"]["page"]["deltas"][0]["value"].clone();
+    assert!(absent.get("mcp_tool_call").is_none());
+    let decoded_absent: CoreRecord = serde_json::from_value(absent.clone()).unwrap();
+    assert!(decoded_absent.mcp_tool_call.is_none());
+    assert!(serde_json::to_value(decoded_absent)
+        .unwrap()
+        .get("mcp_tool_call")
+        .is_none());
+
+    let expected = serde_json::json!({"server": "filesystem", "tool": "read_file"});
+    let mut attributed = absent.clone();
+    attributed
+        .as_object_mut()
+        .unwrap()
+        .insert("mcp_tool_call".to_owned(), expected.clone());
+    assert_inventory_fields_match_actual(canonical, "CoreRecord", &attributed);
+    assert_inventory_fields_match_actual(
+        canonical,
+        "McpToolCallAttribution",
+        &attributed["mcp_tool_call"],
+    );
+    let decoded_attributed: CoreRecord = serde_json::from_value(attributed).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded_attributed).unwrap()["mcp_tool_call"],
+        expected
+    );
+
+    let mut explicit_null = absent;
+    explicit_null
+        .as_object_mut()
+        .unwrap()
+        .insert("mcp_tool_call".to_owned(), Value::Null);
+    assert!(serde_json::from_value::<CoreRecord>(explicit_null).is_err());
 }
 
 #[test]

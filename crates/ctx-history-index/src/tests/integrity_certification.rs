@@ -14,7 +14,10 @@ use std::{
 fn published_fixture(name: &str) -> (TempDir, SourceKey, CommitReceipt) {
     let temp = tempdir().unwrap();
     let source = source(name);
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "certified generation body"))
@@ -44,7 +47,10 @@ fn repeated_open_and_exact_noop_read_zero_artifact_bodies() {
     assert_eq!(crate::publication::verification_activity().0, 0);
     assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
 
-    let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let constructions = Arc::clone(&noop.index_writer_constructions);
     let inventory = complete_inventory(&source, 1, vec![source.clone()]);
     noop.certify_complete_inventory(inventory.clone()).unwrap();
@@ -73,7 +79,10 @@ fn explicit_scrub_forces_one_full_hash_and_refreshes_reusable_authority() {
 #[test]
 fn each_new_generation_hashes_once_and_is_immediately_restart_reusable() {
     let (temp, source, baseline) = published_fixture("one-hash-generation.jsonl");
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
     append
         .add_core_record(document(&source, 2, "new generation suffix"))

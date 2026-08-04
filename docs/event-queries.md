@@ -84,6 +84,19 @@ ctx list events --root-session 01234567-89ab-8def-8123-456789abcdef \
      root_ctx_session_id, sequence, occurred_at_ms, event_type}'
 ```
 
+Filter exact MCP attribution client-side while omitting payload content:
+
+```bash
+ctx list events --provider codex --content none --format jsonl |
+  jq -c 'select(.record_type == "event_range_event") |
+    .event | select(.mcp_tool_call? != null) |
+    {ctx_event_id, ctx_session_id, mcp_tool_call}'
+```
+
+`mcp_tool_call` is metadata and therefore survives the `none` presentation
+projection. This `jq` predicate is not an indexed ctx selector; it runs only
+after each JSONL event has been emitted.
+
 Query a time window and print normalized text without materializing the stream:
 
 ```bash
@@ -124,3 +137,8 @@ round-trip visibility.
 All JSON and JSONL can contain transcript content, command arguments,
 repository evidence, and local workspace paths. Treat it as private local data
 and review it before sharing.
+
+Exact MCP server/tool names are also opaque private local data and can contain
+sensitive identifiers, paths, or controls. See
+[`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for the complete
+presence, absence, and display-safety contract.

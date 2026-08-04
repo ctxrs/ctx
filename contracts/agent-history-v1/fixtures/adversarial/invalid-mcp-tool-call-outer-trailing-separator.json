@@ -1,0 +1,1 @@
+{"event":{"text":"trailing separator outer key must not forge attribution","mcp_tool_call_":{"server":"forged-server","tool":"forged-tool"},"future_event_field":"unrelated-extension"},"events":[]}

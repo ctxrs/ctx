@@ -1,9 +1,26 @@
+mod protobuf;
+
+#[cfg(test)]
+use protobuf::decode_protobuf_struct;
+use protobuf::{
+    bounded_exact_linkage_owned, bounded_linkage_owned, decode_last_nested_text_occurrences,
+    decode_protobuf_struct_map, decode_received_messages_occurrences,
+    decode_summarization_occurrences, decode_system_query_occurrences,
+    decode_timestamp_occurrences, last_length_delimited_field_occurrences,
+    last_length_delimited_value, last_length_delimited_value_occurrences,
+    validate_string_fields_occurrences, warp_text_owned,
+};
+
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{EventRole, EventType, MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES};
+use serde_json::{Map, Value};
+use uuid::Uuid;
 
 use super::super::wire::{
-    warp_message_arm, warp_tool_name, warp_tool_result_name, WarpMessageArm, WarpWireCursor,
-    WarpWireValue,
+    is_warp_tool_arm, is_warp_tool_result_arm, warp_message_arm, warp_tool_name,
+    warp_tool_result_name, WarpMessageArm, WarpWireCursor, WarpWireValue,
 };
 use crate::{CaptureError, OutputOutcome, Result};
 
@@ -20,6 +37,7 @@ pub(super) struct WarpDecodedMessage {
     pub(super) request_id: Option<String>,
     pub(super) occurred_at: Option<DateTime<Utc>>,
     pub(super) legacy_indexed: bool,
+    result_call_id: Option<String>,
     pub(super) payload: WarpDecodedMessagePayload,
 }
 
@@ -37,6 +55,8 @@ pub(super) struct WarpRetainedMessage {
     pub(super) kind: &'static str,
     pub(super) body: String,
     pub(super) tool_call: bool,
+    pub(super) call_id: Option<String>,
+    pub(super) mcp_invocation: Option<WarpMcpToolInvocation>,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +65,22 @@ pub(super) struct WarpDecodedOutput {
     pub(super) tool_name: &'static str,
     pub(super) outcome: OutputOutcome,
     pub(super) body: String,
+    pub(super) mcp_invocation: Option<WarpMcpToolInvocation>,
+    result_kind: WarpToolResultKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(in super::super) struct WarpMcpToolInvocation {
+    pub(in super::super) server_id: String,
+    pub(in super::super) tool_name: String,
+    pub(in super::super) args: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WarpToolResultKind {
+    Other,
+    Mcp,
+    Cancellation,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -62,36 +98,82 @@ pub(super) struct WarpDecodeCounters {
 }
 
 #[derive(Clone, Debug)]
-enum WarpClassifiedBody<'a> {
-    Bytes(Option<&'a [u8]>),
+enum WarpClassifiedBody {
+    Bytes(Option<Vec<u8>>),
+    Owned(Option<String>),
     Malformed,
 }
 
 #[derive(Clone, Debug)]
-struct WarpToolResultClassification<'a> {
-    call_id: Option<&'a [u8]>,
+struct WarpToolResultClassification {
+    call_id: Option<String>,
     tool_name: &'static str,
     outcome: OutputOutcome,
-    body: WarpClassifiedBody<'a>,
+    body: WarpClassifiedBody,
+    result_kind: WarpToolResultKind,
+}
+
+#[derive(Debug)]
+struct WarpSelectedMessage {
+    field: u32,
+    payloads: Vec<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct WarpValidatedString {
+    value: Option<String>,
+    valid: bool,
+}
+
+impl Default for WarpValidatedString {
+    fn default() -> Self {
+        Self {
+            value: None,
+            valid: true,
+        }
+    }
+}
+
+impl WarpValidatedString {
+    fn observe(&mut self, value: &[u8]) {
+        match warp_text_owned(value) {
+            Ok(value) if self.valid => self.value = Some(value),
+            Ok(_) => {}
+            Err(_) => {
+                self.valid = false;
+                self.value = None;
+            }
+        }
+    }
+
+    fn into_optional(self, label: &str) -> Result<Option<String>> {
+        if self.valid {
+            Ok(self.value)
+        } else {
+            Err(CaptureError::InvalidPayload(format!(
+                "invalid UTF-8 in Warp protobuf {label}"
+            )))
+        }
+    }
 }
 
 pub(super) fn decode_warp_native_task(data: &[u8]) -> Result<WarpDecodedTask> {
     let mut cursor = WarpWireCursor::new(data);
-    let mut task_id = None;
+    let mut task_id = None::<String>;
     let mut message_payloads = Vec::new();
     let mut counters = WarpDecodeCounters::default();
     while let Some(field) = cursor.next()? {
         match (field.number, field.value) {
-            (1, WarpWireValue::LengthDelimited(value)) => task_id = Some(value),
+            (1, WarpWireValue::LengthDelimited(value)) => {
+                task_id = Some(warp_text_owned(value)?);
+            }
             (2 | 3 | 6, WarpWireValue::LengthDelimited(_)) => {}
             (5, WarpWireValue::LengthDelimited(value)) => message_payloads.push(value),
             _ => counters.unknown_fields = counters.unknown_fields.saturating_add(1),
         }
     }
 
-    if let Some(task_id) = task_id {
-        let _ = super::super::wire::warp_wire_text(task_id)?;
-    }
+    let _ = task_id;
     let mut messages = Vec::new();
     for (ordinal, message) in message_payloads.into_iter().enumerate() {
         let message_ordinal = u32::try_from(ordinal).map_err(|_| {
@@ -100,6 +182,7 @@ pub(super) fn decode_warp_native_task(data: &[u8]) -> Result<WarpDecodedTask> {
         let payload = decode_warp_native_message(message, message_ordinal, &mut counters)?;
         messages.push(payload);
     }
+    link_mcp_tool_results(&mut messages);
     Ok(WarpDecodedTask { messages, counters })
 }
 
@@ -109,16 +192,20 @@ fn decode_warp_native_message(
     counters: &mut WarpDecodeCounters,
 ) -> Result<WarpDecodedMessage> {
     let mut cursor = WarpWireCursor::new(data);
-    let mut message_id = None;
-    let mut request_id = None;
-    let mut timestamp = None;
+    let mut message_id = None::<String>;
+    let mut request_id = None::<String>;
+    let mut timestamps = Vec::new();
     let mut selected_arm = None;
     while let Some(field) = cursor.next()? {
         match (field.number, field.value) {
-            (1, WarpWireValue::LengthDelimited(value)) => message_id = Some(value),
+            (1, WarpWireValue::LengthDelimited(value)) => {
+                message_id = Some(warp_text_owned(value)?);
+            }
             (11, WarpWireValue::LengthDelimited(_)) => {}
-            (13, WarpWireValue::LengthDelimited(value)) => request_id = Some(value),
-            (14, WarpWireValue::LengthDelimited(value)) => timestamp = Some(value),
+            (13, WarpWireValue::LengthDelimited(value)) => {
+                request_id = Some(warp_text_owned(value)?);
+            }
+            (14, WarpWireValue::LengthDelimited(value)) => timestamps.push(value),
             (number, WarpWireValue::LengthDelimited(value))
                 if warp_message_arm(number).is_some() =>
             {
@@ -128,27 +215,30 @@ fn decode_warp_native_message(
                 if matches!(arm, WarpMessageArm::Unknown(_)) {
                     counters.unknown_fields = counters.unknown_fields.saturating_add(1);
                     counters.unknown_oneofs = counters.unknown_oneofs.saturating_add(1);
+                } else {
+                    validate_message_payload(value)?;
                 }
-                selected_arm = Some((arm, value));
+                select_message_oneof(&mut selected_arm, number, value);
             }
             _ => counters.unknown_fields = counters.unknown_fields.saturating_add(1),
         }
     }
 
-    let message_id = message_id
-        .map(warp_text_owned)
-        .transpose()?
-        .and_then(bounded_linkage_owned);
-    let Some((arm, payload)) = selected_arm else {
+    let message_id = message_id.and_then(bounded_linkage_owned);
+    let Some(selected_arm) = selected_arm else {
         return Ok(WarpDecodedMessage {
             message_ordinal,
             message_id,
             request_id: None,
             occurred_at: None,
             legacy_indexed: false,
+            result_call_id: None,
             payload: WarpDecodedMessagePayload::Excluded,
         });
     };
+    let arm = warp_message_arm(selected_arm.field).ok_or(CaptureError::SystemInvariant(
+        "Warp selected message arm classification changed during decode",
+    ))?;
     if matches!(arm, WarpMessageArm::Unknown(_)) {
         return Ok(WarpDecodedMessage {
             message_ordinal,
@@ -156,6 +246,7 @@ fn decode_warp_native_message(
             request_id: None,
             occurred_at: None,
             legacy_indexed: false,
+            result_call_id: None,
             payload: WarpDecodedMessagePayload::Excluded,
         });
     }
@@ -163,10 +254,13 @@ fn decode_warp_native_message(
         arm,
         WarpMessageArm::ToolResult | WarpMessageArm::DebugOutput
     ) {
-        let decoded_payload = decode_output(arm, payload, counters)?;
+        let result_call_id = matches!(arm, WarpMessageArm::ToolResult)
+            .then(|| decode_tool_result_call_id(&selected_arm.payloads))
+            .flatten();
+        let decoded_payload = decode_output(arm, &selected_arm.payloads, counters)?;
         let needs_metadata = matches!(&decoded_payload, WarpDecodedMessagePayload::Output(_));
         let (request_id, occurred_at) = if needs_metadata {
-            decode_output_metadata(request_id, timestamp, counters)
+            decode_output_metadata(request_id, &timestamps, counters)
         } else {
             (None, None)
         };
@@ -176,67 +270,80 @@ fn decode_warp_native_message(
             request_id,
             occurred_at,
             legacy_indexed: true,
+            result_call_id,
             payload: decoded_payload,
         });
     }
 
-    let request_id = request_id
-        .map(warp_text_owned)
-        .transpose()?
-        .and_then(bounded_linkage_owned);
-    let occurred_at = timestamp.map(decode_timestamp).transpose()?.flatten();
-    let (event_type, role, kind, body, tool_call) = match arm {
+    let request_id = request_id.and_then(bounded_linkage_owned);
+    let occurred_at = decode_timestamp_occurrences(&timestamps)?;
+    let payloads = &selected_arm.payloads;
+    let (event_type, role, kind, body, tool_call, call_id, mcp_invocation) = match arm {
         WarpMessageArm::UserQuery => (
             EventType::Message,
             Some(EventRole::User),
             "user_query",
-            decode_last_nested_text(payload, 1)?.unwrap_or_default(),
+            decode_last_nested_text_occurrences(payloads, 1)?.unwrap_or_default(),
             false,
+            None,
+            None,
         ),
         WarpMessageArm::AgentOutput => (
             EventType::Message,
             Some(EventRole::Assistant),
             "agent_output",
-            decode_last_nested_text(payload, 1)?.unwrap_or_default(),
+            decode_last_nested_text_occurrences(payloads, 1)?.unwrap_or_default(),
             false,
+            None,
+            None,
         ),
         WarpMessageArm::ToolCall => {
-            let field = last_length_delimited_field(payload)?.map_or(0, |(field, _)| field);
+            let decoded = decode_tool_call(payloads)?;
             (
                 EventType::ToolCall,
                 Some(EventRole::Assistant),
                 "tool_call",
-                format!("tool call: {}", warp_tool_name(field)),
+                format!("tool call: {}", decoded.tool_name),
                 true,
+                decoded.call_id,
+                decoded.mcp_invocation,
             )
         }
         WarpMessageArm::SystemQuery => (
             EventType::Message,
             Some(EventRole::System),
             "system_query",
-            decode_system_query(payload)?,
+            decode_system_query_occurrences(payloads)?,
             false,
+            None,
+            None,
         ),
         WarpMessageArm::AgentReasoning => (
             EventType::Message,
             Some(EventRole::Assistant),
             "agent_reasoning",
-            decode_last_nested_text(payload, 1)?.unwrap_or_default(),
+            decode_last_nested_text_occurrences(payloads, 1)?.unwrap_or_default(),
             false,
+            None,
+            None,
         ),
         WarpMessageArm::Summarization => (
             EventType::Message,
             Some(EventRole::Assistant),
             "summarization",
-            decode_summarization(payload)?,
+            decode_summarization_occurrences(payloads)?,
             false,
+            None,
+            None,
         ),
         WarpMessageArm::ReceivedMessages => (
             EventType::Message,
             Some(EventRole::Assistant),
             "messages_received_from_agents",
-            decode_received_messages(payload)?,
+            decode_received_messages_occurrences(payloads)?,
             false,
+            None,
+            None,
         ),
         WarpMessageArm::ToolResult | WarpMessageArm::DebugOutput | WarpMessageArm::Unknown(_) => {
             return Err(CaptureError::SystemInvariant(
@@ -250,52 +357,226 @@ fn decode_warp_native_message(
         occurred_at,
         message_ordinal,
         legacy_indexed: tool_call || !body.is_empty(),
+        result_call_id: None,
         payload: WarpDecodedMessagePayload::Retained(WarpRetainedMessage {
             event_type,
             role,
             kind,
             body,
             tool_call,
+            call_id,
+            mcp_invocation,
         }),
     })
 }
 
 fn decode_output_metadata(
-    request_id: Option<&[u8]>,
-    timestamp: Option<&[u8]>,
+    request_id: Option<String>,
+    timestamps: &[&[u8]],
     counters: &mut WarpDecodeCounters,
 ) -> (Option<String>, Option<DateTime<Utc>>) {
-    let request_id = request_id
-        .map(warp_text_owned)
-        .transpose()
-        .map(|value| value.and_then(bounded_linkage_owned));
-    let occurred_at = timestamp
-        .map(decode_timestamp)
-        .transpose()
-        .map(Option::flatten);
-    let metadata_error = request_id
-        .as_ref()
-        .err()
-        .map(ToString::to_string)
-        .or_else(|| occurred_at.as_ref().err().map(ToString::to_string));
-    if let Some(error) = metadata_error {
+    let request_id = request_id.and_then(bounded_linkage_owned);
+    let occurred_at = decode_timestamp_occurrences(timestamps);
+    if let Err(error) = &occurred_at {
         let _ = error;
         counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
     }
-    (request_id.unwrap_or(None), occurred_at.unwrap_or(None))
+    (request_id, occurred_at.unwrap_or(None))
+}
+
+#[derive(Debug)]
+struct WarpDecodedToolCall {
+    call_id: Option<String>,
+    tool_name: &'static str,
+    mcp_invocation: Option<WarpMcpToolInvocation>,
+}
+
+fn decode_tool_call(payloads: &[Vec<u8>]) -> Result<WarpDecodedToolCall> {
+    let mut call_id = WarpValidatedString::default();
+    let mut selected_tool = None;
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Some(field) = cursor.next()? {
+            match (field.number, field.value) {
+                (1, WarpWireValue::LengthDelimited(value)) => call_id.observe(value),
+                (number, WarpWireValue::LengthDelimited(value)) if is_warp_tool_arm(number) => {
+                    validate_message_payload(value)?;
+                    select_message_oneof(&mut selected_tool, number, value);
+                }
+                _ => {}
+            }
+        }
+    }
+    let call_id = call_id
+        .into_optional("ToolCall.tool_call_id")
+        .ok()
+        .flatten()
+        .and_then(bounded_exact_linkage_owned);
+    let tool_field = selected_tool.as_ref().map_or(0, |selected| selected.field);
+    let mcp_invocation = (tool_field == 12)
+        .then(|| {
+            decode_mcp_tool_call(
+                &selected_tool
+                    .as_ref()
+                    .ok_or(CaptureError::SystemInvariant(
+                        "Warp MCP tool arm disappeared during decode",
+                    ))?
+                    .payloads,
+            )
+        })
+        .transpose()
+        .ok()
+        .flatten();
+    Ok(WarpDecodedToolCall {
+        call_id,
+        tool_name: warp_tool_name(tool_field),
+        mcp_invocation,
+    })
+}
+
+fn decode_mcp_tool_call(payloads: &[Vec<u8>]) -> Result<WarpMcpToolInvocation> {
+    let mut name = WarpValidatedString::default();
+    let mut args = None::<Map<String, Value>>;
+    let mut server_id = WarpValidatedString::default();
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Some(field) = cursor.next()? {
+            match (field.number, field.value) {
+                (1, WarpWireValue::LengthDelimited(value)) => name.observe(value),
+                (2, WarpWireValue::LengthDelimited(value)) => {
+                    let occurrence = decode_protobuf_struct_map(value, 0)?;
+                    args.get_or_insert_with(Map::new).extend(occurrence);
+                }
+                (3, WarpWireValue::LengthDelimited(value)) => server_id.observe(value),
+                _ => {}
+            }
+        }
+    }
+    Ok(WarpMcpToolInvocation {
+        server_id: server_id
+            .into_optional("CallMCPTool.server_id")?
+            .unwrap_or_default(),
+        tool_name: name.into_optional("CallMCPTool.name")?.unwrap_or_default(),
+        args: Value::Object(args.ok_or_else(|| {
+            CaptureError::InvalidPayload("Warp CallMCPTool.args is missing".to_owned())
+        })?),
+    })
+}
+
+fn link_mcp_tool_results(messages: &mut [WarpDecodedMessage]) {
+    #[derive(Default)]
+    struct CallLink {
+        count: usize,
+        invocation: Option<WarpMcpToolInvocation>,
+    }
+
+    let mut calls = HashMap::<String, CallLink>::new();
+    let mut results = HashMap::<String, usize>::new();
+    for message in messages.iter() {
+        match &message.payload {
+            WarpDecodedMessagePayload::Retained(retained) if retained.tool_call => {
+                let Some(call_id) = retained.call_id.as_ref() else {
+                    continue;
+                };
+                let entry = calls.entry(call_id.clone()).or_default();
+                entry.count = entry.count.saturating_add(1);
+                if entry.count == 1 {
+                    entry.invocation = retained.mcp_invocation.clone();
+                } else {
+                    entry.invocation = None;
+                }
+            }
+            _ => {}
+        }
+        if let Some(call_id) = message.result_call_id.as_ref() {
+            let count = results.entry(call_id.clone()).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+
+    for message in messages {
+        let WarpDecodedMessagePayload::Output(output) = &mut message.payload else {
+            continue;
+        };
+        if !matches!(
+            output.result_kind,
+            WarpToolResultKind::Mcp | WarpToolResultKind::Cancellation
+        ) {
+            continue;
+        }
+        let Some(call_id) = output.call_id.as_ref() else {
+            continue;
+        };
+        let Some(call) = calls.get(call_id) else {
+            continue;
+        };
+        if call.count != 1 || results.get(call_id) != Some(&1) {
+            continue;
+        }
+        let Some(invocation) = call.invocation.as_ref() else {
+            continue;
+        };
+        if qualifies_mcp_invocation(invocation) {
+            output.mcp_invocation = Some(invocation.clone());
+        }
+    }
+}
+
+fn qualifies_mcp_invocation(invocation: &WarpMcpToolInvocation) -> bool {
+    Uuid::parse_str(&invocation.server_id).is_ok()
+        && !invocation.tool_name.is_empty()
+        && invocation.tool_name.len() <= MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
+}
+
+fn decode_tool_result_call_id(payloads: &[Vec<u8>]) -> Option<String> {
+    let mut call_id = WarpValidatedString::default();
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Ok(Some(field)) = cursor.next() {
+            if let (1, WarpWireValue::LengthDelimited(value)) = (field.number, field.value) {
+                call_id.observe(value);
+            }
+        }
+    }
+    call_id
+        .into_optional("ToolCallResult.tool_call_id")
+        .ok()
+        .flatten()
+        .and_then(bounded_exact_linkage_owned)
+}
+
+fn select_message_oneof(selected: &mut Option<WarpSelectedMessage>, field: u32, payload: &[u8]) {
+    if let Some(selected) = selected {
+        if selected.field == field {
+            selected.payloads.push(payload.to_vec());
+            return;
+        }
+    }
+    *selected = Some(WarpSelectedMessage {
+        field,
+        payloads: vec![payload.to_vec()],
+    });
+}
+
+fn validate_message_payload(payload: &[u8]) -> Result<()> {
+    let mut cursor = WarpWireCursor::new(payload);
+    while cursor.next()?.is_some() {}
+    Ok(())
 }
 
 fn decode_output(
     arm: WarpMessageArm,
-    payload: &[u8],
+    payloads: &[Vec<u8>],
     counters: &mut WarpDecodeCounters,
 ) -> Result<WarpDecodedMessagePayload> {
     counters.native_result_records = counters.native_result_records.saturating_add(1);
-    counters.native_result_envelope_bytes = counters
-        .native_result_envelope_bytes
-        .saturating_add(u64::try_from(payload.len()).unwrap_or(u64::MAX));
+    counters.native_result_envelope_bytes = counters.native_result_envelope_bytes.saturating_add(
+        payloads.iter().fold(0_u64, |total, payload| {
+            total.saturating_add(u64::try_from(payload.len()).unwrap_or(u64::MAX))
+        }),
+    );
     let classification = match arm {
-        WarpMessageArm::ToolResult => match classify_tool_result(payload) {
+        WarpMessageArm::ToolResult => match classify_tool_result(payloads) {
             Ok(classification) => classification,
             Err(error) => {
                 counters.malformed_output_records =
@@ -313,7 +594,10 @@ fn decode_output(
     };
     let body_bytes = match &classification.body {
         WarpClassifiedBody::Bytes(body) => {
-            u64::try_from(body.map_or(0, <[u8]>::len)).unwrap_or(u64::MAX)
+            u64::try_from(body.as_ref().map_or(0, Vec::len)).unwrap_or(u64::MAX)
+        }
+        WarpClassifiedBody::Owned(body) => {
+            u64::try_from(body.as_ref().map_or(0, String::len)).unwrap_or(u64::MAX)
         }
         WarpClassifiedBody::Malformed => 0,
     };
@@ -334,70 +618,115 @@ fn decode_output(
             counters.native_results_unknown = counters.native_results_unknown.saturating_add(1);
         }
     }
+    let terminal_without_text = matches!(
+        classification.result_kind,
+        WarpToolResultKind::Mcp | WarpToolResultKind::Cancellation
+    );
     let body = match classification.body {
-        WarpClassifiedBody::Bytes(Some(body)) => match warp_text_owned(body) {
+        WarpClassifiedBody::Bytes(Some(body)) => match warp_text_owned(&body) {
             Ok(body) if !body.trim().is_empty() => body,
+            Ok(_) if terminal_without_text => String::new(),
             Ok(_) | Err(_) => {
                 counters.malformed_output_records =
                     counters.malformed_output_records.saturating_add(1);
                 return Ok(WarpDecodedMessagePayload::Excluded);
             }
         },
-        WarpClassifiedBody::Bytes(None) | WarpClassifiedBody::Malformed => {
+        WarpClassifiedBody::Owned(Some(body)) if !body.trim().is_empty() => body,
+        WarpClassifiedBody::Owned(_) | WarpClassifiedBody::Bytes(None) if terminal_without_text => {
+            String::new()
+        }
+        WarpClassifiedBody::Bytes(None)
+        | WarpClassifiedBody::Owned(_)
+        | WarpClassifiedBody::Malformed => {
             counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
             return Ok(WarpDecodedMessagePayload::Excluded);
         }
     };
-    let call_id = classification
-        .call_id
-        .map(warp_text_owned)
-        .transpose()
-        .map(|value| value.and_then(bounded_linkage_owned));
-    if call_id.is_err() {
-        counters.malformed_output_records = counters.malformed_output_records.saturating_add(1);
-    }
     Ok(WarpDecodedMessagePayload::Output(WarpDecodedOutput {
-        call_id: call_id.unwrap_or(None),
+        call_id: classification.call_id,
         tool_name: classification.tool_name,
         outcome: classification.outcome,
         body,
+        mcp_invocation: None,
+        result_kind: classification.result_kind,
     }))
 }
 
-fn classify_tool_result(data: &[u8]) -> Result<WarpToolResultClassification<'_>> {
-    let mut cursor = WarpWireCursor::new(data);
-    let mut call_id = None;
+fn classify_tool_result(payloads: &[Vec<u8>]) -> Result<WarpToolResultClassification> {
+    let mut call_id = WarpValidatedString::default();
     let mut variant = None;
-    while let Some(field) = cursor.next()? {
-        match (field.number, field.value) {
-            (1, WarpWireValue::LengthDelimited(value)) => call_id = Some(value),
-            (1 | 11, _) => {}
-            (number, WarpWireValue::LengthDelimited(value)) => {
-                variant = Some((number, value));
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Some(field) = cursor.next()? {
+            match (field.number, field.value) {
+                (1, WarpWireValue::LengthDelimited(value)) => call_id.observe(value),
+                (1 | 11, _) => {}
+                (number, WarpWireValue::LengthDelimited(value))
+                    if is_warp_tool_result_arm(number) =>
+                {
+                    validate_message_payload(value)?;
+                    select_message_oneof(&mut variant, number, value);
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
-    let Some((variant, payload)) = variant else {
+    let call_id = call_id
+        .into_optional("ToolCallResult.tool_call_id")
+        .ok()
+        .flatten()
+        .and_then(bounded_exact_linkage_owned);
+    let Some(selected) = variant else {
         return Ok(WarpToolResultClassification {
             call_id,
             tool_name: warp_tool_result_name(0),
             outcome: OutputOutcome::Unknown,
             body: WarpClassifiedBody::Bytes(None),
+            result_kind: WarpToolResultKind::Other,
         });
     };
+    let variant = selected.field;
+    if variant == 14 {
+        return Ok(WarpToolResultClassification {
+            call_id,
+            tool_name: warp_tool_result_name(variant),
+            outcome: OutputOutcome::Unknown,
+            body: WarpClassifiedBody::Bytes(None),
+            result_kind: WarpToolResultKind::Cancellation,
+        });
+    }
+    if variant == 16 {
+        let Some((outcome, body)) = classify_mcp_tool_result(&selected.payloads)? else {
+            return Ok(WarpToolResultClassification {
+                call_id,
+                tool_name: warp_tool_result_name(variant),
+                outcome: OutputOutcome::Unknown,
+                body: WarpClassifiedBody::Bytes(None),
+                result_kind: WarpToolResultKind::Other,
+            });
+        };
+        return Ok(WarpToolResultClassification {
+            call_id,
+            tool_name: warp_tool_result_name(variant),
+            outcome,
+            body: WarpClassifiedBody::Owned(body),
+            result_kind: WarpToolResultKind::Mcp,
+        });
+    }
     if variant == 2 {
-        let (outcome, body) = classify_run_shell_result(payload)?;
+        let (outcome, body) = classify_run_shell_result_occurrences(&selected.payloads)?;
         return Ok(WarpToolResultClassification {
             call_id,
             tool_name: warp_tool_result_name(variant),
             outcome,
             body,
+            result_kind: WarpToolResultKind::Other,
         });
     }
-    let selected = last_length_delimited_field(payload)?;
-    let selected_field = selected.map_or(0, |(field, _)| field);
-    let outcome = match (variant, selected_field) {
+    let selected_field = last_length_delimited_field_occurrences(&selected.payloads)?;
+    let selected_field_number = selected_field.map_or(0, |(field, _)| field);
+    let outcome = match (variant, selected_field_number) {
         (4 | 23, 1) => OutputOutcome::Success,
         (
             3 | 5 | 6 | 9 | 10 | 15 | 16 | 19 | 24 | 25 | 26 | 28 | 30 | 32 | 34 | 36 | 38 | 41
@@ -416,45 +745,51 @@ fn classify_tool_result(data: &[u8]) -> Result<WarpToolResultClassification<'_>>
         (39, 2 | 3) => OutputOutcome::Failure,
         _ => OutputOutcome::Unknown,
     };
-    let body = classified_result_body(variant, selected);
+    let body = classified_result_body(variant, selected_field);
     Ok(WarpToolResultClassification {
         call_id,
         tool_name: warp_tool_result_name(variant),
         outcome,
         body,
+        result_kind: WarpToolResultKind::Other,
     })
 }
 
-fn classify_run_shell_result(data: &[u8]) -> Result<(OutputOutcome, WarpClassifiedBody<'_>)> {
-    let mut cursor = WarpWireCursor::new(data);
+fn classify_run_shell_result_occurrences(
+    payloads: &[Vec<u8>],
+) -> Result<(OutputOutcome, WarpClassifiedBody)> {
     let mut deprecated_output = None;
     let mut terminal = None;
-    while let Some(field) = cursor.next()? {
-        match (field.number, field.value) {
-            (1, WarpWireValue::LengthDelimited(value)) => {
-                deprecated_output = Some(value);
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Some(field) = cursor.next()? {
+            match (field.number, field.value) {
+                (1, WarpWireValue::LengthDelimited(value)) => {
+                    deprecated_output = Some(value.to_vec());
+                }
+                (4..=6, WarpWireValue::LengthDelimited(value)) => {
+                    validate_message_payload(value)?;
+                    select_message_oneof(&mut terminal, field.number, value);
+                }
+                _ => {}
             }
-            (4..=6, WarpWireValue::LengthDelimited(value)) => {
-                terminal = Some((field.number, value));
-            }
-            _ => {}
         }
     }
-    let Some((field, payload)) = terminal else {
+    let Some(terminal) = terminal else {
         return Ok((
             OutputOutcome::Unknown,
             WarpClassifiedBody::Bytes(deprecated_output),
         ));
     };
-    let body = match field {
-        4 | 5 => classified_nested_text(payload, 1),
-        6 => match classified_nested_text(payload, 1) {
+    let body = match terminal.field {
+        4 | 5 => classified_nested_text_occurrences(&terminal.payloads, 1),
+        6 => match classified_nested_text_occurrences(&terminal.payloads, 1) {
             WarpClassifiedBody::Bytes(None) => WarpClassifiedBody::Bytes(deprecated_output),
             body => body,
         },
         _ => WarpClassifiedBody::Bytes(None),
     };
-    let outcome = match field {
+    let outcome = match terminal.field {
         5 => OutputOutcome::Success,
         6 => OutputOutcome::Failure,
         _ => OutputOutcome::Unknown,
@@ -462,12 +797,12 @@ fn classify_run_shell_result(data: &[u8]) -> Result<(OutputOutcome, WarpClassifi
     Ok((outcome, body))
 }
 
-fn classified_result_body(variant: u32, selected: Option<(u32, &[u8])>) -> WarpClassifiedBody<'_> {
+fn classified_result_body(variant: u32, selected: Option<(u32, &[u8])>) -> WarpClassifiedBody {
     let Some((arm, arm_payload)) = selected else {
         return WarpClassifiedBody::Bytes(None);
     };
     match (variant, arm) {
-        (4 | 23, 1) => WarpClassifiedBody::Bytes(Some(arm_payload)),
+        (4 | 23, 1) => WarpClassifiedBody::Bytes(Some(arm_payload.to_vec())),
         (10, 1 | 2) => classified_nested_text(arm_payload, 1),
         (
             3 | 5 | 6 | 9 | 15 | 16 | 19 | 24 | 25 | 26 | 28 | 30 | 32 | 34 | 36 | 38 | 41 | 42,
@@ -480,232 +815,129 @@ fn classified_result_body(variant: u32, selected: Option<(u32, &[u8])>) -> WarpC
     }
 }
 
-fn classified_nested_text(data: &[u8], field: u32) -> WarpClassifiedBody<'_> {
+fn classified_nested_text(data: &[u8], field: u32) -> WarpClassifiedBody {
     match last_length_delimited_value(data, field) {
-        Ok(value) => WarpClassifiedBody::Bytes(value),
+        Ok(value) => WarpClassifiedBody::Bytes(value.map(<[u8]>::to_vec)),
         Err(_) => WarpClassifiedBody::Malformed,
     }
 }
 
-fn decode_timestamp(data: &[u8]) -> Result<Option<DateTime<Utc>>> {
-    let mut cursor = WarpWireCursor::new(data);
-    let mut seconds = None;
-    let mut nanos = 0_u32;
-    while let Some(field) = cursor.next()? {
-        match (field.number, field.value) {
-            (1, WarpWireValue::Varint(value)) => seconds = Some(value as i64),
-            (2, WarpWireValue::Varint(value)) => {
-                nanos = u32::try_from(value).map_err(|_| {
-                    CaptureError::InvalidPayload(
-                        "Warp protobuf timestamp nanos overflowed".to_owned(),
-                    )
-                })?;
+fn classified_nested_text_occurrences(payloads: &[Vec<u8>], field: u32) -> WarpClassifiedBody {
+    match last_length_delimited_value_occurrences(payloads, field) {
+        Ok(value) => WarpClassifiedBody::Bytes(value.map(<[u8]>::to_vec)),
+        Err(_) => WarpClassifiedBody::Malformed,
+    }
+}
+
+fn classify_mcp_tool_result(
+    payloads: &[Vec<u8>],
+) -> Result<Option<(OutputOutcome, Option<String>)>> {
+    let mut selected = None;
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Some(field) = cursor.next()? {
+            if let (number @ (1 | 2), WarpWireValue::LengthDelimited(value)) =
+                (field.number, field.value)
+            {
+                validate_message_payload(value)?;
+                select_message_oneof(&mut selected, number, value);
             }
-            _ => {}
         }
     }
-    if nanos >= 1_000_000_000 {
-        return Err(CaptureError::InvalidPayload(
-            "Warp protobuf timestamp nanos are out of range".to_owned(),
-        ));
-    }
-    Ok(seconds.and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, nanos)))
-}
-
-fn decode_system_query(data: &[u8]) -> Result<String> {
-    let Some((field, payload)) = last_length_delimited_field(data)? else {
-        return Ok("system query".to_owned());
+    let Some(selected) = selected else {
+        return Ok(None);
     };
-    Ok(match field {
-        1 => "system query: auto code diff".to_owned(),
-        3 => "system query: resume conversation".to_owned(),
-        4 => "system query: generate passive suggestions".to_owned(),
-        5 => decode_last_nested_text(payload, 1)?
-            .map(|query| format!("system query: create new project\n{query}"))
-            .unwrap_or_else(|| "system query: create new project".to_owned()),
-        6 => "system query: clone repository".to_owned(),
-        7 => decode_last_nested_text(payload, 1)?
-            .map(|prompt| format!("system query: summarize conversation\n{prompt}"))
-            .unwrap_or_else(|| "system query: summarize conversation".to_owned()),
-        8 => "system query: fetch review comments".to_owned(),
-        9 => "system query: handoff rehydration".to_owned(),
-        _ => format!("system query: field {field}"),
-    })
-}
-
-fn decode_summarization(data: &[u8]) -> Result<String> {
-    let Some((field, payload)) = last_length_delimited_field(data)? else {
-        return Err(CaptureError::InvalidPayload(
-            "Warp summarization has no selected arm".to_owned(),
-        ));
-    };
-    if field == 1 {
-        return Ok(decode_last_nested_text(payload, 1)?
-            .map(|summary| format!("conversation summary\n{summary}"))
-            .unwrap_or_else(|| "conversation summary".to_owned()));
+    match selected.field {
+        1 => Ok(Some((
+            OutputOutcome::Success,
+            decode_mcp_success_text_occurrences(&selected.payloads)?,
+        ))),
+        2 => Ok(Some((
+            OutputOutcome::Failure,
+            decode_last_nested_text_occurrences(&selected.payloads, 1)?,
+        ))),
+        _ => Err(CaptureError::SystemInvariant(
+            "Warp MCP result selected an unclassified oneof arm",
+        )),
     }
-    Ok(format!("summarization: field {field}"))
 }
 
-fn decode_received_messages(data: &[u8]) -> Result<String> {
-    let mut cursor = WarpWireCursor::new(data);
+fn decode_mcp_success_text_occurrences(payloads: &[Vec<u8>]) -> Result<Option<String>> {
     let mut parts = Vec::new();
-    while let Some(field) = cursor.next()? {
-        let (1, WarpWireValue::LengthDelimited(received)) = (field.number, field.value) else {
-            continue;
-        };
-        let subject = decode_last_nested_text(received, 4)?.unwrap_or_default();
-        let body = decode_last_nested_text(received, 5)?.unwrap_or_default();
-        let text = match (subject.is_empty(), body.is_empty()) {
-            (false, false) => format!("{subject}\n{body}"),
-            (false, true) => subject,
-            (true, false) => body,
-            (true, true) => continue,
-        };
-        parts.push(text);
-    }
-    Ok(parts.join("\n\n"))
-}
-
-fn decode_last_nested_text(data: &[u8], field: u32) -> Result<Option<String>> {
-    last_length_delimited_value(data, field)?
-        .map(warp_text_owned)
-        .transpose()
-}
-
-fn last_length_delimited_value(data: &[u8], desired_field: u32) -> Result<Option<&[u8]>> {
-    let mut cursor = WarpWireCursor::new(data);
-    let mut selected = None;
-    while let Some(field) = cursor.next()? {
-        if let (number, WarpWireValue::LengthDelimited(value)) = (field.number, field.value) {
-            if number == desired_field {
-                selected = Some(value);
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Some(field) = cursor.next()? {
+            let (1, WarpWireValue::LengthDelimited(result)) = (field.number, field.value) else {
+                continue;
+            };
+            if let Some(text) = decode_mcp_result_content_text(result)? {
+                if !text.trim().is_empty() {
+                    parts.push(text);
+                }
             }
         }
     }
-    Ok(selected)
+    Ok((!parts.is_empty()).then(|| parts.join("\n")))
 }
 
-fn last_length_delimited_field(data: &[u8]) -> Result<Option<(u32, &[u8])>> {
+fn decode_mcp_result_content_text(data: &[u8]) -> Result<Option<String>> {
     let mut cursor = WarpWireCursor::new(data);
     let mut selected = None;
     while let Some(field) = cursor.next()? {
-        if let WarpWireValue::LengthDelimited(value) = field.value {
-            selected = Some((field.number, value));
+        if let (number @ (1..=3), WarpWireValue::LengthDelimited(value)) =
+            (field.number, field.value)
+        {
+            validate_message_payload(value)?;
+            select_message_oneof(&mut selected, number, value);
         }
     }
-    Ok(selected)
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    match selected.field {
+        1 => decode_last_nested_text_occurrences(&selected.payloads, 1),
+        2 => {
+            validate_string_fields_occurrences(&selected.payloads, &[1, 2], "MCP image")?;
+            Ok(None)
+        }
+        3 => decode_mcp_resource_text_occurrences(&selected.payloads),
+        _ => Err(CaptureError::SystemInvariant(
+            "Warp MCP content selected an unclassified oneof arm",
+        )),
+    }
 }
 
-fn warp_text_owned(data: &[u8]) -> Result<String> {
-    super::super::wire::warp_wire_text(data).map(str::to_owned)
-}
-
-fn bounded_linkage_owned(value: String) -> Option<String> {
-    const MAX_LINKAGE_BYTES: usize = 16 * 1024;
-    let value = value.trim();
-    (!value.is_empty() && value.len() <= MAX_LINKAGE_BYTES).then(|| value.to_owned())
+fn decode_mcp_resource_text_occurrences(payloads: &[Vec<u8>]) -> Result<Option<String>> {
+    let mut selected = None;
+    let mut uri = WarpValidatedString::default();
+    for payload in payloads {
+        let mut cursor = WarpWireCursor::new(payload);
+        while let Some(field) = cursor.next()? {
+            match (field.number, field.value) {
+                (1, WarpWireValue::LengthDelimited(value)) => uri.observe(value),
+                (number @ (2 | 3), WarpWireValue::LengthDelimited(value)) => {
+                    validate_message_payload(value)?;
+                    select_message_oneof(&mut selected, number, value);
+                }
+                _ => {}
+            }
+        }
+    }
+    let _ = uri.into_optional("MCP resource URI")?;
+    match selected {
+        Some(WarpSelectedMessage { field: 2, payloads }) => {
+            decode_last_nested_text_occurrences(&payloads, 1)
+        }
+        Some(WarpSelectedMessage { field: 3, payloads }) => {
+            validate_string_fields_occurrences(&payloads, &[1, 2], "MCP blob resource")?;
+            Ok(None)
+        }
+        None => Ok(None),
+        Some(_) => Err(CaptureError::SystemInvariant(
+            "Warp MCP resource selected an unclassified oneof arm",
+        )),
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn textual_success_failure_and_unknown_results_are_complete() {
-        for (tool_result, expected_outcome, expected_body) in [
-            (
-                shell_result(Some((5, nested_text("shell success"))), None),
-                OutputOutcome::Success,
-                "shell success",
-            ),
-            (
-                shell_result(Some((6, nested_text("shell failure"))), None),
-                OutputOutcome::Failure,
-                "shell failure",
-            ),
-            (
-                shell_result(None, Some(b"shell unknown")),
-                OutputOutcome::Unknown,
-                "shell unknown",
-            ),
-        ] {
-            let decoded = decode_warp_native_task(&task_with_tool_result(tool_result)).unwrap();
-            let WarpDecodedMessagePayload::Output(output) = &decoded.messages[0].payload else {
-                panic!("textual Warp result was not retained");
-            };
-            assert_eq!(output.outcome, expected_outcome);
-            assert_eq!(output.body, expected_body);
-            assert_eq!(output.call_id.as_deref(), Some("call-1"));
-        }
-    }
-
-    #[test]
-    fn binary_and_status_only_results_remain_unsupported() {
-        let binary = shell_result(None, Some(&[0xff, 0xfe]));
-        let status_only = shell_result(Some((6, Vec::new())), None);
-        for tool_result in [binary, status_only] {
-            let decoded = decode_warp_native_task(&task_with_tool_result(tool_result)).unwrap();
-            assert!(matches!(
-                decoded.messages[0].payload,
-                WarpDecodedMessagePayload::Excluded
-            ));
-        }
-    }
-
-    #[test]
-    fn textual_result_larger_than_page_target_is_not_truncated() {
-        let body = format!(
-            "warp-large-head-{}-warp-large-tail",
-            "x".repeat(8 * 1024 * 1024)
-        );
-        let tool_result = shell_result(Some((5, nested_text(&body))), None);
-        let decoded = decode_warp_native_task(&task_with_tool_result(tool_result)).unwrap();
-        let WarpDecodedMessagePayload::Output(output) = &decoded.messages[0].payload else {
-            panic!("large textual Warp result was not retained");
-        };
-        assert_eq!(output.body, body);
-    }
-
-    fn task_with_tool_result(tool_result: Vec<u8>) -> Vec<u8> {
-        let mut message = Vec::new();
-        push_length_delimited(&mut message, 5, &tool_result);
-        let mut task = Vec::new();
-        push_length_delimited(&mut task, 5, &message);
-        task
-    }
-
-    fn shell_result(terminal: Option<(u32, Vec<u8>)>, deprecated: Option<&[u8]>) -> Vec<u8> {
-        let mut shell = Vec::new();
-        if let Some(deprecated) = deprecated {
-            push_length_delimited(&mut shell, 1, deprecated);
-        }
-        if let Some((field, payload)) = terminal {
-            push_length_delimited(&mut shell, field, &payload);
-        }
-        let mut result = Vec::new();
-        push_length_delimited(&mut result, 1, b"call-1");
-        push_length_delimited(&mut result, 2, &shell);
-        result
-    }
-
-    fn nested_text(text: &str) -> Vec<u8> {
-        let mut nested = Vec::new();
-        push_length_delimited(&mut nested, 1, text.as_bytes());
-        nested
-    }
-
-    fn push_length_delimited(target: &mut Vec<u8>, field: u32, payload: &[u8]) {
-        push_varint(target, u64::from(field) << 3 | 2);
-        push_varint(target, u64::try_from(payload.len()).unwrap());
-        target.extend_from_slice(payload);
-    }
-
-    fn push_varint(target: &mut Vec<u8>, mut value: u64) {
-        while value >= 0x80 {
-            target.push((value as u8 & 0x7f) | 0x80);
-            value >>= 7;
-        }
-        target.push(value as u8);
-    }
-}
+mod tests;

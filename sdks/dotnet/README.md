@@ -92,6 +92,17 @@ not exposed.
 Set `LocalAgentHistoryConfig.CtxBinary`, `DataRoot`, `WorkingDirectory`,
 `Environment`, or `Timeout` to control command execution.
 
+The adapter owns the complete CLI process tree for each request. Linux uses a
+dedicated `setsid` process group (the `setsid` utility is required); Windows
+assigns the suspended CLI root to a kill-on-close Job Object before it can run.
+The local adapter fails closed on other operating systems with a structured
+`CtxAgentHistoryCliException` (`adapter_error`); fake transports and typed
+response parsing remain platform independent.
+Timeouts cover both root-process exit and stdout/stderr EOF, and residual
+descendants are terminated even after a successful root exit. Stdout is
+accepted through the CLI's 64 MiB presentation ceiling; stderr remains bounded
+to 16 MiB, and excess bytes are drained without unbounded retention.
+
 ## Tests
 
 When the .NET SDK is installed:

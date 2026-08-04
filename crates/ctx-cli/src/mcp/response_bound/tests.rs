@@ -109,18 +109,38 @@ fn query_events_detection_and_final_response_bound_are_exact() {
     })));
 
     let response_id = json!(9);
+    let exact_attribution = json!({
+        "server": "server\n\u{202e}|`[]",
+        "tool": "tool\\literal\t*#",
+    });
     let response = success_response(
         response_id.clone(),
         tool_result(json!({
             "payload_type": "event_range_page",
-            "events": [{"text": "x".repeat(2_000)}],
+            "events": [{
+                "text": "x".repeat(2_000),
+                "mcp_tool_call": exact_attribution,
+            }],
             "next_cursor": "opaque-cursor"
         })),
     );
     let exact = serialized_json_line_bytes(&response).unwrap();
+    let mut without_attribution = response.clone();
+    without_attribution["result"]["structuredContent"]["events"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("mcp_tool_call");
+    assert!(serialized_json_line_bytes(&without_attribution).unwrap() < exact);
     assert_eq!(
         bound_query_events_mcp_response(response.clone(), response_id.clone(), exact),
         response
+    );
+    let one_byte_short =
+        bound_query_events_mcp_response(response.clone(), response_id.clone(), exact - 1);
+    assert_eq!(one_byte_short["result"]["isError"], true);
+    assert_eq!(
+        one_byte_short["result"]["structuredContent"]["error_code"],
+        "output_limit_exceeded"
     );
 
     let bounded = bound_query_events_mcp_response(response, response_id, TEST_OUTPUT_LIMIT);
@@ -132,6 +152,54 @@ fn query_events_detection_and_final_response_bound_are_exact() {
     assert!(bounded["result"]["structuredContent"]
         .get("next_cursor")
         .is_none());
+    assert!(serialized_json_line_bytes(&bounded).unwrap() <= TEST_OUTPUT_LIMIT);
+}
+
+#[test]
+fn query_events_content_none_overflow_recommends_lower_limit() {
+    let response_id = json!("content-none-attribution");
+    let attribution = ctx_history_core::McpToolCallAttribution {
+        server: "s".repeat(2_000),
+        tool: "valid-tool".to_owned(),
+    };
+    attribution.validate_contract().unwrap();
+    let mut event = json!({
+        "ctx_event_id": "018f45d0-0000-7000-8000-000000000010",
+        "text": null,
+        "structured_content": null,
+        "content_projection": "none",
+    });
+    let page_without_attribution = json!({
+        "payload_type": "event_range_page",
+        "events": [event.clone()],
+    });
+    let response_without_attribution =
+        success_response(response_id.clone(), tool_result(page_without_attribution));
+    assert!(
+        serialized_json_line_bytes(&response_without_attribution).unwrap() <= TEST_OUTPUT_LIMIT
+    );
+
+    event["mcp_tool_call"] = serde_json::to_value(attribution).unwrap();
+    let response = success_response(
+        response_id.clone(),
+        tool_result(json!({
+            "payload_type": "event_range_page",
+            "events": [event],
+        })),
+    );
+    assert!(serialized_json_line_bytes(&response).unwrap() > TEST_OUTPUT_LIMIT);
+
+    let bounded = bound_query_events_mcp_response(response, response_id, TEST_OUTPUT_LIMIT);
+    for advice in [
+        bounded["result"]["content"][0]["text"].as_str().unwrap(),
+        bounded["result"]["structuredContent"]["recommendation"]
+            .as_str()
+            .unwrap(),
+    ] {
+        assert!(advice.contains("lower `limit`"));
+        assert!(advice.contains("content=text"));
+        assert!(advice.contains("content=none"));
+    }
     assert!(serialized_json_line_bytes(&bounded).unwrap() <= TEST_OUTPUT_LIMIT);
 }
 

@@ -296,7 +296,9 @@ fn hydrate_task_candidate(
                     kind: message.kind,
                     request_id,
                     result_outcome: None,
-                    call_id: None,
+                    call_id: message.call_id,
+                    mcp_invocation: message.mcp_invocation,
+                    mcp_attribution: false,
                     occurred_at: occurred_at.or(task_modified),
                     body: message.body,
                     source_record_digest: record_digest.clone(),
@@ -311,6 +313,7 @@ fn hydrate_task_candidate(
                 let outcome = output.outcome;
                 let call_id = output.call_id;
                 let tool_name = output.tool_name;
+                let mcp_attribution = output.mcp_invocation.is_some();
                 let event = WarpNativeEvent::from_draft(WarpNativeEventDraft {
                     provider_event_index: builder.retained_events(),
                     legacy_provider_event_index,
@@ -325,6 +328,8 @@ fn hydrate_task_candidate(
                     request_id,
                     result_outcome: Some(outcome),
                     call_id,
+                    mcp_invocation: output.mcp_invocation,
+                    mcp_attribution,
                     occurred_at: occurred_at.or(task_modified),
                     body: output.body,
                     source_record_digest: record_digest.clone(),

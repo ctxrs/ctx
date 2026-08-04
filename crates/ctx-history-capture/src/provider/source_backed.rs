@@ -19,9 +19,9 @@ use ctx_history_core::{
     CertifiedSourceInventory, CoreRecord, ScannedSourceCounts, SourceAnchor, SourceKey, TypedKey,
 };
 use ctx_history_index::{
-    CommitReceipt, CoreRecordPreparer, GenerationManifest, GenerationWriter, IndexError,
-    PublicationDisposition, PublicationMetadataContext, RevalidationTarget, SourceRouteIdentity,
-    SourceRouteSnapshot, VerifiedIndex, WriterOptions,
+    CommitReceipt, CoreRecordPreparer, GenerationManifest, GenerationWriter,
+    GenerationWriterOpenOutcome, IndexError, PublicationDisposition, PublicationMetadataContext,
+    RevalidationTarget, SourceRouteIdentity, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;

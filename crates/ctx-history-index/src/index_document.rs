@@ -957,8 +957,10 @@ mod tests {
         assert!(!active.exact_descriptor_eq(&descriptor_alias));
 
         let directory = tempdir().unwrap();
-        let mut writer =
-            GenerationWriter::open(directory.path(), WriterOptions::default()).unwrap();
+        let mut writer = GenerationWriter::open(directory.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         writer.begin_source(active.clone()).unwrap();
 
         let mut mismatched_identity = core_record(&active);

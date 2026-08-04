@@ -32,11 +32,27 @@ const TEMPORARY_FILE_ATTEMPTS: usize = 16;
 /// A failure from the final directory synchronization happens after the
 /// replacement became visible. Returning that error is intentional: reporting
 /// success would claim a durability guarantee that the filesystem did not
-/// provide.
+/// provide. Higher-level publication code must reconcile the visible target;
+/// predecessor migration exposes that case as a committed recovery outcome.
 #[derive(Clone)]
 pub(crate) struct DurableMmapDirectory {
     inner: MmapDirectory,
     root_path: Arc<PathBuf>,
+}
+
+#[derive(Debug)]
+pub(crate) enum DurableAtomicWriteOutcome {
+    Durable,
+    VisibleButDurabilityUncertain(io::Error),
+}
+
+impl DurableAtomicWriteOutcome {
+    fn into_io_result(self) -> io::Result<()> {
+        match self {
+            Self::Durable => Ok(()),
+            Self::VisibleButDurabilityUncertain(error) => Err(error),
+        }
+    }
 }
 
 impl DurableMmapDirectory {
@@ -52,6 +68,25 @@ impl DurableMmapDirectory {
 
     pub(crate) fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    pub(crate) fn atomic_write_with_outcome(
+        &self,
+        path: &Path,
+        data: &[u8],
+    ) -> io::Result<DurableAtomicWriteOutcome> {
+        let target_path = self.resolve_path(path);
+        let parent_path = target_path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("path {} has no parent directory", target_path.display()),
+            )
+        })?;
+        // Open the synchronization handle before publication. Any later error
+        // is therefore known to occur either before replacement or after the
+        // target became visible.
+        let parent_sync = ParentDirectorySync::open(parent_path)?;
+        atomic_replace_with_outcome(&target_path, data, replace_file, move || parent_sync.sync())
     }
 
     fn resolve_path(&self, relative_path: &Path) -> PathBuf {
@@ -169,17 +204,7 @@ impl Directory for DurableMmapDirectory {
     }
 
     fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        let target_path = self.resolve_path(path);
-        let parent_path = target_path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("path {} has no parent directory", target_path.display()),
-            )
-        })?;
-        // Open the directory before publication so failure to acquire the
-        // synchronization handle cannot happen after the target is replaced.
-        let parent_sync = ParentDirectorySync::open(parent_path)?;
-        atomic_replace_with(&target_path, data, replace_file, move || parent_sync.sync())
+        self.atomic_write_with_outcome(path, data)?.into_io_result()
     }
 
     fn sync_directory(&self) -> io::Result<()> {
@@ -214,12 +239,26 @@ fn canonical_root_path(directory_path: &Path) -> Result<PathBuf, OpenDirectoryEr
     }
 }
 
+#[cfg(test)]
 fn atomic_replace_with<Replace, SyncParent>(
     target_path: &Path,
     data: &[u8],
     replace: Replace,
     sync_parent: SyncParent,
 ) -> io::Result<()>
+where
+    Replace: FnOnce(&Path, &Path) -> io::Result<()>,
+    SyncParent: FnOnce() -> io::Result<()>,
+{
+    atomic_replace_with_outcome(target_path, data, replace, sync_parent)?.into_io_result()
+}
+
+fn atomic_replace_with_outcome<Replace, SyncParent>(
+    target_path: &Path,
+    data: &[u8],
+    replace: Replace,
+    sync_parent: SyncParent,
+) -> io::Result<DurableAtomicWriteOutcome>
 where
     Replace: FnOnce(&Path, &Path) -> io::Result<()>,
     SyncParent: FnOnce() -> io::Result<()>,
@@ -231,6 +270,8 @@ where
         )
     })?;
     let (temporary_path, mut temporary_file) = create_temporary_file(parent_path)?;
+
+    atomic_write_checkpoint(AtomicWriteStage::BeforeTemporaryWrite, target_path)?;
 
     let write_result = temporary_file
         .write_all(data)
@@ -244,12 +285,96 @@ where
         return Err(error);
     }
 
+    atomic_write_checkpoint(
+        AtomicWriteStage::AfterTemporarySyncBeforeReplace,
+        target_path,
+    )?;
+    atomic_write_checkpoint(AtomicWriteStage::BeforeReplace, target_path)?;
+
     if let Err(error) = replace(&temporary_path, target_path) {
         let _ = fs::remove_file(&temporary_path);
         return Err(error);
     }
 
-    sync_parent()
+    if let Err(error) = atomic_write_checkpoint(
+        AtomicWriteStage::AfterReplaceBeforeDirectorySync,
+        target_path,
+    ) {
+        return Ok(DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(
+            error,
+        ));
+    }
+
+    match sync_parent() {
+        Ok(()) => Ok(DurableAtomicWriteOutcome::Durable),
+        Err(error) => Ok(DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(
+            error,
+        )),
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtomicWriteStage {
+    BeforeTemporaryWrite,
+    AfterTemporarySyncBeforeReplace,
+    BeforeReplace,
+    AfterReplaceBeforeDirectorySync,
+}
+
+#[cfg(not(test))]
+#[derive(Debug, Clone, Copy)]
+enum AtomicWriteStage {
+    BeforeTemporaryWrite,
+    AfterTemporarySyncBeforeReplace,
+    BeforeReplace,
+    AfterReplaceBeforeDirectorySync,
+}
+
+#[cfg(test)]
+type AtomicWriteTestHook = Box<dyn for<'a> FnMut(AtomicWriteStage, &'a Path) -> io::Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static ATOMIC_WRITE_TEST_HOOK: std::cell::RefCell<Option<AtomicWriteTestHook>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct AtomicWriteTestHookGuard(Option<AtomicWriteTestHook>);
+
+#[cfg(test)]
+impl AtomicWriteTestHookGuard {
+    pub(crate) fn set<F>(hook: F) -> Self
+    where
+        F: for<'a> FnMut(AtomicWriteStage, &'a Path) -> io::Result<()> + 'static,
+    {
+        let previous = ATOMIC_WRITE_TEST_HOOK.with(|active| active.replace(Some(Box::new(hook))));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for AtomicWriteTestHookGuard {
+    fn drop(&mut self) {
+        ATOMIC_WRITE_TEST_HOOK.with(|active| active.replace(self.0.take()));
+    }
+}
+
+#[cfg(test)]
+fn atomic_write_checkpoint(stage: AtomicWriteStage, target: &Path) -> io::Result<()> {
+    ATOMIC_WRITE_TEST_HOOK.with(|active| {
+        let mut active = active.borrow_mut();
+        match active.as_mut() {
+            Some(hook) => hook(stage, target),
+            None => Ok(()),
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn atomic_write_checkpoint(_stage: AtomicWriteStage, _target: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn create_temporary_file(parent_path: &Path) -> io::Result<(PathBuf, File)> {

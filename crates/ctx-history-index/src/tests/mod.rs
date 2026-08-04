@@ -18,7 +18,7 @@ use tempfile::{tempdir, TempDir};
 
 use super::*;
 
-fn source(name: &str) -> SourceKey {
+pub(crate) fn source(name: &str) -> SourceKey {
     source_for_provider("codex", "codex_session_jsonl", name)
 }
 
@@ -133,7 +133,7 @@ fn stage_exact_replay(writer: &mut GenerationWriter, source: &SourceKey) -> Cert
     base
 }
 
-fn document(source: &SourceKey, sequence: u64, body: &str) -> CoreRecord {
+pub(crate) fn document(source: &SourceKey, sequence: u64, body: &str) -> CoreRecord {
     document_for_session(source, "session", sequence, body)
 }
 
@@ -453,7 +453,10 @@ fn multisegment_fixture(
     let mut sources = Vec::with_capacity(source_count);
     for source_index in 0..source_count {
         let current = source(&format!("verification-{source_index}.jsonl"));
-        let mut writer = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), options.clone())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         writer.begin_source(current.clone()).unwrap();
         for sequence in 1..=documents_per_source {
             writer
@@ -479,6 +482,9 @@ fn multisegment_fixture(
 }
 
 mod integrity_certification;
+mod migration;
+#[cfg(target_os = "linux")]
+mod migration_qualification;
 mod pinned_generation;
 mod publication_metadata;
 mod query;

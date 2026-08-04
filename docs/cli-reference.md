@@ -682,6 +682,13 @@ the bounded presentation limit require `--max-events`; the value is capped at
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
 
+Qualifying terminal/result events can include exact MCP metadata as
+`mcp_tool_call: {server, tool}` in JSON/JSONL and as safely escaped labelled
+values in text/Markdown. Ordinary tool results require `--mode log`; the
+default `lite` and `full` selection rules do not change. The object is omitted
+rather than `null` when exact attribution is unavailable. See
+[`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md).
+
 ## List
 
 ```bash
@@ -699,6 +706,10 @@ the result. JSON returns one internally bounded page;
 JSONL streams bounded pages and ends with exactly one completion record. Opaque
 cursors are bound to the exact selection and immutable Core generation. See
 [`event-queries.md`](event-queries.md) for the wire contract and jq examples.
+
+`--content none` retains event metadata, including an available
+`mcp_tool_call`, while omitting payload content. MCP attribution has no list
+selector; filter JSON/JSONL rows client-side.
 
 Show and list commands read complete policy-selected normalized records from the active
 verified Core/Tantivy generation. They do not reopen provider history at query
@@ -905,8 +916,8 @@ ctx integrations install mcp
 ```
 
 `mcp serve` starts a local MCP server over newline-delimited stdio JSON-RPC. It
-exposes Core tools (`status`, `sources`, `search`, `show_session`, and
-`show_event`) plus two Pro tools (`pro_status` and `blame`).
+exposes Core tools (`status`, `sources`, `search`, `show_session`, `show_event`,
+and `query_events`) plus two Pro tools (`pro_status` and `blame`).
 `pro_status` remains read-only. Pro blame advertises `readOnlyHint: false`
 because bounded local catch-up consumes a feed from the pinned Core generation,
 writes the encrypted derived Pro graph, and advances its generation receipt. It
@@ -924,6 +935,20 @@ forward tool output.
 MCP search follows the same active Codex session-tree exclusion as the CLI when
 `CODEX_THREAD_ID` is set. Pass `include_current_session: true` to the search
 tool when the active session tree itself is the target.
+
+MCP `show_event`, log-mode `show_session`, and `query_events` event rows expose
+the same optional exact `mcp_tool_call` object in `structuredContent`. Filter
+bounded pages on the client and continue with their existing opaque cursors;
+there are no MCP attribution selectors or search arguments.
+
+Human CLI and Markdown views retain exactly the first 256 Unicode scalar values
+of each MCP server/tool component before escaping and append
+`… [display truncated]` to a component when more values exist. The accompanying
+guidance is
+`MCP identity display truncated; use --format json or --format jsonl for exact values.`
+Use machine JSON/JSONL for each full exact value; see
+[`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for the complete
+escaping contract.
 
 The MCP server is optional. The CLI remains the primary interface, and MCP is
 intended for agents or hosts that prefer tool discovery over shell commands.

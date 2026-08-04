@@ -88,6 +88,13 @@ impl SourceBackedRouteError {
 pub enum SourceBackedCoordinatorError {
     #[error(transparent)]
     Index(#[from] IndexError),
+    #[error(
+        "predecessor generation migration committed successor {generation_id}, but writer recovery is still required: {detail}"
+    )]
+    CommittedPredecessorMigrationRecovery {
+        generation_id: String,
+        detail: String,
+    },
     #[error("invalid source-backed route for {provider}: {detail}")]
     InvalidRoute {
         provider: CaptureProvider,

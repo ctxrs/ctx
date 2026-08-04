@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Experimental in-repo TypeScript/JavaScript SDK for the ctx agent-history-v1 API.",
+  "files": [
+    "src"
+  ],
   "exports": {
     ".": {
       "types": "./src/index.d.ts",

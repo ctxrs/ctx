@@ -5,7 +5,10 @@ fn identical_staging_revalidates_active_checksum_after_terminal_callback() {
     let temp = tempdir().unwrap();
     let source = source("identical-terminal-corruption.jsonl");
     let certificate = certificate(&source, 1, 1);
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "stable logical row"))
@@ -15,7 +18,10 @@ fn identical_staging_revalidates_active_checksum_after_terminal_callback() {
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
     let active_path = active_generation_path(temp.path());
 
-    let mut staged = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut staged = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     staged.begin_source(source.clone()).unwrap();
     staged
         .add_core_record(document(&source, 1, "stable logical row"))
@@ -56,7 +62,10 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
 
     let cold = tempdir().unwrap();
     let cold_source = source("cold-activity.jsonl");
-    let mut initial = GenerationWriter::open(cold.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(cold.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(cold_source.clone()).unwrap();
     for sequence in 1..=RETAINED_DOCUMENTS {
         initial
@@ -76,7 +85,10 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
     assert_eq!(crate::publication::verification_activity(), (1, 1));
 
     crate::publication::reset_verification_activity();
-    let mut noop = GenerationWriter::open(cold.path(), WriterOptions::default()).unwrap();
+    let mut noop = GenerationWriter::open(cold.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let constructions = Arc::clone(&noop.index_writer_constructions);
     let inventory = complete_inventory(&cold_source, 1, vec![cold_source.clone()]);
     noop.certify_complete_inventory(inventory.clone()).unwrap();
@@ -88,7 +100,10 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
     assert_eq!(constructions.load(Ordering::SeqCst), 0);
 
     crate::publication::reset_verification_activity();
-    let mut append = GenerationWriter::open(cold.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(cold.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append
         .begin_source_append(cold_source.clone())
         .unwrap()
@@ -129,7 +144,10 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
 fn committed_visible_error_reconciliation_uses_incremental_identity_audit() {
     let temp = tempdir().unwrap();
     let source = source("committed-visible-reconciliation.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "reconciliation baseline"))
@@ -139,7 +157,10 @@ fn committed_visible_error_reconciliation_uses_incremental_identity_audit() {
         .unwrap();
     let baseline = initial.commit(|_| true).unwrap();
 
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
     append
         .add_core_record(document(&source, 2, "reconciled append"))

@@ -47,7 +47,9 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
             let mut writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
-            )?;
+            )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
             writer.begin_source(source.clone())?;
             writer.add_core_record(publication_pin_record(&source))?;
             writer.certify_source(publication_pin_certificate(&source))?;
@@ -98,7 +100,9 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
             let mut writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
-            )?;
+            )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
             writer.begin_source(source.clone())?;
             writer.add_core_record(publication_pin_record(&source))?;
             writer.certify_source(publication_pin_certificate(&source))?;
@@ -213,6 +217,8 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
                     source_backed_index_root(&execution_root),
                     WriterOptions::default(),
                 )?
+                .into_writer()
+                .map_err(crate::semantic::committed_generation_recovery_error)?
                 .commit_with_publication_metadata(
                     |_| true,
                     |context| {
@@ -357,7 +363,9 @@ fn pointer_crash_recovers_exact_manual_all_continuation_receipt_without_recaptur
             let mut writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
-            )?;
+            )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
             writer.begin_source(source.clone())?;
             writer.add_core_record(publication_pin_record(&source))?;
             writer.certify_source(publication_rejection_certificate(&source))?;

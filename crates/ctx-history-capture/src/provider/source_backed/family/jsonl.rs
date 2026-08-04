@@ -226,6 +226,12 @@ pub(crate) enum JsonlSourceChange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlOversizedRecordPolicy {
+    RejectSource,
+    RejectRecord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct JsonlRecordEvidence {
     physical_ordinal: u64,
     byte_start: u64,
@@ -255,6 +261,7 @@ impl JsonlRecordEvidence {
 pub(crate) struct JsonlRecordRef<'record> {
     bytes: &'record [u8],
     evidence: JsonlRecordEvidence,
+    oversized: bool,
 }
 
 impl<'record> JsonlRecordRef<'record> {
@@ -268,6 +275,7 @@ impl<'record> JsonlRecordRef<'record> {
                 byte_end_exclusive: bytes.len() as u64,
                 record_digest: Sha256::digest(bytes).into(),
             },
+            oversized: false,
         }
     }
 
@@ -277,6 +285,10 @@ impl<'record> JsonlRecordRef<'record> {
 
     pub(crate) fn evidence(self) -> JsonlRecordEvidence {
         self.evidence
+    }
+
+    pub(crate) fn oversized(self) -> bool {
+        self.oversized
     }
 }
 
@@ -310,6 +322,7 @@ pub(crate) struct JsonlReader {
     record_buffer: Vec<u8>,
     whole_record: bool,
     append_log: bool,
+    oversized_record_policy: JsonlOversizedRecordPolicy,
 }
 
 impl JsonlReader {
@@ -433,7 +446,12 @@ impl JsonlReader {
             record_buffer: Vec::new(),
             whole_record,
             append_log: !whole_record,
+            oversized_record_policy: JsonlOversizedRecordPolicy::RejectSource,
         })
+    }
+
+    pub(crate) fn set_oversized_record_policy(&mut self, policy: JsonlOversizedRecordPolicy) {
+        self.oversized_record_policy = policy;
     }
 
     pub(crate) fn source_change(&self) -> JsonlSourceChange {
@@ -476,37 +494,40 @@ impl JsonlReader {
                 start,
             )
             .map_err(E::from)?;
-            let RawLine::Complete {
-                end,
-                record_digest,
-                wire_bytes,
-            } = line
-            else {
-                match line {
-                    RawLine::EndOfFile => self.finish(true).map_err(E::from)?,
-                    RawLine::IncompleteTail => {
-                        self.prefix_hasher = hasher_before;
-                        self.reader
-                            .seek(SeekFrom::Start(start))
-                            .map_err(CaptureError::from)
-                            .map_err(E::from)?;
-                        self.finish(false).map_err(E::from)?;
-                    }
-                    RawLine::Oversized => {
-                        return Err(E::from(CaptureError::InvalidPayload(format!(
-                            "{}:{} exceeds the {} byte JSONL record limit",
-                            self.identity.source_path.display(),
-                            ordinal.saturating_add(1),
-                            MAX_PROVIDER_JSONL_LINE_BYTES
-                        ))));
-                    }
-                    RawLine::Complete { .. } => {
-                        return Err(E::from(CaptureError::SystemInvariant(
-                            "complete JSONL line classification was lost",
-                        )));
-                    }
+            let (end, record_digest, wire_bytes, oversized) = match line {
+                RawLine::Complete {
+                    end,
+                    record_digest,
+                    wire_bytes,
+                } => (end, record_digest, wire_bytes, false),
+                RawLine::Oversized {
+                    end,
+                    record_digest,
+                    wire_bytes,
+                } if self.oversized_record_policy == JsonlOversizedRecordPolicy::RejectRecord => {
+                    (end, record_digest, wire_bytes, true)
                 }
-                break;
+                RawLine::Oversized { .. } => {
+                    return Err(E::from(CaptureError::InvalidPayload(format!(
+                        "{}:{} exceeds the {} byte JSONL record limit",
+                        self.identity.source_path.display(),
+                        ordinal.saturating_add(1),
+                        MAX_PROVIDER_JSONL_LINE_BYTES
+                    ))));
+                }
+                RawLine::EndOfFile => {
+                    self.finish(true).map_err(E::from)?;
+                    break;
+                }
+                RawLine::IncompleteTail => {
+                    self.prefix_hasher = hasher_before;
+                    self.reader
+                        .seek(SeekFrom::Start(start))
+                        .map_err(CaptureError::from)
+                        .map_err(E::from)?;
+                    self.finish(false).map_err(E::from)?;
+                    break;
+                }
             };
 
             if records != 0 && page_bytes.saturating_add(wire_bytes) > PAGE_MAX_BYTES {
@@ -527,6 +548,7 @@ impl JsonlReader {
             visit(JsonlRecordRef {
                 bytes: &self.record_buffer,
                 evidence,
+                oversized,
             })?;
             self.complete_prefix_end = end;
             self.next_physical_ordinal = self.next_physical_ordinal.saturating_add(1);
@@ -583,6 +605,7 @@ impl JsonlReader {
         visit(JsonlRecordRef {
             bytes: &self.record_buffer,
             evidence,
+            oversized: false,
         })?;
         self.complete_prefix_end = self.observation.length;
         self.next_physical_ordinal = 1;
@@ -724,7 +747,7 @@ where
                 wire_bytes,
             } => (end, record_digest, wire_bytes),
             RawLine::EndOfFile | RawLine::IncompleteTail => break,
-            RawLine::Oversized => {
+            RawLine::Oversized { .. } => {
                 return Err(E::from(CaptureError::InvalidPayload(format!(
                     "provider identity record exceeds the {} byte JSONL record limit",
                     MAX_PROVIDER_JSONL_LINE_BYTES
@@ -744,6 +767,7 @@ where
                 byte_end_exclusive: end,
                 record_digest,
             },
+            oversized: false,
         })? {
             let closing = revalidate_frozen_prefix(
                 source_path,
@@ -779,7 +803,11 @@ where
 enum RawLine {
     EndOfFile,
     IncompleteTail,
-    Oversized,
+    Oversized {
+        end: u64,
+        record_digest: [u8; 32],
+        wire_bytes: usize,
+    },
     Complete {
         end: u64,
         record_digest: [u8; 32],
@@ -800,6 +828,7 @@ fn read_bounded_line(
     }
     let mut total = 0_u64;
     let mut oversized = false;
+    let mut record_hasher = Sha256::new();
     loop {
         let remaining = frozen_length.saturating_sub(start.saturating_add(total));
         if remaining == 0 {
@@ -818,6 +847,7 @@ fn read_bounded_line(
             .map_or(available.len(), |index| index.saturating_add(1));
         let chunk = &available[..take];
         hasher.update(chunk);
+        record_hasher.update(chunk);
         total = total.saturating_add(chunk.len() as u64);
         if !oversized {
             if bytes.len().saturating_add(chunk.len())
@@ -838,9 +868,13 @@ fn read_bounded_line(
                     "JSONL byte offset overflowed",
                 ))?;
             if oversized {
-                return Ok(RawLine::Oversized);
+                return Ok(RawLine::Oversized {
+                    end,
+                    record_digest: record_hasher.finalize().into(),
+                    wire_bytes: usize::try_from(total).unwrap_or(usize::MAX),
+                });
             }
-            let record_digest = Sha256::digest(bytes.as_slice()).into();
+            let record_digest = record_hasher.finalize().into();
             let wire_bytes = bytes.len();
             if bytes.last() == Some(&b'\n') {
                 bytes.pop();
@@ -850,7 +884,11 @@ fn read_bounded_line(
             }
             if bytes.len() > MAX_PROVIDER_JSONL_LINE_BYTES {
                 bytes.clear();
-                return Ok(RawLine::Oversized);
+                return Ok(RawLine::Oversized {
+                    end,
+                    record_digest,
+                    wire_bytes,
+                });
             }
             return Ok(RawLine::Complete {
                 end,

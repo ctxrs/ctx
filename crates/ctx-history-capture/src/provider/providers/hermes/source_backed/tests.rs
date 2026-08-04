@@ -767,7 +767,10 @@ fn unchanged_legacy_v1_observation_is_rescanned_and_replaced_by_v2() {
     .unwrap();
     assert_ne!(legacy_certificate.observation(), projected.observation());
 
-    let mut legacy_writer = GenerationWriter::open(&index_root, fixture_writer_options()).unwrap();
+    let mut legacy_writer = GenerationWriter::open(&index_root, fixture_writer_options())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     legacy_writer
         .set_source_route_plan(BTreeSet::from([route_identity.clone()]), BTreeSet::new())
         .unwrap();

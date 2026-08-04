@@ -418,6 +418,85 @@ public struct AgentHistorySessionResult: Codable, Equatable, Sendable {
     }
 }
 
+public struct AgentHistoryMCPToolCall: Codable, Equatable, Sendable {
+    public static let maximumComponentBytes = 64 * 1024
+    public var server: String
+    public var tool: String
+
+    public init(server: String, tool: String) {
+        self.server = server
+        self.tool = tool
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: AgentHistoryAnyCodingKey.self)
+        let expected = Set(["server", "tool"])
+        let actual = Set(container.allKeys.map(\.stringValue))
+        guard actual == expected else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "mcpToolCall requires exactly server and tool")
+            )
+        }
+        server = try Self.decodeComponent("server", from: container, codingPath: decoder.codingPath)
+        tool = try Self.decodeComponent("tool", from: container, codingPath: decoder.codingPath)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try Self.validateComponent(server, field: "server", codingPath: encoder.codingPath)
+        try Self.validateComponent(tool, field: "tool", codingPath: encoder.codingPath)
+        var container = encoder.container(keyedBy: AgentHistoryAnyCodingKey.self)
+        try container.encode(server, forKey: AgentHistoryAnyCodingKey("server"))
+        try container.encode(tool, forKey: AgentHistoryAnyCodingKey("tool"))
+    }
+
+    private static func decodeComponent(
+        _ field: String,
+        from container: KeyedDecodingContainer<AgentHistoryAnyCodingKey>,
+        codingPath: [CodingKey]
+    ) throws -> String {
+        let value = try container.decode(String.self, forKey: AgentHistoryAnyCodingKey(field))
+        try validateComponent(value, field: field, codingPath: codingPath)
+        return value
+    }
+
+    private static func validateComponent(
+        _ value: String,
+        field: String,
+        codingPath: [CodingKey]
+    ) throws {
+        guard !value.isEmpty else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: codingPath, debugDescription: "mcpToolCall.\(field) must be nonempty")
+            )
+        }
+        guard value.utf8.count <= maximumComponentBytes else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: codingPath,
+                    debugDescription: "mcpToolCall.\(field) exceeds \(maximumComponentBytes) decoded UTF-8 bytes"
+                )
+            )
+        }
+    }
+}
+
+private struct AgentHistoryAnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+
+    init(_ stringValue: String) {
+        self.stringValue = stringValue
+    }
+
+    init?(stringValue: String) {
+        self.init(stringValue)
+    }
+
+    init?(intValue: Int) {
+        return nil
+    }
+}
+
 public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
     public var ctxEventId: String?
     public var ctxSessionId: String?
@@ -429,6 +508,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
     public var role: String?
     public var occurredAt: String?
     public var text: String?
+    public var mcpToolCall: AgentHistoryMCPToolCall?
     public var structuredContent: JSONValue?
     public var content: CoreContentMetadata?
     public var citations: [AgentHistoryCitation]?
@@ -444,6 +524,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         role: String? = nil,
         occurredAt: String? = nil,
         text: String? = nil,
+        mcpToolCall: AgentHistoryMCPToolCall? = nil,
         structuredContent: JSONValue? = nil,
         content: CoreContentMetadata? = nil,
         citations: [AgentHistoryCitation]? = nil
@@ -458,9 +539,47 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         self.role = role
         self.occurredAt = occurredAt
         self.text = text
+        self.mcpToolCall = mcpToolCall
         self.structuredContent = structuredContent
         self.content = content
         self.citations = citations
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ctxEventId
+        case ctxSessionId
+        case provider
+        case providerSessionId
+        case sourceFormat
+        case sequence
+        case eventType
+        case role
+        case occurredAt
+        case text
+        case mcpToolCall
+        case structuredContent
+        case content
+        case citations
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ctxEventId = try container.decodeIfPresent(String.self, forKey: .ctxEventId)
+        ctxSessionId = try container.decodeIfPresent(String.self, forKey: .ctxSessionId)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        providerSessionId = try container.decodeIfPresent(String.self, forKey: .providerSessionId)
+        sourceFormat = try container.decodeIfPresent(String.self, forKey: .sourceFormat)
+        sequence = try container.decodeIfPresent(Int.self, forKey: .sequence)
+        eventType = try container.decodeIfPresent(String.self, forKey: .eventType)
+        role = try container.decodeIfPresent(String.self, forKey: .role)
+        occurredAt = try container.decodeIfPresent(String.self, forKey: .occurredAt)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
+        mcpToolCall = container.contains(.mcpToolCall)
+            ? try container.decode(AgentHistoryMCPToolCall.self, forKey: .mcpToolCall)
+            : nil
+        structuredContent = try container.decodeIfPresent(JSONValue.self, forKey: .structuredContent)
+        content = try container.decodeIfPresent(CoreContentMetadata.self, forKey: .content)
+        citations = try container.decodeIfPresent([AgentHistoryCitation].self, forKey: .citations)
     }
 }
 

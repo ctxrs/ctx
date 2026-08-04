@@ -2,7 +2,10 @@
 fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
     let temp = tempdir().unwrap();
     let source = source("manifest-retention.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "visible generation"))
@@ -34,7 +37,10 @@ fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
     fs::write(&sha256_integrity, b"not a legacy UUID receipt").unwrap();
     fs::write(&unrelated, b"not managed by ctx manifest retention").unwrap();
 
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert_eq!(
         writer.base_manifest().unwrap().generation_id().unwrap(),
         receipt.generation_id
@@ -52,14 +58,20 @@ fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
 fn writer_exposes_the_base_manifest_captured_under_its_lock() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(first.base_manifest().is_none());
     first.begin_source(source.clone()).unwrap();
     first.add_core_record(document(&source, 1, "base")).unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     let receipt = first.commit(|_| true).unwrap();
 
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = writer.base_manifest().unwrap();
     assert_eq!(base.generation_id().unwrap(), receipt.generation_id);
     assert_eq!(base.sources.len(), 1);
@@ -83,7 +95,10 @@ fn writer_exposes_the_base_manifest_captured_under_its_lock() {
 fn orphaned_inactive_generation_is_reclaimed_before_exact_noop_without_index_writer() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "stable generation"))
@@ -103,7 +118,10 @@ fn orphaned_inactive_generation_is_reclaimed_before_exact_noop_without_index_wri
     fs::write(&orphan_path, b"abandoned candidate segment").unwrap();
     assert!(orphan_path.is_file());
 
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(
         !orphan_path.exists(),
         "preflight recovery left an orphaned managed file"
@@ -130,13 +148,85 @@ fn orphaned_inactive_generation_is_reclaimed_before_exact_noop_without_index_wri
 }
 
 #[test]
+fn inactive_generation_reclamation_revalidates_retained_identity_before_deletion() {
+    use crate::publication::{ReclamationStage, ReclamationTestHookGuard};
+
+    let temp = tempdir().unwrap();
+    let source = source("reclamation-race.jsonl");
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "stable authority"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let orphan = temp
+        .path()
+        .join(INDEX_GENERATIONS_DIRECTORY)
+        .join("generation-00000000000000000000000000000000");
+    let displaced = temp.path().join("retained-reclamation-candidate");
+    fs::create_dir(&orphan).unwrap();
+    fs::write(orphan.join("original-sentinel"), b"retained object").unwrap();
+    let orphan_for_hook = orphan.clone();
+    let displaced_for_hook = displaced.clone();
+    let mut replaced = false;
+    let hook = ReclamationTestHookGuard::set(move |stage, path| {
+        if stage == ReclamationStage::AfterCandidateRetained && path == orphan_for_hook && !replaced
+        {
+            fs::rename(&orphan_for_hook, &displaced_for_hook)?;
+            fs::create_dir(&orphan_for_hook)?;
+            fs::write(
+                orphan_for_hook.join("replacement-sentinel"),
+                b"must survive reclamation",
+            )?;
+            replaced = true;
+        }
+        Ok(())
+    });
+
+    assert!(matches!(
+        GenerationWriter::open(temp.path(), WriterOptions::default()),
+        Err(IndexError::ConcurrentGenerationChange)
+    ));
+    assert_eq!(
+        fs::read(orphan.join("replacement-sentinel")).unwrap(),
+        b"must survive reclamation"
+    );
+    assert_eq!(
+        VerifiedIndex::open(temp.path())
+            .unwrap()
+            .count_term("authority")
+            .unwrap(),
+        1
+    );
+
+    drop(hook);
+    fs::remove_dir_all(&orphan).unwrap();
+    fs::rename(&displaced, &orphan).unwrap();
+    drop(
+        GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap(),
+    );
+    assert!(!orphan.exists());
+}
+
+#[test]
 fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
     let temp = tempdir().unwrap();
     let source = source("scrub-rebuild.jsonl");
     let certificate = appendable_certificate(&source, 1, 1, 10);
     let inventory = complete_inventory(&source, 1, vec![source.clone()]);
 
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "stable searchable body"))
@@ -148,7 +238,10 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
     // An omissive managed-file receipt must not hide corruption in an active
     // segment component referenced by meta.json.
     omit_managed_and_corrupt_body_projection(&original_generation_path);
-    let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(noop.base_manifest().is_some());
     noop.certify_complete_inventory(inventory.clone()).unwrap();
     stage_exact_replay(&mut noop, &source);
@@ -169,7 +262,10 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
         .join("active-generation-rebuild-required.json")
         .is_file());
 
-    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(
         rebuild.base_manifest().is_none(),
         "a marked physical generation must not be exposed as reusable base state"
@@ -198,7 +294,10 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
         1
     );
 
-    let mut second_noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut second_noop = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let constructions = Arc::clone(&second_noop.index_writer_constructions);
     second_noop
         .certify_complete_inventory(inventory.clone())
@@ -214,7 +313,10 @@ fn post_publication_mutation_fails_exact_noop_then_forces_fresh_rebuild() {
 fn abandoned_publication_reclamation_does_not_construct_index_writer() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "base"))
@@ -234,7 +336,10 @@ fn abandoned_publication_reclamation_does_not_construct_index_writer() {
     fs::write(&root_abandoned, b"abandoned root publication").unwrap();
     fs::write(&manifest_abandoned, b"abandoned manifest publication").unwrap();
 
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(!root_abandoned.exists());
     assert!(!manifest_abandoned.exists());
     let constructions = std::sync::Arc::clone(&replay.index_writer_constructions);
@@ -257,7 +362,10 @@ fn abandoned_publication_reclamation_does_not_construct_index_writer() {
 fn root_writer_lock_closes_the_lazy_writer_handoff_gap() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "base"))
@@ -267,7 +375,10 @@ fn root_writer_lock_closes_the_lazy_writer_handoff_gap() {
         .unwrap();
     initial.commit(|_| true).unwrap();
 
-    let mut stale = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut stale = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = stale.begin_source_append(source.clone()).unwrap().clone();
     let competing_root = temp.path().to_path_buf();
     stale.before_writer_handoff = Some(Box::new(move || {
@@ -306,7 +417,10 @@ fn root_writer_lock_closes_the_lazy_writer_handoff_gap() {
 fn lazy_writer_handoff_retries_a_short_lived_inherited_lock() {
     let temp = tempdir().unwrap();
     let source = source("inherited-lock.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "base"))
@@ -316,7 +430,10 @@ fn lazy_writer_handoff_retries_a_short_lived_inherited_lock() {
         .unwrap();
     initial.commit(|_| true).unwrap();
 
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
     let release_thread = Arc::new(std::sync::Mutex::new(None));
     let release_thread_for_hook = Arc::clone(&release_thread);
@@ -356,7 +473,10 @@ fn lazy_writer_handoff_retries_a_short_lived_inherited_lock() {
 fn writer_rejects_a_nonempty_payloadless_index() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first.add_core_record(document(&source, 1, "body")).unwrap();
     first.certify_source(certificate(&source, 1, 1)).unwrap();

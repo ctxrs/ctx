@@ -1,0 +1,20 @@
+{
+  "contract_schema_version": 1,
+  "classification": "route_schema_contract",
+  "provider": "factory_ai_droid",
+  "route": "native_import",
+  "source_format": "factory_ai_droid_sessions_jsonl",
+  "format_schema": {
+    "kind": "structural_revision",
+    "revision": 1
+  },
+  "producer_domain": {
+    "kind": "discrete",
+    "versions": [
+      {
+        "kind": "unversioned_generation",
+        "generation": 1
+      }
+    ]
+  }
+}

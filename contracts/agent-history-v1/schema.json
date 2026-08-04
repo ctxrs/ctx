@@ -259,6 +259,7 @@
         "role": { "type": ["string", "null"] },
         "occurredAt": { "type": ["string", "null"] },
         "text": { "type": ["string", "null"] },
+        "mcpToolCall": { "$ref": "#/$defs/mcpToolCall" },
         "structuredContent": {
           "description": "Optional Core structured content. Any JSON value, including null, is preserved without a narrowed SDK-specific schema."
         },
@@ -269,6 +270,16 @@
         }
       },
       "additionalProperties": true
+    },
+    "mcpToolCall": {
+      "description": "Closed MCP attribution pair. Each string is nonempty and limited to 65,536 decoded UTF-8 bytes; maxLength is the corresponding code-point ceiling, while SDK decoders enforce the byte ceiling.",
+      "type": "object",
+      "required": ["server", "tool"],
+      "properties": {
+        "server": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "tool": { "type": "string", "minLength": 1, "maxLength": 65536 }
+      },
+      "additionalProperties": false
     },
     "coreContentMetadata": {
       "type": "object",

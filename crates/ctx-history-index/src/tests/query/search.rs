@@ -38,7 +38,10 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     let other_session_id = other.session_id;
     other.root_session_id = other_session_id;
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(codex_root.clone()).unwrap();
     writer.add_core_record(root).unwrap();
     writer
@@ -173,7 +176,10 @@ fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview()
     let source = source("session.jsonl");
     let body = format!("{} tailonlyneedle", "界".repeat(16_384));
     let expected = document(&source, 1, &body);
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(expected.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
@@ -259,7 +265,10 @@ fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview()
 fn empty_or_invalid_programmatic_queries_are_safe() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))

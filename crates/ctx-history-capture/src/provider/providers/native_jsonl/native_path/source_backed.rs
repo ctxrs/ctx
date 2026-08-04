@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    reader::DirectJsonlProjector, DirectJsonlEvent, DirectJsonlRejection,
+    copilot, reader::DirectJsonlProjector, DirectJsonlEvent, DirectJsonlRejection,
     DirectJsonlRetryDiscriminator, DirectJsonlSession,
 };
 use crate::{
@@ -28,7 +28,7 @@ use crate::{
         family::jsonl::{
             observe_opened_file, probe_first_record, JsonlFamilyAdapter, JsonlFamilyAppendMode,
             JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector,
-            JsonlFamilyRejectedLeaf, JsonlRecordRef,
+            JsonlFamilyRejectedLeaf, JsonlOversizedRecordPolicy, JsonlRecordRef,
         },
         FallbackEventIdentityState,
     },
@@ -97,6 +97,13 @@ impl DirectJsonlFamilyAdapter {
             source_format,
             schema_variant,
             parser_revision,
+        }
+    }
+
+    const fn effective_parser_revision(self) -> &'static str {
+        match self.provider {
+            CaptureProvider::CopilotCli => copilot::COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION,
+            _ => self.parser_revision,
         }
     }
 
@@ -220,7 +227,7 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
     }
 
     fn parser_revision(&self) -> &'static str {
-        self.parser_revision
+        self.effective_parser_revision()
     }
 
     fn event_identity_revision(&self) -> &'static str {
@@ -228,7 +235,17 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
-        JsonlFamilyAppendMode::CertifiedSuffix
+        match self.provider {
+            CaptureProvider::CopilotCli => JsonlFamilyAppendMode::Replacement,
+            _ => JsonlFamilyAppendMode::CertifiedSuffix,
+        }
+    }
+
+    fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
+        match self.provider {
+            CaptureProvider::CopilotCli => JsonlOversizedRecordPolicy::RejectRecord,
+            _ => JsonlOversizedRecordPolicy::RejectSource,
+        }
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -255,12 +272,13 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
     fn projector(
         &self,
         leaf: &JsonlFamilyLeaf,
-        _source_file: Arc<OpenedProviderSourceFile>,
+        source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         DirectJsonlFamilyProjector::new(
             *self,
             leaf,
+            &source_file,
             imported_at,
             None,
             JsonlFamilyProjectionMode::Cold,
@@ -272,7 +290,7 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
     fn projector_with_provider_checkpoint(
         &self,
         leaf: &JsonlFamilyLeaf,
-        _source_file: Arc<OpenedProviderSourceFile>,
+        source_file: Arc<OpenedProviderSourceFile>,
         imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
@@ -283,9 +301,16 @@ impl JsonlFamilyAdapter for DirectJsonlFamilyAdapter {
                 "direct JSONL adapter does not accept provider checkpoint state".to_owned(),
             ));
         }
-        DirectJsonlFamilyProjector::new(*self, leaf, imported_at, base_event_lookup, mode)
-            .map(|projector| Box::new(projector) as Box<dyn JsonlFamilyProjector>)
-            .map_err(capture_error)
+        DirectJsonlFamilyProjector::new(
+            *self,
+            leaf,
+            &source_file,
+            imported_at,
+            base_event_lookup,
+            mode,
+        )
+        .map(|projector| Box::new(projector) as Box<dyn JsonlFamilyProjector>)
+        .map_err(capture_error)
     }
 }
 
@@ -518,6 +543,7 @@ impl DirectJsonlFamilyProjector {
     fn new(
         adapter: DirectJsonlFamilyAdapter,
         leaf: &JsonlFamilyLeaf,
+        source_file: &OpenedProviderSourceFile,
         imported_at: DateTime<Utc>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
         mode: JsonlFamilyProjectionMode,
@@ -525,7 +551,7 @@ impl DirectJsonlFamilyProjector {
         let binding = decode_binding(leaf)?;
         let (source, session_id) = adapter.session_identity(&binding.session.native_session_id)?;
         source.validate_exact_descriptor(leaf.source())?;
-        let projector = DirectJsonlProjector::new(
+        let mut projector = DirectJsonlProjector::new(
             adapter.provider,
             adapter.source_format,
             leaf.source_path(),
@@ -542,6 +568,11 @@ impl DirectJsonlFamilyProjector {
             mode.into(),
             base_event_lookup,
         )?;
+        if adapter.provider == CaptureProvider::CopilotCli {
+            projector.set_copilot_mcp_tool_calls(copilot::copilot_mcp_tool_call_attributions(
+                source_file,
+            )?);
+        }
         Ok(Self {
             adapter,
             source,
@@ -602,6 +633,9 @@ impl JsonlFamilyProjector for DirectJsonlFamilyProjector {
     }
 
     fn finish(&mut self) -> Result<()> {
+        if !self.projector.copilot_attribution_projection_matches() {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
         self.validate_session().map_err(capture_error)?;
         self.fallback_identities.finish()
     }
@@ -740,7 +774,7 @@ fn project_event(
         event.event_type.as_str(),
         session.agent_type.as_str(),
         session.is_primary,
-        adapter.parser_revision,
+        adapter.effective_parser_revision(),
         body,
     )?;
     record.parent_session_id = parent_session_id;
@@ -749,6 +783,7 @@ fn project_event(
     record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
     record.role = Some(event.role.as_str().to_owned());
     record.cwd = session.cwd.clone();
+    record.mcp_tool_call = event.mcp_tool_call;
     record.content.structured_content = structured_content;
     record.validate_contract()?;
     Ok(record)
@@ -780,3 +815,7 @@ fn capture_error(error: DirectJsonlAdapterError) -> CaptureError {
 #[cfg(test)]
 #[path = "source_backed_result_tests.rs"]
 mod result_tests;
+
+#[cfg(test)]
+#[path = "source_backed_copilot_tests.rs"]
+mod copilot_tests;

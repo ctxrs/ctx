@@ -36,7 +36,10 @@ fn v8_frontier_and_v11_parser_generation_is_rebuilt_to_current_authority() {
     .unwrap();
 
     let source = old_certificate.observation().source().clone();
-    let mut downgrade = GenerationWriter::open(&index, WriterOptions::default()).unwrap();
+    let mut downgrade = GenerationWriter::open(&index, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     downgrade.begin_source(source).unwrap();
     downgrade.certify_source(old_certificate.clone()).unwrap();
     let downgraded = downgrade
@@ -102,7 +105,10 @@ fn v12_parser_generation_is_rebuilt_with_a_current_frontier() {
     .unwrap();
 
     let source = old_certificate.observation().source().clone();
-    let mut downgrade = GenerationWriter::open(&index, WriterOptions::default()).unwrap();
+    let mut downgrade = GenerationWriter::open(&index, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     downgrade.begin_source(source).unwrap();
     downgrade.certify_source(old_certificate.clone()).unwrap();
     let downgraded = downgrade
@@ -170,7 +176,10 @@ fn v8_frontier_is_rebuilt_when_parser_revision_is_already_current() {
     .unwrap();
 
     let source = old_certificate.observation().source().clone();
-    let mut downgrade = GenerationWriter::open(&index, WriterOptions::default()).unwrap();
+    let mut downgrade = GenerationWriter::open(&index, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     downgrade.begin_source(source).unwrap();
     downgrade.certify_source(old_certificate.clone()).unwrap();
     let downgraded = downgrade

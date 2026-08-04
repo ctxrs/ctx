@@ -9,7 +9,10 @@ mod verification;
 fn commit_binds_manifest_and_searchable_documents() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "atomic generation"))
@@ -50,7 +53,10 @@ fn manifest_accumulator_uses_the_fingerprinted_event_binding() {
     expected.update(record_leaf);
     let expected: [u8; 32] = expected.finalize().into();
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(record).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
@@ -68,7 +74,10 @@ fn manifest_accumulator_uses_the_fingerprinted_event_binding() {
 fn logical_generation_identity_excludes_physical_index_topology() {
     let source = source("independent-logical-generation.jsonl");
     let publish = |root: &Path| {
-        let mut writer = GenerationWriter::open(root, WriterOptions::default()).unwrap();
+        let mut writer = GenerationWriter::open(root, WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         writer.begin_source(source.clone()).unwrap();
         writer
             .add_core_record(document(&source, 1, "same logical publication"))
@@ -134,7 +143,10 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
         }],
         association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     };
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     for initial_document in initial_documents {
         initial
@@ -151,7 +163,10 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
     initial.commit(|_| true).unwrap();
 
     crate::publication::reset_verification_activity();
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     let abstention = CoreRecordAnnotation {
         repository_abstentions: vec![RepositoryAbstention {
@@ -230,7 +245,10 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
             .any(|abstention| { abstention.reason == RepositoryAbstentionReason::Unavailable }));
     }
 
-    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let (deletion, inventory) = deletion_evidence(&source, 3);
     deleting.delete_source(deletion, inventory).unwrap();
     deleting.commit(|_| true).unwrap();
@@ -264,7 +282,10 @@ fn failed_certificate_preparation_is_read_only_for_a_forged_base() {
         }],
         association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     };
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(with_annotation(
@@ -320,7 +341,10 @@ fn failed_certificate_preparation_is_read_only_for_a_forged_base() {
     index_writer.wait_merging_threads().unwrap();
 
     crate::publication::reset_verification_activity();
-    let replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let marker_path = temp.path().join("active-generation-rebuild-required.json");
     assert!(!marker_path.exists());
     assert!(replacement.pending.is_empty());
@@ -370,7 +394,10 @@ fn prepared_record_requires_matching_active_source_state() {
     let temp = tempdir().unwrap();
     let active_source = source("prepared-source-state.jsonl");
     let other = source("prepared-other-source.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
 
     let inactive = writer
         .core_record_preparer()
@@ -401,7 +428,10 @@ fn prepared_record_requires_matching_active_source_state() {
         .unwrap();
     writer.commit(|_| true).unwrap();
 
-    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     retained
         .retain_source(certificate(&active_source, 1, 1))
         .unwrap();
@@ -440,7 +470,10 @@ fn replacement_does_not_reuse_repository_certificate_after_event_semantics_chang
         }],
         association_policy_revision: ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     };
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(with_annotation(
@@ -454,7 +487,10 @@ fn replacement_does_not_reuse_repository_certificate_after_event_semantics_chang
     initial.certify_source(certificate(&source, 1, 1)).unwrap();
     initial.commit(|_| true).unwrap();
 
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
         .add_core_record(with_annotation(
@@ -491,7 +527,10 @@ fn replacement_does_not_reuse_repository_certificate_after_event_semantics_chang
 fn unchanged_commit_returns_the_verified_base_without_republication() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "stable generation"))
@@ -512,8 +551,10 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
     let manifest_before = fs::read(&manifest_path).unwrap();
     let manifest_metadata_before = fs::metadata(&manifest_path).unwrap();
 
-    let mut unchanged_writer =
-        GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut unchanged_writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(
         unchanged_writer.writer.is_none(),
         "opening a generation must not construct Tantivy's IndexWriter"
@@ -625,7 +666,10 @@ fn unchanged_commit_returns_the_verified_base_without_republication() {
 fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
     let temp = tempdir().unwrap();
     let source = source("logical.sqlite");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "logical snapshot"))
@@ -646,7 +690,10 @@ fn logical_rescan_retains_nonappendable_source_without_tantivy_artifacts() {
         .collect::<std::collections::BTreeMap<_, _>>();
     let managed_metadata_before = fs::metadata(active_path.join(".managed.json")).unwrap();
 
-    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let constructions = Arc::clone(&retained.index_writer_constructions);
     let inventory = complete_inventory(&source, 1, vec![source.clone()]);
     retained
@@ -690,7 +737,10 @@ fn logical_rescan_advances_only_replay_frontier_without_rewriting_documents() {
     let temp = tempdir().unwrap();
     let source = source("logical-frontier.sqlite");
     let base = appendable_certificate(&source, 1, 1, 10);
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "retained logical row"))
@@ -717,7 +767,10 @@ fn logical_rescan_advances_only_replay_frontier_without_rewriting_documents() {
         ),
     )
     .unwrap();
-    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut retained = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let constructions = Arc::clone(&retained.index_writer_constructions);
     retained.retain_source(current.clone()).unwrap();
     let receipt = retained
@@ -743,7 +796,10 @@ fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
     let temp = tempdir().unwrap();
     let source = source("logical-snapshot.sqlite");
     let certificate = certificate(&source, 1, 1);
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "stable logical row"))
@@ -758,7 +814,10 @@ fn logically_identical_one_pass_replacement_is_discarded_without_publication() {
         .unwrap()
         .count();
 
-    let mut staged = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut staged = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let constructions = Arc::clone(&staged.index_writer_constructions);
     staged.begin_source(source.clone()).unwrap();
     staged
@@ -829,7 +888,10 @@ fn record_only_change_with_identical_source_certificate_publishes_a_new_generati
     let temp = tempdir().unwrap();
     let source = source("record-only-change.sqlite");
     let certificate = certificate(&source, 1, 1);
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "old exact Core record"))
@@ -837,7 +899,10 @@ fn record_only_change_with_identical_source_certificate_publishes_a_new_generati
     initial.certify_source(certificate.clone()).unwrap();
     let initial_receipt = initial.commit(|_| true).unwrap();
 
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
         .add_core_record(document(&source, 1, "changed exact Core record"))
@@ -863,7 +928,10 @@ fn exact_replay_omission_fails_with_typed_incomplete_coverage() {
     let temp = tempdir().unwrap();
     let replayed_source = source("replayed.jsonl");
     let omitted_source = source("omitted.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(replayed_source.clone()).unwrap();
     initial
         .add_core_record(document(&replayed_source, 1, "replayed source"))
@@ -880,7 +948,10 @@ fn exact_replay_omission_fails_with_typed_incomplete_coverage() {
         .unwrap();
     let initial_receipt = initial.commit(|_| true).unwrap();
 
-    let mut incomplete = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut incomplete = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = incomplete
         .begin_source_append(replayed_source.clone())
         .unwrap()
@@ -932,7 +1003,10 @@ fn exact_replay_accepts_independent_source_coverage_beside_complete_inventory() 
     let temp = tempdir().unwrap();
     let inventoried_source = source("inventoried.jsonl");
     let independent_source = source("independent.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     for (source, body) in [
         (&inventoried_source, "inventoried source"),
         (&independent_source, "independent source"),
@@ -945,7 +1019,10 @@ fn exact_replay_accepts_independent_source_coverage_beside_complete_inventory() 
     }
     let initial_receipt = initial.commit(|_| true).unwrap();
 
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let inventoried_certificate = stage_exact_replay(&mut replay, &inventoried_source);
     let independent_certificate = stage_exact_replay(&mut replay, &independent_source);
     let inventory = complete_inventory(&inventoried_source, 1, vec![inventoried_source.clone()]);
@@ -976,7 +1053,10 @@ fn exact_replay_witness_covers_retained_sources_and_carried_removals() {
     let retained = source("retained.jsonl");
     let removed = source("removed.jsonl");
 
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(retained.clone()).unwrap();
     initial
         .add_core_record(document(&retained, 1, "retained source"))
@@ -996,11 +1076,17 @@ fn exact_replay_witness_covers_retained_sources_and_carried_removals() {
     let (deletion, inventory) =
         deletion_evidence_with_retained(&removed, 2, vec![retained.clone()]);
     let current_inventory = inventory.clone();
-    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     deleting.delete_source(deletion, inventory).unwrap();
     let deleted = deleting.commit(|_| true).unwrap();
 
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let replayed_source = stage_exact_replay(&mut replay, &retained);
     replay
         .certify_complete_inventory(current_inventory.clone())
@@ -1035,7 +1121,10 @@ fn exact_replay_witness_covers_retained_sources_and_carried_removals() {
 fn exact_replay_witness_covers_removal_only_and_rejects_stale_inventory() {
     let temp = tempdir().unwrap();
     let removed = source("removed.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(removed.clone()).unwrap();
     initial
         .add_core_record(document(&removed, 1, "removed source"))
@@ -1047,11 +1136,17 @@ fn exact_replay_witness_covers_removal_only_and_rejects_stale_inventory() {
 
     let (deletion, inventory) = deletion_evidence(&removed, 2);
     let current_inventory = inventory.clone();
-    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     deleting.delete_source(deletion, inventory).unwrap();
     let deleted = deleting.commit(|_| true).unwrap();
 
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replay
         .certify_complete_inventory(current_inventory.clone())
         .unwrap();
@@ -1066,7 +1161,10 @@ fn exact_replay_witness_covers_removal_only_and_rejects_stale_inventory() {
     assert_eq!(receipt.generation_id, deleted.generation_id);
     assert_eq!(receipt.opstamp, deleted.opstamp);
 
-    let mut stale = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut stale = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     stale
         .certify_complete_inventory(current_inventory.clone())
         .unwrap();
@@ -1097,175 +1195,7 @@ fn exact_replay_witness_covers_removal_only_and_rejects_stale_inventory() {
     );
 }
 
-#[test]
-fn certified_missing_route_grace_survives_reopen_reappearance_and_final_deletion() {
-    const DELETE_AFTER: u32 = 3;
-
-    let temp = tempdir().unwrap();
-    let source = source("automatic-missing.jsonl");
-    let route_id = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    initial.begin_source(source.clone()).unwrap();
-    initial
-        .add_core_record(document(&source, 1, "last good automatic source"))
-        .unwrap();
-    initial
-        .certify_source(appendable_certificate(&source, 1, 1, 10))
-        .unwrap();
-    initial
-        .set_present_source_routes(vec![SourceRouteSnapshot::present(
-            route_id.clone(),
-            vec![source.clone()],
-        )
-        .unwrap()])
-        .unwrap();
-    let initial = initial.commit(|_| true).unwrap();
-
-    let present_inventory = complete_inventory(&source, 2, vec![source.clone()]);
-    let mut noop = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    let replayed = stage_exact_replay(&mut noop, &source);
-    noop.certify_complete_inventory(present_inventory.clone())
-        .unwrap();
-    noop.set_present_source_routes(vec![SourceRouteSnapshot::present(
-        route_id.clone(),
-        vec![source.clone()],
-    )
-    .unwrap()])
-        .unwrap();
-    let noop = noop
-        .commit_with_complete_inventory_revalidation(
-            |target| matches!(target, RevalidationTarget::Source(current) if current == &replayed),
-            |current| current == &present_inventory,
-        )
-        .unwrap();
-    assert_eq!(noop.generation_id, initial.generation_id);
-    assert!(noop
-        .manifest()
-        .source_route(&route_id)
-        .unwrap()
-        .missing_state()
-        .is_none());
-
-    let observe_missing = |observed_at_unix_ms| {
-        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-        writer.set_present_source_routes(Vec::new()).unwrap();
-        let outcome = writer
-            .observe_certified_missing_route(
-                route_id.clone(),
-                observed_at_unix_ms,
-                DELETE_AFTER,
-                || true,
-            )
-            .unwrap();
-        let receipt = writer.commit(|_| true).unwrap();
-        (outcome.deleted(), receipt)
-    };
-
-    let (deleted, first_missing) = observe_missing(100);
-    assert!(!deleted);
-    assert_eq!(first_missing.indexed_documents, 1);
-    let first_state = first_missing.manifest().source_route(&route_id).unwrap();
-    let first_state = first_state.missing_state().unwrap();
-    assert_eq!(first_state.consecutive_missing().get(), 1);
-    assert_eq!(
-        first_state.first_observation().generation_id(),
-        initial.generation_id
-    );
-    assert_eq!(first_state.first_observation().observed_at_unix_ms(), 100);
-    assert_eq!(
-        first_state.first_observation(),
-        first_state.last_observation()
-    );
-
-    let (deleted, second_missing) = observe_missing(200);
-    assert!(!deleted);
-    assert_eq!(second_missing.indexed_documents, 1);
-    let second_state = second_missing.manifest().source_route(&route_id).unwrap();
-    let second_state = second_state.missing_state().unwrap();
-    assert_eq!(second_state.consecutive_missing().get(), 2);
-    assert_eq!(
-        second_state.first_observation(),
-        first_state.first_observation()
-    );
-    assert_eq!(
-        second_state.last_observation().generation_id(),
-        first_missing.generation_id
-    );
-    assert_eq!(second_state.last_observation().observed_at_unix_ms(), 200);
-
-    let reappeared_inventory = complete_inventory(&source, 5, vec![source.clone()]);
-    let mut reappeared = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    let replayed = stage_exact_replay(&mut reappeared, &source);
-    reappeared
-        .certify_complete_inventory(reappeared_inventory.clone())
-        .unwrap();
-    reappeared
-        .set_present_source_routes(vec![SourceRouteSnapshot::present(
-            route_id.clone(),
-            vec![source.clone()],
-        )
-        .unwrap()])
-        .unwrap();
-    let reappeared = reappeared
-        .commit_with_complete_inventory_revalidation(
-            |target| matches!(target, RevalidationTarget::Source(current) if current == &replayed),
-            |current| current == &reappeared_inventory,
-        )
-        .unwrap();
-    assert_eq!(reappeared.indexed_documents, 1);
-    assert!(reappeared
-        .manifest()
-        .source_route(&route_id)
-        .unwrap()
-        .missing_state()
-        .is_none());
-
-    let (deleted, missing_after_reset) = observe_missing(300);
-    assert!(!deleted);
-    let reset_state = missing_after_reset
-        .manifest()
-        .source_route(&route_id)
-        .unwrap();
-    let reset_state = reset_state.missing_state().unwrap();
-    assert_eq!(reset_state.consecutive_missing().get(), 1);
-    assert_eq!(
-        reset_state.first_observation().generation_id(),
-        reappeared.generation_id
-    );
-
-    let (deleted, second_after_reset) = observe_missing(400);
-    assert!(!deleted);
-    assert_eq!(
-        second_after_reset
-            .manifest()
-            .source_route(&route_id)
-            .unwrap()
-            .missing_state()
-            .unwrap()
-            .consecutive_missing()
-            .get(),
-        2
-    );
-
-    let (deleted, final_deletion) = observe_missing(500);
-    assert!(deleted);
-    assert_eq!(final_deletion.indexed_documents, 0);
-    assert!(final_deletion.manifest().source_routes().is_empty());
-    assert_eq!(
-        VerifiedIndex::open(temp.path()).unwrap().document_count(),
-        0
-    );
-
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
-    replay.set_present_source_routes(Vec::new()).unwrap();
-    assert!(replay
-        .observe_certified_missing_route(route_id, 600, DELETE_AFTER, || true)
-        .unwrap()
-        .retained_sources()
-        .is_empty());
-    let replay = replay.commit(|_| false).unwrap();
-    assert_eq!(replay.generation_id, final_deletion.generation_id);
-}
+include!("writer/missing_route.rs");
 
 #[test]
 fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race() {
@@ -1273,10 +1203,15 @@ fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race(
     let discovered = source("discovered-after-opening.jsonl");
     let initial = GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()
+        .into_writer()
+        .unwrap()
         .commit(|_| true)
         .unwrap();
 
-    let unwitnessed = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let unwitnessed = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let unwitnessed_constructions = std::sync::Arc::clone(&unwitnessed.index_writer_constructions);
     let unwitnessed_receipt = unwitnessed.commit(|_| true).unwrap();
     assert_eq!(unwitnessed_receipt.generation_id, initial.generation_id);
@@ -1287,7 +1222,10 @@ fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race(
     );
 
     let opening_empty = complete_inventory(&discovered, 1, Vec::new());
-    let mut empty = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut empty = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     empty
         .certify_complete_inventory(opening_empty.clone())
         .unwrap();
@@ -1310,7 +1248,10 @@ fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race(
     assert_eq!(replay.indexed_documents, 0);
     assert_eq!(replay.certified_sources, 0);
 
-    let mut raced = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut raced = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     raced
         .certify_complete_inventory(opening_empty.clone())
         .unwrap();

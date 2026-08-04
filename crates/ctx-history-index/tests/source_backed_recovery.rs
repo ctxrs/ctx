@@ -44,7 +44,10 @@ fn subprocess_generation_worker() {
     let root = required_env_path(CHILD_ROOT_ENV);
     match mode.as_str() {
         "pause_after_writer_open" => {
-            let _writer = GenerationWriter::open(&root, writer_options()).unwrap();
+            let _writer = GenerationWriter::open(&root, writer_options())
+                .unwrap()
+                .into_writer()
+                .unwrap();
             checkpoint_and_stop("writer-open");
         }
         "pause_before_commit" => {
@@ -188,7 +191,10 @@ fn stale_writer_lock_after_sigkill_is_recoverable() {
         stale_lock.is_file(),
         "SIGKILL did not leave the lock witness"
     );
-    let writer = GenerationWriter::open(&fixture.root, writer_options()).unwrap();
+    let writer = GenerationWriter::open(&fixture.root, writer_options())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     drop(writer);
 
     assert_generation(
@@ -373,7 +379,10 @@ fn incompatible_zstd_generation_rebuilds_from_sources_without_cloning_the_slot()
         Err(IndexError::IndexSettingsMismatch(_))
     ));
 
-    let mut rebuild = GenerationWriter::open(&fixture.root, writer_options()).unwrap();
+    let mut rebuild = GenerationWriter::open(&fixture.root, writer_options())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(rebuild.base_manifest().is_none());
     assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
     let candidates = inactive_generation_directories(&fixture.root);
@@ -524,7 +533,9 @@ fn retry_after_pre_pointer_crash_reclaims_inactive_generation() {
         .opstamp;
     let inventory = complete_inventory(&source(), 1, vec![source()]);
     let mut replay = GenerationWriter::open(&fixture.root, writer_options())
-        .expect("preflight recovery must reclaim candidate files");
+        .expect("preflight recovery must reclaim candidate files")
+        .into_writer()
+        .expect("preflight recovery must produce a usable writer");
     replay
         .certify_complete_inventory(inventory.clone())
         .unwrap();
@@ -673,7 +684,12 @@ fn writer_reopen_reclaims_abandoned_atomic_write_files() {
         "the crash point did not leave its expected temporary-file witness"
     );
 
-    drop(GenerationWriter::open(&fixture.root, writer_options()).unwrap());
+    drop(
+        GenerationWriter::open(&fixture.root, writer_options())
+            .unwrap()
+            .into_writer()
+            .unwrap(),
+    );
     let after = atomic_temporary_files(&manifest_directory);
     assert!(
         after.is_empty(),
@@ -951,7 +967,10 @@ fn configure_fault(
 
 fn build_generation(root: &Path, revision: u8, body: &str) -> CommitReceipt {
     let source = source();
-    let mut writer = GenerationWriter::open(root, writer_options()).unwrap();
+    let mut writer = GenerationWriter::open(root, writer_options())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(document(&source, body)).unwrap();
     writer
@@ -979,7 +998,13 @@ fn stage_exact_replay(writer: &mut GenerationWriter) {
 
 fn try_staged_replacement(root: &Path) -> std::result::Result<GenerationWriter, IndexError> {
     let source = source();
-    let mut writer = GenerationWriter::open(root, writer_options())?;
+    let mut writer = GenerationWriter::open(root, writer_options())?
+        .into_writer()
+        .map_err(|recovery| IndexError::CommittedGenerationNeedsRecovery {
+            generation_id: recovery.generation_id().to_owned(),
+            stage: "predecessor migration recovery",
+            detail: recovery.detail().to_owned(),
+        })?;
     writer.begin_source(source.clone())?;
     writer.add_core_record(document(&source, CANDIDATE_BODY))?;
     writer.certify_source(certificate(&source, 2))?;

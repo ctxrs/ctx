@@ -176,6 +176,12 @@ reopen provider history. Provider changes become searchable and visible to show
 after explicit import or daemon refresh publishes a new Core generation.
 `ctx show session` preserves provider event order.
 
+Exact `mcp_tool_call` server/tool metadata is not indexed and is not added to
+search inputs, filters, results, matching, ranking, snippets, or
+`why_matched`. Use log-mode `ctx show session`, `ctx show event`, or
+`ctx list events` and filter JSON/JSONL rows client-side when that metadata is
+needed.
+
 ## History reports
 
 Use the agent history-search skill when a topic needs a cited synthesis rather

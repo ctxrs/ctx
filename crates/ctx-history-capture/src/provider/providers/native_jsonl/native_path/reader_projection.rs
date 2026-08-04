@@ -210,13 +210,15 @@ impl DirectJsonlProjector {
             Vec::new()
         };
         for subrecord in subrecords {
-            let Some(content) = subrecord
+            let content = subrecord
                 .content
                 .as_deref()
-                .filter(|content| !content.trim().is_empty())
-            else {
+                .filter(|content| !content.trim().is_empty());
+            let retain_contentless_copilot_completion =
+                self.provider == CaptureProvider::CopilotCli && subrecord.call_id.is_some();
+            if content.is_none() && !retain_contentless_copilot_completion {
                 continue;
-            };
+            }
             let sub_ordinal = subrecord.subrecord_index;
             let touches = if matches!(
                 subrecord.outcome.outcome,
@@ -226,7 +228,7 @@ impl DirectJsonlProjector {
             } else {
                 Vec::new()
             };
-            debug_assert_eq!(subrecord.content.as_deref(), Some(content));
+            debug_assert!(content.is_some() || retain_contentless_copilot_completion);
             let mut event = direct_event(
                 self.provider,
                 &self.source_format,
@@ -238,6 +240,11 @@ impl DirectJsonlProjector {
                 Some(&subrecord),
                 touches,
             )?;
+            if self.provider == CaptureProvider::CopilotCli {
+                event.mcp_tool_call = self
+                    .copilot_mcp_tool_calls
+                    .attribution_for_projected_completion(ordinal, record_digest);
+            }
             event.source_record = DirectJsonlSourceRecord {
                 byte_start,
                 byte_end_exclusive,
@@ -358,7 +365,7 @@ impl ProjectedLine {
         }
     }
 
-    fn rejection(rejection: DirectJsonlRejection) -> Self {
+    pub(super) fn rejection(rejection: DirectJsonlRejection) -> Self {
         Self {
             rejections: vec![rejection],
             ..Self::default()
@@ -386,7 +393,11 @@ fn direct_event(
     } else {
         direct_jsonl_event_text(provider, value, event_type, &entry_type)
     };
-    let lexical_text = direct_jsonl_lexical_text(event_type, &text, result);
+    let mut lexical_text = direct_jsonl_lexical_text(event_type, &text, result);
+    if provider == CaptureProvider::CopilotCli && result.is_some() && lexical_text.trim().is_empty()
+    {
+        lexical_text = event_type.as_str().to_owned();
+    }
     if result.is_some() && lexical_text.trim().is_empty() {
         return Err(CaptureError::InvalidPayload(
             "direct JSONL result record has no meaningful selected content".to_owned(),
@@ -435,6 +446,7 @@ fn direct_event(
         event_type,
         role,
         occurred_at,
+        mcp_tool_call: None,
         lexical_text,
         metadata: json!({
             "source": source_format,

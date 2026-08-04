@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -9,6 +10,10 @@ namespace Ctx.AgentHistory;
 public sealed class LocalCliAdapter : IAgentHistoryTransport
 {
     private const string AnalyticsEnabledEnvironment = "CTX_ANALYTICS_ENABLED";
+    private const int MaxRetainedStdoutBytes = 64 * 1024 * 1024;
+    private const int MaxRetainedStderrBytes = 16 * 1024 * 1024;
+    private static readonly TimeSpan ForceCleanupTimeout = TimeSpan.FromSeconds(2);
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     public LocalCliAdapter(LocalAgentHistoryConfig? config = null)
     {
@@ -53,6 +58,7 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
 
         try
         {
+            EnsureNoDuplicateObjectMembers(stdout);
             var node = JsonNode.Parse(stdout);
             if (node is not JsonObject obj)
             {
@@ -79,6 +85,36 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
                     ["stderr"] = result.Stderr
                 },
                 ex);
+        }
+    }
+
+    private static void EnsureNoDuplicateObjectMembers(string json)
+    {
+        var reader = new Utf8JsonReader(Encoding.UTF8.GetBytes(json));
+        var objectMembers = new Stack<HashSet<string>>(capacity: 8);
+        while (reader.Read())
+        {
+            switch (reader.TokenType)
+            {
+                case JsonTokenType.StartObject:
+                    objectMembers.Push(new HashSet<string>(StringComparer.Ordinal));
+                    break;
+                case JsonTokenType.PropertyName:
+                    var member = reader.GetString()
+                        ?? throw new JsonException("JSON object member name was null");
+                    if (objectMembers.Count == 0 || !objectMembers.Peek().Add(member))
+                    {
+                        throw new JsonException($"duplicate JSON object member {member}");
+                    }
+                    break;
+                case JsonTokenType.EndObject:
+                    if (objectMembers.Count == 0)
+                    {
+                        throw new JsonException("unexpected JSON object end");
+                    }
+                    objectMembers.Pop();
+                    break;
+            }
         }
     }
 
@@ -134,18 +170,20 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         }
         startInfo.Environment[AnalyticsEnabledEnvironment] = "false";
 
-        using var process = new Process { StartInfo = startInfo };
+        ProcessTree process;
         try
         {
-            process.Start();
+            process = ProcessTree.Start(startInfo);
         }
-        catch (Win32Exception ex)
+        catch (Exception ex) when (ex is Win32Exception or PlatformNotSupportedException)
         {
             throw new CtxAgentHistoryCliException("failed to execute ctx CLI", command, -1, "", ex.Message, innerException: ex);
         }
+        await using var processOwner = process;
 
-        var stdoutTask = process.StandardOutput.ReadToEndAsync();
-        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdoutTask = ReadBoundedAsync(process.StandardOutput, MaxRetainedStdoutBytes);
+        var stderrTask = ReadBoundedAsync(process.StandardError, MaxRetainedStderrBytes);
+        var exitTask = process.WaitForExitAsync(CancellationToken.None);
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (Config.Timeout is { } timeout)
@@ -155,24 +193,67 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
 
         try
         {
-            await process.WaitForExitAsync(linked.Token).ConfigureAwait(false);
+            await Task.WhenAll(exitTask, stdoutTask, stderrTask)
+                .WaitAsync(linked.Token)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException ex)
         {
-            TryKill(process);
-            var stdout = await SafeReadAsync(stdoutTask).ConfigureAwait(false);
-            var stderr = await SafeReadAsync(stderrTask).ConfigureAwait(false);
+            var (timeoutStdout, timeoutStderr) = await StopAndCaptureAsync(
+                    process,
+                    stdoutTask,
+                    stderrTask)
+                .ConfigureAwait(false);
+            var stdout = Encoding.UTF8.GetString(timeoutStdout.Bytes);
+            var stderr = Encoding.UTF8.GetString(timeoutStderr.Bytes);
             throw new CtxAgentHistoryCliException("ctx CLI timed out", command, -1, stdout, stderr, code: "timeout", retryable: true, innerException: ex);
         }
-
-        var outText = await stdoutTask.ConfigureAwait(false);
-        var errText = await stderrTask.ConfigureAwait(false);
-        if (process.ExitCode != 0)
+        catch
         {
-            throw new CtxAgentHistoryCliException("ctx CLI command failed", command, process.ExitCode, outText, errText);
+            await StopAndCaptureAsync(process, stdoutTask, stderrTask).ConfigureAwait(false);
+            throw;
         }
 
-        return new CommandResult(command, outText, errText, process.ExitCode);
+        var stdoutCapture = await stdoutTask.ConfigureAwait(false);
+        var stderrCapture = await stderrTask.ConfigureAwait(false);
+        var stdoutBytes = stdoutCapture.Bytes;
+        var stderrBytes = stderrCapture.Bytes;
+        var errText = Encoding.UTF8.GetString(stderrBytes);
+        if (process.ExitCode != 0)
+        {
+            var outText = Encoding.UTF8.GetString(stdoutBytes);
+            throw new CtxAgentHistoryCliException("ctx CLI command failed", command, process.ExitCode, outText, errText);
+        }
+        if (stdoutCapture.Truncated)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                "ctx command stdout exceeded the retained output limit",
+                new JsonObject
+                {
+                    ["stream"] = "stdout",
+                    ["maximumBytes"] = MaxRetainedStdoutBytes
+                });
+        }
+
+        string strictOutText;
+        try
+        {
+            strictOutText = StrictUtf8.GetString(stdoutBytes);
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw new CtxAgentHistoryProtocolException(
+                "ctx returned invalid UTF-8 on stdout",
+                new JsonObject
+                {
+                    ["command"] = JsonHelpers.ToJsonArray(command),
+                    ["stdout"] = Encoding.UTF8.GetString(stdoutBytes),
+                    ["stderr"] = errText
+                },
+                ex);
+        }
+
+        return new CommandResult(command, strictOutText, errText, process.ExitCode);
     }
 
     private IReadOnlyList<string> BuildCommand(IReadOnlyList<string> args)
@@ -187,31 +268,98 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         return command;
     }
 
-    private static async Task<string> SafeReadAsync(Task<string> task)
+    private static async Task<OutputCapture> ReadBoundedAsync(Stream stream, int maximumBytes)
+    {
+        using var retained = new MemoryStream();
+        var buffer = new byte[8 * 1024];
+        var truncated = false;
+        try
+        {
+            while (true)
+            {
+                var count = await stream.ReadAsync(buffer).ConfigureAwait(false);
+                if (count == 0)
+                {
+                    break;
+                }
+
+                var remaining = maximumBytes - checked((int)retained.Length);
+                var keep = Math.Min(count, Math.Max(remaining, 0));
+                if (keep > 0)
+                {
+                    retained.Write(buffer, 0, keep);
+                }
+                if (keep < count)
+                {
+                    truncated = true;
+                }
+            }
+        }
+        catch (IOException)
+        {
+            // Match the prior adapter behavior: a closed/broken pipe contributes what was read.
+        }
+        catch (ObjectDisposedException)
+        {
+            // Cleanup may close a pipe to unblock a reader after forceful termination.
+        }
+        return new OutputCapture(retained.ToArray(), truncated);
+    }
+
+    private static async Task<(OutputCapture Stdout, OutputCapture Stderr)> StopAndCaptureAsync(
+        ProcessTree process,
+        Task<OutputCapture> stdoutTask,
+        Task<OutputCapture> stderrTask)
+    {
+        process.TryTerminateTree();
+        using var cleanup = new CancellationTokenSource(ForceCleanupTimeout);
+        try
+        {
+            await process.WaitForExitAsync(CancellationToken.None)
+                .WaitAsync(cleanup.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            process.TryTerminateTree();
+        }
+
+        try
+        {
+            await Task.WhenAll(stdoutTask, stderrTask, process.WaitForTreeExitAsync(cleanup.Token))
+                .WaitAsync(cleanup.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            TryClose(process.StandardOutput);
+            TryClose(process.StandardError);
+        }
+
+        process.MarkCleanupWaitCompleted();
+        return (CompletedCapture(stdoutTask), CompletedCapture(stderrTask));
+    }
+
+    private static OutputCapture CompletedCapture(Task<OutputCapture> task)
+    {
+        return task.IsCompletedSuccessfully ? task.Result : OutputCapture.Empty;
+    }
+
+    private static void TryClose(Stream stream)
     {
         try
         {
-            return await task.ConfigureAwait(false);
+            stream.Close();
         }
         catch
         {
-            return "";
+            // Closing is only a final reader-unblock fallback after forceful termination.
         }
     }
 
-    private static void TryKill(Process process)
+    private sealed record OutputCapture(byte[] Bytes, bool Truncated)
     {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // The process may have exited between cancellation and kill.
-        }
+        internal static readonly OutputCapture Empty = new([], false);
     }
 
     private sealed record CommandResult(IReadOnlyList<string> Command, string Stdout, string Stderr, int ExitCode);

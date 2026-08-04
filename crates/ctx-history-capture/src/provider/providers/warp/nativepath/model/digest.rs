@@ -60,6 +60,13 @@ pub(super) fn event_estimated_bytes(event: &WarpNativeEvent) -> usize {
         .saturating_add(event.native_order.task_key.len())
         .saturating_add(event.request_id.as_ref().map_or(0, String::len))
         .saturating_add(event.call_id.as_ref().map_or(0, String::len))
+        .saturating_add(event.mcp_invocation.as_ref().map_or(0, |invocation| {
+            invocation
+                .server_id
+                .len()
+                .saturating_add(invocation.tool_name.len())
+                .saturating_add(invocation.args.to_string().len())
+        }))
         .saturating_add(event.lexical_body.len())
         .saturating_add(event.kind.len());
     conservative_text_bytes(text, 512)
@@ -122,6 +129,13 @@ fn hash_event(hasher: &mut Sha256, event: &WarpNativeEvent) -> Result<()> {
     hash_optional_text(hasher, event.request_id.as_deref())?;
     hash_optional_outcome(hasher, event.result_outcome);
     hash_optional_text(hasher, event.call_id.as_deref())?;
+    hasher.update([u8::from(event.mcp_attribution)]);
+    hasher.update([u8::from(event.mcp_invocation.is_some())]);
+    if let Some(invocation) = &event.mcp_invocation {
+        hash_text(hasher, &invocation.server_id)?;
+        hash_text(hasher, &invocation.tool_name)?;
+        hash_bytes(hasher, &serde_json::to_vec(&invocation.args)?)?;
+    }
     hash_optional_i64(
         hasher,
         event.occurred_at.map(|value| value.timestamp_millis()),

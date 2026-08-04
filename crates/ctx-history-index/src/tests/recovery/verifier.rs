@@ -43,6 +43,8 @@ fn complete_verifier_splits_one_large_segment_across_workers() {
             memory_bytes: 128 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for sequence in 1..=DOCUMENTS {
@@ -130,7 +132,10 @@ fn complete_verifier_splits_one_large_segment_across_workers() {
 fn complete_verifier_rejects_identity_digest_corruption() {
     let temp = tempdir().unwrap();
     let source = source("digest-corruption.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -177,7 +182,10 @@ fn complete_verifier_rejects_source_count_corruption() {
     let temp = tempdir().unwrap();
     let first = source("count-first.jsonl");
     let second = source("count-second.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(first.clone()).unwrap();
     writer
         .add_core_record(document(&first, 1, "first"))
@@ -219,7 +227,10 @@ fn complete_verifier_rejects_source_count_corruption() {
 fn complete_verifier_rejects_total_count_corruption() {
     let temp = tempdir().unwrap();
     let source = source("total-count.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))

@@ -498,6 +498,8 @@ mod tests {
             WriterOptions::default(),
         )
         .unwrap()
+        .into_writer()
+        .unwrap()
         .commit(|_| true)
         .unwrap();
         open_verified_index(&source_backed_index_root(data_root)).unwrap()

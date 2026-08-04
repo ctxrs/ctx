@@ -1,7 +1,12 @@
-use std::mem::size_of;
+use std::{
+    io::{self, Write},
+    mem::size_of,
+};
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType, FileChangeKind, RepositoryFileObservationKind};
+use ctx_history_core::{
+    EventRole, EventType, FileChangeKind, McpToolCallAttribution, RepositoryFileObservationKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -26,6 +31,33 @@ use crate::{
 };
 
 const OWNED_ALLOCATION_OVERHEAD_BYTES: usize = 16;
+
+struct JsonLengthWriter {
+    bytes: usize,
+}
+
+impl Write for JsonLengthWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(buffer.len())
+            .ok_or_else(|| io::Error::other("encoded JSON length exceeds usize"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(super) fn encoded_json_len<T>(value: &T) -> Option<usize>
+where
+    T: Serialize + ?Sized,
+{
+    let mut writer = JsonLengthWriter { bytes: 0 };
+    serde_json::to_writer(&mut writer, value).ok()?;
+    Some(writer.bytes)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +98,7 @@ pub(crate) struct CodexSourceBackedRowV0 {
     pub(crate) session_cwd: Option<String>,
     pub(crate) lexical_body: String,
     pub(crate) structured_content: Option<Value>,
+    pub(crate) mcp_tool_call: Option<McpToolCallAttribution>,
     pub(crate) touched_paths: Vec<String>,
     pub(crate) repository_tools: Vec<CodexRepositoryToolEvidence>,
     pub(crate) repository_result: Option<CodexRepositoryResultEvidence>,
@@ -87,10 +120,7 @@ impl CodexSourceBackedRowV0 {
             .iter()
             .fold(0_usize, |total, evidence| {
                 total
-                    .saturating_add(
-                        serde_json::to_vec(&evidence.structured_content)
-                            .map_or(0, |value| value.len()),
-                    )
+                    .saturating_add(encoded_json_len(&evidence.structured_content).unwrap_or(0))
                     .saturating_add(evidence.command.as_ref().map_or(0, String::capacity))
                     .saturating_add(
                         evidence
@@ -142,11 +172,9 @@ impl CodexSourceBackedRowV0 {
                     .outcome_output_repository_path
                     .as_ref()
                     .map_or(0, String::capacity)
-                + serde_json::to_vec(&evidence.structured_content)
-                    .map_or(0, |encoded| encoded.len())
-                + serde_json::to_vec(&evidence.provider_native_repository_aliases)
-                    .map_or(0, |encoded| encoded.len())
-                + serde_json::to_vec(&evidence.outcomes).map_or(0, |encoded| encoded.len())
+                + encoded_json_len(&evidence.structured_content).unwrap_or(0)
+                + encoded_json_len(&evidence.provider_native_repository_aliases).unwrap_or(0)
+                + encoded_json_len(&evidence.outcomes).unwrap_or(0)
         });
         let repository_file_bytes =
             self.repository_files
@@ -156,9 +184,17 @@ impl CodexSourceBackedRowV0 {
                         .checked_add(observation.path.capacity())?
                         .checked_add(observation.prior_path.as_ref().map_or(0, String::capacity))
                 })?;
+        let mcp_tool_call_bytes = match self.mcp_tool_call.as_ref() {
+            Some(attribution) => attribution
+                .server
+                .capacity()
+                .checked_add(attribution.tool.capacity())?,
+            None => 0,
+        };
         let allocation_count = 3_usize
             .checked_add(self.touched_paths.len())?
-            .checked_add(self.repository_files.len())?;
+            .checked_add(self.repository_files.len())?
+            .checked_add(usize::from(self.mcp_tool_call.is_some()).checked_mul(2)?)?;
         size_of::<Self>()
             .checked_add(
                 self.provider_event_identity
@@ -169,9 +205,10 @@ impl CodexSourceBackedRowV0 {
             .checked_add(
                 self.structured_content
                     .as_ref()
-                    .and_then(|value| serde_json::to_vec(value).ok())
-                    .map_or(0, |value| value.len()),
+                    .and_then(encoded_json_len)
+                    .unwrap_or(0),
             )?
+            .checked_add(mcp_tool_call_bytes)?
             .checked_add(self.session_cwd.as_ref().map_or(0, String::capacity))?
             .checked_add(path_slots)?
             .checked_add(path_bytes)?
@@ -305,6 +342,7 @@ pub(super) fn build_source_backed_event_row(
             session_cwd: None,
             lexical_body: semantic.lexical_body,
             structured_content: semantic.structured_content,
+            mcp_tool_call: None,
             touched_paths: Vec::new(),
             repository_tools,
             repository_result: None,
@@ -324,6 +362,7 @@ pub(super) fn build_source_backed_sparse_output_row(
     _outcome: &OutputOutcomeMetadata,
     normalized_body: String,
     structured_content: Option<Value>,
+    mcp_tool_call: Option<McpToolCallAttribution>,
     repository_result: Option<CodexRepositoryResultEvidence>,
     session_cwd: Option<String>,
 ) -> CaptureResult<Option<CodexSourceBackedRowV0>> {
@@ -349,6 +388,7 @@ pub(super) fn build_source_backed_sparse_output_row(
         session_cwd,
         lexical_body,
         structured_content,
+        mcp_tool_call,
         touched_paths: Vec::new(),
         repository_tools: Vec::new(),
         repository_result,

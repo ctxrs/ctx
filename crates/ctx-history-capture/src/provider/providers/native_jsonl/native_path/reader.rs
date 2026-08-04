@@ -46,6 +46,7 @@ pub(crate) struct DirectJsonlProjector {
     pub(super) source_root: Option<PathBuf>,
     pub(super) imported_at: DateTime<Utc>,
     pub(super) session: Option<DirectJsonlSession>,
+    pub(super) copilot_mcp_tool_calls: copilot::CopilotMcpToolCallAttributions,
 }
 
 impl DirectJsonlProjector {
@@ -70,7 +71,15 @@ impl DirectJsonlProjector {
             source_root,
             imported_at,
             session,
+            copilot_mcp_tool_calls: copilot::CopilotMcpToolCallAttributions::new(),
         })
+    }
+
+    pub(super) fn set_copilot_mcp_tool_calls(
+        &mut self,
+        attributions: copilot::CopilotMcpToolCallAttributions,
+    ) {
+        self.copilot_mcp_tool_calls = attributions;
     }
 
     pub(crate) fn project_record(&mut self, record: JsonlRecordRef<'_>) -> Result<ProjectedLine> {
@@ -86,6 +95,25 @@ impl DirectJsonlProjector {
 
     fn project_record_inner(&mut self, record: JsonlRecordRef<'_>) -> Result<ProjectedLine> {
         let evidence = record.evidence();
+        self.copilot_mcp_tool_calls
+            .observe_projected_record(evidence.physical_ordinal(), evidence.record_digest());
+        if record.oversized() {
+            if self.provider != CaptureProvider::CopilotCli {
+                return Err(CaptureError::SystemInvariant(
+                    "non-Copilot direct JSONL projector received an oversized record",
+                ));
+            }
+            return Ok(ProjectedLine::rejection(DirectJsonlRejection {
+                raw_ordinal: evidence.physical_ordinal(),
+                byte_start: evidence.byte_start(),
+                byte_end_exclusive: evidence.byte_end_exclusive(),
+                reason: format!(
+                    "{}:{} discarded oversized Copilot CLI JSONL record",
+                    self.path.display(),
+                    evidence.physical_ordinal().saturating_add(1)
+                ),
+            }));
+        }
         self.project_line(
             record.bytes(),
             evidence.physical_ordinal(),
@@ -97,5 +125,9 @@ impl DirectJsonlProjector {
 
     pub(crate) fn session(&self) -> Option<&DirectJsonlSession> {
         self.session.as_ref()
+    }
+
+    pub(super) fn copilot_attribution_projection_matches(&self) -> bool {
+        self.copilot_mcp_tool_calls.projected_records_match()
     }
 }

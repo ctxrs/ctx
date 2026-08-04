@@ -10,6 +10,8 @@ fn retained_generation_hint_seeds_enqueued_generation_identity() {
         ctx_history_index::WriterOptions::default(),
     )
     .unwrap()
+    .into_writer()
+    .unwrap()
     .commit(|_| true)
     .unwrap()
     .generation_id;
@@ -44,6 +46,8 @@ fn retained_generation_hint_recovers_commit_before_stale_job_receipt() {
         &index_root,
         ctx_history_index::WriterOptions::default(),
     )
+    .unwrap()
+    .into_writer()
     .unwrap()
     .commit(|_| true)
     .unwrap()

@@ -194,7 +194,10 @@ fn terminal_pages_share_one_source_pinned_multi_source_envelope() {
     let temp = tempdir().unwrap();
     let first = source("batch-source-first.jsonl");
     let second = source("batch-source-second.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &first, 1, vec!["first".to_owned()]);
     add_source(&mut writer, &second, 1, vec!["second".to_owned()]);
     writer.commit(|_| true).unwrap();
@@ -223,7 +226,10 @@ fn terminal_pages_share_one_source_pinned_multi_source_envelope() {
 fn post_finish_status_rejects_a_peak_above_the_launched_helper_limit() {
     let temp = tempdir().unwrap();
     let source = source("worker-peak-over-limit.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();

@@ -13,6 +13,11 @@ filegroup(
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
 )
 
+filegroup(
+    name = "predecessor_fixture",
+    srcs = glob(["testdata/core-predecessor-c5ad8c7b/**"]),
+)
+
 COMMON_RUSTC_ENV = {
     "CARGO_MANIFEST_DIR": "crates/ctx-history-index",
 }
@@ -50,6 +55,7 @@ ctx_rust_test(
         normal_dev = True,
         proc_macro_dev = True,
     ),
+    data = [":predecessor_fixture"],
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -59,6 +65,141 @@ ctx_rust_test(
         proc_macro_dev = True,
     ),
     rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
+    name = "migration_fault_tests",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_history_index_migration_faults",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = ["subprocess_"],
+    data = [":predecessor_fixture"],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + CTX_HISTORY_INDEX_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+    tags = [
+        "fault-injection",
+        "migration",
+        "safe-presubmit",
+    ],
+)
+
+# Hermetic generated-index structural/disk gate. The release benchmark below
+# uses the same harness but keeps noisy wall/CPU/RSS thresholds off ordinary CI.
+ctx_rust_test(
+    name = "migration_disk_qualification_tests",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_history_index_migration_disk_qualification",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = [
+        "--ignored",
+        "--exact",
+        "tests::migration_qualification::generated_small_and_large_disk_qualification",
+        "--nocapture",
+        "--test-threads=1",
+    ],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + CTX_HISTORY_INDEX_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+    size = "large",
+    tags = [
+        "linux-only",
+        "migration",
+        "safe-presubmit",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    timeout = "long",
+)
+
+# Dedicated controlled-host report. Invoke with --config=release,
+# --nocache_test_results, and CTX_MIGRATION_QUALIFICATION_ENFORCE_PERF=1 for the
+# blocking release run.
+ctx_rust_test(
+    name = "migration_release_benchmark",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_history_index_migration_release_benchmark",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    args = [
+        "--ignored",
+        "--exact",
+        "tests::migration_qualification::release_benchmark_report",
+        "--nocapture",
+        "--test-threads=1",
+    ],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + CTX_HISTORY_INDEX_DEPS,
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+    size = "large",
+    tags = [
+        "linux-only",
+        "manual",
+        "migration",
+        "no-cache",
+        "release",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    timeout = "long",
+)
+
+ctx_rust_test(
+    name = "mcp_attribution_search_tests",
+    srcs = ["tests/mcp_attribution_search.rs"],
+    crate_name = "mcp_attribution_search",
+    crate_root = "tests/mcp_attribution_search.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":lib",
+        "//crates/ctx-history-core:lib",
+    ],
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+    tags = [
+        "privacy",
+        "provider-conformance",
+    ],
 )
 
 ctx_rust_test(

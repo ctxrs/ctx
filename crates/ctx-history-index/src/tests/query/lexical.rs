@@ -84,7 +84,10 @@ fn with_inspected_object(mut record: CoreRecord, object_id: GitObjectId) -> Core
 
 fn publish_records(temp: &TempDir, source: &SourceKey, records: Vec<CoreRecord>) -> VerifiedIndex {
     let document_count = u64::try_from(records.len()).unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for record in records {
         writer.add_core_record(record).unwrap();
@@ -303,7 +306,10 @@ fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
         2,
         &format!("failed while resolving {technical_identifier}"),
     );
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(cjk.clone()).unwrap();
     writer.add_core_record(identifier.clone()).unwrap();
@@ -338,7 +344,10 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
     let exact = document(&source, 1, "coveragealpha coveragebeta");
     let partial = document(&source, 2, &"coveragealpha ".repeat(64));
     let unrelated = document(&source, 3, "coveragegamma");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(partial.clone()).unwrap();
     writer.add_core_record(unrelated).unwrap();
@@ -403,7 +412,10 @@ fn coverage_tiers_materialize_each_ranked_candidate_once_without_changing_order(
 fn lexical_query_limit_fixture() -> (TempDir, VerifiedIndex) {
     let temp = tempdir().unwrap();
     let source = source("query-limits.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "bounded lexical query"))

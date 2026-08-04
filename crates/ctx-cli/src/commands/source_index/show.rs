@@ -16,6 +16,9 @@ use uuid::Uuid;
 
 use crate::{
     analytics::{count_bucket, ShowTelemetry},
+    commands::mcp_tool_call::{
+        append_mcp_tool_call_markdown, append_mcp_tool_call_text, MCP_TOOL_CALL_JSON_GUIDANCE,
+    },
     local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, OutputFormat},
     presentation_limit::{enforce_presentation_output_limit, CLI_PRESENTATION_MAX_OUTPUT_BYTES},
@@ -597,14 +600,17 @@ fn render_stream_text_event(event: &Value) -> String {
     let role = event["role"]
         .as_str()
         .unwrap_or_else(|| event["event_type"].as_str().unwrap_or("event"));
-    format!(
-        "[{}] {} {} {}\n{}\n\n",
+    let mut output = format!(
+        "[{}] {} {} {}\n",
         event["occurred_at"].as_str().unwrap_or("-"),
         role,
         event["event_type"].as_str().unwrap_or("event"),
         event["ctx_event_id"].as_str().unwrap_or("unknown"),
-        event["text"].as_str().unwrap_or_default()
-    )
+    );
+    append_mcp_tool_call_text(&mut output, event, "", MCP_TOOL_CALL_JSON_GUIDANCE);
+    output.push_str(event["text"].as_str().unwrap_or_default());
+    output.push_str("\n\n");
+    output
 }
 
 fn render_stream_markdown_header(value: &Value) -> String {
@@ -623,14 +629,19 @@ fn render_stream_markdown_event(event: &Value) -> String {
     let role = event["role"]
         .as_str()
         .unwrap_or_else(|| event["event_type"].as_str().unwrap_or("event"));
-    format!(
-        "\n## {} - {} - {}\n\nctx_event_id: `{}`\n\n{}\n",
+    let mut output = format!(
+        "\n## {} - {} - {}\n\nctx_event_id: `{}`\n\n",
         role,
         event["event_type"].as_str().unwrap_or("event"),
         event["occurred_at"].as_str().unwrap_or("-"),
         event["ctx_event_id"].as_str().unwrap_or("unknown"),
-        event["text"].as_str().unwrap_or_default()
-    )
+    );
+    if append_mcp_tool_call_markdown(&mut output, event) {
+        output.push('\n');
+    }
+    output.push_str(event["text"].as_str().unwrap_or_default());
+    output.push('\n');
+    output
 }
 
 fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usize> {

@@ -26,6 +26,17 @@ Aliases are accepted for common naming differences, for example `claude-code`, `
 
 Custom history is separate: `ctx import --input-format ctx-history-jsonl-v1 --path <file>` reads an explicit JSONL interchange file from any exporter, and history-source plugins can stream the same format from local adapter commands.
 
+Exact MCP server/tool attribution is a separate, narrower event capability.
+Supported provider import does not automatically qualify it. The complete
+41-provider route/format partition is documented in
+[`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) and its
+machine-readable
+[`capability contract`](mcp-tool-call-attribution-capabilities.json).
+Capability revision 3 exact providers are Codex, Warp, and Copilot CLI. Deep
+Agents remains generally supported through its local SQLite import, which is
+not qualified for exact attribution; its hosted trace is separately excluded
+from this local-only capability boundary.
+
 ## Location Selection
 
 For each provider and product surface, ctx applies the provider's current

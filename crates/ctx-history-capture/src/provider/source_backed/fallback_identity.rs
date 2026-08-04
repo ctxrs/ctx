@@ -350,7 +350,10 @@ mod tests {
             indexer_threads: 1,
             memory_bytes: 15_000_000,
         };
-        let mut writer = GenerationWriter::open(temp.path(), options.clone()).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), options.clone())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         writer.begin_source(source.clone()).unwrap();
         for (index, (event_id, native_event_id)) in events.iter().enumerate() {
             let sequence = u64::try_from(index).unwrap();
@@ -393,7 +396,10 @@ mod tests {
             )
             .unwrap();
         writer.commit(|_| true).unwrap();
-        let writer = GenerationWriter::open(temp.path(), options).unwrap();
+        let writer = GenerationWriter::open(temp.path(), options)
+            .unwrap()
+            .into_writer()
+            .unwrap();
         let lookup = writer.base_event_identity_lookup();
         drop(writer);
         (temp, lookup)

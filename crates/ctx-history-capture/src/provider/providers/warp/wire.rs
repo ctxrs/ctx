@@ -61,6 +61,10 @@ pub(super) fn warp_tool_name(field: u32) -> &'static str {
     }
 }
 
+pub(super) fn is_warp_tool_arm(field: u32) -> bool {
+    matches!(field, 2..=28 | 30..=32 | 34..=38)
+}
+
 pub(super) fn warp_tool_result_name(field: u32) -> &'static str {
     match field {
         2 => "run_shell_command",
@@ -104,10 +108,14 @@ pub(super) fn warp_tool_result_name(field: u32) -> &'static str {
     }
 }
 
+pub(super) fn is_warp_tool_result_arm(field: u32) -> bool {
+    matches!(field, 2..=10 | 14..=32 | 34..=36 | 38..=42)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum WarpWireValue<'a> {
     Varint(u64),
-    Fixed64,
+    Fixed64(u64),
     LengthDelimited(&'a [u8]),
     Fixed32,
 }
@@ -145,8 +153,11 @@ impl<'a> WarpWireCursor<'a> {
         let value = match wire_type {
             0 => WarpWireValue::Varint(read_varint(self.data, &mut self.position)?),
             1 => {
-                let _ = self.take(8, "fixed64")?;
-                WarpWireValue::Fixed64
+                let bytes: [u8; 8] = self
+                    .take(8, "fixed64")?
+                    .try_into()
+                    .map_err(|_| CaptureError::SystemInvariant("Warp fixed64 width changed"))?;
+                WarpWireValue::Fixed64(u64::from_le_bytes(bytes))
             }
             2 => {
                 let length =

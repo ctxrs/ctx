@@ -248,6 +248,65 @@ fn mcp_direct_result_minimal_synthetic_retains_text_and_linkage() {
     assert_eq!(native["result_metadata"]["content"][0]["type"], "text");
     assert_eq!(native["invocation"]["server"], "example");
     assert!(!serde_json::to_string(native).unwrap().contains(output));
+    assert_eq!(
+        row.mcp_tool_call.as_ref().unwrap(),
+        &ctx_history_core::McpToolCallAttribution {
+            server: "example".to_owned(),
+            tool: "read".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn versioned_mcp_terminal_results_abstain_without_dropping_the_event() {
+    for cli_version in ["0.200.0", "0.201.0", "0.202.0", "999.0.0"] {
+        let owner = format!("versioned-mcp-{cli_version}");
+        let output = format!("terminal result from {cli_version}");
+        let contents = [
+            jsonl(json!({
+                "timestamp": "2026-01-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": owner,
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "cwd": "/workspace",
+                    "source": "cli",
+                    "cli_version": cli_version
+                }
+            })),
+            jsonl(json!({
+                "timestamp": "2026-01-01T00:00:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "mcp_tool_call_end",
+                    "call_id": format!("exec-mcp-{cli_version}"),
+                    "invocation": {
+                        "server": "versioned-server",
+                        "tool": "versioned-tool",
+                        "arguments": {}
+                    },
+                    "duration": {"secs": 0, "nanos": 42},
+                    "result": {
+                        "Ok": {
+                            "content": [{"type": "text", "text": output}],
+                            "isError": false
+                        }
+                    }
+                }
+            })),
+        ]
+        .concat();
+        let (_temp, path) = write_source(&contents);
+        let (scan, sink) = scan_collect(discover_one(&path, &owner), None);
+
+        assert_eq!(scan.counters.rejected_complete_records, 0, "{cli_version}");
+        assert_eq!(sink.rows.len(), 1, "{cli_version}");
+        let row = &sink.rows[0];
+        assert_eq!(row.event_type, EventType::ToolOutput, "{cli_version}");
+        assert_eq!(row.lexical_body, output, "{cli_version}");
+        assert!(row.structured_content.is_some(), "{cli_version}");
+        assert!(row.mcp_tool_call.is_none(), "{cli_version}");
+    }
 }
 
 #[test]
@@ -332,6 +391,13 @@ fn mcp_direct_result_accepts_native_error_variants() {
     assert_eq!(sink.rows.len(), 2);
     assert_eq!(sink.rows[0].lexical_body, "tool-level failure");
     assert_eq!(sink.rows[1].lexical_body, "protocol-level failure");
+    assert!(sink.rows.iter().all(|row| {
+        row.mcp_tool_call.as_ref()
+            == Some(&ctx_history_core::McpToolCallAttribution {
+                server: "example".to_owned(),
+                tool: "read".to_owned(),
+            })
+    }));
     assert_eq!(
         sink.rows[1].structured_content.as_ref().unwrap()["provider_native_tool_result"]
             ["result_variant"],
@@ -340,6 +406,159 @@ fn mcp_direct_result_accepts_native_error_variants() {
     assert!(!serde_json::to_string(&sink.rows[1].structured_content)
         .unwrap()
         .contains("protocol-level failure"));
+}
+
+#[test]
+fn malformed_mcp_attribution_never_drops_an_ordinary_terminal_result() {
+    let oversized = "x".repeat(ctx_history_core::MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES + 1);
+    let cases = [
+        ("missing-invocation", None),
+        ("wrong-invocation", Some(json!(false))),
+        (
+            "missing-server",
+            Some(json!({"tool": "read", "arguments": {}})),
+        ),
+        (
+            "missing-tool",
+            Some(json!({"server": "example", "arguments": {}})),
+        ),
+        (
+            "wrong-server",
+            Some(json!({"server": 7, "tool": "read", "arguments": {}})),
+        ),
+        (
+            "wrong-tool",
+            Some(json!({"server": "example", "tool": ["read"], "arguments": {}})),
+        ),
+        (
+            "empty-server",
+            Some(json!({"server": "", "tool": "read", "arguments": {}})),
+        ),
+        (
+            "empty-tool",
+            Some(json!({"server": "example", "tool": "", "arguments": {}})),
+        ),
+        (
+            "oversized-server",
+            Some(json!({"server": oversized, "tool": "read", "arguments": {}})),
+        ),
+        (
+            "oversized-tool",
+            Some(json!({"server": "example", "tool": oversized, "arguments": {}})),
+        ),
+    ];
+    let mut contents = session_meta("mcp-invalid-attribution-owner");
+    for (index, (marker, invocation)) in cases.iter().enumerate() {
+        let mut payload = json!({
+            "type": "mcp_tool_call_end",
+            "call_id": format!("exec-mcp-invalid-attribution-{index}"),
+            "duration": {"secs": 0, "nanos": 42},
+            "result": {
+                "Ok": {
+                    "content": [{"type": "text", "text": marker}],
+                    "isError": false
+                }
+            }
+        });
+        if let Some(invocation) = invocation {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("invocation".to_owned(), invocation.clone());
+        }
+        contents.push_str(&jsonl(json!({
+            "timestamp": "2026-01-01T00:00:03Z",
+            "type": "event_msg",
+            "payload": payload,
+        })));
+    }
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "mcp-invalid-attribution-owner"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), cases.len());
+    assert!(sink.rows.iter().all(|row| row.mcp_tool_call.is_none()));
+    assert_eq!(
+        sink.rows
+            .iter()
+            .map(|row| row.lexical_body.as_str())
+            .collect::<Vec<_>>(),
+        cases.iter().map(|(marker, _)| *marker).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        sink.rows[1].structured_content.as_ref().unwrap()["provider_native_tool_result"]
+            ["invocation"],
+        false
+    );
+}
+
+#[test]
+fn exact_mcp_attribution_preserves_opaque_names_and_component_bound() {
+    let exact_server = "  srv__/雪\u{1}::opaque  ";
+    let exact_tool = "tool//λ__name\u{2}";
+    let max_server = "m".repeat(ctx_history_core::MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES);
+    let contents = [
+        session_meta("mcp-exact-attribution-owner"),
+        jsonl(json!({
+            "timestamp": "2026-01-01T00:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": "exec-mcp-opaque",
+                "invocation": {
+                    "server": exact_server,
+                    "tool": exact_tool,
+                    "arguments": {}
+                },
+                "duration": {"secs": 0, "nanos": 42},
+                "result": {"Ok": {"content": [{"type": "text", "text": "opaque"}]}}
+            }
+        })),
+        jsonl(json!({
+            "timestamp": "2026-01-01T00:00:04Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": "exec-mcp-max",
+                "invocation": {
+                    "server": max_server,
+                    "tool": "max-tool",
+                    "arguments": {}
+                },
+                "duration": {"secs": 0, "nanos": 43},
+                "result": {"Err": "max-bound"}
+            }
+        })),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "mcp-exact-attribution-owner"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), 2);
+    let attributed_owned_bytes = sink.rows[0].estimated_owned_bytes().unwrap();
+    let mut unattributed = sink.rows[0].clone();
+    unattributed.mcp_tool_call = None;
+    let unattributed_owned_bytes = unattributed.estimated_owned_bytes().unwrap();
+    assert!(
+        attributed_owned_bytes.saturating_sub(unattributed_owned_bytes)
+            >= exact_server.len() + exact_tool.len()
+    );
+    assert_eq!(
+        sink.rows[0].mcp_tool_call.as_ref().unwrap(),
+        &ctx_history_core::McpToolCallAttribution {
+            server: exact_server.to_owned(),
+            tool: exact_tool.to_owned(),
+        }
+    );
+    assert_eq!(
+        sink.rows[1].mcp_tool_call.as_ref().unwrap().server.len(),
+        ctx_history_core::MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
+    );
+    assert!(sink
+        .pages
+        .iter()
+        .all(|(_, bytes)| { *bytes <= MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES }));
 }
 
 #[test]
@@ -400,6 +619,159 @@ fn redacted_real_shape_fixture_retains_mcp_direct_result() {
         native["result_metadata"]["_meta"]["codex/toolSurface"]["kind"],
         "browserUse"
     );
+    assert_eq!(
+        sink.rows[0].mcp_tool_call.as_ref().unwrap(),
+        &ctx_history_core::McpToolCallAttribution {
+            server: "node_repl".to_owned(),
+            tool: "js".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn synthetic_adversarial_fixture_requires_source_unique_terminal_authority() {
+    let contents = include_str!("fixtures/mcp_tool_call_attribution_adversarial.jsonl");
+    let (_temp, path) = write_source(contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "redacted-mcp-attribution"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), 14);
+    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 10);
+    assert!(scan.counters.peak_mcp_terminal_authority_bytes > 10 * 32);
+    for marker in [
+        "AMBIGUOUS_MCP_RESULT",
+        "DUPLICATE_SAME_FIRST",
+        "DUPLICATE_SAME_SECOND",
+        "DUPLICATE_CONFLICT_FIRST",
+        "DUPLICATE_CONFLICT_SECOND",
+        "SEQUENTIAL_REUSE_FIRST",
+        "SEQUENTIAL_REUSE_SECOND",
+        "AMBIGUOUS_MCP_TERMINAL_SELECTORS",
+    ] {
+        let row = sink
+            .rows
+            .iter()
+            .find(|row| row.lexical_body == marker)
+            .unwrap_or_else(|| panic!("missing terminal marker {marker}"));
+        assert!(
+            row.mcp_tool_call.is_none(),
+            "unexpected attribution for {marker}"
+        );
+    }
+    assert_eq!(
+        sink.rows
+            .iter()
+            .filter(|row| row.mcp_tool_call.is_some())
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn malformed_same_id_mcp_terminals_abstain_before_and_after_valid_results() {
+    fn terminal(call_id: &str, duration: Value, result: Value) -> String {
+        jsonl(json!({
+            "timestamp": "2026-08-01T12:00:01Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": call_id,
+                "invocation": {"server": "example", "tool": "read", "arguments": {}},
+                "duration": duration,
+                "result": result
+            }
+        }))
+    }
+
+    fn valid_terminal(call_id: &str, marker: &str) -> String {
+        terminal(
+            call_id,
+            json!({"secs": 0, "nanos": 7}),
+            json!({"Err": marker}),
+        )
+    }
+
+    let cases = [
+        (
+            "neighbor-before",
+            "mcp_malformed_duplicate_neighbor_before",
+            true,
+        ),
+        (
+            "same-id-result-before",
+            "mcp_valid_after_malformed_result",
+            false,
+        ),
+        (
+            "same-id-duration-before",
+            "mcp_valid_after_malformed_duration",
+            false,
+        ),
+        (
+            "same-id-result-after",
+            "mcp_valid_before_malformed_result",
+            false,
+        ),
+        (
+            "same-id-duration-after",
+            "mcp_valid_before_malformed_duration",
+            false,
+        ),
+        (
+            "neighbor-after",
+            "mcp_malformed_duplicate_neighbor_after",
+            true,
+        ),
+    ];
+    let contents = [
+        session_meta("mcp-malformed-duplicate-owner"),
+        valid_terminal(cases[0].0, cases[0].1),
+        terminal(
+            cases[1].0,
+            json!({"secs": 0, "nanos": 7}),
+            json!({"Ok": {"content": "malformed_result_before_rejected"}}),
+        ),
+        valid_terminal(cases[1].0, cases[1].1),
+        terminal(
+            cases[2].0,
+            json!({"secs": "0", "nanos": 7}),
+            json!({"Err": "malformed_duration_before_rejected"}),
+        ),
+        valid_terminal(cases[2].0, cases[2].1),
+        valid_terminal(cases[3].0, cases[3].1),
+        terminal(
+            cases[3].0,
+            json!({"secs": 0, "nanos": 7}),
+            json!({"Ok": {"content": "malformed_result_after_rejected"}}),
+        ),
+        valid_terminal(cases[4].0, cases[4].1),
+        terminal(
+            cases[4].0,
+            json!({"secs": 0, "nanos": 1_000_000_000_u64}),
+            json!({"Err": "malformed_duration_after_rejected"}),
+        ),
+        valid_terminal(cases[5].0, cases[5].1),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "mcp-malformed-duplicate-owner"), None);
+
+    assert_eq!(scan.counters.malformed_records, 4);
+    assert_eq!(scan.counters.rejected_complete_records, 4);
+    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 6);
+    assert_eq!(sink.rows.len(), cases.len());
+    for (row, (call_id, marker, attributed)) in sink.rows.iter().zip(cases) {
+        assert_eq!(row.lexical_body, marker);
+        let identity = row.provider_event_identity.as_ref().unwrap();
+        assert_eq!(identity.kind.as_str(), "call_id");
+        assert_eq!(identity.value, call_id);
+        assert_eq!(row.mcp_tool_call.is_some(), attributed, "{marker}");
+        assert_eq!(
+            row.structured_content.as_ref().unwrap()["provider_native_tool_result"]
+                ["result_variant"],
+            "Err"
+        );
+    }
 }
 
 #[test]

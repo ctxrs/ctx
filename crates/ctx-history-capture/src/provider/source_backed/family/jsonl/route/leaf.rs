@@ -330,6 +330,7 @@ fn prepare_leaf(
             leaf.identity_probe.clone(),
         )
     }?;
+    reader.set_oversized_record_policy(adapter.oversized_record_policy());
 
     if reader.source_change() == JsonlSourceChange::Unchanged {
         let base = base.ok_or_else(|| {

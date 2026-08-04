@@ -2,6 +2,7 @@ package rs.ctx.agenthistory;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Canonical agent-history-v1 envelope shared by all typed responses. */
@@ -89,7 +90,11 @@ public class AgentHistoryEnvelope {
             return AgentHistoryValue.copyObject(raw);
         }
 
-        Map<String, Object> camel = new LinkedHashMap<>(AgentHistoryValue.camelizeObject(raw));
+        Map<String, Object> normalizable = raw;
+        if ("showEvent".equals(operation) || "showSession".equals(operation)) {
+            normalizable = normalizeEventPayload(operation, raw);
+        }
+        Map<String, Object> camel = new LinkedHashMap<>(AgentHistoryValue.camelizeObject(normalizable));
         Map<String, Object> fields = new LinkedHashMap<>();
         switch (operation) {
             case "status":
@@ -175,6 +180,68 @@ public class AgentHistoryEnvelope {
 
     private static Map<String, Object> eventResult(Map<String, Object> camel) {
         return pick(camel, "event", "events");
+    }
+
+    private static Map<String, Object> normalizeEventPayload(
+            String operation,
+            Map<String, Object> raw) {
+        Map<String, Object> out = new LinkedHashMap<>(raw);
+        if ("showEvent".equals(operation) && raw.containsKey("event")) {
+            out.put("event", normalizeEventRecord(raw.get("event")));
+        }
+        if (raw.containsKey("events")) {
+            out.put("events", normalizeEventRecords(raw.get("events")));
+        }
+        return out;
+    }
+
+    private static Object normalizeEventRecords(Object value) {
+        if (!(value instanceof List<?>)) {
+            return value;
+        }
+        List<Object> out = new java.util.ArrayList<>();
+        for (Object event : (List<?>) value) {
+            out.add(normalizeEventRecord(event));
+        }
+        return out;
+    }
+
+    private static Object normalizeEventRecord(Object value) {
+        Map<String, Object> event = AgentHistoryValue.objectOrNull(value);
+        if (event == null) {
+            return value;
+        }
+        boolean hasSnake = event.containsKey("mcp_tool_call");
+        boolean hasCamel = event.containsKey("mcpToolCall");
+        if (hasSnake && hasCamel) {
+            throw invalidMcpWire("duplicate outer wire aliases");
+        }
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : event.entrySet()) {
+            String key = entry.getKey();
+            if ("mcp_tool_call".equals(key) || "mcpToolCall".equals(key)) {
+                continue;
+            }
+            if ("mcpToolCall".equals(AgentHistoryValue.snakeToCamel(key))) {
+                throw invalidMcpWire("outer member " + key + " collides with canonical mcpToolCall");
+            }
+            out.put(key, entry.getValue());
+        }
+        if (hasSnake || hasCamel) {
+            Object call = hasSnake ? event.get("mcp_tool_call") : event.get("mcpToolCall");
+            out.put("mcpToolCall", McpToolCall.from(call).asMap());
+        }
+        return out;
+    }
+
+    private static CtxAgentHistoryException.Protocol invalidMcpWire(String message) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("field", "mcpToolCall");
+        return new CtxAgentHistoryException.Protocol(
+                "agent-history-v1 MCP tool call " + message,
+                details,
+                null);
     }
 
     private static Map<String, Object> pick(Map<String, Object> raw, String... keys) {

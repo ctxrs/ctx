@@ -6,18 +6,18 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
-use ctx_history_core::{core_record_contract_fingerprint, CORE_RECORD_VERSION, IDENTITY_VERSION};
+use ctx_history_core::{CORE_RECORD_VERSION, IDENTITY_VERSION};
 use serde::{Deserialize, Serialize};
 use tantivy::{directory::Directory, IndexMeta, Searcher};
 use uuid::Uuid;
 
 use crate::{
-    current_source_generation_policy_hash,
+    classify_core_contract_generation, current_source_generation_policy_hash,
     durable_directory::DurableMmapDirectory,
     identity::{is_generation_id, sha256_hex},
-    CommitPayload, GenerationManifest, IndexError, Result, COMMIT_PAYLOAD_VERSION,
-    GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
-    MANIFEST_DIRECTORY, MAX_PUBLICATION_METADATA_BYTES,
+    CommitPayload, CoreContractGeneration, GenerationManifest, IndexError, Result,
+    COMMIT_PAYLOAD_VERSION, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
+    LEXICAL_SCHEMA_VERSION, MANIFEST_DIRECTORY, MAX_PUBLICATION_METADATA_BYTES,
 };
 
 const MAX_PUBLICATION_METADATA_ENCODED_BYTES: usize =
@@ -29,6 +29,7 @@ pub(crate) struct LoadedPublication {
     pub(crate) generation_id: String,
     pub(crate) manifest: GenerationManifest,
     pub(crate) metadata: Option<Arc<[u8]>>,
+    pub(crate) core_contract: CoreContractGeneration,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -88,13 +89,8 @@ pub(crate) fn load_publication_for_metas(
             core_record: manifest.core_record_version,
         });
     }
-    let expected_core_fingerprint = core_record_contract_fingerprint();
-    if manifest.core_record_contract_fingerprint != expected_core_fingerprint {
-        return Err(IndexError::CoreRecordContractMismatch {
-            expected: expected_core_fingerprint,
-            actual: manifest.core_record_contract_fingerprint,
-        });
-    }
+    let core_contract =
+        classify_core_contract_generation(&manifest.core_record_contract_fingerprint)?;
     let expected_policy_hash = current_source_generation_policy_hash()?;
     if manifest.policy_schema_hash != expected_policy_hash {
         return Err(IndexError::GenerationPolicyMismatch {
@@ -109,7 +105,45 @@ pub(crate) fn load_publication_for_metas(
         metadata: payload
             .publication_metadata
             .map(|metadata| Arc::from(metadata.into_boxed_slice())),
+        core_contract,
     })
+}
+
+/// Classifies only the Core fingerprint carried by an otherwise digest-bound,
+/// canonical manifest. The writer uses this before deciding whether the
+/// ordinary current-generation rebuild rules or the narrow predecessor bridge
+/// owns the open.
+pub(crate) fn load_core_contract_for_metas(
+    root: &Path,
+    metas: &IndexMeta,
+) -> Result<CoreContractGeneration> {
+    let payload = decode_commit_payload(
+        metas
+            .payload
+            .as_deref()
+            .ok_or(IndexError::MissingCommitPayload)?,
+    )?;
+    let bytes =
+        fs::read(manifest_path(root, &payload.generation_id)).map_err(|error| {
+            match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    IndexError::MissingManifest(payload.generation_id.clone())
+                }
+                _ => IndexError::Io(error),
+            }
+        })?;
+    let actual = sha256_hex(&bytes);
+    if actual != payload.generation_id {
+        return Err(IndexError::ManifestDigestMismatch {
+            expected: payload.generation_id,
+            actual,
+        });
+    }
+    let manifest: GenerationManifest = serde_json::from_slice(&bytes)?;
+    if serde_json::to_vec(&manifest)? != bytes {
+        return Err(IndexError::NonCanonicalManifest);
+    }
+    classify_core_contract_generation(&manifest.core_record_contract_fingerprint)
 }
 
 pub(crate) fn canonical_commit_payload(

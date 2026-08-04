@@ -37,7 +37,10 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
         "How should an embedded <environment_context> marker be rendered?",
     );
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for document in [
         third.clone(),
@@ -192,7 +195,10 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
     subagent.is_primary = false;
     subagent.validate_contract().unwrap();
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for record in [target.clone(), other.clone(), subagent.clone()] {
         writer.add_core_record(record).unwrap();
@@ -262,7 +268,10 @@ fn semantic_first_pages_filter_the_neutral_core_order() {
     const INELIGIBLE_EVENTS: u64 = 2_048;
     let temp = tempdir().unwrap();
     let first_source = source("semantic-bounded-first-page.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(first_source.clone()).unwrap();
     for sequence in 1..=INELIGIBLE_EVENTS {
         let mut event = document(&first_source, sequence, "irrelevant assistant message");
@@ -292,8 +301,10 @@ fn semantic_first_pages_filter_the_neutral_core_order() {
 
     let empty_temp = tempdir().unwrap();
     let empty_source = source("semantic-bounded-empty-page.jsonl");
-    let mut empty_writer =
-        GenerationWriter::open(empty_temp.path(), WriterOptions::default()).unwrap();
+    let mut empty_writer = GenerationWriter::open(empty_temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     empty_writer.begin_source(empty_source.clone()).unwrap();
     for sequence in 1..=INELIGIBLE_EVENTS {
         let mut event = document(&empty_source, sequence, "irrelevant assistant message");
@@ -324,7 +335,10 @@ fn semantic_policy_count_tracks_unchanged_core_across_append_retain_and_delete()
     let mut first_assistant = document(&source, 2, "first assistant message");
     first_assistant.role = Some("assistant".to_owned());
 
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first.add_core_record(first_user).unwrap();
     first.add_core_record(first_assistant).unwrap();
@@ -344,7 +358,10 @@ fn semantic_policy_count_tracks_unchanged_core_across_append_retain_and_delete()
     second_user.workspace = Some("append".to_owned());
     let mut second_assistant = document(&source, 4, "second assistant message");
     second_assistant.role = Some("assistant".to_owned());
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
     append.add_core_record(second_assistant).unwrap();
     append.add_core_record(second_user).unwrap();
@@ -369,12 +386,18 @@ fn semantic_policy_count_tracks_unchanged_core_across_append_retain_and_delete()
     );
 
     let retained_certificate = append_receipt.manifest().sources[0].clone();
-    let mut retain = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut retain = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     retain.retain_source(retained_certificate).unwrap();
     let retain_receipt = retain.commit(|_| true).unwrap();
     assert_eq!(retain_receipt.generation_id, append_receipt.generation_id);
 
-    let mut deletion = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deletion = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let (proof, inventory) = deletion_evidence(&source, 3);
     deletion.delete_source(proof, inventory).unwrap();
     let _deletion_receipt = deletion.commit(|_| true).unwrap();
@@ -394,7 +417,10 @@ fn semantic_pages_select_addresses_before_decoding_and_bound_retained_core_bytes
     let source = source("semantic-address-first.jsonl");
     let large_body = format!("x{}", " ".repeat(512 * 1024 - 1));
     let mut expected = Vec::new();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for sequence in 1..=INELIGIBLE_EVENTS {
         let mut event = document(&source, sequence, "ineligible assistant message");
@@ -453,6 +479,8 @@ fn semantic_event_pages_handle_empty_final_and_generation_bound_cursors() {
     let temp = tempdir().unwrap();
     GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()
+        .into_writer()
+        .unwrap()
         .commit(|_| true)
         .unwrap();
     let empty = VerifiedIndex::open(temp.path()).unwrap();
@@ -466,7 +494,10 @@ fn semantic_event_pages_handle_empty_final_and_generation_bound_cursors() {
 
     let source = source("final-page.jsonl");
     let expected = document(&source, 1, "only eligible event");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(expected.clone()).unwrap();
     writer.certify_source(certificate(&source, 1, 1)).unwrap();
@@ -519,7 +550,10 @@ fn semantic_event_pages_keep_old_pins_isolated_from_rewrite_and_deletion() {
     let source = source("rewrite-delete.jsonl");
     let old_first = document(&source, 1, "old first event");
     let old_second = document(&source, 2, "old second event");
-    let mut first_writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first_writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first_writer.begin_source(source.clone()).unwrap();
     first_writer.add_core_record(old_second.clone()).unwrap();
     first_writer.add_core_record(old_first.clone()).unwrap();
@@ -537,8 +571,10 @@ fn semantic_event_pages_keep_old_pins_isolated_from_rewrite_and_deletion() {
     let mut rewritten_first = document(&source, 1, "rewritten first event");
     rewritten_first.workspace = Some("rewritten-workspace".to_owned());
     let replacement = document(&source, 3, "replacement third event");
-    let mut replacement_writer =
-        GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement_writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement_writer.begin_source(source.clone()).unwrap();
     replacement_writer
         .add_core_record(replacement.clone())
@@ -579,8 +615,10 @@ fn semantic_event_pages_keep_old_pins_isolated_from_rewrite_and_deletion() {
         Err(IndexError::SemanticEventCursorGenerationMismatch { .. })
     ));
 
-    let mut deletion_writer =
-        GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deletion_writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let (deletion, inventory) = deletion_evidence(&source, 3);
     deletion_writer.delete_source(deletion, inventory).unwrap();
     deletion_writer.commit(|_| true).unwrap();

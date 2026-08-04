@@ -53,6 +53,11 @@
     },
     {
       "classification": "platform-manual",
+      "label": "//crates/ctx-history-index:migration_release_benchmark",
+      "reason": "Requires a controlled Linux host and explicit performance-threshold enforcement."
+    },
+    {
+      "classification": "platform-manual",
       "label": "//scripts/source-backed-recovery:actual_bounded_filesystem_enospc_preserves_previous_generation",
       "reason": "Requires a privileged Linux tmpfs and real bounded filesystem exhaustion."
     }

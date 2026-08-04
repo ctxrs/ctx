@@ -45,98 +45,42 @@ public protocol CommandRunner: Sendable {
 }
 
 public struct ProcessCommandRunner: CommandRunner {
-    public init() {}
+    private static let defaultMaxRetainedStdoutBytes = 64 * 1024 * 1024
+    private static let defaultMaxRetainedStderrBytes = 64 * 1024
 
-    public func run(_ request: CommandRequest) throws -> CommandResult {
-        let process = Process()
-        if request.command.contains("/") {
-            process.executableURL = URL(fileURLWithPath: request.command)
-            process.arguments = request.arguments
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = [request.command] + request.arguments
-        }
-        if let cwd = request.cwd {
-            process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        }
-        process.environment = ProcessInfo.processInfo.environment.merging(request.env) { _, new in new }
+    private let maxRetainedStdoutBytes: Int
+    private let maxRetainedStderrBytes: Int
 
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        do {
-            try process.run()
-        } catch {
-            throw CtxAgentHistorySDKError(
-                code: .backendUnavailable,
-                message: "failed to execute ctx CLI",
-                details: .object(["command": .array(([request.command] + request.arguments).map { .string($0) })]),
-                cause: String(describing: error),
-                command: [request.command] + request.arguments,
-                exitCode: -1
-            )
-        }
-
-        let stdoutData = LockedData()
-        let stderrData = LockedData()
-        let pipeReaders = DispatchGroup()
-        pipeReaders.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stdoutData.store(stdout.fileHandleForReading.readDataToEndOfFile())
-            pipeReaders.leave()
-        }
-        pipeReaders.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderrData.store(stderr.fileHandleForReading.readDataToEndOfFile())
-            pipeReaders.leave()
-        }
-
-        if let timeout = request.timeout {
-            let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-            if process.isRunning {
-                process.terminate()
-                process.waitUntilExit()
-                pipeReaders.wait()
-                throw CtxAgentHistorySDKError(
-                    code: .timeout,
-                    message: "ctx CLI timed out",
-                    retryable: true,
-                    command: [request.command] + request.arguments,
-                    exitCode: -1
-                )
-            }
-        }
-
-        process.waitUntilExit()
-        pipeReaders.wait()
-        return CommandResult(
-            stdout: stdoutData.load(),
-            stderr: stderrData.load(),
-            exitCode: process.terminationStatus
+    public init() {
+        self.init(
+            maxRetainedStdoutBytes: Self.defaultMaxRetainedStdoutBytes,
+            maxRetainedStderrBytes: Self.defaultMaxRetainedStderrBytes
         )
     }
-}
 
-private final class LockedData: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-
-    func store(_ newValue: Data) {
-        lock.lock()
-        data = newValue
-        lock.unlock()
+    init(maxRetainedStdoutBytes: Int, maxRetainedStderrBytes: Int) {
+        self.maxRetainedStdoutBytes = max(0, maxRetainedStdoutBytes)
+        self.maxRetainedStderrBytes = max(0, maxRetainedStderrBytes)
     }
 
-    func load() -> Data {
-        lock.lock()
-        let value = data
-        lock.unlock()
-        return value
+    public func run(_ request: CommandRequest) throws -> CommandResult {
+        #if os(macOS)
+        return try DarwinCommandExecution(
+            maxRetainedStdoutBytes: maxRetainedStdoutBytes,
+            maxRetainedStderrBytes: maxRetainedStderrBytes
+        ).run(request)
+        #else
+        let command = [request.command] + request.arguments
+        throw CtxAgentHistorySDKError(
+            code: .notSupported,
+            message: "the ctx Swift local adapter requires macOS process-group containment",
+            details: .object([
+                "platform": .string(ProcessInfo.processInfo.operatingSystemVersionString)
+            ]),
+            command: command,
+            exitCode: -1
+        )
+        #endif
     }
 }
 

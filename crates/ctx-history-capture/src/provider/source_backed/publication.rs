@@ -412,7 +412,19 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
 
     let mut prepared_successful_route_outcomes = None;
     let (commit, applied_removals, commit_duration, base_route_content, verified_publication) = {
-        let mut writer = GenerationWriter::open(index_root, writer_options.clone())?;
+        let open = GenerationWriter::open(index_root, writer_options.clone())?;
+        let mut writer = match open {
+            GenerationWriterOpenOutcome::Ready(writer)
+            | GenerationWriterOpenOutcome::RecoveredCommittedMigration { writer, .. } => writer,
+            GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired { recovery } => {
+                return Err(
+                    SourceBackedCoordinatorError::CommittedPredecessorMigrationRecovery {
+                        generation_id: recovery.generation_id().to_owned(),
+                        detail: recovery.detail().to_owned(),
+                    },
+                );
+            }
+        };
         let base_route_content = source_route_content_fingerprints(writer.base_manifest());
         let base_route_ids = writer
             .base_manifest()

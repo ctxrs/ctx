@@ -17,6 +17,19 @@ record-size and content policies. The public source formats below identify
 discovery/import source shapes; stored event metadata may use the corresponding
 per-file adapter format, such as
 `codex_session_jsonl` for files discovered under `codex_session_jsonl_tree`.
+
+General history support does not imply exact MCP tool-call attribution. That
+event-local capability has its own provider + route + source format + format
+version authority in
+[`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
+Capability revision 3 exact providers are Codex, Warp, and Copilot CLI. The
+complete evidence matrix contains 43 base routes and 46 capability lanes:
+three exact, 42 not-qualified, and one excluded. The Deep Agents hosted trace
+is excluded from the local-only boundary, while its local SQLite history import
+remains Supported but not qualified for exact attribution. See
+[`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for absence,
+privacy, migration, and retrieval semantics.
+
 The public
 support matrix is:
 

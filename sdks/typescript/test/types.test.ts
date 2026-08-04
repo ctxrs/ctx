@@ -2,6 +2,7 @@ import {
   type ImportEnvelope,
   type JsonValue,
   type AgentHistoryEnvelope,
+  type McpToolCall,
   type SearchBackendMode,
   type SearchEnvelope,
   type ShowEventEnvelope,
@@ -84,6 +85,19 @@ expectType<boolean | undefined>(shown.event.events[0]!.content?.complete);
 expectType<"selected" | "redacted" | "omitted" | undefined>(
   shown.event.events[0]!.content?.policyStatus,
 );
+expectType<string | undefined>(shown.event.events[0]!.mcpToolCall?.server);
+expectType<string | undefined>(shown.event.events[0]!.mcpToolCall?.tool);
+const exactMcpToolCall: McpToolCall = {
+  server: "mcp-サーバー-🦀",
+  tool: "検索/工具/🛠️",
+};
+expectType<McpToolCall>(exactMcpToolCall);
+// @ts-expect-error MCP tool calls are closed to exactly server and tool.
+const extendedMcpToolCall: McpToolCall = { server: "server", tool: "tool", futureLabel: true };
+expectType<McpToolCall>(extendedMcpToolCall);
+// @ts-expect-error MCP tool calls require both server and tool.
+const incompleteMcpToolCall: McpToolCall = { server: "only-server" };
+expectType<McpToolCall>(incompleteMcpToolCall);
 
 const shownSession = await client.showSession("22222222-2222-4222-8222-222222222222");
 expectType<string | null | undefined>(shownSession.session.session?.providerSessionId);

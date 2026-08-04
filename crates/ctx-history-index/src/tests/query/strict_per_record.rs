@@ -11,7 +11,10 @@ fn budgets(records: usize) -> (CoreEventPageBudget, CoreEventPageBudget) {
 
 fn indexed_records(source: &SourceKey, records: &[CoreRecord]) -> (TempDir, VerifiedIndex) {
     let temp = tempdir().unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for record in records {
         writer.add_core_record(record.clone()).unwrap();
