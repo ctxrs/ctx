@@ -267,8 +267,8 @@ fn replacement_reuses_missing_prior_repository_certificate_and_deletion_removes_
     replacement.commit(|_| true).unwrap();
     assert_eq!(
         crate::publication::verification_activity(),
-        (2, 0),
-        "multiple reuses add one final candidate checksum without a full logical replay"
+        (2, 1),
+        "multiple reuses add one final exhaustive candidate verification without per-record replay"
     );
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
