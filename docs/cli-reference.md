@@ -748,6 +748,7 @@ ctx search "build failure"
 ctx search "storage layout" --provider codex
 ctx search "retry handling" --workspace checkout --since 60d
 ctx search "tool output" --event-type tool_output
+ctx search "permission denied" --content-scope outputs
 ctx search --file crates/foo/src/lib.rs
 ctx search "token budget" --refresh off
 ctx search "signed metadata" --term checksum --term release
@@ -797,6 +798,20 @@ ahead of partial matches. Repeat
 `--term <query-or-keyword>` when you want to broaden a search across several
 related queries or keywords and merge the ranked results; `--term` is OR-style
 broadening, not a must-include filter.
+`--content-scope all|transcript|calls|outputs` selects a searchable event class
+at query time. Omission resolves to `all` and is identical to explicitly
+passing `all`. In `all`, lexical class weights are `message` 1.0, `summary`
+0.9, `tool_call` and `command_started` 0.8, `tool_output`, `command_output`, and
+`command_finished` 0.6, and other or future searchable events 0.8.
+`transcript` searches messages at 1.0 and summaries at 0.9; `calls` searches
+only tool calls and command starts at ordinary lexical strength; `outputs`
+searches only tool outputs, command outputs, and command finishes at ordinary
+lexical strength. It does not add a diagnostic boost or collapse duplicate
+events. `--content-scope` conflicts unconditionally with `--event-type`.
+`all` and `transcript` retain normal semantic/hybrid behavior. Since the
+semantic projection contains transcript messages, hybrid `calls` and `outputs`
+requests report a lexical fallback, while semantic-only requests for those
+scopes fail with a typed unsupported-scope error.
 JSON echoes the normalized positional/`--term` alternatives in `query`, trims
 surrounding whitespace, and joins nonempty alternatives with ` OR `. Scoped
 follow-up commands preserve the positional and repeatable-term argument shape
@@ -847,6 +862,8 @@ Filters:
 - `--event-type <event-type>`, one of `message`, `tool_call`, `tool_output`,
   `command_started`, `command_output`, `command_finished`, `file_touched`,
   `vcs_change`, `artifact`, `summary`, or `notice`;
+- `--content-scope all|transcript|calls|outputs`, a class-aware query-time
+  selection that cannot be combined with `--event-type`;
 - `--file <path>`, indexed touched-file path metadata, not the current
   filesystem;
 - `--session <ctx-session-id-or-prefix>`, for dense event results within one session;
@@ -870,7 +887,10 @@ output; multiword IDs may be snake_case, such as
 
 Lexical matching indexes the policy-selected meaningful body. Search serializes
 the indexed Core hit associated with the match; show/locate presentation reads
-the complete policy-selected record and source identity stored in Core.
+the complete policy-selected record and source identity stored in Core. Content
+scope changes neither retained bodies nor the Core/index schema and requires no
+rebuild. Search JSON always reports the resolved selection as
+`filters.content_scope`, including `all` when the option was omitted.
 
 Default daemon maintenance owns provider/plugin refresh, immutable candidate
 construction, atomic lexical publication, source discovery state, and semantic

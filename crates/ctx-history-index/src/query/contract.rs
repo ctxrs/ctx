@@ -4,8 +4,9 @@ use super::*;
 ///
 /// Raw admission happens before analyzer lookup or query construction. The
 /// analyzed-token ceiling bounds coverage ranking to at most 32 Tantivy search
-/// tiers and 1,024 term-query nodes. Empty alternatives still count because
-/// callers must not turn repeated empty inputs into unbounded pre-search work.
+/// tiers and 1,024 body term-query nodes plus bounded event-class postings. Empty alternatives
+/// still count because callers must not turn repeated empty inputs into
+/// unbounded pre-search work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexicalQueryLimits {
     /// Maximum aggregate UTF-8 bytes across all supplied alternatives.
@@ -451,6 +452,31 @@ pub enum AgentScope {
     Primary,
 }
 
+/// Event-content classes eligible for one search request.
+///
+/// `All` retains every indexed event type, including future types unknown to
+/// this query implementation. The narrower variants select only their named
+/// stable event classes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchContentScope {
+    #[default]
+    All,
+    Transcript,
+    Calls,
+    Outputs,
+}
+
+impl SearchContentScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Transcript => "transcript",
+            Self::Calls => "calls",
+            Self::Outputs => "outputs",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExcludedSessionTree {
     pub provider: String,
@@ -472,6 +498,7 @@ pub struct EventSearchFilters {
     pub branch: Option<String>,
     pub workspace: Option<String>,
     pub since_unix_ms: Option<i64>,
+    pub content_scope: SearchContentScope,
     pub event_type: Option<String>,
     pub role: Option<String>,
     pub agent_type: Option<String>,
@@ -481,6 +508,15 @@ pub struct EventSearchFilters {
 }
 
 impl EventSearchFilters {
+    pub(super) fn validate_content_scope(&self) -> Result<()> {
+        if self.content_scope != SearchContentScope::All && self.event_type.is_some() {
+            return Err(IndexError::ContentScopeEventTypeConflict {
+                scope: self.content_scope.as_str(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn matches_source_identity(&self, event: &EventRecord) -> bool {
         if !self.has_source_identity_filter() {
             return true;

@@ -12,6 +12,7 @@ from .config import HostedConfig, LocalConfig
 from .errors import (
     CtxAgentHistoryError,
     CtxAgentHistoryProtocolError,
+    CtxAgentHistoryValidationError,
     HostedTransportNotImplementedError,
 )
 from .agent_history_v1 import (
@@ -30,6 +31,7 @@ from .types import (
     InitResponse,
     JsonObject,
     SearchBackendMode,
+    SearchContentScope,
     SearchResponse,
     ShowEventResponse,
     ShowSessionResponse,
@@ -46,6 +48,28 @@ class _DuplicateJSONMemberError(ValueError):
 
 class _NonFiniteJSONConstantError(ValueError):
     pass
+
+
+def _validate_search_class_filters(
+    *,
+    content_scope: Optional[SearchContentScope],
+    event_type: Optional[str],
+) -> None:
+    if content_scope is not None and content_scope not in (
+        "all",
+        "transcript",
+        "calls",
+        "outputs",
+    ):
+        raise CtxAgentHistoryValidationError(
+            "search content_scope must be one of all, transcript, calls, outputs",
+            details={"content_scope": content_scope},
+        )
+    if content_scope is not None and event_type is not None:
+        raise CtxAgentHistoryValidationError(
+            "search content_scope and event_type are mutually exclusive",
+            details={"content_scope": content_scope, "event_type": event_type},
+        )
 
 
 def _reject_duplicate_object_pairs(pairs: Sequence[tuple[str, Any]]) -> JsonObject:
@@ -102,6 +126,7 @@ class AgentHistoryTransport(Protocol):
         provider: Optional[str] = None,
         workspace: Optional[str] = None,
         since: Optional[str] = None,
+        content_scope: Optional[SearchContentScope] = None,
         event_type: Optional[str] = None,
         file: Optional[str] = None,
         session: Optional[str] = None,
@@ -237,6 +262,7 @@ class LocalCliAdapter:
         provider: Optional[str] = None,
         workspace: Optional[str] = None,
         since: Optional[str] = None,
+        content_scope: Optional[SearchContentScope] = None,
         event_type: Optional[str] = None,
         file: Optional[str] = None,
         session: Optional[str] = None,
@@ -250,6 +276,7 @@ class LocalCliAdapter:
         refresh: Optional[str] = None,
         include_current_session: bool = False,
     ) -> SearchResponse:
+        _validate_search_class_filters(content_scope=content_scope, event_type=event_type)
         validate_search_intent(query=query, terms=terms, file=file)
         args = ["search", "--format=json"]
         if query is not None:
@@ -257,6 +284,7 @@ class LocalCliAdapter:
         _extend_option(args, "--provider", provider)
         _extend_option(args, "--workspace", workspace)
         _extend_option(args, "--since", since)
+        _extend_option(args, "--content-scope", content_scope)
         _extend_option(args, "--event-type", event_type)
         _extend_option(args, "--file", file)
         _extend_option(args, "--session", session)

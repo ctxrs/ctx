@@ -711,6 +711,8 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Filter to recent history, as RFC3339 or a day window like 30d",
                 "--include-subagents",
                 "Include subagent sessions",
+                "--content-scope <CONTENT_SCOPE>",
+                "Search content scope: all, transcript, calls, or outputs",
                 "--event-type <EVENT_TYPE>",
                 "Filter by event type:",
                 "--file <FILE>",

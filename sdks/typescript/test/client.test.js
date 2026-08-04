@@ -312,6 +312,53 @@ test("omits semantic search override flags when unset", async () => {
 
   assert.equal(calls[0].args.includes("--backend"), false);
   assert.equal(calls[0].args.includes("--semantic-weight"), false);
+  assert.equal(calls[0].args.includes("--content-scope"), false);
+});
+
+test("forwards exactly one class-aware search content scope", async () => {
+  const { client, calls } = mockClient(() => JSON.stringify({ query: "tool calls", results: [] }));
+
+  await client.search("tool calls", { contentScope: "calls" });
+
+  const args = calls[0].args;
+  assert.equal(args.filter((arg) => arg === "--content-scope").length, 1);
+  assert.equal(args[args.indexOf("--content-scope") + 1], "calls");
+});
+
+test("rejects content scope with event type before invoking CLI", async () => {
+  const { client, calls } = mockClient(() => {
+    throw new Error("runner should not be called");
+  });
+
+  await assert.rejects(
+    () => client.search("messages", { contentScope: "all", eventType: "message" }),
+    (error) =>
+      error instanceof CtxValidationError &&
+      error.code === "CTX_VALIDATION_ERROR" &&
+      error.message === "search contentScope and eventType are mutually exclusive" &&
+      error.details.contentScope === "all" &&
+      error.details.eventType === "message",
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("rejects an invalid content scope before invoking CLI", async () => {
+  const { client, calls } = mockClient(() => {
+    throw new Error("runner should not be called");
+  });
+
+  for (const contentScope of ["messages", "All", "outputs ", 1, {}]) {
+    await assert.rejects(
+      () => client.search("messages", { contentScope }),
+      (error) =>
+        error instanceof CtxValidationError &&
+        error.code === "CTX_VALIDATION_ERROR" &&
+        error.message ===
+          "search contentScope must be one of all, transcript, calls, outputs" &&
+        error.details.contentScope === contentScope,
+    );
+  }
+  assert.equal(calls.length, 0);
 });
 
 test("rejects search without query, term, or file before invoking CLI", async () => {

@@ -9,7 +9,8 @@
   "search": {
     "query": "no matches",
     "filters": {
-      "provider": "codex"
+      "provider": "codex",
+      "contentScope": "all"
     },
     "freshness": {
       "mode": "off",

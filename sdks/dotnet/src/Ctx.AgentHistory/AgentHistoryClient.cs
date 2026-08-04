@@ -68,6 +68,7 @@ public sealed class AgentHistoryClient
     {
         options ??= new SearchOptions();
         RequireSearchIntent(options);
+        RequireCompatibleSearchFilters(options);
         var args = new List<string> { "search" };
         if (!string.IsNullOrWhiteSpace(options.Query))
         {
@@ -93,6 +94,10 @@ public sealed class AgentHistoryClient
         if (options.IncludeSubagents)
         {
             args.Add("--include-subagents");
+        }
+        if (options.ContentScope is { } contentScope)
+        {
+            AddOption(args, "--content-scope", SearchContentScopeValue(contentScope));
         }
         AddOption(args, "--event-type", options.EventType);
         AddOption(args, "--file", options.File);
@@ -232,6 +237,28 @@ public sealed class AgentHistoryClient
         }
 
         throw new CtxAgentHistoryValidationException("search requires a query, term, or file option");
+    }
+
+    private static void RequireCompatibleSearchFilters(SearchOptions options)
+    {
+        if (options.ContentScope is not null && !string.IsNullOrWhiteSpace(options.EventType))
+        {
+            throw new CtxAgentHistoryValidationException(
+                "search content scope and event type are mutually exclusive");
+        }
+    }
+
+    private static string SearchContentScopeValue(SearchContentScope contentScope)
+    {
+        return contentScope switch
+        {
+            SearchContentScope.All => "all",
+            SearchContentScope.Transcript => "transcript",
+            SearchContentScope.Calls => "calls",
+            SearchContentScope.Outputs => "outputs",
+            _ => throw new CtxAgentHistoryValidationException(
+                "search content scope must be one of all, transcript, calls, or outputs"),
+        };
     }
 
     private static void RequireValue(string value, string name)

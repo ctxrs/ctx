@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ctx_history_core::EventType;
+use ctx_history_index::SearchContentScope;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -85,6 +86,24 @@ pub(super) fn optional_search_backend(
     }
 }
 
+pub(super) fn optional_content_scope(
+    arguments: &Value,
+    key: &str,
+) -> Result<Option<SearchContentScope>> {
+    let Some(value) = optional_string(arguments, key)? else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "all" => Ok(Some(SearchContentScope::All)),
+        "transcript" => Ok(Some(SearchContentScope::Transcript)),
+        "calls" => Ok(Some(SearchContentScope::Calls)),
+        "outputs" => Ok(Some(SearchContentScope::Outputs)),
+        _ => Err(invalid_tool_request(
+            "content_scope must be one of all, transcript, calls, outputs",
+        )),
+    }
+}
+
 pub(super) fn allowed_tool_arguments(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "status" | "sources" | "pro_status" => Some(&[]),
@@ -100,6 +119,7 @@ pub(super) fn allowed_tool_arguments(name: &str) -> Option<&'static [&'static st
             "since",
             "primary_only",
             "include_subagents",
+            "content_scope",
             "event_type",
             "file",
             "session",

@@ -112,6 +112,7 @@ public final class AgentHistoryOptions {
         private boolean primaryOnly;
         private boolean includeSubagents;
         private String eventType;
+        private SearchContentScope contentScope;
         private String file;
         private String session;
         private boolean events;
@@ -160,6 +161,10 @@ public final class AgentHistoryOptions {
 
         public String eventType() {
             return eventType;
+        }
+
+        public SearchContentScope contentScope() {
+            return contentScope;
         }
 
         public String file() {
@@ -241,6 +246,11 @@ public final class AgentHistoryOptions {
 
         public Search eventType(String eventType) {
             this.eventType = eventType;
+            return this;
+        }
+
+        public Search contentScope(SearchContentScope contentScope) {
+            this.contentScope = contentScope;
             return this;
         }
 

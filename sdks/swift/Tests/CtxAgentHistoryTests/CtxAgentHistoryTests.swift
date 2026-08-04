@@ -167,6 +167,57 @@ final class CtxAgentHistoryTests: XCTestCase {
         )
     }
 
+    func testSearchContentScopeValuesAreClosed() {
+        XCTAssertEqual(
+            SearchContentScope.allCases.map(\.rawValue),
+            ["all", "transcript", "calls", "outputs"]
+        )
+        XCTAssertNil(SearchContentScope(rawValue: "messages"))
+    }
+
+    func testSearchForwardsContentScopeOnce() throws {
+        let runner = CapturingRunner { _ in CommandResult(stdout: #"{"results":[]}"#) }
+        let client = AgentHistoryClient(
+            adapter: LocalCLIAdapter(dataRoot: "/tmp/ctx-sdk-test", runner: runner)
+        )
+
+        _ = try client.search(
+            "agent history",
+            options: SearchOptions(contentScope: .calls)
+        )
+
+        XCTAssertEqual(
+            runner.requests[0].arguments,
+            [
+                "--data-root", "/tmp/ctx-sdk-test",
+                "search", "agent history",
+                "--content-scope", "calls",
+                "--format=json"
+            ]
+        )
+        XCTAssertEqual(
+            runner.requests[0].arguments.filter { $0 == "--content-scope" }.count,
+            1
+        )
+    }
+
+    func testSearchRejectsContentScopeEventTypeConflictBeforeTransport() throws {
+        let runner = CapturingRunner { _ in CommandResult(stdout: #"{"results":[]}"#) }
+        let client = AgentHistoryClient(
+            adapter: LocalCLIAdapter(dataRoot: "/tmp/ctx-sdk-test", runner: runner)
+        )
+
+        XCTAssertThrowsError(
+            try client.search(
+                "agent history",
+                options: SearchOptions(eventType: "message", contentScope: .all)
+            )
+        ) { error in
+            XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .invalidRequest)
+        }
+        XCTAssertTrue(runner.requests.isEmpty)
+    }
+
     func testWrapsShowCommands() throws {
         let runner = CapturingRunner { _ in CommandResult(stdout: #"{"events":[]}"#) }
         let client = AgentHistoryClient(

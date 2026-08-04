@@ -18,6 +18,7 @@ Operation = Literal[
 ]
 BackendKind = Literal["local", "hosted"]
 SearchBackendMode = Literal["hybrid", "semantic", "lexical"]
+SearchContentScope = Literal["all", "transcript", "calls", "outputs"]
 CoreContentPolicyStatus = Literal["selected", "redacted", "omitted"]
 
 

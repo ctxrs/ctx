@@ -31,6 +31,27 @@ fixed documented count. Core tools include:
 - `query_events`, read one bounded deterministic page selected from normalized
   Core events.
 
+The `search` tool accepts `content_scope` with the exact values `all`,
+`transcript`, `calls`, or `outputs`. Omission resolves to `all`, and successful
+search `structuredContent` always reports that resolved value in
+`filters.content_scope`. `content_scope` conflicts unconditionally with the
+exact `event_type` input.
+
+The class mapping matches CLI search: `all` weights messages at 1.0, summaries
+at 0.9, tool calls and command starts at 0.8, tool outputs, command outputs,
+and command finishes at 0.6, and other or future searchable events at 0.8.
+`transcript` keeps the message/summary weights; `calls` selects only tool calls
+and command starts at ordinary lexical strength; `outputs` selects only tool
+outputs, command outputs, and command finishes at ordinary lexical strength.
+This selection is query-time only. It does not change complete retained/indexed
+bodies, require a Core or index rebuild, infer diagnostic importance, or
+collapse duplicate events.
+
+Because the semantic projection contains transcript messages, `all` and
+`transcript` retain normal semantic/hybrid behavior. `calls` and `outputs` use
+lexical retrieval for a hybrid request and report the typed fallback in search
+metadata; semantic-only requests for those scopes fail as unsupported.
+
 `query_events` accepts the same typed identity, relationship, source, role,
 event, workspace/file, chronology, order, and content-projection inputs as
 `ctx list events`, plus an opaque continuation cursor. It returns one

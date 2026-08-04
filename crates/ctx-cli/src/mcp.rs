@@ -7,6 +7,7 @@ use std::{
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use ctx_history_core::EventType;
+use ctx_history_index::SearchContentScope;
 use serde_json::{json, Value};
 
 mod arguments;
@@ -20,7 +21,7 @@ mod telemetry;
 mod text;
 
 use arguments::{
-    allowed_tool_arguments, optional_bool, optional_f32, optional_provider,
+    allowed_tool_arguments, optional_bool, optional_content_scope, optional_f32, optional_provider,
     optional_search_backend, optional_string, optional_transcript_mode, optional_usize,
     validate_argument_keys, validate_search_filter_arguments,
 };
@@ -546,6 +547,20 @@ fn tool_search(
     arguments: &Value,
     data_root: &Path,
 ) -> Result<(Value, crate::local_usage::SearchContextObservation)> {
+    let request = search_request(arguments)?;
+    crate::commands::source_index::validate_explicit_semantic_scope(&request)?;
+    recover_enabled_daemon_before_search(data_root);
+    crate::commands::source_index::mcp_search(request, data_root)
+}
+
+fn search_request(arguments: &Value) -> Result<crate::commands::source_index::SourceSearchRequest> {
+    let event_type = optional_string(arguments, "event_type")?;
+    let content_scope = optional_content_scope(arguments, "content_scope")?;
+    if content_scope.is_some() && event_type.is_some() {
+        return Err(invalid_tool_request(
+            "content_scope and event_type are mutually exclusive",
+        ));
+    }
     let query = optional_string(arguments, "query")?.unwrap_or_default();
     let limit = optional_usize(arguments, "limit")?.unwrap_or(20);
     if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
@@ -563,7 +578,6 @@ fn tool_search(
     let since = optional_string(arguments, "since")?;
     let primary_only = optional_bool(arguments, "primary_only")?.unwrap_or(false);
     let include_subagents = optional_bool(arguments, "include_subagents")?.unwrap_or(false);
-    let event_type = optional_string(arguments, "event_type")?;
     let file = optional_string(arguments, "file")?.map(PathBuf::from);
     let events = optional_bool(arguments, "events")?.unwrap_or(false) || session.is_some();
     let include_current_session =
@@ -595,34 +609,31 @@ fn tool_search(
         since.as_deref(),
         event_type.as_deref(),
     )?;
-    recover_enabled_daemon_before_search(data_root);
-    crate::commands::source_index::mcp_search(
-        crate::commands::source_index::SourceSearchRequest {
-            query,
-            terms: Vec::new(),
-            limit,
-            provider: provider.map(ProviderArg::capture_provider),
-            history_source: source_identity.history_source,
-            provider_key: source_identity.provider_key,
-            source_id: source_identity.source_id,
-            source_format: source_identity.source_format,
-            workspace,
-            since,
-            primary_only,
-            include_subagents,
-            event_type,
-            file,
-            session,
-            events,
-            include_current_session,
-            backend,
-            semantic_weight,
-            semantic_enabled: false,
-            semantic_daemon_enabled: false,
-            refresh: RefreshArg::Off,
-        },
-        data_root,
-    )
+    Ok(crate::commands::source_index::SourceSearchRequest {
+        query,
+        terms: Vec::new(),
+        limit,
+        provider: provider.map(ProviderArg::capture_provider),
+        history_source: source_identity.history_source,
+        provider_key: source_identity.provider_key,
+        source_id: source_identity.source_id,
+        source_format: source_identity.source_format,
+        workspace,
+        since,
+        primary_only,
+        include_subagents,
+        content_scope: content_scope.unwrap_or(SearchContentScope::All),
+        event_type,
+        file,
+        session,
+        events,
+        include_current_session,
+        backend,
+        semantic_weight,
+        semantic_enabled: false,
+        semantic_daemon_enabled: false,
+        refresh: RefreshArg::Off,
+    })
 }
 
 fn recover_enabled_daemon_before_search(data_root: &Path) {
@@ -663,7 +674,7 @@ fn tool_definitions() -> Vec<Value> {
             "name": "search",
             "title": "Search",
             "description": "Search the existing local ctx index by query text or touched-file path. This does not refresh or import provider history.",
-            "inputSchema": object_schema(json!({
+            "inputSchema": object_schema_with_mutually_exclusive(json!({
                 "query": { "type": "string", "description": "Non-empty text query. Required unless file is provided." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT, "default": 20 },
                 "provider": { "type": "string", "enum": provider_names() },
@@ -674,6 +685,7 @@ fn tool_definitions() -> Vec<Value> {
                 "workspace": { "type": "string", "description": "Workspace path or name text." },
                 "since": { "type": "string", "description": "RFC3339 timestamp or day window such as 30d." },
                 "include_subagents": { "type": "boolean", "default": false, "description": "Include subagent sessions in addition to primary-agent sessions." },
+                "content_scope": { "type": "string", "enum": content_scope_names(), "default": "all", "description": "Search all indexed content, transcript text, tool/command calls, or tool/command outputs." },
                 "event_type": { "type": "string", "enum": event_type_names() },
                 "file": { "type": "string", "description": "Indexed touched-file path. Required unless query is provided." },
                 "session": { "type": "string", "description": "ctx session id." },
@@ -681,7 +693,7 @@ fn tool_definitions() -> Vec<Value> {
                 "include_current_session": { "type": "boolean", "default": false, "description": "Include the active Codex session tree when CODEX_THREAD_ID is set." },
                 "backend": { "type": "string", "enum": ["hybrid", "semantic", "lexical"], "description": "Optional backend override. Defaults to lexical unless local semantic search is enabled in ctx config, then hybrid." },
                 "semantic_weight": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.35 }
-            }), vec![]),
+            }), vec![], "content_scope", "event_type"),
             "annotations": { "readOnlyHint": true },
         }),
         json!({
@@ -775,8 +787,23 @@ fn object_schema(properties: Value, required: Vec<&str>) -> Value {
     }))
 }
 
+fn object_schema_with_mutually_exclusive(
+    properties: Value,
+    required: Vec<&str>,
+    left: &str,
+    right: &str,
+) -> Value {
+    let mut schema = object_schema(properties, required);
+    schema["not"] = json!({"required": [left, right]});
+    compact_json(schema)
+}
+
 fn provider_names() -> Vec<&'static str> {
     ProviderArg::mcp_names()
+}
+
+fn content_scope_names() -> Vec<&'static str> {
+    vec!["all", "transcript", "calls", "outputs"]
 }
 
 fn event_type_names() -> Vec<&'static str> {

@@ -1,5 +1,9 @@
 use super::*;
 
+pub(super) const TRANSCRIPT_EVENT_TYPES: &[&str] = &["message", "summary"];
+pub(super) const CALL_EVENT_TYPES: &[&str] = &["tool_call", "command_started"];
+pub(super) const OUTPUT_EVENT_TYPES: &[&str] =
+    &["tool_output", "command_output", "command_finished"];
 pub(super) fn filtered_event_query(
     body_query: Box<dyn Query>,
     source_identity_query: Option<Box<dyn Query>>,
@@ -51,6 +55,12 @@ pub(super) fn filtered_event_query(
         "event_type",
         filters.event_type.as_deref(),
     )?;
+    if let Some(event_types) = content_scope_event_types(filters.content_scope) {
+        add_filter_clause(
+            &mut clauses,
+            event_type_union_query(fields.event_type, event_types),
+        );
+    }
     add_optional_text_filter(&mut clauses, fields.role, "role", filters.role.as_deref())?;
     add_optional_text_filter(
         &mut clauses,
@@ -112,6 +122,34 @@ pub(super) fn filtered_event_query(
         ));
     }
     Ok(Box::new(BooleanQuery::new(clauses)))
+}
+
+pub(super) fn content_scope_event_types(
+    scope: SearchContentScope,
+) -> Option<&'static [&'static str]> {
+    match scope {
+        SearchContentScope::All => None,
+        SearchContentScope::Transcript => Some(TRANSCRIPT_EVENT_TYPES),
+        SearchContentScope::Calls => Some(CALL_EVENT_TYPES),
+        SearchContentScope::Outputs => Some(OUTPUT_EVENT_TYPES),
+    }
+}
+
+pub(super) fn event_type_union_query(
+    field: tantivy::schema::Field,
+    event_types: &[&str],
+) -> Box<dyn Query> {
+    Box::new(BooleanQuery::union(
+        event_types
+            .iter()
+            .map(|event_type| {
+                Box::new(TermQuery::new(
+                    Term::from_field_text(field, event_type),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>
+            })
+            .collect(),
+    ))
 }
 
 pub(super) fn custom_source_identity(event: &EventRecord) -> Option<(&str, &str)> {

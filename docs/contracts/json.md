@@ -597,6 +597,14 @@ Returns:
 - `result_window`;
 - `truncation`.
 
+`filters` always includes the resolved `content_scope`, one of `all`,
+`transcript`, `calls`, or `outputs`. Omission of the CLI option or MCP input
+resolves to `"content_scope": "all"`. The field reports query-time event-class
+selection; it does not describe a different retained body, Core schema, or
+index generation. `content_scope` and the exact `event_type` filter cannot
+appear in the same successful request because those inputs conflict
+unconditionally.
+
 `result_window` has exactly `limit`, `returned`, and `more_available`.
 `returned` is at most `limit`. `more_available` is `true` only when the same
 bounded search pass finds one additional fully shaped result: an event for
@@ -701,6 +709,8 @@ importer. Off mode sends no maintenance wake.
 `retrieval.semantic_status` is one of:
 
 - `skipped`, lexical retrieval was used and no semantic lookup ran;
+- `unsupported`, a hybrid request used lexical retrieval because its content
+  scope or exact event type has no semantic projection;
 - `unavailable`, the semantic sidecar is missing, empty, unreadable, or otherwise
   not usable for the request;
 - `partial`, some but not all searchable items have embeddings;
@@ -718,8 +728,12 @@ Semantic-only unavailability is a typed command error, not a successful
 are numbers when present; null count fields are pruned from public SDK fixtures
 and typed SDK shapes.
 
-The SDK `agent-history-v1` contract camel-cases the same retrieval fields
-(`requestedMode`, `effectiveMode`, `semanticWeight`, and so on). SDK contract
+The SDK `agent-history-v1` contract keeps schema version 1 and normalizes the
+resolved filter as `search.filters.contentScope`, with the same exact four
+values. The filters object remains extensible, so SDK consumers must continue
+to tolerate additive filter fields. The contract camel-cases the same
+retrieval fields (`requestedMode`, `effectiveMode`, `semanticWeight`, and so
+on). SDK contract
 search results expose retrieval at the top level of `search`; TypeScript and
 Python type the core retrieval/coverage fields, while Go, .NET, JVM, and Swift
 preserve retrieval as camel-cased JSON values. Per-hit retrieval details are not

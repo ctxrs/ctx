@@ -28,6 +28,9 @@ public final class AgentHistoryClientTest {
         normalizesRawShowResponses();
         preservesLegitimateNestedSourceSemantics();
         buildsSearchCommand();
+        searchContentScopeValuesAreClosed();
+        searchForwardsContentScopeOnce();
+        searchRejectsContentScopeEventTypeConflictBeforeTransport();
         localCliForcesAnalyticsOffAfterAmbientAndUserEnvironment();
         localCliPreservesLaunchFailureContract();
         localCliDoesNotLaunchThroughTheParentPath();
@@ -813,6 +816,7 @@ public final class AgentHistoryClientTest {
                 .limit(5)
                 .backend("hybrid")
                 .semanticWeight(Double.valueOf(0.35))
+                .eventType("message")
                 .refresh("off"));
 
         assertEquals("search", transport.lastOperation.name());
@@ -821,7 +825,55 @@ public final class AgentHistoryClientTest {
         assertContainsInOrder(transport.lastOperation.args(), "--backend", "hybrid");
         assertContainsInOrder(transport.lastOperation.args(), "--semantic-weight", "0.35");
         assertContainsInOrder(transport.lastOperation.args(), "--term", "ctx");
+        assertContainsInOrder(transport.lastOperation.args(), "--event-type", "message");
         assertContainsInOrder(transport.lastOperation.args(), "--refresh", "off");
+    }
+
+    private static void searchContentScopeValuesAreClosed() {
+        assertEquals(Integer.valueOf(4), Integer.valueOf(SearchContentScope.values().length));
+        assertEquals(
+                List.of("all", "transcript", "calls", "outputs"),
+                List.of(
+                        SearchContentScope.ALL.wireName(),
+                        SearchContentScope.TRANSCRIPT.wireName(),
+                        SearchContentScope.CALLS.wireName(),
+                        SearchContentScope.OUTPUTS.wireName()));
+    }
+
+    private static void searchForwardsContentScopeOnce() {
+        FakeTransport transport = new FakeTransport(
+                "local-cli",
+                "{\"schema_version\":1,\"query\":\"client\",\"results\":[]}");
+        AgentHistoryClient client = AgentHistoryClient.withTransport(transport);
+
+        client.search(AgentHistoryOptions.search()
+                .query("agent history")
+                .contentScope(SearchContentScope.CALLS));
+
+        assertContainsInOrder(transport.lastOperation.args(), "--content-scope", "calls");
+        int count = 0;
+        for (String arg : transport.lastOperation.args()) {
+            if ("--content-scope".equals(arg)) {
+                count += 1;
+            }
+        }
+        assertEquals(Integer.valueOf(1), Integer.valueOf(count));
+    }
+
+    private static void searchRejectsContentScopeEventTypeConflictBeforeTransport() {
+        FakeTransport transport = new FakeTransport(
+                "local-cli",
+                "{\"schema_version\":1,\"query\":\"client\",\"results\":[]}");
+        AgentHistoryClient client = AgentHistoryClient.withTransport(transport);
+
+        assertValidation(() -> client.search(AgentHistoryOptions.search()
+                .query("agent history")
+                .eventType("message")
+                .contentScope(SearchContentScope.ALL)));
+        if (transport.lastOperation != null) {
+            throw new AssertionError(
+                    "conflicting search filters invoked transport: " + transport.lastOperation.args());
+        }
     }
 
     private static void searchRequiresIntent() {

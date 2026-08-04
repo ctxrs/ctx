@@ -11,6 +11,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use clap::Parser;
     use ctx_history_capture::{
         provider_source_for_path, refresh_source_backed_generation,
         register_landed_source_backed_route, SourceBackedProviderRegistry,
@@ -24,13 +25,14 @@ mod tests {
         SourceKey, SourceObservation, TypedKey, MAX_CORE_CONTENT_BYTES,
     };
     use ctx_history_index::{
-        EventSearchFilters, GenerationWriter, IndexError, SessionRecord, WriterOptions,
-        LEXICAL_QUERY_LIMITS,
+        AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,
+        SessionRecord, WriterOptions, LEXICAL_QUERY_LIMITS,
     };
     use serde_json::{json, Value};
     use tempfile::tempdir;
 
     use crate::{
+        cli::{Cli, CommandRoot},
         commands::show::{ShowEventArgs, ShowSessionArgs},
         output::OutputFormat,
         transcript::TranscriptMode,
@@ -44,8 +46,9 @@ mod tests {
             render_show_document, search_json, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
         },
         search::{
-            presentations_for_search_hits_with_budget, NormalizedSearchQuery, SearchCollection,
-            SearchEventMetadata, SearchHit, SearchPresentation, SearchPresentationHydrationBudget,
+            presentations_for_search_hits_with_budget, resolve_source_search_backend,
+            NormalizedSearchQuery, SearchCollection, SearchEventMetadata, SearchHit,
+            SearchPresentation, SearchPresentationHydrationBudget,
             SearchPresentationRetentionBudgetExceeded, SearchResultWindow,
             SEARCH_PRESENTATION_HYDRATION_BUDGET, SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
         },
@@ -99,6 +102,126 @@ mod tests {
             NormalizedSearchQuery::from_request(&source_request).shell_arguments(),
             "--term=--option-like"
         );
+    }
+
+    #[test]
+    fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
+        let omitted = Cli::try_parse_from(["ctx", "search", TEST_QUERY]).unwrap();
+        let CommandRoot::Search(omitted) = omitted.command else {
+            panic!("expected search command");
+        };
+        let explicit =
+            Cli::try_parse_from(["ctx", "search", TEST_QUERY, "--content-scope", "all"]).unwrap();
+        let CommandRoot::Search(explicit) = explicit.command else {
+            panic!("expected search command");
+        };
+        let mut omitted = SourceSearchRequest::from(&omitted);
+        let mut explicit = SourceSearchRequest::from(&explicit);
+        assert_eq!(omitted.content_scope, SearchContentScope::All);
+        assert_eq!(explicit.content_scope, SearchContentScope::All);
+
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+        for request in [&mut omitted, &mut explicit] {
+            request.backend = Some(SearchBackendArg::Hybrid);
+            request.semantic_enabled = true;
+            request.semantic_daemon_enabled = true;
+            request.refresh = RefreshArg::Off;
+            request.include_current_session = true;
+        }
+        let omitted_filters = index_search_filters(&omitted, &index).unwrap();
+        let explicit_filters = index_search_filters(&explicit, &index).unwrap();
+        assert_eq!(omitted_filters, explicit_filters);
+
+        let collect = |request: &SourceSearchRequest, filters: &EventSearchFilters| {
+            collect_search_hits_with_backend_using(
+                request,
+                &index,
+                temp.path(),
+                request.semantic_weight,
+                filters,
+                |index, _data_root, query, filters, candidate_limit| {
+                    Ok((
+                        index.search_event_candidates_any_with_filters(
+                            &[query],
+                            filters,
+                            candidate_limit,
+                        )?,
+                        json!({"fixture": "weighted"}),
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        let omitted_collection = collect(&omitted, &omitted_filters);
+        let explicit_collection = collect(&explicit, &explicit_filters);
+        assert_eq!(
+            omitted_collection
+                .result_window
+                .hits
+                .iter()
+                .map(|hit| (hit.event.event_id, hit.score))
+                .collect::<Vec<_>>(),
+            explicit_collection
+                .result_window
+                .hits
+                .iter()
+                .map(|hit| (hit.event.event_id, hit.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            omitted_collection.effective_backend,
+            SearchBackendArg::Hybrid
+        );
+        assert_eq!(
+            explicit_collection.effective_backend,
+            SearchBackendArg::Hybrid
+        );
+        assert_eq!(
+            omitted_collection.semantic_weight,
+            explicit_collection.semantic_weight
+        );
+    }
+
+    #[test]
+    fn content_scope_forwards_alongside_ordinary_search_controls() {
+        let cli = Cli::try_parse_from([
+            "ctx",
+            "search",
+            TEST_QUERY,
+            "--content-scope",
+            "calls",
+            "--provider",
+            "codex",
+            "--workspace",
+            "/workspace/pinned",
+            "--since",
+            "30d",
+            "--file",
+            "src/lib.rs",
+            "--events",
+            "--include-subagents",
+            "--include-current-session",
+        ])
+        .unwrap();
+        let CommandRoot::Search(args) = cli.command else {
+            panic!("expected search command");
+        };
+        let request = SourceSearchRequest::from(&args);
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let filters = index_search_filters(&request, &open_index(temp.path()).unwrap()).unwrap();
+
+        assert_eq!(request.content_scope, SearchContentScope::Calls);
+        assert!(request.events);
+        assert_eq!(filters.content_scope, SearchContentScope::Calls);
+        assert_eq!(filters.provider.as_deref(), Some("codex"));
+        assert_eq!(filters.workspace.as_deref(), Some("/workspace/pinned"));
+        assert!(filters.since_unix_ms.is_some());
+        assert_eq!(filters.file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(filters.agent_scope, AgentScope::All);
+        assert!(filters.exclude_session_tree.is_none());
     }
 
     #[test]
@@ -223,6 +346,7 @@ mod tests {
             chrono::DateTime::parse_from_rfc3339(value["generated_at"].as_str().unwrap()).is_ok()
         );
         assert_eq!(value["query"], "primary query OR term with spaces");
+        assert_eq!(value["filters"]["content_scope"], "all");
         assert_eq!(
             sorted_json_keys(&value["result_window"]),
             vec!["limit", "more_available", "returned"]
@@ -933,6 +1057,206 @@ mod tests {
         assert_eq!(collection.result_window.hits.len(), 1);
         assert!(!temp.path().join("search").join("semantic").exists());
         assert!(!temp.path().join("work.sqlite").exists());
+    }
+
+    #[test]
+    fn zero_weight_hybrid_skips_semantic_fallback_for_lexical_only_filters() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+
+        for (content_scope, event_type) in [
+            (SearchContentScope::Calls, None),
+            (SearchContentScope::Outputs, None),
+            (SearchContentScope::All, Some("tool_call".to_owned())),
+        ] {
+            let mut request = request(RefreshArg::Off);
+            request.backend = Some(SearchBackendArg::Hybrid);
+            request.semantic_weight = 0.0;
+            request.content_scope = content_scope;
+            request.event_type = event_type;
+            let filters = index_search_filters(&request, &index).unwrap();
+
+            let collection = collect_search_hits_with_backend_using(
+                &request,
+                &index,
+                temp.path(),
+                0.0,
+                &filters,
+                |_index, _data_root, _query, _filters, _candidate_limit| {
+                    panic!("zero-weight hybrid must not enter semantic retrieval")
+                },
+            )
+            .unwrap();
+
+            assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);
+            assert_eq!(collection.effective_backend, SearchBackendArg::Lexical);
+            assert_eq!(collection.semantic_weight, 0.0);
+            assert_eq!(collection.semantic_status, "skipped");
+            assert!(collection.semantic_fallback.is_none());
+            assert!(collection.semantic_diagnostics.is_none());
+        }
+    }
+
+    #[test]
+    fn all_and_transcript_preserve_the_hybrid_semantic_lane() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+
+        for content_scope in [SearchContentScope::All, SearchContentScope::Transcript] {
+            let mut hybrid_request = request(RefreshArg::Off);
+            hybrid_request.backend = Some(SearchBackendArg::Hybrid);
+            hybrid_request.content_scope = content_scope;
+            let filters = index_search_filters(&hybrid_request, &index).unwrap();
+            let semantic_called = Cell::new(false);
+            let collection = collect_search_hits_with_backend_using(
+                &hybrid_request,
+                &index,
+                temp.path(),
+                hybrid_request.semantic_weight,
+                &filters,
+                |_index, _data_root, _query, _filters, _candidate_limit| {
+                    semantic_called.set(true);
+                    Ok((Vec::new(), json!({"fixture": "semantic-lane"})))
+                },
+            )
+            .unwrap();
+
+            assert!(semantic_called.get(), "scope {content_scope:?}");
+            assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);
+            assert_eq!(collection.effective_backend, SearchBackendArg::Hybrid);
+            assert_eq!(collection.semantic_status, "ready");
+            assert!(collection.semantic_fallback.is_none());
+        }
+    }
+
+    #[test]
+    fn calls_and_outputs_make_hybrid_lexical_with_truthful_json_metadata() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+
+        for (content_scope, expected_name) in [
+            (SearchContentScope::Calls, "calls"),
+            (SearchContentScope::Outputs, "outputs"),
+        ] {
+            let mut hybrid_request = request(RefreshArg::Off);
+            hybrid_request.backend = Some(SearchBackendArg::Hybrid);
+            hybrid_request.content_scope = content_scope;
+            let filters = index_search_filters(&hybrid_request, &index).unwrap();
+            let collection = collect_search_hits_with_backend_using(
+                &hybrid_request,
+                &index,
+                temp.path(),
+                hybrid_request.semantic_weight,
+                &filters,
+                |_index, _data_root, _query, _filters, _candidate_limit| {
+                    panic!("lexical-only content scopes must not enter semantic retrieval")
+                },
+            )
+            .unwrap();
+
+            assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);
+            assert_eq!(collection.effective_backend, SearchBackendArg::Lexical);
+            assert_eq!(collection.semantic_weight, 0.0);
+            assert_eq!(collection.semantic_status, "unsupported");
+            assert_eq!(
+                collection
+                    .semantic_fallback
+                    .as_ref()
+                    .map(|fallback| fallback.code),
+                Some("semantic_content_scope_unsupported")
+            );
+            assert!(collection.result_window.hits.is_empty());
+
+            let value = search_json(
+                &hybrid_request,
+                temp.path(),
+                &index,
+                &collection,
+                &filters,
+                &[],
+                "existing_generation",
+                1,
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
+            assert_eq!(value["filters"]["content_scope"], expected_name);
+            assert_eq!(value["retrieval"]["requested_mode"], "hybrid");
+            assert_eq!(value["retrieval"]["effective_mode"], "lexical");
+            assert_eq!(value["retrieval"]["semantic_weight"], 0.0);
+            assert_eq!(value["retrieval"]["semantic_status"], "unsupported");
+            assert_eq!(
+                value["retrieval"]["semantic_fallback_code"],
+                "semantic_content_scope_unsupported"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_only_rejects_lexical_only_scopes_before_search() {
+        let temp = tempdir().unwrap();
+        let config = config::AppConfig::load(temp.path()).unwrap();
+
+        for content_scope in [SearchContentScope::Calls, SearchContentScope::Outputs] {
+            let mut semantic_request = request(RefreshArg::Off);
+            semantic_request.backend = Some(SearchBackendArg::Semantic);
+            semantic_request.content_scope = content_scope;
+            let error = resolve_source_search_backend(&semantic_request, &config)
+                .expect_err("semantic-only lexical scopes must fail before search");
+            let not_ready = error
+                .downcast_ref::<SourceBackedSemanticNotReady>()
+                .expect("unsupported scope must retain the typed semantic error contract");
+            assert_eq!(not_ready.code(), "semantic_content_scope_unsupported");
+            assert!(not_ready.detail().contains(match content_scope {
+                SearchContentScope::Calls => "'calls'",
+                SearchContentScope::Outputs => "'outputs'",
+                SearchContentScope::All | SearchContentScope::Transcript => unreachable!(),
+            }));
+            assert!(!not_ready.retryable());
+        }
+    }
+
+    #[test]
+    fn exact_non_message_event_type_uses_the_same_semantic_boundary() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let index = open_index(temp.path()).unwrap();
+        let config = config::AppConfig::load(temp.path()).unwrap();
+        let mut request = request(RefreshArg::Off);
+        request.event_type = Some("tool_call".to_owned());
+        request.backend = Some(SearchBackendArg::Hybrid);
+        let filters = index_search_filters(&request, &index).unwrap();
+        let collection = collect_search_hits_with_backend_using(
+            &request,
+            &index,
+            temp.path(),
+            request.semantic_weight,
+            &filters,
+            |_index, _data_root, _query, _filters, _candidate_limit| {
+                panic!("exact non-message event types must not enter semantic retrieval")
+            },
+        )
+        .unwrap();
+        assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);
+        assert_eq!(collection.effective_backend, SearchBackendArg::Lexical);
+        assert_eq!(
+            collection
+                .semantic_fallback
+                .as_ref()
+                .map(|fallback| fallback.code),
+            Some("semantic_event_type_unsupported")
+        );
+
+        request.backend = Some(SearchBackendArg::Semantic);
+        let error = resolve_source_search_backend(&request, &config)
+            .expect_err("semantic-only exact non-message searches must fail before search");
+        let not_ready = error
+            .downcast_ref::<SourceBackedSemanticNotReady>()
+            .expect("event type rejection must retain the typed semantic error contract");
+        assert_eq!(not_ready.code(), "semantic_event_type_unsupported");
+        assert!(not_ready.detail().contains("'tool_call'"));
     }
 
     #[test]

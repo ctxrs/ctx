@@ -102,7 +102,7 @@
       "required": ["query", "results"],
       "properties": {
         "query": { "type": ["string", "null"] },
-        "filters": { "type": "object", "additionalProperties": true },
+        "filters": { "$ref": "#/$defs/searchFilters" },
         "freshness": { "$ref": "#/$defs/freshness" },
         "retrieval": { "$ref": "#/$defs/searchRetrieval" },
         "generatedAt": { "type": ["string", "null"] },
@@ -113,6 +113,17 @@
         "resultWindow": { "$ref": "#/$defs/searchResultWindow" },
         "pagination": { "type": "object", "additionalProperties": true },
         "truncation": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
+    "searchFilters": {
+      "type": "object",
+      "properties": {
+        "contentScope": {
+          "type": "string",
+          "enum": ["all", "transcript", "calls", "outputs"],
+          "description": "Resolved query-time content scope; omitted input normalizes to all."
+        }
       },
       "additionalProperties": true
     },

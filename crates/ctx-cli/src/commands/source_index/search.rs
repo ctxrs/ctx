@@ -53,7 +53,7 @@ pub(crate) use query::SourceSearchRequest;
 pub(super) use query::{
     index_search_filters, resolve_source_search_backend, NormalizedSearchQuery,
 };
-use query::{normalize_search_request, validate_search_request};
+use query::{normalize_search_request, unsupported_semantic_scope, validate_search_request};
 
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
@@ -185,6 +185,7 @@ fn run_search_inner(
             requested_backend,
             SearchBackendArg::Semantic | SearchBackendArg::Hybrid
         )
+        && unsupported_semantic_scope(&request).is_none()
         && !(requested_backend == SearchBackendArg::Hybrid && semantic_weight == 0.0)
     {
         crate::semantic::wait_for_daemon_query_service(&data_root, Duration::from_secs(3));
@@ -299,12 +300,19 @@ pub(super) fn render_semantic_fallback_warning(
     context: &RenderContext,
     fallback: &SemanticFallbackDiagnostics,
 ) -> Document {
-    let (detail, action) = match fallback.code {
+    let (summary, detail, action) = match fallback.code {
         "semantic_disabled" => (
+            "Semantic search is unavailable",
             "Keyword search was used because semantic search is disabled.",
             "ctx setup --semantic",
         ),
+        "semantic_content_scope_unsupported" | "semantic_event_type_unsupported" => (
+            "Semantic search does not support this filter",
+            "Keyword search was used because this content filter is lexical-only.",
+            "ctx search \"<term>\" --backend lexical",
+        ),
         _ => (
+            "Semantic search is unavailable",
             "Keyword search was used because semantic retrieval did not complete.",
             "ctx doctor",
         ),
@@ -313,7 +321,7 @@ pub(super) fn render_semantic_fallback_warning(
         context,
         Diagnostic {
             level: DiagnosticLevel::Warning,
-            summary: "Semantic search is unavailable",
+            summary,
             detail: Some(detail),
             fields: &[],
             action: Some(Action { command: action }),
@@ -340,6 +348,15 @@ pub(crate) fn mcp_search(
         SearchContextObservation::unavailable()
     };
     Ok((value, observation))
+}
+
+pub(crate) fn validate_explicit_semantic_scope(request: &SourceSearchRequest) -> Result<()> {
+    if request.backend == Some(SearchBackendArg::Semantic) {
+        if let Some(not_ready) = unsupported_semantic_scope(request) {
+            return Err(anyhow::Error::new(not_ready));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn search_context_observation(
@@ -556,6 +573,35 @@ where
         collection.requested_backend = requested_backend;
         collection.semantic_weight = 0.0;
         return Ok(collection);
+    }
+    if requested_backend != SearchBackendArg::Lexical {
+        if let Some(not_ready) = unsupported_semantic_scope(request) {
+            if requested_backend == SearchBackendArg::Semantic {
+                return Err(anyhow::Error::new(not_ready));
+            }
+            let normalized_query = NormalizedSearchQuery::from_request(request);
+            let queries = normalized_query.texts();
+            let mut collection =
+                collect_search_hits(index, &queries, request.limit, request.events, filters)?;
+            let fallback = SemanticFallbackDiagnostics {
+                code: not_ready.code(),
+                detail: not_ready.detail().to_owned(),
+            };
+            collection.requested_backend = requested_backend;
+            collection.effective_backend = SearchBackendArg::Lexical;
+            collection.semantic_weight = 0.0;
+            collection.semantic_status = "unsupported";
+            collection.semantic_fallback = Some(fallback.clone());
+            collection.semantic_diagnostics = Some(json!({
+                "query_count": queries.len(),
+                "queries": [],
+                "fallback": {
+                    "code": fallback.code,
+                    "detail": fallback.detail,
+                },
+            }));
+            return Ok(collection);
+        }
     }
     if !request.semantic_enabled || !request.semantic_daemon_enabled {
         let not_ready = if request.semantic_enabled {

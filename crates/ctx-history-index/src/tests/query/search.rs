@@ -1,5 +1,9 @@
 use super::*;
 
+use crate::query::SearchContentScope;
+use ctx_history_core::StableEntityId;
+use tantivy::{collector::TopDocs, Score};
+
 #[test]
 fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     let temp = tempdir().unwrap();
@@ -298,4 +302,341 @@ fn empty_or_invalid_programmatic_queries_are_safe() {
         index.sessions_by_id_prefix(""),
         Err(IndexError::InvalidIdPrefix)
     ));
+}
+
+fn publish_class_aware_records(records: Vec<CoreRecord>) -> (TempDir, VerifiedIndex) {
+    let temp = tempdir().unwrap();
+    let source = records.first().unwrap().source.clone();
+    let document_count = u64::try_from(records.len()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in records {
+        writer.add_core_record(record).unwrap();
+    }
+    writer
+        .certify_source(certificate(&source, 1, document_count))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    (temp, index)
+}
+
+fn class_aware_record(
+    source: &SourceKey,
+    sequence: u64,
+    event_type: &str,
+    body: &str,
+) -> CoreRecord {
+    let mut record = document(source, sequence, body);
+    record.event_type = event_type.to_owned();
+    record.validate_contract().unwrap();
+    record
+}
+
+fn candidate_ids(candidates: &[EventSearchCandidate]) -> Vec<StableEntityId> {
+    candidates
+        .iter()
+        .map(|candidate| candidate.event.event_id)
+        .collect()
+}
+
+fn candidate_event_types(candidates: &[EventSearchCandidate]) -> HashSet<&str> {
+    candidates
+        .iter()
+        .map(|candidate| candidate.event.event_type.as_str())
+        .collect()
+}
+
+fn candidate_score(candidates: &[EventSearchCandidate], event_id: StableEntityId) -> Score {
+    candidates
+        .iter()
+        .find(|candidate| candidate.event.event_id == event_id)
+        .unwrap()
+        .score
+}
+
+fn assert_score_ratio(actual: Score, reference: Score, expected: Score) {
+    let ratio = actual / reference;
+    assert!(
+        (ratio - expected).abs() < 0.000_01,
+        "expected score ratio {expected}, got {ratio} ({actual}/{reference})"
+    );
+}
+
+#[test]
+fn all_scope_applies_class_weights_and_retains_unknown_types_with_stable_ties() {
+    let source = source("class-weight-ordering.jsonl");
+    let event_types = [
+        "message",
+        "summary",
+        "tool_call",
+        "command_started",
+        "tool_output",
+        "command_output",
+        "command_finished",
+        "notice",
+        "future_searchable_type",
+    ];
+    let records = event_types
+        .iter()
+        .enumerate()
+        .map(|(index, event_type)| {
+            class_aware_record(
+                &source,
+                u64::try_from(index + 1).unwrap(),
+                event_type,
+                "classweightneedle",
+            )
+        })
+        .collect::<Vec<_>>();
+    let ids_by_type = records
+        .iter()
+        .map(|record| (record.event_type.clone(), record.event_id))
+        .collect::<std::collections::HashMap<_, _>>();
+    let (_temp, index) = publish_class_aware_records(records);
+
+    let omitted = index
+        .search_event_candidates("classweightneedle", 20)
+        .unwrap();
+    let explicit_all = index
+        .search_event_candidates_with_filters(
+            "classweightneedle",
+            &EventSearchFilters {
+                content_scope: SearchContentScope::All,
+                ..EventSearchFilters::default()
+            },
+            20,
+        )
+        .unwrap();
+    assert_eq!(omitted, explicit_all, "omitted and explicit all must agree");
+    assert_eq!(omitted.len(), event_types.len());
+
+    let message_id = ids_by_type["message"];
+    let message_score = candidate_score(&omitted, message_id);
+    assert_eq!(omitted[0].event.event_id, message_id);
+    assert_score_ratio(
+        candidate_score(&omitted, ids_by_type["summary"]),
+        message_score,
+        0.9,
+    );
+    for event_type in [
+        "tool_call",
+        "command_started",
+        "notice",
+        "future_searchable_type",
+    ] {
+        assert_score_ratio(
+            candidate_score(&omitted, ids_by_type[event_type]),
+            message_score,
+            0.8,
+        );
+    }
+    for event_type in ["tool_output", "command_output", "command_finished"] {
+        assert_score_ratio(
+            candidate_score(&omitted, ids_by_type[event_type]),
+            message_score,
+            0.6,
+        );
+    }
+
+    let mut expected_fallback_tie = [
+        ids_by_type["tool_call"],
+        ids_by_type["command_started"],
+        ids_by_type["notice"],
+        ids_by_type["future_searchable_type"],
+    ];
+    expected_fallback_tie.sort_by_key(|event_id| event_id.as_uuid());
+    assert_eq!(candidate_ids(&omitted)[2..6], expected_fallback_tie);
+    assert!(omitted
+        .iter()
+        .any(|candidate| candidate.event.event_type == "future_searchable_type"));
+}
+
+#[test]
+fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_weight() {
+    let source = source("content-scopes.jsonl");
+    let event_types = [
+        "message",
+        "summary",
+        "tool_call",
+        "command_started",
+        "tool_output",
+        "command_output",
+        "command_finished",
+        "notice",
+    ];
+    let records = event_types
+        .iter()
+        .enumerate()
+        .map(|(index, event_type)| {
+            class_aware_record(
+                &source,
+                u64::try_from(index + 1).unwrap(),
+                event_type,
+                "scopeneedle",
+            )
+        })
+        .collect::<Vec<_>>();
+    let message_id = records[0].event_id;
+    let call_id = records[2].event_id;
+    let output_id = records[4].event_id;
+    let (_temp, index) = publish_class_aware_records(records);
+
+    let all = index.search_event_candidates("scopeneedle", 20).unwrap();
+    for (scope, expected_types) in [
+        (
+            SearchContentScope::Transcript,
+            HashSet::from(["message", "summary"]),
+        ),
+        (
+            SearchContentScope::Calls,
+            HashSet::from(["tool_call", "command_started"]),
+        ),
+        (
+            SearchContentScope::Outputs,
+            HashSet::from(["tool_output", "command_output", "command_finished"]),
+        ),
+    ] {
+        let filters = EventSearchFilters {
+            content_scope: scope,
+            ..EventSearchFilters::default()
+        };
+        let searched = index
+            .search_event_candidates_with_filters("scopeneedle", &filters, 20)
+            .unwrap();
+        let listed = index
+            .list_event_candidates_with_filters(&filters, 20)
+            .unwrap();
+        assert_eq!(candidate_event_types(&searched), expected_types);
+        assert_eq!(candidate_event_types(&listed), expected_types);
+
+        let semantic = index.semantic_filter_projection(&filters).unwrap();
+        match scope {
+            SearchContentScope::Transcript => {
+                assert_eq!(
+                    semantic.event_ids().collect::<Vec<_>>(),
+                    vec![message_id.as_uuid()]
+                );
+            }
+            SearchContentScope::Calls | SearchContentScope::Outputs => {
+                assert_eq!(semantic.event_ids().count(), 0);
+            }
+            SearchContentScope::All => unreachable!(),
+        }
+    }
+
+    let calls = index
+        .search_event_candidates_with_filters(
+            "scopeneedle",
+            &EventSearchFilters {
+                content_scope: SearchContentScope::Calls,
+                ..EventSearchFilters::default()
+            },
+            20,
+        )
+        .unwrap();
+    let outputs = index
+        .search_event_candidates_with_filters(
+            "scopeneedle",
+            &EventSearchFilters {
+                content_scope: SearchContentScope::Outputs,
+                ..EventSearchFilters::default()
+            },
+            20,
+        )
+        .unwrap();
+    assert_score_ratio(
+        candidate_score(&all, call_id),
+        candidate_score(&calls, call_id),
+        0.8,
+    );
+    assert_score_ratio(
+        candidate_score(&all, output_id),
+        candidate_score(&outputs, output_id),
+        0.6,
+    );
+
+    let semantic_all = index
+        .semantic_filter_projection(&EventSearchFilters::default())
+        .unwrap();
+    assert_eq!(
+        semantic_all.event_ids().collect::<Vec<_>>(),
+        vec![message_id.as_uuid()]
+    );
+}
+
+#[test]
+fn output_heavy_candidates_do_not_starve_the_stronger_transcript_before_top_docs() {
+    const OUTPUTS: u64 = 32;
+    let source = source("output-saturation.jsonl");
+    let transcript =
+        class_aware_record(&source, 1, "message", "saturationneedle concise transcript");
+    let transcript_id = transcript.event_id;
+    let mut records = vec![transcript];
+    for sequence in 2..=OUTPUTS + 1 {
+        records.push(class_aware_record(
+            &source,
+            sequence,
+            "tool_output",
+            &"saturationneedle ".repeat(128),
+        ));
+    }
+    let (_temp, index) = publish_class_aware_records(records);
+
+    let fields = fields_from_schema(index.searcher.schema()).unwrap();
+    let raw_query = TermQuery::new(
+        Term::from_field_text(fields.body_search, "saturationneedle"),
+        IndexRecordOption::WithFreqs,
+    );
+    let raw_hits = index
+        .searcher
+        .search(&raw_query, &TopDocs::with_limit(1).order_by_score())
+        .unwrap();
+    let raw_top = decoded_stored_core(&index.searcher, raw_hits[0].1);
+    assert_eq!(
+        raw_top.event_type, "tool_output",
+        "the fixture must put an output first without class weighting"
+    );
+
+    let weighted = index
+        .search_event_candidates("saturationneedle", 1)
+        .unwrap();
+    assert_eq!(weighted[0].event.event_id, transcript_id);
+}
+
+#[test]
+fn exact_event_type_conflicts_with_every_explicit_content_scope_at_the_index_boundary() {
+    let source = source("scope-conflict.jsonl");
+    let record = class_aware_record(&source, 1, "message", "conflictneedle");
+    let (_temp, index) = publish_class_aware_records(vec![record]);
+
+    for scope in [
+        SearchContentScope::Transcript,
+        SearchContentScope::Calls,
+        SearchContentScope::Outputs,
+    ] {
+        let filters = EventSearchFilters {
+            content_scope: scope,
+            event_type: Some("message".to_owned()),
+            ..EventSearchFilters::default()
+        };
+        for error in [
+            index
+                .search_event_candidates_with_filters("conflictneedle", &filters, 0)
+                .unwrap_err(),
+            index
+                .list_event_candidates_with_filters(&filters, 0)
+                .unwrap_err(),
+            index.semantic_filter_projection(&filters).unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                IndexError::ContentScopeEventTypeConflict { scope: actual }
+                    if actual == scope.as_str()
+            ));
+        }
+    }
 }

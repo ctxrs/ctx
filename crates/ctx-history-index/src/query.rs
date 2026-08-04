@@ -35,11 +35,12 @@ use ctx_history_core::{
 use serde::{Deserialize, Serialize};
 use tantivy::{
     collector::{Collector, Count, DocSetCollector, SegmentCollector, TopDocs},
+    postings::SegmentPostings,
     query::{
-        AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, Occur, Query, RangeQuery, RegexQuery,
-        TermQuery, TermSetQuery,
+        AllQuery, BooleanQuery, ConstScoreQuery, EmptyQuery, EnableScoring, Explanation, Occur,
+        Query, RangeQuery, RegexQuery, Scorer, TermQuery, TermSetQuery, Weight,
     },
-    schema::{IndexRecordOption, Value as TantivyValue},
+    schema::{Field, IndexRecordOption, Value as TantivyValue},
     termdict::{TermMerger, TermStreamer},
     tokenizer::TokenStream,
     DocAddress, DocId, DocSet, InvertedIndexReader, Score, SegmentOrdinal, SegmentReader,
