@@ -9,7 +9,14 @@ use super::{exact_json_object, keys_are_subset, object_id, BoundedOutcomePlan};
 
 pub(super) fn exact_pr_create_result(output: &Value) -> Option<RepositoryPullRequestIdentity> {
     if let Some(url) = output.as_str() {
-        return pull_request_from_url(url.trim());
+        if let Some(identity) = pull_request_from_url(url.trim()) {
+            return Some(identity);
+        }
+        let mut candidates = url
+            .lines()
+            .filter_map(|line| pull_request_from_url(line.trim()));
+        let selected = candidates.next()?;
+        return candidates.next().is_none().then_some(selected);
     }
     pull_request_from_exact_object(exact_json_object(output)?)
 }

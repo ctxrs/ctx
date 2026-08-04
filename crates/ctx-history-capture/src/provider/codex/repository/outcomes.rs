@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 use crate::{
     provider::codex::events::CodexToolCallContext,
     repository_attribution::{
-        bounded_pull_request_association_query, lexical_absolute, linked_outcome_evidence,
-        LinkedOutcomeEvidence, LinkedOutcomeInput, UnscopedOutcomeObservation,
-        UnscopedPullRequestAssociationObservation,
+        bounded_outcome_evidence_relevant, bounded_pull_request_association_query,
+        lexical_absolute, linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput,
+        UnscopedOutcomeObservation, UnscopedPullRequestAssociationObservation,
     },
     OutputOutcome, OutputOutcomeMetadata,
 };
@@ -68,14 +68,15 @@ pub(crate) fn repository_result_evidence(
     let null_output = Value::Null;
     let provider_output = super::repository_result_output(payload).unwrap_or(&null_output);
     let exact_output;
-    let unwrap_pull_request_association = context.tool_name == "exec_command"
-        && context
-            .declared_workdir
-            .as_deref()
-            .and_then(|workdir| lexical_absolute(workdir, None))
-            .and_then(|base| bounded_pull_request_association_query(command, &base))
-            .is_some();
-    let output = if unwrap_pull_request_association {
+    let unwrap_repository_evidence = context.tool_name == "exec_command"
+        && (bounded_outcome_evidence_relevant(command)
+            || context
+                .declared_workdir
+                .as_deref()
+                .and_then(|workdir| lexical_absolute(workdir, None))
+                .and_then(|base| bounded_pull_request_association_query(command, &base))
+                .is_some());
+    let output = if unwrap_repository_evidence {
         match provider_output.as_str().map(exact_codex_exec_result_body) {
             Some(Ok(Some(body))) => {
                 exact_output = Value::String(body.to_owned());
@@ -435,6 +436,118 @@ mod tests {
         assert_eq!(
             association.merged_as.hex,
             "103c0105645cc02c730f98eba2831fba854d3569"
+        );
+    }
+
+    #[test]
+    fn codex_retains_real_multiline_commit_and_pull_request_outcomes() {
+        let commit_command = concat!(
+            "git add crates/ctx-cli/src/pro/commercial_lifecycle.rs ",
+            "crates/ctx-cli/src/pro/commercial_lifecycle/tests.rs\n",
+            "git commit -m \"fix(pro): refresh auth while Checkout polls\""
+        );
+        let commit_output = concat!(
+            "Chunk ID: 042609\n",
+            "Wall time: 0.0000 seconds\n",
+            "Process exited with code 0\n",
+            "Original token count: 36\n",
+            "Output:\n",
+            "[codex/v026-checkout-token-refresh 0c1ce19ed] ",
+            "fix(pro): refresh auth while Checkout polls\n",
+            " 2 files changed, 290 insertions(+), 34 deletions(-)"
+        );
+        let captured = repository_result_evidence(
+            &json!({"output": commit_output}),
+            &real_context(commit_command, "/repo", "call-commit"),
+            "call-commit",
+            [0x42; 32],
+            10,
+            &success(),
+        )
+        .unwrap();
+        let [UnscopedOutcomeObservation::DeferredCommit(deferred)] = captured.outcomes.as_slice()
+        else {
+            panic!("expected one deferred commit: {captured:#?}");
+        };
+        assert_eq!(deferred.oid_prefix, "0c1ce19ed");
+
+        let pull_request_command = concat!(
+            "git push -u origin codex/v026-checkout-token-refresh\n",
+            "gh pr create --base main --head codex/v026-checkout-token-refresh ",
+            "--title \"fix(pro): refresh auth while Checkout polls\""
+        );
+        let pull_request_output = concat!(
+            "Chunk ID: 6c59d6\n",
+            "Wall time: 2.2410 seconds\n",
+            "Process exited with code 0\n",
+            "Original token count: 122\n",
+            "Output:\n",
+            "To https://github.com/ctxrs/ctx.git\n",
+            "https://github.com/ctxrs/ctx/pull/203"
+        );
+        let captured = repository_result_evidence(
+            &json!({"output": pull_request_output}),
+            &real_context(pull_request_command, "/repo", "call-pr"),
+            "call-pr",
+            [0x43; 32],
+            10,
+            &success(),
+        )
+        .unwrap();
+        let [outcome] = captured.outcomes.as_slice() else {
+            panic!("expected one pull request creation: {captured:#?}");
+        };
+        assert_eq!(
+            exact_outcome(outcome).kind,
+            RepositoryOutcomeKind::PullRequestCreated
+        );
+
+        let ambiguous = format!("{pull_request_output}\nhttps://github.com/ctxrs/ctx/pull/204");
+        let captured = repository_result_evidence(
+            &json!({"output": ambiguous}),
+            &real_context(pull_request_command, "/repo", "call-pr-ambiguous"),
+            "call-pr-ambiguous",
+            [0x45; 32],
+            10,
+            &success(),
+        )
+        .unwrap();
+        assert!(captured.outcomes.is_empty());
+        assert_eq!(
+            captured.abstentions[0].0,
+            RepositoryAbstentionReason::OutcomeResultInadmissible
+        );
+    }
+
+    #[test]
+    fn codex_retains_amended_commit_identity_without_claiming_replacement_lineage() {
+        let oid = "68e96ac54a807931ef5629b1ef0fc0416e85d729";
+        let command = concat!(
+            "git status --short && git add crates/ctx-history-capture/src/provider/providers/openhands/tests.rs && ",
+            "git commit --amend --no-edit && git rev-parse HEAD && git status --short"
+        );
+        let output = format!(
+            "Chunk ID: d05827\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 147\nOutput:\n M crates/ctx-history-capture/src/provider/providers/openhands/tests.rs\n[ctx/v026-pro-output-redesign-20260723 68e96ac54] feat(pro): materialize provider outputs outside core ingestion\n 190 files changed, 22435 insertions(+), 4456 deletions(-)\n{oid}"
+        );
+        let captured = repository_result_evidence(
+            &json!({"output": output}),
+            &real_context(command, "/repo", "call-amend"),
+            "call-amend",
+            [0x44; 32],
+            10,
+            &success(),
+        )
+        .unwrap();
+        assert_eq!(
+            exact_outcome(&captured.outcomes[0]).produced_object_ids[0].hex,
+            oid
+        );
+        assert!(exact_outcome(&captured.outcomes[0])
+            .replacement_lineage
+            .is_empty());
+        assert_eq!(
+            captured.abstentions[0].0,
+            RepositoryAbstentionReason::HistoryRewriteUnlinked
         );
     }
 

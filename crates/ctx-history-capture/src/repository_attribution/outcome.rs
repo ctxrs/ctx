@@ -197,14 +197,30 @@ pub(crate) fn linked_outcome_evidence(
         linkage,
     );
     match parsed {
-        OperationResult::Exact { outcome, aliases } => Some(LinkedOutcomeEvidence {
-            provider_native_repository_aliases: aliases,
-            outcome_operation_repository_path: operation_path,
-            outcome_output_repository_path: output_path,
-            outcomes: vec![(*outcome).into()],
-            pull_request_associations: Vec::new(),
-            abstentions: Vec::new(),
-        }),
+        OperationResult::Exact { outcome, aliases } => {
+            let rewrite_unlinked = outcome.replacement_lineage.is_empty()
+                && matches!(
+                    plan.operation,
+                    BoundedOutcomeOperation::Commit {
+                        rewrites_history: true,
+                        ..
+                    }
+                );
+            Some(LinkedOutcomeEvidence {
+                provider_native_repository_aliases: aliases,
+                outcome_operation_repository_path: operation_path,
+                outcome_output_repository_path: output_path,
+                outcomes: vec![(*outcome).into()],
+                pull_request_associations: Vec::new(),
+                abstentions: rewrite_unlinked
+                    .then_some((
+                        RepositoryAbstentionReason::HistoryRewriteUnlinked,
+                        "rewrite_result_has_no_exact_nonbranching_replacement_lineage",
+                    ))
+                    .into_iter()
+                    .collect(),
+            })
+        }
         OperationResult::Deferred(deferred) => Some(LinkedOutcomeEvidence {
             provider_native_repository_aliases: Vec::new(),
             outcome_operation_repository_path: operation_path,
@@ -339,9 +355,6 @@ fn parse_operation_result(
                     },
                 );
             };
-            if rewrites_history && replacement_lineage.is_empty() {
-                return OperationResult::RewriteUnlinked;
-            }
             if !rewrites_history && !replacement_lineage.is_empty() {
                 return OperationResult::Inadmissible;
             }
@@ -923,6 +936,23 @@ mod tests {
         assert!(raw_rebase.outcomes.is_empty());
         assert_eq!(
             raw_rebase.abstentions[0].0,
+            RepositoryAbstentionReason::HistoryRewriteUnlinked
+        );
+
+        let amended = linked_outcome_evidence(input(
+            "git commit --amend --no-edit && git rev-parse HEAD",
+            &Value::String(new.to_owned()),
+        ))
+        .unwrap();
+        assert_eq!(
+            exact_outcome(&amended.outcomes[0]).produced_object_ids[0].hex,
+            new
+        );
+        assert!(exact_outcome(&amended.outcomes[0])
+            .replacement_lineage
+            .is_empty());
+        assert_eq!(
+            amended.abstentions[0].0,
             RepositoryAbstentionReason::HistoryRewriteUnlinked
         );
 

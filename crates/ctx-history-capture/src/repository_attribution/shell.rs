@@ -410,7 +410,23 @@ fn tokenize(command: &str) -> Result<Tokenization, (RepositoryAbstentionReason, 
                     )),
                 });
             }
-            ';' | '|' | '(' | ')' | '<' | '>' | '\n' => {
+            '\n' => {
+                if !token.is_empty() {
+                    segment.push(std::mem::take(&mut token));
+                    token_count += 1;
+                }
+                if segment.is_empty() {
+                    continue;
+                }
+                segments.push(std::mem::take(&mut segment));
+                if segments.len() > MAX_SEGMENTS {
+                    return Err((
+                        RepositoryAbstentionReason::CommandTooLarge,
+                        "command_segment_limit_exceeded",
+                    ));
+                }
+            }
+            ';' | '|' | '(' | ')' | '<' | '>' => {
                 return Ok(Tokenization {
                     blocks_session_fallback: incomplete_segment_blocks_session_fallback(
                         &segment, &token,
@@ -793,6 +809,15 @@ mod outcome_tests {
                 exact_oid_output: false,
             })
         );
+        assert_eq!(
+            bounded_outcome_operation("git add file\ngit commit -m exact"),
+            Some(BoundedOutcomeOperation::Commit {
+                producer: BoundedCommitProducer::Commit,
+                rewrites_history: false,
+                exact_oid_output: false,
+            })
+        );
+        assert!(bounded_outcome_operation("git add file; git commit -m exact").is_none());
         assert_eq!(
             bounded_outcome_operation("git merge --no-ff feature"),
             Some(BoundedOutcomeOperation::Commit {

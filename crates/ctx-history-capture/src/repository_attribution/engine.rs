@@ -657,17 +657,15 @@ fn resolve_deferred_commit_observations(
                         prior_relative_path: file.prior_path,
                     }),
             );
-        if !deferred.rewrites_history {
-            exact.push(RepositoryOutcomeObservation {
-                kind: RepositoryOutcomeKind::Commit,
-                produced_object_ids: vec![resolved.object_id],
-                replacement_lineage: Vec::new(),
-                pull_request: None,
-                observed_at_unix_ms: deferred.observed_at_unix_ms,
-                linkage: deferred.linkage,
-                outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-            });
-        }
+        exact.push(RepositoryOutcomeObservation {
+            kind: RepositoryOutcomeKind::Commit,
+            produced_object_ids: vec![resolved.object_id],
+            replacement_lineage: Vec::new(),
+            pull_request: None,
+            observed_at_unix_ms: deferred.observed_at_unix_ms,
+            linkage: deferred.linkage,
+            outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+        });
     }
     exact
 }
