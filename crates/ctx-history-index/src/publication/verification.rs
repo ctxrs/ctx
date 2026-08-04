@@ -427,15 +427,15 @@ pub(crate) fn active_index_files(index: &tantivy::Index) -> Result<BTreeSet<Path
 
 /// Verifies a writer-produced candidate without replaying an already-audited base.
 ///
-/// A cold or recovery candidate has no reusable base and therefore keeps the
-/// complete stored-Core and posting audit. For an incremental candidate, every
-/// segment not present in the immutable base contributes its event and session
-/// identity terms to an identity-delta audit. Every changed Core record is fully
-/// decoded once. Each changed identity is then resolved against all live
-/// candidate segments, while an already-audited retained identity is decoded at
-/// most once per role and term. This preserves duplicate/collision and
-/// cross-source session ownership checks without replaying unrelated terms or
-/// retained records that share one session.
+/// A cold, recovery, or all-changed candidate has no reusable candidate segment
+/// and therefore keeps the complete stored-Core and posting audit. For a
+/// genuinely incremental candidate, every segment not present in the immutable
+/// base contributes its event and session identity terms to an identity-delta
+/// audit. Every changed Core record is fully decoded once. Each changed identity
+/// is then resolved against all live candidate segments, while an already-audited
+/// retained identity is decoded at most once per role and term. This preserves
+/// duplicate/collision and cross-source session ownership checks without
+/// replaying unrelated terms or retained records that share one session.
 pub(crate) fn verify_publication_candidate(
     searcher: &Searcher,
     manifest: &GenerationManifest,
@@ -445,23 +445,26 @@ pub(crate) fn verify_publication_candidate(
         return verify_searcher(searcher, manifest);
     };
 
-    verify_searcher_structure(searcher, manifest)?;
-    let fields = fields_from_schema(searcher.schema())?;
-    query::validate_verification_projection(fields)?;
     let base_segment_ids = base_searcher
         .segment_readers()
         .iter()
         .map(|segment| segment.segment_id().uuid_string())
         .collect::<HashSet<_>>();
-    let changed_segments = searcher
-        .segment_readers()
+    let candidate_segments = searcher.segment_readers();
+    let changed_segments = candidate_segments
         .iter()
         .enumerate()
         .filter_map(|(segment_ord, segment)| {
             (!base_segment_ids.contains(&segment.segment_id().uuid_string())).then_some(segment_ord)
         })
         .collect::<Vec<_>>();
+    if changed_segments.len() == candidate_segments.len() {
+        return verify_searcher(searcher, manifest);
+    }
 
+    verify_searcher_structure(searcher, manifest)?;
+    let fields = fields_from_schema(searcher.schema())?;
+    query::validate_verification_projection(fields)?;
     let expected_parent_sessions =
         verify_candidate_event_identities(searcher, fields, &changed_segments)?;
     verify_candidate_session_identities(
