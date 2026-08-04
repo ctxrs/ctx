@@ -7,8 +7,6 @@ use ctx_history_capture::{
 use ctx_history_core::CaptureProvider;
 use std::sync::Barrier;
 
-use super::super::dirty_source_routes::DirtySourceRoutes;
-
 fn catalog_route(
     provider: CaptureProvider,
     path: PathBuf,
@@ -308,14 +306,19 @@ fn in_capture_route_reaches_handoff_fence_before_debounced_wake() {
     let authority = RwLock::new(watch_authority(data_root, catalog));
     let counters = Mutex::new(WatchCounters::default());
     let wakeup = DaemonWakeup::default();
-    let ledger = Arc::new(Mutex::new(DirtySourceRoutes::default()));
+    let ledger = Arc::new(Mutex::new(
+        BTreeMap::<SourceRouteIdentity, EventWatermark>::new(),
+    ));
     let sink_ledger = Arc::clone(&ledger);
     wakeup.install_source_watch_sink(Arc::new(move |batch| {
         let mut ledger = sink_ledger
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (route, watermark) in &batch.routes {
-            ledger.record_event(route.clone(), *watermark, 1_000);
+            ledger
+                .entry(route.clone())
+                .and_modify(|current| *current = (*current).max(*watermark))
+                .or_insert(*watermark);
         }
     }));
 
@@ -336,7 +339,8 @@ fn in_capture_route_reaches_handoff_fence_before_debounced_wake() {
         ledger
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .seen_watermark(&route),
+            .get(&route)
+            .copied(),
         Some(EventWatermark::new(13, 1)),
         "the publication handoff fence must see the event immediately"
     );

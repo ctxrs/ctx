@@ -107,7 +107,6 @@ mod daemon_retry;
 mod daemon_status;
 mod daemon_supervisor;
 mod daemon_wakeup;
-mod dirty_source_routes;
 #[cfg(test)]
 use daemon_retry::*;
 mod source_status;
@@ -119,15 +118,16 @@ pub(crate) use source_backed_pro_catch_up::{
     publish_helper_recheck_intent as publish_source_backed_pro_recheck,
     wake_helper_recheck as wake_source_backed_pro_recheck,
 };
+mod source_backed_refresh_adapter;
 mod source_backed_refresh_coordinator;
-#[allow(unused_imports)] // Provider-neutral executor types are the capture coordinator seam.
+#[cfg(test)]
+pub(crate) use source_backed_refresh_coordinator::SourceBackedRefreshPublication;
 pub(crate) use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
     pin_active_verified_generation, published_explicit_source_relocation_authority,
     PinnedSourceBackedGeneration, SourceBackedCurrentSourceProgress,
     SourceBackedCurrentSourceProgressStage, SourceBackedRefreshDaemonUnavailable,
-    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshMode,
-    SourceBackedRefreshObservation, SourceBackedRefreshProgress, SourceBackedRefreshPublication,
+    SourceBackedRefreshMode, SourceBackedRefreshObservation, SourceBackedRefreshProgress,
 };
 mod daemon_scheduler;
 #[cfg(test)]

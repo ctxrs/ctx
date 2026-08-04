@@ -76,6 +76,11 @@
       },
       "native_unit": "//crates/ctx-history-index:unit_tests"
     },
+    "ctx-history-refresh": {
+      "manifest": "crates/ctx-history-refresh/Cargo.toml",
+      "targets": {"lib:ctx_history_refresh": "//crates/ctx-history-refresh:lib"},
+      "native_unit": "//crates/ctx-history-refresh:unit_tests"
+    },
     "ctx-pro-host-protocol": {
       "manifest": "crates/ctx-pro-host-protocol/Cargo.toml",
       "targets": {

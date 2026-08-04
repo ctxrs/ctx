@@ -10,6 +10,7 @@ use crate::semantic::{
     model_contract::semantic_model_key,
     model_runtime::SharedSemanticRuntime,
     paths_status::{daemon_source_backed_refresh_job_path, read_daemon_job_status},
+    source_backed_refresh_adapter::wire,
     source_backed_refresh_coordinator::CoreRefreshEngine,
 };
 
@@ -84,19 +85,8 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
     }
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     if service == DaemonIpcService::SourceRefresh {
-        if let Some(response) = source_refresh.handle_listener_ipc_request(data_root, &request)? {
-            let response_request_id = response
-                .get("request_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let response_write = (|| -> Result<()> {
-                writeln!(stream, "{}", serde_json::to_string(&response)?)?;
-                Ok(())
-            })();
-            if let Some(request_id) = response_request_id.as_deref() {
-                source_refresh.finish_listener_admission_response(request_id);
-            }
-            response_write?;
+        if let Some(response) = wire::handle_ipc_request(source_refresh, data_root, &request)? {
+            wire::write_response(stream, source_refresh, response)?;
             return Ok(());
         }
         if op == "ping" {

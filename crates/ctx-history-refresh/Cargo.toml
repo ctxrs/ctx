@@ -1,0 +1,28 @@
+[package]
+name = "ctx-history-refresh"
+version = "0.26.0"
+description = "Process-neutral Core refresh engine for ctx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+ctx-history-capture = { path = "../ctx-history-capture" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true

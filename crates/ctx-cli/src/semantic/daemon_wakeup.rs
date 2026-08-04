@@ -13,6 +13,7 @@ use std::{
 use anyhow::{Context, Result};
 use ctx_history_capture::SourceBackedWatchCatalog;
 use ctx_history_index::SourceRouteIdentity;
+use ctx_history_refresh::EventWatermark;
 #[cfg(test)]
 use notify::{
     event::{AccessKind, AccessMode, MetadataKind, ModifyKind},
@@ -24,7 +25,6 @@ use serde_json::{json, Value};
 use crate::{compact_json, config::CONFIG_FILE};
 
 use super::{
-    dirty_source_routes::EventWatermark,
     health_search::create_private_dir_all,
     paths_status::{daemon_root_path, write_private_json_file},
 };

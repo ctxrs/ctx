@@ -15,19 +15,6 @@ impl SourceBackedRefreshOperation {
             Self::Import => "import",
         }
     }
-
-    pub(super) fn from_request_json(request: &Value) -> Result<Self> {
-        match request.get("operation").and_then(Value::as_str) {
-            Some("refresh") => Ok(Self::Refresh),
-            Some("import") => Ok(Self::Import),
-            Some(operation) => Err(anyhow!(
-                "invalid daemon source refresh operation `{operation}`"
-            )),
-            None => Err(anyhow!(
-                "daemon source refresh request operation is missing"
-            )),
-        }
-    }
 }
 
 /// Typed source-refresh IPC request. Exact imports carry their one-shot

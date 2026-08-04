@@ -27,7 +27,7 @@ use crate::{
     output::JsonOutputFormat,
     semantic::{
         daemon::{daemon_wait_duration, install_daemon_test_job_hooks, DaemonTestJobHooks},
-        dirty_source_routes::EventWatermark,
+        source_backed_refresh_coordinator::EventWatermark,
         source_backed_refresh_coordinator::{
             coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
             SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,

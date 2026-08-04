@@ -741,6 +741,7 @@ dependencies = [
  "ctx-history-capture",
  "ctx-history-core",
  "ctx-history-index",
+ "ctx-history-refresh",
  "ctx-pro-host-protocol",
  "ed25519-dalek",
  "fastembed",
@@ -850,6 +851,22 @@ dependencies = [
  "thiserror 1.0.69",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ctx-history-refresh"
+version = "0.26.0"
+dependencies = [
+ "anyhow",
+ "ctx-history-capture",
+ "ctx-history-core",
+ "ctx-history-index",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
