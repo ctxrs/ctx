@@ -322,8 +322,28 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
     assert_eq!(source["source_format"], "forgecode_sqlite");
     assert_eq!(source["path"], legacy_db.to_str().unwrap());
 }
+fn nanoclaw_identity_snapshot(temp: &TempDir) -> (String, String, usize) {
+    let records = provider_core_records(&data_root(temp), "nanoclaw");
+    assert!(!records.is_empty(), "missing NanoClaw Core records");
+    let sources = records
+        .iter()
+        .map(|record| record.source.identity().as_uuid())
+        .collect::<BTreeSet<_>>();
+    let sessions = records
+        .iter()
+        .map(|record| record.session_id.as_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(sources.len(), 1, "NanoClaw source identity forked");
+    assert_eq!(sessions.len(), 1, "NanoClaw session identity forked");
+    (
+        sources.into_iter().next().unwrap().to_string(),
+        sessions.into_iter().next().unwrap().to_string(),
+        records.len(),
+    )
+}
+
 #[test]
-fn nanoclaw_exact_cwd_sources_are_native_and_auto_imported() {
+fn nanoclaw_automatic_then_explicit_import_preserves_one_source_session_and_result() {
     let temp = tempdir();
     let query = "nanoclaw-exact-cwd-auto-refresh-oracle";
     let project = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
@@ -356,6 +376,17 @@ fn nanoclaw_exact_cwd_sources_are_native_and_auto_imported() {
         2,
         "{imported_generation:#}"
     );
+    let automatic_identity = nanoclaw_identity_snapshot(&temp);
+    let automatic_search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "nanoclaw",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&automatic_search, "nanoclaw", query, 1, "message");
 
     ctx(&temp).args(["daemon", "enable"]).assert().success();
     let imported = json_output(ctx(&temp).args([
@@ -367,9 +398,15 @@ fn nanoclaw_exact_cwd_sources_are_native_and_auto_imported() {
         "--format=json",
     ]));
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
-    assert!(imported["totals"]["current_source_count"]
-        .as_u64()
-        .is_some_and(|count| count >= 1));
+    assert_eq!(
+        imported["totals"]["current_source_count"], 1,
+        "{imported:#}"
+    );
+    assert_eq!(
+        imported["totals"]["current_indexed_documents"], 2,
+        "{imported:#}"
+    );
+    assert_eq!(nanoclaw_identity_snapshot(&temp), automatic_identity);
 
     let search_after_import = json_output(ctx(&temp).args([
         "search",
@@ -380,7 +417,63 @@ fn nanoclaw_exact_cwd_sources_are_native_and_auto_imported() {
         "off",
         "--format=json",
     ]));
-    assert_search_provider_oracle(&search_after_import, "nanoclaw", query, 2, "message");
+    assert_search_provider_oracle(&search_after_import, "nanoclaw", query, 1, "message");
+}
+
+#[test]
+fn nanoclaw_explicit_then_automatic_import_preserves_one_source_session_and_result() {
+    let temp = tempdir();
+    let query = "nanoclaw-explicit-then-automatic-oracle";
+    let project = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
+
+    ctx(&temp).args(["daemon", "enable"]).assert().success();
+    let explicit = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "nanoclaw",
+        "--path",
+        project.to_str().unwrap(),
+        "--format=json",
+    ]));
+    assert_eq!(
+        explicit["totals"]["current_source_count"], 1,
+        "{explicit:#}"
+    );
+    assert_eq!(
+        explicit["totals"]["current_indexed_documents"], 2,
+        "{explicit:#}"
+    );
+    let explicit_identity = nanoclaw_identity_snapshot(&temp);
+
+    let mut automatic_command = ctx(&temp);
+    automatic_command.current_dir(&project);
+    let automatic = json_output(automatic_command.args([
+        "import",
+        "--all",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(
+        automatic["totals"]["current_source_count"], 1,
+        "{automatic:#}"
+    );
+    assert_eq!(
+        automatic["totals"]["current_indexed_documents"], 2,
+        "{automatic:#}"
+    );
+    assert_eq!(nanoclaw_identity_snapshot(&temp), explicit_identity);
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "nanoclaw",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "nanoclaw", query, 1, "message");
 }
 
 #[test]

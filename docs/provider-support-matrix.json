@@ -1391,7 +1391,7 @@
         }
       ],
       "history_locations": [
-        "Project-local: nearest/current authorized project `.idea/firebender/chat_history.db`, bounded by the current Git/worktree locator."
+        "Project-local: `.idea/firebender/chat_history.db` at the nearest trusted `.idea` or Git/worktree boundary."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -1410,7 +1410,7 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "Winner: nearest/current authorized project `.idea/firebender/chat_history.db`, bounded by the current Git/worktree locator; compatible DBs remain available by exact `--path`."
+        "Winner: `.idea/firebender/chat_history.db` at the nearest trusted `.idea` or Git/worktree boundary; compatible DBs remain available by exact `--path`."
       ],
       "public_docs": "docs/provider-support.md",
       "metadata": {

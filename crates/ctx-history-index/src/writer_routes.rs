@@ -245,6 +245,33 @@ impl GenerationWriter {
         Ok(())
     }
 
+    /// Authorizes the active route to take ownership from one exact carried
+    /// base route while it scans.
+    ///
+    /// The authorization remains inside the active route savepoint and does
+    /// not mutate the retained route or its documents. The caller must finish
+    /// it with `retire_carried_source_route` only after successful terminal
+    /// revalidation; rollback restores the original route plan.
+    pub fn authorize_carried_source_route_retirement(
+        &mut self,
+        replacement_route: &SourceRouteIdentity,
+        retired_route: &SourceRouteIdentity,
+    ) -> Result<()> {
+        self.validate_carried_source_route_retirement(replacement_route, retired_route)?;
+        let plan = self.source_route_plan.as_mut().ok_or_else(|| {
+            IndexError::InvalidSourceRoutePlan(
+                "route retirement authorization requires a route plan".to_owned(),
+            )
+        })?;
+        if !plan.carried_from_base.remove(retired_route) {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "retired route {} is already authorized for replacement",
+                retired_route.as_str()
+            )));
+        }
+        Ok(())
+    }
+
     /// Atomically retires one exact base route after the active replacement
     /// route has scanned and terminally revalidated successfully.
     ///
@@ -257,6 +284,41 @@ impl GenerationWriter {
         replacement_route: &SourceRouteIdentity,
         retired_route: &SourceRouteIdentity,
     ) -> Result<Vec<SourceKey>> {
+        let retired_sources =
+            self.validate_carried_source_route_retirement(replacement_route, retired_route)?;
+        let source_key_field = self.fields.source_key;
+        for source in &retired_sources {
+            let token = source_token(source);
+            let reowned_by_active_route =
+                self.active_source_route_stage
+                    .as_ref()
+                    .is_some_and(|checkpoint| {
+                        !checkpoint.pending.contains_key(&token)
+                            && self.pending.contains_key(&token)
+                    });
+            if reowned_by_active_route {
+                continue;
+            }
+            if self.pending.contains_key(&token) || self.deletions.contains_key(source) {
+                return Err(IndexError::InvalidSourceRoutePlan(format!(
+                    "retired route {} source {} is already mutated",
+                    retired_route.as_str(),
+                    source.identity()
+                )));
+            }
+            self.writer_mut()?
+                .delete_term(Term::from_field_text(source_key_field, &token));
+            self.route_deletions.insert(source.clone());
+        }
+        remove_retired_route_from_plan(self.source_route_plan.as_mut(), retired_route)?;
+        Ok(retired_sources)
+    }
+
+    fn validate_carried_source_route_retirement(
+        &self,
+        replacement_route: &SourceRouteIdentity,
+        retired_route: &SourceRouteIdentity,
+    ) -> Result<Vec<SourceKey>> {
         self.require_active_source_route(replacement_route)?;
         if replacement_route == retired_route {
             return Err(IndexError::InvalidSourceRoutePlan(
@@ -266,9 +328,24 @@ impl GenerationWriter {
         let plan = self.source_route_plan.as_ref().ok_or_else(|| {
             IndexError::InvalidSourceRoutePlan("route retirement requires a route plan".to_owned())
         })?;
-        if !plan.carried_from_base.contains(retired_route) {
+        let carried_at_stage_start =
+            self.active_source_route_stage
+                .as_ref()
+                .is_some_and(|checkpoint| {
+                    checkpoint
+                        .source_route_plan
+                        .carried_from_base
+                        .contains(retired_route)
+                });
+        if !carried_at_stage_start {
             return Err(IndexError::InvalidSourceRoutePlan(format!(
-                "retired route {} is not carried from the locked base",
+                "retired route {} was not carried when the active route began",
+                retired_route.as_str()
+            )));
+        }
+        if plan.selected.contains(retired_route) {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "retired route {} is selected in the active route plan",
                 retired_route.as_str()
             )));
         }
@@ -299,23 +376,7 @@ impl GenerationWriter {
                 )));
             }
         }
-        let retired_sources = retired.sources().to_vec();
-        let source_key_field = self.fields.source_key;
-        for source in &retired_sources {
-            let token = source_token(source);
-            if self.pending.contains_key(&token) || self.deletions.contains_key(source) {
-                return Err(IndexError::InvalidSourceRoutePlan(format!(
-                    "retired route {} source {} is already mutated",
-                    retired_route.as_str(),
-                    source.identity()
-                )));
-            }
-            self.writer_mut()?
-                .delete_term(Term::from_field_text(source_key_field, &token));
-            self.route_deletions.insert(source.clone());
-        }
-        remove_retired_route_from_plan(self.source_route_plan.as_mut(), retired_route)?;
-        Ok(retired_sources)
+        Ok(retired.sources().to_vec())
     }
 
     /// Converts a failed selected route into exact base carry-forward. Cold
@@ -396,8 +457,21 @@ impl GenerationWriter {
                 })
             })
         });
+        let owner_authorized_for_active = base_owner.is_some_and(|route| {
+            self.active_source_route_stage
+                .as_ref()
+                .is_some_and(|checkpoint| {
+                    checkpoint
+                        .source_route_plan
+                        .carried_from_base
+                        .contains(route.route_identity())
+                        && !plan.carried_from_base.contains(route.route_identity())
+                })
+        });
         if let Some(route) = base_owner {
-            if plan.carried_from_base.contains(route.route_identity()) {
+            if plan.carried_from_base.contains(route.route_identity())
+                && !owner_authorized_for_active
+            {
                 return Err(IndexError::CarriedSourceRouteMutation {
                     route_id: route.route_identity().as_str().to_owned(),
                     source_id: source.identity().to_string(),
@@ -415,7 +489,8 @@ impl GenerationWriter {
             .route_identity
             .clone();
         if let Some(route) = base_owner {
-            if route.route_identity() != &active_route {
+            let owner_is_active = route.route_identity() == &active_route;
+            if !owner_is_active && !owner_authorized_for_active {
                 return Err(IndexError::SourceRouteOwnershipMutation {
                     active_route_id: active_route.as_str().to_owned(),
                     owner_route_id: route.route_identity().as_str().to_owned(),

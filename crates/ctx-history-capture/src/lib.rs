@@ -110,8 +110,8 @@ pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderIm
 pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
     automatic_source_backed_route_identity, build_automatic_source_backed_registry,
-    build_automatic_source_backed_registry_from_report, refresh_source_backed_generation,
-    refresh_source_backed_generation_for_routes,
+    build_automatic_source_backed_registry_from_report, explicit_source_catalog_lineage,
+    refresh_source_backed_generation, refresh_source_backed_generation_for_routes,
     refresh_source_backed_generation_with_detailed_progress,
     refresh_source_backed_generation_with_progress, register_astrbot_source_backed_route,
     register_codex_prompt_history_source_backed_route, register_crush_source_backed_route,

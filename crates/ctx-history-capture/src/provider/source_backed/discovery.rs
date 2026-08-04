@@ -1,5 +1,53 @@
 use super::*;
 
+/// Derives the stable catalog lineage for an exact provider source request.
+///
+/// This is the released explicit-source v1 identity contract. Automatic
+/// routes that represent the same certified format and physical path must use
+/// this lineage too, so route selection does not fork source, session, event,
+/// cursor, or replay-checkpoint identity.
+pub fn explicit_source_catalog_lineage(
+    provider: CaptureProvider,
+    certified_source_format: &str,
+    path: &Path,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.explicit-source-request-lineage.v1\0");
+    digest.update(provider.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(certified_source_format.as_bytes());
+    digest.update([0]);
+    digest.update(path.as_os_str().as_encoded_bytes());
+    digest.finalize().into()
+}
+
+#[cfg(test)]
+#[test]
+fn exact_source_catalog_lineage_preserves_released_v1_identity() {
+    let lineage = explicit_source_catalog_lineage(
+        CaptureProvider::NanoClaw,
+        "nanoclaw_project",
+        Path::new("/fixture/nanoclaw"),
+    );
+    let encoded = lineage
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    assert_eq!(
+        encoded,
+        "5213b19342d779063b64336dd7fff3a678de719fadb60240a1e1061798687e56"
+    );
+    assert_ne!(
+        lineage,
+        explicit_source_catalog_lineage(
+            CaptureProvider::NanoClaw,
+            "nanoclaw_project",
+            Path::new("/fixture/nanoclaw-other"),
+        )
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceBackedAutomaticUnavailableReason {
     SourceStatus(ProviderSourceStatus),
@@ -233,7 +281,7 @@ pub(in crate::provider::source_backed) fn build_automatic_source_backed_registry
             &mut registry,
             discovery,
             data_root,
-            format_route.constructor,
+            format_route,
             source.clone(),
         ) {
             Ok(()) => {
@@ -325,10 +373,10 @@ fn register_discovered_automatic_route(
     registry: &mut SourceBackedProviderRegistry,
     discovery: &DiscoveryContext,
     data_root: &Path,
-    constructor: SourceBackedRouteConstructor,
+    format_route: &'static SourceBackedProviderRouteMetadata,
     source: ProviderSource,
 ) -> Result<(), SourceBackedAutomaticUnavailableReason> {
-    let result = match (constructor, source.provider) {
+    let result = match (format_route.constructor, source.provider) {
         (SourceBackedRouteConstructor::NamedSurface, CaptureProvider::Warp) => {
             let selected =
                 resolve_warp_discovery_authority(discovery, &source).map_err(|error| {
@@ -389,7 +437,11 @@ fn register_discovered_automatic_route(
             )
         }
         (SourceBackedRouteConstructor::CatalogLineage, CaptureProvider::NanoClaw) => {
-            let lineage = nanoclaw_automatic_catalog_lineage(&source);
+            let lineage = explicit_source_catalog_lineage(
+                source.provider,
+                format_route.certified_source_format,
+                &source.path,
+            );
             register_nanoclaw_source_backed_route_with_selection(
                 registry,
                 source,
@@ -425,18 +477,6 @@ fn register_discovered_automatic_route(
             detail: error.to_string(),
         },
     )
-}
-
-fn nanoclaw_automatic_catalog_lineage(source: &ProviderSource) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-nanoclaw-service-registration-catalog-lineage-v1\0");
-    digest.update(source.provider.as_str().as_bytes());
-    digest.update(b"\0");
-    digest.update(source.source_format.as_bytes());
-    let path = source.path.as_os_str().as_encoded_bytes();
-    digest.update((path.len() as u64).to_be_bytes());
-    digest.update(path);
-    digest.finalize().into()
 }
 
 fn goose_platform_root(discovery: &DiscoveryContext, database: &Path) -> Option<PathBuf> {

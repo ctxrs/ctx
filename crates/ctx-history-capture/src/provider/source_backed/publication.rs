@@ -492,6 +492,9 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             let current_source = route.metadata.source.path.display().to_string();
             let record_progress = std::cell::RefCell::new(SourceRecordProgress::default());
             let progress_failure = std::cell::RefCell::new(None::<SourceBackedRouteError>);
+            for retired_route in &route.retire_after_success {
+                writer.authorize_carried_source_route_retirement(route_identity, retired_route)?;
+            }
             let scan_result = {
                 let progress_callback = std::cell::RefCell::new(&mut report_progress);
                 let mut report_record_progress = |delta| {
@@ -623,23 +626,25 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                             carried_unselected_route_ids.remove(retired_route);
                             for source in retired_sources {
                                 let digest = source.identity().digest();
-                                if owners
-                                    .insert(
-                                        digest,
-                                        SourceOwner {
+                                match owners.entry(digest) {
+                                    std::collections::hash_map::Entry::Vacant(entry) => {
+                                        entry.insert(SourceOwner {
                                             route_index,
-                                            source: source.clone(),
+                                            source,
                                             present: false,
                                             revalidation: None,
-                                        },
-                                    )
-                                    .is_some()
-                                {
-                                    return Err(
-                                        SourceBackedCoordinatorError::DuplicateSourceOwner {
-                                            source_id: source.identity().to_string(),
-                                        },
-                                    );
+                                        });
+                                    }
+                                    std::collections::hash_map::Entry::Occupied(entry)
+                                        if entry.get().route_index == route_index
+                                            && entry.get().source.exact_descriptor_eq(&source) => {}
+                                    std::collections::hash_map::Entry::Occupied(_) => {
+                                        return Err(
+                                            SourceBackedCoordinatorError::DuplicateSourceOwner {
+                                                source_id: source.identity().to_string(),
+                                            },
+                                        );
+                                    }
                                 }
                             }
                         }
