@@ -142,6 +142,23 @@ fn qoder_probe_is_shallow_bounded_and_deterministic() {
 }
 
 #[test]
+fn firebender_unmarked_cwd_does_not_synthesize_a_project_store() {
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let mut cwd = temp.path().join("unmarked");
+    for index in 0..MAX_PROJECT_ANCESTORS {
+        cwd.push(format!("level-{index}"));
+    }
+    fs::create_dir_all(&cwd).unwrap();
+    let context = base.with_cwd(Some(cwd));
+
+    let report = resolve(&context, spec(CaptureProvider::Firebender));
+
+    assert!(report.sources.is_empty());
+    assert!(report.issues.is_empty());
+}
+
+#[test]
 fn firebender_project_local_default_reports_missing_at_current_project_root() {
     let temp = tempdir();
     let base = context(temp.path(), DiscoveryPlatform::Linux);
@@ -240,6 +257,29 @@ fn firebender_project_local_default_stops_at_git_boundary() {
 }
 
 #[test]
+fn firebender_project_local_default_accepts_git_worktree_file_boundary() {
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let project = temp.path().join("project");
+    let child = project.join("src/module");
+    fs::create_dir_all(&child).unwrap();
+    fs::write(project.join(".git"), "gitdir: ../git/worktrees/project\n").unwrap();
+
+    let report = resolve(
+        &base.with_cwd(Some(child)),
+        spec(CaptureProvider::Firebender),
+    );
+
+    assert_eq!(
+        (&report.sources[0].path, report.sources[0].status),
+        (
+            &project.join(".idea/firebender/chat_history.db"),
+            ProviderSourceStatus::Missing
+        )
+    );
+}
+
+#[test]
 fn firebender_nearest_project_marker_suppresses_outer_project_store() {
     let temp = tempdir();
     let base = context(temp.path(), DiscoveryPlatform::Linux);
@@ -264,7 +304,7 @@ fn firebender_nearest_project_marker_suppresses_outer_project_store() {
 
 #[cfg(unix)]
 #[test]
-fn firebender_linked_project_store_fails_closed_and_does_not_touch_target() {
+fn firebender_linked_idea_marker_fails_closed_and_does_not_touch_target() {
     use std::os::unix::fs::symlink;
 
     let temp = tempdir();
@@ -276,10 +316,58 @@ fn firebender_linked_project_store_fails_closed_and_does_not_touch_target() {
     symlink(&outside, context.cwd().unwrap().join(".idea")).unwrap();
 
     let report = resolve(&context, spec(CaptureProvider::Firebender));
-    assert_eq!(
-        report.sources[0].status,
-        ProviderSourceStatus::Unsupported
+    assert!(report.sources.is_empty());
+    assert!(report.issues.is_empty());
+    assert_eq!(fs::read(&db).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn firebender_linked_git_marker_fails_closed_before_an_outer_project() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let outer = temp.path().join("outer");
+    let project = outer.join("project");
+    let child = project.join("src");
+    let outer_db = outer.join(".idea/firebender/chat_history.db");
+    write_firebender_chat_history_db(&outer_db);
+    fs::create_dir_all(&child).unwrap();
+    symlink(temp.path().join("missing-git-target"), project.join(".git")).unwrap();
+    let before = fs::read(&outer_db).unwrap();
+
+    let report = resolve(
+        &base.with_cwd(Some(child)),
+        spec(CaptureProvider::Firebender),
     );
+
+    assert!(report.sources.is_empty());
+    assert!(report.issues.is_empty());
+    assert_eq!(fs::read(&outer_db).unwrap(), before);
+}
+
+#[test]
+fn firebender_project_marker_beyond_ancestor_cap_is_not_discovered() {
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let project = temp.path().join("project");
+    let db = project.join(".idea/firebender/chat_history.db");
+    write_firebender_chat_history_db(&db);
+    let mut child = project.clone();
+    for index in 0..MAX_PROJECT_ANCESTORS {
+        child.push(format!("level-{index}"));
+    }
+    fs::create_dir_all(&child).unwrap();
+    let before = fs::read(&db).unwrap();
+
+    let report = resolve(
+        &base.with_cwd(Some(child)),
+        spec(CaptureProvider::Firebender),
+    );
+
+    assert!(report.sources.is_empty());
+    assert!(report.issues.is_empty());
     assert_eq!(fs::read(&db).unwrap(), before);
 }
 

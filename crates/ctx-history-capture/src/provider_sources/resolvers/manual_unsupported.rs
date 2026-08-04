@@ -244,24 +244,21 @@ fn resolve_firebender(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> 
 
 fn firebender_project_root(cwd: Option<&Path>) -> Option<PathBuf> {
     let cwd = cwd?;
-    let mut first = None;
     for candidate in cwd.ancestors().take(MAX_PROJECT_ANCESTORS) {
-        if first.is_none() {
-            first = Some(candidate.to_path_buf());
+        match safe_path_kind(&candidate.join(".idea")) {
+            SafePathKind::Directory => return Some(candidate.to_path_buf()),
+            SafePathKind::Missing => {}
+            SafePathKind::File | SafePathKind::Unsafe => return None,
         }
-        match path_presence(&candidate.join(".idea")) {
-            PathPresence::Present | PathPresence::Unsupported | PathPresence::Unknown(_) => {
+        match safe_path_kind(&candidate.join(".git")) {
+            SafePathKind::File | SafePathKind::Directory => {
                 return Some(candidate.to_path_buf());
             }
-            PathPresence::Missing => {}
-        }
-        match path_presence(&candidate.join(".git")) {
-            PathPresence::Present => return Some(candidate.to_path_buf()),
-            PathPresence::Unsupported | PathPresence::Unknown(_) => return first,
-            PathPresence::Missing => {}
+            SafePathKind::Missing => {}
+            SafePathKind::Unsafe => return None,
         }
     }
-    first
+    None
 }
 
 fn resolve_auggie(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
