@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -949,24 +949,27 @@ fn commit_selector_matches(requested: &str, resolved: &str) -> bool {
 
 fn repository_selector_matches(requested: Option<&str>, resolved: &ResourceRef) -> bool {
     requested.is_none_or(|requested| {
-        normalized_repository_selector(requested)
-            == normalized_repository_selector(&resolved.display)
+        canonical_logical_repository_id(requested)
+            == canonical_logical_repository_id(&resolved.display)
     })
 }
 
-fn normalized_repository_selector(value: &str) -> String {
-    let value = value
+/// Canonicalizes only the ASCII case of the forge host in a logical
+/// repository identity. Every other byte remains identity-bearing.
+#[must_use]
+pub fn canonical_logical_repository_id(value: &str) -> Cow<'_, str> {
+    let Some((host, opaque_tail)) = value
         .strip_prefix("forge:")
-        .or_else(|| value.strip_prefix("https://"))
-        .unwrap_or(value)
-        .trim_end_matches('/');
-    let Some((host, path)) = value.split_once('/') else {
-        return value.to_owned();
+        .and_then(|identity| identity.split_once('/'))
+    else {
+        return Cow::Borrowed(value);
     };
-    if !host.contains('.') {
-        return value.to_owned();
+    let canonical_host = host.to_ascii_lowercase();
+    if canonical_host == host {
+        Cow::Borrowed(value)
+    } else {
+        Cow::Owned(format!("forge:{canonical_host}/{opaque_tail}"))
     }
-    format!("forge:{}/{path}", host.to_ascii_lowercase())
 }
 
 #[cfg(test)]

@@ -21,6 +21,11 @@ RUST_SRCS = glob(["src/**/*.rs"])
 
 CONFORMANCE_DATA = glob(["testdata/**/*.json"])
 
+PROTOCOL_AUTHORITY_DATA = [
+    "testdata/entitlement/v1/golden.json",
+    "testdata/v1/inventory.json",
+]
+
 filegroup(
     name = "entitlement_golden_vectors",
     srcs = glob(["testdata/entitlement/**/*.json"]),
@@ -40,6 +45,7 @@ rust_library(
     srcs = PROD_SRCS,
     crate_name = "ctx_pro_host_protocol",
     crate_root = "src/lib.rs",
+    compile_data = PROTOCOL_AUTHORITY_DATA,
     edition = crate_edition(),
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + CTX_PRO_HOST_PROTOCOL_DEPS,

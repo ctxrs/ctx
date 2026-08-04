@@ -98,7 +98,8 @@ impl RepositoryBinding {
         Ok(())
     }
 
-    pub(crate) fn accepts_pull_request(
+    #[must_use]
+    pub fn accepts_pull_request(
         &self,
         pull_request: &RepositoryPullRequestIdentity,
     ) -> bool {
