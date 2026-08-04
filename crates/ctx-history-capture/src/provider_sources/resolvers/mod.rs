@@ -13,8 +13,8 @@ use super::{
     context::DiscoveryContext,
     probes::{default_location_import_probe, BoundedProbe},
     reasons::{
-        empty_source_reason, path_presence_unknown_reason, probe_io_error_reason,
-        unknown_source_reason,
+        blocked_auth_or_encryption_reason, empty_source_reason, path_presence_unknown_reason,
+        probe_io_error_reason, unknown_source_reason,
     },
     selectors::{
         encoded_path_within_limit, source_path_kind, SourcePathError,
@@ -217,49 +217,82 @@ pub(super) fn source_from_location(
 ) -> ProviderSource {
     let presence = path_presence(&path);
     let exists = !matches!(presence, PathPresence::Missing);
-    let (status, unsupported_reason) =
+    let (status, unsupported_reason, blocked_auth_or_encryption) =
         if matches!(spec.import_support, ProviderImportSupport::Unsupported) {
-            (ProviderSourceStatus::Unsupported, spec.unsupported_reason)
+            (
+                ProviderSourceStatus::Unsupported,
+                spec.unsupported_reason,
+                false,
+            )
         } else {
             match presence {
-                PathPresence::Missing => (ProviderSourceStatus::Missing, spec.unsupported_reason),
+                PathPresence::Missing => (
+                    ProviderSourceStatus::Missing,
+                    spec.unsupported_reason,
+                    false,
+                ),
                 PathPresence::Unknown(kind) => (
                     ProviderSourceStatus::Unknown,
                     Some(path_presence_unknown_reason(kind)),
+                    false,
                 ),
                 PathPresence::Unsupported => (
                     ProviderSourceStatus::Unsupported,
                     Some(UNSUPPORTED_SOURCE_ROOT_REASON),
+                    false,
                 ),
                 PathPresence::Present => {
                     match default_location_import_probe(data_root, spec.provider, location, &path) {
-                        BoundedProbe::Found => {
-                            (ProviderSourceStatus::Available, spec.unsupported_reason)
-                        }
+                        BoundedProbe::Found => (
+                            ProviderSourceStatus::Available,
+                            spec.unsupported_reason,
+                            false,
+                        ),
                         BoundedProbe::NotFound => (
                             ProviderSourceStatus::Empty,
                             empty_source_reason(spec.provider),
+                            false,
                         ),
                         BoundedProbe::BudgetExhausted => (
                             ProviderSourceStatus::Unknown,
                             unknown_source_reason(spec.provider),
+                            false,
                         ),
                         BoundedProbe::IoError => (
                             ProviderSourceStatus::Unknown,
                             probe_io_error_reason(spec.provider),
+                            false,
+                        ),
+                        BoundedProbe::BlockedAuthOrEncryption => (
+                            ProviderSourceStatus::Unknown,
+                            blocked_auth_or_encryption_reason(spec.provider),
+                            true,
                         ),
                     }
                 }
             }
         };
+    let (source_kind, import_support, catalog_support) = if blocked_auth_or_encryption {
+        (
+            ProviderSourceKind::DetectionOnly,
+            ProviderImportSupport::Unsupported,
+            ProviderCatalogSupport::None,
+        )
+    } else {
+        (
+            location.source_kind,
+            spec.import_support,
+            spec.catalog_support,
+        )
+    };
     ProviderSource {
         provider: spec.provider,
         path,
         exists,
         source_format: location.source_format,
-        source_kind: location.source_kind,
-        import_support: spec.import_support,
-        catalog_support: spec.catalog_support,
+        source_kind,
+        import_support,
+        catalog_support,
         status,
         unsupported_reason,
     }

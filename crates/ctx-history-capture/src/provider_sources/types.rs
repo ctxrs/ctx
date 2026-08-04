@@ -73,6 +73,19 @@ impl ProviderSourceStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSourceStatusReason {
+    BlockedAuthOrEncryption,
+}
+
+impl ProviderSourceStatusReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BlockedAuthOrEncryption => "blocked_auth_or_encryption",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderDefaultLocation {
     pub path_components: &'static [&'static str],
@@ -101,4 +114,23 @@ pub struct ProviderSource {
     pub catalog_support: ProviderCatalogSupport,
     pub status: ProviderSourceStatus,
     pub unsupported_reason: Option<&'static str>,
+}
+
+impl ProviderSource {
+    pub fn status_reason(&self) -> Option<ProviderSourceStatusReason> {
+        match (
+            self.provider,
+            self.status,
+            self.source_kind,
+            self.import_support,
+        ) {
+            (
+                CaptureProvider::Trae,
+                ProviderSourceStatus::Unknown,
+                ProviderSourceKind::DetectionOnly,
+                ProviderImportSupport::Unsupported,
+            ) => Some(ProviderSourceStatusReason::BlockedAuthOrEncryption),
+            _ => None,
+        }
+    }
 }

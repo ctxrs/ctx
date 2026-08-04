@@ -19,6 +19,33 @@ fn registry_policy_warp_source(path: PathBuf, exists: bool) -> ProviderSource {
     }
 }
 
+fn registry_policy_nanoclaw_source(path: PathBuf) -> ProviderSource {
+    ProviderSource {
+        provider: CaptureProvider::NanoClaw,
+        path,
+        exists: true,
+        source_format: "nanoclaw_project",
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::Native,
+        status: ProviderSourceStatus::Available,
+        unsupported_reason: None,
+    }
+}
+
+fn registry_policy_automatic_route_identity(source: &ProviderSource) -> SourceRouteIdentity {
+    ctx_history_capture::SourceBackedRoute::automatic(
+        source.clone(),
+        SourceBackedSelectorAuthority::CatalogLineage,
+        ctx_history_capture::SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),
+    )
+    .unwrap()
+    .metadata()
+    .route_identity
+    .clone()
+    .unwrap()
+}
+
 #[test]
 fn only_unscopable_registry_safety_issues_block_globally() {
     let missing_source =
@@ -89,6 +116,71 @@ fn registry_failure_identity_uses_the_canonical_certified_format() {
         failures[0].source_identity,
         format!("{:x}", digest.finalize())
     );
+}
+
+#[test]
+fn distinct_nanoclaw_registry_failures_match_retained_automatic_routes() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let first_checkout = temp.path().join("nanoclaw-first");
+    let second_checkout = temp.path().join("nanoclaw-second");
+    std::fs::create_dir_all(&first_checkout).unwrap();
+    std::fs::create_dir_all(&second_checkout).unwrap();
+    let sources = [
+        registry_policy_nanoclaw_source(first_checkout),
+        registry_policy_nanoclaw_source(second_checkout),
+    ];
+    let expected_route_ids = sources
+        .iter()
+        .map(registry_policy_automatic_route_identity)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected_route_ids.len(), 2);
+
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(&index_root, WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+    let mut retained_routes = Vec::new();
+    for (route_identity, anchor) in expected_route_ids.iter().zip([0xa1, 0xa2]) {
+        let retained_source = publication_pin_source_with_anchor(anchor);
+        writer.begin_source(retained_source.clone()).unwrap();
+        writer
+            .add_core_record(publication_pin_record(&retained_source))
+            .unwrap();
+        writer
+            .certify_source(publication_pin_certificate(&retained_source))
+            .unwrap();
+        retained_routes.push(
+            ctx_history_index::SourceRouteSnapshot::present(
+                route_identity.clone(),
+                vec![retained_source],
+            )
+            .unwrap(),
+        );
+    }
+    writer.set_present_source_routes(retained_routes).unwrap();
+    writer.commit(|_| true).unwrap();
+    let retained = VerifiedIndex::open(&index_root).unwrap();
+
+    let issues = sources.map(|source| SourceBackedAutomaticRegistryIssue::Unavailable {
+        source,
+        reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+            detail: "injected NanoClaw registration failure".to_owned(),
+        },
+    });
+    let failures =
+        capture_refresh::automatic_registry_route_failures(&issues, Some(&retained)).unwrap();
+    let failed_route_ids = failures
+        .iter()
+        .map(|failure| failure.route_identity.clone())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(failures.len(), 2);
+    assert_eq!(failed_route_ids, expected_route_ids);
+    assert!(failures.iter().all(|failure| failure.carried_forward));
 }
 
 #[test]

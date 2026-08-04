@@ -257,10 +257,13 @@ fn source_key_for_workspace(workspace_id: &str) -> TraeSourceBackedResultV0<Sour
 pub(super) fn explicit_trae_leaf(path: &Path) -> TraeSourceBackedResultV0<PathBuf> {
     crate::common::io::ensure_provider_path_parents_are_not_symlinks(path)?;
     let metadata = fs::symlink_metadata(path).map_err(CaptureError::from)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.file_type().is_file()
-        || path.file_name().and_then(|name| name.to_str()) != Some("state.vscdb")
-    {
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(TraeSourceBackedErrorV0::ExplicitLeafRequired);
+    }
+    if !matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("state.vscdb" | "database.db")
+    ) {
         return Err(TraeSourceBackedErrorV0::ExplicitLeafRequired);
     }
     Ok(absolute_trae_path(path)?)

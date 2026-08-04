@@ -21,8 +21,8 @@ pub use provider_sources::{
     LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation, ProviderCatalogSupport,
     ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
     ProviderSourceRootBoundaryError, ProviderSourceSpec, ProviderSourceStatus,
-    WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel,
-    WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
+    ProviderSourceStatusReason, WarpDiscoveryUnavailable, WarpInstalledPlatform,
+    WarpInstalledSurfaceKey, WarpReleaseChannel, WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
 };
 
 pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -109,7 +109,8 @@ pub(crate) mod provider;
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
-    build_automatic_source_backed_registry, build_automatic_source_backed_registry_from_report,
+    automatic_source_backed_route_identity, build_automatic_source_backed_registry,
+    build_automatic_source_backed_registry_from_report, explicit_source_catalog_lineage,
     refresh_source_backed_generation, refresh_source_backed_generation_for_routes,
     refresh_source_backed_generation_with_detailed_progress,
     refresh_source_backed_generation_with_progress, register_astrbot_source_backed_route,

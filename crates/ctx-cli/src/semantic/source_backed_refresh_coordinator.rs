@@ -11,10 +11,8 @@ use std::{
 use std::fs;
 
 use anyhow::{anyhow, bail, Context, Result};
-#[cfg(test)]
-use ctx_history_capture::SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress;
 use ctx_history_capture::{
-    build_automatic_source_backed_registry_from_report,
+    automatic_source_backed_route_identity, build_automatic_source_backed_registry_from_report,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     source_backed_route_inventory, validate_provider_source_roots_outside_data_root, CaptureError,
     DiscoveryContext, DiscoveryReport, ProviderSourceStatus, RouteObservation,
@@ -26,8 +24,13 @@ use ctx_history_capture::{
     SourceBackedFailedRoute, SourceBackedFailedRouteOutcome, SourceBackedLogicalSourceFailures,
     SourceBackedProviderRegistry, SourceBackedRecordRejections, SourceBackedRefreshScope,
     SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
-    SourceBackedSelectorAuthority, SourceBackedSourceFailureClass, SourceBackedSourceFailures,
-    SourceBackedSuccessfulRouteOutcome, SourceBackedWatchCatalog,
+    SourceBackedSourceFailureClass, SourceBackedSourceFailures, SourceBackedSuccessfulRouteOutcome,
+    SourceBackedWatchCatalog,
+};
+#[cfg(test)]
+use ctx_history_capture::{
+    SourceBackedRefreshProgress as CaptureSourceBackedRefreshProgress,
+    SourceBackedSelectorAuthority,
 };
 #[cfg(test)]
 use ctx_history_core::CaptureProvider;

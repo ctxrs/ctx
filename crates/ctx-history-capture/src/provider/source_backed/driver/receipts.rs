@@ -646,12 +646,7 @@ impl SourceBackedRoute {
             SourceBackedRouteSelection::Automatic,
             selector_authority,
         )?;
-        let route_identity = source_backed_route_identity(
-            &source,
-            known.certified_source_format,
-            SourceBackedRouteSelection::Automatic,
-            selector_authority,
-        )?;
+        let route_identity = automatic_source_backed_route_identity(&source)?;
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
                 source,
@@ -709,12 +704,7 @@ impl SourceBackedRoute {
             SourceBackedRouteSelection::Automatic,
             selector_authority,
         )?;
-        let route_identity = source_backed_route_identity(
-            &source,
-            known.certified_source_format,
-            SourceBackedRouteSelection::Automatic,
-            selector_authority,
-        )?;
+        let route_identity = automatic_source_backed_route_identity(&source)?;
         let path = source.path.clone();
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
@@ -846,6 +836,32 @@ impl SourceBackedProviderRegistry {
     }
 }
 
+/// Derives the canonical identity for a source's landed automatic route.
+///
+/// This intentionally accepts sources that failed registration so callers can
+/// match route-local failures to a retained healthy route from the same source.
+pub fn automatic_source_backed_route_identity(
+    source: &ProviderSource,
+) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
+    let known = landed_format_route(source.provider, source.source_format)
+        .filter(|route| route.automatic)
+        .ok_or_else(|| {
+            invalid_route(
+                source.provider,
+                format!(
+                    "source format {:?} has no landed automatic route",
+                    source.source_format
+                ),
+            )
+        })?;
+    source_backed_route_identity(
+        source,
+        known.certified_source_format,
+        SourceBackedRouteSelection::Automatic,
+        known.selector_authority,
+    )
+}
+
 fn source_backed_route_identity(
     source: &ProviderSource,
     certified_source_format: &str,
@@ -873,7 +889,13 @@ fn source_backed_route_identity(
             b"selected-with-retained-explicit".as_slice()
         }
     });
-    if selection == SourceBackedRouteSelection::ExplicitManual {
+    // Discovered-winner routes deliberately keep path-independent identity so
+    // moving the selected provider root remains an in-place replacement.
+    // Catalog-lineage routes instead represent independently owned catalogs;
+    // automatic NanoClaw discovery may therefore register several checkouts.
+    if selection == SourceBackedRouteSelection::ExplicitManual
+        || selector_authority == SourceBackedSelectorAuthority::CatalogLineage
+    {
         let path = source.path.as_os_str().as_encoded_bytes();
         digest.update((path.len() as u64).to_be_bytes());
         digest.update(path);

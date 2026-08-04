@@ -426,7 +426,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     route!(
         NanoClaw,
         "nanoclaw_project",
-        false,
+        true,
         true,
         CatalogLineage,
         CatalogLineage
@@ -514,7 +514,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         DiscoveredWinner
     ),
-    sqlite_route!(Trae, "trae_state_vscdb", true, true, ExplicitPath),
+    sqlite_route!(Trae, "trae_state_vscdb", true, true, DiscoveredWinner),
     sqlite_route!(MiMoCode, "mimocode_sqlite", true, true, DiscoveredWinner),
 ];
 
@@ -588,7 +588,7 @@ Mux|mux_session_jsonl|mux_session_jsonl|false|true|ExplicitPath|none|ProviderSou
 RovoDev|rovodev_session_json_tree|rovodev_session_json_tree|true|true|DiscoveredWinner|none|ProviderSource
 OpenClaw|openclaw_session_jsonl_tree|openclaw_session_jsonl_tree|true|true|DiscoveredWinner|none|ProviderSource
 Hermes|hermes_state_sqlite|hermes_state_sqlite|true|true|DiscoveredWinner|none|ProviderSource
-NanoClaw|nanoclaw_project|nanoclaw_project|false|true|CatalogLineage|none|CatalogLineage
+NanoClaw|nanoclaw_project|nanoclaw_project|true|true|CatalogLineage|none|CatalogLineage
 AstrBot|astrbot_data_v4_sqlite|astrbot_data_v4_sqlite|true|true|DiscoveredWinner|none|DiscoveryContext
 Shelley|shelley_sqlite|shelley_sqlite|true|false|ExactCwd|none|ExactCwd
 Continue|continue_cli_sessions_json|continue_cli_sessions_json|true|true|DiscoveredWinner|none|ProviderSource
@@ -602,7 +602,7 @@ Qoder|qoder_transcript_jsonl_tree|qoder_transcript_jsonl|true|true|DiscoveredWin
 Qoder|qoder_transcript_jsonl|qoder_transcript_jsonl|false|true|ExplicitPath|none|ProviderSource
 Warp|warp_sqlite|warp_sqlite|true|true|NamedSurface|none|NamedSurface
 CodeBuddy|codebuddy_history_json|codebuddy_history_json|true|true|DiscoveredWinner|none|ProviderSource
-Trae|trae_state_vscdb|trae_state_vscdb|true|true|ExplicitPath|none|ProviderSource
+Trae|trae_state_vscdb|trae_state_vscdb|true|true|DiscoveredWinner|none|ProviderSource
 MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 ";
 
@@ -614,7 +614,7 @@ MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|none|Provide
                 .iter()
                 .filter(|route| route.automatic)
                 .count(),
-            41
+            42
         );
         assert_eq!(registry_inventory_oracle(), BASELINE_REGISTRY_INVENTORY);
     }

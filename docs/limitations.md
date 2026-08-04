@@ -13,8 +13,9 @@ shipped.
 - Additional supported agent harnesses are listed in the provider matrix and are
   imported only when their documented local history paths exist and match the
   supported native formats.
-- NanoClaw local import is explicit-path support and is not included in
-  `ctx import --all` or pre-search refresh. AstrBot is supported for bounded
+- NanoClaw local import participates in native automatic discovery from an
+  exact project CWD or official launchd/systemd service registration. Alternate
+  unregistered roots require exact `--path`. AstrBot is supported for bounded
   `data_v4.db` locations and imports local LLM context plus available platform
   history rows when present, but upstream AstrBot still treats non-WebChat raw
   IM replies as platform-side history rather than guaranteed `data_v4.db`

@@ -6,7 +6,7 @@ use super::super::{
     provider_source_for_path, DiscoveryIssueKind, ProviderImportSupport, ProviderSourceKind,
     ProviderSourceStatus,
 };
-use super::support::{assert_source_status, tempdir, EnvGuard, ENV_LOCK};
+use super::support::{assert_source_status, tempdir, CwdGuard, EnvGuard, ENV_LOCK};
 
 #[cfg(target_os = "windows")]
 #[test]
@@ -557,6 +557,8 @@ fn native_provider_default_discovery_uses_importer_specific_file_predicates() {
 fn legacy_vector_apis_are_exact_report_source_projections() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
+    std::fs::create_dir_all(temp.path().join(".git")).unwrap();
+    let _cwd = CwdGuard::set(temp.path());
     let _codex_home = EnvGuard::remove("CODEX_HOME");
     let all_report = discover_provider_sources_report(temp.path());
     assert_eq!(discover_provider_sources(temp.path()), all_report.sources);
@@ -567,9 +569,14 @@ fn legacy_vector_apis_are_exact_report_source_projections() {
         discover_provider_sources_for_provider(temp.path(), CaptureProvider::Codex),
         provider_report.sources
     );
-    assert!(all_report.issues.iter().any(|issue| {
-        issue.provider == CaptureProvider::Firebender
-            && issue.kind == DiscoveryIssueKind::InsufficientOfficialEvidence
+    assert!(all_report.issues.iter().all(|issue| {
+        issue.provider != CaptureProvider::Firebender
+            || issue.kind != DiscoveryIssueKind::InsufficientOfficialEvidence
+    }));
+    assert!(all_report.sources.iter().any(|source| {
+        source.provider == CaptureProvider::Firebender
+            && source.path == temp.path().join(".idea/firebender/chat_history.db")
+            && source.status == ProviderSourceStatus::Missing
     }));
     assert!(all_report.sources.iter().any(|source| {
         source.provider == CaptureProvider::FactoryAiDroid

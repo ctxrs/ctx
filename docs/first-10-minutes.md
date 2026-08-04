@@ -52,14 +52,19 @@ ctx sources --format json
 Expect rows for supported local import providers such as Codex, Pi,
 Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes, Gemini, Cursor,
 Zed, Copilot CLI, Factory AI Droid, and Warp Terminal restoration SQLite.
-NanoClaw is supported for explicit project paths; AstrBot appears as supported
-when a bounded `data_v4.db` source exists. Warp is supported from documented
-local `warp.sqlite` paths. A row with
+NanoClaw is supported from an exact project CWD or official launchd/systemd
+service registration; AstrBot appears as supported when a bounded `data_v4.db`
+source exists. Warp is supported from documented local `warp.sqlite` paths. A
+row with
 `exists: false`
 means ctx knows the default path but did not find local history there. A JSON
 row with `status: "empty"` means the path exists but no provider-specific
-transcript files were found. A row with `status: "unknown"` means the bounded
-transcript probe hit its scan budget.
+transcript files were found. A row with `status: "unknown"` means bounded
+discovery could not decide safely, for example because of a scan budget, I/O
+failure, or an authentication/encryption boundary. Inspect `status_reason` and
+`unsupported_reason` for the typed and human-readable diagnostics; an encrypted
+or non-plaintext Trae database reports
+`status_reason: "blocked_auth_or_encryption"`.
 
 ## 4. Re-Run Or Target Imports
 
@@ -85,8 +90,9 @@ ctx import --provider mimocode
 ctx import --provider codebuddy --path ~/.codebuddy
 ```
 
-NanoClaw is explicit-import only. Use `ctx import --provider nanoclaw` when
-discovery finds the desired source, or add `--path` to target a specific source.
+NanoClaw participates in ordinary automatic discovery when the exact CWD is a
+project store or an official service registration pins a valid checkout. Add
+`--path` to target a specific unregistered NanoClaw project.
 AstrBot `data_v4.db` sources are imported by `ctx import --all` and pre-search
 refresh when they live in bounded default locations, and still support explicit
 `--path` imports.

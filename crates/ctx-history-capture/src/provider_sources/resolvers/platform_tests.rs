@@ -2,7 +2,10 @@ use super::super::super::context::DiscoveryPlatformDirs;
 use std::fs;
 
 use super::*;
-use crate::provider_source_spec;
+use crate::{
+    provider_source_for_path, provider_source_spec, ProviderImportSupport,
+    ProviderSourceStatusReason,
+};
 use rusqlite::Connection;
 
 fn tempdir() -> tempfile::TempDir {
@@ -703,19 +706,243 @@ fn copilot_home_is_a_single_replacement_and_invalid_values_are_manual() {
 }
 
 #[test]
-fn trae_has_no_automatic_source_even_when_compatibility_paths_exist() {
+fn trae_uses_current_platform_database_and_gates_unknown_unix() {
     let temp = tempdir();
-    let context = context(temp.path(), DiscoveryPlatform::MacOS)
-        .with_env("APPDATA", temp.path().join("roaming").as_os_str());
+    let linux = context(temp.path(), DiscoveryPlatform::Linux);
+    assert_eq!(
+        provider_report(&linux, CaptureProvider::Trae).sources[0].path,
+        temp.path()
+            .join("platform-config/Trae/ModularData/ai-agent/database.db")
+    );
+
+    let xdg = temp.path().join("xdg-config");
+    let linux_xdg =
+        context(temp.path(), DiscoveryPlatform::Linux).with_env("XDG_CONFIG_HOME", xdg.as_os_str());
+    assert_eq!(
+        provider_report(&linux_xdg, CaptureProvider::Trae).sources[0].path,
+        xdg.join("Trae/ModularData/ai-agent/database.db")
+    );
+
+    let mac = context(temp.path(), DiscoveryPlatform::MacOS);
+    assert_eq!(
+        provider_report(&mac, CaptureProvider::Trae).sources[0].path,
+        temp.path()
+            .join("platform-data/Trae/ModularData/ai-agent/database.db")
+    );
+
+    let windows = context(temp.path(), DiscoveryPlatform::Windows);
+    assert_eq!(
+        provider_report(&windows, CaptureProvider::Trae).sources[0].path,
+        temp.path()
+            .join("platform-data/Trae/ModularData/ai-agent/database.db")
+    );
+
+    assert!(provider_report(
+        &context(temp.path(), DiscoveryPlatform::OtherUnix),
+        CaptureProvider::Trae
+    )
+    .sources
+    .is_empty());
+}
+
+#[test]
+fn trae_current_database_reports_missing_valid_empty_and_malformed_states() {
+    let temp = tempdir();
+    let context = context(temp.path(), DiscoveryPlatform::Linux);
+    let current = context
+        .platform_dirs()
+        .config
+        .as_ref()
+        .unwrap()
+        .join("Trae/ModularData/ai-agent/database.db");
+
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, current);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Missing);
+
+    fs::create_dir_all(current.parent().unwrap()).unwrap();
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute(
+            "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Empty);
+
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute(
+            "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2)",
+            rusqlite::params!["memento/icube-ai-agent-storage", "invalid JSON"],
+        )
+        .unwrap();
+    drop(connection);
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute(
+            "UPDATE ItemTable SET value = ?1 WHERE [key] = ?2",
+            rusqlite::params![r#"{"list":[]}"#, "memento/icube-ai-agent-storage"],
+        )
+        .unwrap();
+    drop(connection);
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Empty);
+
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute(
+            "UPDATE ItemTable SET value = ?1 WHERE [key] = ?2",
+            rusqlite::params![
+                r#"{"list":[{"id":"input-1","messages":[{"role":"user","content":"trae discovery"}]}]}"#,
+                "memento/icube-ai-agent-storage"
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(
+        report.sources[0].source_kind,
+        ProviderSourceKind::NativeHistory
+    );
+    assert_eq!(
+        report.sources[0].import_support,
+        ProviderImportSupport::Native
+    );
+    assert_eq!(report.sources[0].status_reason(), None);
+
+    let explicit_plaintext = provider_source_for_path(CaptureProvider::Trae, current.clone());
+    assert_eq!(explicit_plaintext.status, ProviderSourceStatus::Available);
+    assert_eq!(
+        explicit_plaintext.source_kind,
+        ProviderSourceKind::NativeHistory
+    );
+    assert_eq!(
+        explicit_plaintext.import_support,
+        ProviderImportSupport::Explicit
+    );
+    assert_eq!(explicit_plaintext.status_reason(), None);
+
+    let encrypted_shape = (0..4096)
+        .map(|index| u8::try_from((index * 131 + 17) % 251).unwrap())
+        .collect::<Vec<_>>();
+    fs::write(&current, &encrypted_shape).unwrap();
+    let before_directory = fs::read_dir(current.parent().unwrap())
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_os_string(),
+                fs::read(path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+    assert_eq!(
+        report.sources[0].source_kind,
+        ProviderSourceKind::DetectionOnly
+    );
+    assert_eq!(
+        report.sources[0].import_support,
+        ProviderImportSupport::Unsupported
+    );
+    assert_eq!(
+        report.sources[0].status_reason(),
+        Some(ProviderSourceStatusReason::BlockedAuthOrEncryption)
+    );
+    assert_eq!(
+        report.sources[0].unsupported_reason,
+        Some(
+            "the Trae database is encrypted or is not plaintext SQLite; current SQLCipher-encrypted relational history cannot be imported without Trae key access"
+        )
+    );
+    assert_eq!(fs::read(&current).unwrap(), encrypted_shape);
+    let after_directory = fs::read_dir(current.parent().unwrap())
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_os_string(),
+                fs::read(path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(after_directory, before_directory);
+
+    let explicit = provider_source_for_path(CaptureProvider::Trae, current);
+    assert_eq!(explicit.status, ProviderSourceStatus::Unknown);
+    assert_eq!(explicit.source_kind, ProviderSourceKind::DetectionOnly);
+    assert_eq!(explicit.import_support, ProviderImportSupport::Unsupported);
+    assert_eq!(
+        explicit.status_reason(),
+        Some(ProviderSourceStatusReason::BlockedAuthOrEncryption)
+    );
+    assert_eq!(
+        explicit.unsupported_reason,
+        report.sources[0].unsupported_reason
+    );
+}
+
+#[test]
+fn trae_current_database_does_not_union_stale_workspace_storage() {
+    let temp = tempdir();
+    let context = context(temp.path(), DiscoveryPlatform::MacOS);
     write_file(
         &context
             .home()
             .join("Library/Application Support/Trae/User/workspaceStorage/w/state.vscdb"),
         b"compatibility",
     );
+
     let report = provider_report(&context, CaptureProvider::Trae);
-    assert!(report.sources.is_empty());
-    assert!(report.issues.is_empty());
+
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(
+        report.sources[0].path,
+        temp.path()
+            .join("platform-data/Trae/ModularData/ai-agent/database.db")
+    );
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Missing);
+}
+
+#[test]
+fn trae_duplicate_known_keys_are_unknown_for_automatic_discovery() {
+    let temp = tempdir();
+    let context = context(temp.path(), DiscoveryPlatform::Linux);
+    let current = context
+        .platform_dirs()
+        .config
+        .as_ref()
+        .unwrap()
+        .join("Trae/ModularData/ai-agent/database.db");
+    fs::create_dir_all(current.parent().unwrap()).unwrap();
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute("CREATE TABLE ItemTable ([key] TEXT, value TEXT)", [])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2), (?1, ?3)",
+            rusqlite::params![
+                "memento/icube-ai-agent-storage",
+                r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                r#"{"list":[]}"#,
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
 }
 
 #[test]

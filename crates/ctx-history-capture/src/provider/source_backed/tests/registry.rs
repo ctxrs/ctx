@@ -52,6 +52,71 @@ fn heterogeneous_routes_publish_one_core_generation() {
     assert!(committed.stage_duration > Duration::ZERO);
 }
 
+#[test]
+fn automatic_identity_preserves_discovered_replacement_and_distinguishes_catalogs() {
+    let driver = fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 3)
+        .driver
+        .unwrap();
+    let automatic_route = |provider: CaptureProvider,
+                           source_format: &'static str,
+                           authority: SourceBackedSelectorAuthority,
+                           path: &'static str| {
+        SourceBackedRoute::automatic(
+            fixture_provider_source_at(
+                provider,
+                source_format,
+                ProviderImportSupport::Native,
+                path,
+            ),
+            authority,
+            driver.clone(),
+        )
+        .unwrap()
+    };
+
+    let discovered_first = automatic_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        "/fixture/gemini-first",
+    );
+    let discovered_second = automatic_route(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        "/fixture/gemini-second",
+    );
+    assert_eq!(
+        discovered_first.metadata.route_identity, discovered_second.metadata.route_identity,
+        "generic discovered-winner path changes must retain replacement identity"
+    );
+    let mut discovered_registry = SourceBackedProviderRegistry::new();
+    discovered_registry.register(discovered_first);
+    discovered_registry.register(discovered_second);
+    assert_eq!(discovered_registry.executable_route_count(), 1);
+
+    let nanoclaw_first = automatic_route(
+        CaptureProvider::NanoClaw,
+        "nanoclaw_project",
+        SourceBackedSelectorAuthority::CatalogLineage,
+        "/fixture/nanoclaw-first",
+    );
+    let nanoclaw_second = automatic_route(
+        CaptureProvider::NanoClaw,
+        "nanoclaw_project",
+        SourceBackedSelectorAuthority::CatalogLineage,
+        "/fixture/nanoclaw-second",
+    );
+    assert_ne!(
+        nanoclaw_first.metadata.route_identity,
+        nanoclaw_second.metadata.route_identity
+    );
+    let mut nanoclaw_registry = SourceBackedProviderRegistry::new();
+    nanoclaw_registry.register(nanoclaw_first);
+    nanoclaw_registry.register(nanoclaw_second);
+    assert_eq!(nanoclaw_registry.executable_route_count(), 2);
+}
+
 fn fail_route_after_scan(
     mut route: SourceBackedRoute,
     kind: SourceBackedRouteErrorKind,

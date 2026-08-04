@@ -7,7 +7,7 @@ use super::super::{
     reasons::{empty_source_reason, probe_io_error_reason, unknown_source_reason},
     selectors::{
         direct_entries, encoded_path_within_limit, source_path_kind, SourcePathKind,
-        MAX_DIRECT_DIRECTORY_ENTRIES, MAX_FINITE_SELECTOR_ENTRIES,
+        MAX_DIRECT_DIRECTORY_ENTRIES, MAX_FINITE_SELECTOR_ENTRIES, MAX_PROJECT_ANCESTORS,
     },
     types::{
         DiscoveryIssueKind, DiscoveryReport, ProviderSource, ProviderSourceKind,
@@ -15,8 +15,8 @@ use super::super::{
     },
 };
 use super::{
-    issue, path_presence, push_source_candidate, select_current_or_legacy, unsupported_source,
-    PathPresence,
+    issue, path_presence, push_source_candidate, select_current_or_legacy,
+    source_from_parts_with_data_root, unsupported_source, PathPresence,
 };
 
 const QODER_DIRECT_UNSUPPORTED: &str =
@@ -32,7 +32,7 @@ const UNSAFE_SELECTED_PATH_REASON: &str =
 pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
     match spec.provider {
         CaptureProvider::Qoder => resolve_qoder(context, spec),
-        CaptureProvider::Firebender => resolve_firebender(spec),
+        CaptureProvider::Firebender => resolve_firebender(context, spec),
         CaptureProvider::Auggie => resolve_auggie(context, spec),
         CaptureProvider::DeepAgents => resolve_deepagents(context, spec),
         CaptureProvider::Mux => resolve_mux(context, spec),
@@ -221,16 +221,44 @@ fn inspect_qoder_projects(projects: &Path) -> (ProbeState, bool) {
     )
 }
 
-fn resolve_firebender(spec: &ProviderSourceSpec) -> DiscoveryReport {
-    DiscoveryReport {
-        sources: Vec::new(),
-        issues: vec![issue(
-            spec.provider,
-            None,
-            DiscoveryIssueKind::InsufficientOfficialEvidence,
-            "no official automatic Firebender history location is established; use the exact user-authorized chat_history.db with --path",
-        )],
+fn resolve_firebender(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
+    let mut report = DiscoveryReport::default();
+    let Some(project_root) = firebender_project_root(context.cwd()) else {
+        return report;
+    };
+    push_selected_source(
+        &mut report,
+        source_from_parts_with_data_root(
+            context.data_root(),
+            spec,
+            project_root
+                .join(".idea")
+                .join("firebender")
+                .join("chat_history.db"),
+            "firebender_chat_history_sqlite",
+            ProviderSourceKind::NativeHistory,
+        ),
+    );
+    report
+}
+
+fn firebender_project_root(cwd: Option<&Path>) -> Option<PathBuf> {
+    let cwd = cwd?;
+    for candidate in cwd.ancestors().take(MAX_PROJECT_ANCESTORS) {
+        match safe_path_kind(&candidate.join(".idea")) {
+            SafePathKind::Directory => return Some(candidate.to_path_buf()),
+            SafePathKind::Missing => {}
+            SafePathKind::File | SafePathKind::Unsafe => return None,
+        }
+        match safe_path_kind(&candidate.join(".git")) {
+            SafePathKind::File | SafePathKind::Directory => {
+                return Some(candidate.to_path_buf());
+            }
+            SafePathKind::Missing => {}
+            SafePathKind::Unsafe => return None,
+        }
     }
+    None
 }
 
 fn resolve_auggie(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {

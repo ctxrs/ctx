@@ -37,15 +37,15 @@ use super::super::{
         trae_session_selection, trae_stream_session, TraeJsonArrayValues, TraeJsonContainerValues,
         TraeSessionSelection, TraeStreamSession,
     },
+    trae_sqlite_value_fits_parser_bound,
     workspace::{trae_workspace_folder, trae_workspace_id},
-    TRAE_CHAT_KEYS,
+    TRAE_CHAT_KEYS, TRAE_CHAT_ROWS_QUERY, TRAE_SQLITE_VALUE_OVERHEAD_BYTES,
 };
 
 const TRAE_SOURCE_PARSER_REVISION: &str = "trae-nativepath-parser-v2";
 const TRAE_SOURCE_POLICY_REVISION: &str = "trae-nativepath-core-policy-v2";
 const TRAE_PAGE_UNIT_LIMIT: usize = NATIVE_INGESTION_PAGE_MAX_UNITS - 8;
 const TRAE_PAGE_BYTE_LIMIT: usize = NATIVE_INGESTION_PAGE_MAX_BYTES - 512 * 1024;
-const TRAE_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 16 * 64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TraeFrontier {
@@ -338,16 +338,12 @@ fn trae_logical_observation(
     conn: &Connection,
     schema_evidence: &[u8],
 ) -> Result<([u8; 32], Vec<Option<TraeObservedKey>>)> {
-    let limit = i64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES)
+    let parser_bound = i64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES)
         .map_err(|_| CaptureError::SystemInvariant("Trae JSON bound exceeds i64"))?;
+    let parser_overhead = i64::try_from(TRAE_SQLITE_VALUE_OVERHEAD_BYTES)
+        .map_err(|_| CaptureError::SystemInvariant("Trae SQLite overhead exceeds i64"))?;
     let _guard = SqliteLengthPreflightGuard::new(conn);
-    let mut statement = conn.prepare(
-        "select [key], typeof(value), coalesce(octet_length(value), 0), \
-                case when typeof(value) = 'text' and octet_length(value) <= ?7 \
-                     then cast(value as text) end \
-         from ItemTable \
-         where [key] in (?1, ?2, ?3, ?4, ?5, ?6)",
-    )?;
+    let mut statement = conn.prepare(TRAE_CHAT_ROWS_QUERY)?;
     let mut rows = statement.query(rusqlite::params![
         TRAE_CHAT_KEYS[0],
         TRAE_CHAT_KEYS[1],
@@ -355,16 +351,24 @@ fn trae_logical_observation(
         TRAE_CHAT_KEYS[3],
         TRAE_CHAT_KEYS[4],
         TRAE_CHAT_KEYS[5],
-        limit,
+        parser_overhead,
+        parser_bound,
     ])?;
     let mut observed = BTreeMap::new();
     while let Some(row) = rows.next()? {
+        let chat_key = row.get::<_, String>(0)?;
+        let cardinality = row.get::<_, i64>(1)?;
+        if cardinality != 1 {
+            return Err(CaptureError::InvalidPayload(format!(
+                "Trae ItemTable key `{chat_key}` appears {cardinality} times"
+            )));
+        }
         observed.insert(
-            row.get::<_, String>(0)?,
+            chat_key,
             (
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Option<String>>(3)?.map(String::into_bytes),
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?.map(String::into_bytes),
             ),
         );
     }
@@ -603,10 +607,7 @@ impl<'a> TraeScanner<'a> {
         let retained_bytes = u64::try_from(observed.retained_bytes).map_err(|_| {
             CaptureError::InvalidPayload("Trae ItemTable value length is negative".into())
         })?;
-        let observed_bytes = retained_bytes
-            .saturating_add(TRAE_SQLITE_VALUE_OVERHEAD_BYTES)
-            .saturating_add(u64::try_from(chat_key.len()).unwrap_or(u64::MAX));
-        if observed_bytes > u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES).unwrap_or(u64::MAX) {
+        if !trae_sqlite_value_fits_parser_bound(chat_key, retained_bytes) {
             return Ok(TraeLoadedKey::Rejected(format!(
                 "Trae ItemTable key `{chat_key}` exceeds the provider JSON bound"
             )));
@@ -820,7 +821,117 @@ mod tests {
 
     use rusqlite::{config::DbConfig, params, Connection};
 
-    use super::TraeSqliteDatabase;
+    use super::{acquire_source, TraeFrontier, TraeScanner, TraeSqliteDatabase};
+    use crate::CaptureError;
+
+    #[test]
+    fn primary_key_itemtable_remains_importable() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let data_root = crate::test_support_paths::tempdir().unwrap();
+        let source = temp.path().join("state.vscdb");
+        let connection = Connection::open(&source).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2)",
+                params![
+                    crate::provider::providers::trae::TRAE_CHAT_KEYS[0],
+                    r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let authority = acquire_source(
+            data_root.path(),
+            &source,
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        )
+        .unwrap();
+        let mut scanner = TraeScanner::new(&authority, TraeFrontier::default());
+        let page = scanner.next_page().unwrap().unwrap();
+        assert_eq!(page.core.len(), 1);
+        assert!(page.rejections.is_empty());
+    }
+
+    #[test]
+    fn duplicate_known_itemtable_keys_are_typed_invalid_payload() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let data_root = crate::test_support_paths::tempdir().unwrap();
+        let source = temp.path().join("state.vscdb");
+        let connection = Connection::open(&source).unwrap();
+        connection
+            .execute("CREATE TABLE ItemTable ([key] TEXT, value TEXT)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2), (?1, ?3)",
+                params![
+                    crate::provider::providers::trae::TRAE_CHAT_KEYS[0],
+                    r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                    r#"{"list":[]}"#,
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = match acquire_source(
+            data_root.path(),
+            &source,
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        ) {
+            Ok(_) => panic!("duplicate known Trae keys must be rejected before import"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            CaptureError::InvalidPayload(detail)
+                if detail == "Trae ItemTable key `memento/icube-ai-agent-storage` appears 2 times"
+        ));
+    }
+
+    #[test]
+    fn malformed_sibling_key_is_isolated_as_a_record_rejection() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let data_root = crate::test_support_paths::tempdir().unwrap();
+        let source = temp.path().join("state.vscdb");
+        let connection = Connection::open(&source).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2), (?3, ?4)",
+                params![
+                    crate::provider::providers::trae::TRAE_CHAT_KEYS[0],
+                    r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                    crate::provider::providers::trae::TRAE_CHAT_KEYS[1],
+                    "invalid JSON",
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let authority = acquire_source(
+            data_root.path(),
+            &source,
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        )
+        .unwrap();
+        let mut scanner = TraeScanner::new(&authority, TraeFrontier::default());
+        let page = scanner.next_page().unwrap().unwrap();
+        assert_eq!(page.core.len(), 1);
+        assert_eq!(page.rejections.len(), 1);
+        assert!(page.rejections[0].error.contains("contains invalid JSON"));
+    }
 
     #[test]
     fn stock_snapshot_queries_active_wal_without_persistent_writes_and_rejects_swap() {

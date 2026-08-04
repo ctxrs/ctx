@@ -109,7 +109,37 @@ const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
-const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[];
+const TRAE_DEFAULTS: &[ProviderDefaultLocation] = &[
+    ProviderDefaultLocation {
+        path_components: &[".config", "Trae", "ModularData", "ai-agent", "database.db"],
+        source_format: "trae_state_vscdb",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "Library",
+            "Application Support",
+            "Trae",
+            "ModularData",
+            "ai-agent",
+            "database.db",
+        ],
+        source_format: "trae_state_vscdb",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+    ProviderDefaultLocation {
+        path_components: &[
+            "AppData",
+            "Roaming",
+            "Trae",
+            "ModularData",
+            "ai-agent",
+            "database.db",
+        ],
+        source_format: "trae_state_vscdb",
+        source_kind: ProviderSourceKind::NativeHistory,
+    },
+];
 
 const QODER_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     path_components: &[".qoder", "projects"],
@@ -575,7 +605,7 @@ pub(super) const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::NanoClaw,
         display_name: "NanoClaw",
         default_locations: NANOCLAW_DEFAULTS,
-        import_support: ProviderImportSupport::Explicit,
+        import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },

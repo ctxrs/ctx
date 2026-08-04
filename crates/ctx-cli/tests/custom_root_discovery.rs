@@ -54,21 +54,19 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
             "provider",
             "source_format",
             "status",
+            "status_reason",
             "unsupported_reason",
         ])
     );
 
+    let mut no_path_command = ctx(&temp);
+    no_path_command.current_dir(temp.path());
     let no_path_report =
-        json_output(ctx(&temp).args(["sources", "--provider", "firebender", "--format=json"]));
+        json_output(no_path_command.args(["sources", "--provider", "firebender", "--format=json"]));
     assert_eq!(object_keys(&no_path_report), object_keys(&packet));
     assert!(no_path_report["sources"].as_array().unwrap().is_empty());
     assert_eq!(no_path_report["issues_truncated"], false);
-    let issues = no_path_report["issues"].as_array().unwrap();
-    assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0]["provider"], "firebender");
-    assert!(issues[0]["path"].is_null());
-    assert_eq!(issues[0]["code"], "insufficient_official_evidence");
-    assert_eq!(issues[0]["message_truncated"], false);
+    assert!(no_path_report["issues"].as_array().unwrap().is_empty());
 }
 
 #[test]

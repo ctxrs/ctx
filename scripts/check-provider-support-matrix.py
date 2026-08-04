@@ -72,6 +72,11 @@ FORBIDDEN_PUBLIC_TEXT_RE = re.compile(
 )
 FORBIDDEN_PROVIDER_FIELDS = {"prio" + "rity", "te" + "sts", "fix" + "ture_paths", "block" + "ers"}
 FORBIDDEN_PATH_FIELDS = {"pro" + "of"}
+REDUNDANT_DEFAULT_CAPABILITY_FIELDS = {
+    "default_auto_discovery",
+    "default_auto_discovery_scope",
+    "supports_default_location",
+}
 SUPPORT_DOC_PATH = REPO_ROOT / "docs/provider-support.md"
 PUBLIC_COVERAGE_PATHS = {
     "crates/ctx-cli/tests/native_providers.rs",
@@ -151,6 +156,21 @@ def scan_public_text(value: Any, field: str) -> None:
             scan_public_text(item, f"{field}.{key}")
 
 
+def reject_redundant_default_capability_fields(value: Any, field: str) -> None:
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            reject_redundant_default_capability_fields(item, f"{field}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in REDUNDANT_DEFAULT_CAPABILITY_FIELDS:
+                fail(
+                    f"{field}.{key} is redundant; "
+                    "every supported provider has automatic discovery",
+                )
+            reject_redundant_default_capability_fields(item, f"{field}.{key}")
+
+
 def codex_public_claim_scan_paths(
     suite_path: Path = CODEX_PUBLIC_CLAIM_TEST_SUITE,
 ) -> tuple[Path, ...]:
@@ -224,6 +244,7 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
     seen_ids.add(provider_id)
     scan_private_text(provider, f"providers[{provider_id}]")
     scan_public_text(provider, f"providers[{provider_id}]")
+    reject_redundant_default_capability_fields(provider, f"providers[{provider_id}]")
     if FORBIDDEN_PROVIDER_FIELDS.intersection(provider):
         fail(f"providers[{provider_id}] contains a non-public field")
 
@@ -267,7 +288,6 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
     require_string_list(
         provider.get("history_locations"),
         f"providers[{provider_id}].history_locations",
-        allow_empty=True,
     )
 
     imports_existing_history = provider.get("imports_existing_history")

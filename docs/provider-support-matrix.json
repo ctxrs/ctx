@@ -558,15 +558,20 @@
           "source_format": "trae_state_vscdb",
           "fidelity": "partial",
           "notes": [
-            "No official automatic Trae history root is established; workspaceStorage compatibility paths require an exact explicit path.",
-            "Explicit Trae or Trae CN User/workspaceStorage roots, workspace directories, or state.vscdb files remain supported.",
+            "Automatic discovery selects the current platform-standard Trae application-data database at Trae/ModularData/ai-agent/database.db on Linux, macOS, and Windows, but admits it only when bounded probing recognizes plaintext ItemTable compatibility data.",
+            "Trae 1.107.1 current chat_session/chat_message_general history is SQLCipher-encrypted and is not imported; encrypted or non-plaintext database.db candidates report unknown with an encryption/key-access diagnostic.",
+            "Released compatibility remains available for exact explicit Trae or Trae CN User/workspaceStorage roots, workspace directories, or state.vscdb files.",
             "Reads SQLite ItemTable values for exporter-backed keys including memento/icube-ai-agent-storage, icube-ai-agent-storage-input-history, chat.ChatSessionStore.index, and ChatStore.",
             "Trae CN input-history rows are imported as user prompts when assistant replies are not present in local state.",
-            "globalStorage, ModularData, arbitrary caches, unknown ItemTable keys, and full assistant transcript recovery from input-history-only databases are not claimed."
+            "globalStorage, arbitrary caches, unknown ItemTable keys, and full assistant transcript recovery from input-history-only databases are not claimed."
           ]
         }
       ],
-      "history_locations": [],
+      "history_locations": [
+        "~/.config/Trae/ModularData/ai-agent/database.db",
+        "~/Library/Application Support/Trae/ModularData/ai-agent/database.db",
+        "%APPDATA%\\Trae\\ModularData\\ai-agent\\database.db"
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -584,13 +589,11 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "No automatic official history leaf: `ModularData` does not identify current-importer input. Former `workspaceStorage` probes are removed; compatible `state.vscdb` remains available by exact `--path`."
+        "Automatic discovery locates only the current platform-standard database.db and never unions legacy workspaceStorage. Current encrypted relational chats are not importable; released plaintext ItemTable compatibility at that location is admitted, while User/workspaceStorage/state.vscdb remains exact `--path` only."
       ],
       "public_docs": "docs/provider-support.md",
       "metadata": {
-        "default_auto_discovery": false,
-        "default_auto_discovery_scope": "none; no official automatic Trae history leaf is established",
-        "import_support": "exact explicit paths only",
+        "import_support": "automatic plaintext ItemTable compatibility at the official current database location plus exact explicit released workspaceStorage paths; current encrypted relational history is unsupported",
         "aliases": [
           "trae-cn",
           "trae_cn"
@@ -689,13 +692,13 @@
           "source_format": "nanoclaw_project",
           "fidelity": "partial",
           "notes": [
-            "Explicit-path importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
-            "Automatic project discovery checks only the exact current working directory; ancestors are not searched, and alternate roots require an exact explicit path."
+            "Native importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
+            "Automatic project discovery retains the exact CWD and every valid finite official service registration together, deduplicated by canonical source identity: macOS ~/Library/LaunchAgents/com.nanoclaw-v2-<sha1>.plist, Linux user ~/.config/systemd/user/nanoclaw-v2-<sha1>.service, and root Linux /etc/systemd/system/nanoclaw-v2-<sha1>.service. The system service directory is examined only when the effective UID is 0."
           ]
         }
       ],
       "history_locations": [
-        "Project default: exact-CWD checkout containing `data/v2.db` and required `data/v2-sessions`; alternate roots are explicit-only."
+        "Exact-CWD checkout containing `data/v2.db` and required `data/v2-sessions` coexists with all valid official launchd/systemd registrations pinning checkout WorkingDirectories; canonical source identity deduplicates overlap. `/etc/systemd/system` is examined only for effective UID 0. Alternate unregistered roots require exact `--path`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -714,7 +717,7 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "`import_support: explicit` excludes NanoClaw from setup, `--all`, daemon, and search refresh. Other clones/mounts require exact `--path`; no home/ancestor scan."
+        "Missing service metadata returns after fixed exact lookups. Malformed, oversized, unsafe, mismatched, missing-checkout, or symlinked registration data is rejected fail-closed; no checkout/ancestor scan and no nohup/WSL wrapper discovery because that wrapper is checkout-local."
       ],
       "public_docs": "docs/providers.md"
     },
@@ -1387,7 +1390,9 @@
           ]
         }
       ],
-      "history_locations": [],
+      "history_locations": [
+        "Project-local: `.idea/firebender/chat_history.db` at the nearest trusted `.idea` or Git/worktree boundary."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -1405,7 +1410,7 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "No automatic official Firebender leaf; ancestor discovery of `<project>/.idea/firebender/chat_history.db` is removed. Compatible DB remains available by exact `--path`."
+        "Winner: `.idea/firebender/chat_history.db` at the nearest trusted `.idea` or Git/worktree boundary; compatible DBs remain available by exact `--path`."
       ],
       "public_docs": "docs/provider-support.md",
       "metadata": {

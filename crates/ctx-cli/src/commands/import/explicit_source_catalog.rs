@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
+    automatic_source_backed_route_identity, explicit_source_catalog_lineage,
     provider_source_for_path, register_custom_history_source_backed_route,
     register_forgecode_explicit_source_backed_route, register_goose_source_backed_route,
     register_hermes_explicit_source_backed_route,
@@ -287,7 +288,7 @@ pub(crate) fn upsert_explicit_source(
     validate_catalog_registration_support(source)?;
     validate_explicit_source_root(data_root, source)?;
     let metadata = route_metadata(source.provider, source.source_format)?;
-    let catalog_lineage = request_catalog_lineage(
+    let catalog_lineage = explicit_source_catalog_lineage(
         source.provider,
         metadata.certified_source_format,
         &source.path,
@@ -400,21 +401,6 @@ pub(crate) fn relocation_authority_for_import(
             )
             .into()
         })
-}
-
-fn request_catalog_lineage(
-    provider: CaptureProvider,
-    certified_source_format: &str,
-    path: &Path,
-) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"ctx.explicit-source-request-lineage.v1\0");
-    digest.update(provider.as_str().as_bytes());
-    digest.update([0]);
-    digest.update(certified_source_format.as_bytes());
-    digest.update([0]);
-    digest.update(path.as_os_str().as_encoded_bytes());
-    digest.finalize().into()
 }
 
 #[cfg(test)]
@@ -536,6 +522,14 @@ fn register_explicit_source_catalog_snapshot_routes(
             .collect::<BTreeSet<_>>();
         let source = source_from_catalog_entry(entry, true)?;
         validate_explicit_source_root(data_root, &source)?;
+        let automatic_route_retirement = if source.provider == CaptureProvider::NanoClaw {
+            let identity = automatic_source_backed_route_identity(&source)?;
+            base_generation
+                .is_some_and(|index| index.manifest().source_route(&identity).is_some())
+                .then_some(identity)
+        } else {
+            None
+        };
         register_enabled_catalog_route(
             data_root,
             &mut build.registry,
@@ -586,6 +580,11 @@ fn register_explicit_source_catalog_snapshot_routes(
                 added.len()
             );
         };
+        if let Some(retired) = automatic_route_retirement {
+            build
+                .registry
+                .retire_routes_after_success(route_identity, [retired])?;
+        }
         bindings.push(ExplicitSourceCatalogRouteBinding {
             catalog_lineage: entry.catalog_lineage.clone(),
             route_identity: route_identity.as_str().to_owned(),
