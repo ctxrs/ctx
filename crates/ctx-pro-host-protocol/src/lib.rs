@@ -21,8 +21,7 @@ pub const MAX_BLAME_TARGET_BYTES: usize = 8 * 1024;
 /// Canonical generated Protocol V1 inventory shipped by this exact crate revision.
 pub const PROTOCOL_INVENTORY_JSON: &str = include_str!("../testdata/v1/inventory.json");
 /// Canonical entitlement vectors shipped by this exact crate revision.
-pub const ENTITLEMENT_GOLDEN_JSON: &str =
-    include_str!("../testdata/entitlement/v1/golden.json");
+pub const ENTITLEMENT_GOLDEN_JSON: &str = include_str!("../testdata/entitlement/v1/golden.json");
 
 mod entitlement;
 pub use entitlement::{
@@ -68,12 +67,11 @@ pub use message::{
 mod query;
 pub use query::{
     canonical_logical_repository_id, AgentAttribution, BlameContinuation, BlameMatch, BlameRequest,
-    BlameResult, BlameTarget,
-    CommitBlameMatch, CommitFactType, CommitPredicate, ContinuationReason, FactConfidence,
-    FactState, FileBlameMatch, GitSnapshot, LineRange, NumberedEvidence, ProductionRelationship,
-    PullRequestAction, PullRequestActivity, PullRequestBlameMatch, PullRequestBlameRelationship,
-    PullRequestCommit, PullRequestCommitRelationship, QuerySnapshotExpectation,
-    ResolvedBlameTarget, WorktreeStatus,
+    BlameResult, BlameTarget, CommitBlameMatch, CommitFactType, CommitPredicate,
+    ContinuationReason, FactConfidence, FactState, FileBlameMatch, GitSnapshot, LineRange,
+    NumberedEvidence, ProductionRelationship, PullRequestAction, PullRequestActivity,
+    PullRequestBlameMatch, PullRequestBlameRelationship, PullRequestCommit,
+    PullRequestCommitRelationship, QuerySnapshotExpectation, ResolvedBlameTarget, WorktreeStatus,
 };
 mod core_materialization;
 pub use core_materialization::{

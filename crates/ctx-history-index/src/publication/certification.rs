@@ -688,13 +688,16 @@ fn open_regular_file(path: &Path) -> Result<(File, FileIdentity)> {
 }
 
 #[cfg(test)]
+type PathTestHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
 thread_local! {
-    static REGULAR_FILE_IDENTITY_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+    static REGULAR_FILE_IDENTITY_TEST_HOOK: std::cell::RefCell<Option<PathTestHook>> =
         std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
-struct RegularFileIdentityTestHookGuard(Option<Box<dyn FnMut(&Path)>>);
+struct RegularFileIdentityTestHookGuard(Option<PathTestHook>);
 
 #[cfg(test)]
 impl RegularFileIdentityTestHookGuard {
@@ -934,12 +937,12 @@ fn retryable_alias_snapshot_error(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 thread_local! {
-    static ALIAS_ENTRY_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+    static ALIAS_ENTRY_TEST_HOOK: std::cell::RefCell<Option<PathTestHook>> =
         std::cell::RefCell::new(None);
 }
 
 #[cfg(test)]
-struct AliasEntryTestHookGuard(Option<Box<dyn FnMut(&Path)>>);
+struct AliasEntryTestHookGuard(Option<PathTestHook>);
 
 #[cfg(test)]
 impl AliasEntryTestHookGuard {

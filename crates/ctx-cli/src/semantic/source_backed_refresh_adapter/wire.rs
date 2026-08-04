@@ -99,7 +99,7 @@ fn refresh_submission(request: &Value) -> Result<RefreshSubmission> {
         .get("operation")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("daemon source refresh request operation is missing"))
-        .and_then(RefreshOperation::from_str)?;
+        .and_then(str::parse)?;
     let explicit_catalog = request.get("explicit_source_catalog");
     match (operation, mode, explicit_catalog) {
         (RefreshOperation::Refresh, _, Some(_)) => {

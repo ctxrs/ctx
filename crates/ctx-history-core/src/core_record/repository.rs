@@ -99,10 +99,7 @@ impl RepositoryBinding {
     }
 
     #[must_use]
-    pub fn accepts_pull_request(
-        &self,
-        pull_request: &RepositoryPullRequestIdentity,
-    ) -> bool {
+    pub fn accepts_pull_request(&self, pull_request: &RepositoryPullRequestIdentity) -> bool {
         let logical_forge_matches = self
             .logical_repository_id
             .strip_prefix("forge:")

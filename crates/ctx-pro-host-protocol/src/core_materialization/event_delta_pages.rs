@@ -2,9 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     core_source_delta_exact_eq, encoded_len, invalid_contract, validate_encoded_bound,
-    validate_sha256,
-    CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied, ErrorClass, ProtocolError,
-    SourceKey, MAX_CORE_CONTROL_WIRE_BYTES,
+    validate_sha256, CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied, ErrorClass,
+    ProtocolError, SourceKey, MAX_CORE_CONTROL_WIRE_BYTES,
 };
 
 pub const MAX_CORE_EVENT_DELTA_PAGES: usize = 16;
@@ -36,10 +35,7 @@ impl ApplyCoreEventDeltaPagesRequest {
         pages: impl ExactSizeIterator<Item = &'a CoreEventDeltaPage>,
     ) -> Result<(), ProtocolError> {
         let pages = pages.collect::<Vec<_>>();
-        validate_event_delta_page_envelope(
-            pages.iter().copied(),
-            CoreEventDeltaPage::validate,
-        )?;
+        validate_event_delta_page_envelope(pages.iter().copied(), CoreEventDeltaPage::validate)?;
         let encoded_request_bytes = pages.iter().enumerate().try_fold(
             b"{\"pages\":[]}".len(),
             |total, (index, page)| -> Result<usize, ProtocolError> {
@@ -156,10 +152,7 @@ fn validate_event_delta_page_envelope<'a>(
             if prior_terminal
                 || prior_page_index.checked_add(1) != Some(page.page_index)
                 || prior_materialize_index != page.reconciliation.materialize_index
-                || !core_source_delta_exact_eq(
-                    &page.reconciliation.delta,
-                    prior_reconciliation,
-                )
+                || !core_source_delta_exact_eq(&page.reconciliation.delta, prior_reconciliation)
             {
                 return Err(batch_sequence_error());
             }

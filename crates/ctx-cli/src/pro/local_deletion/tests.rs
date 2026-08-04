@@ -344,7 +344,7 @@ fn initialized_empty_graph_directory_is_removed_without_key_inventory() {
     let root = tempdir().unwrap();
     crate::identity::installation_id(root.path()).unwrap();
     let layout = ProFilesystemLayout::new(root.path());
-    fs::create_dir(&layout.pro_root()).unwrap();
+    fs::create_dir(layout.pro_root()).unwrap();
     restrict_private_directory(&layout.pro_root()).unwrap();
     write_local_pro_initialization_indicator(root.path()).unwrap();
     fs::create_dir(layout.graph_dir()).unwrap();
