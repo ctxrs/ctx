@@ -358,6 +358,84 @@ fn nanoclaw_no_install_has_no_sources_or_issues() {
 }
 
 #[test]
+fn nanoclaw_system_registry_selection_uses_effective_uid_not_home() {
+    let effective_root = DiscoveryContext::new(
+        "/srv/preserved-home",
+        "/work/nanoclaw",
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    )
+    .with_effective_uid(0);
+    assert_eq!(
+        nanoclaw_systemd_registry_dirs(&effective_root),
+        vec![
+            PathBuf::from("/srv/preserved-home/.config/systemd/user"),
+            PathBuf::from("/etc/systemd/system"),
+        ]
+    );
+
+    let non_root_with_root_home = DiscoveryContext::new(
+        "/root",
+        "/work/nanoclaw",
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    )
+    .with_effective_uid(1000);
+    assert_eq!(
+        nanoclaw_systemd_registry_dirs(&non_root_with_root_home),
+        vec![PathBuf::from("/root/.config/systemd/user")]
+    );
+}
+
+#[test]
+fn nanoclaw_over_limit_registry_reports_selector_limit_at_registry_directory() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let registry = home.join(".config/systemd/user");
+    fs::create_dir_all(&cwd).unwrap();
+    for index in 0..=super::super::super::selectors::MAX_DIRECT_DIRECTORY_ENTRIES {
+        write(&registry.join(format!("unrelated-{index:04}.service")), "");
+    }
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].path.as_deref(), Some(registry.as_path()));
+    assert_eq!(
+        report.issues[0].kind,
+        DiscoveryIssueKind::SelectorUnreconstructible
+    );
+    assert_eq!(report.issues[0].reason, SELECTOR_LIMIT_REASON);
+}
+
+#[cfg(unix)]
+#[test]
+fn nanoclaw_unsafe_registry_reports_selector_issue_at_registry_directory() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let registry = home.join(".config/systemd/user");
+    let linked_registry = temp.path().join("linked-registry");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::create_dir_all(&linked_registry).unwrap();
+    symlink(&linked_registry, &registry).unwrap();
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].path.as_deref(), Some(registry.as_path()));
+    assert_eq!(
+        report.issues[0].kind,
+        DiscoveryIssueKind::SelectorUnreconstructible
+    );
+    assert_eq!(report.issues[0].reason, NANOCLAW_SERVICE_REGISTRY_REASON);
+}
+
+#[test]
 fn nanoclaw_malformed_or_mismatched_service_registration_fails_closed() {
     let temp = tempdir();
     let home = temp.path().join("home");

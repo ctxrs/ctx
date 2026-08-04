@@ -129,6 +129,7 @@ pub struct DiscoveryContext {
     home: PathBuf,
     cwd: Option<PathBuf>,
     data_root: Option<PathBuf>,
+    effective_uid: Option<u32>,
     platform: DiscoveryPlatform,
     platform_dirs: DiscoveryPlatformDirs,
     inherited_env: BTreeMap<&'static str, OsString>,
@@ -144,6 +145,7 @@ impl DiscoveryContext {
             home: home.into(),
             cwd: env::current_dir().ok(),
             data_root: None,
+            effective_uid: process_effective_uid(),
             platform: DiscoveryPlatform::current(),
             platform_dirs: DiscoveryPlatformDirs::from_process(),
             inherited_env,
@@ -160,6 +162,7 @@ impl DiscoveryContext {
             home: home.into(),
             cwd: Some(cwd.into()),
             data_root: None,
+            effective_uid: None,
             platform,
             platform_dirs,
             inherited_env: BTreeMap::new(),
@@ -175,6 +178,7 @@ impl DiscoveryContext {
             home: home.into(),
             cwd: None,
             data_root: None,
+            effective_uid: None,
             platform,
             platform_dirs,
             inherited_env: BTreeMap::new(),
@@ -193,6 +197,14 @@ impl DiscoveryContext {
         self.data_root.as_deref()
     }
 
+    /// Returns the effective Unix user ID captured at discovery startup.
+    ///
+    /// Synthetic contexts leave this unavailable unless a test or embedding
+    /// caller supplies explicit process authority with [`Self::with_effective_uid`].
+    pub fn effective_uid(&self) -> Option<u32> {
+        self.effective_uid
+    }
+
     /// Returns the same bounded process snapshot scoped to one authorized activity locator.
     ///
     /// Passing `None` suppresses all project-relative resolver behavior while retaining the
@@ -207,6 +219,12 @@ impl DiscoveryContext {
     /// and reports live-WAL structural probes as unavailable.
     pub fn with_data_root(mut self, data_root: impl Into<PathBuf>) -> Self {
         self.data_root = Some(data_root.into());
+        self
+    }
+
+    /// Supplies effective-user authority for a synthetic discovery context.
+    pub fn with_effective_uid(mut self, effective_uid: u32) -> Self {
+        self.effective_uid = Some(effective_uid);
         self
     }
 
@@ -228,6 +246,17 @@ impl DiscoveryContext {
         }
         self
     }
+}
+
+#[cfg(unix)]
+fn process_effective_uid() -> Option<u32> {
+    // SAFETY: `geteuid` takes no arguments and has no failure mode.
+    Some(unsafe { libc::geteuid() })
+}
+
+#[cfg(not(unix))]
+fn process_effective_uid() -> Option<u32> {
+    None
 }
 
 #[cfg(test)]

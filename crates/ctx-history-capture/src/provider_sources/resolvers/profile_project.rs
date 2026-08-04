@@ -39,6 +39,8 @@ const REMOTE_OPENHANDS_REASON: &str =
     "OpenHands selected remote event storage, so there is no local filesystem history root";
 const NANOCLAW_SERVICE_REGISTRATION_REASON: &str =
     "the NanoClaw service registration is malformed, unsafe, or does not match the selected checkout; use an exact --path";
+const NANOCLAW_SERVICE_REGISTRY_REASON: &str =
+    "the official NanoClaw service registry directory is unsafe or unreadable; use an exact --path";
 
 pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
     let report = match spec.provider {
@@ -721,12 +723,25 @@ fn resolve_nanoclaw(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Di
     for registration in nanoclaw_service_registrations(context) {
         match registration {
             Ok(project) => push_selected_source(&mut report, spec, project, "nanoclaw_project"),
-            Err(path) => report.issues.push(issue(
-                spec.provider,
-                Some(path),
-                DiscoveryIssueKind::SelectorUnreconstructible,
-                NANOCLAW_SERVICE_REGISTRATION_REASON,
-            )),
+            Err(NanoClawServiceRegistrationError::Registration(path)) => {
+                report.issues.push(issue(
+                    spec.provider,
+                    Some(path),
+                    DiscoveryIssueKind::SelectorUnreconstructible,
+                    NANOCLAW_SERVICE_REGISTRATION_REASON,
+                ));
+            }
+            Err(NanoClawServiceRegistrationError::Registry(path)) => {
+                report.issues.push(issue(
+                    spec.provider,
+                    Some(path),
+                    DiscoveryIssueKind::SelectorUnreconstructible,
+                    NANOCLAW_SERVICE_REGISTRY_REASON,
+                ));
+            }
+            Err(NanoClawServiceRegistrationError::RegistryLimit(path)) => {
+                issue_limit(&mut report, spec.provider, path);
+            }
         }
     }
     report
@@ -737,18 +752,24 @@ fn nanoclaw_supported_project_store(project: &Path) -> bool {
         && ordinary_directory(&project.join("data").join("v2-sessions"))
 }
 
-fn nanoclaw_service_registrations(context: &DiscoveryContext) -> Vec<Result<PathBuf, PathBuf>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NanoClawServiceRegistrationError {
+    Registration(PathBuf),
+    Registry(PathBuf),
+    RegistryLimit(PathBuf),
+}
+
+type NanoClawServiceRegistration = Result<PathBuf, NanoClawServiceRegistrationError>;
+
+fn nanoclaw_service_registrations(context: &DiscoveryContext) -> Vec<NanoClawServiceRegistration> {
     match context.platform() {
         DiscoveryPlatform::MacOS => {
             nanoclaw_launchd_registrations(&context.home().join("Library").join("LaunchAgents"))
         }
         DiscoveryPlatform::Linux => {
-            let mut registrations =
-                nanoclaw_systemd_registrations(&context.home().join(".config/systemd/user"));
-            if context.home() == Path::new("/root") {
-                registrations.extend(nanoclaw_systemd_registrations(Path::new(
-                    "/etc/systemd/system",
-                )));
+            let mut registrations = Vec::new();
+            for registry_dir in nanoclaw_systemd_registry_dirs(context) {
+                registrations.extend(nanoclaw_systemd_registrations(&registry_dir));
             }
             registrations
         }
@@ -756,10 +777,19 @@ fn nanoclaw_service_registrations(context: &DiscoveryContext) -> Vec<Result<Path
     }
 }
 
-fn nanoclaw_launchd_registrations(registry_dir: &Path) -> Vec<Result<PathBuf, PathBuf>> {
+fn nanoclaw_systemd_registry_dirs(context: &DiscoveryContext) -> Vec<PathBuf> {
+    let mut registry_dirs = vec![context.home().join(".config/systemd/user")];
+    if context.effective_uid() == Some(0) {
+        registry_dirs.push(PathBuf::from("/etc/systemd/system"));
+    }
+    registry_dirs
+}
+
+fn nanoclaw_launchd_registrations(registry_dir: &Path) -> Vec<NanoClawServiceRegistration> {
     let mut registrations = Vec::new();
-    let Ok(entries) = nanoclaw_registration_entries(registry_dir) else {
-        return registrations;
+    let entries = match nanoclaw_registration_entries(registry_dir) {
+        Ok(entries) => entries,
+        Err(error) => return vec![Err(error)],
     };
     for path in entries {
         let Some(name) = path.file_name().and_then(OsStr::to_str) else {
@@ -770,16 +800,18 @@ fn nanoclaw_launchd_registrations(registry_dir: &Path) -> Vec<Result<PathBuf, Pa
         }
         registrations.push(
             parse_nanoclaw_launchd_plist(&path)
-                .and_then(|project| validate_nanoclaw_registered_project(&path, project)),
+                .and_then(|project| validate_nanoclaw_registered_project(&path, project))
+                .map_err(NanoClawServiceRegistrationError::Registration),
         );
     }
     registrations
 }
 
-fn nanoclaw_systemd_registrations(registry_dir: &Path) -> Vec<Result<PathBuf, PathBuf>> {
+fn nanoclaw_systemd_registrations(registry_dir: &Path) -> Vec<NanoClawServiceRegistration> {
     let mut registrations = Vec::new();
-    let Ok(entries) = nanoclaw_registration_entries(registry_dir) else {
-        return registrations;
+    let entries = match nanoclaw_registration_entries(registry_dir) {
+        Ok(entries) => entries,
+        Err(error) => return vec![Err(error)],
     };
     for path in entries {
         let Some(name) = path.file_name().and_then(OsStr::to_str) else {
@@ -790,22 +822,32 @@ fn nanoclaw_systemd_registrations(registry_dir: &Path) -> Vec<Result<PathBuf, Pa
         }
         registrations.push(
             parse_nanoclaw_systemd_unit(&path)
-                .and_then(|project| validate_nanoclaw_registered_project(&path, project)),
+                .and_then(|project| validate_nanoclaw_registered_project(&path, project))
+                .map_err(NanoClawServiceRegistrationError::Registration),
         );
     }
     registrations
 }
 
-fn nanoclaw_registration_entries(registry_dir: &Path) -> Result<Vec<PathBuf>, ()> {
+fn nanoclaw_registration_entries(
+    registry_dir: &Path,
+) -> Result<Vec<PathBuf>, NanoClawServiceRegistrationError> {
     match path_presence(registry_dir) {
         PathPresence::Missing => Ok(Vec::new()),
         PathPresence::Present if ordinary_directory(registry_dir) => direct_entries(registry_dir)
-            .map_err(|_| ())
+            .map_err(|error| match error {
+                SelectorReadError::DirectoryLimit => {
+                    NanoClawServiceRegistrationError::RegistryLimit(registry_dir.to_path_buf())
+                }
+                _ => NanoClawServiceRegistrationError::Registry(registry_dir.to_path_buf()),
+            })
             .map(|mut entries| {
                 entries.retain(|entry| ordinary_file(entry));
                 entries
             }),
-        _ => Err(()),
+        _ => Err(NanoClawServiceRegistrationError::Registry(
+            registry_dir.to_path_buf(),
+        )),
     }
 }
 
