@@ -816,7 +816,7 @@ fn setup_handoff_accepts_a_slow_healthy_daemon_owned_first_build() {
     });
     let refresh_job = json!({
         "owner": "daemon",
-        "kind": "source_backed",
+        "kind": "core_refresh",
         "status": "running",
         "request_id": "cold-build",
         "request_state": "running",
@@ -835,8 +835,14 @@ fn setup_handoff_accepts_a_slow_healthy_daemon_owned_first_build() {
         Some(&expected),
         1_050,
     );
-    let active_refresh =
-        daemon_owned_source_refresh_is_active(Some(&status), Some(&refresh_job), Some(41), 1_050);
+    let active_refresh = daemon_owned_source_refresh_is_active(
+        Some(&status),
+        Some(&refresh_job),
+        Some(41),
+        None,
+        None,
+        1_050,
+    );
 
     assert!(active_refresh);
     assert_eq!(
@@ -946,7 +952,7 @@ fn setup_handoff_rejects_real_daemon_and_refresh_failures() {
     });
     let failed_refresh = json!({
         "owner": "daemon",
-        "kind": "source_backed",
+        "kind": "core_refresh",
         "status": "failed",
         "request_id": "failed-build",
         "request_state": "failed",
@@ -958,6 +964,8 @@ fn setup_handoff_rejects_real_daemon_and_refresh_failures() {
         Some(&running_status),
         Some(&failed_refresh),
         Some(44),
+        None,
+        None,
         4_010,
     ));
     assert_eq!(
@@ -1069,16 +1077,91 @@ fn concurrent_recovery_never_terminates_a_replacement_owner() -> Result<()> {
     Ok(())
 }
 
+fn running_refresh_status(heartbeat_at_ms: i64) -> (Value, Value) {
+    (
+        json!({
+            "status": "running",
+            "pid": 41,
+            "started_at_ms": 1_000,
+            "heartbeat_at_ms": heartbeat_at_ms,
+        }),
+        json!({
+            "owner": "daemon",
+            "kind": "core_refresh",
+            "status": "running",
+            "request_id": "slow-refresh",
+            "request_state": "running",
+            "last_run_at_ms": 2_000,
+            "progress": {
+                "phase": "refreshing",
+                "completed_sources": 800,
+                "total_sources": 5_781,
+            },
+        }),
+    )
+}
+
 #[test]
-fn active_refresh_prevents_unusable_endpoint_termination() -> Result<()> {
-    let owner = test_daemon_owner("refresh-owner", 41);
+fn stale_running_refresh_does_not_suppress_bounded_owner_takeover() -> Result<()> {
+    let owner = test_daemon_owner("stale-refresh-owner", 41);
+    let now_ms = 100_000;
+    let stale_at_ms = now_ms - DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS - 1;
+    let (status, refresh_job) = running_refresh_status(stale_at_ms);
     let endpoint_checks = Cell::new(0);
     let terminations = Cell::new(0);
 
     let terminated = recover_unusable_daemon_owner_with(
         &owner,
         || Ok(Some(owner.clone())),
-        || true,
+        || {
+            daemon_owned_source_refresh_is_active(
+                Some(&status),
+                Some(&refresh_job),
+                Some(owner.pid),
+                Some(owner.started_at_ms),
+                Some(stale_at_ms),
+                now_ms,
+            )
+        },
+        || {
+            endpoint_checks.set(endpoint_checks.get() + 1);
+            Ok(false)
+        },
+        |owner_id| {
+            assert_eq!(owner_id, "stale-refresh-owner");
+            terminations.set(terminations.get() + 1);
+            Ok(())
+        },
+    )?;
+
+    assert!(terminated);
+    assert_eq!(endpoint_checks.get(), 1);
+    assert_eq!(terminations.get(), 1);
+    Ok(())
+}
+
+#[test]
+fn fresh_slow_refresh_progress_prevents_unusable_endpoint_takeover() -> Result<()> {
+    let owner = test_daemon_owner("refresh-owner", 41);
+    let now_ms = 100_000;
+    let stale_heartbeat_at_ms = now_ms - DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS - 1;
+    let (status, refresh_job) = running_refresh_status(stale_heartbeat_at_ms);
+    let endpoint_checks = Cell::new(0);
+    let terminations = Cell::new(0);
+
+    let terminated = recover_unusable_daemon_owner_with(
+        &owner,
+        || Ok(Some(owner.clone())),
+        || {
+            daemon_owned_source_refresh_is_active(
+                Some(&status),
+                Some(&refresh_job),
+                Some(owner.pid),
+                Some(owner.started_at_ms),
+                Some(now_ms),
+                now_ms,
+            )
+        },
         || {
             endpoint_checks.set(endpoint_checks.get() + 1);
             Ok(false)

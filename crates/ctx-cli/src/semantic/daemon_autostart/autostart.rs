@@ -167,13 +167,25 @@ fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIden
 
 fn daemon_owner_has_active_refresh(data_root: &Path, observed_owner: &DaemonOwnerIdentity) -> bool {
     let status = read_daemon_status(data_root);
-    let refresh_job = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
+    let refresh_job_path = daemon_core_refresh_job_path(data_root);
+    let refresh_job = read_daemon_job_status(&refresh_job_path);
     daemon_owned_source_refresh_is_active(
         status.as_ref(),
         refresh_job.as_ref(),
         Some(observed_owner.pid),
+        Some(observed_owner.started_at_ms),
+        daemon_job_modified_at_ms(&refresh_job_path),
         utc_now().timestamp_millis(),
     )
+}
+
+fn daemon_job_modified_at_ms(path: &Path) -> Option<i64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let millis = modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    i64::try_from(millis).ok()
 }
 
 fn recover_unusable_daemon_owner(
@@ -440,6 +452,8 @@ fn daemon_handoff_observation(
         status.as_ref(),
         refresh_job.as_ref(),
         lock_pid,
+        None,
+        None,
         now_ms,
     );
     // The daemon's first scheduler tick can enter a long synchronous refresh
@@ -490,6 +504,8 @@ pub(super) fn daemon_owned_source_refresh_is_active(
     daemon_status: Option<&Value>,
     refresh_job: Option<&Value>,
     lock_pid: Option<u32>,
+    lock_started_at_ms: Option<i64>,
+    refresh_job_modified_at_ms: Option<i64>,
     now_ms: i64,
 ) -> bool {
     let Some((daemon_status, refresh_job)) = daemon_status.zip(refresh_job) else {
@@ -509,15 +525,35 @@ pub(super) fn daemon_owned_source_refresh_is_active(
                 && *started_at_ms
                     <= now_ms.saturating_add(DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS)
         });
-    daemon_status
-        .get("pid")
-        .and_then(Value::as_u64)
-        .and_then(|pid| u32::try_from(pid).ok())
-        == lock_pid
+    let timestamp_is_fresh = |timestamp: i64| {
+        timestamp > 0
+            && now_ms.saturating_sub(timestamp) <= DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS
+            && timestamp.saturating_sub(now_ms) <= DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS
+    };
+    // A synchronous refresh can delay the daemon lifecycle heartbeat while
+    // coordinator progress continues to rewrite the durable job receipt. Both
+    // are bounded authority; stale `running` fields alone are not a lease.
+    let refresh_authority_is_fresh = daemon_status
+        .get("heartbeat_at_ms")
+        .and_then(Value::as_i64)
+        .is_some_and(timestamp_is_fresh)
+        || refresh_job_modified_at_ms.is_some_and(|modified_at_ms| {
+            job_started_at_ms.is_some_and(|started_at_ms| modified_at_ms >= started_at_ms)
+                && timestamp_is_fresh(modified_at_ms)
+        });
+    daemon_status.get("status").and_then(Value::as_str) == Some("running")
+        && daemon_status
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+            == lock_pid
         && daemon_started_at_ms.is_some()
+        && lock_started_at_ms
+            .is_none_or(|started_at_ms| daemon_started_at_ms == Some(started_at_ms))
         && job_started_at_ms.is_some()
+        && refresh_authority_is_fresh
         && refresh_job.get("owner").and_then(Value::as_str) == Some("daemon")
-        && refresh_job.get("kind").and_then(Value::as_str) == Some("source_backed")
+        && refresh_job.get("kind").and_then(Value::as_str) == Some("core_refresh")
         && refresh_job.get("status").and_then(Value::as_str) == Some("running")
         && refresh_job.get("request_state").and_then(Value::as_str) == Some("running")
         && refresh_job
