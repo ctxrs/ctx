@@ -57,6 +57,8 @@ enum Phase {
     Armed,
     RemovingBinary,
     BinaryRemoved,
+    RemovingOwnership,
+    OwnershipRemoved,
     RemovingMarker,
     Committed,
 }
@@ -207,6 +209,7 @@ fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
                 binding_sha256: String::new(),
             };
             journal.binding_sha256 = journal_binding(&journal);
+            validate_journal(&journal, &install_path, TransactionKind::Install)?;
             write_initial_journal(&journal_path, &journal)?;
             journal
         }
@@ -373,37 +376,7 @@ fn uninstall_prepare(args: HostedTransactionArgs, install_path: PathBuf) -> Resu
                 .attempt_id
                 .as_deref()
                 .ok_or_else(|| anyhow!("hosted uninstall missing attempt identity"))?;
-            if !is_valid_install_attempt_id(attempt_id) {
-                bail!("hosted uninstall has an invalid attempt identity");
-            }
-            let binary_sha256 = sha256_path(&install_path, MAX_BINARY_BYTES, "managed executable")?;
-            let marker_path = install_marker_path(&install_path);
-            let marker_body = String::from_utf8(read_bounded(
-                &marker_path,
-                MAX_MARKER_BYTES,
-                "managed install marker",
-            )?)?;
-            let marker_sha256 = sha256_hex(marker_body.as_bytes());
-            validate_marker_body(&marker_body, &install_path, &binary_sha256, None)?;
-            let mut journal = Journal {
-                schema_version: SCHEMA_VERSION,
-                kind: TransactionKind::Uninstall,
-                attempt_id: attempt_id.to_owned(),
-                marker_path,
-                install_path: install_path.clone(),
-                binary_sha256,
-                marker_sha256,
-                marker_body,
-                prior_binary_sha256: None,
-                prior_marker_sha256: None,
-                prior_ownership_sha256: None,
-                ownership_path: None,
-                ownership_sha256: None,
-                ownership_body: None,
-                phase: Phase::Prepared,
-                binding_sha256: String::new(),
-            };
-            journal.binding_sha256 = journal_binding(&journal);
+            let journal = new_uninstall_journal(&install_path, attempt_id)?;
             write_initial_journal(&journal_path, &journal)?;
             journal
         }
@@ -445,6 +418,7 @@ fn uninstall_arm(_args: HostedTransactionArgs, install_path: PathBuf) -> Result<
         MAX_MARKER_BYTES,
         "managed marker",
     )?;
+    verify_recorded_ownership(&journal)?;
     journal.phase = Phase::Armed;
     write_journal(&journal_path, &journal)?;
     print_uninstall_receipt(&journal, &uninstall_helper_path(&install_path), "armed")
@@ -459,6 +433,46 @@ fn uninstall_commit(_args: HostedTransactionArgs, install_path: PathBuf) -> Resu
     remove_journal(&journal_path)
 }
 
+fn new_uninstall_journal(install_path: &Path, attempt_id: &str) -> Result<Journal> {
+    if !is_valid_install_attempt_id(attempt_id) {
+        bail!("hosted uninstall has an invalid attempt identity");
+    }
+    let binary_sha256 = sha256_path(install_path, MAX_BINARY_BYTES, "managed executable")?;
+    let marker_path = install_marker_path(install_path);
+    let marker_body = String::from_utf8(read_bounded(
+        &marker_path,
+        MAX_MARKER_BYTES,
+        "managed install marker",
+    )?)?;
+    let marker_sha256 = sha256_hex(marker_body.as_bytes());
+    validate_marker_body(&marker_body, install_path, &binary_sha256, None)?;
+    let recorded_ownership = read_recorded_ownership(&marker_body, install_path)?;
+    let (ownership_path, ownership_sha256, ownership_body) = recorded_ownership
+        .map(|(path, digest, body)| (Some(path), Some(digest), Some(body)))
+        .unwrap_or((None, None, None));
+    let mut journal = Journal {
+        schema_version: SCHEMA_VERSION,
+        kind: TransactionKind::Uninstall,
+        attempt_id: attempt_id.to_owned(),
+        marker_path,
+        install_path: install_path.to_owned(),
+        binary_sha256,
+        marker_sha256,
+        marker_body,
+        prior_binary_sha256: None,
+        prior_marker_sha256: None,
+        prior_ownership_sha256: None,
+        ownership_path,
+        ownership_sha256,
+        ownership_body,
+        phase: Phase::Prepared,
+        binding_sha256: String::new(),
+    };
+    journal.binding_sha256 = journal_binding(&journal);
+    validate_journal(&journal, install_path, TransactionKind::Uninstall)?;
+    Ok(journal)
+}
+
 fn complete_uninstall_commit(
     current: &Path,
     journal_path: &Path,
@@ -471,6 +485,8 @@ fn complete_uninstall_commit(
         Phase::Armed
             | Phase::RemovingBinary
             | Phase::BinaryRemoved
+            | Phase::RemovingOwnership
+            | Phase::OwnershipRemoved
             | Phase::RemovingMarker
             | Phase::Committed
     ) {
@@ -485,14 +501,30 @@ fn complete_uninstall_commit(
             "managed executable",
         )?;
         journal.phase = Phase::RemovingBinary;
-        write_journal(&journal_path, &journal)?;
+        write_journal(journal_path, journal)?;
         fault("removing_binary")?;
         remove_durable(&journal.install_path)?;
         fault("binary_removed")?;
     }
     journal.phase = Phase::BinaryRemoved;
-    write_journal(&journal_path, &journal)?;
+    write_journal(journal_path, journal)?;
     fault("binary_removed_recorded")?;
+    if let Some(path) = journal.ownership_path.clone() {
+        if journal.ownership_sha256.is_none() {
+            bail!("hosted uninstall journal has incomplete integration ownership");
+        }
+        if path_entry_exists(&path)? {
+            verify_recorded_ownership(journal)?;
+            journal.phase = Phase::RemovingOwnership;
+            write_journal(journal_path, journal)?;
+            fault("removing_ownership")?;
+            remove_durable(&path)?;
+            fault("ownership_removed")?;
+        }
+        journal.phase = Phase::OwnershipRemoved;
+        write_journal(journal_path, journal)?;
+        fault("ownership_removed_recorded")?;
+    }
     if journal.marker_path.try_exists()? {
         verify_file_digest(
             &journal.marker_path,
@@ -501,13 +533,13 @@ fn complete_uninstall_commit(
             "managed marker",
         )?;
         journal.phase = Phase::RemovingMarker;
-        write_journal(&journal_path, &journal)?;
+        write_journal(journal_path, journal)?;
         fault("removing_marker")?;
         remove_durable(&journal.marker_path)?;
         fault("marker_removed")?;
     }
     journal.phase = Phase::Committed;
-    write_journal(&journal_path, &journal)?;
+    write_journal(journal_path, journal)?;
     fault("committed")
 }
 
@@ -561,6 +593,56 @@ fn validate_helper_caller(current: &Path, journal: &Journal) -> Result<()> {
     )
 }
 
+fn verify_recorded_ownership(journal: &Journal) -> Result<()> {
+    if let (Some(path), Some(digest)) = (
+        journal.ownership_path.as_ref(),
+        journal.ownership_sha256.as_ref(),
+    ) {
+        verify_file_digest(
+            path,
+            digest,
+            MAX_OWNERSHIP_BYTES,
+            "managed integration ownership",
+        )
+        .with_context(|| {
+            format!(
+                "integration ownership at {} changed; restore the transaction-owned sidecar or move the changed file aside, then retry hosted uninstall",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn read_recorded_ownership(
+    marker: &str,
+    install_path: &Path,
+) -> Result<Option<(PathBuf, String, Vec<u8>)>> {
+    let value: Value = serde_json::from_str(marker)?;
+    match (
+        value.get("integrations_path"),
+        value.get("integrations_sha256"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(Value::String(path)), Some(Value::String(digest))) => {
+            let expected_path = ownership_path(install_path);
+            if Some(path.as_str()) != expected_path.to_str() || !is_normalized_sha256(digest) {
+                bail!("managed marker has invalid integration ownership identity");
+            }
+            let body = read_bounded(
+                &expected_path,
+                MAX_OWNERSHIP_BYTES,
+                "managed integration ownership",
+            )?;
+            if sha256_hex(&body) != *digest {
+                bail!("managed integration ownership digest does not match its marker");
+            }
+            Ok(Some((expected_path, digest.clone(), body)))
+        }
+        _ => bail!("managed marker has incomplete integration ownership identity"),
+    }
+}
+
 fn validate_existing_pair_for_install(
     install_path: &Path,
 ) -> Result<Option<(String, String, Option<String>)>> {
@@ -581,27 +663,8 @@ fn validate_existing_pair_for_install(
     )?)?;
     validate_marker_body(&marker, install_path, &digest, None)
         .context("existing ctx install is not owned by the hosted installer")?;
-    let value: Value = serde_json::from_str(&marker)?;
-    let prior_ownership = match (
-        value.get("integrations_path").and_then(Value::as_str),
-        value.get("integrations_sha256").and_then(Value::as_str),
-    ) {
-        (None, None) => None,
-        (Some(path), Some(digest)) => {
-            let expected_path = ownership_path(install_path);
-            if Some(path) != expected_path.to_str() || !is_normalized_sha256(digest) {
-                bail!("prior managed marker has invalid integration ownership");
-            }
-            verify_file_digest(
-                &expected_path,
-                digest,
-                MAX_OWNERSHIP_BYTES,
-                "prior hosted integration ownership",
-            )?;
-            Some(digest.to_owned())
-        }
-        _ => bail!("prior managed marker has incomplete integration ownership"),
-    };
+    let prior_ownership =
+        read_recorded_ownership(&marker, install_path)?.map(|(_path, digest, _body)| digest);
     Ok(Some((
         digest,
         sha256_hex(marker.as_bytes()),
@@ -701,6 +764,22 @@ fn validate_journal(journal: &Journal, install_path: &Path, kind: TransactionKin
                 && sha256_hex(body) == *digest => {}
         _ => bail!("hosted transaction journal ownership identity is invalid"),
     }
+    let marker: Value = serde_json::from_str(&journal.marker_body)?;
+    match (
+        journal.ownership_path.as_ref(),
+        journal.ownership_sha256.as_ref(),
+        marker.get("integrations_path"),
+        marker.get("integrations_sha256"),
+    ) {
+        (None, None, None, None) => {}
+        (
+            Some(path),
+            Some(digest),
+            Some(Value::String(marker_path)),
+            Some(Value::String(marker_digest)),
+        ) if Some(marker_path.as_str()) == path.to_str() && marker_digest == digest => {}
+        _ => bail!("hosted transaction marker and integration ownership do not match"),
+    }
     validate_marker_body(
         &journal.marker_body,
         install_path,
@@ -737,237 +816,4 @@ fn journal_binding(journal: &Journal) -> String {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt as _};
-
-    fn fixture() -> (tempfile::TempDir, PathBuf, String, PathBuf) {
-        let temp = tempfile::tempdir().unwrap();
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let install = temp.path().join("ctx");
-        let binary = b"new ctx";
-        let digest = sha256_hex(binary);
-        let source = temp.path().join("candidate");
-        fs::write(&source, binary).unwrap();
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
-        (temp, install, digest, source)
-    }
-
-    fn marker(install: &Path, digest: &str) -> String {
-        serde_json::to_string_pretty(&json!({
-            "schema_version": 1,
-            "manager": "ctx-hosted-installer",
-            "install_attempt_id": "ia_12345678",
-            "install_path": install,
-            "platform": platform_key().unwrap(),
-            "channel": "stable",
-            "version": "1.0.0",
-            "sha256": digest,
-        }))
-        .unwrap()
-            + "\n"
-    }
-
-    #[test]
-    fn journal_binding_rejects_path_and_digest_changes() {
-        let (_temp, install, digest, _source) = fixture();
-        let body = marker(&install, &digest);
-        let mut journal = Journal {
-            schema_version: 1,
-            kind: TransactionKind::Install,
-            attempt_id: "ia_12345678".into(),
-            install_path: install.clone(),
-            marker_path: install_marker_path(&install),
-            binary_sha256: digest,
-            marker_sha256: sha256_hex(body.as_bytes()),
-            marker_body: body,
-            prior_binary_sha256: None,
-            prior_marker_sha256: None,
-            prior_ownership_sha256: None,
-            ownership_path: None,
-            ownership_sha256: None,
-            ownership_body: None,
-            phase: Phase::Prepared,
-            binding_sha256: String::new(),
-        };
-        journal.binding_sha256 = journal_binding(&journal);
-        assert!(validate_journal(&journal, &install, TransactionKind::Install).is_ok());
-        journal.install_path = install.with_file_name("other-ctx");
-        assert!(validate_journal(&journal, &install, TransactionKind::Install).is_err());
-        journal.install_path = install.clone();
-        journal.binary_sha256 = "0".repeat(64);
-        assert!(validate_journal(&journal, &install, TransactionKind::Install).is_err());
-    }
-
-    #[test]
-    fn markerless_existing_binary_remains_unmanaged() {
-        let (_temp, install, _digest, _source) = fixture();
-        fs::write(&install, b"new ctx").unwrap();
-        assert!(validate_existing_pair_for_install(&install).is_err());
-    }
-
-    #[test]
-    fn posix_publication_consumes_a_sibling_without_truncating_target() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let target = temp.path().join("ctx");
-        let staged = temp.path().join(".ctx.new");
-        fs::write(&target, b"old-complete").unwrap();
-        fs::write(&staged, b"new-complete").unwrap();
-        atomic_publish(&staged, &target).unwrap();
-        assert_eq!(fs::read(&target).unwrap(), b"new-complete");
-        assert!(!staged.exists());
-    }
-
-    #[test]
-    fn install_retry_converges_from_every_durable_phase() {
-        const POINTS: &[&str] = &[
-            "journal_prepared",
-            "binary_staged",
-            "binary_replaced",
-            "binary_published",
-            "ownership_replaced",
-            "ownership_published",
-            "marker_replaced",
-            "marker_published",
-            "committed",
-        ];
-        for point in POINTS {
-            let (_temp, install, digest, source) = fixture();
-            let ownership_path = ownership_path(&install);
-            let ownership_body = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\tfixture\n".to_vec();
-            let ownership_digest = sha256_hex(&ownership_body);
-            let marker_body = serde_json::to_string_pretty(&json!({
-                "schema_version": 1,
-                "manager": "ctx-hosted-installer",
-                "install_attempt_id": "ia_12345678",
-                "install_path": install,
-                "platform": platform_key().unwrap(),
-                "channel": "stable",
-                "version": "1.0.0",
-                "sha256": digest,
-                "integrations_path": ownership_path,
-                "integrations_sha256": ownership_digest,
-            }))
-            .unwrap()
-                + "\n";
-            let mut journal = Journal {
-                schema_version: 1,
-                kind: TransactionKind::Install,
-                attempt_id: "ia_12345678".into(),
-                install_path: install.clone(),
-                marker_path: install_marker_path(&install),
-                binary_sha256: digest.clone(),
-                marker_sha256: sha256_hex(marker_body.as_bytes()),
-                marker_body,
-                prior_binary_sha256: None,
-                prior_marker_sha256: None,
-                prior_ownership_sha256: None,
-                ownership_path: Some(ownership_path.clone()),
-                ownership_sha256: Some(ownership_digest.clone()),
-                ownership_body: Some(ownership_body),
-                phase: Phase::Prepared,
-                binding_sha256: String::new(),
-            };
-            journal.binding_sha256 = journal_binding(&journal);
-            let journal_path = journal_path(&install);
-            write_initial_journal(&journal_path, &journal).unwrap();
-            let mut injected = false;
-            let error = complete_install_with_fault(
-                &source,
-                &journal_path,
-                &mut journal,
-                &mut |observed| {
-                    if !injected && observed == *point {
-                        injected = true;
-                        bail!("injected interruption after {observed}");
-                    }
-                    Ok(())
-                },
-            )
-            .unwrap_err();
-            assert!(
-                error.to_string().contains("injected interruption"),
-                "{point}"
-            );
-            let mut recovered = read_journal(&journal_path).unwrap().unwrap();
-            validate_journal(&recovered, &install, TransactionKind::Install).unwrap();
-            complete_install(&source, &journal_path, &mut recovered).unwrap();
-            assert_eq!(fs::read(&install).unwrap(), b"new ctx", "{point}");
-            assert_eq!(
-                sha256_path(&install_marker_path(&install), MAX_MARKER_BYTES, "marker").unwrap(),
-                recovered.marker_sha256,
-                "{point}"
-            );
-            assert_eq!(
-                sha256_path(&ownership_path, MAX_OWNERSHIP_BYTES, "ownership").unwrap(),
-                ownership_digest,
-                "{point}"
-            );
-            assert!(!journal_path.exists(), "{point}");
-        }
-    }
-
-    #[test]
-    fn uninstall_commit_recovers_every_recorded_removal_phase() {
-        const POINTS: &[&str] = &[
-            "armed",
-            "removing_binary",
-            "binary_removed",
-            "binary_removed_recorded",
-            "removing_marker",
-            "marker_removed",
-            "committed",
-        ];
-        for point in POINTS {
-            let (_temp, install, digest, source) = fixture();
-            fs::copy(&source, &install).unwrap();
-            let marker_body = marker(&install, &digest);
-            fs::write(install_marker_path(&install), &marker_body).unwrap();
-            let helper = uninstall_helper_path(&install);
-            fs::copy(&source, &helper).unwrap();
-            let mut journal = Journal {
-                schema_version: 1,
-                kind: TransactionKind::Uninstall,
-                attempt_id: "ia_12345678".into(),
-                install_path: install.clone(),
-                marker_path: install_marker_path(&install),
-                binary_sha256: digest,
-                marker_sha256: sha256_hex(marker_body.as_bytes()),
-                marker_body,
-                prior_binary_sha256: None,
-                prior_marker_sha256: None,
-                prior_ownership_sha256: None,
-                ownership_path: None,
-                ownership_sha256: None,
-                ownership_body: None,
-                phase: Phase::Armed,
-                binding_sha256: String::new(),
-            };
-            journal.binding_sha256 = journal_binding(&journal);
-            let journal_path = journal_path(&install);
-            write_initial_journal(&journal_path, &journal).unwrap();
-            let mut injected = false;
-            let error =
-                complete_uninstall_commit(&helper, &journal_path, &mut journal, &mut |observed| {
-                    if !injected && observed == *point {
-                        injected = true;
-                        bail!("injected interruption after {observed}");
-                    }
-                    Ok(())
-                })
-                .unwrap_err();
-            assert!(
-                error.to_string().contains("injected interruption"),
-                "{point}"
-            );
-            let mut recovered = read_journal(&journal_path).unwrap().unwrap();
-            complete_uninstall_commit(&helper, &journal_path, &mut recovered, &mut |_| Ok(()))
-                .unwrap();
-            remove_journal(&journal_path).unwrap();
-            assert!(!install.exists(), "{point}");
-            assert!(!install_marker_path(&install).exists(), "{point}");
-            assert!(!journal_path.exists(), "{point}");
-        }
-    }
-}
+mod tests;

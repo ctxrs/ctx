@@ -275,8 +275,16 @@ pub(super) fn verify_file_digest(path: &Path, expected: &str, max: u64, label: &
     Ok(())
 }
 
+pub(super) fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
 pub(super) fn file_has_digest(path: &Path, expected: &str, max: u64) -> Result<bool> {
-    if !path.try_exists()? {
+    if !path_entry_exists(path)? {
         return Ok(false);
     }
     Ok(sha256_path(path, max, "hosted transaction path")? == expected)
