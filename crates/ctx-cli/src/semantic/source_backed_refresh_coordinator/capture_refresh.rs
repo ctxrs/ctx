@@ -10,6 +10,12 @@ use catalog_witness::{reconcile_published_catalog_witness, retained_catalog_witn
 #[path = "capture_refresh/progress.rs"]
 mod progress;
 use progress::{daemon_current_source_progress, record_source_backed_refresh_progress};
+#[path = "capture_refresh/registry_issues.rs"]
+mod registry_issues;
+use registry_issues::selected_registry_route_count;
+pub(super) use registry_issues::{
+    automatic_registry_route_failures, reject_blocking_automatic_registry_issues,
+};
 
 pub(super) struct SourceBackedRefreshPlan<'a> {
     pub(super) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
@@ -725,6 +731,80 @@ pub(super) fn source_backed_watch_catalog(data_root: &Path) -> Result<SourceBack
     Ok(build.registry.watch_catalog())
 }
 
+/// Captures the logical caller's admission fence over the current automatic
+/// route catalog. Missing observation tokens are retained explicitly so
+/// coverage evaluation fails closed instead of treating silence as freshness.
+pub(super) fn source_backed_route_admission_fence(
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
+    source_backed_route_observation_fence(data_root, explicit_source_catalog, None)
+}
+
+/// Samples only the exact routes that can contribute to one publication
+/// coverage certificate. Requested routes absent from the current catalog are
+/// retained with an indeterminate observation so certification fails closed.
+pub(super) fn source_backed_requested_route_observation_fence(
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    requested_routes: &BTreeSet<SourceRouteIdentity>,
+) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
+    source_backed_route_observation_fence(
+        data_root,
+        explicit_source_catalog,
+        Some(requested_routes),
+    )
+}
+
+fn source_backed_route_observation_fence(
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    requested_routes: Option<&BTreeSet<SourceRouteIdentity>>,
+) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
+    let discovery = source_backed_discovery_context()?.with_data_root(data_root);
+    let work_budget = source_backed_refresh_work_budget(WriterOptions::default().indexer_threads);
+    let discovery_started = StdInstant::now();
+    let report = discover_provider_sources_with_context_and_work_budget(&discovery, work_budget);
+    let discovery_duration = discovery_started.elapsed();
+    validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
+        .context("validate provider roots before admitting source refresh demand")?;
+    let merged = build_merged_source_backed_registry(
+        &discovery,
+        report,
+        discovery_duration,
+        data_root,
+        explicit_source_catalog,
+    )?;
+    let catalog = merged.build.registry.watch_catalog();
+    Ok(match requested_routes {
+        Some(requested_routes) => {
+            source_backed_requested_route_observations(&catalog, requested_routes)
+        }
+        None => catalog
+            .route_ids()
+            .cloned()
+            .map(|route| {
+                let observation = catalog.certify_route_observation(&route);
+                (route, observation)
+            })
+            .collect(),
+    })
+}
+
+pub(super) fn source_backed_requested_route_observations(
+    catalog: &SourceBackedWatchCatalog,
+    requested_routes: &BTreeSet<SourceRouteIdentity>,
+) -> BTreeMap<SourceRouteIdentity, Option<String>> {
+    requested_routes
+        .iter()
+        .cloned()
+        .map(|route| {
+            let observation = catalog.certify_route_observation(&route);
+            (route, observation)
+        })
+        .collect()
+}
+
 fn build_merged_source_backed_registry(
     discovery: &DiscoveryContext,
     mut report: DiscoveryReport,
@@ -732,15 +812,23 @@ fn build_merged_source_backed_registry(
     data_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
 ) -> Result<MergedSourceBackedRegistry> {
+    let retained_generation = open_published_generation(data_root)?;
+    let (previous_explicit_source_catalog, previous_catalog_route_bindings) =
+        retained_catalog_witness(retained_generation.as_ref())?;
+    // A request overlay is not the whole durable explicit catalog. Keep every
+    // unmatched retained explicit owner out of automatic discovery so those
+    // base routes remain carried rather than being re-scanned under a new
+    // automatic identity. Deduplicate only exact provider/format/path keys:
+    // relocation deliberately preserves lineage while changing the path.
+    if let Some(catalog) = previous_explicit_source_catalog.as_ref() {
+        catalog.prepare_retained_discovery_report(explicit_source_catalog, &mut report)?;
+    }
     if let Some(catalog) = explicit_source_catalog {
         catalog.prepare_discovery_report(data_root, &mut report)?;
     }
     let mut build =
         build_automatic_source_backed_registry_from_report(discovery, data_root, report);
     build.discovery_duration = discovery_duration;
-    let retained_generation = open_published_generation(data_root)?;
-    let (previous_explicit_source_catalog, previous_catalog_route_bindings) =
-        retained_catalog_witness(retained_generation.as_ref())?;
     let requested_catalog_route_bindings = explicit_source_catalog
         .map(|catalog| {
             catalog.register_routes_after_discovery_merge(
@@ -777,197 +865,4 @@ fn source_backed_discovery_context() -> Result<DiscoveryContext> {
     let home = identity::home_dir()
         .context("resolve the user home for source-backed provider discovery")?;
     Ok(DiscoveryContext::from_process(home))
-}
-
-/// Rejects only registry issues whose unsafe root makes route-local execution
-/// incapable of establishing a safe publication boundary.
-pub(super) fn reject_blocking_automatic_registry_issues(
-    issues: &[SourceBackedAutomaticRegistryIssue],
-) -> Result<()> {
-    let mut blocker_count = 0usize;
-    let mut blocker_details = Vec::new();
-    for issue in issues {
-        let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
-            continue;
-        };
-        if !matches!(
-            reason,
-            SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. }
-        ) {
-            continue;
-        }
-        blocker_count = blocker_count.saturating_add(1);
-        if blocker_details.len() < SOURCE_REFRESH_BUILD_ISSUE_LIMIT {
-            blocker_details.push(format!(
-                "{} {}: {}",
-                source.provider.as_str(),
-                source.path.display(),
-                automatic_registry_issue_reason(reason),
-            ));
-        }
-    }
-    if blocker_count == 0 {
-        return Ok(());
-    }
-    let omitted = blocker_count.saturating_sub(blocker_details.len());
-    let omitted = if omitted == 0 {
-        String::new()
-    } else {
-        format!("; {omitted} additional systemic safety issue(s) omitted")
-    };
-    Err(anyhow!(
-        "{TERMINAL_COVERAGE_ERROR_CODE}: capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
-        blocker_details.join("; ")
-    ))
-}
-
-pub(super) fn automatic_registry_route_failures(
-    issues: &[SourceBackedAutomaticRegistryIssue],
-    retained_generation: Option<&VerifiedIndex>,
-) -> Result<Vec<ctx_history_capture::SourceBackedFailedRoute>> {
-    let mut failures = BTreeMap::new();
-    for issue in issues {
-        let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
-            continue;
-        };
-        let Some(class) = automatic_registry_issue_failure_class(source, reason) else {
-            continue;
-        };
-        let route_identity = automatic_registry_issue_route_identity(source)?;
-        let carried_forward = retained_generation.is_some_and(|index| {
-            index
-                .manifest()
-                .source_route(&route_identity)
-                .is_some_and(|route| !route.sources().is_empty())
-        });
-        let source_identity = automatic_registry_issue_source_identity(source)?;
-        failures.entry(route_identity.clone()).or_insert_with(|| {
-            ctx_history_capture::SourceBackedFailedRoute::new(
-                route_identity,
-                source_identity,
-                source.provider,
-                class,
-                carried_forward,
-                source.path.display().to_string(),
-                automatic_registry_issue_reason(reason),
-            )
-        });
-    }
-    Ok(failures.into_values().collect())
-}
-
-fn automatic_registry_issue_failure_class(
-    source: &ctx_history_capture::ProviderSource,
-    reason: &SourceBackedAutomaticUnavailableReason,
-) -> Option<SourceBackedSourceFailureClass> {
-    match reason {
-        SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { .. }
-        | SourceBackedAutomaticUnavailableReason::SourceStatus(
-            ProviderSourceStatus::Missing | ProviderSourceStatus::Unknown,
-        ) => None,
-        SourceBackedAutomaticUnavailableReason::SourceStatus(_) if source.exists => {
-            Some(SourceBackedSourceFailureClass::Unavailable)
-        }
-        SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
-        | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
-        | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. }
-            if source.exists =>
-        {
-            Some(SourceBackedSourceFailureClass::Incompatible)
-        }
-        SourceBackedAutomaticUnavailableReason::SourceStatus(_)
-        | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
-        | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { .. }
-        | SourceBackedAutomaticUnavailableReason::RegistrationRejected { .. } => None,
-    }
-}
-
-fn automatic_registry_issue_route_identity(
-    source: &ctx_history_capture::ProviderSource,
-) -> Result<SourceRouteIdentity> {
-    let metadata = automatic_registry_issue_metadata(source)?;
-    let mut digest = Sha256::new();
-    digest.update(b"ctx.source-route-identity-v1\0");
-    digest.update(source.provider.as_str().as_bytes());
-    digest.update([0]);
-    digest.update(metadata.certified_source_format.as_bytes());
-    digest.update([0]);
-    digest.update(b"automatic");
-    digest.update([0]);
-    digest.update(match metadata.selector_authority {
-        SourceBackedSelectorAuthority::DiscoveredWinner => b"discovered-winner".as_slice(),
-        SourceBackedSelectorAuthority::ExplicitPath => b"explicit-path".as_slice(),
-        SourceBackedSelectorAuthority::CatalogLineage => b"catalog-lineage".as_slice(),
-        SourceBackedSelectorAuthority::ExactCwd => b"exact-cwd".as_slice(),
-        SourceBackedSelectorAuthority::NamedSurface => b"named-surface".as_slice(),
-        SourceBackedSelectorAuthority::SelectedWithRetainedExplicit => {
-            b"selected-with-retained-explicit".as_slice()
-        }
-    });
-    SourceRouteIdentity::from_sha256(format!("{:x}", digest.finalize())).map_err(Into::into)
-}
-
-fn automatic_registry_issue_metadata(
-    source: &ctx_history_capture::ProviderSource,
-) -> Result<&'static ctx_history_capture::SourceBackedProviderRouteMetadata> {
-    source_backed_route_inventory()
-        .iter()
-        .find(|route| {
-            route.provider == source.provider && route.source_format == source.source_format
-        })
-        .filter(|route| route.automatic)
-        .ok_or_else(|| {
-            anyhow!(
-                "automatic registry issue for {}/{} has no prior executable route contract",
-                source.provider.as_str(),
-                source.source_format,
-            )
-        })
-}
-
-fn automatic_registry_issue_source_identity(
-    source: &ctx_history_capture::ProviderSource,
-) -> Result<String> {
-    let metadata = automatic_registry_issue_metadata(source)?;
-    let mut digest = Sha256::new();
-    digest.update(b"ctx.source-failure-identity-v1\0");
-    digest.update(source.provider.as_str().as_bytes());
-    digest.update([0]);
-    digest.update(metadata.certified_source_format.as_bytes());
-    digest.update([0]);
-    let path = source.path.as_os_str().as_encoded_bytes();
-    digest.update((path.len() as u64).to_be_bytes());
-    digest.update(path);
-    Ok(format!("{:x}", digest.finalize()))
-}
-
-fn selected_registry_route_count(
-    registry: &SourceBackedProviderRegistry,
-    scope: &SourceBackedRefreshScope,
-) -> usize {
-    registry
-        .routes()
-        .filter(|route| route.selection.is_some())
-        .filter(|route| match scope {
-            SourceBackedRefreshScope::All => true,
-            SourceBackedRefreshScope::Exact(selected) => route
-                .route_identity
-                .as_ref()
-                .is_some_and(|identity| selected.contains(identity)),
-        })
-        .count()
-}
-
-fn automatic_registry_issue_reason(reason: &SourceBackedAutomaticUnavailableReason) -> String {
-    match reason {
-        SourceBackedAutomaticUnavailableReason::SourceStatus(status) => {
-            format!("source status is {}", status.as_str())
-        }
-        SourceBackedAutomaticUnavailableReason::UnsafeRootOverlap { detail }
-        | SourceBackedAutomaticUnavailableReason::RegistrationRejected { detail } => detail.clone(),
-        SourceBackedAutomaticUnavailableReason::UnsupportedFormat { detail }
-        | SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable { detail } => {
-            (*detail).to_owned()
-        }
-    }
 }

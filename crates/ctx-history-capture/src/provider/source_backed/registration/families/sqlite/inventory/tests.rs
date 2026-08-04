@@ -18,7 +18,7 @@ use crate::{
     provider::source_backed::{
         family::document::DocumentLeafExecutionPolicy, source_backed_leaf_worker_budget,
     },
-    provider_sources::ProviderCatalogSupport,
+    provider_sources::{ProviderCatalogSupport, SqliteSourceAccessError},
 };
 
 use super::{
@@ -58,6 +58,48 @@ enum TestAfterSealAction {
     RemoveEmptyWal,
     CreateNonemptyWal,
     MutateSibling,
+}
+
+fn cleanup_failure_for_test() -> SqliteSourceAccessError {
+    SqliteSourceAccessError::CleanupUnavailable {
+        operation: "remove test snapshot",
+        source: Box::new(SqliteSourceAccessError::SourceChanged),
+    }
+}
+
+#[test]
+fn provider_sink_failure_does_not_mask_snapshot_cleanup_failure() {
+    let sink_failure =
+        || SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, "staging sink failed");
+    let astrbot = astrbot_scan_route_result(
+        Some(sink_failure()),
+        Err(AstrBotSourceBackedErrorV0::SnapshotCleanup {
+            primary: Box::new(AstrBotSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload("sink sentinel".to_owned()),
+            )),
+            cleanup: cleanup_failure_for_test(),
+        }),
+    )
+    .unwrap_err();
+    let lingma = lingma_scan_route_result(
+        Some(sink_failure()),
+        Err(LingmaSourceBackedErrorV0::SnapshotCleanup {
+            primary: Box::new(LingmaSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload("sink sentinel".to_owned()),
+            )),
+            cleanup: cleanup_failure_for_test(),
+        }),
+    )
+    .unwrap_err();
+
+    for error in [astrbot, lingma] {
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::Internal);
+        assert!(error.detail.contains("staging sink failed"));
+        assert!(error
+            .detail
+            .contains("explicit SQLite snapshot cleanup also failed"));
+        assert!(error.detail.contains("ctx-owned SQLite cleanup failed"));
+    }
 }
 
 #[derive(Clone)]
@@ -333,6 +375,57 @@ fn sqlite_inventory_uses_serial_bounded_streaming() {
             DocumentLeafExecutionPolicy::Serial
         );
     }
+}
+
+#[test]
+fn production_shared_inventory_routes_corruption_and_ctx_staging_failure_by_provenance() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("provider/history.sqlite");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    drop(active_wal_database(&database, "corrupt-me"));
+    let mut bytes = fs::read(&database).unwrap();
+    bytes[..16].copy_from_slice(b"not sqlite data!");
+    fs::write(&database, bytes).unwrap();
+    let data_root = temp.path().join("ctx-data");
+    let registry = test_registry(&data_root, &database, test_provider(database.clone()));
+
+    let error = refresh_source_backed_generation(
+        temp.path().join("corrupt-index"),
+        &registry,
+        writer_options(),
+    )
+    .unwrap_err();
+    let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } = error else {
+        panic!("unexpected shared inventory corruption error: {error:?}");
+    };
+    assert_eq!(failed_routes.len(), 1);
+    assert_eq!(
+        failed_routes[0].class,
+        SourceBackedSourceFailureClass::Unreadable
+    );
+    assert!(
+        failed_routes[0]
+            .detail
+            .contains("artifact_kind=provider_database"),
+        "unexpected corruption detail: {}",
+        failed_routes[0].detail
+    );
+
+    let healthy = temp.path().join("provider/healthy.sqlite");
+    let _writer = active_wal_database(&healthy, "healthy");
+    let blocked_data_root = temp.path().join("blocked-data-root");
+    fs::write(&blocked_data_root, b"not a directory").unwrap();
+    let registry = test_registry(&blocked_data_root, &healthy, test_provider(healthy.clone()));
+    let error = refresh_source_backed_generation(
+        temp.path().join("resource-index"),
+        &registry,
+        writer_options(),
+    )
+    .unwrap_err();
+    let SourceBackedCoordinatorError::RouteScan { source, .. } = error else {
+        panic!("unexpected shared inventory staging error: {error:?}");
+    };
+    assert_eq!(source.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
 }
 
 #[test]

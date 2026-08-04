@@ -224,7 +224,18 @@ fn scratch_sqlite_error(
     operation: &'static str,
     source: rusqlite::Error,
 ) -> SqliteSourceAccessError {
-    SqliteSourceAccessError::private_scratch_sqlite(operation, source)
+    let error = SqliteSourceAccessError::private_scratch_sqlite(operation, source);
+    if operation.starts_with("closing") {
+        error.with_diagnostic(
+            SqliteFailurePhase::Cleanup,
+            SqliteArtifactKind::PrivateScratch,
+            0,
+            0,
+            SqliteCleanupStatus::Failed,
+        )
+    } else {
+        error
+    }
 }
 
 fn scratch_io_error(
@@ -232,9 +243,20 @@ fn scratch_io_error(
     path: PathBuf,
     source: std::io::Error,
 ) -> SqliteSourceAccessError {
-    SqliteSourceAccessError::ScratchIoUnavailable {
+    let error = SqliteSourceAccessError::ScratchIoUnavailable {
         operation,
         path,
         source,
+    };
+    if operation.starts_with("cleaning") {
+        error.with_diagnostic(
+            SqliteFailurePhase::Cleanup,
+            SqliteArtifactKind::PrivateScratch,
+            0,
+            0,
+            SqliteCleanupStatus::Failed,
+        )
+    } else {
+        error
     }
 }

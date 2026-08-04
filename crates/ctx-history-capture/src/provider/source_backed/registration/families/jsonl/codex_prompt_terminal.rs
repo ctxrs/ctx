@@ -30,14 +30,17 @@ pub(super) fn remember_codex_prompt_terminal(
 pub(super) fn bind_codex_prompt_target(
     state: &Mutex<Option<CodexPromptTerminalEvidence>>,
     target: SourceBackedRevalidationTarget<'_>,
-) -> bool {
-    let Ok(state) = state.lock() else {
-        return false;
-    };
+) -> SourceBackedRouteResult<bool> {
+    let state = state.lock().map_err(|_| {
+        SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::Internal,
+            "Codex prompt-history terminal evidence lock was poisoned",
+        )
+    })?;
     let Some(expected) = state.as_ref() else {
-        return false;
+        return Ok(false);
     };
-    match target {
+    Ok(match target {
         SourceBackedRevalidationTarget::Source(source) => expected.certificate == *source,
         SourceBackedRevalidationTarget::Deletion(deletion) => {
             deletion.verifies(&expected.inventory)
@@ -47,22 +50,29 @@ pub(super) fn bind_codex_prompt_target(
                     .source()
                     .exact_descriptor_eq(deletion.source())
         }
-    }
+    })
 }
 
 pub(super) fn revalidate_codex_prompt_inventory(
     state: &Mutex<Option<CodexPromptTerminalEvidence>>,
     capture: &CodexPromptTerminalCapture,
     expected_inventory: &CertifiedSourceInventory,
-) -> bool {
-    let Ok(state) = state.lock() else {
-        return false;
-    };
+) -> SourceBackedRouteResult<bool> {
+    let state = state.lock().map_err(|_| {
+        SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::Internal,
+            "Codex prompt-history terminal evidence lock was poisoned",
+        )
+    })?;
     let Some(expected) = state.as_ref() else {
-        return false;
+        return Ok(false);
     };
     if expected.inventory != *expected_inventory {
-        return false;
+        return Ok(false);
     }
-    capture(&expected.certificate).is_ok_and(|inventory| inventory == expected.inventory)
+    match capture(&expected.certificate) {
+        Ok(inventory) => Ok(inventory == expected.inventory),
+        Err(error) if error.kind == SourceBackedRouteErrorKind::SourceChanged => Ok(false),
+        Err(error) => Err(error),
+    }
 }

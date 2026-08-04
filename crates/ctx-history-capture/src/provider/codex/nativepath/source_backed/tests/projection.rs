@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::codex::nativepath::tests::discover_one;
 use serde_json::Value;
 
 pub(super) fn initialize_repository(path: &Path) {
@@ -36,7 +37,7 @@ pub(super) fn initialize_repository(path: &Path) {
     }
 }
 
-fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
+pub(super) fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
     serde_json::json!({
         "timestamp": "2026-07-28T12:00:01Z",
         "type": "response_item",
@@ -54,7 +55,7 @@ fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
     .to_string()
 }
 
-fn successful_result(call_id: &str, output: Value) -> String {
+pub(super) fn successful_result(call_id: &str, output: Value) -> String {
     serde_json::json!({
         "timestamp": "2026-07-28T12:00:02Z",
         "type": "response_item",
@@ -200,7 +201,11 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
     write_session(
         &sessions,
         parent_native_session_id,
-        &[copied_call.clone(), copied_result.clone()],
+        &[
+            copied_call.clone(),
+            copied_result.clone(),
+            "{malformed unrelated record".to_owned(),
+        ],
     );
     write_forked_session(
         &sessions,
@@ -252,6 +257,151 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
 }
 
 #[test]
+fn codex_active_parent_append_during_lineage_publishes_prefix_then_imports_suffix_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let parent_native_session_id = "019fa000-0000-7000-8000-000000000194";
+    let child_native_session_id = "019fa000-0000-7000-8000-000000000195";
+    let copied_call = exec_call(
+        "call-active-parent",
+        "git commit -m exact && git rev-parse --verify HEAD",
+        &repository,
+    );
+    let copied_result = successful_result(
+        "call-active-parent",
+        Value::String(
+            "[main 518dedb] exact\n518dedb053f04ab0b529c7d2e8dafb322974fbf6\n".to_owned(),
+        ),
+    );
+    write_session(
+        &sessions,
+        parent_native_session_id,
+        &[copied_call.clone(), copied_result.clone()],
+    );
+    write_forked_session(
+        &sessions,
+        child_native_session_id,
+        parent_native_session_id,
+        &[copied_call, copied_result],
+    );
+
+    let deferred = message("user", "deferred active-parent suffix");
+    let parent_path = session_path(&sessions, parent_native_session_id);
+    install_after_codex_catalog_authority_hook(move || {
+        let mut file = OpenOptions::new().append(true).open(&parent_path).unwrap();
+        writeln!(file, "{deferred}").unwrap();
+    });
+    let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(cold.counters.cold_sources, 2);
+
+    let parent_source = codex_source_key(parent_native_session_id).unwrap();
+    let parent_session = codex_session_identity(&parent_source, parent_native_session_id).unwrap();
+    let first = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        first
+            .events_for_session(parent_session.as_uuid())
+            .unwrap()
+            .len(),
+        2
+    );
+    let first_generation = first.generation_id().to_owned();
+
+    let catch_up = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(catch_up.counters.appended_sources, 1);
+    assert_eq!(catch_up.counters.replaced_sources, 1);
+    let second = VerifiedIndex::open(&index).unwrap();
+    assert_ne!(second.generation_id(), first_generation);
+    assert_eq!(
+        second
+            .events_for_session(parent_session.as_uuid())
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(replay.counters.replayed_sources, 2);
+    assert_eq!(replay.commit.generation_id, catch_up.commit.generation_id);
+    let third = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        third
+            .events_for_session(parent_session.as_uuid())
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn codex_discovery_prefix_rewrite_and_append_rolls_back_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let parent_native_session_id = "019fa000-0000-7000-8000-000000000198";
+    let child_native_session_id = "019fa000-0000-7000-8000-000000000199";
+    let copied_call = exec_call(
+        "call-prefix-race",
+        "git commit -m exact && git rev-parse --verify HEAD",
+        &repository,
+    );
+    let copied_result = successful_result(
+        "call-prefix-race",
+        Value::String(
+            "[main 518dedb] exact\n518dedb053f04ab0b529c7d2e8dafb322974fbf6\n".to_owned(),
+        ),
+    );
+    write_session(
+        &sessions,
+        parent_native_session_id,
+        &[copied_call.clone(), copied_result.clone()],
+    );
+    write_forked_session(
+        &sessions,
+        child_native_session_id,
+        parent_native_session_id,
+        &[copied_call, copied_result],
+    );
+    let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+
+    let parent_path = session_path(&sessions, parent_native_session_id);
+    writeln!(
+        OpenOptions::new().append(true).open(&parent_path).unwrap(),
+        "{}",
+        message("user", "prefix race dependency change")
+    )
+    .unwrap();
+    let marker = b"git commit -m exact";
+    let marker_offset = fs::read(&parent_path)
+        .unwrap()
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .unwrap();
+    install_after_codex_catalog_authority_hook(move || {
+        let mut file = OpenOptions::new().write(true).open(&parent_path).unwrap();
+        file.seek(SeekFrom::Start(marker_offset as u64)).unwrap();
+        file.write_all(b"Git commit -m exact").unwrap();
+        drop(file);
+        writeln!(
+            OpenOptions::new().append(true).open(&parent_path).unwrap(),
+            "{}",
+            message("user", "rewrite-plus-append race suffix")
+        )
+        .unwrap();
+    });
+
+    assert!(ingest_codex_source_backed_v0(&sessions, &index).is_err());
+    let after = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(after.generation_id(), cold.commit.generation_id);
+}
+
+#[test]
 fn codex_forked_history_abstains_when_parent_origin_is_unavailable() {
     use ctx_history_core::RepositoryAbstentionReason;
 
@@ -286,6 +436,55 @@ fn codex_forked_history_abstains_when_parent_origin_is_unavailable() {
     let session = codex_session_identity(&source, child_native_session_id).unwrap();
     let verified = VerifiedIndex::open(&index).unwrap();
     let result = outcome_for_sequence(&verified, session, 2);
+    assert!(result.repository_vcs_observations.is_empty());
+    assert!(result.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+            && abstention.detail.as_deref() == Some("provider_execution_origin_lineage_unproven")
+    }));
+}
+
+#[test]
+fn codex_forked_history_limits_malformed_lineage_ambiguity_to_matching_call_id() {
+    use ctx_history_core::RepositoryAbstentionReason;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let parent_native_session_id = "019fa000-0000-7000-8000-000000000196";
+    let child_native_session_id = "019fa000-0000-7000-8000-000000000197";
+    let call_id = "call-malformed-lineage";
+    write_session(
+        &sessions,
+        parent_native_session_id,
+        &[format!(r#"{{"call_id":"{call_id}", malformed"#)],
+    );
+    write_forked_session(
+        &sessions,
+        child_native_session_id,
+        parent_native_session_id,
+        &[
+            exec_call(
+                call_id,
+                "git commit -m exact && git rev-parse --verify HEAD",
+                &repository,
+            ),
+            successful_result(
+                call_id,
+                Value::String(
+                    "[main bbbbbbb] exact\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n".to_owned(),
+                ),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let child_source = codex_source_key(child_native_session_id).unwrap();
+    let child_session = codex_session_identity(&child_source, child_native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let result = outcome_for_sequence(&verified, child_session, 2);
     assert!(result.repository_vcs_observations.is_empty());
     assert!(result.repository_abstentions.iter().any(|abstention| {
         abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
@@ -1068,11 +1267,10 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
         &[message("assistant", &full_text)],
     );
 
-    let (catalog_summary, catalog_sessions) = discover_codex_session_catalog(&sessions).unwrap();
-    assert_eq!(catalog_summary.failed_sessions, 0);
-    let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
-    assert!(discovery.rejections.is_empty());
-    let catalog_source = discovery.sources.into_iter().next().unwrap();
+    let catalog_source = discover_one(
+        &session_path(&sessions, native_session_id),
+        native_session_id,
+    );
     let source = codex_source_key(native_session_id).unwrap();
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let mut scanner =
@@ -1145,10 +1343,10 @@ fn codex_large_tool_arguments_keep_both_complete_core_representations() {
     assert!(tool_call.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
     write_session(&sessions, native_session_id, &[tool_call]);
 
-    let (_, catalog_sessions) = discover_codex_session_catalog(&sessions).unwrap();
-    let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
-    assert!(discovery.rejections.is_empty());
-    let catalog_source = discovery.sources.into_iter().next().unwrap();
+    let catalog_source = discover_one(
+        &session_path(&sessions, native_session_id),
+        native_session_id,
+    );
     let source = codex_source_key(native_session_id).unwrap();
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let mut scanner = CodexNativeScanner::new_source_backed_v0(catalog_source, None).unwrap();

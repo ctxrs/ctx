@@ -6,19 +6,20 @@ use std::{
     time::Duration,
 };
 
-use ctx_history_core::CaptureProvider;
 use rusqlite::{limits::Limit, Connection};
 
 use crate::{
     common::io::ProviderSourceRoot,
+    provider::source_backed::SourceBackedRouteError,
     provider::sqlite::{ensure_sqlite_table_columns, sqlite_table_columns, sqlite_table_exists},
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-        SqliteSourceReadSnapshot,
+        SqliteFailurePhase, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
+        SqliteSourceEvidence, SqliteSourceReadSnapshot,
     },
     CaptureError, Result, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
+use source_backed::{KiroSourceBackedErrorV0, KiroSourceBackedResultV0};
 
 #[path = "native_path_scan.rs"]
 mod scan;
@@ -35,7 +36,7 @@ struct KiroSqliteDatabase {
 }
 
 impl KiroSqliteDatabase {
-    fn open(data_root: &Path, path: &Path) -> Result<Self> {
+    fn open(data_root: &Path, path: &Path) -> KiroSourceBackedResultV0<Self> {
         let parent_path = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -50,22 +51,30 @@ impl KiroSqliteDatabase {
         let parent = root.directory()?;
         let authority_handle = parent.try_clone_authority_handle()?;
         let authority =
-            retain_sqlite_source_directory_authority(data_root, &authority_handle, parent_path)
-                .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        let snapshot = open_root_handle_sqlite_source_snapshot(&authority, database_name)
-            .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        snapshot
-            .revalidate()
-            .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        parent.revalidate()?;
-        root.revalidate()?;
-        let connection = snapshot
-            .connection()
-            .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-            .map_err(|_| CaptureError::SystemInvariant("Kiro SQLite value limit is invalid"))?;
-        connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-        connection.busy_timeout(Duration::from_secs(5))?;
+            retain_sqlite_source_directory_authority(data_root, &authority_handle, parent_path)?;
+        let snapshot = open_root_handle_sqlite_source_snapshot(&authority, database_name)?;
+        let configure = (|| {
+            snapshot.revalidate()?;
+            parent.revalidate()?;
+            root.revalidate()?;
+            let connection = snapshot.connection()?;
+            let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+                .map_err(|_| CaptureError::SystemInvariant("Kiro SQLite value limit is invalid"))?;
+            connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(|source| {
+                    snapshot.diagnose_provider_query_error(
+                        "setting the private Kiro SQLite busy timeout",
+                        source,
+                        SqliteFailurePhase::SourceValidation,
+                    )
+                })?;
+            Ok(())
+        })();
+        if let Err(error) = configure {
+            return Err(abort_kiro_snapshot(snapshot, error));
+        }
         Ok(Self {
             root,
             authority,
@@ -73,21 +82,18 @@ impl KiroSqliteDatabase {
         })
     }
 
-    fn connection(&self, path: &Path) -> Result<&Connection> {
-        self.snapshot
-            .connection()
-            .map_err(|error| kiro_sqlite_source_error(path, error))
+    fn connection(&self, _path: &Path) -> KiroSourceBackedResultV0<&Connection> {
+        Ok(self.snapshot.connection()?)
     }
 
     fn evidence(&self) -> &SqliteSourceEvidence {
         self.snapshot.evidence()
     }
 
-    fn revalidate(&self, path: &Path) -> Result<()> {
-        self.snapshot
-            .revalidate()
-            .map_err(|error| kiro_sqlite_source_error(path, error))?;
-        self.root.revalidate()
+    fn revalidate(&self, _path: &Path) -> KiroSourceBackedResultV0<()> {
+        self.snapshot.revalidate()?;
+        self.root.revalidate()?;
+        Ok(())
     }
 
     fn terminal_revalidator(
@@ -114,28 +120,53 @@ impl KiroSqliteDatabase {
         self.authority.clone()
     }
 
-    fn finish(self, path: &Path) -> Result<SqliteSourceEvidence> {
+    fn diagnose_provider_query_error(
+        &self,
+        error: KiroSourceBackedErrorV0,
+        phase: SqliteFailurePhase,
+    ) -> KiroSourceBackedErrorV0 {
+        let source = match error {
+            KiroSourceBackedErrorV0::Sqlite(source)
+            | KiroSourceBackedErrorV0::Capture(CaptureError::Sqlite(source)) => source,
+            error => return error,
+        };
+        self.snapshot
+            .diagnose_provider_query_error("querying the private Kiro provider copy", source, phase)
+            .into()
+    }
+
+    fn abort(self, primary: SourceBackedRouteError) -> SourceBackedRouteError {
+        match self.snapshot.abort() {
+            Ok(()) => primary,
+            Err(cleanup) => {
+                crate::provider::source_backed::combine_primary_and_cleanup_route_errors(
+                    primary,
+                    source_backed::registration::kiro_scan_error(cleanup.into()),
+                )
+            }
+        }
+    }
+
+    fn finish(self, _path: &Path) -> KiroSourceBackedResultV0<SqliteSourceEvidence> {
         let Self { root, snapshot, .. } = self;
-        let evidence = snapshot
-            .finish()
-            .map_err(|error| kiro_sqlite_source_error(path, error))?;
+        let evidence = snapshot.finish()?;
         root.revalidate()?;
         Ok(evidence)
     }
 }
 
-fn kiro_sqlite_source_error(path: &Path, error: SqliteSourceAccessError) -> CaptureError {
-    match error {
-        SqliteSourceAccessError::SourceChanged
-        | SqliteSourceAccessError::ConnectionIdentityMismatch => {
-            CaptureError::SourceChangedDuringCapture
-        }
-        error => CaptureError::ProviderSource {
-            provider: CaptureProvider::KiroCli.as_str(),
-            path: path.to_path_buf(),
-            kind: crate::ProviderSourceFailureKind::SourceDatabase,
-            detail: error.to_string(),
-        },
+fn abort_kiro_snapshot(
+    snapshot: SqliteSourceReadSnapshot,
+    primary: KiroSourceBackedErrorV0,
+) -> KiroSourceBackedErrorV0 {
+    match snapshot.abort() {
+        Ok(()) => primary,
+        Err(cleanup) => KiroSourceBackedErrorV0::Route(
+            crate::provider::source_backed::combine_primary_and_cleanup_route_errors(
+                source_backed::registration::kiro_scan_error(primary),
+                source_backed::registration::kiro_scan_error(cleanup.into()),
+            ),
+        ),
     }
 }
 

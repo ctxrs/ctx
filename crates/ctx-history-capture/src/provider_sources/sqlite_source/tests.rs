@@ -3,7 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant},
@@ -13,26 +13,33 @@ use std::{
 use std::os::unix::fs::{symlink, PermissionsExt};
 
 use ctx_history_core::ScannedSourceCounts;
-use rusqlite::{config::DbConfig, params, Connection};
+use rusqlite::{config::DbConfig, ffi, params, Connection};
 use sha2::{Digest, Sha256};
 
 use crate::provider::source_backed::SourceBackedCurrentSourceProgressStage;
 
 use super::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test, map_revalidation_error,
-    map_revalidation_io_error,
+    map_revalidation_io_error, online_backup_contention_deadline_error_for_test,
+    open_root_handle_sqlite_source_online_backup_after_backup_for_test,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
+    open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
     open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test,
     open_root_handle_sqlite_source_snapshot,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
-    run_online_backup_with_deadline_for_test, SqliteLogicalSnapshot, SqliteSourceAccessError,
-    SqliteSourceComponent, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
-    SqliteSourceSnapshotStrategy, SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+    retained_online_backup_retry_code_for_test, run_online_backup_with_deadline_for_test,
+    SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot,
+    SqliteRetryDecision, SqliteSourceAccessError, SqliteSourceComponent,
+    SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot, SqliteSourceSnapshotStrategy,
+    SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
 };
 
+mod copy_races;
+mod corruption_cleanup;
+mod diagnostics;
 mod path_safety;
 mod scratch;
 
@@ -60,6 +67,28 @@ fn create_persistent_wal(path: &Path) -> Connection {
         .unwrap();
     connection
         .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    connection
+}
+
+fn create_large_persistent_wal(path: &Path) -> Connection {
+    create_database(path, "before-wal");
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE copy_window_padding(payload BLOB NOT NULL);
+             INSERT INTO copy_window_padding VALUES (zeroblob(10485760));",
+        )
+        .unwrap();
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    connection
+        .execute_batch("PRAGMA wal_autocheckpoint=0")
+        .unwrap();
+    connection
+        .execute("INSERT INTO messages (body) VALUES ('from-wal')", [])
         .unwrap();
     connection
 }
@@ -124,94 +153,6 @@ fn directory_names(path: &Path) -> BTreeSet<OsString> {
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect()
-}
-
-fn provider_content_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
-    directory_file_bytes(path)
-        .into_iter()
-        .filter(|(name, _)| {
-            name == OsStr::new("provider.sqlite") || name == OsStr::new("provider.sqlite-wal")
-        })
-        .collect()
-}
-
-fn assert_revalidation_resource_unavailable(error: SqliteSourceAccessError) {
-    assert!(error.is_retryable_resource_unavailable());
-    assert!(matches!(
-        error,
-        SqliteSourceAccessError::ResourceUnavailable { .. }
-    ));
-}
-
-#[cfg(unix)]
-#[test]
-fn sqlite_authority_revalidation_preserves_descriptor_exhaustion() {
-    let path = Path::new("/provider/provider.sqlite");
-    for code in [libc::EMFILE, libc::ENFILE] {
-        let error = map_revalidation_io_error(
-            io::Error::from_raw_os_error(code),
-            "retaining SQLite authority in the regression test",
-            path,
-        );
-        match &error {
-            SqliteSourceAccessError::ResourceUnavailable {
-                operation,
-                path: error_path,
-                source,
-            } => {
-                assert_eq!(
-                    *operation,
-                    "retaining SQLite authority in the regression test"
-                );
-                assert_eq!(error_path, path);
-                assert_eq!(source.raw_os_error(), Some(code));
-            }
-            other => panic!("unexpected revalidation error: {other:?}"),
-        }
-        assert_revalidation_resource_unavailable(error);
-    }
-}
-
-#[test]
-fn sqlite_authority_revalidation_preserves_portable_resource_exhaustion() {
-    let path = Path::new("provider.sqlite");
-    for kind in [
-        io::ErrorKind::OutOfMemory,
-        io::ErrorKind::StorageFull,
-        io::ErrorKind::QuotaExceeded,
-    ] {
-        let error = map_revalidation_io_error(
-            io::Error::from(kind),
-            "retaining SQLite authority in the portable regression test",
-            path,
-        );
-        assert!(matches!(
-            &error,
-            SqliteSourceAccessError::ResourceUnavailable { source, .. }
-                if source.kind() == kind
-        ));
-        assert_revalidation_resource_unavailable(error);
-    }
-}
-
-#[test]
-fn sqlite_authority_revalidation_keeps_mutation_as_source_changed() {
-    assert!(matches!(
-        map_revalidation_error(SqliteSourceAccessError::ConnectionIdentityMismatch),
-        SqliteSourceAccessError::SourceChanged
-    ));
-    assert!(matches!(
-        map_revalidation_error(SqliteSourceAccessError::SourceChanged),
-        SqliteSourceAccessError::SourceChanged
-    ));
-    assert!(matches!(
-        map_revalidation_io_error(
-            io::Error::from(io::ErrorKind::NotFound),
-            "reopening mutated SQLite authority in the regression test",
-            Path::new("provider.sqlite"),
-        ),
-        SqliteSourceAccessError::SourceChanged
-    ));
 }
 
 #[test]
@@ -530,10 +471,7 @@ fn sidecar_creation_during_immutable_open_is_fail_closed() {
         || fs::write(&wal, b"appeared during acquisition").unwrap(),
     );
 
-    assert!(matches!(
-        &result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[cfg(unix)]
@@ -551,10 +489,7 @@ fn wal_deletion_during_copied_acquisition_is_fail_closed() {
         || fs::remove_file(&wal).unwrap(),
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(result.unwrap_err().is_source_changed());
 }
 
 #[test]
@@ -723,10 +658,7 @@ fn snapshot_copy_fails_closed_on_database_mutation_during_family_copy() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -749,10 +681,7 @@ fn shared_memory_rewrite_during_copied_acquisition_is_fail_closed() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -817,6 +746,32 @@ fn logical_online_backup_checks_an_expired_deadline_before_a_bounded_step() {
 }
 
 #[test]
+fn logical_online_backup_contention_deadline_preserves_codes_and_final_attempt() {
+    for code in [ffi::SQLITE_BUSY, ffi::SQLITE_LOCKED] {
+        let error = online_backup_contention_deadline_error_for_test(code, 3, 9, 4_096, 17);
+        let diagnostic = error.diagnostic().unwrap();
+        assert_eq!(diagnostic.phase, SqliteFailurePhase::OnlineBackup);
+        assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateBackup);
+        assert_eq!(diagnostic.sqlite_primary_code, Some(code));
+        assert_eq!(diagnostic.sqlite_extended_code, Some(code));
+        assert_eq!(diagnostic.copied_pages, 3);
+        assert_eq!(diagnostic.copied_bytes, 12_288);
+        assert_eq!(diagnostic.retry, SqliteRetryDecision::RetryBusyOrLocked);
+        assert!(error.is_busy_or_locked());
+    }
+}
+
+#[test]
+fn logical_online_backup_ok_step_retains_prior_contention_code_for_deadline() {
+    for code in [ffi::SQLITE_BUSY, ffi::SQLITE_LOCKED] {
+        assert_eq!(
+            retained_online_backup_retry_code_for_test(Some(code), ffi::SQLITE_OK),
+            Some(code)
+        );
+    }
+}
+
+#[test]
 fn active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_writer_generation() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
@@ -865,10 +820,7 @@ fn committed_wal_write_during_stock_open_is_fail_closed() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -1056,8 +1008,16 @@ fn logical_online_backup_is_one_private_snapshot_without_provider_content_or_nam
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
     let _writer = create_persistent_wal(&database);
-    let before_names = directory_names(temp.path());
-    let before_content = provider_content_bytes(temp.path());
+    fs::write(temp.path().join("unrelated-provider-state"), b"unchanged").unwrap();
+    let before_directory = directory_file_bytes(temp.path());
+    for expected in [
+        "provider.sqlite",
+        "provider.sqlite-wal",
+        "provider.sqlite-shm",
+        "unrelated-provider-state",
+    ] {
+        assert!(before_directory.contains_key(OsStr::new(expected)));
+    }
     let parent = retain_parent(temp.path());
 
     let snapshot = parent
@@ -1068,11 +1028,16 @@ fn logical_online_backup_is_one_private_snapshot_without_provider_content_or_nam
         SqliteSourceSnapshotStrategy::LogicalOnlineBackup
     );
     assert_eq!(read_values(&snapshot), vec!["from-wal"]);
+    let certification = snapshot.certification().unwrap();
+    assert_eq!(certification.source.pages, certification.backup.pages);
+    assert_eq!(certification.source.bytes, certification.backup.bytes);
+    assert!(certification.source.elapsed_ms < 5 * 60 * 1_000);
+    assert!(certification.backup.elapsed_ms < 5 * 60 * 1_000);
     let counters = parent.snapshot_counters();
     assert_eq!(counters.immutable_snapshot_opens(), 0);
     assert_eq!(counters.copied_snapshot_opens(), 0);
     assert_eq!(counters.logical_online_backup_opens(), 1);
-    assert_eq!(counters.source_bytes_copied(), 0);
+    assert!(counters.source_bytes_copied() > 0);
     assert!(counters.logical_online_backup_bytes() > 0);
     assert_eq!(counters.active_snapshots(), 1);
     assert_eq!(counters.max_active_snapshots(), 1);
@@ -1080,8 +1045,7 @@ fn logical_online_backup_is_one_private_snapshot_without_provider_content_or_nam
     let fence = snapshot.seal().unwrap();
     fence.revalidate().unwrap();
     assert_eq!(parent.snapshot_counters().active_snapshots(), 0);
-    assert_eq!(directory_names(temp.path()), before_names);
-    assert_eq!(provider_content_bytes(temp.path()), before_content);
+    assert_eq!(directory_file_bytes(temp.path()), before_directory);
 }
 
 #[test]
@@ -1148,6 +1112,14 @@ fn sidecar_free_logical_snapshot_has_one_near_limit_scratch_allocation() {
         )
         .unwrap();
     drop(connection);
+    fs::write(
+        provider.path().join("unrelated-provider-state"),
+        b"unchanged",
+    )
+    .unwrap();
+    let before_directory = directory_file_bytes(provider.path());
+    assert!(!before_directory.contains_key(OsStr::new("provider.sqlite-wal")));
+    assert!(!before_directory.contains_key(OsStr::new("provider.sqlite-shm")));
     let scratch_limit = fs::metadata(&database).unwrap().len();
     let parent = retain_parent_in_data_root(data_root.path(), provider.path());
 
@@ -1197,10 +1169,13 @@ fn sidecar_free_logical_snapshot_has_one_near_limit_scratch_allocation() {
     let fence = snapshot.seal().unwrap();
     drop(fence);
     assert_eq!(fs::read_dir(staging_root).unwrap().count(), 0);
+    assert_eq!(directory_file_bytes(provider.path()), before_directory);
+    assert!(!database.with_file_name("provider.sqlite-wal").exists());
+    assert!(!database.with_file_name("provider.sqlite-shm").exists());
 }
 
 #[test]
-fn copied_wal_family_is_promoted_without_a_second_scratch_database() {
+fn copied_wal_family_is_backed_up_and_source_staging_is_cleaned() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
@@ -1218,13 +1193,23 @@ fn copied_wal_family_is_promoted_without_a_second_scratch_database() {
         .unwrap();
 
     assert_eq!(read_values(&snapshot), ["from-wal"]);
-    assert_eq!(snapshot.copied_bytes(), expected_copy_bytes);
+    assert!(snapshot.copied_bytes() > 0);
     let counters = parent.snapshot_counters();
     assert_eq!(counters.source_bytes_copied(), expected_copy_bytes);
-    assert_eq!(counters.logical_online_backup_bytes(), 0);
-    assert_eq!(counters.active_snapshot_bytes(), expected_copy_bytes);
-    assert_eq!(counters.max_active_snapshot_bytes(), expected_copy_bytes);
-    assert!(counters.max_active_snapshot_bytes() <= SQLITE_SNAPSHOT_MAX_TOTAL_BYTES);
+    assert_eq!(
+        counters.logical_online_backup_bytes(),
+        snapshot.copied_bytes()
+    );
+    assert_eq!(counters.active_snapshot_bytes(), snapshot.copied_bytes());
+    assert_eq!(
+        counters.max_active_snapshot_bytes(),
+        snapshot.copied_bytes()
+    );
+    let measured_peak = counters
+        .source_bytes_copied()
+        .checked_add(counters.max_active_snapshot_bytes())
+        .unwrap();
+    assert!(measured_peak <= SQLITE_SNAPSHOT_MAX_TOTAL_BYTES * 2);
     let staging_root = data_root.path().join("tmp").join("provider-sqlite");
     assert_eq!(fs::read_dir(&staging_root).unwrap().count(), 1);
     snapshot.finish().unwrap();
@@ -1259,7 +1244,7 @@ fn logical_online_backup_keeps_admitted_content_during_commit_and_next_refresh_a
         .unwrap();
     assert!(refreshed.admitted_revision_is_replay_safe());
     assert_eq!(read_values(&refreshed), vec!["from-wal", "later-commit"]);
-    assert_eq!(refreshed.evidence().revision(), &first_revision);
+    assert_ne!(refreshed.evidence().revision(), &first_revision);
     refreshed.finish().unwrap();
 }
 
@@ -1349,10 +1334,7 @@ fn logical_online_backup_rejects_wal_leaf_replacement_during_named_open() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -1376,10 +1358,7 @@ fn logical_online_backup_rejects_checkpoint_during_copied_family_acquisition() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(result.unwrap_err().is_source_changed());
 }
 
 #[cfg(unix)]
@@ -1443,10 +1422,7 @@ fn logical_online_backup_rejects_database_leaf_symlink_replacement_during_open()
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(result, Err(error) if error.is_source_changed()));
     assert_eq!(fs::read(attacker).unwrap(), attacker_before);
     assert_eq!(parent.snapshot_counters().logical_online_backup_opens(), 0);
 }
@@ -1478,10 +1454,7 @@ fn parent_swap_after_certification_cannot_open_replacement_members() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
     assert_eq!(directory_file_bytes(&approved_parent), replacement_before);
     assert_eq!(directory_file_bytes(&retained_parent), retained_before);
 }

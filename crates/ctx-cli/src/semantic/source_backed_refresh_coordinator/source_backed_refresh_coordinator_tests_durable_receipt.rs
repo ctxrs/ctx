@@ -1,5 +1,20 @@
 use super::*;
 
+fn enqueue_synthetic_fresh_request(
+    coordinator: &CoreRefreshEngine,
+    data_root: &Path,
+    revision: u64,
+) -> Value {
+    coordinator
+        .enqueue_fresh_catalog_demand_for_test(
+            data_root,
+            None,
+            Uuid::now_v7().to_string(),
+            test_catalog_authority(revision, 0),
+        )
+        .expect("synthetic fresh request")
+}
+
 fn publication_pin_test_publication(
     generation_id: impl Into<String>,
 ) -> SourceBackedRefreshPublication {
@@ -63,7 +78,8 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
             ))
         },
     ));
-    first.enqueue_periodic(&data_root).unwrap();
+    let initial_request = first.enqueue_periodic(&data_root).unwrap();
+    let initial_request_id = request_id(&initial_request);
     let initial = first.run_next(&data_root).expect("initial publication");
     assert!(!initial.failed, "{:#}", initial.job);
     assert_eq!(metadata_factories.load(Ordering::SeqCst), 1);
@@ -100,7 +116,9 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
             ))
         },
     ));
-    second.enqueue_periodic(&data_root).unwrap();
+    let no_op_request = second.enqueue_periodic(&data_root).unwrap();
+    let no_op_request_id = request_id(&no_op_request);
+    assert_ne!(no_op_request_id, initial_request_id);
     let replay = second.run_next(&data_root).expect("exact no-op replay");
     assert!(!replay.failed, "{:#}", replay.job);
     assert!(!replay.did_work);
@@ -116,6 +134,7 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
     assert_eq!(metadata_factories.load(Ordering::SeqCst), 1);
     let pin = second.pinned_core_publication().expect("no-op Core pin");
     assert_eq!(pin.receipt().to_json(), durable_receipt);
+    let exact_no_op_response = second.status(&no_op_request_id).unwrap();
     drop(second);
 
     let restarted = CoreRefreshEngine::new();
@@ -130,6 +149,45 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
             .to_json(),
         durable_receipt
     );
+    assert_eq!(
+        restarted.status(&no_op_request_id).unwrap(),
+        exact_no_op_response
+    );
+    assert!(restarted.status(&initial_request_id).is_none());
+    let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("stable no-op terminal after restart");
+    assert_eq!(recovered["request_id"], no_op_request_id);
+}
+
+#[test]
+fn lone_failed_terminal_recovers_exact_status_without_reenqueue() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let first = CoreRefreshEngine::new();
+    let request = first.enqueue_periodic(&data_root).unwrap();
+    let request_id = request_id(&request);
+    let failed = first
+        .run_next_with(
+            |_, _| Err(anyhow!("exact lone terminal failure")),
+            || Ok(None),
+            |job| write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), job),
+            |_| Ok(()),
+        )
+        .expect("failed terminal");
+    assert!(failed.failed);
+    assert!(!failed.terminal_persistence_pending);
+    let exact_failure = first.status(&request_id).unwrap();
+    assert_eq!(exact_failure["request_state"], "failed");
+    assert_eq!(exact_failure["last_error"], "exact lone terminal failure");
+    drop(first);
+
+    let restarted = CoreRefreshEngine::new();
+    assert!(!restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert!(!restarted.has_pending_request());
+    assert_eq!(restarted.status(&request_id).unwrap(), exact_failure);
 }
 
 #[test]
@@ -137,30 +195,17 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
     let first = CoreRefreshEngine::new();
     let active = first.enqueue_periodic(&data_root).unwrap();
     let active_request_id = request_id(&active);
     let successor_request_id = Arc::new(Mutex::new(None::<String>));
     let recorded_successor = Arc::clone(&successor_request_id);
     let execution_root = data_root.clone();
-    let execution_authority = authority.clone();
 
     let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = first.run_next_with(
             |active_id, coordinator| {
-                let successor = coordinator
-                    .handle_ipc_request(
-                        &execution_root,
-                        &json!({
-                            "op": SOURCE_REFRESH_REQUEST_OP,
-                            "mode": "wait",
-                            "operation": "import",
-                            "explicit_source_catalog": execution_authority.to_json(),
-                            "fresh_after_admitted_snapshot": true,
-                        }),
-                    )?
-                    .expect("fresh manual successor");
+                let successor = enqueue_synthetic_fresh_request(coordinator, &execution_root, 1);
                 *recorded_successor.lock().unwrap() = Some(request_id(&successor));
 
                 let metadata_request_id = active_id.to_owned();
@@ -248,9 +293,13 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
     );
     assert!(restarted.has_pending_request());
     let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("successor-rooted recovered job");
-    assert_eq!(recovered["request_id"], successor_request_id);
-    assert_eq!(recovered["request_state"], "queued");
+        .expect("predecessor-rooted recovered job");
+    assert_eq!(recovered["request_id"], active_request_id);
+    assert_eq!(recovered["request_state"], "published");
+    assert_eq!(
+        recovered["queued_successors"][0]["request_id"],
+        successor_request_id
+    );
 }
 
 #[test]
@@ -360,7 +409,6 @@ fn pointer_crash_recovers_exact_manual_all_continuation_receipt_without_recaptur
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
         .unwrap());
-    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
     let manual = std::thread::scope(|scope| {
         let runner = Arc::clone(&coordinator);
         let runner_root = data_root.clone();
@@ -372,7 +420,7 @@ fn pointer_crash_recovers_exact_manual_all_continuation_receipt_without_recaptur
         });
         entered.wait();
         coordinator.initialize_watch_route_authority(routes.iter().cloned());
-        let manual = manual_all_request(&coordinator, &data_root, &authority);
+        let manual = enqueue_synthetic_fresh_request(&coordinator, &data_root, 2);
         release.wait();
         manual
     });
@@ -436,7 +484,6 @@ fn failed_terminal_restart_preserves_fresh_successor() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
     let first = CoreRefreshEngine::new();
     first.enqueue_periodic(&data_root).unwrap();
     let successor_id = Arc::new(Mutex::new(None::<String>));
@@ -444,18 +491,7 @@ fn failed_terminal_restart_preserves_fresh_successor() {
     let run = first
         .run_next_with(
             |_, coordinator| {
-                let successor = coordinator
-                    .handle_ipc_request(
-                        &data_root,
-                        &json!({
-                            "op": SOURCE_REFRESH_REQUEST_OP,
-                            "mode": "wait",
-                            "operation": "import",
-                            "explicit_source_catalog": authority.to_json(),
-                            "fresh_after_admitted_snapshot": true,
-                        }),
-                    )?
-                    .expect("fresh manual successor");
+                let successor = enqueue_synthetic_fresh_request(coordinator, &data_root, 3);
                 *recorded_successor.lock().unwrap() = Some(request_id(&successor));
                 Err(anyhow!("injected terminal provider failure"))
             },
@@ -484,7 +520,6 @@ fn failed_terminal_retry_journals_successor_before_restart() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
     let first = CoreRefreshEngine::new();
     let active = first.enqueue_periodic(&data_root).unwrap();
     let active_id = request_id(&active);
@@ -499,19 +534,7 @@ fn failed_terminal_retry_journals_successor_before_restart() {
     assert!(failed.failed);
     assert!(failed.terminal_persistence_pending);
 
-    let successor = first
-        .handle_ipc_request(
-            &data_root,
-            &json!({
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "mode": "wait",
-                "operation": "import",
-                "explicit_source_catalog": authority.to_json(),
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("fresh successor during terminal retry");
+    let successor = enqueue_synthetic_fresh_request(&first, &data_root, 4);
     let successor_id = request_id(&successor);
     let pending = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
         .expect("failed root with durable successor");

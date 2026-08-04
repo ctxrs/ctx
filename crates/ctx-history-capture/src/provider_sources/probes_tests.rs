@@ -1,4 +1,4 @@
-use std::{fs, time::Duration};
+use std::{collections::BTreeMap, ffi::OsString, fs, time::Duration};
 
 use rusqlite::Connection;
 
@@ -21,6 +21,16 @@ fn sqlite_component_bytes(path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         .map(|component| {
             let bytes = fs::read(&component).ok();
             (component, bytes)
+        })
+        .collect()
+}
+
+fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
+    fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), fs::read(entry.path()).unwrap())
         })
         .collect()
 }
@@ -48,6 +58,7 @@ fn sqlite_probe_reads_committed_live_wal_without_mutating_provider_files() {
         )
         .unwrap();
     let before = sqlite_component_bytes(&path);
+    let before_directory = directory_file_bytes(temp.path());
     assert!(before.iter().any(|(path, bytes)| {
         path.to_string_lossy().ends_with("-wal")
             && bytes.as_ref().is_some_and(|bytes| !bytes.is_empty())
@@ -58,6 +69,7 @@ fn sqlite_probe_reads_committed_live_wal_without_mutating_provider_files() {
         BoundedProbe::Found
     );
     assert_eq!(sqlite_component_bytes(&path), before);
+    assert_eq!(directory_file_bytes(temp.path()), before_directory);
     let staging = data.path().join("tmp/provider-sqlite");
     assert!(staging.is_dir());
     assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
@@ -95,12 +107,14 @@ fn lingma_probe_reads_large_committed_live_wal_without_mutating_provider_files()
         )
         .unwrap();
     let before = sqlite_component_bytes(&path);
+    let before_directory = directory_file_bytes(temp.path());
 
     assert_eq!(
         has_lingma_chat_record_table(Some(data.path()), &path),
         BoundedProbe::Found
     );
     assert_eq!(sqlite_component_bytes(&path), before);
+    assert_eq!(directory_file_bytes(temp.path()), before_directory);
     drop(writer);
 }
 
@@ -192,6 +206,39 @@ fn sqlite_probe_rejects_source_mutation_during_structural_query() {
             Ok(present)
         });
     assert_eq!(outcome, BoundedProbe::IoError);
+}
+
+#[test]
+fn sidecar_free_sqlite_probe_leaves_the_provider_directory_unchanged() {
+    let temp = tempdir();
+    let data = tempdir();
+    let path = temp.path().join("sidecar-free.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("create table conversations (id text);")
+        .unwrap();
+    fs::write(temp.path().join("unrelated-provider-state"), b"unchanged").unwrap();
+    let before = sqlite_component_bytes(&path);
+    let before_directory = directory_file_bytes(temp.path());
+    assert!(!before_directory.contains_key(&OsString::from("sidecar-free.db-wal")));
+    assert!(!before_directory.contains_key(&OsString::from("sidecar-free.db-shm")));
+    let components = sqlite_probe_components(&path, SQLITE_PROBE_MAX_TOTAL_BYTES).unwrap();
+
+    let database = open_sqlite_probe_database(Some(data.path()), &path, &components).unwrap();
+    assert!(database
+        .connection()
+        .query_row("select exists(select 1 from sqlite_schema)", [], |row| row
+            .get::<_, bool>(
+            0
+        ))
+        .unwrap());
+    drop(database);
+    assert_eq!(sqlite_component_bytes(&path), before);
+    assert_eq!(directory_file_bytes(temp.path()), before_directory);
+    assert!(!path.with_file_name("sidecar-free.db-wal").exists());
+    assert!(!path.with_file_name("sidecar-free.db-shm").exists());
+    let staging = data.path().join("tmp/provider-sqlite");
+    assert!(!staging.exists() || fs::read_dir(staging).unwrap().next().is_none());
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use super::*;
 
 const QUEUED_SUCCESSORS_FIELD: &str = "queued_successors";
+const LOGICAL_DEMAND_FIELD: &str = "logical_demand";
 const DAEMON_RETRY_FIELDS: [&str; 4] = [
     "retryable",
     "retry_after_ms",
@@ -11,14 +12,38 @@ const DAEMON_RETRY_FIELDS: [&str; 4] = [
 impl CoreRefreshEngine {
     pub(super) fn persist_job_status(&self, data_root: &Path, request_id: &str) -> Result<()> {
         let state = self.lock_state();
-        find_attempt(&state, request_id)
+        let requested_attempt = find_attempt(&state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-        let durable_request_id = state.active_request_id.as_deref().unwrap_or(request_id);
+        let requested_terminal = !requested_attempt.state.is_active();
+        let durable_request_id = if requested_terminal {
+            request_id
+        } else {
+            state
+                .pending_scheduler_retry_root_id
+                .as_deref()
+                .or_else(|| {
+                    state
+                        .pending_terminal_persistence
+                        .as_ref()
+                        .map(|pending| pending.request_id.as_str())
+                })
+                .or(state.active_request_id.as_deref())
+                .unwrap_or(request_id)
+        };
         let job = durable_job_json(&state, durable_request_id)
             .ok_or_else(|| anyhow!("source refresh request `{durable_request_id}` is unknown"))?;
         // Keep the state lock through publication so an admission snapshot
         // cannot overwrite a later terminal snapshot during waiter races.
         self.write_status(data_root, &job)
+    }
+
+    #[cfg(test)]
+    pub(in super::super) fn persist_job_status_for_test(
+        &self,
+        data_root: &Path,
+        request_id: &str,
+    ) -> Result<()> {
+        self.persist_job_status(data_root, request_id)
     }
 
     pub(super) fn write_status(&self, data_root: &Path, job: &Value) -> Result<()> {
@@ -161,7 +186,7 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
         if let Some(active) = find_attempt(state, active_request_id)
             .filter(|attempt| attempt.state == SourceBackedRefreshState::Queued)
         {
-            successors.push(active.job_json());
+            successors.push(job_with_logical_demand(state, active.job_json()));
         }
     }
     successors.extend(
@@ -170,7 +195,8 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
             .iter()
             .filter_map(|request_id| find_attempt(state, request_id))
             .filter(|attempt| attempt.state == SourceBackedRefreshState::Queued)
-            .map(SourceBackedRefreshAttempt::job_json),
+            .map(SourceBackedRefreshAttempt::job_json)
+            .map(|job| job_with_logical_demand(state, job)),
     );
     let Some(object) = job.as_object_mut() else {
         return job;
@@ -180,7 +206,63 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
     } else {
         object.insert(QUEUED_SUCCESSORS_FIELD.to_owned(), Value::Array(successors));
     }
+    job_with_logical_demand(state, job)
+}
+
+fn job_with_logical_demand(state: &CoreRefreshEngineState, mut job: Value) -> Value {
+    let request_id = job
+        .get("request_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let Some(object) = job.as_object_mut() else {
+        return job;
+    };
+    match request_id
+        .as_deref()
+        .and_then(|request_id| state.manual_all_continuations.get(request_id))
+    {
+        Some(continuation) => {
+            object.insert(LOGICAL_DEMAND_FIELD.to_owned(), continuation.to_json());
+        }
+        None => {
+            object.remove(LOGICAL_DEMAND_FIELD);
+        }
+    }
     job
+}
+
+pub(super) fn recover_logical_demand_continuations(
+    job: &Value,
+) -> Result<BTreeMap<String, ManualAllContinuation>> {
+    let mut recovered = BTreeMap::new();
+    let mut recover = |candidate: &Value| -> Result<()> {
+        let Some(value) = candidate.get(LOGICAL_DEMAND_FIELD) else {
+            return Ok(());
+        };
+        let request_id = candidate
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("logical refresh demand has no request ID"))?
+            .to_owned();
+        if recovered
+            .insert(request_id, ManualAllContinuation::from_json(value)?)
+            .is_some()
+        {
+            bail!("logical refresh demand request ID is duplicated");
+        }
+        Ok(())
+    };
+    recover(job)?;
+    if let Some(successors) = job.get(QUEUED_SUCCESSORS_FIELD) {
+        for successor in successors
+            .as_array()
+            .ok_or_else(|| anyhow!("durable source refresh successors must be an array"))?
+        {
+            recover(successor)?;
+        }
+    }
+    Ok(recovered)
 }
 
 pub(super) fn recover_queued_successors(
@@ -303,7 +385,10 @@ fn recover_pending_attempt(
         refresh_scope,
     );
     attempt.request_id = request_id.to_owned();
-    if let Some(requested_at_ms) = job.get("last_run_at_ms") {
+    if let Some(requested_at_ms) = job
+        .get("requested_at_ms")
+        .or_else(|| job.get("last_run_at_ms"))
+    {
         attempt.requested_at_ms = requested_at_ms.as_i64().ok_or_else(|| {
             anyhow!("durable source refresh {role} has invalid request timestamp")
         })?;

@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use super::rows::CodexSessionRow;
 use super::source::CodexFileObservation;
 
-const CODEX_NATIVE_CHECKPOINT_VERSION: u8 = 7;
+const CODEX_NATIVE_CHECKPOINT_VERSION: u8 = 9;
 const CODEX_PENDING_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/pending-call-id/v1\0";
 const MAX_CODEX_PENDING_TOOL_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
 pub(crate) const MAX_CODEX_TOOL_CONTEXTS: usize = 24;
@@ -149,6 +149,7 @@ pub(crate) struct CodexNativeCheckpoint {
     complete_record_count: u64,
     pending_tool_authorities: Vec<CodexPendingToolAuthority>,
     pub(crate) owner: CodexSessionRow,
+    pub(crate) lineage_dependency_sha256: [u8; 32],
 }
 
 impl CodexNativeCheckpoint {
@@ -165,6 +166,7 @@ impl CodexNativeCheckpoint {
         incomplete_tail: Option<(u64, [u8; 32])>,
         pending_tool_authorities: &[CodexPendingToolAuthority],
         owner: CodexSessionRow,
+        lineage_dependency_sha256: [u8; 32],
     ) -> Self {
         let boundary = match incomplete_tail {
             Some((incomplete_tail_len, incomplete_tail_sha256)) => {
@@ -187,6 +189,7 @@ impl CodexNativeCheckpoint {
             complete_record_count,
             pending_tool_authorities: pending_tool_authorities.to_vec(),
             owner,
+            lineage_dependency_sha256,
         }
     }
 

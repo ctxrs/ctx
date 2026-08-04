@@ -506,7 +506,7 @@ fn fallback_scratch_enospc_is_typed_and_preserves_the_provider() {
     }
     assert_eq!(
         super::super::adapter::route_error(error).kind,
-        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable
+        crate::provider::source_backed::SourceBackedRouteErrorKind::ResourceUnavailable
     );
     assert_eq!(directory_file_bytes(&provider), before);
     let scratch_root = data_root.join("tmp/provider-sqlite-scratch");
@@ -569,7 +569,7 @@ fn unwritable_fallback_scratch_root_is_typed_and_preserves_the_provider() {
     }
     assert_eq!(
         super::super::adapter::route_error(error).kind,
-        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable
+        crate::provider::source_backed::SourceBackedRouteErrorKind::ResourceUnavailable
     );
     assert_eq!(directory_file_bytes(&provider), before);
 }

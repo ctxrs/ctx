@@ -163,7 +163,7 @@ fn ingest_codex_sources_with_options_v0(
     indexer_threads: usize,
     cold_options: ColdParallelOptionsV0,
 ) -> CodexSourceBackedResultV0<()> {
-    let outcome_lineage = Arc::new(CodexOutcomeLineageAuthorityV0::from_sources(&sources));
+    let outcome_lineage = Arc::new(CodexOutcomeLineageAuthorityV0::from_sources(&sources)?);
     counters.catalog_sources =
         u64::try_from(sources.len()).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
     counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
@@ -171,7 +171,9 @@ fn ingest_codex_sources_with_options_v0(
     });
     sources.sort_by_key(|(_, source_key, _)| source_key.identity().digest());
     let mut changed_sources = Vec::new();
+    let mut replay_sources = Vec::new();
     for (source, source_key, native_session_id) in sources {
+        let lineage_dependency_sha256 = outcome_lineage.dependency_digest(&native_session_id);
         let base = base_sources.get(&source_key).cloned();
         if base
             .as_ref()
@@ -184,7 +186,10 @@ fn ingest_codex_sources_with_options_v0(
         let proof = base
             .as_ref()
             .filter(|base| base.parser_revision() == CODEX_PARSER_REVISION)
-            .and_then(|base| decode_append_proof(&source, &source_key, base).ok());
+            .and_then(|base| decode_append_proof(&source, &source_key, base).ok())
+            .filter(|proof| {
+                proof.checkpoint.lineage_dependency_sha256 == lineage_dependency_sha256
+            });
         if replay_unchanged_source_v0(
             &source,
             &source_key,
@@ -195,6 +200,9 @@ fn ingest_codex_sources_with_options_v0(
             timings,
             counters,
         )? {
+            if let Some(proof) = proof {
+                replay_sources.push((source, proof, native_session_id));
+            }
             continue;
         }
         changed_sources.push(super::cold::ChangedSourceV0 {
@@ -203,18 +211,36 @@ fn ingest_codex_sources_with_options_v0(
             native_session_id,
             base,
             proof,
+            lineage_dependency_sha256,
         });
     }
     if changed_sources.is_empty() {
         return Ok(());
     }
+    prepare_replayed_lineage_v0(&replay_sources, &outcome_lineage)?;
+    changed_sources.sort_by_key(|source| outcome_lineage.depth(&source.native_session_id));
+    let changed_ids = changed_sources
+        .iter()
+        .map(|source| source.native_session_id.as_str())
+        .collect::<HashSet<_>>();
+    let has_changed_dependency = changed_sources.iter().any(|source| {
+        source
+            .source
+            .catalog_parent_native_session_id
+            .as_deref()
+            .is_some_and(|parent| changed_ids.contains(parent))
+    });
     let changed_source_count = u64::try_from(changed_sources.len())
         .map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
-    let worker_count = cold_scanner_worker_count(
-        changed_source_count,
-        indexer_threads,
-        cold_options.scanner_workers,
-    )?;
+    let worker_count = if has_changed_dependency {
+        1
+    } else {
+        cold_scanner_worker_count(
+            changed_source_count,
+            indexer_threads,
+            cold_options.scanner_workers,
+        )?
+    };
     let base_event_lookup = writer.base_event_identity_lookup();
     ingest_codex_cold_parallel_v0(
         changed_sources,
@@ -239,10 +265,11 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
-    let outcome_lineage = CodexOutcomeLineageAuthorityV0::from_sources(&sources);
+    let outcome_lineage = CodexOutcomeLineageAuthorityV0::from_sources(&sources)?;
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let base_event_lookup = writer.base_event_identity_lookup();
     for (source, source_key, native_session_id) in sources {
+        let lineage_dependency_sha256 = outcome_lineage.dependency_digest(&native_session_id);
         let base = base_sources.get(&source_key).cloned();
         if base
             .as_ref()
@@ -255,7 +282,10 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         let proof = base
             .as_ref()
             .filter(|base| base.parser_revision() == CODEX_PARSER_REVISION)
-            .and_then(|base| decode_append_proof(&source, &source_key, base).ok());
+            .and_then(|base| decode_append_proof(&source, &source_key, base).ok())
+            .filter(|proof| {
+                proof.checkpoint.lineage_dependency_sha256 == lineage_dependency_sha256
+            });
 
         if replay_unchanged_source_v0(
             &source,
@@ -277,10 +307,15 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             (Some(base), Some(proof))
                 if source.catalog_observation.len > proof.checkpoint.observation.len =>
             {
-                match CodexNativeScanner::new_source_backed_v0(source.clone(), Some(proof)) {
+                let facts = outcome_lineage.new_fact_set()?;
+                match CodexNativeScanner::new_source_backed_with_lineage_v0(
+                    source.clone(),
+                    Some(proof),
+                    facts,
+                ) {
                     Ok(scanner) => Some((base, scanner)),
                     Err(error) if invalid_append_proof(&error) => None,
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(map_lineage_capture_error(error)),
                 }
             }
             _ => None,
@@ -299,7 +334,12 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                 counters.writer_mutated_sources = counters.writer_mutated_sources.saturating_add(1);
                 (
                     None,
-                    CodexNativeScanner::new_source_backed_v0(source.clone(), None)?,
+                    CodexNativeScanner::new_source_backed_with_lineage_v0(
+                        source.clone(),
+                        None,
+                        outcome_lineage.new_fact_set()?,
+                    )
+                    .map_err(map_lineage_capture_error)?,
                 )
             }
         };
@@ -314,7 +354,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         let mut staged_for_source = 0_u64;
         loop {
             let scanner_started = Instant::now();
-            let page = scanner.next_page()?;
+            let page = scanner.next_page().map_err(map_lineage_capture_error)?;
             timings.scanner_worker_busy += scanner_started.elapsed();
             let Some(page) = page else {
                 break;
@@ -353,7 +393,12 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             }
         }
         let scanner_started = Instant::now();
-        let scan = scanner.finish()?;
+        let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
+        let lineage_facts = scan
+            .lineage_facts
+            .take()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        outcome_lineage.register(&native_session_id, lineage_facts)?;
         counters.scanner_sources_completed = counters.scanner_sources_completed.saturating_add(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         timings.scan_and_stage += scan_started.elapsed();
@@ -367,8 +412,14 @@ pub(crate) fn ingest_codex_sources_serial_v0(
         let certification_started = Instant::now();
         match (append_base, scan.disposition) {
             (None, CodexParseDisposition::FullGeneration) => {
-                let current =
-                    certify_scan(&source_key, &scan, None, staged_for_source, scan_counters)?;
+                let current = certify_scan(
+                    &source_key,
+                    &scan,
+                    None,
+                    staged_for_source,
+                    scan_counters,
+                    lineage_dependency_sha256,
+                )?;
                 writer.certify_source(current)?;
                 if base.is_some() {
                     counters.replaced_sources = counters.replaced_sources.saturating_add(1);
@@ -383,6 +434,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     Some(base),
                     staged_for_source,
                     scan_counters,
+                    lineage_dependency_sha256,
                 )?;
                 let base_frontier = base
                     .frontier()
@@ -419,6 +471,32 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             u64::try_from(repository_attributor.full_certification_probe_count())
                 .unwrap_or(u64::MAX),
         );
+    Ok(())
+}
+
+fn prepare_replayed_lineage_v0(
+    replay_sources: &[(CodexCatalogSource, CodexAppendProof, String)],
+    outcome_lineage: &CodexOutcomeLineageAuthorityV0,
+) -> CodexSourceBackedResultV0<()> {
+    for (source, proof, native_session_id) in replay_sources {
+        let mut scanner = CodexNativeScanner::new_source_backed_with_lineage_v0(
+            source.clone(),
+            Some(proof),
+            outcome_lineage.new_fact_set()?,
+        )
+        .map_err(map_lineage_capture_error)?;
+        while scanner
+            .next_page()
+            .map_err(map_lineage_capture_error)?
+            .is_some()
+        {}
+        let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
+        let facts = scan
+            .lineage_facts
+            .take()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        outcome_lineage.register(native_session_id, facts)?;
+    }
     Ok(())
 }
 

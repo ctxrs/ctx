@@ -42,6 +42,11 @@ pub(crate) enum AstrBotSourceBackedErrorV0 {
     Capture(#[from] CaptureError),
     #[error(transparent)]
     SqliteSource(#[from] SqliteSourceAccessError),
+    #[error("AstrBot SQLite scan failed and snapshot cleanup also failed: {cleanup}")]
+    SnapshotCleanup {
+        primary: Box<AstrBotSourceBackedErrorV0>,
+        cleanup: SqliteSourceAccessError,
+    },
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]

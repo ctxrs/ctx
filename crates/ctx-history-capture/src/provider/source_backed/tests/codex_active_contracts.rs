@@ -328,7 +328,25 @@ fn active_source_family_contract_codex_tree_admits_append_during_cold_catalog() 
         },
     )
     .unwrap();
-    assert_eq!(cold.commit.indexed_documents, 2);
+    assert_eq!(cold.commit.indexed_documents, 1);
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates("catalogappendmarker", 8)
+            .unwrap()
+            .len(),
+        0
+    );
+    let catch_up = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(catch_up.commit.indexed_documents, 2);
     assert_eq!(
         VerifiedIndex::open(&index)
             .unwrap()

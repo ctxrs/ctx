@@ -13,10 +13,12 @@ use std::{
 use anyhow::{Context, Result};
 use ctx_history_capture::SourceBackedWatchCatalog;
 use ctx_history_index::SourceRouteIdentity;
+#[cfg(test)]
 use notify::{
-    event::{AccessKind, AccessMode, CreateKind, MetadataKind, ModifyKind, RemoveKind},
-    Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    event::{AccessKind, AccessMode, MetadataKind, ModifyKind},
+    EventKind,
 };
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 
 use crate::{compact_json, config::CONFIG_FILE};
@@ -25,6 +27,13 @@ use super::{
     dirty_source_routes::EventWatermark,
     health_search::create_private_dir_all,
     paths_status::{daemon_root_path, write_private_json_file},
+};
+
+mod event_routing;
+#[cfg(test)]
+use event_routing::record_watch_event;
+use event_routing::{
+    ignored_watch_event, record_and_observe_watch_event, record_ignored_watch_event, watch_roots,
 };
 
 const WATCH_DEBOUNCE_QUIET: Duration = Duration::from_millis(250);
@@ -77,6 +86,58 @@ impl SourceWatchBatch {
     }
 }
 
+pub(super) type SourceWatchSink = Arc<dyn Fn(&SourceWatchBatch) + Send + Sync>;
+
+#[derive(Default)]
+struct SourceWatchSinkSlot {
+    sink: RwLock<Option<SourceWatchSink>>,
+}
+
+impl std::fmt::Debug for SourceWatchSinkSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceWatchSinkSlot")
+            .field(
+                "installed",
+                &self
+                    .sink
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some(),
+            )
+            .finish()
+    }
+}
+
+impl SourceWatchSinkSlot {
+    fn set(&self, sink: Option<SourceWatchSink>) {
+        *self
+            .sink
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = sink;
+    }
+
+    fn is_installed(&self) -> bool {
+        self.sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
+    fn dispatch(&self, batch: &SourceWatchBatch) -> bool {
+        let sink = self
+            .sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(sink) = sink {
+            sink(batch);
+            return true;
+        }
+        false
+    }
+}
+
 #[derive(Debug, Default)]
 struct DaemonWakeupState {
     pending: u8,
@@ -91,6 +152,11 @@ struct DaemonWakeupState {
     // One merged batch replaces a queue of batches. Route entries therefore
     // cannot exceed the current exact watch-catalog cardinality.
     source_watch: SourceWatchBatch,
+    // Exact observations are retained independently from the debounced daemon
+    // wake. This closes sink installation races and lets an in-progress
+    // publication fence events without forcing the synchronous loop awake for
+    // every native callback.
+    observed_source_watch: SourceWatchBatch,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,6 +171,24 @@ pub(super) struct DaemonWake {
 pub(super) struct DaemonWakeup {
     state: Mutex<DaemonWakeupState>,
     changed: Condvar,
+    source_watch_sink: SourceWatchSinkSlot,
+    #[cfg(test)]
+    source_watch_test_hook: SourceWatchTestHook,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SourceWatchTestHook {
+    before_sink_dispatch: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for SourceWatchTestHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceWatchTestHook")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DaemonWakeup {
@@ -113,6 +197,27 @@ impl DaemonWakeup {
         self.signal(WAKE_FILESYSTEM);
     }
 
+    /// Records exact route observations immediately for the publication fence.
+    ///
+    /// The merged replay state is updated before any sink lookup or dispatch.
+    /// Installation therefore observes every interleaving: either it replays
+    /// this batch, or this call observes the installed sink and dispatches it.
+    fn observe_source_watch(&self, batch: &SourceWatchBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        self.lock_state().observed_source_watch.merge(batch.clone());
+        #[cfg(test)]
+        self.run_before_source_watch_sink_dispatch_hook();
+        if self.source_watch_sink.dispatch(batch) {
+            // The replay buffer is startup-only. Once an installed sink has
+            // observed this batch, clearing the merged state prevents route
+            // identities from accumulating across later catalog churn.
+            self.lock_state().observed_source_watch = SourceWatchBatch::default();
+        }
+    }
+
+    /// Coalesces the daemon wake independently from prompt ledger observation.
     fn signal_source_watch(&self, batch: SourceWatchBatch) {
         if batch.is_empty() {
             return;
@@ -122,6 +227,44 @@ impl DaemonWakeup {
         state.filesystem_signals = state.filesystem_signals.saturating_add(1);
         state.source_watch.merge(batch);
         self.changed.notify_one();
+    }
+
+    pub(super) fn install_source_watch_sink(&self, sink: SourceWatchSink) {
+        self.source_watch_sink.set(Some(sink));
+        // Replay all observations merged before installation. Normal daemon
+        // ingestion remains idempotent because route watermarks are monotonic.
+        let pending = self.lock_state().observed_source_watch.clone();
+        if !pending.is_empty() && self.source_watch_sink.dispatch(&pending) {
+            self.lock_state().observed_source_watch = SourceWatchBatch::default();
+        }
+    }
+
+    pub(super) fn has_source_watch_sink(&self) -> bool {
+        self.source_watch_sink.is_installed()
+    }
+
+    #[cfg(test)]
+    fn install_before_source_watch_sink_dispatch_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        let previous = self
+            .source_watch_test_hook
+            .before_sink_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(hook);
+        assert!(previous.is_none(), "source-watch test hooks must not nest");
+    }
+
+    #[cfg(test)]
+    fn run_before_source_watch_sink_dispatch_hook(&self) {
+        let hook = self
+            .source_watch_test_hook
+            .before_sink_dispatch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     pub(super) fn signal_ipc(&self) {
@@ -681,9 +824,10 @@ fn watch_event_loop(
             Ok(WatchMessage::Stop) | Err(_) => return,
         };
         let started = Instant::now();
-        let mut relevant = record_watch_event(
+        let mut relevant = record_and_observe_watch_event(
             &authority,
             &counters,
+            &wakeup,
             &data_root,
             &daemon_root,
             first,
@@ -697,9 +841,10 @@ fn watch_event_loop(
             let timeout = WATCH_DEBOUNCE_QUIET.min(WATCH_DEBOUNCE_MAX - elapsed);
             match receiver.recv_timeout(timeout) {
                 Ok(WatchMessage::Event { event, watermark }) => {
-                    relevant.merge(record_watch_event(
+                    relevant.merge(record_and_observe_watch_event(
                         &authority,
                         &counters,
+                        &wakeup,
                         &data_root,
                         &daemon_root,
                         event,
@@ -719,171 +864,6 @@ fn watch_event_loop(
             wakeup.signal_source_watch(relevant);
         }
     }
-}
-
-fn record_watch_event(
-    authority: &RwLock<WatchAuthority>,
-    counters: &Mutex<WatchCounters>,
-    data_root: &Path,
-    daemon_root: &Path,
-    event: notify::Result<Event>,
-    watermark: EventWatermark,
-) -> SourceWatchBatch {
-    let event = match event {
-        Ok(event) => event,
-        Err(_) => {
-            let mut counters = counters
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            counters.backend_errors = counters.backend_errors.saturating_add(1);
-            return SourceWatchBatch::catalog_reconciliation(watermark);
-        }
-    };
-    if event.need_rescan() {
-        let mut counters = counters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        counters.raw_events = counters.raw_events.saturating_add(1);
-        counters.rescan_notifications = counters.rescan_notifications.saturating_add(1);
-        counters.last_relevant_path = event.paths.first().cloned();
-        return SourceWatchBatch::catalog_reconciliation(watermark);
-    }
-    if let Some(kind) = ignored_watch_event(data_root, &event) {
-        record_ignored_watch_event(counters, &event, kind);
-        return SourceWatchBatch::default();
-    }
-    let authority = authority
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let catalog = authority.catalog.snapshot();
-    let mut batch = SourceWatchBatch::default();
-    let mut relevant_path = None;
-    for event_path in &event.paths {
-        if event_path.as_path() == data_root || event_path.starts_with(daemon_root) {
-            continue;
-        }
-        if authority
-            .controls
-            .iter()
-            .any(|target| declared_control_paths_overlap(target, event_path))
-        {
-            batch.reconcile = Some(watermark);
-            relevant_path.get_or_insert_with(|| event_path.clone());
-        }
-        if let Some(catalog) = catalog.as_ref() {
-            for route in catalog.routes_overlapping_path(event_path) {
-                batch.routes.insert(route, watermark);
-                relevant_path.get_or_insert_with(|| event_path.clone());
-            }
-        }
-    }
-    if event.paths.is_empty() {
-        batch.reconcile = Some(watermark);
-        batch.rearm = true;
-    } else if !batch.is_empty() && watch_event_requires_rearm(&event) {
-        batch.rearm = true;
-    }
-    drop(authority);
-    if !batch.is_empty() {
-        let mut counters = counters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        counters.raw_events = counters.raw_events.saturating_add(1);
-        counters.last_relevant_path = relevant_path;
-    } else {
-        let mut counters = counters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        counters.ignored_other_events = counters.ignored_other_events.saturating_add(1);
-    }
-    batch
-}
-
-fn watch_event_requires_rearm(event: &Event) -> bool {
-    matches!(
-        event.kind,
-        EventKind::Any
-            | EventKind::Other
-            | EventKind::Create(CreateKind::Any | CreateKind::Folder | CreateKind::Other)
-            | EventKind::Modify(ModifyKind::Any | ModifyKind::Name(_) | ModifyKind::Other)
-            | EventKind::Remove(RemoveKind::Any | RemoveKind::Folder | RemoveKind::Other)
-    )
-}
-
-#[derive(Clone, Copy)]
-enum IgnoredWatchEvent {
-    Access,
-    AccessTime,
-}
-
-fn ignored_watch_event(_data_root: &Path, event: &Event) -> Option<IgnoredWatchEvent> {
-    if matches!(
-        event.kind,
-        EventKind::Access(kind)
-            if !matches!(kind, AccessKind::Close(AccessMode::Write))
-    ) {
-        return Some(IgnoredWatchEvent::Access);
-    }
-    if matches!(
-        event.kind,
-        EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))
-    ) {
-        return Some(IgnoredWatchEvent::AccessTime);
-    }
-    None
-}
-
-fn record_ignored_watch_event(
-    counters: &Mutex<WatchCounters>,
-    event: &Event,
-    kind: IgnoredWatchEvent,
-) {
-    let mut counters = counters
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match kind {
-        IgnoredWatchEvent::Access => {
-            counters.ignored_access_events = counters.ignored_access_events.saturating_add(1);
-            counters.last_ignored_access_path = event.paths.first().cloned();
-        }
-        IgnoredWatchEvent::AccessTime => {
-            counters.ignored_access_time_events =
-                counters.ignored_access_time_events.saturating_add(1);
-        }
-    }
-}
-
-fn declared_control_paths_overlap(target: &Path, event: &Path) -> bool {
-    target == event || target.starts_with(event) || event.starts_with(target)
-}
-
-fn watch_roots<'a>(targets: impl IntoIterator<Item = &'a Path>) -> BTreeMap<PathBuf, bool> {
-    let mut roots = BTreeMap::new();
-    for target in targets {
-        if target.is_dir() {
-            roots
-                .entry(target.to_path_buf())
-                .and_modify(|recursive| *recursive = true)
-                .or_insert(true);
-            continue;
-        }
-        if target.is_file() {
-            if let Some(parent) = target.parent() {
-                roots.entry(parent.to_path_buf()).or_insert(false);
-            }
-            continue;
-        }
-        if let Some(existing) = nearest_existing_ancestor(target) {
-            roots.entry(existing).or_insert(false);
-        }
-    }
-    roots
-}
-
-fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .find(|candidate| candidate.is_dir())
-        .map(Path::to_path_buf)
 }
 
 pub(super) fn write_degraded_wakeup_receipt(data_root: &Path, error: &anyhow::Error) -> Result<()> {

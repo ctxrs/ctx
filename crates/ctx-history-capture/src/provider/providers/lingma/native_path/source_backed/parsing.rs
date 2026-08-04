@@ -152,38 +152,53 @@ pub(crate) fn scan_lingma_snapshot_v0(
     sqlite_snapshot: SqliteSourceReadSnapshot,
     sink: &mut impl LingmaSourceBackedSinkV0,
 ) -> LingmaSourceBackedResultV0<CertifiedSource> {
-    let source = database.source_key()?;
-    let connection = sqlite_snapshot.connection()?;
-    let encoding = detect_schema(connection)?;
-    let user_version = connection
-        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
-    let parsed = scan_rows(connection, encoding, &source, sink)?;
-    before_database_certification();
-    sqlite_snapshot.finish()?;
-    let schema_evidence = format!(
-        "user_version={user_version}\0schema={schema_fingerprint}\0encoding={}",
-        match encoding {
-            SqliteEncoding::Utf8 => "utf8",
-            SqliteEncoding::Utf16Le => "utf16le",
-            SqliteEncoding::Utf16Be => "utf16be",
+    let scan = (|| {
+        let source = database.source_key()?;
+        let connection = sqlite_snapshot.connection()?;
+        let encoding = detect_schema(connection)?;
+        let user_version = connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .map_err(CaptureError::from)?;
+        let schema_fingerprint = sqlite_schema_fingerprint(connection)?;
+        let parsed = scan_rows(connection, encoding, &source, sink)?;
+        before_database_certification();
+        let schema_evidence = format!(
+            "user_version={user_version}\0schema={schema_fingerprint}\0encoding={}",
+            match encoding {
+                SqliteEncoding::Utf8 => "utf8",
+                SqliteEncoding::Utf16Le => "utf16le",
+                SqliteEncoding::Utf16Be => "utf16be",
+            }
+        );
+        SqliteLogicalSnapshot::new(
+            PARSER_REVISION,
+            schema_evidence.as_bytes(),
+            parsed.content_digest,
+            ScannedSourceCounts {
+                complete_records: parsed.complete_records,
+                retained_records: parsed.retained_records,
+                rejected_records: parsed.rejected_records,
+                ignored_records: parsed.ignored_records,
+                indexed_documents: parsed.indexed_documents,
+                certified_bytes: parsed.certified_bytes,
+            },
+        )
+        .certify(source)
+        .map_err(Into::into)
+    })();
+    match scan {
+        Ok(certificate) => {
+            sqlite_snapshot.finish()?;
+            Ok(certificate)
         }
-    );
-    Ok(SqliteLogicalSnapshot::new(
-        PARSER_REVISION,
-        schema_evidence.as_bytes(),
-        parsed.content_digest,
-        ScannedSourceCounts {
-            complete_records: parsed.complete_records,
-            retained_records: parsed.retained_records,
-            rejected_records: parsed.rejected_records,
-            ignored_records: parsed.ignored_records,
-            indexed_documents: parsed.indexed_documents,
-            certified_bytes: parsed.certified_bytes,
+        Err(primary) => match sqlite_snapshot.abort() {
+            Ok(()) => Err(primary),
+            Err(cleanup) => Err(LingmaSourceBackedErrorV0::SnapshotCleanup {
+                primary: Box::new(primary),
+                cleanup,
+            }),
         },
-    )
-    .certify(source)?)
+    }
 }
 
 struct ParsedScan {

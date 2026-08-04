@@ -156,7 +156,7 @@ fn append_resumes_at_complete_prefix_and_preserves_suffix_ordinal() {
 }
 
 #[test]
-fn append_after_catalog_is_admitted_at_one_current_frozen_eof() {
+fn append_after_catalog_is_deferred_beyond_the_one_admitted_frozen_eof() {
     let initial = [
         session_meta("moving-catalog-owner"),
         message("user", "captured prefix"),
@@ -173,18 +173,11 @@ fn append_after_catalog_is_admitted_at_one_current_frozen_eof() {
         .unwrap();
 
     let (frozen, frozen_rows) = scan_collect(catalog_source, None);
-    assert_eq!(
-        frozen.before_observation.len,
-        (initial.len() + appended.len()) as u64
-    );
+    assert_eq!(frozen.before_observation.len, initial.len() as u64);
     assert_eq!(frozen.after_observation, frozen.before_observation);
-    assert_eq!(
-        frozen.complete_prefix_end,
-        (initial.len() + appended.len()) as u64
-    );
-    assert_eq!(frozen_rows.rows.len(), 2);
+    assert_eq!(frozen.complete_prefix_end, initial.len() as u64);
+    assert_eq!(frozen_rows.rows.len(), 1);
     assert_eq!(frozen_rows.rows[0].lexical_body, "captured prefix");
-    assert_eq!(frozen_rows.rows[1].lexical_body, "deferred append");
 
     let proof = frozen
         .bind_checkpoint("moving-catalog-source", CodexCheckpointGeneration::new(91))
@@ -192,8 +185,9 @@ fn append_after_catalog_is_admitted_at_one_current_frozen_eof() {
         .unwrap();
     let (replay, replay_rows) =
         scan_collect(discover_one(&path, "moving-catalog-owner"), Some(&proof));
-    assert_eq!(replay.disposition, CodexParseDisposition::ObservationReplay);
-    assert!(replay_rows.rows.is_empty());
+    assert_eq!(replay.disposition, CodexParseDisposition::AppendDelta);
+    assert_eq!(replay_rows.rows.len(), 1);
+    assert_eq!(replay_rows.rows[0].lexical_body, "deferred append");
 }
 
 #[test]
@@ -318,7 +312,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     .concat();
     let (_temp, path) = write_source(&contents);
     let (scan, _) = scan_collect(discover_one(&path, "checkpoint-owner"), None);
-    let checkpoint = scan.checkpoint().unwrap();
+    let checkpoint = scan.checkpoint([0; 32]).unwrap();
     let encoded = checkpoint.encode().unwrap();
     let wire = String::from_utf8(encoded.clone()).unwrap();
 
@@ -331,7 +325,11 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert!(!wire.contains("command"));
     assert!(!wire.contains("arguments_preview"));
     let decoded_wire = serde_json::from_str::<Value>(&wire).unwrap();
-    assert_eq!(decoded_wire["version"], 7);
+    assert_eq!(decoded_wire["version"], 9);
+    assert_eq!(
+        decoded_wire["lineage_dependency_sha256"],
+        json!(vec![0; 32])
+    );
     assert_eq!(
         decoded_wire["pending_tool_authorities"]
             .as_array()
@@ -342,7 +340,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert_eq!(CodexNativeCheckpoint::decode(&encoded).unwrap(), checkpoint);
 
     let mut old_version = decoded_wire.clone();
-    old_version["version"] = json!(2);
+    old_version["version"] = json!(8);
     assert!(CodexNativeCheckpoint::decode(&serde_json::to_vec(&old_version).unwrap()).is_err());
 
     let mut oversized_contexts = decoded_wire;
@@ -371,7 +369,7 @@ fn terminal_checkpoint_boundary_tamper_rejects_during_decode() {
     .concat();
     let (_temp, path) = write_source(&contents);
     let (scan, _) = scan_collect(discover_one(&path, "terminal-tamper-owner"), None);
-    let checkpoint = scan.checkpoint().unwrap();
+    let checkpoint = scan.checkpoint([0; 32]).unwrap();
     let mut wire = serde_json::from_slice::<Value>(&checkpoint.encode().unwrap()).unwrap();
 
     wire["boundary"]["complete_eof"] = json!(contents.len() as u64 - 1);
@@ -390,7 +388,7 @@ fn unchanged_replay_revalidates_raw_ordinal_boundary_and_digests() {
     let contents = format!("{complete}{partial}");
     let (_temp, path) = write_source(&contents);
     let (scan, _) = scan_collect(discover_one(&path, "checkpoint-validation-owner"), None);
-    let checkpoint = scan.checkpoint().unwrap();
+    let checkpoint = scan.checkpoint([0; 32]).unwrap();
     let encoded = checkpoint.encode().unwrap();
 
     let mut bad_length = serde_json::from_slice::<Value>(&encoded).unwrap();

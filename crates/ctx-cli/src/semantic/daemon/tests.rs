@@ -1,3 +1,5 @@
+mod recovery_cadence;
+
 use std::{
     cell::Cell,
     collections::BTreeSet,
@@ -883,6 +885,36 @@ fn due_consumer_retry_wait_loop_blocks_and_wakes_when_query_becomes_idle() -> Re
     assert_eq!(status["core_generation_id"], generation);
     assert_eq!(status["attempts"], 1);
     Ok(())
+}
+
+#[test]
+fn due_dirty_route_waits_for_background_cadence_instead_of_spinning() {
+    let coordinator =
+        CoreRefreshEngine::with_executor(Arc::new(|_: SourceBackedRefreshExecution<'_>| {
+            anyhow::bail!("executor must remain idle")
+        }));
+    let route = ctx_history_index::SourceRouteIdentity::from_sha256("ab".repeat(32))
+        .expect("route identity");
+    coordinator.reconcile_watch_routes([route], EventWatermark::new(1, 0), 0);
+    let now = Instant::now();
+    let mut runtime = DaemonRuntime::default();
+    runtime
+        .background_refresh_cadence
+        .record_completion(now, now);
+
+    let wait_for = daemon_wait_duration(
+        &runtime,
+        Some(&coordinator),
+        now + StdDuration::from_secs(30),
+        None,
+        None,
+        now,
+    );
+
+    assert_eq!(
+        wait_for,
+        super::super::daemon_scheduler::DAEMON_BACKGROUND_REFRESH_MIN_REST
+    );
 }
 
 #[test]

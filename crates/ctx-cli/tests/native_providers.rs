@@ -1039,7 +1039,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 fn task_json_cli_imports_cline_and_roo_and_searches() {
     let temp = tempdir();
     let cline_fixture = PathBuf::from(provider_history_fixture("cline/data"));
-    let cline = temp.path().join(".cline/data");
+    let cline = temp.path().join("explicit-cline-data");
     copy_dir_all(&cline_fixture, &cline);
     let _daemon = start_isolated_provider_daemon(&temp);
     let cline = cline.display().to_string();
@@ -1053,7 +1053,10 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--no-daemon",
         "--format=json",
     ]));
-    assert_explicit_source_publication(&imported, "cline", "cline_task_directory_json");
+    let first_source =
+        assert_explicit_source_publication(&imported, "cline", "cline_task_directory_json");
+    let cline_route_identity = first_source["route_identity"].clone();
+    let cline_catalog_lineage = first_source["catalog_lineage"].clone();
     wait_for_imported_core(&temp, &imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(provider_core_counts(&data_root(&temp), "cline"), (1, 5));
@@ -1067,7 +1070,17 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         "--no-daemon",
         "--format=json",
     ]));
-    assert_explicit_source_publication(&second, "cline", "cline_task_directory_json");
+    let second_source =
+        assert_explicit_source_publication(&second, "cline", "cline_task_directory_json");
+    assert_noop_publication(&second);
+    assert_eq!(
+        second_source["route_identity"], cline_route_identity,
+        "{second:#}"
+    );
+    assert_eq!(
+        second_source["catalog_lineage"], cline_catalog_lineage,
+        "{second:#}"
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1094,6 +1107,39 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     wait_for_imported_core(&temp, &imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(provider_core_counts(&data_root(&temp), "roo_code"), (2, 7));
+    assert_eq!(
+        provider_core_counts(&data_root(&temp), "cline"),
+        (1, 5),
+        "Roo route publication must carry the prior Cline source unchanged"
+    );
+    let retained =
+        ctx_history_index::VerifiedIndex::open(data_root(&temp).join("search").join("lexical"))
+            .unwrap();
+    let retained_cline_route = retained
+        .manifest()
+        .source_routes()
+        .iter()
+        .find(|route| route.route_identity().as_str() == cline_route_identity.as_str().unwrap())
+        .unwrap_or_else(|| panic!("Roo publication dropped the exact Cline route: {imported:#}"));
+    assert!(
+        retained_cline_route
+            .sources()
+            .iter()
+            .any(|source| source.provider() == "cline"),
+        "Roo publication dropped the Cline source: {imported:#}"
+    );
+    let publication_metadata: Value = serde_json::from_slice(
+        retained
+            .publication_metadata()
+            .expect("Roo publication must retain source-refresh authority"),
+    )
+    .unwrap();
+    let expected_lineage = cline_catalog_lineage.as_str().unwrap();
+    assert_eq!(
+        publication_metadata["receipt"]["catalog_route_bindings"][expected_lineage],
+        cline_route_identity,
+        "Roo publication changed the Cline catalog-lineage route binding"
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -1241,7 +1287,12 @@ fn codex_cli_catalogs_valid_content_from_mixed_fixture() {
         &fixture,
         "--format=json",
     ]));
-    assert_explicit_source_publication(&imported, "codex", "codex_session_jsonl");
+    assert_explicit_source_publication_with_rejections(
+        &imported,
+        "codex",
+        "codex_session_jsonl",
+        1,
+    );
     wait_for_imported_core(&temp, &imported);
     assert_eq!(
         imported["totals"]["current_rejected_records"], 1,
@@ -1266,7 +1317,7 @@ fn pi_cli_catalogs_valid_content_from_mixed_fixture() {
         &fixture,
         "--format=json",
     ]));
-    assert_explicit_source_publication(&imported, "pi", "pi_session_jsonl");
+    assert_explicit_source_publication_with_rejections(&imported, "pi", "pi_session_jsonl", 2);
     wait_for_imported_core(&temp, &imported);
     assert_eq!(
         imported["totals"]["current_rejected_records"], 2,

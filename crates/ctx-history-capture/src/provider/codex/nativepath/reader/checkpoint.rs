@@ -191,15 +191,19 @@ pub(super) fn decode_pending_tool_authority(
     authority: &CodexPendingToolAuthority,
     owner: &CodexSessionRow,
 ) -> Result<(String, CodexToolCallContext)> {
-    let Some(record) = record.strip_suffix(b"\n") else {
-        return Err(invalid_checkpoint_proof(
-            "pending tool-call authority does not end at a JSONL boundary",
-        ));
-    };
+    // The surrounding checkpoint walk has already matched this authority to
+    // an exact JSONL boundary. The shared lineage scratch omits the delimiter;
+    // the legacy pending-only scratch includes it.
+    let record = record.strip_suffix(b"\n").unwrap_or(record);
     let record = trim_jsonl_terminator(record);
     let probe = classify_codex_record(record).map_err(|_| {
         invalid_checkpoint_proof("pending tool-call authority is not valid Codex JSON")
     })?;
+    if probe.lineage_malformed() {
+        return Err(invalid_checkpoint_proof(
+            "pending tool-call authority has malformed lineage fields",
+        ));
+    }
     let CodexRecordClass::Retained(kind @ super::super::record::CodexRetainedKind::ToolCall) =
         probe.class
     else {
@@ -260,7 +264,8 @@ pub(super) fn decode_pending_tool_authority(
 pub(super) fn validate_checkpoint_source(
     reader: &mut BufReader<File>,
     checkpoint: &CodexNativeCheckpoint,
-    hydrate_pending_tools: bool,
+    append_replay: bool,
+    mut lineage_facts: Option<&mut CodexLineageFactsV0>,
 ) -> Result<ValidatedCheckpoint> {
     // The prefix proof is the sole read pass over checkpointed bytes. On
     // append, only the at-most-24 authority spans are retained long enough to
@@ -286,6 +291,8 @@ pub(super) fn validate_checkpoint_source(
     let mut authority_index = 0_usize;
     let mut current_record_start = 0_u64;
     let mut pending_tool_record = Vec::new();
+    let mut lineage_record = Vec::new();
+    let mut lineage_record_oversized = false;
     let mut pending_tool_contexts = BTreeMap::new();
     let mut pending_tool_authorities = BTreeMap::new();
     let mut pending_continuations = BTreeMap::new();
@@ -320,13 +327,29 @@ pub(super) fn validate_checkpoint_source(
                     .ok_or(CaptureError::SystemInvariant(
                         "Codex checkpoint record offset exceeds u64",
                     ))?;
-                if hydrate_pending_tools
+                if append_replay
+                    && lineage_facts.is_none()
                     && authorities.get(authority_index).is_some_and(|authority| {
                         absolute_offset >= authority.record_start
                             && absolute_offset < authority.record_end
                     })
                 {
                     pending_tool_record.push(*byte);
+                }
+                if lineage_facts.is_some() && *byte != b'\n' {
+                    if lineage_record.len() < MAX_CODEX_RECORD_BYTES {
+                        if lineage_record.len() == lineage_record.capacity() {
+                            let growth = 8 * 1024;
+                            lineage_record.try_reserve_exact(growth).map_err(|_| {
+                                CaptureError::InvalidPayload(
+                                    CODEX_LINEAGE_EXHAUSTED_SENTINEL.to_owned(),
+                                )
+                            })?;
+                        }
+                        lineage_record.push(*byte);
+                    } else {
+                        lineage_record_oversized = true;
+                    }
                 }
                 if *byte != b'\n' {
                     terminal_suffix_all_nul &= *byte == 0;
@@ -349,9 +372,14 @@ pub(super) fn validate_checkpoint_source(
                                 "pending tool-call authority does not match its JSONL record boundary",
                             ));
                         }
-                        if hydrate_pending_tools {
+                        if append_replay {
+                            let authority_record = if lineage_facts.is_some() {
+                                lineage_record.as_slice()
+                            } else {
+                                pending_tool_record.as_slice()
+                            };
                             let (call_id, context) = decode_pending_tool_authority(
-                                &pending_tool_record,
+                                authority_record,
                                 authority,
                                 &checkpoint.owner,
                             )?;
@@ -370,6 +398,11 @@ pub(super) fn validate_checkpoint_source(
                         }
                         authority_index = authority_index.saturating_add(1);
                     }
+                }
+                if let Some(facts) = lineage_facts.as_deref_mut() {
+                    record_checkpoint_lineage(facts, &lineage_record, lineage_record_oversized)?;
+                    lineage_record.clear();
+                    lineage_record_oversized = false;
                 }
                 current_record_start = record_end;
                 complete_records = complete_records.saturating_add(1);
@@ -422,8 +455,20 @@ pub(super) fn validate_checkpoint_source(
             ));
         }
     }
+    if !append_replay && checkpoint.incomplete_tail().is_some() {
+        if let Some(facts) = lineage_facts {
+            // A fresh bounded scan records every unterminated tail as
+            // unattributed relationship ambiguity. Exact checkpoint replay
+            // must rederive that same fact from the certified boundary; the
+            // tail bytes were hashed above but intentionally never parsed as
+            // a complete JSONL record. Append replay resumes at that boundary,
+            // so the primary scanner derives replacement evidence from the
+            // tail's now-current bytes instead of retaining this old fact.
+            facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)?;
+        }
+    }
 
-    if hydrate_pending_tools {
+    if append_replay {
         for (call_id, authority) in &pending_tool_authorities {
             if let Some(cell_id) = authority.continuation_cell_id() {
                 if authority.continuation_conflicted() {
@@ -506,6 +551,30 @@ pub(super) fn validate_checkpoint_source(
     })
 }
 
+fn record_checkpoint_lineage(
+    facts: &mut CodexLineageFactsV0,
+    record: &[u8],
+    oversized: bool,
+) -> Result<()> {
+    if record
+        .iter()
+        .all(|byte| *byte == 0 || byte.is_ascii_whitespace())
+    {
+        return Ok(());
+    }
+    if oversized {
+        return facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity);
+    }
+    let record = trim_jsonl_terminator(record);
+    match classify_codex_record(record) {
+        Ok(probe) => facts.record(codex_lineage_record_evidence(&probe)),
+        Err(_) if malformed_record_may_contain_lineage(record) => {
+            facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)
+        }
+        Err(_) => Ok(()),
+    }
+}
+
 pub(super) fn invalid_checkpoint_proof(reason: &str) -> CaptureError {
     CaptureError::InvalidPayload(format!("invalid Codex append proof: {reason}"))
 }
@@ -524,7 +593,19 @@ pub(super) fn observed_opened_file(
             "Codex catalog observation changed before NativePath admission".to_owned(),
         ));
     }
-    Ok(current)
+    let expected_prefix = source.catalog_prefix_sha256.ok_or_else(|| {
+        CaptureError::SystemInvariant("Codex catalog prefix digest is unavailable")
+    })?;
+    revalidate_opened_prefix(
+        opened.file(),
+        source.catalog_observation.len,
+        expected_prefix,
+    )?;
+    opened.revalidate_same_object()?;
+    // Discovery admitted this ordinary-file identity and froze this refresh's
+    // EOF. Growth after that observation is deferred to the next refresh;
+    // broadening the boundary here would give one source two authorities.
+    Ok(source.catalog_observation.clone())
 }
 
 pub(crate) fn revalidate_codex_source_observation(
@@ -580,6 +661,13 @@ pub(super) fn revalidate_opened_prefix(
         return Err(source_changed_during_scan());
     }
     Ok(())
+}
+
+pub(crate) fn opened_file_prefix_sha256(file: &File, len: u64) -> Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut reader = file.try_clone()?;
+    hash_opened_file_range(&mut reader, 0, len, &mut hasher)?;
+    Ok(hasher.finalize().into())
 }
 
 pub(crate) fn open_codex_source_capability(

@@ -145,7 +145,13 @@ pub(super) fn discover_one(path: &Path, native_session_id: &str) -> CodexCatalog
     let discovery = discover_codex_catalog_sources(&[catalog_session(path, native_session_id)]);
     assert!(discovery.rejections.is_empty());
     assert_eq!(discovery.sources.len(), 1);
-    discovery.sources.into_iter().next().unwrap()
+    let mut source = discovery.sources.into_iter().next().unwrap();
+    let opened = open_provider_source_file(path).unwrap();
+    source.catalog_prefix_sha256 = Some(
+        super::reader::opened_file_prefix_sha256(opened.file(), source.catalog_observation.len)
+            .unwrap(),
+    );
+    source
 }
 
 pub(super) fn write_source(contents: &str) -> (TempDir, std::path::PathBuf) {

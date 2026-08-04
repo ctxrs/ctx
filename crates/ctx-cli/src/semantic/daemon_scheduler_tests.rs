@@ -1,3 +1,6 @@
+#[path = "daemon_scheduler_tests/background_refresh.rs"]
+mod background_refresh;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -37,14 +40,18 @@ use crate::{
 };
 
 use super::{
-    daemon_consumer_retry_due, daemon_core_refresh_job_path, daemon_job_should_backoff,
-    daemon_mode_runs_core_pro_catch_up, daemon_mode_runs_core_semantic_projection,
-    daemon_semantic_job_path, install_before_core_scheduler_status_hook_for_test,
-    persist_pro_status, prepare_pro_retry_for_generation, read_daemon_job_status, read_pro_status,
-    record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
+    background_refresh_rest, daemon_consumer_retry_due, daemon_core_refresh_job_path,
+    daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
+    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path,
+    install_before_core_scheduler_status_hook_for_test, persist_pro_status,
+    prepare_pro_retry_for_generation, preserve_daemon_background_refresh_recovery_provenance,
+    read_daemon_job_status, read_pro_status, record_daemon_job_retry, record_source_refresh_retry,
+    restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
     run_pending_core_refresh, run_pro_catch_up_with_retry, write_daemon_job_status,
-    DaemonRetryBackoff, DaemonRuntime, SourceBackedProCoreAuthority,
+    DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
+    SourceBackedProCoreAuthority, DAEMON_BACKGROUND_REFRESH_MAX_REST,
+    DAEMON_BACKGROUND_REFRESH_MIN_REST,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -436,6 +443,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
     let route =
         |byte: u8| SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap();
     let routes = BTreeSet::from([route(0x81), route(0x82), route(0x83)]);
+    let startup_routes = routes.iter().take(2).cloned().collect::<BTreeSet<_>>();
     let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Barrier::new(2));
@@ -493,8 +501,9 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
             Ok(publication)
         },
     )));
-    coordinator.reconcile_watch_routes(
-        routes.clone(),
+    coordinator.initialize_watch_route_authority(routes.clone());
+    coordinator.schedule_startup_route_reconciliation(
+        startup_routes,
         EventWatermark::new(1, 0),
         super::source_route_ledger_now_ms().saturating_sub(1_000),
     );
@@ -525,7 +534,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
         });
         entered.wait();
         let response = coordinator
-            .handle_ipc_request(
+            .handle_ipc_request_with_admission_fence_for_test(
                 &data_root,
                 &json!({
                     "schema_version": 1,
@@ -533,7 +542,9 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                     "mode": "wait",
                     "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
+                    "fresh_after_admitted_snapshot": true,
                 }),
+                BTreeMap::new(),
             )
             .unwrap()
             .expect("manual all continuation response");

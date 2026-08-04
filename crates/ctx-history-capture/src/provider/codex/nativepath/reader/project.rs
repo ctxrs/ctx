@@ -29,9 +29,22 @@ impl CodexNativeScanner {
             Ok(probe) => probe,
             Err(_) => {
                 self.reject(false);
+                if malformed_record_may_contain_lineage(record) {
+                    if let Some(lineage_facts) = self.lineage_facts.as_mut() {
+                        lineage_facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)?;
+                    }
+                }
                 return Ok(CodexRecordProjection::default());
             }
         };
+        let lineage_evidence = codex_lineage_record_evidence(&probe);
+        if let Some(lineage_facts) = self.lineage_facts.as_mut() {
+            lineage_facts.record(lineage_evidence)?;
+        }
+        if probe.lineage_malformed() {
+            self.reject(false);
+            return Ok(CodexRecordProjection::default());
+        }
         match probe.class {
             CodexRecordClass::SessionMeta => {
                 self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);

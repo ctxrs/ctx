@@ -53,7 +53,11 @@ impl SourceBackedProviderRegistry {
         let relocate_from = relocate_from.to_path_buf();
         let publication_relocate_from = relocate_from.clone();
         driver.revalidate = Arc::new(move |target| {
-            relocation_source_remains_absent(&relocate_from) && original_revalidate(target)
+            if relocation_source_remains_absent(&relocate_from) {
+                original_revalidate(target)
+            } else {
+                Ok(false)
+            }
         });
         driver.revalidate_at_publication = Some(Arc::new(move || {
             relocation_source_remains_absent(&publication_relocate_from)

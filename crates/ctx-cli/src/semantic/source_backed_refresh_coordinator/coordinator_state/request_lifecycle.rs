@@ -1,108 +1,8 @@
 use super::*;
+mod recovery;
+mod resolution;
 
 impl CoreRefreshEngine {
-    pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
-        self.run_next_with_verified_index_opener(data_root, |index_root| {
-            Ok(Arc::new(open_verified_index(index_root)?))
-        })
-    }
-
-    pub(in super::super) fn run_next_with_verified_index_opener<Open>(
-        &self,
-        data_root: &Path,
-        open_verified: Open,
-    ) -> Option<SourceBackedRefreshRun>
-    where
-        Open: FnOnce(&Path) -> Result<Arc<VerifiedIndex>>,
-    {
-        let executor = Arc::clone(&self.executor);
-        let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
-        let publication_probe_attempted = Cell::new(false);
-        let run = self.run_next_with_terminal_success(
-            |request_id, coordinator| {
-                let requested_catalog = coordinator.requested_explicit_source_catalog(request_id);
-                let refresh_scope = coordinator
-                    .refresh_scope(request_id)
-                    .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-                let operation = coordinator
-                    .operation(request_id)
-                    .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-                let (covered_route_ids, covered_publication) =
-                    coordinator.admit_refresh_scope(request_id, &refresh_scope)?;
-                coordinator.persist_job_status(data_root, request_id)?;
-                let mut publication = execute_source_backed_refresh(
-                    executor.as_ref(),
-                    data_root,
-                    request_id,
-                    coordinator,
-                    SourceBackedRefreshPlan {
-                        explicit_source_catalog: requested_catalog.as_ref(),
-                        operation,
-                        scope: refresh_scope,
-                        covered_route_ids,
-                        covered_publication,
-                    },
-                )?;
-                let probe_started = StdInstant::now();
-                let pin = if let Some(pin) = publication.verified_index.take() {
-                    pin
-                } else {
-                    publication_probe_attempted.set(true);
-                    open_verified(&source_backed_index_root(data_root))
-                        .context("verify Core generation after publication")?
-                };
-                let verification = verify_source_backed_publication(&publication, &pin);
-                coordinator.set_publication_probe_timing(
-                    request_id,
-                    nonzero_duration_micros(probe_started.elapsed()),
-                );
-                verification?;
-                verified_index.replace(Some(pin));
-                Ok(publication)
-            },
-            || {
-                if let Some(verified) = verified_index.borrow().as_ref() {
-                    return Ok(Some(verified.generation_id().to_owned()));
-                }
-                if publication_probe_attempted.get() {
-                    bail!(
-                        "post-publication verified-index probe already failed in this refresh cycle"
-                    );
-                }
-                let verified = open_published_generation(data_root)?.map(Arc::new);
-                let generation_id = verified
-                    .as_ref()
-                    .map(|index| index.generation_id().to_owned());
-                verified_index.replace(verified);
-                Ok(generation_id)
-            },
-            |receipt| {
-                let pin = verified_index.borrow_mut().take().ok_or_else(|| {
-                    anyhow!("verified Core publication has no exact retained generation pin")
-                })?;
-                let authority_receipt = publication_authority_receipt(&pin, receipt)?;
-                CoreRefreshTerminalSuccess::bind(authority_receipt, pin)
-                    .context("bind exact Core publication receipt and generation authority")
-            },
-            |job| self.write_status(data_root, job),
-            |_| Ok(()),
-        )?;
-        let publication_ready = !run.failed && !run.terminal_persistence_pending;
-        if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
-            if !run.terminal_persistence_pending {
-                self.finish_route_admissions(request_id, publication_ready);
-            }
-        }
-        Some(run)
-    }
-
-    fn set_publication_probe_timing(&self, request_id: &str, duration_us: u64) {
-        let mut state = self.lock_state();
-        if let Some(attempt) = find_attempt_mut(&mut state, request_id) {
-            attempt.publication_probe_us = duration_us;
-        }
-    }
-
     pub(in crate::semantic) fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
         let observed_generation = self.observed_published_generation(data_root)?;
         self.enqueue_with_catalog_metadata(
@@ -110,200 +10,12 @@ impl CoreRefreshEngine {
             SourceRefreshRuntimeMetadata::periodic(),
             None,
             SourceBackedRefreshScope::All,
-            SourceRefreshAdmissionRequirement::AttachEquivalent,
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::AttachEquivalent,
+                route_observations: BTreeMap::new(),
+                request_id: None,
+            },
         )
-    }
-
-    /// Restores an exact published authority when its durable receipt is
-    /// complete, or durably enqueues one replay before daemon readiness when
-    /// Core may have committed past the last terminal job snapshot.
-    pub(in crate::semantic) fn recover_interrupted_publication(
-        &self,
-        data_root: &Path,
-    ) -> Result<bool> {
-        let Some(job) = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root))
-        else {
-            return Ok(false);
-        };
-        let verified = open_published_generation(data_root)?.map(Arc::new);
-        let active_generation = verified
-            .as_ref()
-            .map(|verified| verified.generation_id().to_owned());
-        let queued_successors = recover_queued_successors(&job, active_generation.clone())?;
-        if job.get("request_state").and_then(Value::as_str) == Some("published") {
-            if let Some(verified) = verified.as_ref() {
-                if let Ok(status_receipt) = published_refresh_receipt_for_index(&job, verified) {
-                    if let Ok(metadata) = SourceBackedPublicationMetadata::decode(verified) {
-                        if let Ok(durable_receipt) = published_refresh_receipt_for_index(
-                            &metadata.response_value(),
-                            verified,
-                        ) {
-                            if status_receipt.published_generation == verified.generation_id()
-                                && durable_receipt == status_receipt
-                            {
-                                let attempt = SourceBackedRefreshAttempt::recovered_published(
-                                    &job,
-                                    &metadata,
-                                    durable_receipt.clone(),
-                                );
-                                let terminal = CoreRefreshTerminalSuccess::bind(
-                                    durable_receipt,
-                                    Arc::clone(verified),
-                                )?;
-                                let has_successors = !queued_successors.is_empty();
-                                let durable_request_id = {
-                                    let mut state = self.lock_state();
-                                    terminal.install(&mut state);
-                                    state.attempts.push_back(attempt);
-                                    install_recovered_successors(
-                                        &mut state,
-                                        queued_successors.clone(),
-                                    )?;
-                                    state.current_published_generation = active_generation.clone();
-                                    trim_terminal_attempt_history(&mut state);
-                                    state
-                                        .active_request_id
-                                        .as_deref()
-                                        .unwrap_or(metadata.request_id.as_str())
-                                        .to_owned()
-                                };
-                                self.persist_job_status(data_root, &durable_request_id)?;
-                                return Ok(has_successors);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let request_state = job
-            .get("request_state")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let previous_generation = job.get("previous_generation").and_then(Value::as_str);
-        let pointer_advanced = active_generation.as_deref() != previous_generation;
-        // A terminal job must always recover or reject its exact publication,
-        // even when the persisted previous-generation pointer already equals
-        // the active generation. Otherwise malformed terminal authority can
-        // be ignored and queued successors can be lost on restart.
-        if pointer_advanced || request_state == "published" {
-            let active_generation = active_generation.ok_or_else(|| {
-                anyhow!("interrupted source refresh advanced Core without an active generation")
-            })?;
-            let verified = verified.ok_or_else(|| {
-                anyhow!("interrupted source refresh advanced Core without a verified generation")
-            })?;
-            if verified.publication_metadata().is_none() && request_state == "published" {
-                // Publications written before the refresh control plane carry
-                // no source-refresh receipt, so there is nothing exact to
-                // recover. Accept the verified generation as terminal-complete
-                // only when the legacy job names that exact publication, then
-                // install any queued successors; the next scheduled refresh
-                // publishes with metadata again. Non-terminal jobs, mismatched
-                // generations, and present-but-malformed metadata keep failing
-                // closed below.
-                let job_generation = required_generation(
-                    job.get("published_generation"),
-                    "legacy published refresh generation",
-                )?;
-                if job_generation != active_generation {
-                    bail!("legacy Core refresh job names a different published generation");
-                }
-                if !queued_successors.is_empty() {
-                    let durable_request_id = {
-                        let mut state = self.lock_state();
-                        install_recovered_successors(&mut state, queued_successors)?;
-                        state.current_published_generation = Some(active_generation);
-                        state
-                            .active_request_id
-                            .as_deref()
-                            .ok_or_else(|| {
-                                anyhow!("recovered source refresh successor is unavailable")
-                            })?
-                            .to_owned()
-                    };
-                    self.persist_job_status(data_root, &durable_request_id)?;
-                    return Ok(true);
-                }
-                self.lock_state().current_published_generation = Some(active_generation);
-                return Ok(false);
-            }
-            let metadata = SourceBackedPublicationMetadata::decode(&verified)
-                .context("recover exact terminal refresh receipt from Core publication metadata")?;
-            let job_request_id = job
-                .get("request_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("interrupted source refresh job has no request ID"))?;
-            if metadata.request_id != job_request_id {
-                bail!("active Core refresh metadata belongs to a different request");
-            }
-            let job_operation = SourceBackedRefreshOperation::from_request_json(&job)?;
-            let job_scope = refresh_scope_from_json(job.get("refresh_scope"))?;
-            if metadata.operation != job_operation || metadata.refresh_scope != job_scope {
-                bail!("active Core refresh metadata does not match the interrupted request");
-            }
-            let receipt =
-                published_refresh_receipt_for_index(&metadata.response_value(), verified.as_ref())?;
-            if receipt.published_generation != active_generation {
-                bail!("active Core refresh metadata names a different generation");
-            }
-            let attempt =
-                SourceBackedRefreshAttempt::recovered_published(&job, &metadata, receipt.clone());
-            let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
-            let has_successors = !queued_successors.is_empty();
-            let durable_request_id = {
-                let mut state = self.lock_state();
-                terminal.install(&mut state);
-                state.attempts.push_back(attempt);
-                install_recovered_successors(&mut state, queued_successors.clone())?;
-                state.current_published_generation = Some(active_generation);
-                trim_terminal_attempt_history(&mut state);
-                state
-                    .active_request_id
-                    .as_deref()
-                    .unwrap_or(metadata.request_id.as_str())
-                    .to_owned()
-            };
-            self.persist_job_status(data_root, &durable_request_id)?;
-            return Ok(has_successors);
-        }
-        if request_state == "failed" && !queued_successors.is_empty() {
-            let durable_request_id = {
-                let mut state = self.lock_state();
-                install_recovered_successors(&mut state, queued_successors)?;
-                state.current_published_generation = active_generation;
-                state
-                    .active_request_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("recovered source refresh successor is unavailable"))?
-                    .to_owned()
-            };
-            self.persist_job_status(data_root, &durable_request_id)?;
-            return Ok(true);
-        }
-        let needs_recovery = matches!(request_state, "queued" | "running");
-        if !needs_recovery {
-            if let Some(verified) = verified {
-                self.lock_state().current_published_generation =
-                    Some(verified.generation_id().to_owned());
-            }
-            return Ok(false);
-        }
-
-        let root = recover_queued_root(&job, active_generation.clone())?;
-        let request_id = root.request_id.clone();
-        {
-            let mut state = self.lock_state();
-            if state.active_request_id.is_some() || !state.pending_request_ids.is_empty() {
-                bail!("interrupted source refresh recovery conflicts with an active queue");
-            }
-            state.active_request_id = Some(request_id.clone());
-            state.attempts.push_back(root);
-            install_recovered_successors(&mut state, queued_successors)?;
-            state.current_published_generation = active_generation;
-        }
-        self.persist_job_status(data_root, &request_id)?;
-        Ok(true)
     }
 
     #[cfg(test)]
@@ -320,6 +32,66 @@ impl CoreRefreshEngine {
     }
 
     #[cfg(test)]
+    pub(in super::super) fn enqueue_fresh_demand_for_test(
+        &self,
+        observed_generation: Option<String>,
+        request_id: String,
+        admission_route_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
+    ) -> Result<Value> {
+        self.enqueue_with_catalog_metadata(
+            observed_generation,
+            SourceRefreshRuntimeMetadata::default(),
+            None,
+            SourceBackedRefreshScope::All,
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
+                route_observations: admission_route_observations,
+                request_id: Some(request_id),
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn enqueue_fresh_catalog_demand_for_test(
+        &self,
+        data_root: &Path,
+        observed_generation: Option<String>,
+        request_id: String,
+        requested_catalog: ExplicitSourceCatalogAuthority,
+    ) -> Result<Value> {
+        let response = match self.enqueue_with_catalog_metadata(
+            observed_generation,
+            SourceRefreshRuntimeMetadata {
+                operation: SourceBackedRefreshOperation::Import,
+                daemon_mode: DaemonMode::default(),
+                trigger: "import",
+                trigger_provenance: "explicit_source_catalog",
+            },
+            Some(requested_catalog),
+            SourceBackedRefreshScope::All,
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
+                route_observations: BTreeMap::new(),
+                request_id: Some(request_id),
+            },
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(queue_full) = error.downcast_ref::<SourceBackedRefreshQueueFull>() {
+                    return Ok(queue_full.to_json());
+                }
+                return Err(error);
+            }
+        };
+        let request_id = response
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("queued test source refresh has no request ID"))?;
+        self.persist_job_status(data_root, request_id)?;
+        Ok(response)
+    }
+
+    #[cfg(test)]
     fn enqueue_with_metadata(
         &self,
         observed_generation: Option<String>,
@@ -330,7 +102,11 @@ impl CoreRefreshEngine {
             metadata,
             None,
             SourceBackedRefreshScope::All,
-            SourceRefreshAdmissionRequirement::AttachEquivalent,
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::AttachEquivalent,
+                route_observations: BTreeMap::new(),
+                request_id: None,
+            },
         )
         .expect("requests without catalog authority always coalesce")
     }
@@ -341,54 +117,69 @@ impl CoreRefreshEngine {
         metadata: SourceRefreshRuntimeMetadata,
         requested_catalog: Option<ExplicitSourceCatalogAuthority>,
         refresh_scope: SourceBackedRefreshScope,
-        admission: SourceRefreshAdmissionRequirement,
+        logical_demand: SourceRefreshLogicalDemand,
     ) -> Result<Value> {
+        let SourceRefreshLogicalDemand {
+            admission,
+            route_observations: mut admission_route_observations,
+            request_id: logical_request_id,
+        } = logical_demand;
         let mut state = self.lock_state();
-        let is_manual_all = metadata.operation == SourceBackedRefreshOperation::Import
-            && requested_catalog.is_some()
+        if let Some(existing) = logical_request_id
+            .as_deref()
+            .and_then(|request_id| find_attempt(&state, request_id))
+        {
+            return Ok(existing.to_json());
+        }
+        let is_manual_all = admission
+            == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot
             && refresh_scope == SourceBackedRefreshScope::All;
         let mut continuation_predecessor = None;
         if let Some(active_request_id) = state.active_request_id.clone() {
             if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
-                if active.state.is_active() && !admission.requires_successor(active.state) {
-                    if let Some(requested_catalog) = requested_catalog.as_ref() {
-                        let upgrades_queued_automatic =
-                            active.requested_explicit_source_catalog.is_none()
-                                && active.state == SourceBackedRefreshState::Queued;
-                        if upgrades_queued_automatic {
-                            active.requested_explicit_source_catalog =
-                                Some(requested_catalog.clone());
-                        }
+                if active.state.is_active() {
+                    if is_manual_all && active.state == SourceBackedRefreshState::Running {
+                        continuation_predecessor = Some(active.request_id.clone());
                     }
-                    let automatic_exact = active.trigger == "periodic"
-                        && active.trigger_provenance == "daemon_scheduler"
-                        && matches!(&active.refresh_scope, SourceBackedRefreshScope::Exact(_));
-                    if is_manual_all && automatic_exact {
-                        if active.state == SourceBackedRefreshState::Queued {
+                    if admission.requires_successor(active.state) {
+                        // A logical freshness demand attaches to the immutable
+                        // physical attempt, then proves coverage after its
+                        // publication instead of eagerly repeating the pass.
+                    } else {
+                        if let Some(requested_catalog) = requested_catalog.as_ref() {
+                            let upgrades_queued_automatic =
+                                active.requested_explicit_source_catalog.is_none()
+                                    && active.state == SourceBackedRefreshState::Queued;
+                            if upgrades_queued_automatic {
+                                active.requested_explicit_source_catalog =
+                                    Some(requested_catalog.clone());
+                            }
+                        }
+                        let automatic_exact = active.trigger == "periodic"
+                            && active.trigger_provenance == "daemon_scheduler"
+                            && matches!(&active.refresh_scope, SourceBackedRefreshScope::Exact(_));
+                        if is_manual_all
+                            && automatic_exact
+                            && active.state == SourceBackedRefreshState::Queued
+                        {
                             active.refresh_scope = SourceBackedRefreshScope::All;
                             return Ok(coalesce_attempt(active, metadata));
                         }
-                        // The admitted automatic route completes after this
-                        // request arrived, so its terminal result can cover
-                        // that route even though the new request also adds an
-                        // exact overlay. The successor still executes every
-                        // other automatic and overlay route.
-                        continuation_predecessor = Some(active.request_id.clone());
+                        if active.requested_explicit_source_catalog.as_ref()
+                            == requested_catalog.as_ref()
+                            && active.refresh_scope == refresh_scope
+                        {
+                            return Ok(coalesce_attempt(active, metadata));
+                        }
+                        // A running refresh is immutable. Preserve both catalog
+                        // authorities by serializing the newer one as a successor.
                     }
-                    if active.requested_explicit_source_catalog.as_ref()
-                        == requested_catalog.as_ref()
-                        && active.refresh_scope == refresh_scope
-                    {
-                        return Ok(coalesce_attempt(active, metadata));
-                    }
-                    // A running refresh is immutable. Preserve both catalog
-                    // authorities by serializing the newer one as a successor.
                 }
             }
         }
 
-        if admission == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot
-            || requested_catalog.is_some()
+        if admission != SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot
+            && requested_catalog.is_some()
         {
             let coalesced_request_id = state.pending_request_ids.iter().find_map(|request_id| {
                 find_attempt(&state, request_id)
@@ -415,12 +206,15 @@ impl CoreRefreshEngine {
             .into());
         }
 
-        let attempt = new_refresh_attempt(
+        let mut attempt = new_refresh_attempt(
             observed_generation,
             metadata,
             requested_catalog,
             refresh_scope,
         );
+        if let Some(logical_request_id) = logical_request_id {
+            attempt.request_id = logical_request_id;
+        }
         let response = attempt.to_json();
         let request_id = attempt.request_id.clone();
         let terminal_persistence_owns_root = state.pending_terminal_persistence.is_some();
@@ -435,9 +229,41 @@ impl CoreRefreshEngine {
             state.active_request_id = Some(request_id.clone());
         }
         if let Some(predecessor_request_id) = continuation_predecessor {
+            let ledger_eligible_routes = state
+                .known_route_ids
+                .iter()
+                .filter(|route| !admission_route_observations.contains_key(*route))
+                .cloned()
+                .collect();
+            for route in &state.known_route_ids {
+                admission_route_observations
+                    .entry(route.clone())
+                    .or_insert(None);
+            }
+            let admission_event_watermarks = admission_route_observations
+                .keys()
+                .filter_map(|route| {
+                    state
+                        .route_event_watermarks
+                        .get(route)
+                        .copied()
+                        .map(|watermark| (route.clone(), watermark))
+                })
+                .collect();
+            let predecessor_event_watermarks = state
+                .route_admission_watermarks
+                .get(&predecessor_request_id)
+                .cloned()
+                .unwrap_or_default();
             state.manual_all_continuations.insert(
                 request_id,
-                ManualAllContinuation::new(predecessor_request_id),
+                ManualAllContinuation::new(
+                    predecessor_request_id,
+                    admission_route_observations,
+                    ledger_eligible_routes,
+                    admission_event_watermarks,
+                    predecessor_event_watermarks,
+                ),
             );
         }
         state.attempts.push_back(attempt);
@@ -527,6 +353,13 @@ impl CoreRefreshEngine {
                     .difference(&covered_route_ids)
                     .cloned()
                     .collect::<Vec<_>>();
+                for route in &routes {
+                    state
+                        .route_event_watermarks
+                        .entry(route.clone())
+                        .and_modify(|current| *current = (*current).max(watermark))
+                        .or_insert(watermark);
+                }
                 state
                     .dirty_routes
                     .seed_exact_routes(routes, watermark, now_ms);
@@ -561,6 +394,27 @@ impl CoreRefreshEngine {
         state
             .route_admissions
             .insert(request_id.to_owned(), admissions);
+        let admitted_watermarks = state
+            .route_admissions
+            .get(request_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|admission| {
+                state
+                    .route_event_watermarks
+                    .get(admission.route())
+                    .copied()
+                    .map(|watermark| (admission.route().clone(), watermark))
+            })
+            .collect::<BTreeMap<_, _>>();
+        for continuation in state.manual_all_continuations.values_mut() {
+            if continuation.predecessor_request_id == request_id {
+                continuation.predecessor_event_watermarks = admitted_watermarks.clone();
+            }
+        }
+        state
+            .route_admission_watermarks
+            .insert(request_id.to_owned(), admitted_watermarks);
         let covered_publication = state
             .manual_all_continuations
             .get(request_id)
@@ -644,6 +498,7 @@ impl CoreRefreshEngine {
                     failed: failed_run,
                     terminal_persistence_pending: true,
                     scope: refresh_scope,
+                    coverage_certificate: None,
                 });
             }
 
@@ -687,6 +542,7 @@ impl CoreRefreshEngine {
                 failed: failed_run,
                 terminal_persistence_pending: false,
                 scope: refresh_scope,
+                coverage_certificate: None,
             });
         }
         drop(state);
@@ -910,6 +766,7 @@ impl CoreRefreshEngine {
             failed: failed_run,
             terminal_persistence_pending,
             scope: refresh_scope,
+            coverage_certificate: None,
         })
     }
 
@@ -927,13 +784,20 @@ impl CoreRefreshEngine {
         Published: FnOnce(&Value) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
-        self.run_next_with_terminal_success(
+        let run = self.run_next_with_terminal_success(
             execute,
             probe,
             |receipt| Ok(CoreRefreshTerminalSuccess::state_only(receipt)),
             published,
             failed,
-        )
+        )?;
+        let publication_ready = !run.failed && !run.terminal_persistence_pending;
+        if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
+            if !run.terminal_persistence_pending {
+                let _ = self.finish_route_admissions(request_id, publication_ready, None);
+            }
+        }
+        Some(run)
     }
 }
 

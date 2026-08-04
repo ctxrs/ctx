@@ -58,11 +58,11 @@ fn exact_import_overlay_upgrades_queued_route_work_without_rescan() {
     assert_eq!(request["fresh_after_admitted_snapshot"], true);
 
     let upgraded = coordinator
-        .handle_ipc_request(&data_root, &request)
+        .handle_ipc_request_with_admission_fence_for_test(&data_root, &request, BTreeMap::new())
         .unwrap()
         .expect("exact-overlay import response");
     let attached = coordinator
-        .handle_ipc_request(&data_root, &request)
+        .handle_ipc_request_with_admission_fence_for_test(&data_root, &request, BTreeMap::new())
         .unwrap()
         .expect("equivalent import response");
 
@@ -518,17 +518,21 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
         });
         gate.wait_until_started();
 
+        let logical_request_id = Uuid::now_v7().to_string();
+        let request_value = json!({
+            "op": SOURCE_REFRESH_REQUEST_OP,
+            "request_id": logical_request_id,
+            "mode": "wait",
+            "operation": "import",
+            "explicit_source_catalog": authority.to_json(),
+            "fresh_after_admitted_snapshot": true,
+        });
         let request = || {
             coordinator
-                .handle_ipc_request(
+                .handle_ipc_request_with_admission_fence_for_test(
                     temp.path(),
-                    &json!({
-                        "op": SOURCE_REFRESH_REQUEST_OP,
-                        "mode": "wait",
-                        "operation": "import",
-                        "explicit_source_catalog": authority.to_json(),
-                        "fresh_after_admitted_snapshot": true,
-                    }),
+                    &request_value,
+                    BTreeMap::new(),
                 )
                 .unwrap()
                 .expect("fresh-after-admitted-snapshot response")
@@ -542,7 +546,7 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
     let successor_request_id = request_id(&successor);
     assert_ne!(successor_request_id, first_request_id);
     assert_eq!(request_id(&replay), successor_request_id);
-    assert_eq!(replay["coalesced_requests"], 1);
+    assert_eq!(replay["coalesced_requests"], 0);
     let successor_run = coordinator
         .run_next_with(
             |_, _| {
@@ -586,16 +590,20 @@ fn manual_all_fresh_after_running_startup_scan_queues_one_successor() {
         });
         gate.wait_until_started();
 
+        let logical_request_id = Uuid::now_v7().to_string();
+        let request_value = json!({
+            "op": SOURCE_REFRESH_REQUEST_OP,
+            "request_id": logical_request_id,
+            "mode": "wait",
+            "operation": "refresh",
+            "fresh_after_admitted_snapshot": true,
+        });
         let request = || {
             coordinator
-                .handle_ipc_request(
+                .handle_ipc_request_with_admission_fence_for_test(
                     temp.path(),
-                    &json!({
-                        "op": SOURCE_REFRESH_REQUEST_OP,
-                        "mode": "wait",
-                        "operation": "refresh",
-                        "fresh_after_admitted_snapshot": true,
-                    }),
+                    &request_value,
+                    BTreeMap::new(),
                 )
                 .unwrap()
                 .expect("fresh manual all response")
@@ -609,7 +617,7 @@ fn manual_all_fresh_after_running_startup_scan_queues_one_successor() {
     let successor_request_id = request_id(&successor);
     assert_ne!(successor_request_id, first_request_id);
     assert_eq!(request_id(&replay), successor_request_id);
-    assert_eq!(replay["coalesced_requests"], 1);
+    assert_eq!(replay["coalesced_requests"], 0);
     let successor_run = coordinator
         .run_next_with(
             |_, _| Ok(test_publication("manual-generation")),

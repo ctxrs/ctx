@@ -809,30 +809,9 @@ pub(super) fn map_revalidation_error(error: SqliteSourceAccessError) -> SqliteSo
                 source,
             }
         }
-        error if error.is_retryable_resource_unavailable() => error,
+        error if error.is_systemic_resource_failure() => error,
         _ => SqliteSourceAccessError::SourceChanged,
     }
-}
-
-fn resource_exhaustion_io_error(error: &std::io::Error) -> bool {
-    if matches!(
-        error.kind(),
-        std::io::ErrorKind::OutOfMemory
-            | std::io::ErrorKind::StorageFull
-            | std::io::ErrorKind::QuotaExceeded
-    ) {
-        return true;
-    }
-    #[cfg(unix)]
-    if error.raw_os_error().is_some_and(|code| {
-        matches!(
-            code,
-            libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOSPC | libc::EDQUOT
-        )
-    }) {
-        return true;
-    }
-    false
 }
 
 pub(super) fn configure_and_pin_snapshot(connection: &Connection) -> SqliteSourceAccessResult<()> {

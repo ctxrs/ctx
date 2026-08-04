@@ -5,6 +5,9 @@ use ctx_history_capture::{
     SourceBackedSelectorAuthority,
 };
 use ctx_history_core::CaptureProvider;
+use std::sync::Barrier;
+
+use super::super::dirty_source_routes::DirtySourceRoutes;
 
 fn catalog_route(
     provider: CaptureProvider,
@@ -174,6 +177,180 @@ fn source_watch_batches_coalesce_to_catalog_cardinality() {
     let wake = wakeup.wait(Duration::ZERO);
     assert_eq!(wake.source_watch.routes.len(), 1);
     assert!(wakeup.lock_state().source_watch.is_empty());
+}
+
+#[test]
+fn source_watch_sink_receives_pending_and_live_routes_before_daemon_wait() {
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        PathBuf::from("/tmp/provider/direct-ingress.jsonl"),
+        "codex_history_jsonl",
+    )]);
+    let route = catalog.route_ids().next().unwrap().clone();
+    let wakeup = DaemonWakeup::default();
+    let mut pending = SourceWatchBatch::default();
+    pending
+        .routes
+        .insert(route.clone(), EventWatermark::new(11, 1));
+    wakeup.observe_source_watch(&pending);
+    wakeup.signal_source_watch(pending);
+
+    let observed = Arc::new(Mutex::new(SourceWatchBatch::default()));
+    let sink_observed = Arc::clone(&observed);
+    wakeup.install_source_watch_sink(Arc::new(move |batch| {
+        sink_observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .merge(batch.clone());
+    }));
+    assert!(wakeup.has_source_watch_sink());
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .routes
+            .get(&route),
+        Some(&EventWatermark::new(11, 1))
+    );
+
+    let mut live = SourceWatchBatch::default();
+    live.routes
+        .insert(route.clone(), EventWatermark::new(11, 2));
+    wakeup.observe_source_watch(&live);
+    wakeup.signal_source_watch(live);
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .routes
+            .get(&route),
+        Some(&EventWatermark::new(11, 2))
+    );
+
+    let wake = wakeup.wait(Duration::ZERO);
+    assert_eq!(
+        wake.source_watch.routes.get(&route),
+        Some(&EventWatermark::new(11, 2))
+    );
+}
+
+#[test]
+fn source_watch_install_cannot_miss_signal_paused_after_pending_merge() {
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        PathBuf::from("/tmp/provider/install-race.jsonl"),
+        "codex_history_jsonl",
+    )]);
+    let route = catalog.route_ids().next().unwrap().clone();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let hook_entered = Arc::clone(&entered);
+    let hook_release = Arc::clone(&release);
+    wakeup.install_before_source_watch_sink_dispatch_hook(Arc::new(move || {
+        hook_entered.wait();
+        hook_release.wait();
+    }));
+
+    let signal_wakeup = Arc::clone(&wakeup);
+    let signal_route = route.clone();
+    let signal = thread::spawn(move || {
+        let mut batch = SourceWatchBatch::default();
+        batch
+            .routes
+            .insert(signal_route, EventWatermark::new(12, 1));
+        signal_wakeup.observe_source_watch(&batch);
+        signal_wakeup.signal_source_watch(batch);
+    });
+
+    entered.wait();
+    let observed = Arc::new(Mutex::new(SourceWatchBatch::default()));
+    let sink_observed = Arc::clone(&observed);
+    wakeup.install_source_watch_sink(Arc::new(move |batch| {
+        sink_observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .merge(batch.clone());
+    }));
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .routes
+            .get(&route),
+        Some(&EventWatermark::new(12, 1)),
+        "installation must replay the batch already merged by signal"
+    );
+    release.wait();
+    signal.join().unwrap();
+
+    let wake = wakeup.wait(Duration::ZERO);
+    assert!(wake.filesystem);
+    assert_eq!(
+        wake.source_watch.routes.get(&route),
+        Some(&EventWatermark::new(12, 1))
+    );
+}
+
+#[test]
+fn in_capture_route_reaches_handoff_fence_before_debounced_wake() {
+    use notify::event::DataChange;
+
+    let data_root = Path::new("/tmp/ctx-data");
+    let daemon_root = data_root.join("daemon");
+    let provider_file = PathBuf::from("/tmp/provider/in-capture.jsonl");
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        provider_file.clone(),
+        "codex_history_jsonl",
+    )]);
+    let route = catalog.route_ids().next().unwrap().clone();
+    let authority = RwLock::new(watch_authority(data_root, catalog));
+    let counters = Mutex::new(WatchCounters::default());
+    let wakeup = DaemonWakeup::default();
+    let ledger = Arc::new(Mutex::new(DirtySourceRoutes::default()));
+    let sink_ledger = Arc::clone(&ledger);
+    wakeup.install_source_watch_sink(Arc::new(move |batch| {
+        let mut ledger = sink_ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (route, watermark) in &batch.routes {
+            ledger.record_event(route.clone(), *watermark, 1_000);
+        }
+    }));
+
+    let batch = record_and_observe_watch_event(
+        &authority,
+        &counters,
+        &wakeup,
+        data_root,
+        &daemon_root,
+        Ok(
+            Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+                .add_path(provider_file),
+        ),
+        EventWatermark::new(13, 1),
+    );
+
+    assert_eq!(
+        ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .seen_watermark(&route),
+        Some(EventWatermark::new(13, 1)),
+        "the publication handoff fence must see the event immediately"
+    );
+    let before_debounce = wakeup.wait(Duration::ZERO);
+    assert!(!before_debounce.filesystem);
+    assert!(before_debounce.source_watch.is_empty());
+
+    wakeup.signal_source_watch(batch);
+    let after_debounce = wakeup.wait(Duration::ZERO);
+    assert!(after_debounce.filesystem);
+    assert_eq!(
+        after_debounce.source_watch.routes.get(&route),
+        Some(&EventWatermark::new(13, 1))
+    );
 }
 
 #[test]

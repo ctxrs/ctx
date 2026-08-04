@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use sha2::Digest;
 
 use crate::{
+    provider::providers::astrbot::native_path::source_backed::{
+        AstrBotSourceBackedErrorV0, AstrBotSourceBackedResultV0,
+    },
     provider::source_backed::family::document::ChangedDocumentSink,
     provider_sources::SqliteSourceReadSnapshot,
 };
@@ -134,23 +137,45 @@ impl SqliteInventoryProvider for AstrBotInventoryProvider {
             }
             Ok(())
         });
-        if let Some(error) = sink_failure {
-            return Err(error);
-        }
-        certificate.map_err(route_error)
+        astrbot_scan_route_result(sink_failure, certificate)
     }
+}
+
+fn astrbot_scan_route_result(
+    sink_failure: Option<SourceBackedRouteError>,
+    certificate: AstrBotSourceBackedResultV0<CertifiedSource>,
+) -> SourceBackedRouteResult<CertifiedSource> {
+    if let Some(primary) = sink_failure {
+        if let Err(AstrBotSourceBackedErrorV0::SnapshotCleanup { cleanup, .. }) = certificate {
+            return Err(combine_primary_and_cleanup_route_errors(
+                primary,
+                sqlite_source_route_error(cleanup),
+            ));
+        }
+        return Err(primary);
+    }
+    certificate.map_err(astrbot_inventory_route_error)
 }
 
 fn astrbot_inventory_route_error(
     error: crate::provider::providers::astrbot::native_path::source_backed::AstrBotSourceBackedErrorV0,
 ) -> SourceBackedRouteError {
-    let kind = if matches!(
-        &error,
-        crate::provider::providers::astrbot::native_path::source_backed::AstrBotSourceBackedErrorV0::IncompleteInventory { .. }
-    ) {
-        SourceBackedRouteErrorKind::Unavailable
-    } else {
-        SourceBackedRouteErrorKind::InvalidSource
+    use crate::provider::providers::astrbot::native_path::source_backed::AstrBotSourceBackedErrorV0;
+    if let AstrBotSourceBackedErrorV0::SnapshotCleanup { primary, cleanup } = error {
+        return combine_primary_and_cleanup_route_errors(
+            astrbot_inventory_route_error(*primary),
+            sqlite_source_route_error(cleanup),
+        );
+    }
+    let kind = match &error {
+        AstrBotSourceBackedErrorV0::IncompleteInventory { .. } => {
+            SourceBackedRouteErrorKind::Unavailable
+        }
+        AstrBotSourceBackedErrorV0::SqliteSource(error) => sqlite_source_route_error_kind(error),
+        AstrBotSourceBackedErrorV0::Capture(error) => {
+            sqlite_capture_route_error(error).unwrap_or(SourceBackedRouteErrorKind::InvalidSource)
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
     };
     SourceBackedRouteError::new(kind, error.to_string())
 }
@@ -233,13 +258,28 @@ impl SqliteInventoryProvider for ShelleyInventoryProvider {
         snapshot: SqliteSourceReadSnapshot,
         sink: &mut ChangedDocumentSink<'_, '_>,
     ) -> SourceBackedRouteResult<CertifiedSource> {
-        let mut scan = leaf.start_snapshot_scan(snapshot).map_err(route_error)?;
-        while let Some(page) = scan.next_page().map_err(route_error)? {
+        let mut scan = leaf
+            .start_snapshot_scan(snapshot)
+            .map_err(shelley_inventory_route_error)?;
+        loop {
+            let page = match scan.next_page() {
+                Ok(Some(page)) => page,
+                Ok(None) => break,
+                Err(primary) => {
+                    let primary = shelley_inventory_route_error(primary);
+                    return Err(abort_shelley_inventory_scan(scan, primary));
+                }
+            };
             for document in page.documents {
-                sink.emit_core_record(document)?;
+                if let Err(primary) = sink.emit_core_record(document) {
+                    return Err(abort_shelley_inventory_scan(scan, primary));
+                }
             }
         }
-        Ok(scan.finish().map_err(route_error)?.certificate)
+        Ok(scan
+            .finish()
+            .map_err(shelley_inventory_route_error)?
+            .certificate)
     }
 }
 
@@ -379,11 +419,73 @@ impl SqliteInventoryProvider for LingmaInventoryProvider {
             }
             Ok(())
         });
-        if let Some(error) = sink_failure {
-            return Err(error);
-        }
-        certificate.map_err(route_error)
+        lingma_scan_route_result(sink_failure, certificate)
     }
+}
+
+fn lingma_scan_route_result(
+    sink_failure: Option<SourceBackedRouteError>,
+    certificate: LingmaSourceBackedResultV0<CertifiedSource>,
+) -> SourceBackedRouteResult<CertifiedSource> {
+    if let Some(primary) = sink_failure {
+        if let Err(LingmaSourceBackedErrorV0::SnapshotCleanup { cleanup, .. }) = certificate {
+            return Err(combine_primary_and_cleanup_route_errors(
+                primary,
+                sqlite_source_route_error(cleanup),
+            ));
+        }
+        return Err(primary);
+    }
+    certificate.map_err(lingma_inventory_route_error)
+}
+
+fn shelley_inventory_route_error(
+    error: crate::provider::providers::shelley::native_path::source_backed::ShelleySourceBackedError,
+) -> SourceBackedRouteError {
+    use crate::provider::providers::shelley::native_path::source_backed::ShelleySourceBackedError;
+    if let ShelleySourceBackedError::SnapshotCleanup { primary, cleanup } = error {
+        return combine_primary_and_cleanup_route_errors(
+            shelley_inventory_route_error(*primary),
+            sqlite_source_route_error(cleanup),
+        );
+    }
+    let kind = match &error {
+        ShelleySourceBackedError::SqliteSource(error) => sqlite_source_route_error_kind(error),
+        ShelleySourceBackedError::Capture(error) => {
+            sqlite_capture_route_error(error).unwrap_or(SourceBackedRouteErrorKind::InvalidSource)
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
+}
+
+fn abort_shelley_inventory_scan(
+    scan: crate::provider::providers::shelley::native_path::source_backed::ShelleySourceBackedScan,
+    primary: SourceBackedRouteError,
+) -> SourceBackedRouteError {
+    match scan.abort() {
+        Ok(()) => primary,
+        Err(cleanup) => {
+            combine_primary_and_cleanup_route_errors(primary, sqlite_source_route_error(cleanup))
+        }
+    }
+}
+
+fn lingma_inventory_route_error(error: LingmaSourceBackedErrorV0) -> SourceBackedRouteError {
+    if let LingmaSourceBackedErrorV0::SnapshotCleanup { primary, cleanup } = error {
+        return combine_primary_and_cleanup_route_errors(
+            lingma_inventory_route_error(*primary),
+            sqlite_source_route_error(cleanup),
+        );
+    }
+    let kind = match &error {
+        LingmaSourceBackedErrorV0::SqliteSource(error) => sqlite_source_route_error_kind(error),
+        LingmaSourceBackedErrorV0::Capture(error) => {
+            sqlite_capture_route_error(error).unwrap_or(SourceBackedRouteErrorKind::InvalidSource)
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
 }
 
 pub(in crate::provider::source_backed) fn discovered_lingma_inventory_source(

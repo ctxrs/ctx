@@ -1,3 +1,14 @@
+mod background_refresh_cadence;
+
+#[cfg(test)]
+pub(super) use background_refresh_cadence::DAEMON_BACKGROUND_REFRESH_MIN_REST;
+#[cfg(test)]
+use background_refresh_cadence::{background_refresh_rest, DAEMON_BACKGROUND_REFRESH_MAX_REST};
+pub(super) use background_refresh_cadence::{
+    preserve_daemon_background_refresh_recovery_provenance,
+    restore_daemon_background_refresh_cadence, DaemonBackgroundRefreshCadence,
+};
+
 #[derive(Default)]
 pub(super) struct DaemonSidecarDrain {
     pub(super) generation: Option<String>,
@@ -315,6 +326,13 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     };
+    if !runtime.background_refresh_cadence.ready(Instant::now()) {
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
+    }
     if !source_refresh.enqueue_next_scheduled_refresh(data_root, source_route_ledger_now_ms())? {
         return Ok(DaemonIteration::new(
             false,
@@ -322,6 +340,7 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     }
+    let capture_started = Instant::now();
     let Some(run) = source_refresh.run_next(data_root) else {
         return Ok(DaemonIteration::new(
             false,
@@ -329,6 +348,9 @@ fn run_dirty_core_refresh(
             DaemonCycleStateV1::unknown(),
         ));
     };
+    runtime
+        .background_refresh_cadence
+        .record_completion(capture_started, Instant::now());
     let cold_all_refresh = run.scope == SourceBackedRefreshScope::All
         && run.job.get("trigger").and_then(Value::as_str) == Some("periodic")
         && run

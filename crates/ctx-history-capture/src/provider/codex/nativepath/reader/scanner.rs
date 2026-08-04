@@ -1,18 +1,28 @@
 use super::*;
 
 impl CodexNativeScanner {
+    #[cfg(test)]
     pub(super) fn new(
         source: CodexCatalogSource,
         proof: Option<&CodexAppendProof>,
     ) -> Result<Self> {
+        Self::new_with_lineage(source, proof, None)
+    }
+
+    pub(super) fn new_with_lineage(
+        source: CodexCatalogSource,
+        proof: Option<&CodexAppendProof>,
+        lineage_facts: Option<CodexLineageFactsV0>,
+    ) -> Result<Self> {
         let opened = open_codex_source_capability(&source)?;
-        Self::new_retained(source, opened, proof)
+        Self::new_retained(source, opened, proof, lineage_facts)
     }
 
     pub(super) fn new_retained(
         mut source: CodexCatalogSource,
         opened: Arc<OpenedProviderSourceFile>,
         proof: Option<&CodexAppendProof>,
+        mut lineage_facts: Option<CodexLineageFactsV0>,
     ) -> Result<Self> {
         source.opened = Some(Arc::clone(&opened));
         if let Some(proof) = proof {
@@ -33,6 +43,7 @@ impl CodexNativeScanner {
                 &mut reader,
                 &proof.checkpoint,
                 before.len > proof.checkpoint.observation.len,
+                lineage_facts.as_mut(),
             )?)
         } else {
             None
@@ -75,6 +86,7 @@ impl CodexNativeScanner {
                         .min(usize::try_from(validated.bytes_read).unwrap_or(usize::MAX)),
                     ..CodexScanCounters::default()
                 },
+                lineage_facts: None,
             };
             return Ok(Self {
                 source,
@@ -94,6 +106,7 @@ impl CodexNativeScanner {
                 record_buffer: Vec::new(),
                 incomplete_tail: None,
                 counters: replay.counters,
+                lineage_facts,
                 replay: Some(replay),
                 active_core_page: None,
                 ready_core_page: None,
@@ -188,6 +201,7 @@ impl CodexNativeScanner {
                 prefix_bytes_read: offset,
                 ..CodexScanCounters::default()
             },
+            lineage_facts,
             replay: None,
             active_core_page: None,
             ready_core_page: None,
@@ -266,6 +280,9 @@ impl CodexNativeScanner {
                     self.counters.oversized_records =
                         self.counters.oversized_records.saturating_add(1);
                 }
+                if let Some(lineage_facts) = self.lineage_facts.as_mut() {
+                    lineage_facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)?;
+                }
                 self.exhausted = true;
                 self.queue_end_pages(false)?;
                 return Ok(self.take_ready_page());
@@ -278,6 +295,9 @@ impl CodexNativeScanner {
                 CodexRecordProjection::default()
             } else if record_read.oversized {
                 self.reject(true);
+                if let Some(lineage_facts) = self.lineage_facts.as_mut() {
+                    lineage_facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)?;
+                }
                 CodexRecordProjection::default()
             } else {
                 let record_buffer = std::mem::take(&mut self.record_buffer);
@@ -325,7 +345,6 @@ impl CodexNativeScanner {
             if let Some(mutation) = projection.context_mutation.take() {
                 self.apply_context_mutation(mutation);
             }
-
             self.raw_ordinal = self.raw_ordinal.saturating_add(1);
             let page = self
                 .active_core_page

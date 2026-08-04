@@ -1,6 +1,11 @@
 #[cfg(unix)]
 use std::process::Command;
-use std::{fs, path::Path};
+use std::{
+    ffi::OsStr,
+    fs::{self, OpenOptions},
+    io::{Seek, SeekFrom, Write},
+    path::Path,
+};
 
 use ctx_history_core::{
     CaptureProvider, EventRole, EventType, RepositoryFileInvocationKind, TypedKey,
@@ -23,16 +28,22 @@ use super::ordering::{
 };
 use super::*;
 use crate::{
+    common::io::ProviderSourceRoot,
     provider::source_backed::{
         refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
         refresh_source_backed_generation_with_progress, SourceBackedCoordinatorError,
         SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
-    provider_sources::provider_source_for_path,
+    provider_sources::{
+        fail_next_opened_snapshot_cleanup_for_test,
+        open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test,
+        provider_source_for_path, retain_sqlite_source_directory_authority, SqliteRetryDecision,
+    },
 };
 
 mod current_schema;
+mod sqlite_diagnostics;
 mod temp_authority;
 
 use current_schema::create_current_fixture;

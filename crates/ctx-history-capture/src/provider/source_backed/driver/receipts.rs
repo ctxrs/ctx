@@ -512,11 +512,12 @@ pub enum SourceBackedRevalidationTarget<'a> {
 type ScanCallback = dyn for<'writer> Fn(&mut SourceBackedGenerationSink<'writer>) -> SourceBackedRouteResult<()>
     + Send
     + Sync;
-pub(super) type SourcePredicate = dyn Fn(&SourceKey) -> bool + Send + Sync;
-type RevalidationCallback =
-    dyn for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> bool + Send + Sync;
+pub(super) type SourcePredicate = dyn Fn(&SourceKey) -> SourceBackedRouteResult<bool> + Send + Sync;
+type RevalidationCallback = dyn for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> SourceBackedRouteResult<bool>
+    + Send
+    + Sync;
 type CompleteInventoryRevalidationCallback =
-    dyn Fn(&CertifiedSourceInventory) -> bool + Send + Sync;
+    dyn Fn(&CertifiedSourceInventory) -> SourceBackedRouteResult<bool> + Send + Sync;
 type SuccessfulPublicationCallback = dyn Fn() + Send + Sync;
 type RoutePublicationRevalidationCallback = dyn Fn() -> bool + Send + Sync;
 type WatchTargetsCallback = dyn Fn() -> Option<SourceBackedRouteWatchTargets> + Send + Sync;
@@ -557,6 +558,24 @@ impl SourceBackedRouteDriver {
         owns_source: impl Fn(&SourceKey) -> bool + Send + Sync + 'static,
         revalidate: impl for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> bool + Send + Sync + 'static,
     ) -> Self {
+        Self::new_fallible(
+            scan,
+            move |source| Ok(owns_source(source)),
+            move |target| Ok(revalidate(target)),
+        )
+    }
+
+    pub(crate) fn new_fallible(
+        scan: impl for<'writer> Fn(&mut SourceBackedGenerationSink<'writer>) -> SourceBackedRouteResult<()>
+            + Send
+            + Sync
+            + 'static,
+        owns_source: impl Fn(&SourceKey) -> SourceBackedRouteResult<bool> + Send + Sync + 'static,
+        revalidate: impl for<'a> Fn(SourceBackedRevalidationTarget<'a>) -> SourceBackedRouteResult<bool>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
         Self {
             scan: Arc::new(scan),
             owns_source: Arc::new(owns_source),
@@ -571,6 +590,18 @@ impl SourceBackedRouteDriver {
     pub fn with_complete_inventory_revalidation(
         mut self,
         revalidate: impl Fn(&CertifiedSourceInventory) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.revalidate_complete_inventory =
+            Some(Arc::new(move |inventory| Ok(revalidate(inventory))));
+        self
+    }
+
+    pub(crate) fn with_fallible_complete_inventory_revalidation(
+        mut self,
+        revalidate: impl Fn(&CertifiedSourceInventory) -> SourceBackedRouteResult<bool>
+            + Send
+            + Sync
+            + 'static,
     ) -> Self {
         self.revalidate_complete_inventory = Some(Arc::new(revalidate));
         self

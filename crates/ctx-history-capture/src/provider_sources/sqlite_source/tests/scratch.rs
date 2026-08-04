@@ -24,17 +24,24 @@ fn private_scratch_cleanup_failure_is_explicit_and_typed_unavailable() {
             },
         );
 
+    let error = result.as_ref().unwrap_err();
+    let diagnostic = error.diagnostic().unwrap();
+    assert_eq!(diagnostic.phase, SqliteFailurePhase::Cleanup);
+    assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateScratch);
+    assert_eq!(diagnostic.cleanup, SqliteCleanupStatus::Failed);
+    assert_eq!(diagnostic.retry, SqliteRetryDecision::RouteFatalResource);
     assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::ScratchIoUnavailable {
-            operation: "cleaning the private provider SQLite scratch directory",
-            ..
-        })
+        error,
+        SqliteSourceAccessError::Diagnosed { source, .. }
+            if matches!(
+                source.as_ref(),
+                SqliteSourceAccessError::ScratchIoUnavailable {
+                    operation: "cleaning the private provider SQLite scratch directory",
+                    ..
+                }
+            )
     ));
-    assert!(result
-        .as_ref()
-        .unwrap_err()
-        .is_retryable_resource_unavailable());
+    assert!(error.is_systemic_resource_failure());
     fs::remove_file(
         data_root
             .join("tmp/provider-sqlite-scratch")

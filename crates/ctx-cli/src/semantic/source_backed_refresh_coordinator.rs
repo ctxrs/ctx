@@ -66,12 +66,15 @@ mod refresh_mode;
 mod request;
 
 use capture_refresh::{
-    execute_capture_owned_refresh, execute_source_backed_refresh, SourceBackedRefreshPlan,
+    execute_capture_owned_refresh, execute_source_backed_refresh,
+    source_backed_requested_route_observation_fence, source_backed_route_admission_fence,
+    SourceBackedRefreshPlan,
 };
 #[cfg(test)]
 use capture_refresh::{
     execute_capture_owned_refresh_with, refresh_all_provider_sources,
     refresh_all_provider_sources_route_local, reject_blocking_automatic_registry_issues,
+    source_backed_requested_route_observations,
 };
 use client::unknown_refresh_request_response;
 pub(crate) use client::{
@@ -80,10 +83,13 @@ pub(crate) use client::{
 };
 #[cfg(test)]
 use coordinator_state::CaptureOwnedSourceBackedRefreshExecutor;
-pub(in crate::semantic) use coordinator_state::CoreRefreshEngine;
 #[allow(unused_imports)] // Makes the receipt method's projected result type crate-visible.
 pub(crate) use coordinator_state::SourceBackedRefreshCatalogRouteOutcome;
 use coordinator_state::SourceBackedRefreshProgressUpdate;
+#[allow(unused_imports)] // Consumed by #282's watcher integration seam.
+pub(in crate::semantic) use coordinator_state::{
+    CoreRefreshEngine, SourceBackedRefreshCoverageCertificate, VerifiedSourceRefreshRouteBoundary,
+};
 pub(crate) use coordinator_state::{
     PinnedCorePublication, SourceBackedCurrentSourceProgress,
     SourceBackedCurrentSourceProgressStage, SourceBackedRefreshExecution,

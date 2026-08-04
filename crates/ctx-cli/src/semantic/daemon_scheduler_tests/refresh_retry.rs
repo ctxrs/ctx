@@ -1,5 +1,20 @@
 use super::*;
 
+fn enqueue_synthetic_refresh_successor(
+    coordinator: &CoreRefreshEngine,
+    data_root: &Path,
+    revision: u64,
+) -> Value {
+    coordinator
+        .enqueue_fresh_catalog_demand_for_test(
+            data_root,
+            None,
+            uuid::Uuid::now_v7().to_string(),
+            crate::commands::import::explicit_source_catalog_authority_for_test(revision),
+        )
+        .expect("synthetic refresh successor")
+}
+
 #[test]
 fn scheduler_retries_terminal_status_without_republishing_core() {
     let temp = tempfile::tempdir().unwrap();
@@ -64,8 +79,6 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let authority =
-        crate::commands::import::load_explicit_source_catalog_authority(&data_root).unwrap();
     let executions = Arc::new(AtomicUsize::new(0));
     let execution_count = Arc::clone(&executions);
     let executor = Arc::new(move |_execution: SourceBackedRefreshExecution<'_>| {
@@ -83,46 +96,21 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
         write_daemon_job_status(path, job)
     });
     let coordinator = CoreRefreshEngine::with_status_writer_for_test(executor, writer);
-    coordinator.enqueue_periodic(&data_root).unwrap();
+    let root = coordinator.enqueue_periodic(&data_root).unwrap();
+    let root_id = root["request_id"].as_str().unwrap().to_owned();
     let mut runtime = DaemonRuntime::default();
     let first = run_pending_core_refresh(&data_root, &mut runtime, Some(&coordinator))
         .unwrap()
         .expect("failed terminal persistence");
     assert!(first.failed);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
-
-    let successor = coordinator
-        .handle_ipc_request(
-            &data_root,
-            &json!({
-                "op": "source_refresh_request",
-                "mode": "wait",
-                "operation": "import",
-                "explicit_source_catalog": authority.to_json(),
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("fresh successor during failed-terminal retry");
+    let successor = enqueue_synthetic_refresh_successor(&coordinator, &data_root, 0);
     let successor_id = successor["request_id"].as_str().unwrap().to_owned();
     let retry = coordinator
         .run_next(&data_root)
         .expect("terminal retry snapshot");
     assert!(retry.failed);
-    let later_authority = crate::commands::import::explicit_source_catalog_authority_for_test(1);
-    let later = coordinator
-        .handle_ipc_request(
-            &data_root,
-            &json!({
-                "op": "source_refresh_request",
-                "mode": "wait",
-                "operation": "import",
-                "explicit_source_catalog": later_authority.to_json(),
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("successor admitted after retry snapshot");
+    let later = enqueue_synthetic_refresh_successor(&coordinator, &data_root, 1);
     let later_id = later["request_id"].as_str().unwrap().to_owned();
     let recorded = record_source_refresh_retry(
         &data_root,
@@ -133,6 +121,16 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
     .unwrap();
     assert_eq!(recorded["queued_successors"].as_array().unwrap().len(), 2);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let exact_failed_root = coordinator
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "op": "source_refresh_status",
+                "request_id": root_id,
+            }),
+        )
+        .unwrap()
+        .expect("exact failed root status");
     drop(coordinator);
 
     let restarted = CoreRefreshEngine::new();
@@ -161,6 +159,17 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
         .unwrap()
         .expect("later recovered successor status");
     assert_eq!(later_status["request_state"], "queued");
+    let recovered_root = restarted
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "op": "source_refresh_status",
+                "request_id": root_id,
+            }),
+        )
+        .unwrap()
+        .expect("recovered failed root status");
+    assert_eq!(recovered_root, exact_failed_root);
     assert!(restarted.has_pending_request());
 }
 
@@ -169,8 +178,6 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let first_authority =
-        crate::commands::import::load_explicit_source_catalog_authority(&data_root).unwrap();
     let executions = Arc::new(AtomicUsize::new(0));
     let execution_count = Arc::clone(&executions);
     let executor = Arc::new(move |_execution: SourceBackedRefreshExecution<'_>| {
@@ -208,23 +215,10 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
         .unwrap()
         .expect("failed terminal persistence");
     assert!(first.failed);
-    let successor = coordinator
-        .handle_ipc_request(
-            &data_root,
-            &json!({
-                "op": "source_refresh_request",
-                "mode": "wait",
-                "operation": "import",
-                "explicit_source_catalog": first_authority.to_json(),
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("first successor");
+    let successor = enqueue_synthetic_refresh_successor(&coordinator, &data_root, 0);
     let successor_id = successor["request_id"].as_str().unwrap().to_owned();
     block_retry.store(true, Ordering::SeqCst);
 
-    let later_authority = crate::commands::import::explicit_source_catalog_authority_for_test(1);
     let (retry, later_id) = std::thread::scope(|scope| {
         let retry_coordinator = Arc::clone(&coordinator);
         let retry_root = data_root.clone();
@@ -241,19 +235,8 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
         let admission_root = data_root.clone();
         let admission = scope.spawn(move || {
             admission_started_tx.send(()).unwrap();
-            let response = admission_coordinator
-                .handle_ipc_request(
-                    &admission_root,
-                    &json!({
-                        "op": "source_refresh_request",
-                        "mode": "wait",
-                        "operation": "import",
-                        "explicit_source_catalog": later_authority.to_json(),
-                        "fresh_after_admitted_snapshot": true,
-                    }),
-                )
-                .unwrap()
-                .expect("concurrent successor");
+            let response =
+                enqueue_synthetic_refresh_successor(&admission_coordinator, &admission_root, 1);
             admission_done_tx.send(()).unwrap();
             response["request_id"].as_str().unwrap().to_owned()
         });
@@ -306,9 +289,10 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
         "queued"
     );
     let durable = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
-    assert_eq!(durable["request_state"], "queued");
-    assert_eq!(durable["queued_successors"].as_array().unwrap().len(), 1);
-    assert_eq!(durable["queued_successors"][0]["request_id"], later_id);
+    assert_eq!(durable["request_state"], "failed");
+    assert_eq!(durable["queued_successors"].as_array().unwrap().len(), 2);
+    assert_eq!(durable["queued_successors"][0]["request_id"], successor_id);
+    assert_eq!(durable["queued_successors"][1]["request_id"], later_id);
 }
 
 #[test]
@@ -342,22 +326,11 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
     let mut successor_ids = Vec::new();
     let mut busy = None;
     for revision in 1..=16 {
-        let authority = crate::commands::import::explicit_source_catalog_authority_for_test(
+        let response = enqueue_synthetic_refresh_successor(
+            &coordinator,
+            &data_root,
             u64::try_from(revision).unwrap(),
         );
-        let response = coordinator
-            .handle_ipc_request(
-                &data_root,
-                &json!({
-                    "op": "source_refresh_request",
-                    "mode": "wait",
-                    "operation": "import",
-                    "explicit_source_catalog": authority.to_json(),
-                    "fresh_after_admitted_snapshot": true,
-                }),
-            )
-            .unwrap()
-            .expect("bounded successor response");
         if response["ok"] == false {
             busy = Some(response);
             break;
@@ -379,20 +352,7 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
         .expect("successful failed-terminal status retry");
     assert!(retry.failed);
     assert!(!retry.terminal_persistence_pending);
-    let extra_authority = crate::commands::import::explicit_source_catalog_authority_for_test(99);
-    let still_full = coordinator
-        .handle_ipc_request(
-            &data_root,
-            &json!({
-                "op": "source_refresh_request",
-                "mode": "wait",
-                "operation": "import",
-                "explicit_source_catalog": extra_authority.to_json(),
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("terminal root remains part of the durable bound");
+    let still_full = enqueue_synthetic_refresh_successor(&coordinator, &data_root, 99);
     assert_eq!(still_full["error_code"], "source_refresh_queue_full");
     let persisted = record_source_refresh_retry(
         &data_root,
@@ -431,8 +391,6 @@ fn generic_backoff_write_serializes_concurrent_admission_and_restart() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let authority =
-        crate::commands::import::load_explicit_source_catalog_authority(&data_root).unwrap();
     let status_entered = Arc::new(Barrier::new(2));
     let status_release = Arc::new(Barrier::new(2));
     let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
@@ -465,19 +423,7 @@ fn generic_backoff_write_serializes_concurrent_admission_and_restart() {
             .unwrap()
         });
         status_entered.wait();
-        let response = coordinator
-            .handle_ipc_request(
-                &data_root,
-                &json!({
-                    "op": "source_refresh_request",
-                    "mode": "wait",
-                    "operation": "import",
-                    "explicit_source_catalog": authority.to_json(),
-                    "fresh_after_admitted_snapshot": true,
-                }),
-            )
-            .unwrap()
-            .expect("admission after scheduler snapshot");
+        let response = enqueue_synthetic_refresh_successor(&coordinator, &data_root, 0);
         let request_id = response["request_id"].as_str().unwrap().to_owned();
         let admitted = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
         assert_eq!(admitted["request_id"], request_id);

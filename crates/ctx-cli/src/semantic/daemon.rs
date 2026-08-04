@@ -35,15 +35,17 @@ use super::{
     },
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
-        daemon_retry_due, daemon_run_start_mode, restore_daemon_consumer_retries,
+        daemon_retry_due, daemon_run_start_mode,
+        preserve_daemon_background_refresh_recovery_provenance,
+        restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
         restore_daemon_source_refresh_retry, run_daemon_scheduler_cycle_with_activity,
-        DaemonConsumerRetryDeferral, DaemonSidecarDrain,
+        DaemonBackgroundRefreshCadence, DaemonConsumerRetryDeferral, DaemonSidecarDrain,
     },
     daemon_status::{
         daemon_report_failure_message, render_daemon_disable_receipt, render_daemon_enable_receipt,
         render_daemon_prepare_uninstall_receipt, render_daemon_status_human, DaemonStatusView,
     },
-    daemon_wakeup::DaemonWakeup,
+    daemon_wakeup::{DaemonWakeup, SourceWatchBatch},
     daemon_worker::write_daemon_lifecycle_status_with_runtime,
     health_search::semantic_env_flag,
     model_runtime::SharedSemanticRuntime,
@@ -129,6 +131,7 @@ pub(super) struct DaemonRuntime {
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) sidecar_drain: DaemonSidecarDrain,
     pub(super) consumer_retry_deferral: DaemonConsumerRetryDeferral,
+    pub(super) background_refresh_cadence: DaemonBackgroundRefreshCadence,
     pub(super) config: AppConfig,
 }
 
@@ -343,6 +346,7 @@ pub(super) fn run_daemon_inner(
             &mut config_reload,
             &wakeup,
         ) == DaemonConfigReloadOutcome::StopDisabled;
+        install_source_watch_ingress(&wakeup, refresh_service.as_ref());
         if config_reload.status == "activation_failed" {
             let activation_error = config_reload
                 .last_error
@@ -367,14 +371,13 @@ pub(super) fn run_daemon_inner(
         if !runtime.config.daemon.mode.runs_only_source_refresh() {
             resume_completed_installation_daemons(data_root)?;
         }
-        if let Some(source_refresh) = refresh_service
-            .as_ref()
-            .map(|service| service.source_refresh.as_ref())
-        {
-            source_refresh
-                .recover_interrupted_publication(data_root)
-                .context("recover interrupted Core refresh before daemon readiness")?;
-        }
+        recover_source_refresh_before_background_cadence(
+            &mut runtime,
+            data_root,
+            refresh_service
+                .as_ref()
+                .map(|service| service.source_refresh.as_ref()),
+        )?;
         write_daemon_lifecycle_status_with_runtime(
             data_root,
             &args,
@@ -449,6 +452,7 @@ pub(super) fn run_daemon_inner(
                 )?;
                 break;
             }
+            install_source_watch_ingress(&wakeup, refresh_service.as_ref());
             if runtime.config.daemon.mode.runs_only_source_refresh() {
                 // A live mode change must not carry a previously prepared
                 // automatic upgrade into the source-refresh-only profile.
@@ -768,6 +772,25 @@ pub(super) fn run_daemon_inner(
     Ok(daemon_report_with_disabled_status(data_root, !args.force))
 }
 
+fn recover_source_refresh_before_background_cadence(
+    runtime: &mut DaemonRuntime,
+    data_root: &Path,
+    source_refresh: Option<&CoreRefreshEngine>,
+) -> Result<()> {
+    if let Some(source_refresh) = source_refresh {
+        preserve_daemon_background_refresh_recovery_provenance(data_root)
+            .context("preserve automatic Core refresh provenance before recovery")?;
+        source_refresh
+            .recover_interrupted_publication(data_root)
+            .context("recover interrupted Core refresh before daemon readiness")?;
+    }
+    // Recovery replaces the original trigger with `recovery`. Restore only
+    // after that transition, using the request-bound automatic provenance
+    // preserved above, so restart cannot erase background rest.
+    restore_daemon_background_refresh_cadence(runtime, data_root);
+    Ok(())
+}
+
 fn daemon_wait_duration(
     runtime: &DaemonRuntime,
     source_refresh: Option<&CoreRefreshEngine>,
@@ -796,9 +819,36 @@ fn daemon_wait_duration(
     if let Some(route_due_ms) = source_refresh
         .and_then(|refresh| refresh.next_dirty_route_due_in_ms(source_route_ledger_now_ms()))
     {
-        wait_for = wait_for.min(StdDuration::from_millis(route_due_ms));
+        let route_wait = StdDuration::from_millis(route_due_ms);
+        let cadence_wait = runtime
+            .background_refresh_cadence
+            .remaining(now)
+            .unwrap_or_default();
+        wait_for = wait_for.min(route_wait.max(cadence_wait));
     }
     wait_for
+}
+
+fn install_source_watch_ingress(
+    wakeup: &DaemonWakeup,
+    refresh_service: Option<&DaemonQueryService>,
+) {
+    if wakeup.has_source_watch_sink() {
+        return;
+    }
+    let Some(source_refresh) = refresh_service.map(|service| Arc::clone(&service.source_refresh))
+    else {
+        return;
+    };
+    wakeup.install_source_watch_sink(Arc::new(move |batch: &SourceWatchBatch| {
+        source_refresh.record_watch_routes(
+            batch
+                .routes
+                .iter()
+                .map(|(route, watermark)| (route.clone(), *watermark)),
+            source_route_ledger_now_ms(),
+        );
+    }));
 }
 
 fn source_route_ledger_now_ms() -> u64 {

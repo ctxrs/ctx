@@ -39,6 +39,11 @@ pub(crate) enum LingmaSourceBackedErrorV0 {
     Capture(#[from] CaptureError),
     #[error(transparent)]
     SqliteSource(#[from] SqliteSourceAccessError),
+    #[error("Lingma SQLite scan failed and snapshot cleanup also failed: {cleanup}")]
+    SnapshotCleanup {
+        primary: Box<LingmaSourceBackedErrorV0>,
+        cleanup: SqliteSourceAccessError,
+    },
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]

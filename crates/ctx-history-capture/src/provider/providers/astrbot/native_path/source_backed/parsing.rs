@@ -183,98 +183,26 @@ pub(crate) fn scan_astrbot_snapshot_v0(
     sqlite_snapshot: SqliteSourceReadSnapshot,
     sink: &mut impl AstrBotSourceBackedSinkV0,
 ) -> AstrBotSourceBackedResultV0<CertifiedSource> {
-    let conn = sqlite_snapshot.connection()?;
-    let sql = AstrBotSql::new(conn)?;
-    let user_version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(CaptureError::from)?;
-    let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-    let mut counts = ScannedSourceCounts::default();
-    let mut content_chain = [0_u8; 32];
-    let mut native_ordinal = 0_u64;
-    let mut conversation_after = None;
-    let mut page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
-    let mut checkpoint_links = BTreeMap::new();
+    let scan = (|| {
+        let conn = sqlite_snapshot.connection()?;
+        let sql = AstrBotSql::new(conn)?;
+        let user_version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(CaptureError::from)?;
+        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
+        let mut counts = ScannedSourceCounts::default();
+        let mut content_chain = [0_u8; 32];
+        let mut native_ordinal = 0_u64;
+        let mut conversation_after = None;
+        let mut page = Vec::with_capacity(SOURCE_BACKED_PAGE_ROWS);
+        let mut checkpoint_links = BTreeMap::new();
 
-    loop {
-        let candidates = fetch_candidates(
-            conn,
-            &sql.conversation_candidate_initial,
-            &sql.conversation_candidate_after,
-            conversation_after,
-            SOURCE_BACKED_PAGE_ROWS,
-        )?;
-        if candidates.is_empty() {
-            break;
-        }
-        let mut rowids = Vec::with_capacity(candidates.len());
-        for candidate in &candidates {
-            if !candidate_is_oversize(*candidate)? {
-                rowids.push(candidate.physical_rowid);
-            }
-        }
-        let mut candidate_index = 0;
-        visit_conversations(
-            conn,
-            &sql.conversation_rows,
-            &rowids,
-            |physical_rowid, row| {
-                process_oversize_run(
-                    &candidates,
-                    &mut candidate_index,
-                    b"astrbot-source-backed-conversation-oversize-v0\0",
-                    &mut counts,
-                    &mut content_chain,
-                    &mut native_ordinal,
-                )?;
-                let candidate = candidates.get(candidate_index).copied().ok_or(
-                    AstrBotSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture),
-                )?;
-                candidate_index += 1;
-                if candidate.physical_rowid != physical_rowid {
-                    return Err(AstrBotSourceBackedErrorV0::Capture(
-                        CaptureError::SourceChangedDuringCapture,
-                    ));
-                }
-                process_conversation_row(
-                    source,
-                    candidate,
-                    row,
-                    sink,
-                    &mut page,
-                    &mut checkpoint_links,
-                    &mut counts,
-                    &mut content_chain,
-                    &mut native_ordinal,
-                )
-            },
-        )?;
-        process_oversize_run(
-            &candidates,
-            &mut candidate_index,
-            b"astrbot-source-backed-conversation-oversize-v0\0",
-            &mut counts,
-            &mut content_chain,
-            &mut native_ordinal,
-        )?;
-        if candidate_index != candidates.len() {
-            return Err(CaptureError::SourceChangedDuringCapture.into());
-        }
-        conversation_after = candidates.last().map(|candidate| candidate.physical_rowid);
-    }
-
-    if let (Some(initial), Some(after), Some(rows_sql)) = (
-        sql.platform_message_candidate_initial.as_deref(),
-        sql.platform_message_candidate_after.as_deref(),
-        sql.platform_message_rows.as_deref(),
-    ) {
-        let mut platform_after = None;
         loop {
             let candidates = fetch_candidates(
                 conn,
-                initial,
-                after,
-                platform_after,
+                &sql.conversation_candidate_initial,
+                &sql.conversation_candidate_after,
+                conversation_after,
                 SOURCE_BACKED_PAGE_ROWS,
             )?;
             if candidates.is_empty() {
@@ -287,7 +215,113 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                 }
             }
             let mut candidate_index = 0;
-            visit_platform_messages(conn, rows_sql, &rowids, |physical_rowid, row| {
+            visit_conversations(
+                conn,
+                &sql.conversation_rows,
+                &rowids,
+                |physical_rowid, row| {
+                    process_oversize_run(
+                        &candidates,
+                        &mut candidate_index,
+                        b"astrbot-source-backed-conversation-oversize-v0\0",
+                        &mut counts,
+                        &mut content_chain,
+                        &mut native_ordinal,
+                    )?;
+                    let candidate = candidates.get(candidate_index).copied().ok_or(
+                        AstrBotSourceBackedErrorV0::Capture(
+                            CaptureError::SourceChangedDuringCapture,
+                        ),
+                    )?;
+                    candidate_index += 1;
+                    if candidate.physical_rowid != physical_rowid {
+                        return Err(AstrBotSourceBackedErrorV0::Capture(
+                            CaptureError::SourceChangedDuringCapture,
+                        ));
+                    }
+                    process_conversation_row(
+                        source,
+                        candidate,
+                        row,
+                        sink,
+                        &mut page,
+                        &mut checkpoint_links,
+                        &mut counts,
+                        &mut content_chain,
+                        &mut native_ordinal,
+                    )
+                },
+            )?;
+            process_oversize_run(
+                &candidates,
+                &mut candidate_index,
+                b"astrbot-source-backed-conversation-oversize-v0\0",
+                &mut counts,
+                &mut content_chain,
+                &mut native_ordinal,
+            )?;
+            if candidate_index != candidates.len() {
+                return Err(CaptureError::SourceChangedDuringCapture.into());
+            }
+            conversation_after = candidates.last().map(|candidate| candidate.physical_rowid);
+        }
+
+        if let (Some(initial), Some(after), Some(rows_sql)) = (
+            sql.platform_message_candidate_initial.as_deref(),
+            sql.platform_message_candidate_after.as_deref(),
+            sql.platform_message_rows.as_deref(),
+        ) {
+            let mut platform_after = None;
+            loop {
+                let candidates = fetch_candidates(
+                    conn,
+                    initial,
+                    after,
+                    platform_after,
+                    SOURCE_BACKED_PAGE_ROWS,
+                )?;
+                if candidates.is_empty() {
+                    break;
+                }
+                let mut rowids = Vec::with_capacity(candidates.len());
+                for candidate in &candidates {
+                    if !candidate_is_oversize(*candidate)? {
+                        rowids.push(candidate.physical_rowid);
+                    }
+                }
+                let mut candidate_index = 0;
+                visit_platform_messages(conn, rows_sql, &rowids, |physical_rowid, row| {
+                    process_oversize_run(
+                        &candidates,
+                        &mut candidate_index,
+                        b"astrbot-source-backed-platform-oversize-v0\0",
+                        &mut counts,
+                        &mut content_chain,
+                        &mut native_ordinal,
+                    )?;
+                    let candidate = candidates.get(candidate_index).copied().ok_or(
+                        AstrBotSourceBackedErrorV0::Capture(
+                            CaptureError::SourceChangedDuringCapture,
+                        ),
+                    )?;
+                    candidate_index += 1;
+                    if candidate.physical_rowid != physical_rowid {
+                        return Err(AstrBotSourceBackedErrorV0::Capture(
+                            CaptureError::SourceChangedDuringCapture,
+                        ));
+                    }
+                    process_platform_row(
+                        source,
+                        candidate,
+                        row,
+                        &checkpoint_links,
+                        sink,
+                        &mut page,
+                        &mut counts,
+                        &mut content_chain,
+                        &mut native_ordinal,
+                    )
+                })?;
                 process_oversize_run(
                     &candidates,
                     &mut candidate_index,
@@ -296,62 +330,47 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                     &mut content_chain,
                     &mut native_ordinal,
                 )?;
-                let candidate = candidates.get(candidate_index).copied().ok_or(
-                    AstrBotSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture),
-                )?;
-                candidate_index += 1;
-                if candidate.physical_rowid != physical_rowid {
-                    return Err(AstrBotSourceBackedErrorV0::Capture(
-                        CaptureError::SourceChangedDuringCapture,
-                    ));
+                if candidate_index != candidates.len() {
+                    return Err(CaptureError::SourceChangedDuringCapture.into());
                 }
-                process_platform_row(
-                    source,
-                    candidate,
-                    row,
-                    &checkpoint_links,
-                    sink,
-                    &mut page,
-                    &mut counts,
-                    &mut content_chain,
-                    &mut native_ordinal,
-                )
-            })?;
-            process_oversize_run(
-                &candidates,
-                &mut candidate_index,
-                b"astrbot-source-backed-platform-oversize-v0\0",
-                &mut counts,
-                &mut content_chain,
-                &mut native_ordinal,
-            )?;
-            if candidate_index != candidates.len() {
-                return Err(CaptureError::SourceChangedDuringCapture.into());
+                platform_after = candidates.last().map(|candidate| candidate.physical_rowid);
             }
-            platform_after = candidates.last().map(|candidate| candidate.physical_rowid);
         }
-    }
 
-    for document in page {
-        sink.emit(document)?;
-    }
-    sqlite_snapshot.finish()?;
-    let mut digest = Sha256::new();
-    digest.update(b"ctx-astrbot-source-backed-content-v0\0");
-    digest.update(content_chain);
-    digest.update(counts.complete_records.to_be_bytes());
-    digest.update(counts.certified_bytes.to_be_bytes());
-    let schema_evidence = format!(
-        "capture={ASTRBOT_CAPTURE_REVISION}\0policy={ASTRBOT_POLICY_REVISION}\0\
+        for document in page {
+            sink.emit(document)?;
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"ctx-astrbot-source-backed-content-v0\0");
+        digest.update(content_chain);
+        digest.update(counts.complete_records.to_be_bytes());
+        digest.update(counts.certified_bytes.to_be_bytes());
+        let schema_evidence = format!(
+            "capture={ASTRBOT_CAPTURE_REVISION}\0policy={ASTRBOT_POLICY_REVISION}\0\
          user_version={user_version}\0schema={schema_fingerprint}"
-    );
-    Ok(SqliteLogicalSnapshot::new(
-        PARSER_REVISION,
-        schema_evidence.as_bytes(),
-        digest.finalize().into(),
-        counts,
-    )
-    .certify(source.source_key.clone())?)
+        );
+        SqliteLogicalSnapshot::new(
+            PARSER_REVISION,
+            schema_evidence.as_bytes(),
+            digest.finalize().into(),
+            counts,
+        )
+        .certify(source.source_key.clone())
+        .map_err(Into::into)
+    })();
+    match scan {
+        Ok(certificate) => {
+            sqlite_snapshot.finish()?;
+            Ok(certificate)
+        }
+        Err(primary) => match sqlite_snapshot.abort() {
+            Ok(()) => Err(primary),
+            Err(cleanup) => Err(AstrBotSourceBackedErrorV0::SnapshotCleanup {
+                primary: Box::new(primary),
+                cleanup,
+            }),
+        },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
