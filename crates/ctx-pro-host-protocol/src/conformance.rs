@@ -357,7 +357,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
     assert_eq!(evidence["repository_observation_revision"], 3);
     assert_eq!(evidence["association_policy_revision"], 6);
-    assert_eq!(evidence["outcome_capture_revision"], 2);
+    assert_eq!(evidence["outcome_capture_revision"], 3);
     assert_eq!(
         evidence["candidates"],
         serde_json::json!([
