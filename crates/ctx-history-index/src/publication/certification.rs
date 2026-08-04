@@ -22,6 +22,7 @@ const CERTIFICATION_VERSION: u32 = 1;
 const CERTIFICATION_SUFFIX: &str = ".physical-certification.json";
 const CERTIFICATION_DIRECTORY: &str = "integrity-certifications";
 const TANTIVY_META_FILE: &str = "meta.json";
+const ARTIFACT_STABLE_SNAPSHOT_ATTEMPTS: usize = 4;
 pub(crate) const MAX_CERTIFICATION_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_CERTIFIED_ARTIFACTS: usize = 1024;
 
@@ -86,6 +87,21 @@ where
 pub(super) struct ArtifactIdentity {
     pub(super) path: String,
     pub(super) identity: FileIdentity,
+}
+
+impl ArtifactIdentity {
+    /// Returns whether both observations still bind the same native file and
+    /// immutable-content metadata, but some stronger identity metadata changed.
+    ///
+    /// This is a fail-closed concurrency classification, not proof that a hard
+    /// link operation was the cause: ctime is excluded because managed
+    /// link/unlink operations change it, and a same-size mutation with restored
+    /// mtime must likewise force the caller to retry rather than accept bytes.
+    pub(super) fn same_payload_identity_changed(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.identity != other.identity
+            && self.identity.same_payload_identity(&other.identity)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -156,6 +172,33 @@ impl FileIdentity {
         #[cfg(not(any(unix, windows)))]
         {
             let _ = other;
+            false
+        }
+    }
+
+    /// Identity fields that cannot be changed by creating or removing a hard
+    /// link to the same immutable payload. Link operations may change ctime
+    /// and link count, so those fields are deliberately excluded here.
+    fn same_payload_identity(&self, other: &Self) -> bool {
+        if !self.same_native_file(other) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            self.length == other.length
+                && self.mode == other.mode
+                && self.modified_seconds == other.modified_seconds
+                && self.modified_nanoseconds == other.modified_nanoseconds
+        }
+        #[cfg(windows)]
+        {
+            self.length == other.length
+                && self.creation_time == other.creation_time
+                && self.last_write_time == other.last_write_time
+                && self.attributes == other.attributes
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
             false
         }
     }
@@ -256,17 +299,35 @@ fn install_certification(
     ensure_real_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
     ensure_real_directory(&generation_path)?;
 
-    let pointer_identity = capture_single_link_control(&root.join("active-generation.json"))?;
-    let manifest_identity =
-        capture_single_link_control(&manifest_path(root, slot.generation_id()))?;
+    let pointer_identity = capture_pointer_bound_single_link_control(
+        root,
+        pointer,
+        &root.join("active-generation.json"),
+    )?;
+    let manifest_identity = capture_pointer_bound_single_link_control(
+        root,
+        pointer,
+        &manifest_path(root, slot.generation_id()),
+    )?;
     let mut artifacts = Vec::with_capacity(audit.artifacts().len());
     for prior in audit.artifacts() {
-        let current = capture_artifact(root, &generation_path, Path::new(&prior.path))?;
-        if current.identity != prior.identity
-            && !(allow_link_reclamation
-                && current.identity.follows_link_reclamation(&prior.identity))
-        {
-            return Err(IndexError::ChecksumMismatch);
+        let current = capture_artifact(
+            root,
+            &generation_path,
+            Path::new(&prior.path),
+            Some(pointer),
+        )?;
+        if current.identity != prior.identity {
+            if allow_link_reclamation && current.identity.follows_link_reclamation(&prior.identity)
+            {
+                artifacts.push(current);
+                continue;
+            }
+            return if prior.same_payload_identity_changed(&current) {
+                Err(IndexError::ConcurrentGenerationChange)
+            } else {
+                Err(IndexError::ChecksumMismatch)
+            };
         }
         artifacts.push(current);
     }
@@ -336,10 +397,16 @@ fn certification_matches(
     ensure_real_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
     let generation_path = super::slot_path(root, slot);
     ensure_real_directory(&generation_path)?;
-    if capture_single_link_control(&root.join("active-generation.json"))?
-        != certification.pointer_identity
-        || capture_single_link_control(&manifest_path(root, slot.generation_id()))?
-            != certification.manifest_identity
+    if capture_pointer_bound_single_link_control(
+        root,
+        pointer,
+        &root.join("active-generation.json"),
+    )? != certification.pointer_identity
+        || capture_pointer_bound_single_link_control(
+            root,
+            pointer,
+            &manifest_path(root, slot.generation_id()),
+        )? != certification.manifest_identity
     {
         return Ok(false);
     }
@@ -355,10 +422,18 @@ fn certification_matches(
         return Ok(false);
     }
     for expected in &certification.artifacts {
-        let current = capture_artifact(root, &generation_path, Path::new(&expected.path))?;
+        let current = capture_artifact(
+            root,
+            &generation_path,
+            Path::new(&expected.path),
+            Some(pointer),
+        )?;
         if &current != expected {
             return Ok(false);
         }
+    }
+    if load_current_pointer(root)? != *pointer {
+        return Err(IndexError::ConcurrentGenerationChange);
     }
     Ok(true)
 }
@@ -404,6 +479,7 @@ pub(super) fn open_artifact(
     root: &Path,
     generation_path: &Path,
     relative_path: &Path,
+    pointer: Option<&ActiveGenerationPointer>,
 ) -> Result<(File, ArtifactIdentity)> {
     if relative_path.components().count() != 1 {
         return Err(IndexError::ChecksumMismatch);
@@ -412,25 +488,150 @@ pub(super) fn open_artifact(
         .to_str()
         .ok_or(IndexError::ChecksumMismatch)?
         .to_owned();
-    let (file, identity) = open_regular_file(&generation_path.join(relative_path))?;
-    validate_artifact_link_count(root, relative_path, &identity)?;
-    Ok((file, ArtifactIdentity { path, identity }))
+    let artifact_path = generation_path.join(relative_path);
+    let mut unaccounted_observation: Option<(FileIdentity, u64)> = None;
+    let mut stable_unaccounted_attempts = 0_usize;
+    for _ in 0..ARTIFACT_STABLE_SNAPSHOT_ATTEMPTS {
+        let Some((file, identity)) = open_artifact_file_snapshot(&artifact_path)? else {
+            unaccounted_observation = None;
+            stable_unaccounted_attempts = 0;
+            std::thread::yield_now();
+            continue;
+        };
+        match stable_artifact_link_snapshot(
+            root,
+            &artifact_path,
+            relative_path,
+            &file,
+            &identity,
+            pointer,
+        )? {
+            ArtifactLinkSnapshot::Stable(identity) => {
+                return Ok((file, ArtifactIdentity { path, identity }));
+            }
+            ArtifactLinkSnapshot::Retry => {
+                unaccounted_observation = None;
+                stable_unaccounted_attempts = 0;
+            }
+            ArtifactLinkSnapshot::Unaccounted { identity, aliases } => {
+                let observation = (identity, aliases);
+                if unaccounted_observation.as_ref() == Some(&observation) {
+                    stable_unaccounted_attempts = stable_unaccounted_attempts
+                        .checked_add(1)
+                        .ok_or(IndexError::CountOverflow)?;
+                } else {
+                    unaccounted_observation = Some(observation);
+                    stable_unaccounted_attempts = 1;
+                }
+                if stable_unaccounted_attempts == ARTIFACT_STABLE_SNAPSHOT_ATTEMPTS {
+                    return Err(IndexError::ChecksumMismatch);
+                }
+            }
+        }
+        std::thread::yield_now();
+    }
+    Err(IndexError::ConcurrentGenerationChange)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArtifactLinkSnapshot {
+    Stable(FileIdentity),
+    Retry,
+    Unaccounted {
+        identity: FileIdentity,
+        aliases: u64,
+    },
+}
+
+/// Opens a named artifact while distinguishing hard-link topology churn from
+/// replacement or payload mutation. `None` asks the bounded caller to retry a
+/// snapshot changed only by a link/unlink operation.
+fn open_artifact_file_snapshot(path: &Path) -> Result<Option<(File, FileIdentity)>> {
+    validate_named_regular_file(path)?;
+    let file = open_nofollow(path).map_err(|_| IndexError::ChecksumMismatch)?;
+    let opened = file_identity(&file).map_err(|_| IndexError::ChecksumMismatch)?;
+    validate_named_regular_file(path)?;
+    let named = open_nofollow(path).map_err(|_| IndexError::ChecksumMismatch)?;
+    let named_identity = file_identity(&named).map_err(|_| IndexError::ChecksumMismatch)?;
+    drop(named);
+    let held = file_identity(&file).map_err(|_| IndexError::ChecksumMismatch)?;
+    if opened == named_identity && named_identity == held {
+        return Ok(Some((file, held)));
+    }
+    if opened.same_payload_identity(&named_identity) && named_identity.same_payload_identity(&held)
+    {
+        return Ok(None);
+    }
+    Err(IndexError::ChecksumMismatch)
+}
+
+/// Proves one stable managed-alias snapshot for an already-bound artifact.
+/// Stable unaccounted hardlinks remain corruption; only an observation that
+/// changed during the bounded snapshot is retryable.
+fn stable_artifact_link_snapshot(
+    root: &Path,
+    artifact_path: &Path,
+    relative_path: &Path,
+    file: &File,
+    identity: &FileIdentity,
+    pointer: Option<&ActiveGenerationPointer>,
+) -> Result<ArtifactLinkSnapshot> {
+    let before = file_identity(file).map_err(|_| IndexError::ChecksumMismatch)?;
+    if before != *identity {
+        return if before.same_payload_identity(identity) {
+            Ok(ArtifactLinkSnapshot::Retry)
+        } else {
+            Err(IndexError::ChecksumMismatch)
+        };
+    }
+    let Some(alias_snapshot) = managed_artifact_alias_count(root, relative_path, &before, pointer)?
+    else {
+        return Ok(ArtifactLinkSnapshot::Retry);
+    };
+    let after_scan = file_identity(file).map_err(|_| IndexError::ChecksumMismatch)?;
+    validate_named_regular_file(artifact_path)?;
+    let named = open_nofollow(artifact_path).map_err(|_| IndexError::ChecksumMismatch)?;
+    let named_identity = file_identity(&named).map_err(|_| IndexError::ChecksumMismatch)?;
+    drop(named);
+    let final_identity = file_identity(file).map_err(|_| IndexError::ChecksumMismatch)?;
+
+    if before == after_scan && after_scan == named_identity && named_identity == final_identity {
+        if alias_snapshot.aliases == 0 || alias_snapshot.aliases != final_identity.link_count() {
+            if alias_snapshot.saw_unpublished_generation {
+                return Ok(ArtifactLinkSnapshot::Retry);
+            }
+            return Ok(ArtifactLinkSnapshot::Unaccounted {
+                identity: final_identity,
+                aliases: alias_snapshot.aliases,
+            });
+        }
+        return Ok(ArtifactLinkSnapshot::Stable(final_identity));
+    }
+    if before.same_payload_identity(&after_scan)
+        && after_scan.same_payload_identity(&named_identity)
+        && named_identity.same_payload_identity(&final_identity)
+    {
+        return Ok(ArtifactLinkSnapshot::Retry);
+    }
+    Err(IndexError::ChecksumMismatch)
 }
 
 pub(super) fn recapture_artifact(
     root: &Path,
     generation_path: &Path,
     relative_path: &Path,
+    pointer: Option<&ActiveGenerationPointer>,
 ) -> Result<ArtifactIdentity> {
-    capture_artifact(root, generation_path, relative_path)
+    capture_artifact(root, generation_path, relative_path, pointer)
 }
 
 fn capture_artifact(
     root: &Path,
     generation_path: &Path,
     relative_path: &Path,
+    pointer: Option<&ActiveGenerationPointer>,
 ) -> Result<ArtifactIdentity> {
-    let (file, artifact) = open_artifact(root, generation_path, relative_path)?;
+    let (file, artifact) = open_artifact(root, generation_path, relative_path, pointer)?;
     drop(file);
     Ok(artifact)
 }
@@ -444,10 +645,39 @@ fn capture_single_link_control(path: &Path) -> Result<FileIdentity> {
     Ok(identity)
 }
 
+fn capture_pointer_bound_single_link_control(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    path: &Path,
+) -> Result<FileIdentity> {
+    for attempt in 0..ARTIFACT_STABLE_SNAPSHOT_ATTEMPTS {
+        match capture_single_link_control(path) {
+            Ok(identity) => {
+                if load_current_pointer(root)? != *pointer {
+                    return Err(IndexError::ConcurrentGenerationChange);
+                }
+                return Ok(identity);
+            }
+            Err(error) => {
+                if load_current_pointer(root)? != *pointer {
+                    return Err(IndexError::ConcurrentGenerationChange);
+                }
+                if attempt + 1 == ARTIFACT_STABLE_SNAPSHOT_ATTEMPTS {
+                    return Err(error);
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+    Err(IndexError::ConcurrentGenerationChange)
+}
+
 fn open_regular_file(path: &Path) -> Result<(File, FileIdentity)> {
     validate_named_regular_file(path)?;
     let file = open_nofollow(path).map_err(|_| IndexError::ChecksumMismatch)?;
     let identity = file_identity(&file).map_err(|_| IndexError::ChecksumMismatch)?;
+    #[cfg(test)]
+    run_regular_file_identity_test_hook(path);
     validate_named_regular_file(path)?;
     let named = open_nofollow(path).map_err(|_| IndexError::ChecksumMismatch)?;
     let named_identity = file_identity(&named).map_err(|_| IndexError::ChecksumMismatch)?;
@@ -455,6 +685,40 @@ fn open_regular_file(path: &Path) -> Result<(File, FileIdentity)> {
         return Err(IndexError::ChecksumMismatch);
     }
     Ok((file, identity))
+}
+
+#[cfg(test)]
+thread_local! {
+    static REGULAR_FILE_IDENTITY_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct RegularFileIdentityTestHookGuard(Option<Box<dyn FnMut(&Path)>>);
+
+#[cfg(test)]
+impl RegularFileIdentityTestHookGuard {
+    fn install(hook: impl FnMut(&Path) + 'static) -> Self {
+        let previous =
+            REGULAR_FILE_IDENTITY_TEST_HOOK.with(|active| active.replace(Some(Box::new(hook))));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for RegularFileIdentityTestHookGuard {
+    fn drop(&mut self) {
+        REGULAR_FILE_IDENTITY_TEST_HOOK.with(|active| active.replace(self.0.take()));
+    }
+}
+
+#[cfg(test)]
+fn run_regular_file_identity_test_hook(path: &Path) {
+    REGULAR_FILE_IDENTITY_TEST_HOOK.with(|active| {
+        if let Some(hook) = active.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
 }
 
 fn open_nofollow(path: &Path) -> std::io::Result<File> {
@@ -596,37 +860,109 @@ fn metadata_is_reparse_point(_metadata: &Metadata) -> bool {
     false
 }
 
-fn validate_artifact_link_count(
+fn managed_artifact_alias_count(
     root: &Path,
     relative_path: &Path,
     identity: &FileIdentity,
-) -> Result<()> {
+    pointer: Option<&ActiveGenerationPointer>,
+) -> Result<Option<ManagedAliasSnapshot>> {
     let generations = root.join(INDEX_GENERATIONS_DIRECTORY);
     let mut aliases = 0_u64;
+    let mut saw_unpublished_generation = false;
     for entry in fs::read_dir(generations).map_err(|_| IndexError::ChecksumMismatch)? {
-        let entry = entry.map_err(|_| IndexError::ChecksumMismatch)?;
-        let file_type = entry
-            .file_type()
-            .map_err(|_| IndexError::ChecksumMismatch)?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if retryable_alias_snapshot_error(&error) => return Ok(None),
+            Err(_) => return Err(IndexError::ChecksumMismatch),
+        };
+        #[cfg(test)]
+        run_alias_entry_test_hook(&entry.path());
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if retryable_alias_snapshot_error(&error) => return Ok(None),
+            Err(_) => return Err(IndexError::ChecksumMismatch),
+        };
         let Some(directory_name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
         if !file_type.is_dir() || !is_generation_directory_name(&directory_name) {
             continue;
         }
+        if pointer.is_some_and(|pointer| {
+            pointer.active().directory() != directory_name
+                && pointer
+                    .previous()
+                    .is_none_or(|slot| slot.directory() != directory_name)
+        }) {
+            saw_unpublished_generation = true;
+        }
         let candidate = entry.path().join(relative_path);
-        let Ok((file, candidate_identity)) = open_regular_file(&candidate) else {
-            continue;
+        let (file, candidate_identity) = match open_regular_file(&candidate) {
+            Ok(opened) => opened,
+            Err(_) => continue,
         };
         drop(file);
         if candidate_identity.same_native_file(identity) {
             aliases = aliases.checked_add(1).ok_or(IndexError::CountOverflow)?;
         }
     }
-    if aliases == 0 || aliases != identity.link_count() {
-        return Err(IndexError::ChecksumMismatch);
+    Ok(Some(ManagedAliasSnapshot {
+        aliases,
+        saw_unpublished_generation,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManagedAliasSnapshot {
+    aliases: u64,
+    saw_unpublished_generation: bool,
+}
+
+fn retryable_alias_snapshot_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return true;
     }
-    Ok(())
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ESTALE)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static ALIAS_ENTRY_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct AliasEntryTestHookGuard(Option<Box<dyn FnMut(&Path)>>);
+
+#[cfg(test)]
+impl AliasEntryTestHookGuard {
+    fn install(hook: impl FnMut(&Path) + 'static) -> Self {
+        let previous = ALIAS_ENTRY_TEST_HOOK.with(|active| active.replace(Some(Box::new(hook))));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for AliasEntryTestHookGuard {
+    fn drop(&mut self) {
+        ALIAS_ENTRY_TEST_HOOK.with(|active| active.replace(self.0.take()));
+    }
+}
+
+#[cfg(test)]
+fn run_alias_entry_test_hook(path: &Path) {
+    ALIAS_ENTRY_TEST_HOOK.with(|active| {
+        if let Some(hook) = active.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
 }
 
 fn is_generation_directory_name(name: &str) -> bool {
@@ -684,4 +1020,185 @@ pub(crate) fn reclaim_unreferenced_certifications(
 pub(crate) fn certification_file_for_active(root: &Path) -> Result<PathBuf> {
     let pointer = load_current_pointer(root)?;
     Ok(certification_path(root, pointer.active()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generation(root: &Path, digit: char) -> PathBuf {
+        root.join(INDEX_GENERATIONS_DIRECTORY)
+            .join(format!("generation-{}", digit.to_string().repeat(32)))
+    }
+
+    fn pointer(digit: char) -> ActiveGenerationPointer {
+        let digit = digit.to_string();
+        ActiveGenerationPointer::new(
+            GenerationSlot::new(
+                digit.repeat(64),
+                format!("generation-{}", digit.repeat(32)),
+                digit.repeat(64),
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn managed_link_creation_and_cleanup_are_retryable_stable_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let active = generation(root, '1');
+        let candidate = generation(root, '2');
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&candidate).unwrap();
+        let relative = Path::new("payload.bin");
+        let active_path = active.join(relative);
+        let candidate_path = candidate.join(relative);
+        fs::write(&active_path, b"immutable payload").unwrap();
+
+        let (file, before_link) = open_artifact_file_snapshot(&active_path).unwrap().unwrap();
+        fs::hard_link(&active_path, &candidate_path).unwrap();
+        assert!(matches!(
+            stable_artifact_link_snapshot(root, &active_path, relative, &file, &before_link, None,)
+                .unwrap(),
+            ArtifactLinkSnapshot::Retry
+        ));
+        drop(file);
+
+        let (_, linked) = open_artifact(root, &active, relative, None).unwrap();
+        assert_eq!(linked.identity.link_count(), 2);
+        let (file, before_unlink) = open_artifact_file_snapshot(&active_path).unwrap().unwrap();
+        fs::remove_file(&candidate_path).unwrap();
+        assert!(matches!(
+            stable_artifact_link_snapshot(
+                root,
+                &active_path,
+                relative,
+                &file,
+                &before_unlink,
+                None,
+            )
+            .unwrap(),
+            ArtifactLinkSnapshot::Retry
+        ));
+        drop(file);
+
+        let (_, unlinked) = open_artifact(root, &active, relative, None).unwrap();
+        assert_eq!(unlinked.identity.link_count(), 1);
+        assert!(linked.same_payload_identity_changed(&unlinked));
+    }
+
+    #[test]
+    fn generation_disappearing_during_alias_scan_is_retryable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let active = generation(root, '1');
+        let candidate = generation(root, '2');
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&candidate).unwrap();
+        let relative = Path::new("payload.bin");
+        let active_path = active.join(relative);
+        let candidate_path = candidate.join(relative);
+        fs::write(&active_path, b"immutable payload").unwrap();
+        fs::hard_link(&active_path, &candidate_path).unwrap();
+        let (file, linked) = open_artifact_file_snapshot(&active_path).unwrap().unwrap();
+
+        let candidate_for_hook = candidate.clone();
+        let candidate_path_for_hook = candidate_path.clone();
+        let _hook = AliasEntryTestHookGuard::install(move |entry_path| {
+            if entry_path == candidate_for_hook {
+                fs::remove_file(&candidate_path_for_hook).unwrap();
+                fs::remove_dir(&candidate_for_hook).unwrap();
+            }
+        });
+
+        assert!(matches!(
+            stable_artifact_link_snapshot(root, &active_path, relative, &file, &linked, None,)
+                .unwrap(),
+            ArtifactLinkSnapshot::Retry
+        ));
+    }
+
+    #[test]
+    fn stale_directory_entry_errors_are_retryable_but_io_errors_are_not() {
+        assert!(retryable_alias_snapshot_error(&std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        )));
+        assert!(!retryable_alias_snapshot_error(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )));
+        #[cfg(unix)]
+        assert!(retryable_alias_snapshot_error(
+            &std::io::Error::from_raw_os_error(libc::ESTALE)
+        ));
+    }
+
+    #[test]
+    fn pointer_replacement_during_control_capture_is_concurrent_not_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let first = pointer('1');
+        let second = pointer('2');
+        let target = root.join("active-generation.json");
+        fs::write(&target, serde_json::to_vec(&first).unwrap()).unwrap();
+        let directory = DurableMmapDirectory::open(root).unwrap();
+        let target_for_hook = target.clone();
+        let second_bytes = serde_json::to_vec(&second).unwrap();
+        let mut replaced = false;
+        let hook = RegularFileIdentityTestHookGuard::install(move |path| {
+            if path == target_for_hook && !replaced {
+                directory
+                    .atomic_write(Path::new("active-generation.json"), &second_bytes)
+                    .unwrap();
+                replaced = true;
+            }
+        });
+
+        assert!(matches!(
+            capture_pointer_bound_single_link_control(root, &first, &target),
+            Err(IndexError::ConcurrentGenerationChange)
+        ));
+        drop(hook);
+        assert_eq!(load_current_pointer(root).unwrap(), second);
+
+        let directory = DurableMmapDirectory::open(root).unwrap();
+        let target_for_hook = target.clone();
+        let second_bytes = serde_json::to_vec(&second).unwrap();
+        let mut rewritten = false;
+        let hook = RegularFileIdentityTestHookGuard::install(move |path| {
+            if path == target_for_hook && !rewritten {
+                directory
+                    .atomic_write(Path::new("active-generation.json"), &second_bytes)
+                    .unwrap();
+                rewritten = true;
+            }
+        });
+        assert!(capture_pointer_bound_single_link_control(root, &second, &target).is_ok());
+        drop(hook);
+
+        fs::hard_link(&target, root.join("unmanaged-pointer-hardlink")).unwrap();
+        assert!(matches!(
+            capture_pointer_bound_single_link_control(root, &second, &target),
+            Err(IndexError::ChecksumMismatch)
+        ));
+    }
+
+    #[test]
+    fn stable_unmanaged_hardlink_remains_checksum_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let active = generation(root, '1');
+        fs::create_dir_all(&active).unwrap();
+        let relative = Path::new("payload.bin");
+        let active_path = active.join(relative);
+        fs::write(&active_path, b"immutable payload").unwrap();
+        fs::hard_link(&active_path, root.join("unmanaged-hardlink")).unwrap();
+
+        assert!(matches!(
+            open_artifact(root, &active, relative, None),
+            Err(IndexError::ChecksumMismatch)
+        ));
+    }
 }

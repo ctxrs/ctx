@@ -250,7 +250,7 @@ mod tests {
                 .unwrap(),
             SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH
         );
-        assert_eq!(
+        assert_ne!(
             current_source_generation_policy_hash().unwrap(),
             SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH
         );
