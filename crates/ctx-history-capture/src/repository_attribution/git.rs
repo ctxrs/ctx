@@ -320,6 +320,7 @@ impl GitCertifier {
                 "for-each-ref",
                 "--contains",
                 object_id.hex.as_str(),
+                "--count=1",
                 "--format=%(refname)",
                 "refs/heads",
                 "refs/tags",
@@ -328,8 +329,7 @@ impl GitCertifier {
             budget,
         )?;
         let containing_refs = utf8_lines(&containing_refs)?;
-        if containing_refs.is_empty()
-            || containing_refs.len() > MAX_REMOTES
+        if containing_refs.len() != 1
             || containing_refs
                 .iter()
                 .any(|reference| !canonical_symbolic_branch(reference))

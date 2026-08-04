@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn codex_commit_receipt_with_trailing_command_publishes_certified_outcome() {
+fn codex_commit_receipt_with_trailing_command_and_many_refs_publishes_certified_outcome() {
     use std::process::Command;
 
     use ctx_history_core::{RepositoryOutcomeKind, RepositoryVcsObservationKind};
@@ -41,6 +41,15 @@ fn codex_commit_receipt_with_trailing_command_publishes_certified_outcome() {
     .unwrap();
     let oid = oid.trim();
     let short = &oid[..9];
+    for index in 0..65 {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["branch", &format!("contains-produced-{index:02}"), oid])
+            .status()
+            .unwrap()
+            .success());
+    }
     let native_session_id = "019fa000-0000-7000-8000-000000000110";
     let command = concat!(
         "git commit -m 'fix(pro): reserve result bytes before source admission' && ",
