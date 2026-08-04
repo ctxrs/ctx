@@ -134,7 +134,6 @@ fn prefilter_never_skips_a_record_the_probe_rejects() {
         r#"{"type":7,"payload":{"type":"token_count"}}"#,
         r#"{"type":"event_msg","timestamp":7}"#,
         r#"{"type":"event_msg","payload":{"type":7}}"#,
-        r#"{"type":"event_msg","payload":{"type":"token_count","call_id":7}}"#,
         r#"[{"type":"event_msg"}]"#,
         r#"{}"#,
         "",
@@ -165,6 +164,7 @@ fn prefilter_never_skips_a_record_the_probe_rejects() {
         r#"{"type":"event_msg","payload":{"type":"token_count"},"payload":{}}"#,
         r#"{"type":"event_msg","payload":{"type":"token_count","type":"token_count"}}"#,
         r#"{"type":"event_msg","payload":{"call_id":"a","call_id":"b","type":"token_count"}}"#,
+        r#"{"type":"event_msg","payload":{"type":"token_count","call_id":7}}"#,
     ];
     for raw in malformed_lineage {
         let probe = classify_codex_record(raw.as_bytes())

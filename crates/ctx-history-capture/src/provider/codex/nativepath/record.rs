@@ -102,6 +102,108 @@ impl<'de> Visitor<'de> for CodexTextVisitor {
 }
 
 #[derive(Debug)]
+struct CodexLineageText<'a> {
+    value: Option<CodexText<'a>>,
+    malformed: bool,
+}
+
+impl<'de> Deserialize<'de> for CodexLineageText<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(CodexLineageTextVisitor)
+    }
+}
+
+struct CodexLineageTextVisitor;
+
+impl<'de> Visitor<'de> for CodexLineageTextVisitor {
+    type Value = CodexLineageText<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a lineage string")
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(CodexLineageText {
+            value: Some(CodexText {
+                value: Cow::Borrowed(value),
+                escaped: false,
+            }),
+            malformed: false,
+        })
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(CodexLineageText {
+            value: Some(CodexText {
+                value: Cow::Owned(value.to_owned()),
+                escaped: true,
+            }),
+            malformed: false,
+        })
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(CodexLineageText {
+            value: Some(CodexText {
+                value: Cow::Owned(value),
+                escaped: true,
+            }),
+            malformed: false,
+        })
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(malformed_lineage_text())
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(malformed_lineage_text())
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(malformed_lineage_text())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(malformed_lineage_text())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(malformed_lineage_text())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(malformed_lineage_text())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(malformed_lineage_text())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(malformed_lineage_text())
+    }
+}
+
+fn malformed_lineage_text<'a>() -> CodexLineageText<'a> {
+    CodexLineageText {
+        value: None,
+        malformed: true,
+    }
+}
+
+#[derive(Debug)]
 struct CodexEnvelopeProbe<'a> {
     record_type: CodexText<'a>,
     timestamp: Option<Cow<'a, str>>,
@@ -244,10 +346,11 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
                         continue;
                     }
                     saw_call_id = true;
-                    let value = map.next_value::<Option<CodexText<'de>>>()?;
+                    let value = map.next_value::<CodexLineageText<'de>>()?;
                     relationship_escaped |=
-                        key_escaped || value.as_ref().is_some_and(|value| value.escaped);
-                    call_id = value;
+                        key_escaped || value.value.as_ref().is_some_and(|value| value.escaped);
+                    lineage_malformed |= value.malformed;
+                    call_id = value.value;
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -645,6 +748,29 @@ mod lineage_tests {
             codex_lineage_record_evidence(&probe),
             CodexLineageRecordEvidence::UnattributedAmbiguity
         );
+    }
+
+    #[test]
+    fn escaped_non_string_call_ids_are_ambiguous_in_either_duplicate_order() {
+        let records = [
+            br#"{"\u0074\u0079\u0070\u0065":"\u0072\u0065\u0073\u0070\u006f\u006e\u0073\u0065\u005f\u0069\u0074\u0065\u006d","\u0070\u0061\u0079\u006c\u006f\u0061\u0064":{"\u0074\u0079\u0070\u0065":"\u0066\u0075\u006e\u0063\u0074\u0069\u006f\u006e\u005f\u0063\u0061\u006c\u006c","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":7,"\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"target"}}"#
+                .as_slice(),
+            br#"{"\u0074\u0079\u0070\u0065":"\u0072\u0065\u0073\u0070\u006f\u006e\u0073\u0065\u005f\u0069\u0074\u0065\u006d","\u0070\u0061\u0079\u006c\u006f\u0061\u0064":{"\u0074\u0079\u0070\u0065":"\u0066\u0075\u006e\u0063\u0074\u0069\u006f\u006e\u005f\u0063\u0061\u006c\u006c","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"target","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":7}}"#
+                .as_slice(),
+        ];
+        for record in records {
+            assert!(!malformed_record_may_contain_lineage(record));
+            let probe = classify_codex_record(record).unwrap();
+            assert!(probe.lineage_malformed());
+            assert_eq!(
+                codex_lineage_record_evidence(&probe),
+                CodexLineageRecordEvidence::UnattributedAmbiguity
+            );
+        }
+
+        let unrelated = br#"{"timestamp":"a","timestamp":"b","type":"event_msg","payload":{"type":"token_count"}}"#;
+        assert!(classify_codex_record(unrelated).is_err());
+        assert!(!malformed_record_may_contain_lineage(unrelated));
     }
 }
 

@@ -264,7 +264,7 @@ pub(super) fn decode_pending_tool_authority(
 pub(super) fn validate_checkpoint_source(
     reader: &mut BufReader<File>,
     checkpoint: &CodexNativeCheckpoint,
-    hydrate_pending_tools: bool,
+    append_replay: bool,
     mut lineage_facts: Option<&mut CodexLineageFactsV0>,
 ) -> Result<ValidatedCheckpoint> {
     // The prefix proof is the sole read pass over checkpointed bytes. On
@@ -327,7 +327,7 @@ pub(super) fn validate_checkpoint_source(
                     .ok_or(CaptureError::SystemInvariant(
                         "Codex checkpoint record offset exceeds u64",
                     ))?;
-                if hydrate_pending_tools
+                if append_replay
                     && lineage_facts.is_none()
                     && authorities.get(authority_index).is_some_and(|authority| {
                         absolute_offset >= authority.record_start
@@ -372,7 +372,7 @@ pub(super) fn validate_checkpoint_source(
                                 "pending tool-call authority does not match its JSONL record boundary",
                             ));
                         }
-                        if hydrate_pending_tools {
+                        if append_replay {
                             let authority_record = if lineage_facts.is_some() {
                                 lineage_record.as_slice()
                             } else {
@@ -455,18 +455,20 @@ pub(super) fn validate_checkpoint_source(
             ));
         }
     }
-    if checkpoint.incomplete_tail().is_some() {
+    if !append_replay && checkpoint.incomplete_tail().is_some() {
         if let Some(facts) = lineage_facts {
             // A fresh bounded scan records every unterminated tail as
             // unattributed relationship ambiguity. Exact checkpoint replay
             // must rederive that same fact from the certified boundary; the
             // tail bytes were hashed above but intentionally never parsed as
-            // a complete JSONL record.
+            // a complete JSONL record. Append replay resumes at that boundary,
+            // so the primary scanner derives replacement evidence from the
+            // tail's now-current bytes instead of retaining this old fact.
             facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)?;
         }
     }
 
-    if hydrate_pending_tools {
+    if append_replay {
         for (call_id, authority) in &pending_tool_authorities {
             if let Some(cell_id) = authority.continuation_cell_id() {
                 if authority.continuation_conflicted() {
