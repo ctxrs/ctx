@@ -21,6 +21,7 @@ pub(crate) struct CodexToolCallContext {
     pub(crate) continuation_cell_id: Option<String>,
     pub(crate) origin_call_id: Option<String>,
     pub(crate) origin_event_sequence: Option<u64>,
+    pub(crate) origin_occurred_at_unix_ms: Option<i64>,
     pub(crate) continuation_call_id_sha256: Vec<[u8; 32]>,
     pub(crate) continuation_capacity_exceeded: bool,
     pub(crate) correlation_ambiguous: bool,

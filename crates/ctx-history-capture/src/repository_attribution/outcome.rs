@@ -197,14 +197,30 @@ pub(crate) fn linked_outcome_evidence(
         linkage,
     );
     match parsed {
-        OperationResult::Exact { outcome, aliases } => Some(LinkedOutcomeEvidence {
-            provider_native_repository_aliases: aliases,
-            outcome_operation_repository_path: operation_path,
-            outcome_output_repository_path: output_path,
-            outcomes: vec![(*outcome).into()],
-            pull_request_associations: Vec::new(),
-            abstentions: Vec::new(),
-        }),
+        OperationResult::Exact { outcome, aliases } => {
+            let rewrite_unlinked = outcome.replacement_lineage.is_empty()
+                && matches!(
+                    plan.operation,
+                    BoundedOutcomeOperation::Commit {
+                        rewrites_history: true,
+                        ..
+                    }
+                );
+            Some(LinkedOutcomeEvidence {
+                provider_native_repository_aliases: aliases,
+                outcome_operation_repository_path: operation_path,
+                outcome_output_repository_path: output_path,
+                outcomes: vec![(*outcome).into()],
+                pull_request_associations: Vec::new(),
+                abstentions: rewrite_unlinked
+                    .then_some((
+                        RepositoryAbstentionReason::HistoryRewriteUnlinked,
+                        "rewrite_result_has_no_exact_nonbranching_replacement_lineage",
+                    ))
+                    .into_iter()
+                    .collect(),
+            })
+        }
         OperationResult::Deferred(deferred) => Some(LinkedOutcomeEvidence {
             provider_native_repository_aliases: Vec::new(),
             outcome_operation_repository_path: operation_path,
@@ -339,9 +355,6 @@ fn parse_operation_result(
                     },
                 );
             };
-            if rewrites_history && replacement_lineage.is_empty() {
-                return OperationResult::RewriteUnlinked;
-            }
             if !rewrites_history && !replacement_lineage.is_empty() {
                 return OperationResult::Inadmissible;
             }
@@ -745,6 +758,38 @@ mod tests {
     }
 
     #[test]
+    fn exact_commit_receipt_survives_unrelated_output_after_exact_head() {
+        let oid = "cbbccc92da81bbe173789b873b2e579327b7c2e1";
+        let output = Value::String(format!(
+            "[ctx/v026-locator-sidecar-envelope-backfill cbbccc92d] fix(pro): reserve result bytes before source admission\n 2 files changed, 24 insertions(+), 5 deletions(-)\n{oid}\npub const MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;\n"
+        ));
+        let command = concat!(
+            "git commit -m 'fix(pro): reserve result bytes before source admission' && ",
+            "git status --short && git rev-parse HEAD && ",
+            "sed -n '12,18p' crates/ctx-pro-host-protocol/src/lib.rs"
+        );
+        let evidence = linked_outcome_evidence(input(command, &output)).unwrap();
+        let UnscopedOutcomeObservation::DeferredCommit(deferred) = &evidence.outcomes[0] else {
+            panic!("expected certified-receipt candidate");
+        };
+        assert_eq!(deferred.oid_prefix, "cbbccc92d");
+        assert_eq!(
+            deferred.subject,
+            "fix(pro): reserve result bytes before source admission"
+        );
+
+        let ambiguous = Value::String(format!(
+            "[main cbbccc92d] fix(pro): reserve result bytes before source admission\n{oid}\n[main 1111111] unrelated second commit\n"
+        ));
+        let evidence = linked_outcome_evidence(input(command, &ambiguous)).unwrap();
+        assert!(evidence.outcomes.is_empty());
+        assert_eq!(
+            evidence.abstentions[0].0,
+            RepositoryAbstentionReason::OutcomeResultInadmissible
+        );
+    }
+
+    #[test]
     fn canonical_merge_graph_head_is_deferred_and_ambiguous_summaries_abstain() {
         let output = Value::String(
             "Merge made by the 'ort' strategy.\n README.md | 11 +++++++++++\n*   efdfa9e Merge retry validation documentation\n|\\  \n| * a69f7ff Document retry validation contract\n* | 9747be9 Fail closed on invalid retry headers\n"
@@ -891,6 +936,23 @@ mod tests {
         assert!(raw_rebase.outcomes.is_empty());
         assert_eq!(
             raw_rebase.abstentions[0].0,
+            RepositoryAbstentionReason::HistoryRewriteUnlinked
+        );
+
+        let amended = linked_outcome_evidence(input(
+            "git commit --amend --no-edit && git rev-parse HEAD",
+            &Value::String(new.to_owned()),
+        ))
+        .unwrap();
+        assert_eq!(
+            exact_outcome(&amended.outcomes[0]).produced_object_ids[0].hex,
+            new
+        );
+        assert!(exact_outcome(&amended.outcomes[0])
+            .replacement_lineage
+            .is_empty());
+        assert_eq!(
+            amended.abstentions[0].0,
             RepositoryAbstentionReason::HistoryRewriteUnlinked
         );
 

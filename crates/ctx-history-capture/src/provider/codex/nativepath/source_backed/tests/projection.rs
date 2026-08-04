@@ -2,6 +2,8 @@ use super::*;
 use crate::provider::codex::nativepath::tests::discover_one;
 use serde_json::Value;
 
+mod repository_outcome_regressions;
+
 pub(super) fn initialize_repository(path: &Path) {
     use std::process::Command;
 
@@ -38,8 +40,12 @@ pub(super) fn initialize_repository(path: &Path) {
 }
 
 pub(super) fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
+    exec_call_at("2026-07-28T12:00:01Z", call_id, command, workdir)
+}
+
+fn exec_call_at(timestamp: &str, call_id: &str, command: &str, workdir: &Path) -> String {
     serde_json::json!({
-        "timestamp": "2026-07-28T12:00:01Z",
+        "timestamp": timestamp,
         "type": "response_item",
         "payload": {
             "type": "function_call",
@@ -56,8 +62,12 @@ pub(super) fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String 
 }
 
 pub(super) fn successful_result(call_id: &str, output: Value) -> String {
+    successful_result_at("2026-07-28T12:00:02Z", call_id, output)
+}
+
+fn successful_result_at(timestamp: &str, call_id: &str, output: Value) -> String {
     serde_json::json!({
-        "timestamp": "2026-07-28T12:00:02Z",
+        "timestamp": timestamp,
         "type": "response_item",
         "payload": {
             "type": "function_call_output",

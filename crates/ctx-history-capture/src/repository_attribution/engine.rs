@@ -29,7 +29,8 @@ use super::{
         scope_pull_request_associations, scope_vcs,
     },
     shell::{analyze, command_too_large, lexical_absolute},
-    AttributionInput, BoundedCommitProducer, CommandEvidenceDisposition, UnscopedVcsObservation,
+    AttributionInput, BoundedCommitProducer, BoundedOutcomePlanDisposition,
+    CommandEvidenceDisposition, UnscopedVcsObservation,
 };
 
 pub(crate) const MAX_REPOSITORY_CANDIDATES: usize = 32;
@@ -194,9 +195,28 @@ pub(super) fn attribute_with_attributor(
 
     let outcomes_have_provider_binding =
         provider_identity.binds_all_outcomes(&outcome_observations);
+    let has_bounded_outcome_route =
+        input
+            .command
+            .as_deref()
+            .zip(base)
+            .is_some_and(|(command, base)| {
+                matches!(
+                    super::bounded_outcome_plan(command, base),
+                    BoundedOutcomePlanDisposition::Planned(plan)
+                        if Some(&plan.operation_repository_path) == outcome_operation_path.as_ref()
+                            && plan.output_repository_path.as_ref() == outcome_output_path.as_ref()
+                )
+            })
+            && !outcome_observations.is_empty()
+            && matches!(
+                input.command_disposition,
+                CommandEvidenceDisposition::Analyze
+            );
     if command_analysis.blocks_session_fallback
         && !outcome_observations.is_empty()
         && !outcomes_have_provider_binding
+        && !has_bounded_outcome_route
     {
         push_abstention(
             &mut annotation,
@@ -237,7 +257,7 @@ pub(super) fn attribute_with_attributor(
             observed_at_unix_ms: activity_at_unix_ms,
         });
     }
-    if !command_analysis.blocks_session_fallback {
+    if !command_analysis.blocks_session_fallback || has_bounded_outcome_route {
         if let Some(path) = &outcome_operation_path {
             candidates.push(Candidate {
                 path: path.clone(),
@@ -637,17 +657,15 @@ fn resolve_deferred_commit_observations(
                         prior_relative_path: file.prior_path,
                     }),
             );
-        if !deferred.rewrites_history {
-            exact.push(RepositoryOutcomeObservation {
-                kind: RepositoryOutcomeKind::Commit,
-                produced_object_ids: vec![resolved.object_id],
-                replacement_lineage: Vec::new(),
-                pull_request: None,
-                observed_at_unix_ms: deferred.observed_at_unix_ms,
-                linkage: deferred.linkage,
-                outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-            });
-        }
+        exact.push(RepositoryOutcomeObservation {
+            kind: RepositoryOutcomeKind::Commit,
+            produced_object_ids: vec![resolved.object_id],
+            replacement_lineage: Vec::new(),
+            pull_request: None,
+            observed_at_unix_ms: deferred.observed_at_unix_ms,
+            linkage: deferred.linkage,
+            outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+        });
     }
     exact
 }

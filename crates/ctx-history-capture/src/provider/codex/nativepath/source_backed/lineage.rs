@@ -176,6 +176,9 @@ impl CodexOutcomeLineageAuthorityV0 {
         native_session_id: &str,
         origin_call_id: &str,
         result_call_id: &str,
+        origin_occurred_at_unix_ms: Option<i64>,
+        result_occurred_at_unix_ms: i64,
+        session_started_at_unix_ms: i64,
     ) -> CodexSourceBackedResultV0<CodexOutcomeOriginV0> {
         let Some(current) = self
             .indices
@@ -186,6 +189,20 @@ impl CodexOutcomeLineageAuthorityV0 {
         };
         if current.relationship_state == RelationshipStateV0::Cycle {
             return Ok(CodexOutcomeOriginV0::Unproven);
+        }
+        // A Codex fork snapshots its parent when the child session starts. An
+        // exact invocation/result pair recorded strictly after that boundary
+        // cannot have been copied from the parent, even when an older ancestor
+        // archive is unavailable. Mismatched, incomplete, or pre-fork evidence
+        // continues through the fail-closed ancestor-presence proof below.
+        if exact_correlated_result_postdates_fork(
+            origin_call_id,
+            result_call_id,
+            origin_occurred_at_unix_ms,
+            result_occurred_at_unix_ms,
+            session_started_at_unix_ms,
+        ) {
+            return Ok(CodexOutcomeOriginV0::UniqueToSession);
         }
         let facts = self
             .facts
@@ -230,6 +247,20 @@ impl CodexOutcomeLineageAuthorityV0 {
             panic!("poison Codex lineage facts lock");
         }));
     }
+}
+
+fn exact_correlated_result_postdates_fork(
+    origin_call_id: &str,
+    result_call_id: &str,
+    origin_occurred_at_unix_ms: Option<i64>,
+    result_occurred_at_unix_ms: i64,
+    session_started_at_unix_ms: i64,
+) -> bool {
+    !origin_call_id.is_empty()
+        && origin_call_id == result_call_id
+        && origin_occurred_at_unix_ms
+            .is_some_and(|occurred_at| occurred_at > session_started_at_unix_ms)
+        && result_occurred_at_unix_ms > session_started_at_unix_ms
 }
 
 fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedResultV0<usize> {
@@ -464,7 +495,7 @@ mod tests {
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         authority.poison_facts_lock();
         assert!(matches!(
-            authority.classify("child", "call", "call"),
+            authority.classify("child", "call", "call", None, 0, 0),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
         ));
     }
@@ -491,8 +522,39 @@ mod tests {
         ];
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         assert_eq!(
-            authority.classify("left", "call", "call").unwrap(),
+            authority
+                .classify("left", "call", "call", Some(101), 102, 100)
+                .unwrap(),
             CodexOutcomeOriginV0::Unproven
         );
+    }
+
+    #[test]
+    fn only_exact_post_fork_correlated_results_bypass_ancestor_lookup() {
+        assert!(exact_correlated_result_postdates_fork(
+            "call-1",
+            "call-1",
+            Some(101),
+            102,
+            100,
+        ));
+
+        for candidate in [
+            ("call-1", "call-2", Some(101), 102, 100),
+            ("", "", Some(101), 102, 100),
+            ("call-1", "call-1", None, 102, 100),
+            ("call-1", "call-1", Some(100), 102, 100),
+            ("call-1", "call-1", Some(99), 102, 100),
+            ("call-1", "call-1", Some(101), 100, 100),
+            ("call-1", "call-1", Some(101), 99, 100),
+        ] {
+            assert!(!exact_correlated_result_postdates_fork(
+                candidate.0,
+                candidate.1,
+                candidate.2,
+                candidate.3,
+                candidate.4,
+            ));
+        }
     }
 }

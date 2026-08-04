@@ -78,7 +78,7 @@ fn v8_frontier_and_v11_parser_generation_is_rebuilt_to_current_authority() {
 }
 
 #[test]
-fn v12_parser_generation_is_rebuilt_with_a_current_frontier() {
+fn v13_parser_generation_is_rebuilt_with_a_current_frontier() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -97,7 +97,7 @@ fn v12_parser_generation_is_rebuilt_with_a_current_frontier() {
     let old_certificate = CertifiedSource::certify_with_frontier(
         current_certificate.observation().clone(),
         current_certificate.observation().clone(),
-        "codex-nativepath-core-record-v12",
+        "codex-nativepath-core-record-v13",
         *current_certificate.content_digest(),
         current_certificate.counts(),
         current_certificate.frontier().cloned(),
@@ -120,7 +120,7 @@ fn v12_parser_generation_is_rebuilt_with_a_current_frontier() {
     let certificate = &old.manifest().sources[0];
     assert_eq!(
         certificate.parser_revision(),
-        "codex-nativepath-core-record-v12"
+        "codex-nativepath-core-record-v13"
     );
     assert_eq!(
         certificate.frontier().unwrap().checkpoint_kind(),

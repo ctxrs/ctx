@@ -197,6 +197,7 @@ ctx_rust_test(
         "src/repository_attribution/outcome.rs",
         "src/repository_attribution/outcome/pull_request.rs",
         "src/repository_attribution/shell.rs",
+        "src/repository_attribution/shell/outcome_tests.rs",
         "src/repository_attribution/shell/outcome_plan.rs",
         "src/repository_attribution/shell/pull_request.rs",
     ],

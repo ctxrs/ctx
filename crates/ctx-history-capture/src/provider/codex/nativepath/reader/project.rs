@@ -544,6 +544,7 @@ impl CodexNativeScanner {
             .clone_from(&origin.declared_workdir);
         context.origin_call_id = Some(origin_call_id);
         context.origin_event_sequence = origin.origin_event_sequence;
+        context.origin_occurred_at_unix_ms = origin.origin_occurred_at_unix_ms;
         context
             .continuation_call_id_sha256
             .clone_from(&origin.continuation_call_id_sha256);
