@@ -85,6 +85,13 @@ pub(super) fn online_backup_deadline_diagnostic(
     )
 }
 
+pub(super) fn retain_online_backup_retry_code(previous: Option<i32>, code: i32) -> Option<i32> {
+    match code {
+        ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED => Some(code),
+        _ => previous,
+    }
+}
+
 #[cfg(test)]
 pub(super) fn online_backup_contention_deadline_error(
     code: i32,

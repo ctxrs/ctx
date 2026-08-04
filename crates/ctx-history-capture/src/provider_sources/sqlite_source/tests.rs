@@ -30,10 +30,11 @@ use super::{
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
     open_root_handle_sqlite_source_snapshot_for_test, retain_sqlite_source_directory_authority,
-    run_online_backup_with_deadline_for_test, SqliteArtifactKind, SqliteCleanupStatus,
-    SqliteFailurePhase, SqliteLogicalSnapshot, SqliteRetryDecision, SqliteSourceAccessError,
-    SqliteSourceComponent, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
-    SqliteSourceSnapshotStrategy, SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
+    retained_online_backup_retry_code_for_test, run_online_backup_with_deadline_for_test,
+    SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot,
+    SqliteRetryDecision, SqliteSourceAccessError, SqliteSourceComponent,
+    SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot, SqliteSourceSnapshotStrategy,
+    SQLITE_SHM_MAX_BYTES, SQLITE_SNAPSHOT_MAX_TOTAL_BYTES,
 };
 
 mod copy_races;
@@ -761,6 +762,16 @@ fn logical_online_backup_contention_deadline_preserves_codes_and_final_attempt()
 }
 
 #[test]
+fn logical_online_backup_ok_step_retains_prior_contention_code_for_deadline() {
+    for code in [ffi::SQLITE_BUSY, ffi::SQLITE_LOCKED] {
+        assert_eq!(
+            retained_online_backup_retry_code_for_test(Some(code), ffi::SQLITE_OK),
+            Some(code)
+        );
+    }
+}
+
+#[test]
 fn active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_writer_generation() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
@@ -1411,10 +1422,7 @@ fn logical_online_backup_rejects_database_leaf_symlink_replacement_during_open()
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(result, Err(error) if error.is_source_changed()));
     assert_eq!(fs::read(attacker).unwrap(), attacker_before);
     assert_eq!(parent.snapshot_counters().logical_online_backup_opens(), 0);
 }

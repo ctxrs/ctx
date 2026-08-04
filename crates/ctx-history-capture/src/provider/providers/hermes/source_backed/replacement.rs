@@ -183,14 +183,14 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
         let snapshot = take_snapshot(&tree.authority.snapshot)?;
-        let evidence = snapshot.finish().map_err(default_route_error)?;
+        let evidence = route_hermes_terminal_revalidation(snapshot.finish())?;
         if evidence != tree.authority.opening_evidence {
             return Err(hermes_changed(format!(
                 "{}: physical source changed before commit",
                 HermesSourceBackedError::SourceChanged
             )));
         }
-        (tree.authority.terminal_revalidate)().map_err(default_route_error)?;
+        route_hermes_terminal_revalidation((tree.authority.terminal_revalidate)())?;
         Ok(tree.tree_fingerprint)
     }
 }
@@ -232,6 +232,12 @@ pub(super) fn hermes_route_error(error: HermesSourceBackedError) -> SourceBacked
 
 pub(super) fn hermes_sqlite_route_error(error: SqliteSourceAccessError) -> SourceBackedRouteError {
     hermes_route_error(error.into())
+}
+
+pub(super) fn route_hermes_terminal_revalidation<T>(
+    result: Result<T, SqliteSourceAccessError>,
+) -> SourceBackedRouteResult<T> {
+    result.map_err(hermes_sqlite_route_error)
 }
 
 fn abort_hermes_route_snapshot(

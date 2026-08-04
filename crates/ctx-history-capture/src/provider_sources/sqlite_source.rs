@@ -970,7 +970,8 @@ use snapshot::{
     open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
-    open_root_handle_sqlite_source_snapshot_for_test, run_online_backup_with_deadline_for_test,
+    open_root_handle_sqlite_source_snapshot_for_test, retained_online_backup_retry_code_for_test,
+    run_online_backup_with_deadline_for_test,
 };
 pub(crate) use snapshot::{
     open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,

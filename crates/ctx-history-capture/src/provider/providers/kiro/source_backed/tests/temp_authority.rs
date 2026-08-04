@@ -20,7 +20,7 @@ use crate::{
         SourceBackedProviderRegistry, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
     provider_sources::{
-        fail_next_opened_snapshot_cleanup_for_test, provider_source_for_path,
+        fail_next_opened_snapshot_cleanup_for_test, provider_source_for_path, SqliteCleanupStatus,
         SqliteSourceAccessError,
     },
 };
@@ -66,6 +66,29 @@ fn create_fixture(path: &Path, rows: u64) {
             .unwrap();
     }
     transaction.commit().unwrap();
+}
+
+#[test]
+fn terminal_revalidation_preserves_source_change_and_cleanup_resource_types() {
+    let changed = super::super::registration::route_kiro_terminal_revalidation::<()>(Err(
+        SqliteSourceAccessError::SourceChanged,
+    ))
+    .unwrap_err();
+    assert_eq!(changed.kind, SourceBackedRouteErrorKind::SourceChanged);
+
+    let cleanup = SqliteSourceAccessError::ScratchIoUnavailable {
+        operation: "cleaning the Kiro terminal regression snapshot",
+        path: "kiro-terminal.sqlite".into(),
+        source: std::io::Error::from(std::io::ErrorKind::StorageFull),
+    }
+    .with_cleanup_status(SqliteCleanupStatus::Failed);
+    let cleanup = super::super::registration::route_kiro_terminal_revalidation::<()>(Err(cleanup))
+        .unwrap_err();
+    assert_eq!(
+        cleanup.kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+    assert!(cleanup.detail.contains("cleanup_status=failed"));
 }
 
 fn directory_file_bytes(path: &Path) -> BTreeMap<std::ffi::OsString, Vec<u8>> {

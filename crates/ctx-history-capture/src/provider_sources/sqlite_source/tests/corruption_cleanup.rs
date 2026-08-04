@@ -54,6 +54,7 @@ fn malformed_provider_is_source_local_and_is_not_retried_as_a_full_copy() {
         Some(ffi::SQLITE_CORRUPT) | Some(ffi::SQLITE_NOTADB)
     ));
     assert_eq!(diagnostic.retry, SqliteRetryDecision::DoNotRetryCorrupt);
+    assert_eq!(diagnostic.cleanup, SqliteCleanupStatus::Succeeded);
     assert_eq!(
         parent.snapshot_counters().source_bytes_copied(),
         expected_copy_bytes
@@ -93,6 +94,7 @@ fn malformed_private_source_copy_is_ctx_owned_and_not_retried() {
         Some(ffi::SQLITE_CORRUPT) | Some(ffi::SQLITE_NOTADB)
     ));
     assert_eq!(diagnostic.retry, SqliteRetryDecision::DoNotRetryCorrupt);
+    assert_eq!(diagnostic.cleanup, SqliteCleanupStatus::Succeeded);
     assert!(error.is_ctx_owned_corruption());
     assert_eq!(
         parent.snapshot_counters().source_bytes_copied(),

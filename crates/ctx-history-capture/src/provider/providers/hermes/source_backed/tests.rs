@@ -12,7 +12,10 @@ use crate::{
         SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
         SourceBackedRouteErrorKind,
     },
-    provider_sources::{fail_next_opened_snapshot_cleanup_for_test, provider_source_for_path},
+    provider_sources::{
+        fail_next_opened_snapshot_cleanup_for_test, provider_source_for_path, SqliteCleanupStatus,
+        SqliteSourceAccessError,
+    },
     register_hermes_explicit_source_backed_route,
 };
 
@@ -38,6 +41,28 @@ fn direct_core_projection_is_complete_and_self_contained() {
     }
     assert!(!production.contains("body.truncate"));
     assert!(!production.contains("body.chars().take"));
+}
+
+#[test]
+fn terminal_finish_and_revalidation_preserve_typed_sqlite_failures() {
+    let changed = replacement::route_hermes_terminal_revalidation::<()>(Err(
+        SqliteSourceAccessError::SourceChanged,
+    ))
+    .unwrap_err();
+    assert_eq!(changed.kind, SourceBackedRouteErrorKind::SourceChanged);
+
+    let cleanup = SqliteSourceAccessError::ScratchIoUnavailable {
+        operation: "cleaning the Hermes terminal regression snapshot",
+        path: "hermes-terminal.sqlite".into(),
+        source: std::io::Error::from(std::io::ErrorKind::StorageFull),
+    }
+    .with_cleanup_status(SqliteCleanupStatus::Failed);
+    let cleanup = replacement::route_hermes_terminal_revalidation::<()>(Err(cleanup)).unwrap_err();
+    assert_eq!(
+        cleanup.kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+    assert!(cleanup.detail.contains("cleanup_status=failed"));
 }
 
 fn provider_family_bytes(path: &Path) -> Vec<(String, Vec<u8>)> {

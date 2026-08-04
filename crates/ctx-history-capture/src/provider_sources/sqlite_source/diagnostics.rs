@@ -90,6 +90,14 @@ impl SqliteCleanupStatus {
             Self::Failed => "failed",
         }
     }
+
+    const fn combine(self, later: Self) -> Self {
+        match (self, later) {
+            (Self::Failed, _) | (_, Self::Failed) => Self::Failed,
+            (Self::Succeeded, _) | (_, Self::Succeeded) => Self::Succeeded,
+            (Self::NotRequired, Self::NotRequired) => Self::NotRequired,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,7 +409,7 @@ impl SqliteSourceAccessError {
                 mut diagnostic,
                 source,
             } => {
-                diagnostic.cleanup = cleanup;
+                diagnostic.cleanup = diagnostic.cleanup.combine(cleanup);
                 Self::Diagnosed { diagnostic, source }
             }
             Self::ProviderContentCorruption { source } => Self::ProviderContentCorruption {

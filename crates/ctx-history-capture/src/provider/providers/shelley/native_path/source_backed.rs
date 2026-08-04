@@ -70,6 +70,11 @@ pub(crate) enum ShelleySourceBackedError {
     Capture(#[from] CaptureError),
     #[error(transparent)]
     SqliteSource(#[from] SqliteSourceAccessError),
+    #[error("Shelley SQLite scan failed and snapshot cleanup also failed: {cleanup}")]
+    SnapshotCleanup {
+        primary: Box<ShelleySourceBackedError>,
+        cleanup: SqliteSourceAccessError,
+    },
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error("Shelley source-backed scan was not drained to terminal certification")]
@@ -109,7 +114,15 @@ impl ShelleySourceBackedAdapter {
         let (source_root, sqlite_snapshot) =
             open_root_authorized_snapshot(&self.data_root, &self.database_path)?;
         let scan = self.start_snapshot_scan(sqlite_snapshot)?;
-        source_root.revalidate()?;
+        if let Err(primary) = source_root.revalidate() {
+            return Err(match scan.abort() {
+                Ok(()) => primary.into(),
+                Err(cleanup) => ShelleySourceBackedError::SnapshotCleanup {
+                    primary: Box::new(primary.into()),
+                    cleanup,
+                },
+            });
+        }
         Ok(scan)
     }
 
@@ -118,27 +131,52 @@ impl ShelleySourceBackedAdapter {
         sqlite_snapshot: SqliteSourceReadSnapshot,
     ) -> ShelleySourceBackedResult<ShelleySourceBackedScan> {
         let evidence = sqlite_snapshot.evidence().clone();
-        let conn = sqlite_snapshot.connection()?;
-
-        let sqlite_user_version = conn
-            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-            .map_err(CaptureError::from)?;
-        let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-        let conversation_columns = shelley_conversation_columns(conn)?;
-        let message_columns = shelley_message_columns(conn)?;
-        let has_message_sequence_id = message_columns.contains("sequence_id");
-        shelley_require_message_index(conn, has_message_sequence_id)?;
-        let conversation_select =
-            shelley_conversation_select_expressions(&conversation_columns, "c");
-        let message_select = shelley_message_select_expressions(&message_columns, "m");
-        let schema_evidence = format!(
-            "capture={SHELLEY_CAPTURE_REVISION}\0policy={SHELLEY_POLICY_REVISION}\0\
+        let prepared = (|| {
+            let conn = sqlite_snapshot.connection()?;
+            let sqlite_user_version = conn
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .map_err(CaptureError::from)?;
+            let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
+            let conversation_columns = shelley_conversation_columns(conn)?;
+            let message_columns = shelley_message_columns(conn)?;
+            let has_message_sequence_id = message_columns.contains("sequence_id");
+            shelley_require_message_index(conn, has_message_sequence_id)?;
+            let conversation_select =
+                shelley_conversation_select_expressions(&conversation_columns, "c");
+            let message_select = shelley_message_select_expressions(&message_columns, "m");
+            let schema_evidence = format!(
+                "capture={SHELLEY_CAPTURE_REVISION}\0policy={SHELLEY_POLICY_REVISION}\0\
              user_version={sqlite_user_version}\0schema={schema_fingerprint}"
-        )
-        .into_bytes();
-        let mut content_digest = Sha256::new();
-        content_digest.update(SHELLEY_CERTIFIED_STREAM_DOMAIN);
-
+            )
+            .into_bytes();
+            let mut content_digest = Sha256::new();
+            content_digest.update(SHELLEY_CERTIFIED_STREAM_DOMAIN);
+            Ok((
+                schema_evidence,
+                conversation_select,
+                message_select,
+                has_message_sequence_id,
+                content_digest,
+            ))
+        })();
+        let (
+            schema_evidence,
+            conversation_select,
+            message_select,
+            has_message_sequence_id,
+            content_digest,
+        ) = match prepared {
+            Ok(prepared) => prepared,
+            Err(primary) => {
+                return Err(match sqlite_snapshot.abort() {
+                    Ok(()) => primary,
+                    Err(cleanup) => ShelleySourceBackedError::SnapshotCleanup {
+                        primary: Box::new(primary),
+                        cleanup,
+                    },
+                });
+            }
+        };
         Ok(ShelleySourceBackedScan {
             source: self.source.clone(),
             evidence,
@@ -219,6 +257,13 @@ pub(crate) struct ShelleySourceBackedScan {
 }
 
 impl ShelleySourceBackedScan {
+    pub(crate) fn abort(mut self) -> Result<(), SqliteSourceAccessError> {
+        match self.sqlite_snapshot.take() {
+            Some(snapshot) => snapshot.abort(),
+            None => Ok(()),
+        }
+    }
+
     /// Returns at most 64 native records with each retained record's full
     /// lexical body. Pages are forwarded immediately into the rollback-capable
     /// replacement staging generation; the source certificate remains

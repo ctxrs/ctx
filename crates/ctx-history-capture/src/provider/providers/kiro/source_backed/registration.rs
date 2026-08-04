@@ -179,7 +179,7 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
                         "Kiro SQLite physical inventory changed before commit",
                     ));
                 }
-                (authority.terminal_revalidate)().map_err(route_error)?;
+                route_kiro_terminal_revalidation((authority.terminal_revalidate)())?;
             }
             KiroTreeAuthority::Missing(fence) if !fence.revalidate() => {
                 return Err(source_changed("Kiro SQLite absence changed before commit"));
@@ -472,6 +472,12 @@ pub(super) fn route_kiro_sqlite_call<T>(
     result: super::KiroSourceBackedResultV0<T>,
 ) -> SourceBackedRouteResult<T> {
     result.map_err(kiro_scan_error)
+}
+
+pub(super) fn route_kiro_terminal_revalidation<T>(
+    result: Result<T, SqliteSourceAccessError>,
+) -> SourceBackedRouteResult<T> {
+    result.map_err(|error| kiro_scan_error(error.into()))
 }
 
 #[cfg(test)]

@@ -16,7 +16,10 @@ use crate::{
             SourceBackedProviderRegistry, SourceBackedRouteSelection,
         },
     },
-    provider_sources::{provider_source_for_path, SqliteSourceAccessError},
+    provider_sources::{
+        fail_next_opened_snapshot_cleanup_for_test, provider_source_for_path, SqliteCleanupStatus,
+        SqliteRetryDecision, SqliteSourceAccessError,
+    },
     test_support_paths::tempdir,
     DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs,
 };
@@ -122,6 +125,36 @@ fn scan_records(source: &AstrBotSourceBackedSourceV0) -> Vec<CoreRecord> {
     )
     .unwrap();
     records
+}
+
+#[test]
+fn transferred_snapshot_scan_failure_reports_cleanup_fatal_error() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("data_v4.db");
+    create_database(&path, "cleanup", "cleanup");
+    let source = selected_source(&path);
+    fail_next_opened_snapshot_cleanup_for_test();
+    let (_source_root, snapshot) = open_root_authorized_snapshot_with_hook(
+        crate::test_provider_sqlite_data_root(),
+        &path,
+        || {},
+    )
+    .unwrap();
+
+    let error = scan_astrbot_snapshot_v0(&source, snapshot, &mut |_record| {
+        Err(AstrBotSourceBackedErrorV0::CountOverflow)
+    })
+    .unwrap_err();
+    let AstrBotSourceBackedErrorV0::SnapshotCleanup { primary, cleanup } = error else {
+        panic!("expected typed primary-plus-cleanup failure");
+    };
+    assert!(matches!(
+        *primary,
+        AstrBotSourceBackedErrorV0::CountOverflow
+    ));
+    let diagnostic = cleanup.diagnostic().unwrap();
+    assert_eq!(diagnostic.cleanup, SqliteCleanupStatus::Failed);
+    assert_eq!(diagnostic.retry, SqliteRetryDecision::RouteFatalResource);
 }
 
 fn sqlite_persistent_bytes(path: &Path) -> Vec<Vec<u8>> {

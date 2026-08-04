@@ -150,6 +150,13 @@ pub(in crate::provider_sources::sqlite_source) fn online_backup_contention_deadl
     )
 }
 
+pub(in crate::provider_sources::sqlite_source) fn retained_online_backup_retry_code_for_test(
+    previous: Option<i32>,
+    code: i32,
+) -> Option<i32> {
+    super::retain_online_backup_retry_code(previous, code)
+}
+
 pub(in crate::provider_sources::sqlite_source) fn open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,

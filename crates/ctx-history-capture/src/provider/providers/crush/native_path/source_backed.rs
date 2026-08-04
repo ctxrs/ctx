@@ -500,7 +500,13 @@ pub(crate) fn scan_source(
     source: &OpenedSource,
     sink: &mut ChangedDocumentSink<'_, '_>,
 ) -> CrushSourceBackedResultV0<CertifiedSource> {
-    let scan = scan_source_in_snapshot(source, sink)?;
+    let scan = scan_source_in_snapshot(source, sink).map_err(|error| {
+        diagnose_crush_provider_query_error(
+            &source.read_snapshot,
+            error,
+            SqliteFailurePhase::Projection,
+        )
+    })?;
     Ok(SqliteLogicalSnapshot::new(
         CRUSH_PARSER_REVISION,
         source.schema.schema_fingerprint.as_bytes(),

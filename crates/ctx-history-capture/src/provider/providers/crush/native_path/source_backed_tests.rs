@@ -61,6 +61,37 @@ impl CrushProjectInventorySourceV0 for TestInventory {
 }
 
 #[test]
+fn query_time_corrupt_and_notadb_keep_provider_database_provenance() {
+    for code in [rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_NOTADB] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("query-provenance.db");
+        write_database(&path, "session", "message", "body");
+        let frozen = bind_inventory(
+            crate::test_provider_sqlite_data_root(),
+            inventory(b"query-provenance", vec![database("project", &path)]),
+        )
+        .unwrap();
+        let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
+        let raw = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+
+        let diagnosed = diagnose_crush_provider_query_error(
+            &source.read_snapshot,
+            CrushSourceBackedErrorV0::Sqlite(raw),
+            crate::provider_sources::SqliteFailurePhase::Projection,
+        );
+        let CrushSourceBackedErrorV0::SqliteSource(error) = diagnosed else {
+            panic!("expected diagnosed SQLite source error");
+        };
+        assert!(error.source().is_provider_corruption());
+        assert!(!error.source().is_ctx_owned_corruption());
+        assert_eq!(
+            error.source().diagnostic().unwrap().artifact,
+            crate::provider_sources::SqliteArtifactKind::PrivateSourceCopy
+        );
+    }
+}
+
+#[test]
 fn multi_project_route_watches_every_exact_sqlite_family_and_authority_parent() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first_parent = temp.path().join("project-a");

@@ -47,7 +47,8 @@ pub(super) use test_api::{
     open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test,
     open_root_handle_sqlite_source_snapshot_after_database_copy_for_test,
     open_root_handle_sqlite_source_snapshot_after_parent_certification_for_test,
-    open_root_handle_sqlite_source_snapshot_for_test, run_online_backup_with_deadline_for_test,
+    open_root_handle_sqlite_source_snapshot_for_test, retained_online_backup_retry_code_for_test,
+    run_online_backup_with_deadline_for_test,
 };
 
 #[cfg(test)]
@@ -458,7 +459,7 @@ where
                 0,
             );
             return match cleanup {
-                Ok(_) => Err(error.into()),
+                Ok(status) => Err(error.with_cleanup_status(status).into()),
                 Err(cleanup) => Err(cleanup.into()),
             };
         }
@@ -485,7 +486,14 @@ where
                 online_backup_bounds.bytes,
             );
             return match cleanup {
-                Ok(_) => Err(error),
+                Ok(status) => Err(match error {
+                    SqliteSourceProgressError::Source(error) => {
+                        SqliteSourceProgressError::Source(error.with_cleanup_status(status))
+                    }
+                    SqliteSourceProgressError::Progress(error) => {
+                        SqliteSourceProgressError::Progress(error)
+                    }
+                }),
                 Err(cleanup) => Err(cleanup.into()),
             };
         }
@@ -854,12 +862,16 @@ fn run_online_backup_with_progress<E>(
         let code = unsafe {
             ffi::sqlite3_backup_step(backup.pointer(), SQLITE_ONLINE_BACKUP_PAGES_PER_STEP)
         };
+        let observed_retry_code = retain_online_backup_retry_code(last_retry_code, code);
         if Instant::now() >= deadline {
-            let final_code = matches!(code, ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED).then_some(code);
-            return Err(
-                online_backup_deadline_diagnostic(completed_pages, bounds, final_code).into(),
-            );
+            return Err(online_backup_deadline_diagnostic(
+                completed_pages,
+                bounds,
+                observed_retry_code,
+            )
+            .into());
         }
+        last_retry_code = observed_retry_code;
         match code {
             ffi::SQLITE_DONE => {
                 completed_pages = report_online_backup_step(
@@ -872,7 +884,6 @@ fn run_online_backup_with_progress<E>(
                 break;
             }
             ffi::SQLITE_OK => {
-                last_retry_code = None;
                 completed_pages = report_online_backup_step(
                     &backup,
                     bounds,
@@ -882,7 +893,6 @@ fn run_online_backup_with_progress<E>(
                 )?;
             }
             ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED if Instant::now() < deadline => {
-                last_retry_code = Some(code);
                 thread::sleep(Duration::from_millis(10));
             }
             code => {
