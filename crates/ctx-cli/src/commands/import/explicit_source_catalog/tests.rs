@@ -64,7 +64,10 @@ mod tests {
         relocated = authority_for(relocated.revision, &relocated.entries).unwrap();
 
         let mut report = DiscoveryReport {
-            sources: vec![custom_source(old_path.clone()), custom_source(new_path.clone())],
+            sources: vec![
+                custom_source(old_path.clone()),
+                custom_source(new_path.clone()),
+            ],
             issues: Vec::new(),
         };
         retained
