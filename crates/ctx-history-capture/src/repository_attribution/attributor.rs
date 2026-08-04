@@ -50,6 +50,19 @@ struct CachedEventTimeCertificate {
 }
 
 impl RepositoryAttributor {
+    /// Starts an independent provider source while retaining only the
+    /// revalidated positive and negative certification caches. Historical
+    /// event-time bindings are source-semantic state and must not cross a
+    /// shared scanner worker's leaf boundary.
+    pub(crate) fn begin_source(&mut self) {
+        self.event_time_cache.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn event_time_cache_len(&self) -> usize {
+        self.event_time_cache.len()
+    }
+
     pub(crate) fn attribute(&mut self, input: AttributionInput) -> CoreRecordAnnotation {
         // Certificates authorize the route observed during this event only.
         // A later event must revalidate after a move, replacement, or removal.

@@ -4,6 +4,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::SyncSender,
     },
+    thread,
+    time::Duration,
 };
 
 use ctx_history_core::{CertifiedSource, CertifiedSourceAppend, CoreRecord, SourceKey};
@@ -11,10 +13,14 @@ use ctx_history_index::CoreRecordPreparer;
 use thiserror::Error;
 
 use super::super::{
-    CoreRecordEmission, SourceBackedCoordinatorError, SourceBackedGenerationSink,
-    SourceBackedLogicalSourceFailureFact, SourceBackedRecordRejectionDrafts,
-    SourceBackedRouteError, SourceBackedRouteResources, SourceBackedSourceOutcome,
+    CoreRecordEmission, CoreRecordEmissionBatch, SourceBackedCoordinatorError,
+    SourceBackedGenerationSink, SourceBackedLogicalSourceFailureFact,
+    SourceBackedRecordRejectionDrafts, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedRouteResourceKind, SourceBackedRouteResources, SourceBackedSourceOutcome,
+    SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS,
 };
+
+const CORE_OUTPUT_RESERVATION_RETRY_DELAY: Duration = Duration::from_millis(1);
 
 #[derive(Debug)]
 pub struct ParallelLeafScanJob<L> {
@@ -138,6 +144,7 @@ pub enum ParallelLeafScanMessageKind {
     BeginReplace,
     BeginAppend,
     CoreRecord,
+    CoreRecordBatch,
     CompleteReplace,
     CompleteAppend,
     CompleteRetain,
@@ -150,6 +157,7 @@ impl std::fmt::Display for ParallelLeafScanMessageKind {
             Self::BeginReplace => formatter.write_str("replacement begin"),
             Self::BeginAppend => formatter.write_str("append begin"),
             Self::CoreRecord => formatter.write_str("Core record"),
+            Self::CoreRecordBatch => formatter.write_str("Core record batch"),
             Self::CompleteReplace => formatter.write_str("replacement completion"),
             Self::CompleteAppend => formatter.write_str("append completion"),
             Self::CompleteRetain => formatter.write_str("retained completion"),
@@ -286,6 +294,7 @@ pub enum ParallelLeafSinkOperation {
     BeginReplace,
     BeginAppend,
     AddCoreRecord,
+    AddCoreRecordBatch,
     CompleteReplace,
     CompleteAppend,
     RetainSource,
@@ -298,6 +307,7 @@ impl std::fmt::Display for ParallelLeafSinkOperation {
             Self::BeginReplace => formatter.write_str("begin replacement"),
             Self::BeginAppend => formatter.write_str("begin append"),
             Self::AddCoreRecord => formatter.write_str("add Core record"),
+            Self::AddCoreRecordBatch => formatter.write_str("add Core record batch"),
             Self::CompleteReplace => formatter.write_str("complete replacement"),
             Self::CompleteAppend => formatter.write_str("complete append"),
             Self::RetainSource => formatter.write_str("retain source"),
@@ -358,6 +368,7 @@ where
 pub(super) enum ParallelLeafProtocolMessage<R> {
     Begin(Box<ParallelLeafScanBegin>),
     CoreRecord(Box<CoreRecordEmission>),
+    CoreRecordBatch(Box<CoreRecordEmissionBatch>),
     Complete(Box<ParallelLeafScanComplete<R>>),
 }
 
@@ -423,6 +434,85 @@ impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
         emission: CoreRecordEmission,
     ) -> Result<(), ParallelLeafScanEmitError> {
         self.send(ParallelLeafProtocolMessage::CoreRecord(Box::new(emission)))?;
+        Ok(())
+    }
+
+    /// Prepares and reserves one bounded provider page on this worker, then
+    /// transports each max-64 Core-record chunk through one rendezvous with
+    /// the coordinator. Ordinary JSONL pages therefore use one message, while
+    /// projectors that fan one physical page out further remain bounded. The
+    /// shared live-byte budget is backpressure rather than a batch admission
+    /// ceiling: a worker flushes its current batch before waiting cancelably
+    /// for an individually admissible next record.
+    pub fn emit_core_records(
+        &mut self,
+        records: Vec<CoreRecord>,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        let mut emissions = Vec::with_capacity(
+            records
+                .len()
+                .min(SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS),
+        );
+        for record in records {
+            self.require_not_cancelled()?;
+            let prepared = CoreRecordEmission::prepare(record, &self.core_record_preparer)?;
+            let prepared_bytes = prepared.encoded_core_bytes();
+            let maximum_bytes = self
+                .resources
+                .maximum_bytes(SourceBackedRouteResourceKind::CoreOutput);
+
+            let reservation = loop {
+                self.require_not_cancelled()?;
+                match self
+                    .resources
+                    .reserve(SourceBackedRouteResourceKind::CoreOutput, prepared_bytes)
+                {
+                    Ok(reservation) => break reservation,
+                    Err(error)
+                        if error.kind == SourceBackedRouteErrorKind::ResourceUnavailable
+                            && u64::try_from(prepared_bytes)
+                                .ok()
+                                .is_some_and(|bytes| bytes <= maximum_bytes) =>
+                    {
+                        if !emissions.is_empty() {
+                            self.emit_core_record_batch(&mut emissions)?;
+                        } else {
+                            thread::sleep(CORE_OUTPUT_RESERVATION_RETRY_DELAY);
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            emissions.push(CoreRecordEmission::from_prepared_and_reservation(
+                prepared,
+                reservation,
+            ));
+            if emissions.len() == SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS {
+                self.emit_core_record_batch(&mut emissions)?;
+            }
+        }
+        self.emit_core_record_batch(&mut emissions)?;
+        Ok(())
+    }
+
+    fn emit_core_record_batch(
+        &mut self,
+        emissions: &mut Vec<CoreRecordEmission>,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        if emissions.is_empty() {
+            return Ok(());
+        }
+        let batch = CoreRecordEmissionBatch::from_emissions(std::mem::take(emissions))?;
+        self.send(ParallelLeafProtocolMessage::CoreRecordBatch(Box::new(
+            batch,
+        )))?;
+        Ok(())
+    }
+
+    fn require_not_cancelled(&self) -> Result<(), ParallelLeafScanCancelled> {
+        if self.is_cancelled() {
+            return Err(ParallelLeafScanCancelled);
+        }
         Ok(())
     }
 
@@ -544,6 +634,9 @@ where
         ParallelLeafProtocolMessage::CoreRecord(record) => {
             apply_core_record(sink, job_index, state, *record)
         }
+        ParallelLeafProtocolMessage::CoreRecordBatch(batch) => {
+            apply_core_record_batch(sink, job_index, state, *batch)
+        }
         ParallelLeafProtocolMessage::Complete(completion) => {
             let result = apply_completion(sink, job_index, state, *completion)?;
             let slot = results.get_mut(job_index).ok_or({
@@ -649,6 +742,44 @@ where
             job_index,
             source,
             ParallelLeafSinkOperation::AddCoreRecord,
+            error,
+        )
+    })
+}
+
+fn apply_core_record_batch<E>(
+    sink: &mut SourceBackedGenerationSink<'_>,
+    job_index: usize,
+    state: &mut ParallelLeafJobState,
+    batch: CoreRecordEmissionBatch,
+) -> Result<(), ParallelLeafScanError<E>>
+where
+    E: StdError + 'static,
+{
+    if state.completion.is_some() {
+        return Err(ParallelLeafScanProtocolError::CoreRecordAfterCompletion { job_index }.into());
+    }
+    if state.begin.is_none() {
+        return Err(ParallelLeafScanProtocolError::CoreRecordBeforeBegin { job_index }.into());
+    }
+    let source = bound_source(
+        job_index,
+        ParallelLeafScanMessageKind::CoreRecordBatch,
+        state,
+    )?;
+    for emission in batch.iter() {
+        validate_source(
+            job_index,
+            ParallelLeafScanMessageKind::CoreRecordBatch,
+            source,
+            emission.source(),
+        )?;
+    }
+    sink.add_core_record_emission_batch(batch).map_err(|error| {
+        sink_error(
+            job_index,
+            source,
+            ParallelLeafSinkOperation::AddCoreRecordBatch,
             error,
         )
     })
@@ -778,7 +909,6 @@ where
             Ok(SourceBackedSourceOutcome::Success(result))
         }
         ParallelLeafScanComplete::SourceFailure { failure } => {
-            let mut failure = failure;
             if state.begin.is_some() {
                 return Err(ParallelLeafScanProtocolError::SkippedAfterBegin { job_index }.into());
             }
@@ -798,7 +928,7 @@ where
                 bound,
                 &failure.source,
             )?;
-            let carried_forward = if let Some(base) = failure.retained.as_ref() {
+            if let Some(base) = failure.retained.as_ref() {
                 if base.observation().source() != bound {
                     return Err(ParallelLeafScanProtocolError::SourceFailureBaseMismatch {
                         job_index,
@@ -813,28 +943,44 @@ where
                         error,
                     )
                 })?;
-                true
-            } else {
-                false
-            };
-            sink.record_logical_source_failure(
-                failure.source.clone(),
-                failure.failure.clone(),
-                carried_forward,
-            )
-            .map_err(|error| {
-                sink_error(
-                    job_index,
-                    bound,
-                    ParallelLeafSinkOperation::RecordSourceFailure,
-                    error,
-                )
-            })?;
-            sink.record_rejections(std::mem::take(&mut failure.record_rejections));
+            }
             state.completion = Some(ParallelLeafScanMode::SourceFailure);
             Ok(SourceBackedSourceOutcome::Failed(failure))
         }
     }
+}
+
+/// Applies receipt-only failure diagnostics after all ready-driven worker
+/// events have been accepted. Results are indexed by input job, so this keeps
+/// the bounded diagnostic prefix in canonical scan order without serializing
+/// record ingestion behind a slow earlier worker.
+pub(super) fn finalize_parallel_leaf_diagnostics<R, E>(
+    sink: &mut SourceBackedGenerationSink<'_>,
+    results: &[Option<SourceBackedSourceOutcome<R>>],
+) -> Result<(), ParallelLeafScanError<E>>
+where
+    E: StdError + 'static,
+{
+    for (job_index, result) in results.iter().enumerate() {
+        let Some(SourceBackedSourceOutcome::Failed(failure)) = result.as_ref() else {
+            continue;
+        };
+        let source = failure.source.clone();
+        sink.record_logical_source_failure(
+            source.clone(),
+            failure.failure.clone(),
+            failure.retained.is_some(),
+        )
+        .map_err(|error| {
+            sink_error(
+                job_index,
+                &source,
+                ParallelLeafSinkOperation::RecordSourceFailure,
+                error,
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn require_begin_mode<E>(

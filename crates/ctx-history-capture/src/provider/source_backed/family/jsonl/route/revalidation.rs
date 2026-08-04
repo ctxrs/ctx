@@ -6,6 +6,7 @@ pub(super) fn reset_terminal(resident: &Mutex<FamilyResident>) -> SourceBackedRo
         .map_err(|_| route_internal("JSONL resident catalog lock was poisoned"))?;
     resident.terminal_sources.clear();
     resident.certified_inventory = None;
+    resident.opening_inventory = None;
     Ok(())
 }
 
@@ -44,17 +45,25 @@ pub(super) fn revalidate_complete_inventory(
     resident: &Mutex<FamilyResident>,
     expected_inventory: &CertifiedSourceInventory,
 ) -> Result<bool> {
-    let (expected_sources, certified_inventory) = {
+    let (owned_sources, expected_sources, certified_inventory, opening_inventory) = {
         let resident = resident.lock().map_err(|_| {
             CaptureError::InvalidPayload("JSONL resident catalog lock was poisoned".to_owned())
         })?;
         (
+            resident.owned_sources.clone(),
             resident.terminal_sources.clone(),
             resident.certified_inventory.clone(),
+            resident.opening_inventory.clone(),
         )
     };
     if certified_inventory.as_ref() != Some(expected_inventory) {
         return Ok(false);
+    }
+    let Some(opening_inventory) = opening_inventory else {
+        return Ok(false);
+    };
+    if adapter.inventory_mode() == JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions {
+        opening_inventory.revalidate_root_same_object()?;
     }
 
     // This is the single terminal filesystem witness for the route. Earlier
@@ -62,15 +71,37 @@ pub(super) fn revalidate_complete_inventory(
     // and verifies every admitted leaf. Framed JSONL may grow only when its
     // exact certified prefix remains unchanged.
     let current = adapter.discover(root)?;
-    if current.root_missing() || current.leaves().len() != expected_sources.len() {
+    if current.root_missing()
+        && adapter.root_missing_mode() == JsonlFamilyRootMissingMode::Unavailable
+    {
         return Ok(false);
     }
-    let current_inventory = current.certify_against(&current)?;
-    if current_inventory != *expected_inventory {
+    if !current.retains_authorities_from(&opening_inventory) {
         return Ok(false);
     }
+    let mut current_by_descriptor = HashMap::with_capacity(current.leaves().len());
     for leaf in current.leaves() {
-        let Some(evidence) = expected_sources.get(&leaf.source().exact_descriptor_digest()) else {
+        if current_by_descriptor
+            .insert(leaf.source().exact_descriptor_digest(), leaf)
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    if adapter.inventory_mode() == JsonlFamilyInventoryMode::Exact {
+        let current_inventory = current.certify_selected_against(
+            &current,
+            expected_sources
+                .values()
+                .map(|evidence| evidence.certificate.observation().source().clone())
+                .collect(),
+        )?;
+        if current_inventory != *expected_inventory {
+            return Ok(false);
+        }
+    }
+    for (digest, evidence) in &expected_sources {
+        let Some(leaf) = current_by_descriptor.get(digest).copied() else {
             return Ok(false);
         };
         if !leaf
@@ -79,24 +110,17 @@ pub(super) fn revalidate_complete_inventory(
         {
             return Ok(false);
         }
-        if leaf.whole_record {
-            if source_observation(leaf.source(), leaf.observation())?
-                != *evidence.certificate.observation()
-            {
-                return Ok(false);
-            }
-            drop(leaf.open_verified()?);
-        } else if let Some(checkpoint) = evidence.checkpoint.as_ref() {
-            let (opened, _) = leaf.open_for_revalidation()?;
-            revalidate_frozen_prefix(
-                leaf.source_path(),
-                opened.as_ref(),
-                checkpoint.source_observation(),
-                checkpoint.complete_prefix_end(),
-                *checkpoint.complete_prefix_sha256(),
-            )?;
-        } else if source_observation(leaf.source(), leaf.observation())?
-            != *evidence.certificate.observation()
+        if !adapter.revalidate_leaf(leaf, &evidence.certificate, evidence.checkpoint.as_ref())? {
+            return Ok(false);
+        }
+    }
+    for (digest, owned) in &owned_sources {
+        if expected_sources.contains_key(digest) {
+            continue;
+        }
+        if current_by_descriptor
+            .get(digest)
+            .is_some_and(|current| current.source().exact_descriptor_eq(owned))
         {
             return Ok(false);
         }
@@ -109,7 +133,7 @@ pub(super) fn inventory_observation(
     provider: CaptureProvider,
     root: &Path,
     missing: bool,
-    authority: Option<&ProviderSourceRoot>,
+    authorities: &[Arc<ProviderSourceRoot>],
     leaves: &[JsonlFamilyLeaf],
     rejected_leaves: &[JsonlFamilyRejectedLeaf],
 ) -> Result<SourceInventoryObservation> {
@@ -118,8 +142,24 @@ pub(super) fn inventory_observation(
     digest.update([u8::from(missing)]);
     digest.update((leaves.len() as u64).to_be_bytes());
     digest.update((rejected_leaves.len() as u64).to_be_bytes());
-    if let Some(authority) = authority {
-        digest.update(authority.authority_fingerprint());
+    match authorities {
+        [] => {}
+        [authority] => {
+            // Preserve the v1 single-root digest exactly. Multi-root adapters
+            // use an explicit extension below without perturbing existing
+            // providers' generation identities.
+            digest.update(authority.authority_fingerprint());
+        }
+        authorities => {
+            digest.update(b"multi-root-authorities-v1\0");
+            digest.update((authorities.len() as u64).to_be_bytes());
+            for authority in authorities {
+                let path = authority.named_path().as_os_str().as_encoded_bytes();
+                digest.update((path.len() as u64).to_be_bytes());
+                digest.update(path);
+                digest.update(authority.authority_fingerprint());
+            }
+        }
     }
     for leaf in leaves {
         digest.update([0]);

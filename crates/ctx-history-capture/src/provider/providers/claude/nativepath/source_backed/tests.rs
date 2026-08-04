@@ -1,5 +1,6 @@
 use super::super::invocation_evidence::CLAUDE_MAX_EXACT_FILE_INVOCATIONS_PER_CALL;
 use super::*;
+use crate::repository_attribution::RepositoryAttributor;
 use ctx_history_core::{
     CertifiedSource, RepositoryFileInvocationKind, ScannedSourceCounts, SourceObservation,
 };
@@ -91,12 +92,17 @@ fn claude_oversized_command_abstains_without_session_cwd_fallback() {
     }))
     .unwrap();
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {
@@ -165,12 +171,17 @@ fn exact_file_invocations_emit_per_call_provider_neutral_evidence() {
     }))
     .unwrap();
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let expected = [
@@ -261,12 +272,17 @@ fn exact_multi_path_call_emits_one_call_local_vector_with_one_complete_input_ran
     }))
     .unwrap();
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {
@@ -639,7 +655,6 @@ fn test_projector() -> ClaudeProjector {
         identities: identities(&binding).unwrap(),
         binding,
         session: ClaudeSessionMetadata::new(key),
-        attributor: RepositoryAttributor::default(),
         pending_calls: HashMap::new(),
         linkage_capacity_exceeded: false,
         rejected_records: 0,
@@ -670,12 +685,17 @@ fn sixty_five_small_result_blocks_are_all_emitted() {
     assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
 
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert_eq!(emitted.len(), 65);
@@ -711,12 +731,17 @@ fn exact_multi_path_overflow_abstains_without_truncating_or_rejecting_the_record
     .unwrap();
 
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
     let [record] = emitted.as_slice() else {
         panic!("expected the overflowing native call to remain available");
@@ -756,12 +781,17 @@ fn exact_file_invocation_boundaries_are_typed_and_fail_closed() {
         }))
         .unwrap();
         let mut projector = test_projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let mut emitted = Vec::new();
         projector
-            .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-                emitted.push(record);
-                Ok(())
-            })
+            .project(
+                JsonlRecordRef::for_test(&bytes, 0),
+                &mut worker,
+                &mut |record| {
+                    emitted.push(record);
+                    Ok(())
+                },
+            )
             .unwrap();
         let [record] = emitted.as_slice() else {
             panic!("expected one boundary record for {count}");
@@ -805,12 +835,17 @@ fn exact_file_invocation_boundaries_are_typed_and_fail_closed() {
         }))
         .unwrap();
         let mut projector = test_projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let mut emitted = Vec::new();
         projector
-            .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-                emitted.push(record);
-                Ok(())
-            })
+            .project(
+                JsonlRecordRef::for_test(&bytes, 0),
+                &mut worker,
+                &mut |record| {
+                    emitted.push(record);
+                    Ok(())
+                },
+            )
             .unwrap();
         let [record] = emitted.as_slice() else {
             panic!("expected one inexact record");
@@ -853,26 +888,39 @@ fn malformed_empty_and_row_overflow_records_are_counted_rejections() {
         .contains("Claude result exceeds the representable row limit"));
 
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(malformed, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(malformed, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
     assert_eq!(projector.rejected_records(), 1);
     projector
-        .project(JsonlRecordRef::for_test(empty, 1), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(empty, 1),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
     assert_eq!(projector.rejected_records(), 2);
     projector
-        .project(JsonlRecordRef::for_test(&overflow, 2), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&overflow, 2),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert!(emitted.is_empty());
@@ -884,18 +932,27 @@ fn exact_linked_unknown_tool_result_is_emitted_without_outcome_evidence() {
     let call = br#"{"type":"assistant","uuid":"call-record","sessionId":"test-session","message":{"role":"assistant","content":[{"type":"tool_use","id":"unknown-call","name":"Read","input":{"file_path":"src/lib.rs"}}]}}"#;
     let result = br#"{"type":"user","uuid":"result-record","sessionId":"test-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"unknown-call","content":"exact unknown output"}]}}"#;
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(call, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(call, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
     projector
-        .project(JsonlRecordRef::for_test(result, 1), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(result, 1),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert_eq!(emitted.len(), 2);
@@ -931,12 +988,17 @@ fn over_8_mib_tool_result_is_admitted_complete_without_structured_body_duplicati
     assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
 
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {
@@ -981,12 +1043,17 @@ fn claude_large_tool_arguments_preserve_body_and_identity_within_aggregate_limit
     assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
 
     let mut projector = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {
@@ -1046,12 +1113,17 @@ fn source_storage_project_path_never_becomes_core_workspace() {
     let mut projector = test_projector();
     projector.binding.project_dir = PathBuf::from(source_storage);
     projector.source_path = format!("{source_storage}/test-session.jsonl");
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {
@@ -1158,7 +1230,6 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         binding: binding.clone(),
         identities,
         session: ClaudeSessionMetadata::new(key),
-        attributor: RepositoryAttributor::default(),
         pending_calls,
         linkage_capacity_exceeded,
         rejected_records: 0,

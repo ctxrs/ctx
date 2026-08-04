@@ -20,7 +20,7 @@ use std::{
 use super::{discover_inventory, normalization, openclaw_output_metadata};
 use crate::repository_attribution::{
     apply_annotation, linked_outcome_evidence, AttributionInput, LinkedOutcomeInput,
-    RepositoryAttributor, UnscopedFileObservation,
+    UnscopedFileObservation,
 };
 #[cfg(test)]
 use crate::OutputOutcome;
@@ -30,7 +30,8 @@ use crate::{
         normalization::{provider_explicit_result_value_text, provider_timestamp_value},
         source_backed::family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
+            JsonlRecordRef,
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
@@ -234,7 +235,6 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             session,
             index_file: compound.index_file,
             authority: Arc::clone(leaf.authority()),
-            attributor: RepositoryAttributor::default(),
             pending_calls,
             running_processes,
             linkage_capacity_exceeded,
@@ -254,7 +254,6 @@ struct OpenClawProjector {
     session: SessionState,
     index_file: Option<OpenedProviderSourceFile>,
     authority: Arc<ProviderSourceRoot>,
-    attributor: RepositoryAttributor,
     pending_calls: HashMap<String, PendingCallState>,
     running_processes: HashMap<String, PendingCallState>,
     linkage_capacity_exceeded: bool,

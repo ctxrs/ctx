@@ -147,13 +147,3 @@ pub(crate) fn route_coordinator_error(
         }
     }
 }
-
-fn capture_coordinator_error(
-    failure: &mut Option<SourceBackedRouteError>,
-    error: SourceBackedCoordinatorError,
-) -> CaptureError {
-    let error = route_coordinator_error(error);
-    let detail = error.to_string();
-    *failure = Some(error);
-    CaptureError::InvalidPayload(detail)
-}

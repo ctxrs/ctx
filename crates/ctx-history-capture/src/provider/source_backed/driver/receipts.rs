@@ -277,13 +277,24 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         emission: CoreRecordEmission,
     ) -> SourceBackedCoordinatorResult<()> {
-        let (prepared, _reservation) = emission.into_prepared();
+        let (prepared, reservation) = emission.into_prepared();
         self.writer.add_prepared_core_record(prepared)?;
+        drop(reservation);
         if let Some(report_progress) = self.record_progress.as_mut() {
             report_progress(SourceBackedRecordProgressDelta {
                 accepted_records: 1,
                 completed_bytes: 0,
             })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_core_record_emission_batch(
+        &mut self,
+        batch: CoreRecordEmissionBatch,
+    ) -> SourceBackedCoordinatorResult<()> {
+        for emission in batch.into_emissions() {
+            self.add_core_record_emission(emission)?;
         }
         Ok(())
     }

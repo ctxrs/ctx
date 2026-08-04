@@ -14,6 +14,13 @@ use super::{SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRout
 /// consumes each bounded emission.
 const SOURCE_BACKED_ROUTE_MAX_LIVE_CORE_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
 
+/// A protocol emission carries at most one ordinary JSONL/Codex page worth of
+/// Core records. JSONL input pages are already capped at 64 physical records;
+/// fan-out projectors are split into additional batches at this same bound.
+/// Exact prepared bytes remain governed independently by the shared 256 MiB
+/// live Core-output budget above.
+pub(crate) const SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS: usize = 64;
+
 /// Replacement-document workers may each stage one provider-bounded logical
 /// snapshot. The common document family uses at most four such workers and a
 /// 256 MiB per-snapshot bound, so this is an explicit aggregate physical-file
@@ -92,6 +99,13 @@ impl SourceBackedRouteResources {
 
     pub(crate) fn leaf_worker_budget(&self) -> usize {
         self.leaf_worker_budget
+    }
+
+    pub(crate) fn maximum_bytes(&self, kind: SourceBackedRouteResourceKind) -> u64 {
+        match kind {
+            SourceBackedRouteResourceKind::CoreOutput => self.output.maximum,
+            SourceBackedRouteResourceKind::LogicalSourceScratch => self.scratch.maximum,
+        }
     }
 
     pub(crate) fn reserve(
@@ -195,17 +209,38 @@ impl CoreRecordEmission {
         resources: &SourceBackedRouteResources,
         preparer: &CoreRecordPreparer,
     ) -> SourceBackedRouteResult<Self> {
-        let prepared = preparer.prepare(record).map_err(|error| {
+        let prepared = Self::prepare(record, preparer)?;
+        Self::from_prepared(prepared, resources)
+    }
+
+    pub(crate) fn prepare(
+        record: CoreRecord,
+        preparer: &CoreRecordPreparer,
+    ) -> SourceBackedRouteResult<PreparedCoreRecord> {
+        preparer.prepare(record).map_err(|error| {
             SourceBackedRouteError::new(core_preparation_error_kind(&error), error.to_string())
-        })?;
+        })
+    }
+
+    pub(crate) fn from_prepared(
+        prepared: PreparedCoreRecord,
+        resources: &SourceBackedRouteResources,
+    ) -> SourceBackedRouteResult<Self> {
         let reservation = resources.reserve(
             SourceBackedRouteResourceKind::CoreOutput,
             prepared.encoded_core_bytes(),
         )?;
-        Ok(Self {
+        Ok(Self::from_prepared_and_reservation(prepared, reservation))
+    }
+
+    pub(crate) fn from_prepared_and_reservation(
+        prepared: PreparedCoreRecord,
+        reservation: SourceBackedRouteByteReservation,
+    ) -> Self {
+        Self {
             prepared,
             reservation,
-        })
+        }
     }
 
     pub(crate) fn source(&self) -> &ctx_history_core::SourceKey {
@@ -218,6 +253,44 @@ impl CoreRecordEmission {
             reservation,
         } = self;
         (prepared, reservation)
+    }
+}
+
+/// One worker-prepared Core-record batch. Every record owns an independent
+/// reservation from the shared live output budget, so dropping a partially
+/// prepared batch or a rejected protocol message releases all of its bytes.
+#[derive(Debug)]
+pub(crate) struct CoreRecordEmissionBatch {
+    emissions: Vec<CoreRecordEmission>,
+}
+
+impl CoreRecordEmissionBatch {
+    pub(crate) fn from_emissions(
+        emissions: Vec<CoreRecordEmission>,
+    ) -> SourceBackedRouteResult<Self> {
+        if emissions.len() > SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS {
+            return Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Internal,
+                format!(
+                    "Core-record emission batch exceeds the shared {}-record protocol bound",
+                    SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS
+                ),
+            ));
+        }
+        Ok(Self { emissions })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.emissions.len()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &CoreRecordEmission> {
+        self.emissions.iter()
+    }
+
+    pub(crate) fn into_emissions(self) -> impl Iterator<Item = CoreRecordEmission> {
+        self.emissions.into_iter()
     }
 }
 

@@ -1,20 +1,25 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Barrier, Mutex,
     },
+    time::Duration,
 };
 
 use crate::provider::source_backed::{
-    CoreRecordEmission, SourceBackedLogicalSourceFailures, SourceBackedRecordRejections,
-    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResourceKind,
-    SourceBackedRouteResources,
+    CoreRecordEmission, SourceBackedCoordinatorError, SourceBackedCoordinatorResult,
+    SourceBackedLogicalSourceFailures, SourceBackedRecordProgressDelta,
+    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
+    SourceBackedRecordRejectionDrafts, SourceBackedRecordRejections, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteResourceKind, SourceBackedRouteResources,
+    SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS,
 };
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceAppend, CoreRecord,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceObservation, TypedKey, MAX_CORE_CONTENT_BYTES,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
+    CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceFrontier, SourceObservation, TypedKey,
+    MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
     CommitReceipt, GenerationWriter, SourceRouteIdentity, VerifiedIndex, WriterOptions,
@@ -111,9 +116,269 @@ impl SinkHarness {
         sink.run_parallel_leaf_scans(jobs, worker_count, scan)
     }
 
+    fn run_with_source_outcomes<L, R, F>(
+        &mut self,
+        jobs: Vec<ParallelLeafScanJob<L>>,
+        worker_count: usize,
+        scan: F,
+    ) -> Result<Vec<SourceBackedSourceOutcome<R>>, ParallelLeafScanError<TestWorkerFailure>>
+    where
+        L: Send,
+        R: Send,
+        F: Fn(
+                &ParallelLeafScanJob<L>,
+                &mut ParallelLeafScanEmitter<'_, R, TestWorkerFailure>,
+            ) -> TestWorkerResult
+            + Sync,
+    {
+        let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: self.writer.core_record_preparer(),
+            writer: &mut self.writer,
+            owners: &mut self.owners,
+            complete_inventories: &mut self.complete_inventories,
+            route_index: 0,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(self.leaf_worker_budget),
+            logical_source_failures: &mut self.logical_source_failures,
+            record_rejections: &mut self.record_rejections,
+            applied_removals: &mut Vec::new(),
+            record_progress: None,
+            current_source_progress: None,
+        };
+        sink.run_parallel_leaf_scans_with_source_outcomes(jobs, worker_count, scan)
+    }
+
+    fn run_with_worker_state<L, R, W, I, F>(
+        &mut self,
+        jobs: Vec<ParallelLeafScanJob<L>>,
+        worker_count: usize,
+        initialize_worker: I,
+        scan: F,
+    ) -> TestRunResult<R>
+    where
+        L: Send,
+        R: Send,
+        W: Send,
+        I: Fn(usize) -> W,
+        F: Fn(
+                &mut W,
+                &ParallelLeafScanJob<L>,
+                &mut ParallelLeafScanEmitter<'_, R, TestWorkerFailure>,
+            ) -> TestWorkerResult
+            + Sync,
+    {
+        let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: self.writer.core_record_preparer(),
+            writer: &mut self.writer,
+            owners: &mut self.owners,
+            complete_inventories: &mut self.complete_inventories,
+            route_index: 0,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(self.leaf_worker_budget),
+            logical_source_failures: &mut self.logical_source_failures,
+            record_rejections: &mut self.record_rejections,
+            applied_removals: &mut Vec::new(),
+            record_progress: None,
+            current_source_progress: None,
+        };
+        sink.run_parallel_leaf_scans_with_worker_state(jobs, worker_count, initialize_worker, scan)
+    }
+
+    fn run_with_resources_and_record_progress<L, R, F>(
+        &mut self,
+        jobs: Vec<ParallelLeafScanJob<L>>,
+        worker_count: usize,
+        resources: SourceBackedRouteResources,
+        report_progress: &mut dyn FnMut(
+            SourceBackedRecordProgressDelta,
+        ) -> SourceBackedCoordinatorResult<()>,
+        scan: F,
+    ) -> TestRunResult<R>
+    where
+        L: Send,
+        R: Send,
+        F: Fn(
+                &ParallelLeafScanJob<L>,
+                &mut ParallelLeafScanEmitter<'_, R, TestWorkerFailure>,
+            ) -> TestWorkerResult
+            + Sync,
+    {
+        let mut applied_removals = Vec::new();
+        let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: self.writer.core_record_preparer(),
+            writer: &mut self.writer,
+            owners: &mut self.owners,
+            complete_inventories: &mut self.complete_inventories,
+            route_index: 0,
+            route_identity: test_route_identity(),
+            resources,
+            logical_source_failures: &mut self.logical_source_failures,
+            record_rejections: &mut self.record_rejections,
+            applied_removals: &mut applied_removals,
+            record_progress: Some(report_progress),
+            current_source_progress: None,
+        };
+        sink.run_parallel_leaf_scans(jobs, worker_count, scan)
+    }
+
+    fn record_rejections(&mut self, rejections: SourceBackedRecordRejectionDrafts) {
+        let mut applied_removals = Vec::new();
+        let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: self.writer.core_record_preparer(),
+            writer: &mut self.writer,
+            owners: &mut self.owners,
+            complete_inventories: &mut self.complete_inventories,
+            route_index: 0,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(self.leaf_worker_budget),
+            logical_source_failures: &mut self.logical_source_failures,
+            record_rejections: &mut self.record_rejections,
+            applied_removals: &mut applied_removals,
+            record_progress: None,
+            current_source_progress: None,
+        };
+        sink.record_rejections(rejections);
+    }
+
     fn commit(self) -> CommitReceipt {
         self.writer.commit(|_| true).unwrap()
     }
+}
+
+struct TestWorkerState {
+    worker_index: usize,
+    jobs_seen: usize,
+    dropped: Arc<AtomicUsize>,
+}
+
+impl Drop for TestWorkerState {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn worker_state_is_initialized_once_per_stripe_and_reused_in_order() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let jobs = (0_u8..8)
+        .map(|id| {
+            let source = test_source(id);
+            ParallelLeafScanJob::new(
+                source,
+                ReplacementLeaf {
+                    id,
+                    document_count: 0,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let initialized = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let initialized_for_workers = Arc::clone(&initialized);
+    let dropped_for_workers = Arc::clone(&dropped);
+    let mut harness = SinkHarness::open(&temp.path().join("index"));
+    let results = harness
+        .run_with_worker_state(
+            jobs,
+            3,
+            move |worker_index| {
+                initialized_for_workers.fetch_add(1, Ordering::SeqCst);
+                TestWorkerState {
+                    worker_index,
+                    jobs_seen: 0,
+                    dropped: Arc::clone(&dropped_for_workers),
+                }
+            },
+            |worker, job, emitter| {
+                assert_eq!(usize::from(job.leaf().id) % 3, worker.worker_index);
+                worker.jobs_seen = worker.jobs_seen.saturating_add(1);
+                let source = job.source().clone();
+                emitter.begin(ParallelLeafScanBegin::replace(source.clone()))?;
+                emitter.complete(ParallelLeafScanComplete::replace(
+                    test_certificate(&source, 1, 0, false),
+                    (worker.worker_index, worker.jobs_seen),
+                ))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(initialized.load(Ordering::SeqCst), 3);
+    assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        results,
+        vec![
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (0, 3),
+            (1, 3)
+        ]
+    );
+}
+
+#[test]
+fn worker_state_is_dropped_for_every_stripe_after_provider_failure() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let jobs = (0_u8..4)
+        .map(|id| {
+            let source = test_source(id);
+            ParallelLeafScanJob::new(
+                source,
+                ReplacementLeaf {
+                    id,
+                    document_count: 0,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let initialized = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let initialized_for_workers = Arc::clone(&initialized);
+    let dropped_for_workers = Arc::clone(&dropped);
+    let mut harness = SinkHarness::open(&temp.path().join("index"));
+    let error = harness
+        .run_with_worker_state(
+            jobs,
+            2,
+            move |worker_index| {
+                initialized_for_workers.fetch_add(1, Ordering::SeqCst);
+                TestWorkerState {
+                    worker_index,
+                    jobs_seen: 0,
+                    dropped: Arc::clone(&dropped_for_workers),
+                }
+            },
+            |worker, job, emitter| {
+                if job.leaf().id == 0 {
+                    return Err(ParallelLeafScanWorkerError::provider(
+                        TestWorkerFailure::Injected,
+                    ));
+                }
+                worker.jobs_seen = worker.jobs_seen.saturating_add(1);
+                let source = job.source().clone();
+                emitter.begin(ParallelLeafScanBegin::replace(source.clone()))?;
+                emitter.complete(ParallelLeafScanComplete::replace(
+                    test_certificate(&source, 1, 0, false),
+                    (),
+                ))?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ParallelLeafScanError::Worker {
+            source: TestWorkerFailure::Injected,
+            ..
+        }
+    ));
+    assert_eq!(initialized.load(Ordering::SeqCst), 2);
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
 }
 
 #[derive(Debug)]
@@ -272,6 +537,167 @@ fn a_barrier_proves_all_forced_workers_scan_concurrently() {
             .collect::<HashSet<_>>(),
         (0..4).map(source_worker_thread_name).collect()
     );
+}
+
+#[test]
+fn ready_driven_transport_accepts_a_later_worker_while_the_first_job_is_withheld() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let mut harness = SinkHarness::open(&temp.path().join("index"));
+    let jobs = (0_u8..4)
+        .map(|id| ParallelLeafScanJob::new(test_source(id.saturating_add(40)), id))
+        .collect();
+    let rendezvous = Arc::new(Barrier::new(2));
+    let scan_rendezvous = Arc::clone(&rendezvous);
+    let (later_accepted_sender, later_accepted_receiver) = mpsc::channel();
+    let later_accepted_receiver = Mutex::new(later_accepted_receiver);
+
+    let results = harness
+        .run(jobs, 2, move |job, emitter| {
+            if *job.leaf() < 2 {
+                scan_rendezvous.wait();
+            }
+            if *job.leaf() == 0 {
+                let receiver = later_accepted_receiver.lock().unwrap();
+                for expected in [1, 3] {
+                    let accepted = receiver.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+                        ParallelLeafScanWorkerError::provider(TestWorkerFailure::Injected)
+                    })?;
+                    assert_eq!(accepted, expected);
+                }
+            }
+            emitter.complete(ParallelLeafScanComplete::Skipped {
+                result: *job.leaf(),
+            })?;
+            if *job.leaf() % 2 == 1 {
+                later_accepted_sender.send(*job.leaf()).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(results, [0, 1, 2, 3]);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FailureOrderingSummary {
+    failed_outcomes: Vec<bool>,
+    diagnostic_sources: Vec<SourceKey>,
+    rejection_lines: Vec<u64>,
+    omitted_failures: usize,
+    omitted_rejections: usize,
+}
+
+#[test]
+fn ready_driven_mixed_outcomes_finalize_diagnostics_in_canonical_job_order() {
+    let serial = run_failure_ordering_fixture(1, false);
+    let parallel = run_failure_ordering_fixture(16, true);
+
+    assert_eq!(parallel, serial);
+    assert_eq!(
+        parallel.failed_outcomes,
+        (0_u8..70).map(|id| id % 2 == 1).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        parallel.diagnostic_sources,
+        (0_u8..70)
+            .filter(|id| id % 2 == 1)
+            .map(test_source)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(parallel.rejection_lines, (0_u64..64).collect::<Vec<_>>());
+    assert_eq!(parallel.omitted_failures, 0);
+    assert_eq!(parallel.omitted_rejections, 6);
+}
+
+fn run_failure_ordering_fixture(
+    worker_count: usize,
+    force_out_of_order: bool,
+) -> FailureOrderingSummary {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let mut harness = SinkHarness::open(&temp.path().join("index"));
+    let jobs = (0_u8..70)
+        .map(|id| ParallelLeafScanJob::new(test_source(id), id))
+        .collect();
+    let (accepted_sender, accepted_receiver) = mpsc::channel();
+    let accepted_receiver = Mutex::new(accepted_receiver);
+    let mut outcomes = harness
+        .run_with_source_outcomes(jobs, worker_count, move |job, emitter| {
+            let id = *job.leaf();
+            if force_out_of_order && id == 0 {
+                let receiver = accepted_receiver.lock().unwrap();
+                for _ in 0..65 {
+                    receiver.recv_timeout(Duration::from_secs(5)).map_err(|_| {
+                        ParallelLeafScanWorkerError::provider(TestWorkerFailure::Injected)
+                    })?;
+                }
+            }
+            let mut rejections = SourceBackedRecordRejectionDrafts::default();
+            rejections.record(SourceBackedRecordRejectionDraft {
+                source: job.source().clone(),
+                provider: CaptureProvider::Codex,
+                source_selector: format!("source-{id}"),
+                line_number: u64::from(id),
+                payload_type: Some("fixture".to_owned()),
+                class: SourceBackedRecordRejectionClass::MalformedRecord,
+                detail: format!("rejection-{id}"),
+            });
+            if id % 2 == 0 {
+                emitter.complete(ParallelLeafScanComplete::Skipped {
+                    result: (id, rejections),
+                })?;
+            } else {
+                emitter.complete(ParallelLeafScanComplete::source_failure_with_rejections(
+                    job.source().clone(),
+                    None,
+                    SourceBackedRouteError::new(
+                        SourceBackedRouteErrorKind::InvalidSource,
+                        format!("failure-{id}"),
+                    ),
+                    rejections,
+                ))?;
+            }
+            if force_out_of_order && id % 16 != 0 {
+                accepted_sender.send(id).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let mut failed_outcomes = Vec::with_capacity(outcomes.len());
+    let mut canonical_rejections = SourceBackedRecordRejectionDrafts::default();
+    for (id, outcome) in outcomes.iter_mut().enumerate() {
+        match outcome {
+            SourceBackedSourceOutcome::Success((result_id, rejections)) => {
+                assert_eq!(usize::from(*result_id), id);
+                failed_outcomes.push(false);
+                canonical_rejections.merge(std::mem::take(rejections));
+            }
+            SourceBackedSourceOutcome::Failed(failure) => {
+                assert_eq!(failure.source, test_source(u8::try_from(id).unwrap()));
+                failed_outcomes.push(true);
+                canonical_rejections.merge(std::mem::take(&mut failure.record_rejections));
+            }
+        }
+    }
+    harness.record_rejections(canonical_rejections);
+
+    FailureOrderingSummary {
+        failed_outcomes,
+        diagnostic_sources: harness
+            .logical_source_failures
+            .failures()
+            .iter()
+            .map(|failure| failure.source.clone())
+            .collect(),
+        rejection_lines: harness
+            .record_rejections
+            .rejections()
+            .iter()
+            .map(|rejection| rejection.line_number)
+            .collect(),
+        omitted_failures: harness.logical_source_failures.omitted(),
+        omitted_rejections: harness.record_rejections.omitted(),
+    }
 }
 
 #[test]
@@ -728,6 +1154,453 @@ fn core_record_transport_is_a_zero_capacity_one_record_rendezvous() {
         ));
         finished_receiver.recv().unwrap();
     });
+}
+
+#[test]
+fn core_record_batch_transport_is_one_bounded_zero_capacity_rendezvous() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let harness = SinkHarness::open(&temp.path().join("index"));
+    let core_record_preparer = harness.writer.core_record_preparer();
+    let source = test_source(32);
+    let records = (1..=3)
+        .map(|sequence| test_core_record(&source, sequence, 32))
+        .collect::<Vec<_>>();
+    let resources = SourceBackedRouteResources::production(1);
+    let (sender, receiver) =
+        mpsc::sync_channel::<ParallelLeafWorkerEvent<(), TestWorkerFailure>>(0);
+    let cancellation = AtomicBool::new(false);
+    let barrier = Barrier::new(2);
+    let (finished_sender, finished_receiver) = mpsc::channel();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut emitter = ParallelLeafScanEmitter {
+                worker_index: 0,
+                job_index: 0,
+                sender: &sender,
+                cancellation: &cancellation,
+                resources: resources.clone(),
+                core_record_preparer: core_record_preparer.clone(),
+            };
+            barrier.wait();
+            emitter.emit_core_records(records).unwrap();
+            finished_sender.send(()).unwrap();
+        });
+
+        barrier.wait();
+        assert!(matches!(
+            finished_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let event = receiver.recv().unwrap();
+        let ParallelLeafWorkerEvent::Protocol { message, .. } = event else {
+            panic!("expected a protocol event");
+        };
+        let ParallelLeafProtocolMessage::CoreRecordBatch(batch) = *message else {
+            panic!("expected one Core-record batch");
+        };
+        assert_eq!(batch.len(), 3);
+        finished_receiver.recv().unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    });
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+
+    cancellation.store(true, Ordering::Release);
+    let mut invalid_record = test_core_record(&source, 4, 32);
+    invalid_record.source = test_source(132);
+    let mut emitter = ParallelLeafScanEmitter {
+        worker_index: 0,
+        job_index: 0,
+        sender: &sender,
+        cancellation: &cancellation,
+        resources: resources.clone(),
+        core_record_preparer,
+    };
+    let error = emitter.emit_core_records(vec![invalid_record]).unwrap_err();
+    assert!(matches!(error, ParallelLeafScanEmitError::Cancelled(_)));
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+}
+
+#[test]
+fn batch_emitter_streams_records_that_fit_individually_but_not_together() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let harness = SinkHarness::open(&temp.path().join("index"));
+    let core_record_preparer = harness.writer.core_record_preparer();
+    let source = test_source(35);
+    let records = (1..=2)
+        .map(|sequence| test_core_record(&source, sequence, 35))
+        .collect::<Vec<_>>();
+    let maximum_record_bytes = records
+        .iter()
+        .cloned()
+        .map(|record| {
+            u64::try_from(
+                core_record_preparer
+                    .prepare(record)
+                    .unwrap()
+                    .encoded_core_bytes(),
+            )
+            .unwrap()
+        })
+        .max()
+        .unwrap();
+    let resources = SourceBackedRouteResources::for_test(1, maximum_record_bytes, u64::MAX);
+    let (sender, receiver) =
+        mpsc::sync_channel::<ParallelLeafWorkerEvent<(), TestWorkerFailure>>(0);
+    let (finished_sender, finished_receiver) = mpsc::channel();
+    let cancellation = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut emitter = ParallelLeafScanEmitter {
+                worker_index: 0,
+                job_index: 0,
+                sender: &sender,
+                cancellation: &cancellation,
+                resources: resources.clone(),
+                core_record_preparer,
+            };
+            finished_sender
+                .send(emitter.emit_core_records(records))
+                .unwrap();
+        });
+
+        for _ in 0..2 {
+            let ParallelLeafWorkerEvent::Protocol { message, .. } = receiver.recv().unwrap() else {
+                panic!("expected a protocol event");
+            };
+            let ParallelLeafProtocolMessage::CoreRecordBatch(batch) = *message else {
+                panic!("expected a Core-record batch");
+            };
+            assert_eq!(batch.len(), 1);
+        }
+        finished_receiver.recv().unwrap().unwrap();
+    });
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+}
+
+#[test]
+fn batch_emitter_backpressures_multiple_workers_at_the_shared_byte_limit() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let harness = SinkHarness::open(&temp.path().join("index"));
+    let core_record_preparer = harness.writer.core_record_preparer();
+    let sources = [test_source(36), test_source(37)];
+    let records = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            test_core_record(source, u64::try_from(index).unwrap().saturating_add(1), 36)
+        })
+        .collect::<Vec<_>>();
+    let maximum_record_bytes = records
+        .iter()
+        .cloned()
+        .map(|record| {
+            u64::try_from(
+                core_record_preparer
+                    .prepare(record)
+                    .unwrap()
+                    .encoded_core_bytes(),
+            )
+            .unwrap()
+        })
+        .max()
+        .unwrap();
+    let resources = SourceBackedRouteResources::for_test(2, maximum_record_bytes, u64::MAX);
+    let (sender, receiver) =
+        mpsc::sync_channel::<ParallelLeafWorkerEvent<(), TestWorkerFailure>>(0);
+    let cancellation = AtomicBool::new(false);
+    let barrier = Barrier::new(3);
+
+    std::thread::scope(|scope| {
+        for (worker_index, record) in records.into_iter().enumerate() {
+            let sender = &sender;
+            let cancellation = &cancellation;
+            let barrier = &barrier;
+            let resources = resources.clone();
+            let core_record_preparer = core_record_preparer.clone();
+            scope.spawn(move || {
+                let mut emitter = ParallelLeafScanEmitter {
+                    worker_index,
+                    job_index: worker_index,
+                    sender,
+                    cancellation,
+                    resources,
+                    core_record_preparer,
+                };
+                barrier.wait();
+                emitter.emit_core_records(vec![record]).unwrap();
+            });
+        }
+
+        barrier.wait();
+        for _ in 0..2 {
+            let ParallelLeafWorkerEvent::Protocol { message, .. } = receiver.recv().unwrap() else {
+                panic!("expected a protocol event");
+            };
+            assert!(matches!(
+                *message,
+                ParallelLeafProtocolMessage::CoreRecordBatch(_)
+            ));
+        }
+    });
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+}
+
+#[test]
+fn batch_emitter_chunks_projector_fanout_at_the_protocol_bound() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let harness = SinkHarness::open(&temp.path().join("index"));
+    let core_record_preparer = harness.writer.core_record_preparer();
+    let source = test_source(33);
+    let records = (1..=u64::try_from(SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS + 1).unwrap())
+        .map(|sequence| test_core_record(&source, sequence, 33))
+        .collect::<Vec<_>>();
+    let (sender, receiver) =
+        mpsc::sync_channel::<ParallelLeafWorkerEvent<(), TestWorkerFailure>>(0);
+    let cancellation = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut emitter = ParallelLeafScanEmitter {
+                worker_index: 0,
+                job_index: 0,
+                sender: &sender,
+                cancellation: &cancellation,
+                resources: SourceBackedRouteResources::production(1),
+                core_record_preparer,
+            };
+            emitter.emit_core_records(records).unwrap();
+        });
+
+        let mut batch_lengths = Vec::new();
+        for _ in 0..2 {
+            let ParallelLeafWorkerEvent::Protocol { message, .. } = receiver.recv().unwrap() else {
+                panic!("expected a protocol event");
+            };
+            let ParallelLeafProtocolMessage::CoreRecordBatch(batch) = *message else {
+                panic!("expected a Core-record batch");
+            };
+            batch_lengths.push(batch.len());
+        }
+        assert_eq!(
+            batch_lengths,
+            [SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS, 1]
+        );
+    });
+}
+
+#[test]
+fn batch_application_preserves_order_accounts_progress_and_releases_reservations() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let source = test_source(34);
+    let records = (1..=3)
+        .map(|sequence| test_core_record(&source, sequence, 34))
+        .collect::<Vec<_>>();
+    let mut harness = SinkHarness::open(&index_root);
+    let preparer = harness.writer.core_record_preparer();
+    let prepared_sizes = records
+        .iter()
+        .cloned()
+        .map(|record| {
+            u64::try_from(preparer.prepare(record).unwrap().encoded_core_bytes()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let total_prepared_bytes = prepared_sizes.iter().copied().sum::<u64>();
+
+    let resources = SourceBackedRouteResources::for_test(1, total_prepared_bytes, u64::MAX);
+    let progress_resources = resources.clone();
+    let mut progress = Vec::new();
+    let mut live_bytes_after_acceptance = Vec::new();
+    let mut report_progress = |delta| {
+        progress.push(delta);
+        live_bytes_after_acceptance
+            .push(progress_resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput));
+        Ok(())
+    };
+    let job_source = source.clone();
+    let emitted_records = records.clone();
+    let results = harness
+        .run_with_resources_and_record_progress::<_, (), _>(
+            vec![ParallelLeafScanJob::new(source.clone(), ())],
+            1,
+            resources.clone(),
+            &mut report_progress,
+            move |job, emitter| {
+                emitter.begin(ParallelLeafScanBegin::replace(job.source().clone()))?;
+                emitter.emit_core_records(emitted_records.clone())?;
+                emitter.complete(ParallelLeafScanComplete::replace(
+                    test_certificate(&job_source, 34, 3, false),
+                    (),
+                ))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(results, [()]);
+    assert_eq!(
+        progress,
+        vec![
+            SourceBackedRecordProgressDelta {
+                accepted_records: 1,
+                completed_bytes: 0,
+            };
+            3
+        ]
+    );
+    assert_eq!(
+        live_bytes_after_acceptance,
+        [prepared_sizes[1] + prepared_sizes[2], prepared_sizes[2], 0,],
+        "each record reservation must be released immediately after writer acceptance"
+    );
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+
+    let batch_commit = harness.commit();
+
+    let reference_root = temp.path().join("reference-index");
+    let mut reference = SinkHarness::open(&reference_root);
+    let reference_source = source.clone();
+    let reference_records = records.clone();
+    reference
+        .run(
+            vec![ParallelLeafScanJob::new(source, ())],
+            1,
+            move |job, emitter| {
+                emitter.begin(ParallelLeafScanBegin::replace(job.source().clone()))?;
+                for record in reference_records.clone() {
+                    emitter.emit_core_record(record)?;
+                }
+                emitter.complete(ParallelLeafScanComplete::replace(
+                    test_certificate(&reference_source, 34, 3, false),
+                    (),
+                ))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    let reference_commit = reference.commit();
+    assert_eq!(
+        batch_commit.generation_id, reference_commit.generation_id,
+        "one batch must preserve the canonical order of the equivalent single-record emissions"
+    );
+}
+
+#[test]
+fn batch_validates_every_source_before_writing_and_propagates_progress_errors() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let expected = test_source(35);
+    let observed = test_source(36);
+    let resources = SourceBackedRouteResources::production(1);
+    let mut progress = Vec::new();
+    let mut report_progress = |delta| {
+        progress.push(delta);
+        Ok(())
+    };
+    let records = vec![
+        test_core_record(&expected, 1, 35),
+        test_core_record(&observed, 2, 35),
+        test_core_record(&expected, 3, 35),
+    ];
+    let mut harness = SinkHarness::open(&index_root);
+    let error = harness
+        .run_with_resources_and_record_progress::<_, (), _>(
+            vec![ParallelLeafScanJob::new(expected.clone(), ())],
+            1,
+            resources.clone(),
+            &mut report_progress,
+            move |job, emitter| {
+                emitter.begin(ParallelLeafScanBegin::replace(job.source().clone()))?;
+                emitter.emit_core_records(records.clone())?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ParallelLeafScanError::Protocol(ParallelLeafScanProtocolError::SourceMismatch {
+            job_index: 0,
+            message: ParallelLeafScanMessageKind::CoreRecordBatch,
+            ..
+        })
+    ));
+    assert!(
+        progress.is_empty(),
+        "the whole batch must validate before writes"
+    );
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+
+    let source = test_source(37);
+    let records = (1..=3)
+        .map(|sequence| test_core_record(&source, sequence, 37))
+        .collect::<Vec<_>>();
+    let resources = SourceBackedRouteResources::production(1);
+    let mut accepted = 0_u64;
+    let mut fail_progress = |delta: SourceBackedRecordProgressDelta| {
+        accepted = accepted.saturating_add(delta.accepted_records);
+        if accepted == 2 {
+            return Err(SourceBackedCoordinatorError::Progress(
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "injected batch progress failure",
+                ),
+            ));
+        }
+        Ok(())
+    };
+    let mut harness = SinkHarness::open(&temp.path().join("progress-index"));
+    let error = harness
+        .run_with_resources_and_record_progress::<_, (), _>(
+            vec![ParallelLeafScanJob::new(source, ())],
+            1,
+            resources.clone(),
+            &mut fail_progress,
+            move |job, emitter| {
+                emitter.begin(ParallelLeafScanBegin::replace(job.source().clone()))?;
+                emitter.emit_core_records(records.clone())?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ParallelLeafScanError::Sink {
+            operation: ParallelLeafSinkOperation::AddCoreRecordBatch,
+            source: SourceBackedCoordinatorError::Progress(SourceBackedRouteError {
+                detail,
+                ..
+            }),
+            ..
+        } if detail == "injected batch progress failure"
+    ));
+    assert_eq!(accepted, 2);
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0,
+        "a coordinator error must release the accepted and unconsumed batch reservations"
+    );
 }
 
 #[test]

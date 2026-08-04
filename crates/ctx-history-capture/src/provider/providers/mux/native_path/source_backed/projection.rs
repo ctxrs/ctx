@@ -23,8 +23,8 @@ use crate::{
             mux_provider_event_id, mux_result_content, MuxMessageRow, MuxOutputProjection,
         },
         source_backed::family::jsonl::{
-            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlReader, JsonlRecordRef,
-            JsonlSourceIdentity,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlReader,
+            JsonlRecordRef, JsonlSourceIdentity,
         },
         source_backed::FallbackEventIdentityState,
     },
@@ -264,12 +264,17 @@ impl JsonlFamilyProjector for MuxProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         self.project_record(self.binding.primary_stream, record, emit)
     }
 
-    fn finish_projecting(&mut self, emit: &mut dyn FnMut(CoreRecord) -> Result<()>) -> Result<()> {
+    fn finish_projecting(
+        &mut self,
+        _worker: &mut JsonlFamilyWorkerContext,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
         if !self.binding.primary_stream.is_partial() {
             if let Some(partial) = self.binding.partial.clone() {
                 let source_file = open_verified(&self.authority, &partial)?;

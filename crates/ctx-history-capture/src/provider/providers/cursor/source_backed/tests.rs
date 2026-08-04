@@ -57,7 +57,6 @@ mod repository_tests {
             source,
             native_session_id,
             session_id,
-            repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
             event_identities: CursorEventIdentityState::default(),
@@ -120,8 +119,9 @@ mod repository_tests {
         .to_string();
         let result = r#"{"timestamp":"2026-07-31T12:00:01Z","role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"untrusted prose oid deadbeef"}]}}"#;
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
 
-        let call_annotation = projector.attribution_for_event(&event(&call, 1));
+        let call_annotation = projector.attribution_for_event(&mut worker, &event(&call, 1));
         assert_eq!(call_annotation.repository_bindings.len(), 1);
         assert_eq!(
             call_annotation
@@ -135,7 +135,7 @@ mod repository_tests {
             "src/lib.rs"
         );
 
-        let result_annotation = projector.attribution_for_event(&event(result, 2));
+        let result_annotation = projector.attribution_for_event(&mut worker, &event(result, 2));
         assert_eq!(result_annotation.repository_bindings.len(), 1);
         assert!(result_annotation.repository_vcs_observations.is_empty());
         assert!(has_reason(
@@ -168,8 +168,9 @@ mod repository_tests {
         .to_string();
         let result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"write-local","content":"done"}]}}"#;
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let call_event = event(&call, 1);
-        let call_annotation = projector.attribution_for_event(&call_event);
+        let call_annotation = projector.attribution_for_event(&mut worker, &call_event);
         assert_eq!(call_annotation.repository_file_invocation_evidence.len(), 1);
         assert_eq!(call_annotation.repository_file_observations.len(), 1);
         assert_eq!(
@@ -177,8 +178,8 @@ mod repository_tests {
             "src/lib.rs"
         );
         assert_eq!(
-            projector
-                .repository_attributor
+            worker
+                .repository_attributor()
                 .full_certification_probe_count(),
             1
         );
@@ -204,7 +205,7 @@ mod repository_tests {
             normalized_body
         );
 
-        let result_annotation = projector.attribution_for_event(&event(result, 2));
+        let result_annotation = projector.attribution_for_event(&mut worker, &event(result, 2));
         assert!(result_annotation
             .repository_file_invocation_evidence
             .is_empty());
@@ -216,6 +217,7 @@ mod repository_tests {
         let temp = TempDir::new().unwrap();
         let repo = repository(&temp);
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let dynamic = serde_json::json!({
             "role": "assistant",
             "message": {"role": "assistant", "content": [{
@@ -226,7 +228,7 @@ mod repository_tests {
             }]}
         })
         .to_string();
-        let dynamic_annotation = projector.attribution_for_event(&event(&dynamic, 1));
+        let dynamic_annotation = projector.attribution_for_event(&mut worker, &event(&dynamic, 1));
         assert!(dynamic_annotation.repository_bindings.is_empty());
         assert!(has_reason(
             &dynamic_annotation,
@@ -243,9 +245,10 @@ mod repository_tests {
             }]}
         })
         .to_string();
-        projector.attribution_for_event(&event(&rewrite, 2));
+        projector.attribution_for_event(&mut worker, &event(&rewrite, 2));
         let rewrite_result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"rewrite","content":"success without structured replacement lineage"}]}}"#;
-        let rewrite_annotation = projector.attribution_for_event(&event(rewrite_result, 3));
+        let rewrite_annotation =
+            projector.attribution_for_event(&mut worker, &event(rewrite_result, 3));
         assert!(rewrite_annotation.repository_vcs_observations.is_empty());
         assert!(has_reason(
             &rewrite_annotation,
@@ -265,9 +268,9 @@ mod repository_tests {
             }]}
         })
         .to_string();
-        projector.attribution_for_event(&event(&pr, 4));
+        projector.attribution_for_event(&mut worker, &event(&pr, 4));
         let pr_result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"pr","content":"URL prose is not structured outcome authority"}]}}"#;
-        let pr_annotation = projector.attribution_for_event(&event(pr_result, 5));
+        let pr_annotation = projector.attribution_for_event(&mut worker, &event(pr_result, 5));
         assert!(pr_annotation.repository_vcs_observations.is_empty());
         assert!(has_reason(
             &pr_annotation,
@@ -275,7 +278,8 @@ mod repository_tests {
         ));
 
         let ambiguous_result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"rewrite","tool_use_id":"other","content":"ignored"}]}}"#;
-        let ambiguous_annotation = projector.attribution_for_event(&event(ambiguous_result, 6));
+        let ambiguous_annotation =
+            projector.attribution_for_event(&mut worker, &event(ambiguous_result, 6));
         assert!(has_reason(
             &ambiguous_annotation,
             RepositoryAbstentionReason::ProviderOutputUnjoined
@@ -285,8 +289,9 @@ mod repository_tests {
     #[test]
     fn cursor_synthetic_native_contract_does_not_establish_real_history_parity() {
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let relative_only = r#"{"role":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"call","name":"write_file","input":{"path":"src/unproven.rs"}}]}}"#;
-        let annotation = projector.attribution_for_event(&event(relative_only, 1));
+        let annotation = projector.attribution_for_event(&mut worker, &event(relative_only, 1));
         assert!(annotation.repository_bindings.is_empty());
         assert!(annotation.repository_vcs_observations.is_empty());
         assert!(has_reason(
@@ -309,7 +314,9 @@ mod repository_tests {
             &format!(r#"{{"paths":{exact_paths_json}}}"#),
         );
         let mut exact_projector = projector();
-        let exact_annotation = exact_projector.attribution_for_event(&event(&exact_call, 1));
+        let mut exact_worker = JsonlFamilyWorkerContext::default();
+        let exact_annotation =
+            exact_projector.attribution_for_event(&mut exact_worker, &event(&exact_call, 1));
         assert_eq!(exact_annotation.repository_bindings.len(), 1);
         assert_eq!(
             exact_annotation.repository_file_invocation_evidence.len(),
@@ -320,8 +327,8 @@ mod repository_tests {
             MAX_CURSOR_INPUT_PATHS
         );
         assert_eq!(
-            exact_projector
-                .repository_attributor
+            exact_worker
+                .repository_attributor()
                 .full_certification_probe_count(),
             1
         );
@@ -351,6 +358,7 @@ mod repository_tests {
         {
             let call = raw_tool_call(call_id, &input);
             let mut overflow_projector = projector();
+            let mut overflow_worker = JsonlFamilyWorkerContext::default();
             let call_event = event(&call, ordinal as u64 + 2);
             let native_content = match &call_event.body {
                 CursorEventBody::ToolCall { native_content, .. } => native_content.clone(),
@@ -373,7 +381,8 @@ mod repository_tests {
                 );
             }
 
-            let annotation = overflow_projector.attribution_for_event(&call_event);
+            let annotation =
+                overflow_projector.attribution_for_event(&mut overflow_worker, &call_event);
             assert_eq!(annotation.repository_bindings.len(), 1);
             assert_eq!(
                 annotation.repository_file_observations.len(),
@@ -410,8 +419,8 @@ mod repository_tests {
             let result = format!(
                 r#"{{"role":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{call_id}","content":"complete result"}}]}}}}"#
             );
-            let result_annotation =
-                overflow_projector.attribution_for_event(&event(&result, ordinal as u64 + 10));
+            let result_annotation = overflow_projector
+                .attribution_for_event(&mut overflow_worker, &event(&result, ordinal as u64 + 10));
             assert!(result_annotation.repository_bindings.is_empty());
             assert!(result_annotation.repository_file_observations.is_empty());
             assert_eq!(
@@ -449,6 +458,7 @@ mod repository_tests {
         })
         .to_string();
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let call_event = event(&call, 1);
         let native_content = match &call_event.body {
             CursorEventBody::ToolCall { native_content, .. } => native_content.clone(),
@@ -458,7 +468,7 @@ mod repository_tests {
             .pointer("/input/paths/1/unexpected")
             .is_some());
 
-        let annotation = projector.attribution_for_event(&call_event);
+        let annotation = projector.attribution_for_event(&mut worker, &call_event);
         assert_eq!(annotation.repository_bindings.len(), 1);
         assert_eq!(annotation.repository_file_observations.len(), 1);
         assert_eq!(
@@ -481,7 +491,7 @@ mod repository_tests {
         assert_eq!(complete_body, native_content);
 
         let result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"invalid-path-shape","content":"complete result"}]}}"#;
-        let result_annotation = projector.attribution_for_event(&event(result, 2));
+        let result_annotation = projector.attribution_for_event(&mut worker, &event(result, 2));
         assert_eq!(result_annotation.repository_bindings.len(), 1);
         assert_eq!(result_annotation.repository_file_observations.len(), 1);
         assert_eq!(
@@ -520,6 +530,7 @@ mod repository_tests {
         })
         .to_string();
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let call_event = event(&call, 1);
         let native_content = match &call_event.body {
             CursorEventBody::ToolCall { native_content, .. } => native_content.clone(),
@@ -530,7 +541,7 @@ mod repository_tests {
             native_content.pointer("/input/file_path")
         );
 
-        let annotation = projector.attribution_for_event(&call_event);
+        let annotation = projector.attribution_for_event(&mut worker, &call_event);
         assert_eq!(annotation.repository_bindings.len(), 1);
         assert_eq!(annotation.repository_file_observations.len(), 1);
         assert_eq!(
@@ -552,6 +563,7 @@ mod repository_tests {
     #[test]
     fn cursor_checkpoint_byte_overflow_is_a_typed_capacity_abstention() {
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         projector.remember_tool_context(
             "oversized-call",
             CursorToolContextState::Exact(CursorToolContext {
@@ -565,7 +577,7 @@ mod repository_tests {
         assert!(encode_cursor_checkpoint(&projector).is_ok());
 
         let result = r#"{"role":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"oversized-call","content":"exact output"}]}}"#;
-        let annotation = projector.attribution_for_event(&event(result, 2));
+        let annotation = projector.attribution_for_event(&mut worker, &event(result, 2));
         assert!(has_reason(
             &annotation,
             RepositoryAbstentionReason::LinkageCapacityExceeded
@@ -692,7 +704,6 @@ mod fidelity_identity_tests {
             source,
             native_session_id,
             session_id,
-            repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
             event_identities: CursorEventIdentityState::default(),
@@ -701,8 +712,9 @@ mod fidelity_identity_tests {
 
     fn projected_core(row: &Value) -> CoreRecord {
         let mut projector = projector();
+        let mut worker = JsonlFamilyWorkerContext::default();
         let event = event(row, 0);
-        let annotation = projector.attribution_for_event(&event);
+        let annotation = projector.attribution_for_event(&mut worker, &event);
         let duplicate_occurrence = next_event_occurrence(
             &event,
             &projector.source,
@@ -982,14 +994,15 @@ mod fidelity_identity_tests {
             }]}
         });
         let mut initial = projector();
-        initial.attribution_for_event(&event(&call, 0));
+        let mut worker = JsonlFamilyWorkerContext::default();
+        initial.attribution_for_event(&mut worker, &event(&call, 0));
         let checkpoint = encode_cursor_checkpoint(&initial).unwrap();
         let restored = decode_cursor_checkpoint(&checkpoint, &initial.native_session_id).unwrap();
         let mut appended = projector();
         appended.tool_contexts = restored.tool_contexts;
         appended.linkage_capacity_exceeded = restored.linkage_capacity_exceeded;
 
-        let annotation = appended.attribution_for_event(&event(&result, 1));
+        let annotation = appended.attribution_for_event(&mut worker, &event(&result, 1));
         assert!(!annotation.repository_abstentions.iter().any(|abstention| {
             matches!(
                 abstention.reason,

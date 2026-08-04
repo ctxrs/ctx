@@ -29,7 +29,8 @@ use crate::{
         family::jsonl::{
             observe_opened_file, probe_first_record, JsonlFamilyAdapter, JsonlFamilyAppendMode,
             JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector,
-            JsonlFamilyRejectedLeaf, JsonlOversizedRecordPolicy, JsonlRecordRef,
+            JsonlFamilyRejectedLeaf, JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy,
+            JsonlRecordRef,
         },
         FallbackEventIdentityState,
     },
@@ -601,6 +602,7 @@ impl JsonlFamilyProjector for DirectJsonlFamilyProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let projected = self.projector.project_record(record)?;

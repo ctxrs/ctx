@@ -1,4 +1,5 @@
 use super::*;
+use crate::repository_attribution::RepositoryAttributor;
 use ctx_history_core::{
     CertifiedSource, RepositoryFileInvocationKind, ScannedSourceCounts, SourceObservation,
 };
@@ -36,7 +37,6 @@ fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
             session,
             index_file: None,
             authority,
-            attributor: RepositoryAttributor::default(),
             pending_calls: HashMap::new(),
             running_processes: HashMap::new(),
             linkage_capacity_exceeded: false,
@@ -238,12 +238,17 @@ fn every_tool_call_block_projects_with_a_stable_selector() {
     });
     let bytes = serde_json::to_vec(&value).unwrap();
     let (_temp, mut projector) = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     assert_eq!(emitted.len(), 2);
@@ -287,12 +292,17 @@ fn every_tool_call_block_projects_with_a_stable_selector() {
         .is_some_and(|body| body.contains("call-b")));
 
     let (_temp, mut replay) = test_projector();
+    let mut replay_worker = JsonlFamilyWorkerContext::default();
     let mut replayed = Vec::new();
     replay
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            replayed.push(record.event_id);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut replay_worker,
+            &mut |record| {
+                replayed.push(record.event_id);
+                Ok(())
+            },
+        )
         .unwrap();
     assert_eq!(
         emitted
@@ -383,10 +393,12 @@ fn strict_tool_call_ambiguity_rename_and_overflow_abstain_without_narrowing_obse
     }))
     .unwrap();
     let (_temp, mut projector) = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
         .project(
             JsonlRecordRef::for_test(&overflow_record, 0),
+            &mut worker,
             &mut |record| {
                 emitted.push(record);
                 Ok(())
@@ -441,6 +453,7 @@ fn strict_tool_call_ambiguity_rename_and_overflow_abstain_without_narrowing_obse
 #[test]
 fn strict_tool_call_evidence_is_scoped_additively_and_selects_the_complete_call() {
     let (temp, mut projector) = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let repository = temp.path().join("repository");
     fs::create_dir(&repository).unwrap();
     run_git(&repository, &["init", "-q"]);
@@ -455,7 +468,11 @@ fn strict_tool_call_evidence_is_scoped_additively_and_selects_the_complete_call(
     }))
     .unwrap();
     projector
-        .project(JsonlRecordRef::for_test(&header, 0), &mut |_| Ok(()))
+        .project(
+            JsonlRecordRef::for_test(&header, 0),
+            &mut worker,
+            &mut |_| Ok(()),
+        )
         .unwrap();
     let call = serde_json::to_vec(&serde_json::json!({
         "type": "message",
@@ -474,10 +491,14 @@ fn strict_tool_call_evidence_is_scoped_additively_and_selects_the_complete_call(
     .unwrap();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&call, 1), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&call, 1),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {
@@ -526,12 +547,17 @@ fn openclaw_large_tool_arguments_preserve_body_and_identity_within_aggregate_lim
     let bytes = serde_json::to_vec(&value).unwrap();
     assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
     let (_temp, mut projector) = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {
@@ -607,11 +633,13 @@ fn running_result_is_emitted_before_continuation_state_is_checkpointed() {
     }))
     .unwrap();
     let (_temp, mut projector) = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     for (ordinal, bytes) in [&call, &running].into_iter().enumerate() {
         projector
             .project(
                 JsonlRecordRef::for_test(bytes, ordinal as u64),
+                &mut worker,
                 &mut |record| {
                     emitted.push(record);
                     Ok(())
@@ -805,7 +833,6 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         session,
         index_file: None,
         authority,
-        attributor: RepositoryAttributor::default(),
         pending_calls,
         running_processes: HashMap::new(),
         linkage_capacity_exceeded,
@@ -915,12 +942,17 @@ fn over_8_mib_tool_result_is_admitted_complete_without_structured_body_duplicati
     assert!(bytes.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
 
     let (_temp, mut projector) = test_projector();
+    let mut worker = JsonlFamilyWorkerContext::default();
     let mut emitted = Vec::new();
     projector
-        .project(JsonlRecordRef::for_test(&bytes, 0), &mut |record| {
-            emitted.push(record);
-            Ok(())
-        })
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
         .unwrap();
 
     let [record] = emitted.as_slice() else {

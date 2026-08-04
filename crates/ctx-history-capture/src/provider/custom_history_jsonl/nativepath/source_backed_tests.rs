@@ -559,6 +559,40 @@ fn registered_route_preserves_lifecycle_and_reads_only_core_after_publication() 
     assert_eq!(exact.sources, cold.sources);
     assert_eq!(custom_history_source_backed_work().projection_parses, 0);
 
+    append_record(&path, &event(2, "event-c", "root", "gamma family append"));
+    let (_, appended_records, _) = collect(&input, None);
+    let appended_event_id = appended_records
+        .iter()
+        .find(|record| body(record) == "gamma family append")
+        .unwrap()
+        .event_id;
+    reset_custom_history_source_backed_work();
+    let appended =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(appended.commit.indexed_documents, 3);
+    assert_eq!(custom_history_source_backed_work().projection_parses, 1);
+    assert_eq!(custom_history_source_backed_work().source_read_passes, 1);
+    let appended_index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(
+        body(
+            &appended_index
+                .core_record_by_id(event_ids[0].as_uuid())
+                .unwrap()
+                .unwrap()
+        ),
+        "alpha exact"
+    );
+    assert_eq!(
+        body(
+            &appended_index
+                .core_record_by_id(appended_event_id.as_uuid())
+                .unwrap()
+                .unwrap()
+        ),
+        "gamma family append"
+    );
+    drop(appended_index);
+
     write_records(
         &path,
         &[
@@ -573,7 +607,7 @@ fn registered_route_preserves_lifecycle_and_reads_only_core_after_publication() 
     let replacement =
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     assert_eq!(replacement.commit.indexed_documents, 2);
-    assert_ne!(replacement.sources, exact.sources);
+    assert_ne!(replacement.sources, appended.sources);
     assert_eq!(custom_history_source_backed_work().projection_parses, 1);
     assert_eq!(
         body(
@@ -601,7 +635,95 @@ fn registered_route_preserves_lifecycle_and_reads_only_core_after_publication() 
 }
 
 #[test]
-fn structural_manifest_failure_retains_the_published_generation_and_restores() {
+fn registered_route_replaces_when_append_closes_a_forward_reference() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("registered-forward-reference.jsonl");
+    write_records(
+        &path,
+        &[
+            manifest(),
+            source(),
+            event(0, "forward-event", "late-session", "family now retained"),
+        ],
+    );
+    let input = CustomHistorySourceBackedInput::explicit(&path, [24; 32]);
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_custom_history_source_backed_route(
+        &mut registry,
+        explicit_provider_source(&path),
+        [24; 32],
+    )
+    .unwrap();
+    let index_root = temp.path().join("forward-index");
+
+    let cold =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(cold.commit.indexed_documents, 0);
+    assert_eq!(cold.sources.len(), 1);
+
+    reset_custom_history_source_backed_work();
+    let exact =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(exact.sources, cold.sources);
+    assert_eq!(custom_history_source_backed_work().projection_parses, 0);
+
+    append_record(&path, &session("late-session", None, true));
+    let (_, closure_records, _) = collect(&input, None);
+    let forward_event_id = closure_records[0].event_id;
+    reset_custom_history_source_backed_work();
+    let closure =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(closure.commit.indexed_documents, 1);
+    let closure_work = custom_history_source_backed_work();
+    assert_eq!(closure_work.projection_parses, 1);
+    assert_eq!(closure_work.source_read_passes, 1);
+    assert_eq!(closure_work.retained_events_before_prior_prefix, 1);
+    assert_eq!(
+        body(
+            &VerifiedIndex::open_pinned(&index_root)
+                .unwrap()
+                .core_record_by_id(forward_event_id.as_uuid())
+                .unwrap()
+                .unwrap()
+        ),
+        "family now retained"
+    );
+
+    append_record(
+        &path,
+        &event(
+            1,
+            "ordinary-after-closure",
+            "late-session",
+            "family ordinary append",
+        ),
+    );
+    let (_, appended_records, _) = collect(&input, None);
+    let appended_event_id = appended_records
+        .iter()
+        .find(|record| body(record) == "family ordinary append")
+        .unwrap()
+        .event_id;
+    reset_custom_history_source_backed_work();
+    let appended =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(appended.commit.indexed_documents, 2);
+    assert_eq!(custom_history_source_backed_work().projection_parses, 1);
+    assert_eq!(custom_history_source_backed_work().source_read_passes, 1);
+    assert_eq!(
+        body(
+            &VerifiedIndex::open_pinned(&index_root)
+                .unwrap()
+                .core_record_by_id(appended_event_id.as_uuid())
+                .unwrap()
+                .unwrap()
+        ),
+        "family ordinary append"
+    );
+}
+
+#[test]
+fn structural_manifest_failures_retain_the_published_generation_and_restore() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("retained-across-invalidity.jsonl");
     let valid_lines = write_records(
@@ -627,6 +749,25 @@ fn structural_manifest_failure_retains_the_published_generation_and_restores() {
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     let initial_generation = initial.commit.generation_id.clone();
     assert_eq!(initial.commit.indexed_documents, 1);
+
+    let mut incompatible_manifest = manifest();
+    incompatible_manifest["schema_version"] = json!("ctx-history-jsonl-v2");
+    write_records(
+        &path,
+        &[
+            incompatible_manifest,
+            source(),
+            session("root", None, true),
+            event(0, "incompatible-event", "root", "must not publish"),
+        ],
+    );
+    let incompatible =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_carried_route_failure(
+        &incompatible,
+        &initial_generation,
+        SourceBackedSourceFailureClass::Incompatible,
+    );
 
     fs::write(&path, []).unwrap();
     let failed =
@@ -901,6 +1042,14 @@ fn source_backed_custom_adapter_has_no_preview_or_store_body_fallback() {
     assert!(!source.contains("ctx_history_store"));
     assert!(!source.contains("SourceRecordLocator"));
     assert!(!source.contains("hydrate_"));
+    assert!(source.contains("scan_optimized_leaf"));
+    assert!(source.contains("base_source_path"));
+    assert!(source.contains("revalidate_leaf"));
+
+    let registration = include_str!("../../source_backed/registration/families/jsonl/other.rs");
+    assert!(registration.contains("custom_history_jsonl_family_adapter"));
+    assert!(registration.contains("jsonl_family_driver"));
+    assert!(!registration.contains("SourceBackedRouteDriver::new"));
 }
 
 #[test]

@@ -30,7 +30,7 @@ use crate::{
         executable_route,
         family::jsonl::{
             jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlRecordRef,
+            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlRecordRef,
         },
         SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
         SourceBackedSelectorAuthority,
@@ -225,7 +225,6 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
             root_session_id,
             source_file,
             authority: Arc::clone(leaf.authority()),
-            repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
             native_item_ids: GeminiSourceNativeItemIds::default(),
@@ -243,7 +242,6 @@ struct GeminiProjector {
     root_session_id: StableEntityId,
     source_file: Arc<OpenedProviderSourceFile>,
     authority: Arc<ProviderSourceRoot>,
-    repository_attributor: crate::repository_attribution::RepositoryAttributor,
     tool_contexts: BTreeMap<String, GeminiToolContextState>,
     linkage_capacity_exceeded: bool,
     native_item_ids: GeminiSourceNativeItemIds,
@@ -324,6 +322,7 @@ impl JsonlFamilyProjector for GeminiProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
     ) -> crate::Result<()> {
         let native_item_id = self.native_item_ids.candidate(record.bytes());
@@ -353,7 +352,13 @@ impl JsonlFamilyProjector for GeminiProjector {
             if !self.emitted_event_digests.insert(event_id.digest()) {
                 continue;
             }
-            let annotation = self.attribution_for_event(&event);
+            let annotation = gemini_attribution_for_event(
+                worker.repository_attributor(),
+                &self.session,
+                &mut self.tool_contexts,
+                &mut self.linkage_capacity_exceeded,
+                &event,
+            );
             emit(
                 project_event(
                     &self.source,
@@ -374,21 +379,6 @@ impl JsonlFamilyProjector for GeminiProjector {
         self.parser.finish().map_err(capture_scan_error)?;
         self.source_file.revalidate_leaf()?;
         self.authority.revalidate()
-    }
-}
-
-impl GeminiProjector {
-    fn attribution_for_event(
-        &mut self,
-        event: &super::GeminiRetainedEvent,
-    ) -> ctx_history_core::CoreRecordAnnotation {
-        gemini_attribution_for_event(
-            &mut self.repository_attributor,
-            &self.session,
-            &mut self.tool_contexts,
-            &mut self.linkage_capacity_exceeded,
-            event,
-        )
     }
 }
 

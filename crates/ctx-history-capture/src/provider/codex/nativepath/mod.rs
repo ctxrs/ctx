@@ -10,12 +10,7 @@ mod source_backed;
 
 pub(crate) use checkpoint::{CodexNativeCheckpoint, MAX_CODEX_TOOL_CONTEXTS};
 pub(crate) use prompt_history::{
-    observe_codex_prompt_history_source_backed_explicit_v0,
-    plan_codex_prompt_history_source_backed_v0, revalidate_codex_prompt_history_source_backed_v0,
-    scan_codex_prompt_history_source_backed_v0,
-    stage_planned_codex_prompt_history_source_backed_v0,
-    CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedErrorV0,
-    CodexPromptHistorySourceBackedInputV0,
+    CodexPromptHistoryJsonlFamilyAdapterV0, CodexPromptHistorySourceBackedInputV0,
 };
 #[cfg(test)]
 pub(crate) use reader::{
@@ -34,16 +29,13 @@ pub(crate) use source::{
 #[cfg(test)]
 pub(crate) use source::{CodexCatalogSource, CodexSourceIdentity};
 pub(crate) use source_backed::{
-    discover_codex_session_tree_inventory_v0, ingest_codex_sources_serial_v0,
-    ingest_codex_sources_v0, managed_codex_session_source,
-    observe_codex_explicit_session_source_backed_v0,
-    source_observation as codex_source_observation, CodexExplicitSessionSourceBackedInputV0,
-    CodexSessionTreeInventoryV0, CodexSourceBackedCountersV0, CodexSourceBackedErrorV0,
-    CodexSourceBackedPhaseTimingsV0, CodexSourceBackedResultV0, CodexTerminalSourceEvidenceV0,
+    codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,
+    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeJsonlFamilyAdapterV0,
 };
 #[cfg(test)]
 pub(crate) use source_backed::{
     install_after_codex_directory_visit_hook, install_after_codex_metadata_inventory_hook,
+    CodexSourceBackedCountersV0,
 };
 #[cfg(test)]
 mod tests;

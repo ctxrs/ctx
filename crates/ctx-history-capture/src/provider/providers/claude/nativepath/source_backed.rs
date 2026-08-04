@@ -28,8 +28,7 @@ use super::{
 };
 use crate::repository_attribution::{
     apply_annotation, linked_outcome_evidence, AttributionInput, CommandEvidenceDisposition,
-    LinkedOutcomeInput, RepositoryAttributor, UnscopedFileObservation,
-    UnscopedRepositoryFileInvocationEvidence,
+    LinkedOutcomeInput, UnscopedFileObservation, UnscopedRepositoryFileInvocationEvidence,
 };
 use crate::OutputOutcome;
 use crate::{
@@ -39,8 +38,8 @@ use crate::{
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFileObservation,
-            JsonlRecordRef,
+            JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector,
+            JsonlFamilyWorkerContext, JsonlFileObservation, JsonlRecordRef,
         },
     },
     CaptureError, Result, CLAUDE_PROJECTS_SOURCE_FORMAT,
@@ -206,7 +205,6 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             session,
             binding,
             identities,
-            attributor: RepositoryAttributor::default(),
             pending_calls,
             linkage_capacity_exceeded,
             rejected_records: 0,
@@ -233,7 +231,6 @@ struct ClaudeProjector {
     binding: Binding,
     identities: Identities,
     session: ClaudeSessionMetadata,
-    attributor: RepositoryAttributor,
     pending_calls: HashMap<String, PendingCallState>,
     linkage_capacity_exceeded: bool,
     rejected_records: u64,
@@ -314,6 +311,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let evidence = record.evidence();
@@ -491,7 +489,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
                 fallback_identity,
                 normalized_body,
             )?;
-            apply_annotation(&mut core, self.attributor.attribute(input));
+            apply_annotation(&mut core, worker.repository_attributor().attribute(input));
             core.content
                 .omit_structured_content_if_aggregate_exceeds_limit()
                 .map_err(contract)?;

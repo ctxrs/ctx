@@ -1,4 +1,11 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    fs,
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use super::super::JsonlReader;
 use super::*;
@@ -92,7 +99,7 @@ impl JsonlFamilyAdapter for TestAdapter {
 }
 
 fn expected_state(
-    adapter: &TestAdapter,
+    adapter: &dyn JsonlFamilyAdapter,
     root: &Path,
 ) -> (FamilyResident, CertifiedSourceInventory) {
     let observed = adapter.discover(root).unwrap();
@@ -115,7 +122,7 @@ fn expected_state(
             let certificate = CertifiedSource::certify(
                 observation.clone(),
                 observation,
-                "terminal-witness-parser-v1",
+                adapter.parser_revision(),
                 *checkpoint.complete_prefix_sha256(),
                 ScannedSourceCounts::default(),
             )
@@ -145,9 +152,160 @@ fn expected_state(
             owned_sources,
             terminal_sources,
             certified_inventory: Some(inventory.clone()),
+            opening_inventory: Some(observed),
         },
         inventory,
     )
+}
+
+struct FrozenMultiRootTestAdapter {
+    roots: Vec<PathBuf>,
+}
+
+impl JsonlFamilyAdapter for FrozenMultiRootTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "frozen-multi-root-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn inventory_mode(&self) -> JsonlFamilyInventoryMode {
+        JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions
+    }
+
+    fn base_scope(&self) -> JsonlFamilyBaseScope {
+        JsonlFamilyBaseScope::Route
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        let mut authorities = Vec::new();
+        let mut leaves = Vec::new();
+        for source_root in &self.roots {
+            let authority = Arc::new(ProviderSourceRoot::open(source_root)?);
+            for entry in fs::read_dir(source_root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let name = entry.file_name();
+                let source = SourceKey::derive(
+                    self.provider().as_str(),
+                    TEST_SOURCE_FORMAT,
+                    TEST_SCHEMA,
+                    1,
+                    SourceAnchor::provider_native(
+                        "frozen-multi-root-file",
+                        TypedKey::bytes(path.as_os_str().as_encoded_bytes().to_vec())
+                            .map_err(contract_error)?,
+                    )
+                    .map_err(contract_error)?,
+                )
+                .map_err(contract_error)?;
+                leaves.push(JsonlFamilyLeaf::observe(
+                    source,
+                    path,
+                    Arc::clone(&authority),
+                    PathBuf::from(&name),
+                    TypedKey::bytes(name.as_encoded_bytes().to_vec()).map_err(contract_error)?,
+                )?);
+            }
+            authorities.push(authority);
+        }
+        authorities.reverse();
+        JsonlFamilyInventory::present_multi(self.provider(), root, authorities, leaves)
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Err(CaptureError::SystemInvariant(
+            "frozen inventory tests never project",
+        ))
+    }
+}
+
+struct TerminalRootSwapTestAdapter {
+    root: PathBuf,
+    discoveries: AtomicUsize,
+}
+
+impl JsonlFamilyAdapter for TerminalRootSwapTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "terminal-root-swap-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn inventory_mode(&self) -> JsonlFamilyInventoryMode {
+        JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions
+    }
+
+    fn discover(&self, selection_root: &Path) -> Result<JsonlFamilyInventory> {
+        if self.discoveries.fetch_add(1, Ordering::SeqCst) == 1 {
+            let moved = self.root.with_file_name("moved-sessions");
+            fs::rename(&self.root, moved).unwrap();
+            fs::create_dir(&self.root).unwrap();
+            fs::write(self.root.join("first.jsonl"), TEST_RECORD).unwrap();
+        }
+        FrozenMultiRootTestAdapter {
+            roots: vec![self.root.clone()],
+        }
+        .discover(selection_root)
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Err(CaptureError::SystemInvariant(
+            "terminal root swap tests never project",
+        ))
+    }
+
+    fn revalidate_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        certificate: &CertifiedSource,
+        _checkpoint: Option<&JsonlCheckpoint>,
+    ) -> Result<bool> {
+        Ok(leaf
+            .source()
+            .exact_descriptor_eq(certificate.observation().source()))
+    }
 }
 
 fn expected_source(resident: &FamilyResident) -> CertifiedSource {
@@ -168,6 +326,7 @@ impl JsonlFamilyProjector for ParallelTestProjector {
     fn project(
         &mut self,
         _record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
         _emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         Ok(())
@@ -279,52 +438,57 @@ struct EmissionTestProjector {
     source: SourceKey,
 }
 
+fn emission_test_record(source: &SourceKey, ordinal: u64) -> Result<CoreRecord> {
+    let session_key = NativeSessionKey::native_id(
+        "session",
+        TypedKey::utf8("session").map_err(contract_error)?,
+    )
+    .map_err(contract_error)?;
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "session",
+        native_session_key: &session_key,
+    })
+    .map_err(contract_error)?;
+    let native_item_key =
+        NativeItemKey::native_id("message", TypedKey::U64(ordinal)).map_err(contract_error)?;
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .map_err(contract_error)?;
+    let mut projected = CoreRecord::new_selected(
+        event_id,
+        session_id,
+        session_id,
+        source.clone(),
+        ordinal,
+        "message",
+        "primary",
+        true,
+        "jsonl-emission-test-v1",
+        "bounded",
+    )
+    .map_err(contract_error)?;
+    projected.provider_session_id = Some("session".to_owned());
+    projected.native_event_id = Some(TypedKey::U64(ordinal));
+    projected.occurred_at_unix_ms = Some(ordinal as i64);
+    projected.role = Some("user".to_owned());
+    Ok(projected)
+}
+
 impl JsonlFamilyProjector for EmissionTestProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let ordinal = record.evidence().physical_ordinal();
-        let session_key = NativeSessionKey::native_id(
-            "session",
-            TypedKey::utf8("session").map_err(contract_error)?,
-        )
-        .map_err(contract_error)?;
-        let session_id = derive_session_id(SessionIdentityInput {
-            source: &self.source,
-            logical_session_kind: "session",
-            native_session_key: &session_key,
-        })
-        .map_err(contract_error)?;
-        let native_item_key =
-            NativeItemKey::native_id("message", TypedKey::U64(ordinal)).map_err(contract_error)?;
-        let event_id = derive_event_id(EventIdentityInput {
-            source: &self.source,
-            session_id,
-            logical_item_kind: "message",
-            native_item_key: &native_item_key,
-            subrecord_selector: None,
-        })
-        .map_err(contract_error)?;
-        let mut projected = CoreRecord::new_selected(
-            event_id,
-            session_id,
-            session_id,
-            self.source.clone(),
-            ordinal,
-            "message",
-            "primary",
-            true,
-            "jsonl-emission-test-v1",
-            "bounded",
-        )
-        .map_err(contract_error)?;
-        projected.provider_session_id = Some("session".to_owned());
-        projected.native_event_id = Some(TypedKey::U64(ordinal));
-        projected.occurred_at_unix_ms = Some(ordinal as i64);
-        projected.role = Some("user".to_owned());
-        emit(projected)
+        emit(emission_test_record(&self.source, ordinal)?)
     }
 }
 
@@ -367,6 +531,97 @@ impl JsonlFamilyAdapter for EmissionTestAdapter {
 
 struct CheckpointTestAdapter;
 
+struct OptimizedLeafTestAdapter {
+    scans: AtomicUsize,
+    emit_wrong_source: bool,
+}
+
+impl JsonlFamilyAdapter for OptimizedLeafTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "optimized-leaf-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        TestAdapter.discover(root)
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Err(CaptureError::SystemInvariant(
+            "optimized leaf test must not construct the generic projector",
+        ))
+    }
+
+    fn scan_optimized_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        _base: Option<&CertifiedSource>,
+        _base_event_lookup: &BaseEventIdentityLookup,
+        _worker: &mut JsonlFamilyWorkerContext,
+        emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
+    ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        drop(leaf.open_verified()?);
+        let records = if self.emit_wrong_source {
+            let wrong_source = SourceKey::derive(
+                self.provider().as_str(),
+                TEST_SOURCE_FORMAT,
+                TEST_SCHEMA,
+                1,
+                SourceAnchor::provider_native(
+                    "wrong-optimized-source",
+                    TypedKey::utf8("wrong").map_err(contract_error)?,
+                )
+                .map_err(contract_error)?,
+            )
+            .map_err(contract_error)?;
+            vec![emission_test_record(&wrong_source, 0)?]
+        } else {
+            Vec::new()
+        };
+        emit_page(JsonlFamilyPublication::Replace, records)?;
+        let observation = source_observation(leaf.source(), leaf.observation())?;
+        let certificate = CertifiedSource::certify(
+            observation.clone(),
+            observation,
+            self.parser_revision(),
+            Sha256::digest(TEST_RECORD).into(),
+            ScannedSourceCounts {
+                complete_records: 1,
+                retained_records: 0,
+                rejected_records: 0,
+                ignored_records: 1,
+                indexed_documents: 0,
+                certified_bytes: TEST_RECORD.len() as u64,
+            },
+        )
+        .map_err(contract_error)?;
+        Ok(Some(JsonlFamilyOptimizedLeafOutcome::replacement(
+            certificate,
+        )))
+    }
+}
+
 struct CheckpointTestProjector {
     projected_records: u64,
     resumed: bool,
@@ -376,6 +631,7 @@ impl JsonlFamilyProjector for CheckpointTestProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
         _emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         if self.resumed && self.projected_records != record.evidence().physical_ordinal() {
@@ -579,6 +835,87 @@ fn provider_checkpoints(receipt: &CommitReceipt) -> Vec<Option<TypedKey>> {
                 .provider_checkpoint
         })
         .collect()
+}
+
+#[test]
+fn optimized_leaf_execution_keeps_publication_inside_the_shared_family() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("optimized.jsonl"), TEST_RECORD).unwrap();
+    let adapter = OptimizedLeafTestAdapter {
+        scans: AtomicUsize::new(0),
+        emit_wrong_source: false,
+    };
+    let inventory = adapter.discover(&root).unwrap();
+    let leaf = inventory.leaves().first().unwrap();
+    let writer = GenerationWriter::open(
+        temp.path().join("index"),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let mut publications = Vec::new();
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let prepared = prepare_leaf(
+        &adapter,
+        leaf,
+        None,
+        &writer.base_event_identity_lookup(),
+        &mut worker,
+        &mut |append, records| {
+            publications.push((append, records.len()));
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(adapter.scans.load(Ordering::SeqCst), 1);
+    assert_eq!(publications, vec![(false, 0)]);
+    assert!(prepared.append.is_none());
+    assert!(prepared.checkpoint.is_none());
+    assert_eq!(
+        prepared.certificate.parser_revision(),
+        adapter.parser_revision()
+    );
+}
+
+#[test]
+fn optimized_leaf_execution_rejects_records_owned_by_another_source() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("optimized.jsonl"), TEST_RECORD).unwrap();
+    let adapter = OptimizedLeafTestAdapter {
+        scans: AtomicUsize::new(0),
+        emit_wrong_source: true,
+    };
+    let inventory = adapter.discover(&root).unwrap();
+    let leaf = inventory.leaves().first().unwrap();
+    let writer = GenerationWriter::open(
+        temp.path().join("index"),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let error = prepare_leaf(
+        &adapter,
+        leaf,
+        None,
+        &writer.base_event_identity_lookup(),
+        &mut worker,
+        &mut |_append, _records| Ok(()),
+    )
+    .err()
+    .expect("wrong-source optimized emission must fail");
+    assert!(error
+        .to_string()
+        .contains("optimized JSONL leaf emitted a record for another source"));
 }
 
 #[test]
@@ -939,4 +1276,115 @@ fn active_source_family_contract_jsonl_terminal_inventory_rejects_reappearance()
 
     fs::write(&deleted_path, b"{\"message\":\"reappeared\"}\n").unwrap();
     assert!(!revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap());
+}
+
+#[test]
+fn active_source_family_contract_jsonl_frozen_multi_root_defers_new_leaves() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let first_root = temp.path().join("sessions");
+    let second_root = temp.path().join("archived_sessions");
+    fs::create_dir_all(&first_root).unwrap();
+    fs::create_dir_all(&second_root).unwrap();
+    let retained = first_root.join("first.jsonl");
+    fs::write(&retained, TEST_RECORD).unwrap();
+    fs::write(second_root.join("archived.jsonl"), TEST_RECORD).unwrap();
+    let adapter = FrozenMultiRootTestAdapter {
+        roots: vec![first_root.clone(), second_root.clone()],
+    };
+    let selection_root = temp.path().join("codex-selection");
+
+    let (resident, inventory) = expected_state(&adapter, &selection_root);
+    let resident = Mutex::new(resident);
+    fs::write(second_root.join("late.jsonl"), TEST_RECORD).unwrap();
+    assert!(
+        revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).unwrap()
+    );
+
+    let (resident, inventory) = expected_state(&adapter, &selection_root);
+    let resident = Mutex::new(resident);
+    fs::remove_file(retained).unwrap();
+    assert!(
+        !revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).unwrap()
+    );
+}
+
+#[test]
+fn active_source_family_contract_jsonl_frozen_root_replacement_fails_closed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("first.jsonl"), TEST_RECORD).unwrap();
+    let adapter = FrozenMultiRootTestAdapter {
+        roots: vec![root.clone()],
+    };
+    let selection_root = temp.path().join("codex-selection");
+    let (resident, inventory) = expected_state(&adapter, &selection_root);
+    let resident = Mutex::new(resident);
+
+    let moved = temp.path().join("moved-sessions");
+    fs::rename(&root, &moved).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("first.jsonl"), TEST_RECORD).unwrap();
+    assert!(
+        revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).is_err()
+    );
+}
+
+#[test]
+fn active_source_family_contract_jsonl_frozen_rejects_root_swap_during_rediscovery() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("first.jsonl"), TEST_RECORD).unwrap();
+    let adapter = TerminalRootSwapTestAdapter {
+        root,
+        discoveries: AtomicUsize::new(0),
+    };
+    let selection_root = temp.path().join("codex-selection");
+    let (resident, inventory) = expected_state(&adapter, &selection_root);
+    let resident = Mutex::new(resident);
+
+    assert!(
+        !revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).unwrap()
+    );
+}
+
+#[test]
+fn active_source_family_contract_jsonl_frozen_inventory_rejects_deleted_source_reappearance() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("retained.jsonl"), TEST_RECORD).unwrap();
+    let deleted_path = root.join("deleted.jsonl");
+    fs::write(&deleted_path, TEST_RECORD).unwrap();
+    let adapter = FrozenMultiRootTestAdapter {
+        roots: vec![root.clone()],
+    };
+    let selection_root = temp.path().join("codex-selection");
+    let before = adapter.discover(&selection_root).unwrap();
+    let deleted_source = before
+        .leaves()
+        .iter()
+        .find(|leaf| leaf.source_path() == deleted_path)
+        .unwrap()
+        .source()
+        .clone();
+
+    fs::remove_file(&deleted_path).unwrap();
+    let (mut resident, inventory) = expected_state(&adapter, &selection_root);
+    resident.owned_sources.insert(
+        deleted_source.exact_descriptor_digest(),
+        deleted_source.clone(),
+    );
+    let deletion = CertifiedSourceDeletion::from_inventory(deleted_source, &inventory).unwrap();
+    let resident = Mutex::new(resident);
+    assert!(revalidate_target(
+        &resident,
+        SourceBackedRevalidationTarget::Deletion(&deletion),
+    ));
+
+    fs::write(&deleted_path, TEST_RECORD).unwrap();
+    assert!(
+        !revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).unwrap()
+    );
 }

@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 #[cfg(test)]
 use ctx_history_core::ScannedSourceCounts;
 use ctx_history_core::{
-    CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
-    CoreRecord, SourceInventoryObservation, SourceKey, TypedKey,
+    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
+    CertifiedSourceInventory, CoreRecord, SourceInventoryObservation, SourceKey, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,7 @@ use crate::{
         SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
         SourceBackedRouteResult,
     },
+    repository_attribution::RepositoryAttributor,
     CaptureError, Result,
 };
 
@@ -46,6 +47,8 @@ const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
 mod leaf;
 #[cfg(test)]
 use leaf::family_scanner_worker_count_policy;
+#[cfg(test)]
+use leaf::prepare_leaf;
 use leaf::{physical_identity, scan_leaves, source_observation};
 mod ownership;
 use ownership::base_sources_for_root;
@@ -175,10 +178,94 @@ pub(crate) enum JsonlFamilyProjectionMode {
     Replacement,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlFamilyRootMissingMode {
+    /// A missing provider-owned root is not evidence that every prior source
+    /// was deleted; leave the route unavailable.
+    Unavailable,
+    /// One explicitly registered authority disappeared. Certify an empty
+    /// inventory so the shared family can delete its formerly owned sources.
+    AuthoritativeEmpty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlFamilyInventoryMode {
+    /// The complete discovered tree must remain byte-for-byte identical from
+    /// opening through terminal revalidation.
+    Exact,
+    /// The opening membership is the generation boundary. Captured members
+    /// must retain their certified ordinary-file prefixes, deleted members
+    /// must remain absent, and newly discovered members are deferred to the
+    /// next refresh.
+    FrozenOpeningAllowAdditions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlFamilyBaseScope {
+    /// Compatibility mode for family adapters whose source identity is unique
+    /// across every route for that provider/schema tuple.
+    ProviderFamily,
+    /// Reuse only sources previously committed by this exact route. Adapters
+    /// whose explicit and automatic routes can overlap must select this mode.
+    Route,
+}
+
+/// Publication mode selected by an optimized JSONL leaf executor.
+///
+/// The family keeps this seam provider-neutral: adapters may retain a native
+/// parser or staged full-file projection, while the shared driver still owns
+/// inventory, scheduling, writer staging, certification, and revalidation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlFamilyPublication {
+    Append,
+    Replace,
+}
+
+/// Mutable services reused by one shared JSONL scanner worker across every
+/// leaf in its stripe. Keeping these caches at worker lifetime preserves
+/// bounded parallelism while amortizing provider-neutral projection work.
+#[derive(Debug, Default)]
+pub(crate) struct JsonlFamilyWorkerContext {
+    repository_attributor: RepositoryAttributor,
+}
+
+impl JsonlFamilyWorkerContext {
+    fn begin_leaf(&mut self) {
+        self.repository_attributor.begin_source();
+    }
+
+    pub(crate) fn repository_attributor(&mut self) -> &mut RepositoryAttributor {
+        &mut self.repository_attributor
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct JsonlFamilyOptimizedLeafOutcome {
+    certificate: CertifiedSource,
+    append: Option<CertifiedSourceAppend>,
+}
+
+impl JsonlFamilyOptimizedLeafOutcome {
+    pub(crate) fn replacement(certificate: CertifiedSource) -> Self {
+        Self {
+            certificate,
+            append: None,
+        }
+    }
+
+    pub(crate) fn append(append: CertifiedSourceAppend) -> Self {
+        Self {
+            certificate: append.current().clone(),
+            append: Some(append),
+        }
+    }
+}
+
 pub(crate) trait JsonlFamilyProjector: Send {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()>;
 
@@ -186,7 +273,11 @@ pub(crate) trait JsonlFamilyProjector: Send {
         Ok(())
     }
 
-    fn finish_projecting(&mut self, _emit: &mut dyn FnMut(CoreRecord) -> Result<()>) -> Result<()> {
+    fn finish_projecting(
+        &mut self,
+        _worker: &mut JsonlFamilyWorkerContext,
+        _emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
         self.finish()
     }
 
@@ -218,10 +309,37 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         JsonlOversizedRecordPolicy::RejectSource
     }
 
+    fn root_missing_mode(&self) -> JsonlFamilyRootMissingMode {
+        JsonlFamilyRootMissingMode::Unavailable
+    }
+
+    fn inventory_mode(&self) -> JsonlFamilyInventoryMode {
+        JsonlFamilyInventoryMode::Exact
+    }
+
+    fn base_scope(&self) -> JsonlFamilyBaseScope {
+        JsonlFamilyBaseScope::ProviderFamily
+    }
+
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory>;
 
     fn discovery_error_kind(&self, _error: &CaptureError) -> SourceBackedRouteErrorKind {
         SourceBackedRouteErrorKind::InvalidSource
+    }
+
+    fn scan_error_kind(&self, _error: &CaptureError) -> SourceBackedRouteErrorKind {
+        SourceBackedRouteErrorKind::InvalidSource
+    }
+
+    /// Performs adapter-owned preparation that must complete before any leaf
+    /// worker starts and may conservatively cap this capture's worker count.
+    /// The default has no preparation and keeps the shared scheduler budget.
+    fn prepare_leaf_scans(
+        &self,
+        _leaves: &[JsonlFamilyLeaf],
+        _bases: &HashMap<[u8; 32], &CertifiedSource>,
+    ) -> Result<Option<usize>> {
+        Ok(None)
     }
 
     fn projector(
@@ -251,6 +369,44 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
             ));
         }
         self.projector(leaf, source_file, imported_at)
+    }
+
+    /// Optional optimized execution for one JSONL leaf.
+    ///
+    /// Returning `None` selects the family's ordinary framed reader and
+    /// per-record projector. Returning an outcome lets an adapter retain a
+    /// native prefilter/parser or a bounded staged replay when flattening that
+    /// work into `project` would add passes, hashes, or unbounded buffering.
+    /// The shared family still validates the terminal certificate and owns all
+    /// writer publication through `emit_page`.
+    fn scan_optimized_leaf(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _base: Option<&CertifiedSource>,
+        _base_event_lookup: &BaseEventIdentityLookup,
+        _worker: &mut JsonlFamilyWorkerContext,
+        _emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
+    ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
+        Ok(None)
+    }
+
+    /// Resolves the ordinary path represented by a committed base. Optimized
+    /// adapters with their own bounded frontier format may override this; the
+    /// default decodes the shared family checkpoint.
+    fn base_source_path(&self, certificate: &CertifiedSource) -> Result<PathBuf> {
+        default_base_source_path(self, certificate)
+    }
+
+    /// Revalidates one terminal leaf at commit time. Optimized adapters may
+    /// retain provider-native evidence; the default uses the shared physical
+    /// checkpoint and exact-prefix rules.
+    fn revalidate_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        certificate: &CertifiedSource,
+        checkpoint: Option<&JsonlCheckpoint>,
+    ) -> Result<bool> {
+        default_revalidate_leaf(leaf, certificate, checkpoint)
     }
 
     fn owns(&self, source: &SourceKey) -> bool {
@@ -495,7 +651,7 @@ impl JsonlFamilyRejectedLeaf {
 pub(crate) struct JsonlFamilyInventory {
     root_missing: bool,
     observation: SourceInventoryObservation,
-    authority: Option<Arc<ProviderSourceRoot>>,
+    authorities: Vec<Arc<ProviderSourceRoot>>,
     leaves: Vec<JsonlFamilyLeaf>,
     rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
 }
@@ -514,23 +670,68 @@ impl JsonlFamilyInventory {
         provider: CaptureProvider,
         root: &Path,
         authority: Arc<ProviderSourceRoot>,
+        leaves: Vec<JsonlFamilyLeaf>,
+        rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
+    ) -> Result<Self> {
+        Self::present_multi_with_rejected(provider, root, vec![authority], leaves, rejected_leaves)
+    }
+
+    pub(crate) fn present_multi(
+        provider: CaptureProvider,
+        root: &Path,
+        authorities: Vec<Arc<ProviderSourceRoot>>,
+        leaves: Vec<JsonlFamilyLeaf>,
+    ) -> Result<Self> {
+        Self::present_multi_with_rejected(provider, root, authorities, leaves, Vec::new())
+    }
+
+    pub(crate) fn present_multi_with_rejected(
+        provider: CaptureProvider,
+        root: &Path,
+        mut authorities: Vec<Arc<ProviderSourceRoot>>,
         mut leaves: Vec<JsonlFamilyLeaf>,
         mut rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
     ) -> Result<Self> {
+        if authorities.is_empty() {
+            return Err(CaptureError::InvalidPayload(
+                "present JSONL inventory has no retained root authority".to_owned(),
+            ));
+        }
+        authorities.sort_by(|left, right| left.named_path().cmp(right.named_path()));
+        for pair in authorities.windows(2) {
+            if pair[0].named_path() == pair[1].named_path() {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "present JSONL inventory has duplicate root authority {}",
+                    pair[0].named_path().display()
+                )));
+            }
+        }
+        for leaf in &leaves {
+            let retained = authorities.iter().any(|authority| {
+                authority.named_path() == leaf.authority.named_path()
+                    && authority.authority_fingerprint() == leaf.authority.authority_fingerprint()
+            });
+            if !retained {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "JSONL leaf {} is outside the retained root authorities",
+                    leaf.source_path.display()
+                )));
+            }
+        }
         leaves.sort_by(|left, right| left.source_path.cmp(&right.source_path));
         rejected_leaves.sort_by(|left, right| left.source_path.cmp(&right.source_path));
         let observation = inventory_observation(
             provider,
             root,
             false,
-            Some(&authority),
+            &authorities,
             &leaves,
             &rejected_leaves,
         )?;
         Ok(Self {
             root_missing: false,
             observation,
-            authority: Some(authority),
+            authorities,
             leaves,
             rejected_leaves,
         })
@@ -539,8 +740,8 @@ impl JsonlFamilyInventory {
     pub(crate) fn missing(provider: CaptureProvider, root: &Path) -> Result<Self> {
         Ok(Self {
             root_missing: true,
-            observation: inventory_observation(provider, root, true, None, &[], &[])?,
-            authority: None,
+            observation: inventory_observation(provider, root, true, &[], &[], &[])?,
+            authorities: Vec::new(),
             leaves: Vec::new(),
             rejected_leaves: Vec::new(),
         })
@@ -558,34 +759,75 @@ impl JsonlFamilyInventory {
         &self.rejected_leaves
     }
 
+    #[cfg(test)]
     fn certify_against(&self, closing: &Self) -> Result<CertifiedSourceInventory> {
-        if self.root_missing || closing.root_missing {
-            return Err(CaptureError::InvalidPayload(
-                "missing JSONL roots cannot certify an inventory".to_owned(),
-            ));
-        }
-        CertifiedSourceInventory::certify(
-            self.observation.clone(),
-            closing.observation.clone(),
-            FAMILY_DISCOVERY_REVISION,
+        self.certify_selected_against(
+            closing,
             closing
                 .leaves
                 .iter()
                 .map(|leaf| leaf.source.clone())
                 .collect(),
         )
+    }
+
+    fn certify_selected_against(
+        &self,
+        closing: &Self,
+        sources: Vec<SourceKey>,
+    ) -> Result<CertifiedSourceInventory> {
+        if self.root_missing != closing.root_missing {
+            return Err(CaptureError::InvalidPayload(
+                "JSONL root availability changed during capture".to_owned(),
+            ));
+        }
+        CertifiedSourceInventory::certify(
+            self.observation.clone(),
+            closing.observation.clone(),
+            FAMILY_DISCOVERY_REVISION,
+            sources,
+        )
         .map_err(contract_error)
     }
 
     fn revalidate_root(&self) -> Result<()> {
-        self.authority
-            .as_ref()
-            .ok_or_else(|| {
-                CaptureError::InvalidPayload(
-                    "JSONL inventory has no retained root authority".to_owned(),
-                )
-            })?
-            .revalidate()
+        if self.root_missing {
+            return Ok(());
+        }
+        if self.authorities.is_empty() {
+            return Err(CaptureError::InvalidPayload(
+                "JSONL inventory has no retained root authority".to_owned(),
+            ));
+        }
+        for authority in &self.authorities {
+            authority.revalidate()?;
+        }
+        Ok(())
+    }
+
+    fn revalidate_root_same_object(&self) -> Result<()> {
+        if self.root_missing {
+            return Ok(());
+        }
+        if self.authorities.is_empty() {
+            return Err(CaptureError::InvalidPayload(
+                "JSONL inventory has no retained root authority".to_owned(),
+            ));
+        }
+        for authority in &self.authorities {
+            authority.revalidate_same_object()?;
+        }
+        Ok(())
+    }
+
+    fn retains_authorities_from(&self, opening: &Self) -> bool {
+        self.root_missing == opening.root_missing
+            && opening.authorities.iter().all(|expected| {
+                self.authorities.iter().any(|current| {
+                    current.named_path() == expected.named_path()
+                        && current.same_object_as(expected)
+                })
+            })
     }
 }
 
@@ -631,12 +873,72 @@ struct TerminalSourceEvidence {
     checkpoint: Option<JsonlCheckpoint>,
 }
 
+fn default_base_source_path(
+    adapter: &(impl JsonlFamilyAdapter + ?Sized),
+    certificate: &CertifiedSource,
+) -> Result<PathBuf> {
+    certificate.validate_contract().map_err(contract_error)?;
+    if certificate.parser_revision() != adapter.parser_revision() {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL base parser revision changed".to_owned(),
+        ));
+    }
+    let frontier = certificate
+        .frontier()
+        .ok_or_else(|| CaptureError::InvalidPayload("JSONL base frontier is absent".to_owned()))?;
+    if frontier.checkpoint_kind() != FAMILY_FRONTIER_KIND {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL base frontier kind changed".to_owned(),
+        ));
+    }
+    let TypedKey::Bytes(bytes) = frontier.checkpoint() else {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL base checkpoint is malformed".to_owned(),
+        ));
+    };
+    let checkpoint: FamilyCheckpoint = serde_json::from_slice(bytes)?;
+    if checkpoint.physical.identity().source_descriptor_digest()
+        != &certificate.observation().source().exact_descriptor_digest()
+    {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL base checkpoint source changed".to_owned(),
+        ));
+    }
+    Ok(checkpoint.physical.identity().source_path().clone())
+}
+
+fn default_revalidate_leaf(
+    leaf: &JsonlFamilyLeaf,
+    certificate: &CertifiedSource,
+    checkpoint: Option<&JsonlCheckpoint>,
+) -> Result<bool> {
+    if leaf.whole_record {
+        if source_observation(leaf.source(), leaf.observation())? != *certificate.observation() {
+            return Ok(false);
+        }
+        drop(leaf.open_verified()?);
+    } else if let Some(checkpoint) = checkpoint {
+        let (opened, _) = leaf.open_for_revalidation()?;
+        revalidate_frozen_prefix(
+            leaf.source_path(),
+            opened.as_ref(),
+            checkpoint.source_observation(),
+            checkpoint.complete_prefix_end(),
+            *checkpoint.complete_prefix_sha256(),
+        )?;
+    } else if source_observation(leaf.source(), leaf.observation())? != *certificate.observation() {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 #[derive(Default)]
 struct FamilyResident {
     ownership_initialized: bool,
     owned_sources: HashMap<[u8; 32], SourceKey>,
     terminal_sources: HashMap<[u8; 32], TerminalSourceEvidence>,
     certified_inventory: Option<CertifiedSourceInventory>,
+    opening_inventory: Option<JsonlFamilyInventory>,
 }
 
 pub(crate) fn jsonl_family_driver(
@@ -668,14 +970,22 @@ pub(crate) fn jsonl_family_driver(
         },
         move |target| revalidate_target(&revalidation_resident, target),
     )
-    .with_complete_inventory_revalidation(move |expected| {
-        revalidate_complete_inventory(
+    .with_fallible_complete_inventory_revalidation(move |expected| {
+        match revalidate_complete_inventory(
             terminal_adapter.as_ref(),
             &terminal_root,
             &inventory_resident,
             expected,
-        )
-        .unwrap_or(false)
+        ) {
+            Ok(revalidated) => Ok(revalidated),
+            Err(error)
+                if terminal_adapter.scan_error_kind(&error)
+                    == SourceBackedRouteErrorKind::SourceChanged =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(route_scan(terminal_adapter.as_ref(), error)),
+        }
     })
 }
 
@@ -689,7 +999,9 @@ fn capture(
     let opening = adapter
         .discover(root)
         .map_err(|error| route_discovery(adapter, error))?;
-    if opening.root_missing() {
+    if opening.root_missing()
+        && adapter.root_missing_mode() == JsonlFamilyRootMissingMode::Unavailable
+    {
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::Unavailable,
             "provider JSONL root is unavailable",
@@ -717,12 +1029,21 @@ fn capture(
             ),
         ));
     }
-    let bases = base_sources_for_root(adapter, &opening, sink).map_err(route_invalid)?;
-    let mut owned_sources = HashMap::with_capacity(bases.len() + opening.leaves.len());
+    let bases = base_sources_for_root(adapter, &opening, root, sink)?;
+    let selected_leaves = opening
+        .leaves()
+        .iter()
+        .filter(|leaf| {
+            adapter.base_scope() == JsonlFamilyBaseScope::ProviderFamily
+                || !sink.source_owned_by_other_route(leaf.source())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut owned_sources = HashMap::with_capacity(bases.len() + selected_leaves.len());
     for source in bases
         .iter()
         .map(|base| base.observation().source())
-        .chain(opening.leaves().iter().map(JsonlFamilyLeaf::source))
+        .chain(selected_leaves.iter().map(JsonlFamilyLeaf::source))
     {
         let digest = source.exact_descriptor_digest();
         if owned_sources
@@ -738,16 +1059,29 @@ fn capture(
     let base_event_lookup = sink.writer.base_event_identity_lookup();
     let terminal_sources = scan_leaves(
         adapter,
-        opening.leaves(),
+        &selected_leaves,
         &bases_by_descriptor,
         base_event_lookup,
         sink,
     )?;
 
-    let closing = adapter
-        .discover(root)
-        .map_err(|error| route_discovery(adapter, error))?;
-    let inventory = opening.certify_against(&closing).map_err(route_invalid)?;
+    let selected_sources = selected_leaves
+        .iter()
+        .map(|leaf| leaf.source().clone())
+        .collect::<Vec<_>>();
+    let inventory = match adapter.inventory_mode() {
+        JsonlFamilyInventoryMode::Exact => {
+            let closing = adapter
+                .discover(root)
+                .map_err(|error| route_discovery(adapter, error))?;
+            opening
+                .certify_selected_against(&closing, selected_sources)
+                .map_err(route_invalid)?
+        }
+        JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions => opening
+            .certify_selected_against(&opening, selected_sources)
+            .map_err(route_invalid)?,
+    };
     sink.certify_complete_inventory(inventory.clone())
         .map_err(route_internal)?;
     for base in bases {
@@ -768,6 +1102,7 @@ fn capture(
     resident.owned_sources = owned_sources;
     resident.terminal_sources = terminal_sources;
     resident.certified_inventory = Some(inventory);
+    resident.opening_inventory = Some(opening);
     Ok(())
 }
 
@@ -815,6 +1150,10 @@ fn route_discovery(
     error: CaptureError,
 ) -> SourceBackedRouteError {
     SourceBackedRouteError::new(adapter.discovery_error_kind(&error), error.to_string())
+}
+
+fn route_scan(adapter: &dyn JsonlFamilyAdapter, error: CaptureError) -> SourceBackedRouteError {
+    SourceBackedRouteError::new(adapter.scan_error_kind(&error), error.to_string())
 }
 
 fn route_internal(error: impl std::fmt::Display) -> SourceBackedRouteError {

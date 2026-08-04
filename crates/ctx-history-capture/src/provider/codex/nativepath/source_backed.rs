@@ -1,30 +1,35 @@
 use std::{
     collections::{HashMap, HashSet},
-    panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
+    sync::Arc,
+};
+
+#[cfg(test)]
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
         mpsc::{self, Receiver, SyncSender},
-        Arc,
     },
     thread,
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use ctx_history_core::CertifiedSourceDeletion;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation, CoreRecordError,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, TypedKey,
+    CoreRecord, CoreRecordAnnotation, CoreRecordError, EventIdentityInput, NativeItemKey,
+    NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
+    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, StableEntityId, TypedKey,
 };
 #[cfg(test)]
-use ctx_history_index::VerifiedIndex;
-use ctx_history_index::{BaseEventIdentityLookup, GenerationWriter, IndexError};
+use ctx_history_core::{
+    CertifiedSourceDeletion, CertifiedSourceInventory, SourceInventoryObservation,
+};
+use ctx_history_index::{BaseEventIdentityLookup, IndexError};
 #[cfg(test)]
-use ctx_history_index::{CommitReceipt, RevalidationTarget, WriterOptions};
+use ctx_history_index::{
+    CommitReceipt, GenerationWriter, RevalidationTarget, VerifiedIndex, WriterOptions,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -62,13 +67,13 @@ const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v9";
 const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v16-aggregate-content-admission";
+#[cfg(test)]
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
+#[cfg(test)]
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
+#[cfg(test)]
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
-const CODEX_EXPLICIT_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.explicit-session-file";
-const CODEX_EXPLICIT_INVENTORY_REVISION_KIND: &str = "codex-explicit-session-inventory-v1";
-const CODEX_EXPLICIT_DISCOVERY_REVISION: &str = "codex-explicit-session-file-v1";
-const CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx/codex-explicit-session-inventory/v1\0";
+#[cfg(test)]
 const MAX_CODEX_SCANNER_WORKERS: usize = 16;
 
 #[derive(Debug, Error)]
@@ -111,10 +116,13 @@ pub enum CodexSourceBackedErrorV0 {
     LineageWorkingSetExhausted,
     #[error("Codex lineage working set is unavailable")]
     LineageWorkingSetUnavailable,
+    #[cfg(test)]
     #[error("Codex cold scanner lane {lane} disconnected before completing its sources")]
     ColdLaneDisconnected { lane: usize },
+    #[cfg(test)]
     #[error("Codex cold scanner lane {lane} panicked")]
     ColdWorkerPanicked { lane: usize },
+    #[cfg(test)]
     #[error("Codex cold scanner protocol mismatch: {0}")]
     ColdProtocolMismatch(&'static str),
     #[cfg(test)]
@@ -124,8 +132,6 @@ pub enum CodexSourceBackedErrorV0 {
     UnexpectedLegacyRow,
     #[error("explicit Codex session source changed its native session identity")]
     ExplicitSourceIdentityChanged,
-    #[error("explicit Codex session inventory changed while it was being certified")]
-    ExplicitInventoryChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -184,19 +190,16 @@ impl CodexTerminalSourceEvidenceV0 {
 
 pub type CodexSourceBackedResultV0<T> = Result<T, CodexSourceBackedErrorV0>;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CodexSourceBackedPhaseTimingsV0 {
-    #[cfg(test)]
     pub discovery: Duration,
-    #[cfg(test)]
     pub writer_open: Duration,
     pub scan_and_stage: Duration,
     pub scanner_worker_busy: Duration,
     pub writer_add_document: Duration,
     pub certification: Duration,
-    #[cfg(test)]
     pub commit: Duration,
-    #[cfg(test)]
     pub total: Duration,
 }
 
@@ -246,6 +249,54 @@ pub struct CodexSourceBackedCountersV0 {
 }
 
 impl CodexSourceBackedCountersV0 {
+    fn add_assign(&mut self, other: Self) {
+        macro_rules! add {
+            ($($field:ident),+ $(,)?) => {
+                $(self.$field = self.$field.saturating_add(other.$field);)+
+            };
+        }
+        add!(
+            catalog_sources,
+            catalog_source_bytes,
+            inventory_walks,
+            inventory_source_observations,
+            catalog_source_body_reads,
+            catalog_session_meta_parses,
+            cold_sources,
+            appended_sources,
+            replaced_sources,
+            replayed_sources,
+            deleted_sources,
+            writer_exact_replay_sources,
+            writer_mutated_sources,
+            scanner_sources_started,
+            scanner_sources_completed,
+            repository_full_git_certification_probes,
+            staged_documents,
+            complete_records_scanned,
+            retained_records_scanned,
+            rejected_records_scanned,
+            ignored_records_scanned,
+            scanner_bytes_read,
+            checkpoint_validation_bytes,
+            prefiltered_records,
+            structural_json_parses,
+            typed_json_parses,
+            emitted_pages,
+            scanner_legacy_body_json_serializations,
+            scanner_legacy_row_json_serializations,
+            scanner_legacy_json_serialized_bytes,
+            scanner_legacy_normalized_payload_hashes,
+            scanner_legacy_file_touch_rows,
+            scanner_legacy_duplicate_preview_allocations,
+            scanner_legacy_page_owner_json_serializations,
+            scanner_legacy_page_identity_owner_json_serializations,
+            scanner_legacy_page_identity_row_json_serializations,
+        );
+        self.scanner_workers = self.scanner_workers.max(other.scanner_workers);
+        self.peak_active_scanners = self.peak_active_scanners.max(other.peak_active_scanners);
+    }
+
     #[cfg(test)]
     pub(crate) fn add_catalog_work(&mut self, work: CodexCatalogWorkV0) {
         self.inventory_walks = self.inventory_walks.saturating_add(work.inventory_walks);
@@ -335,39 +386,50 @@ pub struct CodexSourceBackedIngestReceiptV0 {
 }
 
 mod catalog;
+#[cfg(test)]
 mod cold;
 mod identity;
 mod ingestion;
+mod jsonl_family;
 mod lineage;
 
 use lineage::{map_lineage_capture_error, CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
 
+use catalog::discover_codex_session_tree_inventory_v0;
 #[cfg(test)]
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
     discover_codex_session_tree_inventory_from_plans_v0,
     install_after_codex_catalog_authority_hook, install_after_codex_directory_visit_hook,
-    install_after_codex_metadata_inventory_hook, writer_base_sources, CodexCatalogWorkV0,
+    install_after_codex_metadata_inventory_hook, managed_codex_session_source, writer_base_sources,
+    CodexCatalogWorkV0,
 };
 pub(crate) use catalog::{
-    discover_codex_session_tree_inventory_v0, managed_codex_session_source,
     observe_codex_explicit_session_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
     CodexSessionTreeInventoryV0,
 };
+#[cfg(test)]
 use cold::{
     cold_scanner_worker_count, ingest_codex_cold_parallel_v0, ColdIngestionTargetV0,
     ColdParallelOptionsV0,
 };
 #[cfg(test)]
 use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
-pub(crate) use identity::source_observation;
+use identity::source_observation;
 use identity::{
     certify_scan, codex_core_record, codex_session_identity, codex_source_key, decode_append_proof,
     validate_owner, CodexEventIdentityStateV0,
 };
 #[cfg(test)]
 use ingestion::{ingest_codex_source_backed_inner_v0, ingest_codex_source_backed_v0};
-pub(crate) use ingestion::{ingest_codex_sources_serial_v0, ingest_codex_sources_v0};
+use ingestion::{
+    prepare_replayed_lineage_v0, scan_codex_jsonl_family_leaf_v0, CodexJsonlFamilyLeafContextV0,
+    CodexJsonlFamilyPublicationV0,
+};
+pub(crate) use jsonl_family::{
+    codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,
+    CodexSessionTreeJsonlFamilyAdapterV0,
+};
 
 #[cfg(test)]
 mod tests;

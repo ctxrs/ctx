@@ -2,13 +2,24 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::Path,
+    sync::Arc,
 };
 
 use ctx_history_core::{CoreRecord, TypedKey};
+use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::json;
 
 use super::*;
+use crate::provider::source_backed::{
+    family::jsonl::jsonl_family_driver, refresh_source_backed_generation,
+    SourceBackedProviderRegistry, SourceBackedRoute, SourceBackedSelectorAuthority,
+    SourceBackedSourceFailureClass,
+};
 use crate::test_support_paths::tempdir;
+use crate::{
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus,
+};
 
 fn prompt_line(session_id: &str, ts: i64, text: &str) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(&json!({
@@ -56,6 +67,69 @@ fn core_body(record: &CoreRecord) -> &str {
 }
 
 #[test]
+fn active_source_family_contract_prompt_history_rejects_same_content_pathname_replacement() {
+    let temp = tempdir().unwrap();
+    let provider_root = temp.path().join("provider");
+    fs::create_dir(&provider_root).unwrap();
+    let history = provider_root.join("history.jsonl");
+    write_lines(
+        &history,
+        &[prompt_line("session", 1_700_000_000, "first prompt")],
+    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&history, [6; 32]);
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::new(input).unwrap();
+    let driver = jsonl_family_driver(Arc::new(adapter.clone()), history.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(
+        SourceBackedRoute::automatic(
+            ProviderSource {
+                provider: CaptureProvider::Codex,
+                path: history.clone(),
+                exists: true,
+                source_format: SOURCE_FORMAT,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )
+        .unwrap(),
+    );
+    let index_root = temp.path().join("index");
+    let initial =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+
+    append(
+        &history,
+        &prompt_line("session", 1_700_000_001, "staged prompt"),
+    );
+    let replacement = provider_root.join("replacement.jsonl");
+    fs::write(&replacement, fs::read(&history).unwrap()).unwrap();
+    let moved = provider_root.join("scanned-history.jsonl");
+    let hook_history = history.clone();
+    adapter.set_after_scan_hook(move || {
+        fs::rename(&hook_history, moved).unwrap();
+        fs::rename(replacement, hook_history).unwrap();
+    });
+
+    let refreshed =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(refreshed.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(refreshed.failed_routes.len(), 1);
+    assert_eq!(
+        refreshed.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(refreshed.failed_routes[0].carried_forward);
+    let retained = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(retained.generation_id(), initial.commit.generation_id);
+    assert_eq!(retained.document_count(), 1);
+}
+
+#[test]
 fn cold_scan_emits_complete_self_contained_core_records() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("history.jsonl");
@@ -89,7 +163,7 @@ fn cold_scan_emits_complete_self_contained_core_records() {
 }
 
 #[test]
-fn append_noop_and_rewrite_preserve_lifecycle_and_stable_ids() {
+fn active_source_family_contract_prompt_history_preserves_append_noop_and_rewrite_lifecycle() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("history.jsonl");
     write_lines(&path, &[prompt_line("s", 1_700_000_000, "one")]);

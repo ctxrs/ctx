@@ -1,5 +1,239 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CodexJsonlFamilyPublicationV0 {
+    Append,
+    Replace,
+}
+
+#[derive(Debug)]
+pub(super) struct CodexJsonlFamilyLeafOutcomeV0 {
+    pub(super) certificate: CertifiedSource,
+    pub(super) append: Option<CertifiedSourceAppend>,
+    pub(super) evidence: CodexTerminalSourceEvidenceV0,
+    pub(super) counters: CodexSourceBackedCountersV0,
+}
+
+pub(super) struct CodexJsonlFamilyLeafContextV0<'a> {
+    pub(super) base_event_lookup: &'a BaseEventIdentityLookup,
+    pub(super) outcome_lineage: &'a CodexOutcomeLineageAuthorityV0,
+    pub(super) repository_attributor: &'a mut crate::repository_attribution::RepositoryAttributor,
+}
+
+/// Runs exactly one Codex session leaf through the native scanner while the
+/// shared JSONL family owns scheduling and writer publication.
+///
+/// This is intentionally the same NativePath path used by the former custom
+/// route: exact replay validates only the native checkpoint observation,
+/// certified growth scans only the suffix, and failed append evidence falls
+/// back to one full native replacement scan.
+pub(super) fn scan_codex_jsonl_family_leaf_v0(
+    source: CodexCatalogSource,
+    source_key: SourceKey,
+    native_session_id: String,
+    base: Option<&CertifiedSource>,
+    context: &mut CodexJsonlFamilyLeafContextV0<'_>,
+    mut emit: impl FnMut(
+        CodexJsonlFamilyPublicationV0,
+        Vec<CoreRecord>,
+    ) -> CodexSourceBackedResultV0<()>,
+) -> CodexSourceBackedResultV0<CodexJsonlFamilyLeafOutcomeV0> {
+    let probes_before = context
+        .repository_attributor
+        .full_certification_probe_count();
+    let lineage_dependency_sha256 = context
+        .outcome_lineage
+        .dependency_digest(&native_session_id);
+    if base.is_some_and(|base| !base.observation().source().exact_descriptor_eq(&source_key)) {
+        return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
+            native_session_id,
+        ));
+    }
+    let proof = base
+        .filter(|base| base.parser_revision() == CODEX_PARSER_REVISION)
+        .and_then(|base| decode_append_proof(&source, &source_key, base).ok())
+        .filter(|proof| proof.checkpoint.lineage_dependency_sha256 == lineage_dependency_sha256);
+    if let (Some(base), Some(proof)) = (base, proof.as_ref()) {
+        if proof.checkpoint.observation == source.catalog_observation {
+            let frontier = base
+                .frontier()
+                .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
+            let append = CertifiedSourceAppend::certify(
+                base,
+                base.clone(),
+                frontier.certified_prefix_bytes(),
+                *frontier.certified_prefix_digest(),
+            )?;
+            let evidence = CodexTerminalSourceEvidenceV0::new(
+                source,
+                proof.checkpoint.observation.clone(),
+                proof.checkpoint.observation.len,
+                proof.checkpoint.full_revision_sha256,
+            );
+            return Ok(CodexJsonlFamilyLeafOutcomeV0 {
+                certificate: base.clone(),
+                append: Some(append),
+                evidence,
+                counters: CodexSourceBackedCountersV0 {
+                    catalog_sources: 1,
+                    catalog_source_bytes: proof.checkpoint.observation.len,
+                    replayed_sources: 1,
+                    writer_exact_replay_sources: 1,
+                    ..CodexSourceBackedCountersV0::default()
+                },
+            });
+        }
+    }
+
+    let append_scanner = match (base, proof.as_ref()) {
+        (Some(base), Some(proof))
+            if source.catalog_observation.len > proof.checkpoint.observation.len =>
+        {
+            match CodexNativeScanner::new_source_backed_with_lineage_v0(
+                source.clone(),
+                Some(proof),
+                context.outcome_lineage.new_fact_set()?,
+            ) {
+                Ok(scanner) => Some((base, scanner)),
+                Err(error) if invalid_append_proof(&error) => None,
+                Err(error) => return Err(map_lineage_capture_error(error)),
+            }
+        }
+        _ => None,
+    };
+    let (append_base, publication, mut scanner) = match append_scanner {
+        Some((base, scanner)) => (Some(base), CodexJsonlFamilyPublicationV0::Append, scanner),
+        None => (
+            None,
+            CodexJsonlFamilyPublicationV0::Replace,
+            CodexNativeScanner::new_source_backed_with_lineage_v0(
+                source.clone(),
+                None,
+                context.outcome_lineage.new_fact_set()?,
+            )
+            .map_err(map_lineage_capture_error)?,
+        ),
+    };
+    let session_id = codex_session_identity(&source_key, &native_session_id)?;
+    let mut event_identity_state = match append_base {
+        Some(_) => CodexEventIdentityStateV0::for_append(context.base_event_lookup.clone()),
+        None => CodexEventIdentityStateV0::default(),
+    };
+    let mut staged_documents = 0_u64;
+    while let Some(page) = scanner.next_page().map_err(map_lineage_capture_error)? {
+        let CodexNativeOwnedPage::Core(page) = page;
+        if !page.core_rows.is_empty() {
+            return Err(CodexSourceBackedErrorV0::UnexpectedLegacyRow);
+        }
+        let mut records = Vec::with_capacity(page.source_backed_rows.len());
+        if !page.source_backed_rows.is_empty() {
+            let owner = page
+                .owner
+                .as_ref()
+                .ok_or(CodexSourceBackedErrorV0::MissingPageOwner)?;
+            validate_owner(owner, &native_session_id)?;
+            for row in page.source_backed_rows {
+                records.push(codex_core_record(
+                    &source_key,
+                    session_id,
+                    owner,
+                    row,
+                    &mut event_identity_state,
+                    context.repository_attributor,
+                    context.outcome_lineage,
+                )?);
+                staged_documents = staged_documents
+                    .checked_add(1)
+                    .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+            }
+        }
+        scanner.release_transient_record_buffer();
+        if !records.is_empty() {
+            emit(publication, records)?;
+        }
+    }
+    let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
+    let lineage_facts = scan
+        .lineage_facts
+        .take()
+        .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+    context
+        .outcome_lineage
+        .register(&native_session_id, lineage_facts)?;
+    let scan_counters = scan.counters;
+    let certificate = match (append_base, scan.disposition) {
+        (None, CodexParseDisposition::FullGeneration) => certify_scan(
+            &source_key,
+            &scan,
+            None,
+            staged_documents,
+            scan_counters,
+            lineage_dependency_sha256,
+        )?,
+        (Some(base), CodexParseDisposition::AppendDelta) => certify_scan(
+            &source_key,
+            &scan,
+            Some(base),
+            staged_documents,
+            scan_counters,
+            lineage_dependency_sha256,
+        )?,
+        _ => {
+            return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
+                native_session_id,
+            ));
+        }
+    };
+    let append = match append_base {
+        Some(base) => {
+            let frontier = base
+                .frontier()
+                .ok_or(CodexSourceBackedErrorV0::MissingCheckpoint)?;
+            Some(CertifiedSourceAppend::certify(
+                base,
+                certificate.clone(),
+                frontier.certified_prefix_bytes(),
+                *frontier.certified_prefix_digest(),
+            )?)
+        }
+        None => None,
+    };
+    let evidence = CodexTerminalSourceEvidenceV0::new(
+        scan.source,
+        scan.after_observation,
+        scan.before_observation.len,
+        scan.full_revision_sha256,
+    );
+    let mut counters = CodexSourceBackedCountersV0 {
+        catalog_sources: 1,
+        catalog_source_bytes: source.catalog_observation.len,
+        cold_sources: u64::from(base.is_none()),
+        appended_sources: u64::from(append.is_some()),
+        replaced_sources: u64::from(base.is_some() && append.is_none()),
+        writer_mutated_sources: 1,
+        scanner_workers: 1,
+        scanner_sources_started: 1,
+        scanner_sources_completed: 1,
+        peak_active_scanners: 1,
+        repository_full_git_certification_probes: u64::try_from(
+            context
+                .repository_attributor
+                .full_certification_probe_count()
+                .saturating_sub(probes_before),
+        )
+        .unwrap_or(u64::MAX),
+        staged_documents,
+        ..CodexSourceBackedCountersV0::default()
+    };
+    counters.add_scan(scan_counters);
+    Ok(CodexJsonlFamilyLeafOutcomeV0 {
+        certificate,
+        append,
+        evidence,
+        counters,
+    })
+}
+
 #[cfg(test)]
 pub(super) fn ingest_codex_source_backed_v0(
     session_root: impl AsRef<Path>,
@@ -127,37 +361,7 @@ pub(super) fn ingest_codex_source_backed_inner_v0(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn ingest_codex_sources_v0(
-    sources: Vec<(CodexCatalogSource, SourceKey, String)>,
-    base_sources: &HashMap<SourceKey, CertifiedSource>,
-    writer: &mut GenerationWriter,
-    revalidation: &mut HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
-    timings: &mut CodexSourceBackedPhaseTimingsV0,
-    counters: &mut CodexSourceBackedCountersV0,
-    indexer_threads: usize,
-    scanner_workers: Option<usize>,
-) -> CodexSourceBackedResultV0<()> {
-    ingest_codex_sources_with_options_v0(
-        sources,
-        base_sources,
-        writer,
-        revalidation,
-        timings,
-        counters,
-        indexer_threads,
-        ColdParallelOptionsV0 {
-            scanner_workers,
-            #[cfg(test)]
-            fail_source_index: None,
-            #[cfg(test)]
-            before_commit_revalidation: None,
-            #[cfg(test)]
-            scanner_rendezvous: None,
-        },
-    )
-}
-
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn ingest_codex_sources_with_options_v0(
     mut sources: Vec<(CodexCatalogSource, SourceKey, String)>,
@@ -263,6 +467,8 @@ fn ingest_codex_sources_with_options_v0(
     )
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn ingest_codex_sources_serial_v0(
     sources: Vec<(CodexCatalogSource, SourceKey, String)>,
     base_sources: &HashMap<SourceKey, CertifiedSource>,
@@ -480,7 +686,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     Ok(())
 }
 
-fn prepare_replayed_lineage_v0(
+pub(super) fn prepare_replayed_lineage_v0(
     replay_sources: &[(CodexCatalogSource, CodexAppendProof, String)],
     outcome_lineage: &CodexOutcomeLineageAuthorityV0,
 ) -> CodexSourceBackedResultV0<()> {
@@ -506,6 +712,7 @@ fn prepare_replayed_lineage_v0(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn replay_unchanged_source_v0(
     source: &CodexCatalogSource,

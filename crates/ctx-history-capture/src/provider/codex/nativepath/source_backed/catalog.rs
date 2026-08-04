@@ -1,7 +1,9 @@
 use super::*;
 
+#[cfg(test)]
 const CODEX_SESSION_TREE_UNION_INVENTORY_REVISION_KIND: &str =
     "codex-session-tree-union-inventory-v0";
+#[cfg(test)]
 const CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION: &str = "codex-session-tree-union-catalog-v0";
 
 #[cfg(test)]
@@ -87,6 +89,7 @@ fn run_after_codex_directory_visit_hook(relative_directory: &Path) {
 #[derive(Debug, Clone)]
 pub(crate) struct CodexSessionTreeInventoryV0 {
     pub(crate) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    #[cfg(test)]
     pub(crate) certificate: CertifiedSourceInventory,
     #[cfg(test)]
     pub(crate) work: CodexCatalogWorkV0,
@@ -181,41 +184,15 @@ impl Eq for CodexExplicitSessionInventoryStateV0 {}
 /// One finite observation of exactly one caller-selected Codex rollout.
 #[derive(Debug, Clone)]
 pub(crate) struct CodexExplicitSessionInventoryV0 {
-    input: CodexExplicitSessionSourceBackedInputV0,
-    observation: SourceInventoryObservation,
     state: CodexExplicitSessionInventoryStateV0,
 }
 
 impl CodexExplicitSessionInventoryV0 {
-    pub(crate) fn is_missing(&self) -> bool {
-        self.state == CodexExplicitSessionInventoryStateV0::Missing
-    }
-
     pub(crate) fn source_plan(&self) -> Option<(CodexCatalogSource, SourceKey, String)> {
         match &self.state {
             CodexExplicitSessionInventoryStateV0::Present { plan } => Some(plan.clone()),
             CodexExplicitSessionInventoryStateV0::Missing => None,
         }
-    }
-
-    pub(crate) fn certify_against(
-        &self,
-        closing: &Self,
-    ) -> CodexSourceBackedResultV0<CertifiedSourceInventory> {
-        if self.input != closing.input || self.state != closing.state {
-            return Err(CodexSourceBackedErrorV0::ExplicitInventoryChanged);
-        }
-        let sources = if self.is_missing() {
-            Vec::new()
-        } else {
-            vec![self.input.source.clone()]
-        };
-        Ok(CertifiedSourceInventory::certify(
-            self.observation.clone(),
-            closing.observation.clone(),
-            CODEX_EXPLICIT_DISCOVERY_REVISION,
-            sources,
-        )?)
     }
 }
 
@@ -236,12 +213,7 @@ pub(crate) fn observe_codex_explicit_session_source_backed_v0(
         }
         Err(error) => return Err(error),
     };
-    let observation = codex_explicit_inventory_observation_v0(input, &state)?;
-    Ok(CodexExplicitSessionInventoryV0 {
-        input: input.clone(),
-        observation,
-        state,
-    })
+    Ok(CodexExplicitSessionInventoryV0 { state })
 }
 
 fn open_codex_explicit_source_plan_v0(
@@ -292,28 +264,6 @@ fn open_codex_explicit_source_plan_v0(
             rejected: 1,
             failed: 0,
         })
-}
-
-fn codex_explicit_inventory_observation_v0(
-    input: &CodexExplicitSessionSourceBackedInputV0,
-    state: &CodexExplicitSessionInventoryStateV0,
-) -> CodexSourceBackedResultV0<SourceInventoryObservation> {
-    let path_identity = crate::provider::provider_path_identity(input.path())?;
-    let authority_key: [u8; 32] = Sha256::digest(path_identity.as_bytes()).into();
-    let mut revision = Sha256::new();
-    revision.update(CODEX_EXPLICIT_INVENTORY_DIGEST_DOMAIN);
-    revision.update(input.source.exact_descriptor_digest());
-    match state {
-        CodexExplicitSessionInventoryStateV0::Present { .. } => revision.update(b"present\0"),
-        CodexExplicitSessionInventoryStateV0::Missing => revision.update(b"missing\0"),
-    }
-    Ok(SourceInventoryObservation::new(
-        CaptureProvider::Codex.as_str(),
-        CODEX_EXPLICIT_INVENTORY_AUTHORITY_NAMESPACE,
-        TypedKey::bytes(authority_key.to_vec())?,
-        CODEX_EXPLICIT_INVENTORY_REVISION_KIND,
-        revision.finalize().to_vec(),
-    )?)
 }
 
 fn absolute_lexical_path(path: &Path) -> CodexSourceBackedResultV0<PathBuf> {
@@ -469,6 +419,7 @@ fn discover_codex_session_tree_inventory_incremental_v0(
 ) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
     let normalized_roots = normalized_session_roots(session_roots)?;
     let mut leaves = Vec::new();
+    #[cfg(test)]
     let mut root_revisions = Vec::with_capacity(normalized_roots.len());
     let mut authorities = Vec::with_capacity(normalized_roots.len());
     let mut work = CodexCatalogWorkV0::default();
@@ -480,6 +431,7 @@ fn discover_codex_session_tree_inventory_incremental_v0(
             leaves.len().saturating_add(root_leaves.len()),
         )?;
         leaves.append(&mut root_leaves);
+        #[cfg(test)]
         root_revisions.push(codex_root_revision_v0(session_root)?);
         authorities.push(root);
     }
@@ -508,28 +460,36 @@ fn discover_codex_session_tree_inventory_incremental_v0(
 
     let mut sources = bind_source_keys(catalog_sources)?;
     sort_bound_sources(&mut sources);
-    let observation = if let [session_root] = normalized_roots.as_slice() {
-        codex_inventory_observation_v0(session_root, &root_revisions[0], &sources)?
-    } else {
-        codex_session_tree_inventory_observation_v0(&normalized_roots, &root_revisions, &sources)?
+    #[cfg(test)]
+    let certificate = {
+        let observation = if let [session_root] = normalized_roots.as_slice() {
+            codex_inventory_observation_v0(session_root, &root_revisions[0], &sources)?
+        } else {
+            codex_session_tree_inventory_observation_v0(
+                &normalized_roots,
+                &root_revisions,
+                &sources,
+            )?
+        };
+        let discovery_revision = if normalized_roots.len() == 1 {
+            CODEX_DISCOVERY_REVISION
+        } else {
+            CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION
+        };
+        let source_keys = sources
+            .iter()
+            .map(|(_, source_key, _)| source_key.clone())
+            .collect();
+        CertifiedSourceInventory::certify(
+            observation.clone(),
+            observation,
+            discovery_revision,
+            source_keys,
+        )?
     };
-    let discovery_revision = if normalized_roots.len() == 1 {
-        CODEX_DISCOVERY_REVISION
-    } else {
-        CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION
-    };
-    let source_keys = sources
-        .iter()
-        .map(|(_, source_key, _)| source_key.clone())
-        .collect();
-    let certificate = CertifiedSourceInventory::certify(
-        observation.clone(),
-        observation,
-        discovery_revision,
-        source_keys,
-    )?;
     Ok(CodexSessionTreeInventoryV0 {
         sources,
+        #[cfg(test)]
         certificate,
         #[cfg(test)]
         work,
@@ -845,6 +805,7 @@ fn sort_bound_sources(sources: &mut [(CodexCatalogSource, SourceKey, String)]) {
     });
 }
 
+#[cfg(test)]
 fn codex_inventory_observation_v0(
     session_root: &Path,
     root_revision: &[u8; 32],
@@ -878,6 +839,7 @@ fn codex_inventory_observation_v0(
     )?)
 }
 
+#[cfg(test)]
 fn codex_session_tree_inventory_observation_v0(
     session_roots: &[PathBuf],
     root_revisions: &[[u8; 32]],
@@ -923,11 +885,13 @@ fn codex_session_tree_inventory_observation_v0(
     )?)
 }
 
+#[cfg(test)]
 fn hash_inventory_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update((value.len() as u64).to_be_bytes());
     hasher.update(value);
 }
 
+#[cfg(test)]
 fn codex_root_revision_v0(session_root: &Path) -> CodexSourceBackedResultV0<[u8; 32]> {
     let root_identity = crate::provider::provider_path_identity(session_root)?;
     let mut revision = Sha256::new();
@@ -949,6 +913,7 @@ pub(crate) fn writer_base_sources(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn managed_codex_session_source(source: &SourceKey) -> bool {
     source.provider() == CaptureProvider::Codex.as_str()
         && source.source_format() == CODEX_SESSION_SOURCE_FORMAT

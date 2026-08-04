@@ -9,13 +9,14 @@
 use std::cell::Cell;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs::File,
+    fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::UNIX_EPOCH,
 };
 
+use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CtxHistoryJsonlEventRecord,
@@ -24,6 +25,7 @@ use ctx_history_core::{
     SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, TypedKey,
     CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -34,10 +36,16 @@ use super::reader::{
 };
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::{
-    common::io::{open_provider_source_file, OpenedProviderSourceFile},
+    common::io::{open_provider_source_file, OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
         custom_history_jsonl::{validate_custom_history_identifier, validate_custom_source_record},
         normalization::{provider_policy_event_text, provider_value_text},
+        source_backed::family::jsonl::{
+            JsonlCheckpoint, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome,
+            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRootMissingMode,
+            JsonlFamilyWorkerContext,
+        },
     },
     CaptureError, ProviderImportSummary, ProviderSourceFailureKind, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -199,6 +207,229 @@ impl CustomHistorySourceBackedInput {
             CUSTOM_SOURCE_IDENTITY_VERSION,
             SourceAnchor::CatalogLineage(self.catalog_lineage),
         )?)
+    }
+}
+
+#[derive(Debug)]
+struct CustomHistoryJsonlFamilyAdapter {
+    input: CustomHistorySourceBackedInput,
+    source: SourceKey,
+}
+
+pub(crate) fn custom_history_jsonl_family_adapter(
+    input: CustomHistorySourceBackedInput,
+) -> CustomHistorySourceBackedResult<Arc<dyn JsonlFamilyAdapter>> {
+    let source = input.source_key()?;
+    Ok(Arc::new(CustomHistoryJsonlFamilyAdapter { input, source }))
+}
+
+impl JsonlFamilyAdapter for CustomHistoryJsonlFamilyAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Custom
+    }
+
+    fn source_format(&self) -> &'static str {
+        CUSTOM_ROUTE_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        CUSTOM_SOURCE_SCHEMA_VARIANT
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        CUSTOM_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
+    }
+
+    fn root_missing_mode(&self) -> JsonlFamilyRootMissingMode {
+        JsonlFamilyRootMissingMode::AuthoritativeEmpty
+    }
+
+    fn base_scope(&self) -> JsonlFamilyBaseScope {
+        JsonlFamilyBaseScope::Route
+    }
+
+    fn discover(&self, root: &Path) -> crate::Result<JsonlFamilyInventory> {
+        custom_history_jsonl_family_inventory(&self.input, &self.source, root)
+            .map_err(custom_history_family_capture_error)
+    }
+
+    fn scan_error_kind(
+        &self,
+        error: &CaptureError,
+    ) -> crate::provider::source_backed::SourceBackedRouteErrorKind {
+        match error {
+            CaptureError::ProviderSource {
+                kind: ProviderSourceFailureKind::SchemaIncompatible,
+                ..
+            } => crate::provider::source_backed::SourceBackedRouteErrorKind::Unsupported,
+            _ => crate::provider::source_backed::SourceBackedRouteErrorKind::InvalidSource,
+        }
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> crate::Result<Box<dyn JsonlFamilyProjector>> {
+        Err(CaptureError::SystemInvariant(
+            "Custom History must use optimized JSONL leaf execution",
+        ))
+    }
+
+    fn scan_optimized_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        base: Option<&CertifiedSource>,
+        _base_event_lookup: &BaseEventIdentityLookup,
+        _worker: &mut JsonlFamilyWorkerContext,
+        emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> crate::Result<()>,
+    ) -> crate::Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
+        self.source
+            .validate_exact_descriptor(leaf.source())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        let outcome =
+            scan_custom_history_source_backed_explicit(&self.input, base, |disposition, page| {
+                let publication = match disposition {
+                    CustomHistorySourceBackedDisposition::Unchanged
+                    | CustomHistorySourceBackedDisposition::Append => {
+                        JsonlFamilyPublication::Append
+                    }
+                    CustomHistorySourceBackedDisposition::Cold
+                    | CustomHistorySourceBackedDisposition::Replacement => {
+                        JsonlFamilyPublication::Replace
+                    }
+                };
+                emit_page(publication, page.records).map_err(CustomHistorySourceBackedError::from)
+            })
+            .map_err(custom_history_family_capture_error)?;
+        let receipt = match outcome {
+            CustomHistorySourceBackedOutcome::Present(receipt) => receipt,
+            CustomHistorySourceBackedOutcome::Missing {
+                inventory,
+                deletion,
+            } => {
+                if deletion
+                    .as_ref()
+                    .is_some_and(|deletion| !deletion.verifies(&inventory))
+                {
+                    return Err(CaptureError::SystemInvariant(
+                        "Custom History missing-source evidence does not reconcile",
+                    ));
+                }
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+        };
+        let receipt = *receipt;
+        let optimized = match (receipt.disposition, receipt.append) {
+            (
+                CustomHistorySourceBackedDisposition::Unchanged
+                | CustomHistorySourceBackedDisposition::Append,
+                Some(append),
+            ) => JsonlFamilyOptimizedLeafOutcome::append(append),
+            (
+                CustomHistorySourceBackedDisposition::Cold
+                | CustomHistorySourceBackedDisposition::Replacement,
+                None,
+            ) => JsonlFamilyOptimizedLeafOutcome::replacement(receipt.certificate),
+            _ => {
+                return Err(CaptureError::SystemInvariant(
+                    "Custom History disposition and append evidence disagree",
+                ));
+            }
+        };
+        Ok(Some(optimized))
+    }
+
+    fn base_source_path(&self, certificate: &CertifiedSource) -> crate::Result<PathBuf> {
+        certificate
+            .validate_contract()
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        self.source
+            .validate_exact_descriptor(certificate.observation().source())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        decode_checkpoint(certificate).map_err(custom_history_family_capture_error)?;
+        std::path::absolute(self.input.path()).map_err(CaptureError::from)
+    }
+
+    fn revalidate_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        certificate: &CertifiedSource,
+        checkpoint: Option<&JsonlCheckpoint>,
+    ) -> crate::Result<bool> {
+        if checkpoint.is_some() || !self.source.exact_descriptor_eq(leaf.source()) {
+            return Ok(false);
+        }
+        revalidate_custom_history_source_backed(&self.input, certificate)
+            .map_err(custom_history_family_capture_error)
+    }
+
+    fn owns(&self, source: &SourceKey) -> bool {
+        self.source.exact_descriptor_eq(source)
+    }
+}
+
+fn custom_history_jsonl_family_inventory(
+    input: &CustomHistorySourceBackedInput,
+    source: &SourceKey,
+    root: &Path,
+) -> CustomHistorySourceBackedResult<JsonlFamilyInventory> {
+    let selected = std::path::absolute(root)?;
+    if selected != std::path::absolute(input.path())? {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: selected,
+            reason: "Custom History family root changed from its explicit selection",
+        }
+        .into());
+    }
+    match fs::symlink_metadata(&selected) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(JsonlFamilyInventory::missing(
+                CaptureProvider::Custom,
+                &selected,
+            )?);
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let authority_path = selected
+        .parent()
+        .ok_or(CaptureError::InvalidProviderTranscriptPath {
+            path: selected.clone(),
+            reason: "Custom History selected file has no authority directory",
+        })?;
+    let authority = Arc::new(ProviderSourceRoot::open(authority_path)?);
+    let authority_relative_path = selected
+        .strip_prefix(authority.named_path())
+        .map(Path::to_path_buf)
+        .map_err(|_| CaptureError::InvalidProviderTranscriptPath {
+            path: selected.clone(),
+            reason: "Custom History source escaped its retained authority",
+        })?;
+    let leaves = vec![JsonlFamilyLeaf::observe(
+        source.clone(),
+        selected.clone(),
+        Arc::clone(&authority),
+        authority_relative_path,
+        TypedKey::bytes(source.exact_descriptor_digest().to_vec())?,
+    )?];
+    Ok(JsonlFamilyInventory::present(
+        CaptureProvider::Custom,
+        &selected,
+        authority,
+        leaves,
+    )?)
+}
+
+fn custom_history_family_capture_error(error: CustomHistorySourceBackedError) -> CaptureError {
+    match error {
+        CustomHistorySourceBackedError::Capture(error) => error,
+        error => CaptureError::InvalidPayload(error.to_string()),
     }
 }
 

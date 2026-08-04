@@ -1,6 +1,9 @@
 use super::*;
+#[cfg(test)]
 use ctx_history_core::SourceInventoryObservation;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::fmt;
 
 /// Certifies the complete source membership produced by one provider route.
@@ -8,6 +11,7 @@ use std::fmt;
 /// The authority and revision labels are persisted generation identity. Keep
 /// them stable even though certification is no longer owned by the captured
 /// route observation layer.
+#[cfg(test)]
 pub(crate) fn certify_source_inventory(
     route: &ProviderSource,
     certificates: &[CertifiedSource],
@@ -50,6 +54,7 @@ pub(crate) fn certify_source_inventory(
     .map_err(source_inventory_contract)
 }
 
+#[cfg(test)]
 fn source_inventory_contract(error: impl fmt::Display) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, error.to_string())
 }
