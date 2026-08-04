@@ -128,7 +128,7 @@ pub(in crate::provider_sources::sqlite_source) fn run_online_backup_with_deadlin
     destination: &Connection,
     deadline: Instant,
 ) -> SqliteSourceAccessResult<()> {
-    run_online_backup_until(source, destination, deadline)
+    super::backup_handle::run_online_backup_until(source, destination, deadline)
 }
 
 pub(in crate::provider_sources::sqlite_source) fn open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test(
