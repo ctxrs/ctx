@@ -1387,7 +1387,9 @@
           ]
         }
       ],
-      "history_locations": [],
+      "history_locations": [
+        "Project-local: nearest/current authorized project `.idea/firebender/chat_history.db`, bounded by the current Git/worktree locator."
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -1405,7 +1407,7 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "No automatic official Firebender leaf; ancestor discovery of `<project>/.idea/firebender/chat_history.db` is removed. Compatible DB remains available by exact `--path`."
+        "Winner: nearest/current authorized project `.idea/firebender/chat_history.db`, bounded by the current Git/worktree locator; compatible DBs remain available by exact `--path`."
       ],
       "public_docs": "docs/provider-support.md",
       "metadata": {

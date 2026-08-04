@@ -206,14 +206,43 @@ fn has_firebender_chat_sessions_table(data_root: Option<&Path>, path: &Path) -> 
         other => return other,
     }
     sqlite_structural_probe(data_root, &db_path, SqliteProbeLimits::default(), |conn| {
-        conn.query_row(
-            "select exists(select 1 from sqlite_schema \
-             where type = 'table' and name = 'chat_sessions')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
+        firebender_supported_chat_sessions_shape(conn)
     })
 }
+
+fn firebender_supported_chat_sessions_shape(conn: &Connection) -> rusqlite::Result<bool> {
+    let has_schema_info = conn.query_row(
+        "select exists(select 1 from sqlite_schema where type = 'table' and name = 'schema_info')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let has_subagents = conn.query_row(
+        "select exists(select 1 from sqlite_schema where type = 'table' and name = 'subagent_conversations')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let mut statement = conn.prepare("pragma table_info(chat_sessions)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let chat_sessions_supported = [
+        "id",
+        "name",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+        "messages_json",
+        "metadata_json",
+    ]
+    .iter()
+    .all(|required| columns.iter().any(|column| column == required));
+    if has_schema_info && has_subagents && chat_sessions_supported {
+        Ok(true)
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
+    }
+}
+
 fn has_junie_session_events(root: &Path, max_entries: usize) -> BoundedProbe {
     match path_metadata_probe(root) {
         PathProbe::File => {

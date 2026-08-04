@@ -6,8 +6,8 @@ use super::super::{
     discover_provider_sources, discover_provider_sources_for_provider,
     discover_provider_sources_for_provider_report,
     discover_provider_sources_for_provider_with_context,
-    discover_provider_sources_for_provider_with_projects, DiscoveryContext, DiscoveryIssueKind,
-    DiscoveryPlatform, DiscoveryPlatformDirs, ProviderImportSupport, ProviderSourceStatus,
+    discover_provider_sources_for_provider_with_projects, DiscoveryContext, DiscoveryPlatform,
+    DiscoveryPlatformDirs, ProviderImportSupport, ProviderSourceStatus,
 };
 use super::support::{
     shared_provider_history_fixture, tempdir, write_junie_discovery_session,
@@ -154,7 +154,7 @@ fn codebuddy_discovery_uses_cli_config_override() {
 }
 
 #[test]
-fn firebender_project_db_requires_explicit_path() {
+fn firebender_project_db_participates_in_current_project_discovery() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let project = temp.path().join("project");
@@ -177,12 +177,15 @@ fn firebender_project_db_requires_explicit_path() {
 
     let report =
         discover_provider_sources_for_provider_report(temp.path(), CaptureProvider::Firebender);
-    assert!(report.sources.is_empty());
-    assert_eq!(report.issues.len(), 1);
     assert_eq!(
-        report.issues[0].kind,
-        DiscoveryIssueKind::InsufficientOfficialEvidence
+        (
+            report.sources.len(),
+            &report.sources[0].path,
+            report.sources[0].status
+        ),
+        (1, &db, ProviderSourceStatus::Unknown)
     );
+    assert!(report.issues.is_empty());
 }
 #[test]
 fn junie_home_replaces_default_and_retired_sessions_override() {

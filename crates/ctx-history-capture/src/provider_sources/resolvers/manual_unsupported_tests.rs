@@ -3,6 +3,7 @@ use super::super::super::{
     specs::provider_source_spec, types::ProviderImportSupport,
 };
 use super::super::dedupe_report;
+use rusqlite::Connection;
 use std::fs;
 
 use super::*;
@@ -37,6 +38,47 @@ fn spec(provider: CaptureProvider) -> &'static ProviderSourceSpec {
 fn write(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
+}
+
+fn write_firebender_chat_history_db(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE chat_sessions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            deleted_at INTEGER DEFAULT NULL,
+            messages_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL
+        );
+        CREATE TABLE schema_info (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE subagent_conversations (
+            tool_call_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            subagent_type TEXT NOT NULL,
+            description TEXT NOT NULL,
+            messages_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (session_id, tool_call_id),
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .unwrap();
+}
+
+fn write_malformed_firebender_db(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch("CREATE TABLE chat_sessions (id TEXT PRIMARY KEY);")
+        .unwrap();
 }
 
 fn source<'a>(report: &'a DiscoveryReport, format: &str) -> &'a ProviderSource {
@@ -100,23 +142,145 @@ fn qoder_probe_is_shallow_bounded_and_deterministic() {
 }
 
 #[test]
-fn firebender_emits_only_insufficient_evidence_issues() {
+fn firebender_project_local_default_reports_missing_at_current_project_root() {
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let project = temp.path().join("project");
+    let child = project.join("src/module");
+    fs::create_dir_all(project.join(".git")).unwrap();
+    fs::create_dir_all(&child).unwrap();
+    let context = base.with_cwd(Some(child));
+    let report = resolve(&context, spec(CaptureProvider::Firebender));
+    assert_eq!(
+        (
+            report.sources.len(),
+            &report.sources[0].path,
+            report.sources[0].status,
+            report.issues.len()
+        ),
+        (
+            1,
+            &project.join(".idea/firebender/chat_history.db"),
+            ProviderSourceStatus::Missing,
+            0
+        )
+    );
+}
+
+#[test]
+fn firebender_project_local_default_accepts_valid_official_shape_without_writes() {
     let temp = tempdir();
     let context = context(temp.path(), DiscoveryPlatform::Linux);
-    write(
-        &context
-            .cwd()
-            .unwrap()
-            .join(".idea/firebender/chat_history.db"),
-        b"not consulted",
-    );
+    let db = context
+        .cwd()
+        .unwrap()
+        .join(".idea/firebender/chat_history.db");
+    write_firebender_chat_history_db(&db);
+    let before = fs::read(&db).unwrap();
+
     let report = resolve(&context, spec(CaptureProvider::Firebender));
-    assert!(report.sources.is_empty());
     assert_eq!(
-        (report.issues.len(), report.issues[0].kind),
-        (1, DiscoveryIssueKind::InsufficientOfficialEvidence)
+        (
+            report.sources.len(),
+            &report.sources[0].path,
+            report.sources[0].status,
+            report.sources[0].import_support
+        ),
+        (
+            1,
+            &db,
+            ProviderSourceStatus::Available,
+            ProviderImportSupport::Native
+        )
     );
-    assert_eq!(report.issues[0].path, None);
+    assert_eq!(fs::read(&db).unwrap(), before);
+}
+
+#[test]
+fn firebender_project_local_default_rejects_wrong_shape_as_unknown() {
+    let temp = tempdir();
+    let context = context(temp.path(), DiscoveryPlatform::Linux);
+    let db = context
+        .cwd()
+        .unwrap()
+        .join(".idea/firebender/chat_history.db");
+    write_malformed_firebender_db(&db);
+    let report = resolve(&context, spec(CaptureProvider::Firebender));
+    assert_eq!(
+        (&report.sources[0].path, report.sources[0].status),
+        (&db, ProviderSourceStatus::Unknown)
+    );
+    assert!(report.sources[0]
+        .unsupported_reason
+        .unwrap()
+        .contains("could not be read"));
+}
+
+#[test]
+fn firebender_project_local_default_stops_at_git_boundary() {
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let outer = temp.path().join("outer");
+    let repo = outer.join("repo");
+    let child = repo.join("src/module");
+    write_firebender_chat_history_db(&outer.join(".idea/firebender/chat_history.db"));
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(&child).unwrap();
+    let report = resolve(
+        &base.with_cwd(Some(child)),
+        spec(CaptureProvider::Firebender),
+    );
+    assert_eq!(
+        (&report.sources[0].path, report.sources[0].status),
+        (
+            &repo.join(".idea/firebender/chat_history.db"),
+            ProviderSourceStatus::Missing
+        )
+    );
+}
+
+#[test]
+fn firebender_nearest_project_marker_suppresses_outer_project_store() {
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let outer = temp.path().join("outer");
+    let nested = outer.join("nested");
+    let child = nested.join("src");
+    write_firebender_chat_history_db(&outer.join(".idea/firebender/chat_history.db"));
+    fs::create_dir_all(nested.join(".idea")).unwrap();
+    fs::create_dir_all(&child).unwrap();
+    let report = resolve(
+        &base.with_cwd(Some(child)),
+        spec(CaptureProvider::Firebender),
+    );
+    assert_eq!(
+        (&report.sources[0].path, report.sources[0].status),
+        (
+            &nested.join(".idea/firebender/chat_history.db"),
+            ProviderSourceStatus::Missing
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn firebender_linked_project_store_fails_closed_and_does_not_touch_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let context = context(temp.path(), DiscoveryPlatform::Linux);
+    let outside = temp.path().join("outside");
+    let db = outside.join("firebender/chat_history.db");
+    write_firebender_chat_history_db(&db);
+    let before = fs::read(&db).unwrap();
+    symlink(&outside, context.cwd().unwrap().join(".idea")).unwrap();
+
+    let report = resolve(&context, spec(CaptureProvider::Firebender));
+    assert_eq!(
+        report.sources[0].status,
+        ProviderSourceStatus::Unsupported
+    );
+    assert_eq!(fs::read(&db).unwrap(), before);
 }
 
 #[test]
