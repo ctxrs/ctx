@@ -831,7 +831,7 @@ fn lifecycle_status_renders_repository_readiness_axes_independently() {
     assert_eq!(value["storage_evidence"]["flat_format_version"], 2);
     assert_eq!(
         value["storage_evidence"]["materializer_checkpoint_version"],
-        3
+        4
     );
     assert_eq!(value["storage_evidence"]["journal_pack_format_version"], 3);
     assert_eq!(value["storage_evidence"]["legacy_journals_written"], 0);
