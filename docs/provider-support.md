@@ -30,6 +30,12 @@ remains Supported but not qualified for exact attribution. See
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for absence,
 privacy, migration, and retrieval semantics.
 
+Typed MCP invocation/response capture is another separate event-content
+capability. It currently covers only Codex session JSONL, Warp SQLite, and
+Copilot CLI JSONL at their documented native event granularities; it does not
+change general provider support or the exact-attribution qualification counts.
+See [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
+
 The public
 support matrix is:
 

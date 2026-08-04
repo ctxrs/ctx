@@ -181,6 +181,21 @@ from provider-specific content or current MCP configuration. Presentation
 `--content none` retains already-stored metadata; Core `Redacted` or `Omitted`
 policy omits the sensitive pair by default.
 
+A selected Core event may separately carry content-governed `mcp_exchange`
+with a provider call ID and invocation and/or terminal response. Present
+arguments and response payloads are complete decoded JSON, not raw source-byte
+representations. The normalized body, provider-native structured content, and
+exchange share the 16 MiB Core encoded-content budget. Oversized JSON channels
+become explicit `omitted` capture states without truncation; if the compact
+exchange cannot fit, the ordinary event remains stored without it.
+
+The exchange is retrievable from full-content event output but is not copied
+into Tantivy fields or tokens, semantic text, `usage.sqlite`, SQL columns, or
+the Local Pro graph. Provider call IDs, arguments, status/timing, and response
+payloads add no selectors, snippets, or ranking signals. Existing normalized
+body indexing behavior is unchanged. See
+[`mcp-exchange-capture.md`](mcp-exchange-capture.md).
+
 Search, show, list, locate, and MCP retrieval read verified Core/Tantivy
 generations. List continuations remain bound to the named active or retained
 generation, and JSONL holds one generation pin for its whole traversal. Show
@@ -571,17 +586,17 @@ Exact MCP attribution introduces one deliberately narrow exception for the
 immediately preceding self-contained Core contract. When that allowlisted
 predecessor is present, ctx verifies its pointer, manifest, checksums, records,
 identities, and counts, then republishes an out-of-place current candidate with
-`mcp_tool_call` absent. It does not discover or reopen provider history during
-this preservation step. The prior generation remains authoritative until the
-new candidate is completely verified and atomically published; unknown,
-incomplete, or corrupt predecessors fail closed.
+`mcp_tool_call` and `mcp_exchange` absent. It does not discover or reopen
+provider history during this preservation step. The prior generation remains
+authoritative until the new candidate is completely verified and atomically
+published; unknown, incomplete, or corrupt predecessors fail closed.
 
-A later ordinary provider refresh can enrich qualifying source records with
-exact attribution. If their original provider source is unavailable,
-historical records remain readable and unattributed with stable existing event
-and session identities. This bridge applies only within the self-contained
-Core epoch; it does not read or migrate the legacy Store/SQL epoch described
-above.
+A later ordinary provider refresh or reimport can enrich qualifying source
+records with exact attribution and typed exchange capture. If their original
+provider source is unavailable, historical records remain readable and
+unattributed, with `mcp_exchange` absent and stable existing event and session
+identities. This bridge applies only within the self-contained Core epoch; it
+does not read or migrate the legacy Store/SQL epoch described above.
 
 Remove a source from future imports:
 
@@ -649,9 +664,10 @@ Exact MCP server and tool names are opaque local data with the same handling
 requirements. They may themselves contain credentials, paths, customer or
 repository identifiers, Unicode controls, or terminal escape content. Exact
 JSON/JSONL and MCP structured output is therefore not share-safe without
-review. Human terminal and Markdown views escape controls and structure; a
-display-bounded value is visibly marked rather than silently changing the
-machine value. See
+review. Captured MCP arguments and response payloads can contain the same data,
+plus arbitrary provider-native output. Human terminal and Markdown views escape
+identity controls and structure; a display-bounded value is visibly marked
+rather than silently changing the machine value. See
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md).
 
 Recommended handling:

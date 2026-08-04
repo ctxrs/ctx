@@ -37,6 +37,11 @@ Agents remains generally supported through its local SQLite import, which is
 not qualified for exact attribution; its hosted trace is separately excluded
 from this local-only capability boundary.
 
+Typed MCP invocation/response capture is content rather than attribution
+metadata. It currently covers only Codex session JSONL, Warp SQLite, and
+Copilot CLI JSONL and preserves each provider's native combined or split event
+shape. See [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
+
 ## Location Selection
 
 For each provider and product surface, ctx applies the provider's current

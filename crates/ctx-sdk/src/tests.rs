@@ -191,6 +191,226 @@ fn show_normalization_exposes_typed_mcp_tool_call_metadata() {
     }
 }
 
+#[test]
+fn show_normalization_exposes_lossless_typed_mcp_exchange_content() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../contracts/agent-history-v1/fixtures/show-event.mcp-tool-call.json"
+    ))
+    .unwrap();
+    let canonical = normalize_event(&fixture["event"]).unwrap();
+    let canonical_selected = canonical.event.unwrap();
+    let canonical_exchange = canonical_selected.mcp_exchange.as_ref().unwrap();
+    assert_eq!(
+        canonical_exchange.provider_call_id,
+        "native-call-呼び出し-🦀"
+    );
+    let canonical_arguments = match &canonical_exchange.invocation.as_ref().unwrap().arguments {
+        McpJsonCapture::Present { value } => value,
+        other => panic!("expected present canonical arguments, got {other:?}"),
+    };
+    assert!(canonical_arguments["snake_key"][1].is_null());
+    assert!(canonical_arguments["nested"]["items"][1]["deep_null"].is_null());
+
+    let raw_arguments = json!({
+        "snake_key": ["雪", null, {"camelKey": true}],
+        "nested_object": {"deep_null": null, "items": [1, false]}
+    });
+    let raw_payload = json!({
+        "result_key": ["完了", null, {"mixedCase": [false, 3]}]
+    });
+    let normalized = normalize_event(&json!({
+        "event": {
+            "ctx_event_id": "event-1",
+            "text": "normalized response body",
+            "mcp_exchange": {
+                "provider_call_id": "call-呼び出し-🦀",
+                "invocation": {
+                    "server": "mcp-サーバー",
+                    "tool": "検索-tool",
+                    "arguments": {
+                        "capture_status": "present",
+                        "value": raw_arguments.clone()
+                    }
+                },
+                "response": {
+                    "status": "succeeded",
+                    "duration_ns": 42,
+                    "text": {"capture_status": "normalized_body"},
+                    "payload": {
+                        "capture_status": "present",
+                        "value": raw_payload.clone()
+                    }
+                }
+            }
+        },
+        "events": [
+            {
+                "mcp_exchange": {
+                    "provider_call_id": "capture-states",
+                    "invocation": {
+                        "server": "server",
+                        "tool": "tool",
+                        "arguments": {"capture_status": "absent"}
+                    },
+                    "response": {
+                        "status": "cancelled",
+                        "text": {"capture_status": "unavailable"},
+                        "payload": {
+                            "capture_status": "omitted",
+                            "reason": "size_limit",
+                            "observed_encoded_bytes": 70000
+                        }
+                    }
+                }
+            },
+            {"ctx_event_id": "event-without-exchange"}
+        ]
+    }))
+    .unwrap();
+    let selected = normalized.event.unwrap();
+    let exchange = selected.mcp_exchange.as_ref().unwrap();
+    assert_eq!(exchange.provider_call_id, "call-呼び出し-🦀");
+    let McpJsonCapture::Present { value: arguments } =
+        &exchange.invocation.as_ref().unwrap().arguments
+    else {
+        panic!("normalized arguments must be present");
+    };
+    assert_eq!(arguments, &raw_arguments);
+    let response = exchange.response.as_ref().unwrap();
+    assert_eq!(response.status, McpResponseStatus::Succeeded);
+    assert_eq!(response.duration_ns, Some(42));
+    let McpJsonCapture::Present { value: payload } = &response.payload else {
+        panic!("normalized payload must be present");
+    };
+    assert_eq!(payload, &raw_payload);
+
+    let encoded = serde_json::to_value(&selected).unwrap();
+    assert!(encoded.get("mcp_exchange").is_none());
+    assert_eq!(
+        encoded["mcpExchange"]["invocation"]["arguments"]["value"],
+        raw_arguments
+    );
+    assert_eq!(
+        encoded["mcpExchange"]["response"]["payload"]["value"],
+        raw_payload
+    );
+
+    let states = normalized.events[0].mcp_exchange.as_ref().unwrap();
+    assert_eq!(
+        states.invocation.as_ref().unwrap().arguments,
+        McpJsonCapture::Absent
+    );
+    assert_eq!(
+        states.response.as_ref().unwrap().text,
+        McpTextCapture::Unavailable
+    );
+    assert_eq!(
+        states.response.as_ref().unwrap().payload,
+        McpJsonCapture::Omitted {
+            reason: McpPayloadOmissionReason::SizeLimit,
+            observed_encoded_bytes: Some(70_000),
+        }
+    );
+    assert!(normalized.events[1].mcp_exchange.is_none());
+}
+
+#[test]
+fn mcp_exchange_normalization_rejects_null_unknown_and_alias_ambiguity() {
+    for fixture in [
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-explicit-null.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-unknown-field.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-outer-alias-collision.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-normalized-body-missing-event-text.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-normalized-body-empty-event-text.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-unsafe-duration-ns.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-exchange-unsafe-observed-encoded-bytes.json"
+        )
+        .as_slice(),
+    ] {
+        let raw = decode_json_value_exact(fixture, "failed to decode ctx JSON").unwrap();
+        let error = normalize_event(&raw).unwrap_err();
+        assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+        assert!(
+            error.body.message.to_ascii_lowercase().contains("mcp")
+                || error.body.cause.as_deref().is_some_and(|cause| {
+                    cause.to_ascii_lowercase().contains("mcp")
+                }),
+            "missing MCP decode context: message={:?}, cause={:?}",
+            error.body.message,
+            error.body.cause
+        );
+    }
+
+    for invalid in [
+        json!({
+            "event": {
+                "mcp_exchange_": {
+                    "provider_call_id": "forged",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"capture_status": "absent"},
+                        "payload": {"capture_status": "absent"}
+                    }
+                }
+            },
+            "events": []
+        }),
+        json!({
+            "event": {
+                "mcp_exchange": {
+                    "provider_call_id": "snake",
+                    "providerCallId": "camel",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"capture_status": "absent"},
+                        "payload": {"capture_status": "absent"}
+                    }
+                }
+            },
+            "events": []
+        }),
+        json!({
+            "event": {
+                "mcp_exchange": {
+                    "provider_call_id": "call",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"capture_status": "absent"},
+                        "payload": {
+                            "capture_status": "omitted",
+                            "captureStatus": "omitted",
+                            "reason": "size_limit"
+                        }
+                    }
+                }
+            },
+            "events": []
+        }),
+    ] {
+        let error = normalize_event(&invalid).unwrap_err();
+        assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn show_event_local_cli_drains_max_valid_mcp_attribution() {
@@ -282,6 +502,14 @@ fn raw_json_decode_rejects_duplicate_members_without_scanning_string_contents() 
         r#"{"mcpToolCall":{"server":"first","server":"second","tool":"one"}}"#
     )
     .is_err());
+    assert!(serde_json::from_str::<AgentHistoryEvent>(
+        r#"{"mcpExchange":{"providerCallId":"first","response":{"status":"succeeded","text":{"captureStatus":"absent"},"payload":{"captureStatus":"absent"}}},"mcpExchange":{"providerCallId":"second","response":{"status":"succeeded","text":{"captureStatus":"absent"},"payload":{"captureStatus":"absent"}}}}"#
+    )
+    .is_err());
+    assert!(serde_json::from_str::<AgentHistoryEvent>(
+        r#"{"mcpExchange":{"providerCallId":"first","providerCallId":"second","response":{"status":"succeeded","text":{"captureStatus":"absent"},"payload":{"captureStatus":"absent"}}}}"#
+    )
+    .is_err());
 
     for duplicate in [
         include_bytes!(
@@ -298,6 +526,14 @@ fn raw_json_decode_rejects_duplicate_members_without_scanning_string_contents() 
         .as_slice(),
         include_bytes!(
             "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-mcp-tool-call-tool.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-event-mcp-exchange-snake.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-mcp-exchange-captured-value.json"
         )
         .as_slice(),
     ] {

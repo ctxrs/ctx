@@ -227,6 +227,11 @@ impl PreparedEventDelta {
     pub(super) fn into_typed(self) -> CoreEventDelta {
         self.delta
     }
+
+    #[cfg(test)]
+    pub(super) const fn content_bytes(&self) -> usize {
+        self.content_bytes
+    }
 }
 
 pub(super) struct EventDeltaPageBuilder {
@@ -677,8 +682,16 @@ fn event_delta_content_bytes(delta: &CoreEventDelta) -> Result<usize> {
         .map(encoded_json_len)
         .transpose()?
         .unwrap_or(0);
+    let mcp_exchange_bytes = record
+        .content
+        .mcp_exchange
+        .as_ref()
+        .map(encoded_json_len)
+        .transpose()?
+        .unwrap_or(0);
     body_bytes
         .checked_add(structured_bytes)
+        .and_then(|bytes| bytes.checked_add(mcp_exchange_bytes))
         .ok_or_else(|| anyhow!("invalid_request: Core event delta content bytes overflowed"))
 }
 

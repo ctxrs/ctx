@@ -4,6 +4,7 @@ use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::Deserializer;
 use serde_json::Value;
 
+#[cfg(test)]
 use super::{AgentHistoryError, AgentHistoryErrorCode};
 
 struct NoDuplicateJsonMembers;

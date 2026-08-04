@@ -22,6 +22,9 @@ pub(crate) fn render_event(
     let structured_content = (projection == EventContentProjection::Full)
         .then_some(content.structured_content.as_ref())
         .flatten();
+    let mcp_exchange = (projection == EventContentProjection::Full)
+        .then_some(content.mcp_exchange.as_ref())
+        .flatten();
     let occurred_at = format_timestamp(event.occurred_at_unix_ms);
     let mut rendered = json!({
         "schema_version": EVENT_QUERY_SCHEMA_VERSION,
@@ -77,6 +80,9 @@ pub(crate) fn render_event(
         "repository_vcs_observations": record.repository_vcs_observations,
         "content_projection": projection.as_str(),
     });
+    if let Some(mcp_exchange) = mcp_exchange {
+        rendered["mcp_exchange"] = serde_json::to_value(mcp_exchange)?;
+    }
     crate::commands::mcp_tool_call::insert_mcp_tool_call(&mut rendered, record);
     Ok(rendered)
 }

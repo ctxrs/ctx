@@ -3,6 +3,9 @@ import XCTest
 
 final class CtxAgentHistoryTests: XCTestCase {
     func testForcesAnalyticsOffAfterAmbientAndUserEnvironmentMerging() throws {
+        #if !os(macOS)
+        throw XCTSkip("Darwin process-group execution is macOS-only")
+        #else
         let variable = "CTX_ANALYTICS_ENABLED"
         let original = ProcessInfo.processInfo.environment[variable]
         setenv(variable, "true", 1)
@@ -41,6 +44,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             JSONSerialization.jsonObject(with: output) as? [String: String]
         )
         XCTAssertEqual(raw["analyticsEnabled"], "false")
+        #endif
     }
 
     func testStatusCountersUseTheExactCrossSDKIntegerDomain() throws {
@@ -515,6 +519,145 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(aliasResponse.event.event?.text, "snake outer alias")
         XCTAssertEqual(aliasResponse.event.events.first?.mcpToolCall?.server, "camel-server")
         XCTAssertEqual(aliasResponse.event.events.first?.text, "camel outer alias")
+    }
+
+    func testMCPExchangeCanonicalFixtureIsTypedLosslessAndRoundTrips() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("contracts/agent-history-v1/fixtures/show-event.mcp-tool-call.json")
+        let fixtureData = try Data(contentsOf: fixtureURL)
+        let envelope = try JSONDecoder().decode(AgentHistoryEnvelope.self, from: fixtureData)
+        let selected = try XCTUnwrap(envelope.event?.event)
+        let exchange = try XCTUnwrap(selected.mcpExchange)
+
+        XCTAssertEqual(exchange.providerCallId, "native-call-呼び出し-🦀")
+        XCTAssertEqual(exchange.invocation?.server, "mcp-サーバー-🦀")
+        XCTAssertEqual(exchange.invocation?.tool, "検索/工具/🛠️")
+        XCTAssertEqual(exchange.invocation?.arguments.captureStatus, .present)
+        let arguments = try XCTUnwrap(exchange.invocation?.arguments.value)
+        XCTAssertEqual(
+            arguments,
+            .object([
+                "snake_key": .array([
+                    .string("雪"),
+                    .null,
+                    .object(["camelKey": .bool(true)])
+                ]),
+                "nested": .object([
+                    "items": .array([
+                        .number(1),
+                        .object(["deep_null": .null])
+                    ])
+                ])
+            ])
+        )
+        XCTAssertNil(arguments["snakeKey"])
+        XCTAssertNil(arguments["nested"]?["items"]?.arrayValue?[1]["deepNull"])
+        XCTAssertEqual(arguments["nested"]?["items"]?.arrayValue?[1]["deep_null"], .null)
+
+        XCTAssertEqual(exchange.response?.status, .succeeded)
+        XCTAssertEqual(exchange.response?.durationNs, AgentHistoryMCPExchange.maximumExactInteger)
+        XCTAssertEqual(exchange.response?.text.captureStatus, .normalizedBody)
+        XCTAssertEqual(
+            exchange.response?.payload.value,
+            .object([
+                "result_key": .array([
+                    .string("完了"),
+                    .null,
+                    .object(["mixedCase": .array([.bool(false), .number(3)])])
+                ])
+            ])
+        )
+        XCTAssertNil(exchange.response?.payload.value?["resultKey"])
+
+        let captureStates = try XCTUnwrap(envelope.event?.events[1].mcpExchange)
+        XCTAssertEqual(captureStates.invocation?.arguments.captureStatus, .absent)
+        XCTAssertEqual(captureStates.response?.status, .cancelled)
+        XCTAssertEqual(captureStates.response?.text.captureStatus, .absent)
+        XCTAssertEqual(captureStates.response?.payload.captureStatus, .unavailable)
+
+        let omitted = try XCTUnwrap(envelope.event?.events[2].mcpExchange)
+        XCTAssertEqual(omitted.response?.status, .failed)
+        XCTAssertEqual(omitted.response?.failureKind, .toolReported)
+        XCTAssertEqual(omitted.response?.text.captureStatus, .omitted)
+        XCTAssertEqual(omitted.response?.text.reason, .sizeLimit)
+        XCTAssertEqual(
+            omitted.response?.text.observedEncodedBytes,
+            AgentHistoryMCPExchange.maximumExactInteger
+        )
+        XCTAssertEqual(omitted.response?.payload.captureStatus, .omitted)
+        XCTAssertEqual(omitted.response?.payload.reason, .sizeLimit)
+        XCTAssertNil(omitted.response?.payload.observedEncodedBytes)
+        XCTAssertNil(envelope.event?.events[3].mcpExchange)
+
+        let encoded = try JSONEncoder().encode(selected)
+        XCTAssertEqual(try JSONDecoder().decode(AgentHistoryEventRecord.self, from: encoded), selected)
+
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: fixtureData) as? [String: Any])
+        let rawEventResult = try XCTUnwrap(root["event"])
+        let rawEventData = try JSONSerialization.data(withJSONObject: rawEventResult)
+        let runner = CapturingRunner { _ in CommandResult(stdout: rawEventData) }
+        let normalized = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            .showEvent("event-1")
+        XCTAssertEqual(normalized.event.event?.mcpExchange?.invocation?.arguments.value, arguments)
+        XCTAssertEqual(normalized.event.event?.mcpExchange?.response?.payload.value, exchange.response?.payload.value)
+    }
+
+    func testMCPExchangeSnakeCaseWireAliasesPreserveOpaqueCapturedJSON() throws {
+        let raw = #"{"event":{"text":"normalized","mcp_exchange":{"provider_call_id":"call","invocation":{"server":"server","tool":"tool","arguments":{"capture_status":"present","value":{"snake_key":[null,{"deep_null":null}]}}},"response":{"status":"succeeded","duration_ns":9007199254740991,"text":{"capture_status":"normalized_body"},"payload":{"capture_status":"present","value":null}}}},"events":[]}"#
+        let runner = CapturingRunner { _ in CommandResult(stdout: raw) }
+        let event = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            .showEvent("event-1")
+            .event.event
+        let exchange = try XCTUnwrap(event?.mcpExchange)
+
+        XCTAssertEqual(exchange.providerCallId, "call")
+        XCTAssertEqual(exchange.response?.durationNs, AgentHistoryMCPExchange.maximumExactInteger)
+        XCTAssertEqual(exchange.response?.text.captureStatus, .normalizedBody)
+        XCTAssertEqual(exchange.response?.payload.value, .null)
+        let arguments = try XCTUnwrap(exchange.invocation?.arguments.value)
+        XCTAssertEqual(arguments["snake_key"]?.arrayValue?[0], .null)
+        XCTAssertEqual(arguments["snake_key"]?.arrayValue?[1]["deep_null"], .null)
+        XCTAssertNil(arguments["snakeKey"])
+        XCTAssertNil(arguments["snake_key"]?.arrayValue?[1]["deepNull"])
+    }
+
+    func testMCPExchangeAdversarialFixturesAreRejected() throws {
+        let fixtureDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "contracts/agent-history-v1/fixtures/adversarial",
+                isDirectory: true
+            )
+        for name in [
+            "duplicate-event-mcp-exchange-snake.json",
+            "duplicate-mcp-exchange-captured-value.json",
+            "invalid-mcp-exchange-explicit-null.json",
+            "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+            "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+            "invalid-mcp-exchange-outer-alias-collision.json",
+            "invalid-mcp-exchange-unknown-field.json",
+            "invalid-mcp-exchange-unsafe-duration-ns.json",
+            "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json"
+        ] {
+            let data = try Data(contentsOf: fixtureDirectory.appendingPathComponent(name))
+            let runner = CapturingRunner { _ in CommandResult(stdout: data) }
+            XCTAssertThrowsError(
+                try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+                    .showEvent("event-1"),
+                name
+            ) { error in
+                XCTAssertEqual((error as? CtxAgentHistorySDKError)?.code, .decodeError, name)
+            }
+        }
     }
 
     func testCamelizedPublicJSONOmitsRawMetadataKeys() throws {

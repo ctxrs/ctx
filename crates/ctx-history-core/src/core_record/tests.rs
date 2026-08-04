@@ -61,6 +61,7 @@ fn record() -> CoreRecord {
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: Some("complete body".to_owned()),
             structured_content: Some(serde_json::json!({"type": "message"})),
+            mcp_exchange: None,
         },
         metadata: BTreeMap::new(),
         repository_candidate_evidence: RepositoryCandidateEvidence::default(),
@@ -113,6 +114,28 @@ fn mcp_tool_call(server: impl Into<String>, tool: impl Into<String>) -> McpToolC
     McpToolCallAttribution {
         server: server.into(),
         tool: tool.into(),
+    }
+}
+
+fn mcp_exchange() -> McpExchangeContent {
+    McpExchangeContent {
+        provider_call_id: "call-1".to_owned(),
+        invocation: Some(McpInvocationContent {
+            server: "filesystem".to_owned(),
+            tool: "read_file".to_owned(),
+            arguments: McpJsonCapture::Present {
+                value: serde_json::json!({"path": "/work/ctx/README.md"}),
+            },
+        }),
+        response: Some(McpTerminalResponseContent {
+            status: McpTerminalStatus::Succeeded,
+            failure_kind: None,
+            duration_ns: Some(42),
+            text: McpTextCapture::NormalizedBody,
+            payload: McpJsonCapture::Present {
+                value: serde_json::json!({"content": "hello"}),
+            },
+        }),
     }
 }
 
@@ -251,6 +274,185 @@ fn mcp_tool_call_uses_the_exact_optional_canonical_wire_shape() {
         assert!(matches!(
             CoreRecord::decode_stored(&serde_json::to_vec(&wire).unwrap()),
             Err(CoreRecordError::Json(_))
+        ));
+    }
+}
+
+#[test]
+fn mcp_exchange_uses_an_optional_content_governed_wire_shape() {
+    let absent = serde_json::to_value(record()).unwrap();
+    assert!(!absent["content"]
+        .as_object()
+        .unwrap()
+        .contains_key("mcp_exchange"));
+
+    let mut captured = record();
+    captured.content.mcp_exchange = Some(mcp_exchange());
+    let encoded = captured.encode_stored().unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        wire["content"]["mcp_exchange"],
+        serde_json::json!({
+            "provider_call_id": "call-1",
+            "invocation": {
+                "server": "filesystem",
+                "tool": "read_file",
+                "arguments": {
+                    "capture_status": "present",
+                    "value": {"path": "/work/ctx/README.md"}
+                }
+            },
+            "response": {
+                "status": "succeeded",
+                "duration_ns": 42,
+                "text": {"capture_status": "normalized_body"},
+                "payload": {
+                    "capture_status": "present",
+                    "value": {"content": "hello"}
+                }
+            }
+        })
+    );
+    assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), captured);
+
+    let mut explicit_null = absent;
+    explicit_null["content"]
+        .as_object_mut()
+        .unwrap()
+        .insert("mcp_exchange".to_owned(), serde_json::Value::Null);
+    assert!(matches!(
+        CoreRecord::decode_stored(&serde_json::to_vec(&explicit_null).unwrap()),
+        Err(CoreRecordError::Json(_))
+    ));
+}
+
+#[test]
+fn mcp_exchange_rejects_noncanonical_explicit_null_optional_members() {
+    let record = {
+        let mut record = record();
+        record.content.mcp_exchange = Some(mcp_exchange());
+        serde_json::to_value(record).unwrap()
+    };
+    for path in [
+        &["content", "mcp_exchange", "invocation"][..],
+        &["content", "mcp_exchange", "response"][..],
+        &["content", "mcp_exchange", "response", "duration_ns"][..],
+    ] {
+        let mut wire = record.clone();
+        let (member, parents) = path.split_last().unwrap();
+        let mut parent = &mut wire;
+        for key in parents {
+            parent = parent.get_mut(*key).unwrap();
+        }
+        parent
+            .as_object_mut()
+            .unwrap()
+            .insert((*member).to_owned(), serde_json::Value::Null);
+        assert!(matches!(
+            CoreRecord::decode_stored(&serde_json::to_vec(&wire).unwrap()),
+            Err(CoreRecordError::Json(_))
+        ));
+    }
+
+    let mut failed = record;
+    failed["content"]["mcp_exchange"]["response"]["status"] =
+        serde_json::Value::String("failed".to_owned());
+    failed["content"]["mcp_exchange"]["response"]
+        .as_object_mut()
+        .unwrap()
+        .insert("failure_kind".to_owned(), serde_json::Value::Null);
+    assert!(matches!(
+        CoreRecord::decode_stored(&serde_json::to_vec(&failed).unwrap()),
+        Err(CoreRecordError::Json(_))
+    ));
+}
+
+#[test]
+fn mcp_exchange_requires_a_nonempty_side_and_object_arguments() {
+    let mut empty = record();
+    empty.content.mcp_exchange = Some(McpExchangeContent {
+        provider_call_id: "call-1".to_owned(),
+        invocation: None,
+        response: None,
+    });
+    assert!(matches!(
+        empty.validate_contract(),
+        Err(CoreRecordError::InvalidMcpExchange)
+    ));
+
+    let mut scalar_arguments = record();
+    let mut exchange = mcp_exchange();
+    exchange.invocation.as_mut().unwrap().arguments = McpJsonCapture::Present {
+        value: serde_json::json!(["not", "an", "object"]),
+    };
+    scalar_arguments.content.mcp_exchange = Some(exchange);
+    assert!(matches!(
+        scalar_arguments.validate_contract(),
+        Err(CoreRecordError::InvalidMcpExchange)
+    ));
+}
+
+#[test]
+fn mcp_exchange_terminal_state_and_body_reference_are_consistent() {
+    let mut missing_failure_kind = record();
+    let mut exchange = mcp_exchange();
+    exchange.response.as_mut().unwrap().status = McpTerminalStatus::Failed;
+    missing_failure_kind.content.mcp_exchange = Some(exchange);
+    assert!(matches!(
+        missing_failure_kind.validate_contract(),
+        Err(CoreRecordError::InvalidMcpExchange)
+    ));
+
+    let mut stray_failure_kind = record();
+    let mut exchange = mcp_exchange();
+    exchange.response.as_mut().unwrap().failure_kind = Some(McpFailureKind::Unknown);
+    stray_failure_kind.content.mcp_exchange = Some(exchange);
+    assert!(matches!(
+        stray_failure_kind.validate_contract(),
+        Err(CoreRecordError::InvalidMcpExchange)
+    ));
+
+    let mut missing_body = record();
+    missing_body.content.normalized_body = None;
+    missing_body.content.mcp_exchange = Some(mcp_exchange());
+    assert!(matches!(
+        missing_body.validate_contract(),
+        Err(CoreRecordError::InvalidMcpExchange)
+    ));
+}
+
+#[test]
+fn mcp_exchange_invocation_agrees_with_projection_independent_attribution() {
+    let mut record = record();
+    record.mcp_tool_call = Some(mcp_tool_call("other-server", "read_file"));
+    record.content.mcp_exchange = Some(mcp_exchange());
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidMcpExchange)
+    ));
+
+    record.mcp_tool_call = Some(mcp_tool_call("filesystem", "read_file"));
+    record.validate_contract().unwrap();
+}
+
+#[test]
+fn nonselected_content_cannot_retain_an_mcp_exchange() {
+    for status in [
+        CoreContentPolicyStatus::Redacted {
+            reason: "sensitive".to_owned(),
+        },
+        CoreContentPolicyStatus::Omitted {
+            reason: "policy".to_owned(),
+        },
+    ] {
+        let mut record = record();
+        record.content.policy_status = status;
+        record.content.normalized_body = None;
+        record.content.structured_content = None;
+        record.content.mcp_exchange = Some(mcp_exchange());
+        assert!(matches!(
+            record.validate_contract(),
+            Err(CoreRecordError::InvalidContentPolicyState)
         ));
     }
 }
@@ -570,18 +772,70 @@ fn invocation_evidence_count_is_bounded() {
 }
 
 #[test]
-fn duplicate_complete_representations_share_one_content_budget_through_the_ceiling() {
-    let duplicate = "x".repeat(MAX_CORE_CONTENT_BYTES - 2);
+fn aggregate_complete_representations_share_one_content_budget() {
+    let duplicate = "x".repeat((MAX_CORE_CONTENT_BYTES - 2) / 2);
     let mut record = record();
     record.content.normalized_body = Some(duplicate.clone());
     record.content.structured_content = Some(serde_json::Value::String(duplicate));
 
     assert_eq!(
-        serde_json::to_vec(record.content.structured_content.as_ref().unwrap())
-            .unwrap()
-            .len(),
+        record.content.encoded_content_bytes().unwrap(),
         MAX_CORE_CONTENT_BYTES
     );
+    record.validate_contract().unwrap();
+    record.encode_stored().unwrap();
+
+    record.content.normalized_body.as_mut().unwrap().push('x');
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::FieldTooLarge {
+            field: "selected_content",
+            actual,
+            maximum: MAX_CORE_CONTENT_BYTES,
+        }) if actual == MAX_CORE_CONTENT_BYTES + 1
+    ));
+}
+
+#[test]
+fn projectors_can_omit_duplicate_structured_content_without_losing_body_or_identity() {
+    let tail = "aggregate_content_tail_survives";
+    let body = format!("{}{tail}", "x".repeat(MAX_CORE_CONTENT_BYTES / 2 + 1_024));
+    let mut record = record();
+    record.content.normalized_body = Some(body.clone());
+    record.content.structured_content = Some(serde_json::json!({
+        "provider_native": {"body": &body}
+    }));
+    record.native_event_id = Some(TypedKey::utf8("stable-native-event").unwrap());
+    let event_id = record.event_id;
+    let native_event_id = record.native_event_id.clone();
+
+    assert!(record.content.normalized_body.as_ref().unwrap().len() <= MAX_CORE_CONTENT_BYTES);
+    assert!(
+        serde_json::to_vec(record.content.structured_content.as_ref().unwrap())
+            .unwrap()
+            .len()
+            <= MAX_CORE_CONTENT_BYTES
+    );
+    assert!(record.content.encoded_content_bytes().unwrap() > MAX_CORE_CONTENT_BYTES);
+
+    assert!(record
+        .content
+        .omit_structured_content_if_aggregate_exceeds_limit()
+        .unwrap());
+    assert_eq!(record.event_id, event_id);
+    assert_eq!(record.native_event_id, native_event_id);
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(body.as_str())
+    );
+    assert!(record
+        .content
+        .normalized_body
+        .as_deref()
+        .unwrap()
+        .ends_with(tail));
+    assert!(record.content.structured_content.is_none());
+    assert!(record.content.encoded_content_bytes().unwrap() <= MAX_CORE_CONTENT_BYTES);
     record.validate_contract().unwrap();
     record.encode_stored().unwrap();
 }
@@ -1352,18 +1606,22 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "7552eee7cae0695a98f202b02f52cbf5680845cb7bacea4ed754e283bc15f051"
+        "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "0610e4c21d2de00a19b8302d5bcb029ae07a9940aa0c3c9d02a95254ad61be0c"
+        "209e0c8677b765b8b1bfea1dbdf8f3ff7732e61150713de296628d661ad72b50"
     );
     for changed in [
         CoreContractRevisions {
             mcp_tool_call_attribution: current.mcp_tool_call_attribution + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            mcp_exchange: current.mcp_exchange + 1,
             ..current
         },
         CoreContractRevisions {

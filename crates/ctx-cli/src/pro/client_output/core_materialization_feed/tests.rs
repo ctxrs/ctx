@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreRecord, EventIdentityInput, NativeItemKey, NativeSessionKey,
+    CertifiedSourceInventory, CoreRecord, EventIdentityInput, McpExchangeContent, McpJsonCapture,
+    McpTerminalResponseContent, McpTerminalStatus, McpTextCapture, NativeItemKey, NativeSessionKey,
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey,
     SourceObservation, TypedKey,
 };

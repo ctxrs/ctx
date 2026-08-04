@@ -48,7 +48,7 @@ const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
-    "gemini-nativepath-source-backed-v0-p9-pull-request-association";
+    "gemini-nativepath-source-backed-v0-p10-aggregate-content-admission";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 const MAX_GEMINI_REPOSITORY_FIELD_CHARS: usize = 64 * 1024;
 const MAX_GEMINI_TOOL_CONTEXTS: usize = 256;

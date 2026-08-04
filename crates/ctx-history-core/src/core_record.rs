@@ -6,9 +6,15 @@ use thiserror::Error;
 
 use crate::{SourceKey, StableEntityId, StableEntityKind, TypedKey};
 
+mod mcp_exchange;
 mod repository;
 mod validation;
 
+pub use mcp_exchange::{
+    McpExchangeContent, McpFailureKind, McpInvocationContent, McpJsonCapture,
+    McpPayloadOmissionReason, McpTerminalResponseContent, McpTerminalStatus, McpTextCapture,
+    CORE_MCP_EXCHANGE_REVISION, MAX_MCP_EXCHANGE_CALL_ID_BYTES,
+};
 pub use repository::{
     GitObjectFormat, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
     RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidate,
@@ -84,6 +90,7 @@ struct CoreContractRevisions {
     normalization: u32,
     content_policy: u32,
     mcp_tool_call_attribution: u32,
+    mcp_exchange: u32,
     accumulator_identity: &'static [u8],
     repository_contract: u32,
     repository_observation: u32,
@@ -101,6 +108,7 @@ impl CoreContractRevisions {
             normalization: CORE_NORMALIZATION_REVISION,
             content_policy: CORE_CONTENT_POLICY_REVISION,
             mcp_tool_call_attribution: CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION,
+            mcp_exchange: CORE_MCP_EXCHANGE_REVISION,
             accumulator_identity: CORE_RECORD_ACCUMULATOR_IDENTITY,
             repository_contract: CORE_REPOSITORY_CONTRACT_REVISION,
             repository_observation: CORE_REPOSITORY_OBSERVATION_REVISION,
@@ -122,6 +130,7 @@ fn core_record_contract_fingerprint_for(revisions: CoreContractRevisions) -> Str
     digest.update(revisions.normalization.to_be_bytes());
     digest.update(revisions.content_policy.to_be_bytes());
     digest.update(revisions.mcp_tool_call_attribution.to_be_bytes());
+    digest.update(revisions.mcp_exchange.to_be_bytes());
     digest.update(revisions.repository_contract.to_be_bytes());
     digest.update(revisions.repository_observation.to_be_bytes());
     digest.update(revisions.bounded_shell_subset.to_be_bytes());
@@ -227,6 +236,8 @@ pub enum CoreRecordError {
     InvalidIdentityRelationship,
     #[error("Core record content does not match its policy status")]
     InvalidContentPolicyState,
+    #[error("Core record MCP exchange has an invalid shape or relationship")]
+    InvalidMcpExchange,
     #[error("Core record metadata must be a bounded JSON value")]
     InvalidMetadata,
     #[error("Core record repository identity {field} is duplicated: {value}")]
@@ -266,8 +277,17 @@ pub struct CoreContent {
     pub normalized_body: Option<String>,
     /// Optional complete structured representation of the same selected event.
     /// Providers may intentionally repeat arguments present in
-    /// `normalized_body`; admission charges the larger representation once.
+    /// `normalized_body`; every encoded representation is charged to the
+    /// aggregate selected-content budget.
     pub structured_content: Option<serde_json::Value>,
+    /// Typed, provider-neutral MCP invocation/response content. This remains
+    /// content-policy governed and is never projection-independent metadata.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_mcp_exchange"
+    )]
+    pub mcp_exchange: Option<McpExchangeContent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,6 +477,7 @@ impl CoreRecord {
                 policy_status: CoreContentPolicyStatus::Selected,
                 normalized_body: Some(normalized_body.into()),
                 structured_content: None,
+                mcp_exchange: None,
             },
             metadata: BTreeMap::new(),
             repository_candidate_evidence: RepositoryCandidateEvidence::default(),
@@ -521,6 +542,17 @@ impl CoreRecord {
             return Err(CoreRecordError::InvalidContentPolicyState);
         }
         self.content.validate_contract()?;
+        if let (Some(attribution), Some(invocation)) = (
+            self.mcp_tool_call.as_ref(),
+            self.content
+                .mcp_exchange
+                .as_ref()
+                .and_then(|exchange| exchange.invocation.as_ref()),
+        ) {
+            if attribution.server != invocation.server || attribution.tool != invocation.tool {
+                return Err(CoreRecordError::InvalidMcpExchange);
+            }
+        }
         validate_json_map(&self.metadata)?;
         self.repository_candidate_evidence.validate_contract()?;
         self.validate_repositories()
@@ -765,9 +797,63 @@ where
     McpToolCallAttribution::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_present_mcp_exchange<'de, D>(
+    deserializer: D,
+) -> Result<Option<McpExchangeContent>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    McpExchangeContent::deserialize(deserializer).map(Some)
+}
+
 impl CoreContent {
     pub fn meaningful_text(&self) -> &str {
         self.normalized_body.as_deref().unwrap_or("")
+    }
+
+    pub fn encoded_content_bytes(&self) -> CoreRecordResult<usize> {
+        let body_bytes = self.normalized_body.as_ref().map_or(0, String::len);
+        let structured_bytes = self
+            .structured_content
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()?
+            .map_or(0, |encoded| encoded.len());
+        let mcp_exchange_bytes = self
+            .mcp_exchange
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()?
+            .map_or(0, |encoded| encoded.len());
+        body_bytes
+            .checked_add(structured_bytes)
+            .and_then(|bytes| bytes.checked_add(mcp_exchange_bytes))
+            .ok_or(CoreRecordError::EncodedLengthOverflow)
+    }
+
+    /// Omits a projector-declared redundant structured representation when it
+    /// is the only reason the aggregate selected content exceeds Core's limit.
+    ///
+    /// The normalized body and all other selected content remain unchanged.
+    /// Projectors should call this only when the normalized body is the
+    /// authoritative complete representation of the event.
+    pub fn omit_structured_content_if_aggregate_exceeds_limit(&mut self) -> CoreRecordResult<bool> {
+        let Some(structured_content) = self.structured_content.as_ref() else {
+            return Ok(false);
+        };
+        let aggregate_bytes = self.encoded_content_bytes()?;
+        if aggregate_bytes <= MAX_CORE_CONTENT_BYTES {
+            return Ok(false);
+        }
+        let structured_bytes = serde_json::to_vec(structured_content)?.len();
+        let retained_bytes = aggregate_bytes
+            .checked_sub(structured_bytes)
+            .ok_or(CoreRecordError::EncodedLengthOverflow)?;
+        if retained_bytes > MAX_CORE_CONTENT_BYTES {
+            return Ok(false);
+        }
+        self.structured_content = None;
+        Ok(true)
     }
 
     fn validate_contract(&self) -> CoreRecordResult<()> {
@@ -787,11 +873,13 @@ impl CoreContent {
             structured_bytes,
             MAX_CORE_CONTENT_BYTES,
         )?;
-        // These fields are alternate complete representations of one selected
-        // event, not independent payloads. Charging the larger decoded form
-        // keeps the per-record ceiling while avoiding double-counting content
-        // that providers intentionally retain in both forms.
-        let selected_content_bytes = body_bytes.max(structured_bytes);
+        if let Some(exchange) = &self.mcp_exchange {
+            if !matches!(self.policy_status, CoreContentPolicyStatus::Selected) {
+                return Err(CoreRecordError::InvalidContentPolicyState);
+            }
+            exchange.validate_contract(self.normalized_body.as_deref())?;
+        }
+        let selected_content_bytes = self.encoded_content_bytes()?;
         validate_size(
             "selected_content",
             selected_content_bytes,

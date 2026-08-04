@@ -1483,7 +1483,14 @@
           "class": "max_plus_one",
           "kind": "rust_test",
           "suite": "codex_direct_result",
-          "test": "exact_raw_limit_omits_oversized_invocation_but_publishes_result",
+          "test": "exact_raw_limit_omits_oversized_arguments_but_publishes_result",
+          "scope": "tuple"
+        },
+        {
+          "class": "result_preservation",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "nested_duplicate_json_is_unavailable_without_losing_terminal_text",
           "scope": "tuple"
         },
         {
@@ -1525,7 +1532,7 @@
           "class": "search_nonindexing",
           "kind": "rust_test",
           "suite": "mcp_attribution_search",
-          "test": "mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked",
+          "test": "mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked",
           "scope": "provider_neutral"
         },
         {
@@ -2072,7 +2079,7 @@
           "class": "search_nonindexing",
           "kind": "rust_test",
           "suite": "mcp_attribution_search",
-          "test": "mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked",
+          "test": "mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked",
           "scope": "provider_neutral"
         }
       ],
@@ -2720,7 +2727,7 @@
           "class": "result_preservation",
           "kind": "rust_test",
           "suite": "mcp_attribution_provider_units",
-          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_oversized_or_malformed_linkage_never_aborts_neighbor_projection",
+          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_large_unrelated_line_preserves_linkage_while_malformed_line_abstains",
           "scope": "tuple"
         },
         {
@@ -2748,7 +2755,7 @@
           "class": "search_nonindexing",
           "kind": "rust_test",
           "suite": "mcp_attribution_search",
-          "test": "mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked",
+          "test": "mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked",
           "scope": "provider_neutral"
         }
       ],

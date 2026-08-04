@@ -1,0 +1,1 @@
+{"event":{"mcp_exchange":{"provider_call_id":"snake","response":{"status":"succeeded","text":{"capture_status":"absent"},"payload":{"capture_status":"absent"}}},"mcpExchange":{"providerCallId":"camel","response":{"status":"succeeded","text":{"captureStatus":"absent"},"payload":{"captureStatus":"absent"}}}},"events":[]}

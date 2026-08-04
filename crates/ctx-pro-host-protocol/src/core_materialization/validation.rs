@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use ctx_history_core::CoreRecord;
+use ctx_history_core::{CoreRecord, CoreRecordError};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -116,27 +116,15 @@ pub(super) fn core_source_delta_exact_eq(left: &CoreSourceDelta, right: &CoreSou
 }
 
 pub(super) fn core_record_content_bytes(record: &CoreRecord) -> Result<usize, ProtocolError> {
-    let body = record
+    record
         .content
-        .normalized_body
-        .as_ref()
-        .map_or(0, String::len);
-    let structured = record
-        .content
-        .structured_content
-        .as_ref()
-        .map(serde_json::to_vec)
-        .transpose()
-        .map_err(|_| {
-            ProtocolError::new(
-                ErrorClass::Internal,
-                "Core structured content encoding failed",
-            )
-        })?
-        .map_or(0, |encoded| encoded.len());
-    body.checked_add(structured).ok_or_else(|| {
-        ProtocolError::new(ErrorClass::Bounds, "Core record content bytes overflowed")
-    })
+        .encoded_content_bytes()
+        .map_err(|error| match error {
+            CoreRecordError::EncodedLengthOverflow => {
+                ProtocolError::new(ErrorClass::Bounds, "Core record content bytes overflowed")
+            }
+            _ => ProtocolError::new(ErrorClass::Internal, "Core content byte accounting failed"),
+        })
 }
 
 pub(super) fn validate_identity(value: &str, label: &'static str) -> Result<(), ProtocolError> {

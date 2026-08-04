@@ -133,6 +133,9 @@ final class AgentHistoryValue {
     }
 
     static Object camelize(Object value) {
+        if (value instanceof OpaqueJson) {
+            return copy(((OpaqueJson) value).value);
+        }
         if (value instanceof Map<?, ?>) {
             Map<?, ?> map = (Map<?, ?>) value;
             Map<String, Object> out = new LinkedHashMap<>();
@@ -157,6 +160,18 @@ final class AgentHistoryValue {
             return Collections.unmodifiableList(out);
         }
         return value;
+    }
+
+    static Object opaqueJson(Object value) {
+        return new OpaqueJson(value);
+    }
+
+    private static final class OpaqueJson {
+        private final Object value;
+
+        private OpaqueJson(Object value) {
+            this.value = value;
+        }
     }
 
     static String snakeToCamel(String value) {

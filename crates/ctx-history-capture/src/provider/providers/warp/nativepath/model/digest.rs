@@ -67,6 +67,9 @@ pub(super) fn event_estimated_bytes(event: &WarpNativeEvent) -> usize {
                 .saturating_add(invocation.tool_name.len())
                 .saturating_add(invocation.args.to_string().len())
         }))
+        .saturating_add(event.mcp_response.as_ref().map_or(0, |response| {
+            serde_json::to_vec(response).map_or(usize::MAX, |encoded| encoded.len())
+        }))
         .saturating_add(event.lexical_body.len())
         .saturating_add(event.kind.len());
     conservative_text_bytes(text, 512)
@@ -135,6 +138,10 @@ fn hash_event(hasher: &mut Sha256, event: &WarpNativeEvent) -> Result<()> {
         hash_text(hasher, &invocation.server_id)?;
         hash_text(hasher, &invocation.tool_name)?;
         hash_bytes(hasher, &serde_json::to_vec(&invocation.args)?)?;
+    }
+    hasher.update([u8::from(event.mcp_response.is_some())]);
+    if let Some(response) = &event.mcp_response {
+        hash_bytes(hasher, &serde_json::to_vec(response)?)?;
     }
     hash_optional_i64(
         hasher,

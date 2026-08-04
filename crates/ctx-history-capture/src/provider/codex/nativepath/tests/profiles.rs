@@ -306,6 +306,30 @@ fn versioned_mcp_terminal_results_abstain_without_dropping_the_event() {
         assert_eq!(row.lexical_body, output, "{cli_version}");
         assert!(row.structured_content.is_some(), "{cli_version}");
         assert!(row.mcp_tool_call.is_none(), "{cli_version}");
+        let exchange = row.mcp_exchange.as_ref().unwrap();
+        assert_eq!(exchange.provider_call_id, format!("exec-mcp-{cli_version}"));
+        let invocation = exchange.invocation.as_ref().unwrap();
+        assert_eq!(invocation.server, "versioned-server");
+        assert_eq!(invocation.tool, "versioned-tool");
+        assert_eq!(
+            invocation.arguments,
+            ctx_history_core::McpJsonCapture::Present { value: json!({}) }
+        );
+        let response = exchange.response.as_ref().unwrap();
+        assert_eq!(
+            response.status,
+            ctx_history_core::McpTerminalStatus::Succeeded
+        );
+        assert_eq!(response.failure_kind, None);
+        assert_eq!(response.duration_ns, Some(42));
+        assert_eq!(
+            response.text,
+            ctx_history_core::McpTextCapture::NormalizedBody
+        );
+        assert!(matches!(
+            &response.payload,
+            ctx_history_core::McpJsonCapture::Present { .. }
+        ));
     }
 }
 

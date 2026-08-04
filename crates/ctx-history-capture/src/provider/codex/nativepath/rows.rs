@@ -5,7 +5,8 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    EventRole, EventType, FileChangeKind, McpToolCallAttribution, RepositoryFileObservationKind,
+    EventRole, EventType, FileChangeKind, McpExchangeContent, McpToolCallAttribution,
+    RepositoryFileObservationKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -99,6 +100,7 @@ pub(crate) struct CodexSourceBackedRowV0 {
     pub(crate) lexical_body: String,
     pub(crate) structured_content: Option<Value>,
     pub(crate) mcp_tool_call: Option<McpToolCallAttribution>,
+    pub(crate) mcp_exchange: Option<McpExchangeContent>,
     pub(crate) touched_paths: Vec<String>,
     pub(crate) repository_tools: Vec<CodexRepositoryToolEvidence>,
     pub(crate) repository_result: Option<CodexRepositoryResultEvidence>,
@@ -191,10 +193,16 @@ impl CodexSourceBackedRowV0 {
                 .checked_add(attribution.tool.capacity())?,
             None => 0,
         };
+        let mcp_exchange_bytes = self
+            .mcp_exchange
+            .as_ref()
+            .and_then(encoded_json_len)
+            .unwrap_or_default();
         let allocation_count = 3_usize
             .checked_add(self.touched_paths.len())?
             .checked_add(self.repository_files.len())?
-            .checked_add(usize::from(self.mcp_tool_call.is_some()).checked_mul(2)?)?;
+            .checked_add(usize::from(self.mcp_tool_call.is_some()).checked_mul(2)?)?
+            .checked_add(usize::from(self.mcp_exchange.is_some()))?;
         size_of::<Self>()
             .checked_add(
                 self.provider_event_identity
@@ -209,6 +217,7 @@ impl CodexSourceBackedRowV0 {
                     .unwrap_or(0),
             )?
             .checked_add(mcp_tool_call_bytes)?
+            .checked_add(mcp_exchange_bytes)?
             .checked_add(self.session_cwd.as_ref().map_or(0, String::capacity))?
             .checked_add(path_slots)?
             .checked_add(path_bytes)?
@@ -344,6 +353,7 @@ pub(super) fn build_source_backed_event_row(
             lexical_body: semantic.lexical_body,
             structured_content: semantic.structured_content,
             mcp_tool_call: None,
+            mcp_exchange: None,
             touched_paths: Vec::new(),
             repository_tools,
             repository_result: None,
@@ -364,6 +374,7 @@ pub(super) fn build_source_backed_sparse_output_row(
     normalized_body: String,
     structured_content: Option<Value>,
     mcp_tool_call: Option<McpToolCallAttribution>,
+    mcp_exchange: Option<McpExchangeContent>,
     repository_result: Option<CodexRepositoryResultEvidence>,
     session_cwd: Option<String>,
 ) -> CaptureResult<Option<CodexSourceBackedRowV0>> {
@@ -390,6 +401,7 @@ pub(super) fn build_source_backed_sparse_output_row(
         lexical_body,
         structured_content,
         mcp_tool_call,
+        mcp_exchange,
         touched_paths: Vec::new(),
         repository_tools: Vec::new(),
         repository_result,

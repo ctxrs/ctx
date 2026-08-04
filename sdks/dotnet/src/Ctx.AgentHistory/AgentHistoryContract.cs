@@ -212,17 +212,27 @@ internal static class AgentHistoryContract
         {
             throw InvalidMcpWire("duplicate outer wire aliases");
         }
+        var hasSnakeExchange = eventObject.TryGetPropertyValue("mcp_exchange", out var snakeExchange);
+        var hasCamelExchange = eventObject.TryGetPropertyValue("mcpExchange", out var camelExchange);
+        if (hasSnakeExchange && hasCamelExchange)
+        {
+            throw InvalidMcpExchangeWire("duplicate outer wire aliases");
+        }
 
         var outer = new JsonObject();
         foreach (var pair in eventObject)
         {
-            if (pair.Key is "mcp_tool_call" or "mcpToolCall")
+            if (pair.Key is "mcp_tool_call" or "mcpToolCall" or "mcp_exchange" or "mcpExchange")
             {
                 continue;
             }
             if (SnakeToCamel(pair.Key) == "mcpToolCall")
             {
                 throw InvalidMcpWire($"outer member {pair.Key} collides with canonical mcpToolCall");
+            }
+            if (SnakeToCamel(pair.Key) == "mcpExchange")
+            {
+                throw InvalidMcpExchangeWire($"outer member {pair.Key} collides with canonical mcpExchange");
             }
             outer[pair.Key] = JsonHelpers.Clone(pair.Value);
         }
@@ -232,6 +242,11 @@ internal static class AgentHistoryContract
         {
             normalized["mcpToolCall"] = McpToolCall.FromJson(hasSnake ? snake : camel).ToJsonObject();
         }
+        if (hasSnakeExchange || hasCamelExchange)
+        {
+            normalized["mcpExchange"] = McpExchange.NormalizeWire(
+                hasSnakeExchange ? snakeExchange : camelExchange);
+        }
         return normalized;
     }
 
@@ -239,6 +254,11 @@ internal static class AgentHistoryContract
         new(
             $"agent-history-v1 MCP tool call {message}",
             new JsonObject { ["field"] = "mcpToolCall" });
+
+    private static CtxAgentHistoryProtocolException InvalidMcpExchangeWire(string message) =>
+        new(
+            $"agent-history-v1 MCP exchange {message}",
+            new JsonObject { ["field"] = "mcpExchange" });
 
     public static JsonNode? CamelizePublic(JsonNode? value)
     {

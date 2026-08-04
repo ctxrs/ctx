@@ -21,6 +21,7 @@ public final class AgentHistoryClientTest {
         rejectsMalformedJsonGrammar();
         acceptsCanonicalSearchFixture();
         exposesOptionalMcpToolCallMetadata();
+        exposesTypedLosslessMcpExchange();
         rejectsRawMcpToolCallDuplicateMembers();
         strictlyDecodesSpawnedProcessStdoutUtf8();
         camelizesSearchRetrievalJson();
@@ -577,6 +578,15 @@ public final class AgentHistoryClientTest {
                 "duplicate-event-mcp-tool-call-camel.json",
                 "duplicate-mcp-tool-call-server.json",
                 "duplicate-mcp-tool-call-tool.json",
+                "duplicate-event-mcp-exchange-snake.json",
+                "duplicate-mcp-exchange-captured-value.json",
+                "invalid-mcp-exchange-explicit-null.json",
+                "invalid-mcp-exchange-outer-alias-collision.json",
+                "invalid-mcp-exchange-unknown-field.json",
+                "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+                "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+                "invalid-mcp-exchange-unsafe-duration-ns.json",
+                "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
                 "invalid-mcp-tool-call-transformed-server.json",
                 "invalid-mcp-tool-call-transformed-tool.json",
                 "invalid-mcp-tool-call-transformed-collision.json",
@@ -607,6 +617,44 @@ public final class AgentHistoryClientTest {
         assertEquals("snake-extra", aliases.getEvent().asMap().get("futureEventField"));
         assertEquals("camel-server", aliases.getEvents().get(0).getMcpToolCall().getServer());
         assertEquals("camel-extra", aliases.getEvents().get(0).asMap().get("futureEventField"));
+    }
+
+    private static void exposesTypedLosslessMcpExchange() throws Exception {
+        ShowEventResponse response = new ShowEventResponse(
+                Json.parseObject(readFixture("show-event.mcp-tool-call.json")));
+        McpExchange exchange = response.getEvent().getEvent().getMcpExchange();
+        assertEquals("native-call-呼び出し-🦀", exchange.getProviderCallId());
+        assertEquals(Long.valueOf(McpExchange.MAX_SAFE_INTEGER), exchange.getResponse().getDurationNs());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> arguments = (Map<String, Object>) exchange
+                .getInvocation().getArguments().getValue();
+        assertEquals(Boolean.TRUE, Boolean.valueOf(arguments.containsKey("snake_key")));
+        assertEquals(Boolean.FALSE, Boolean.valueOf(arguments.containsKey("snakeKey")));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> nested = (Map<String, Object>) arguments.get("nested");
+        assertEquals(Boolean.TRUE, Boolean.valueOf(nested.containsKey("items")));
+        assertEquals(
+                Long.valueOf(McpExchange.MAX_SAFE_INTEGER),
+                response.getEvent().getEvents().get(2).getMcpExchange()
+                        .getResponse().getText().getObservedEncodedBytes());
+        assertEquals(null, response.getEvent().getEvents().get(3).getMcpExchange());
+
+        Map<String, Object> normalized = AgentHistoryEnvelope.normalize(
+                "showEvent",
+                new Backend("local", null, null),
+                Json.parseObject("{\"event\":{\"text\":\"body\",\"mcp_exchange\":{"
+                        + "\"provider_call_id\":\"call\",\"response\":{"
+                        + "\"status\":\"succeeded\","
+                        + "\"text\":{\"capture_status\":\"normalized_body\"},"
+                        + "\"payload\":{\"capture_status\":\"present\","
+                        + "\"value\":{\"result_key\":[\"雪\",null]}}}}},\"events\":[]}"));
+        McpExchange normalizedExchange = new ShowEventResponse(normalized)
+                .getEvent().getEvent().getMcpExchange();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = (Map<String, Object>) normalizedExchange
+                .getResponse().getPayload().getValue();
+        assertEquals(Boolean.TRUE, Boolean.valueOf(payload.containsKey("result_key")));
+        assertEquals(Boolean.FALSE, Boolean.valueOf(payload.containsKey("resultKey")));
     }
 
     private static void strictlyDecodesSpawnedProcessStdoutUtf8() throws Exception {

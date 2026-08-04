@@ -506,7 +506,7 @@ fn strict_tool_call_evidence_is_scoped_additively_and_selects_the_complete_call(
 }
 
 #[test]
-fn openclaw_large_tool_arguments_keep_both_complete_core_representations() {
+fn openclaw_large_tool_arguments_preserve_body_and_identity_within_aggregate_limit() {
     let tail = "openclaw_large_tool_argument_tail_complete";
     let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
     let value = serde_json::json!({
@@ -538,15 +538,43 @@ fn openclaw_large_tool_arguments_keep_both_complete_core_representations() {
         panic!("expected exactly one OpenClaw tool-call record");
     };
     let normalized = record.content.normalized_body.as_deref().unwrap();
-    let structured = record.content.structured_content.as_ref().unwrap();
+    let base_native_event_id = TypedKey::utf8("large-tool-call-record").unwrap();
+    let call_id = TypedKey::utf8("large-call-1").unwrap();
+    let expected_native_event_id = TypedKey::composite(vec![
+        base_native_event_id.clone(),
+        TypedKey::composite(vec![
+            TypedKey::utf8("tool_call_id").unwrap(),
+            call_id.clone(),
+        ])
+        .unwrap(),
+    ])
+    .unwrap();
+    let expected_event_id = derive_event_id(EventIdentityInput {
+        source: &record.source,
+        session_id: record.session_id,
+        logical_item_kind: "openclaw-legacy-event",
+        native_item_key: &NativeItemKey::native_id("openclaw.legacy-event", base_native_event_id)
+            .unwrap(),
+        subrecord_selector: Some(
+            &ctx_history_core::SubrecordSelector::native_id("openclaw.tool-call-block", call_id)
+                .unwrap(),
+        ),
+    })
+    .unwrap();
+    let duplicate_structured = value.pointer("/message/content/0").unwrap();
     assert!(normalized.contains(tail));
+    assert_eq!(record.event_id, expected_event_id);
     assert_eq!(
-        structured["arguments"]["prompt"].as_str(),
-        Some(full_argument.as_str())
+        record.native_event_id.as_ref(),
+        Some(&expected_native_event_id)
+    );
+    assert!(record.content.structured_content.is_none());
+    assert!(
+        normalized.len() + serde_json::to_vec(duplicate_structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
     );
     assert!(
-        normalized.len() + serde_json::to_vec(structured).unwrap().len()
-            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+        record.content.encoded_content_bytes().unwrap() <= ctx_history_core::MAX_CORE_CONTENT_BYTES
     );
     record.validate_contract().unwrap();
     record.encode_stored().unwrap();

@@ -608,10 +608,21 @@ private func normalizeEventRecord(_ raw: JSONValue?) throws -> JSONValue? {
         throw invalidMCPWire("transformed outer alias")
     }
 
+    let exactMCPExchangeWireKeys = Set(["mcp_exchange", "mcpExchange"])
+    if eventObject.keys.contains(where: {
+        !exactMCPExchangeWireKeys.contains($0) && JSONValue.camelizedPublicKey($0) == "mcpExchange"
+    }) {
+        throw invalidMCPExchangeWire("transformed outer alias")
+    }
+
     let hasSnake = eventObject["mcp_tool_call"] != nil
     let hasCamel = eventObject["mcpToolCall"] != nil
     if hasSnake && hasCamel {
         throw invalidMCPWire("duplicate outer wire aliases")
+    }
+    let exchangeWireKeys = eventObject.keys.filter { exactMCPExchangeWireKeys.contains($0) }
+    if exchangeWireKeys.count > 1 {
+        throw invalidMCPExchangeWire("duplicate outer wire aliases")
     }
 
     var outer = eventObject
@@ -620,6 +631,12 @@ private func normalizeEventRecord(_ raw: JSONValue?) throws -> JSONValue? {
         call = snake
     } else {
         call = outer.removeValue(forKey: "mcpToolCall")
+    }
+    let exchange: JSONValue?
+    if let snake = outer.removeValue(forKey: "mcp_exchange") {
+        exchange = snake
+    } else {
+        exchange = outer.removeValue(forKey: "mcpExchange")
     }
     let normalized = JSONValue.object(outer)
         .camelizedPublicJSON()
@@ -633,6 +650,12 @@ private func normalizeEventRecord(_ raw: JSONValue?) throws -> JSONValue? {
     }
     if let call {
         result["mcpToolCall"] = call
+    }
+    if result["mcpExchange"] != nil {
+        throw invalidMCPExchangeWire("outer member collides with canonical mcpExchange")
+    }
+    if let exchange {
+        result["mcpExchange"] = try normalizeMCPExchangeWire(exchange)
     }
     return .object(result)
 }
@@ -667,6 +690,121 @@ private func invalidMCPWire(_ message: String) -> CtxAgentHistorySDKError {
         message: "agent-history-v1 MCP tool call \(message)",
         details: .object(["field": .string("mcpToolCall")])
     )
+}
+
+private func invalidMCPExchangeWire(_ message: String) -> CtxAgentHistorySDKError {
+    CtxAgentHistorySDKError(
+        code: .decodeError,
+        message: "agent-history-v1 MCP exchange \(message)",
+        details: .object(["field": .string("mcpExchange")])
+    )
+}
+
+private func normalizeMCPExchangeWire(_ raw: JSONValue) throws -> JSONValue {
+    var exchange = try normalizeClosedMCPObject(
+        raw,
+        context: "exchange",
+        aliases: [
+            "provider_call_id": "providerCallId",
+            "providerCallId": "providerCallId",
+            "invocation": "invocation",
+            "response": "response"
+        ]
+    )
+    if let invocation = exchange["invocation"] {
+        exchange["invocation"] = try normalizeMCPInvocationWire(invocation)
+    }
+    if let response = exchange["response"] {
+        exchange["response"] = try normalizeMCPResponseWire(response)
+    }
+    return .object(exchange)
+}
+
+private func normalizeMCPInvocationWire(_ raw: JSONValue) throws -> JSONValue {
+    var invocation = try normalizeClosedMCPObject(
+        raw,
+        context: "invocation",
+        aliases: ["server": "server", "tool": "tool", "arguments": "arguments"]
+    )
+    if let arguments = invocation["arguments"] {
+        invocation["arguments"] = try normalizeMCPCaptureWire(arguments, context: "invocation.arguments")
+    }
+    return .object(invocation)
+}
+
+private func normalizeMCPResponseWire(_ raw: JSONValue) throws -> JSONValue {
+    var response = try normalizeClosedMCPObject(
+        raw,
+        context: "response",
+        aliases: [
+            "status": "status",
+            "failure_kind": "failureKind",
+            "failureKind": "failureKind",
+            "duration_ns": "durationNs",
+            "durationNs": "durationNs",
+            "text": "text",
+            "payload": "payload"
+        ]
+    )
+    if let duration = response["durationNs"] {
+        try validateMCPWireSafeInteger(duration, context: "response.durationNs")
+    }
+    if let text = response["text"] {
+        response["text"] = try normalizeMCPCaptureWire(text, context: "response.text")
+    }
+    if let payload = response["payload"] {
+        response["payload"] = try normalizeMCPCaptureWire(payload, context: "response.payload")
+    }
+    return .object(response)
+}
+
+private func normalizeMCPCaptureWire(_ raw: JSONValue, context: String) throws -> JSONValue {
+    let capture = try normalizeClosedMCPObject(
+        raw,
+        context: context,
+        aliases: [
+            "capture_status": "captureStatus",
+            "captureStatus": "captureStatus",
+            "value": "value",
+            "reason": "reason",
+            "observed_encoded_bytes": "observedEncodedBytes",
+            "observedEncodedBytes": "observedEncodedBytes"
+        ]
+    )
+    if let observed = capture["observedEncodedBytes"] {
+        try validateMCPWireSafeInteger(observed, context: "\(context).observedEncodedBytes")
+    }
+    return .object(capture)
+}
+
+private func normalizeClosedMCPObject(
+    _ raw: JSONValue,
+    context: String,
+    aliases: [String: String]
+) throws -> [String: JSONValue] {
+    guard case let .object(object) = raw else {
+        throw invalidMCPExchangeWire("\(context) must be an object")
+    }
+    var normalized: [String: JSONValue] = [:]
+    for (key, value) in object {
+        guard let canonical = aliases[key] else {
+            throw invalidMCPExchangeWire("\(context) contains unknown member \(key)")
+        }
+        guard normalized[canonical] == nil else {
+            throw invalidMCPExchangeWire("\(context) contains colliding aliases for \(canonical)")
+        }
+        normalized[canonical] = value
+    }
+    return normalized
+}
+
+private func validateMCPWireSafeInteger(_ value: JSONValue, context: String) throws {
+    guard let integer = value.intValue,
+          integer >= 0,
+          integer <= AgentHistoryMCPExchange.maximumExactInteger
+    else {
+        throw invalidMCPExchangeWire("\(context) is outside the exact JSON integer domain")
+    }
 }
 
 private func copyFirst(

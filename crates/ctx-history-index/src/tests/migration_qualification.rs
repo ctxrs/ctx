@@ -35,7 +35,7 @@ use process::wait4_operation;
 use topology::{first_payload_pair, verify_clone_topology, CloneTopologyProof};
 
 const SUCCESSOR_CORE_FINGERPRINT: &str =
-    "a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684";
+    "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e";
 const QUALIFICATION_CASE_ENV: &str = "CTX_MIGRATION_QUALIFICATION_CASE";
 const QUALIFICATION_ROOT_ENV: &str = "CTX_MIGRATION_QUALIFICATION_ROOT";
 const QUALIFICATION_OUTPUT_ENV: &str = "CTX_MIGRATION_QUALIFICATION_OUTPUT";

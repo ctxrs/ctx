@@ -1,4 +1,5 @@
 use super::*;
+use ctx_history_core::McpFailureKind;
 
 const SERVER_A: &str = "11111111-1111-4111-8111-111111111111";
 const SERVER_B: &str = "22222222-2222-4222-8222-222222222222";
@@ -16,7 +17,6 @@ fn qualified_mcp_success_error_cancellation_and_nontext_results_link_exactly() {
             "success",
             vec![
                 mcp_text_content("first"),
-                mcp_image_content(),
                 mcp_resource_text_content("resource text"),
                 mcp_text_content("last"),
             ],
@@ -27,16 +27,21 @@ fn qualified_mcp_success_error_cancellation_and_nontext_results_link_exactly() {
         cancel_message("cancel"),
         mcp_call_message("nontext", SERVER_B, "binary_tool", Vec::new()),
         mcp_success_message("nontext", vec![mcp_image_content()]),
+        mcp_call_message("bodyless", SERVER_A, "bodyless_tool", Vec::new()),
+        mcp_success_message("bodyless", vec![]),
     ];
     let decoded = decode_warp_native_task(&task_messages(messages)).unwrap();
 
-    for (index, server, tool, outcome, body) in [
+    for (index, server, tool, outcome, body, status, failure_kind, text) in [
         (
             1,
             SERVER_A,
             "shared_tool",
             OutputOutcome::Success,
             "first\nresource text\nlast",
+            McpTerminalStatus::Succeeded,
+            None,
+            McpTextCapture::NormalizedBody,
         ),
         (
             3,
@@ -44,9 +49,40 @@ fn qualified_mcp_success_error_cancellation_and_nontext_results_link_exactly() {
             "shared_tool",
             OutputOutcome::Failure,
             "sanitized tool error",
+            McpTerminalStatus::Failed,
+            Some(McpFailureKind::Unknown),
+            McpTextCapture::NormalizedBody,
         ),
-        (5, SERVER_A, "cancel_tool", OutputOutcome::Unknown, ""),
-        (7, SERVER_B, "binary_tool", OutputOutcome::Success, ""),
+        (
+            5,
+            SERVER_A,
+            "cancel_tool",
+            OutputOutcome::Unknown,
+            "",
+            McpTerminalStatus::Cancelled,
+            None,
+            McpTextCapture::Absent,
+        ),
+        (
+            7,
+            SERVER_B,
+            "binary_tool",
+            OutputOutcome::Success,
+            "",
+            McpTerminalStatus::Succeeded,
+            None,
+            McpTextCapture::Absent,
+        ),
+        (
+            9,
+            SERVER_A,
+            "bodyless_tool",
+            OutputOutcome::Success,
+            "",
+            McpTerminalStatus::Succeeded,
+            None,
+            McpTextCapture::Absent,
+        ),
     ] {
         let WarpDecodedMessagePayload::Output(output) = &decoded.messages[index].payload else {
             panic!("terminal MCP result at {index} was not retained");
@@ -56,12 +92,96 @@ fn qualified_mcp_success_error_cancellation_and_nontext_results_link_exactly() {
         assert_eq!(invocation.tool_name, tool);
         assert_eq!(output.outcome, outcome);
         assert_eq!(output.body, body);
+        let response = output.mcp_response.as_ref().unwrap();
+        assert_eq!(response.status, status);
+        assert_eq!(response.failure_kind, failure_kind);
+        assert_eq!(response.duration_ns, None);
+        assert_eq!(response.text, text);
     }
     let WarpDecodedMessagePayload::Retained(call) = &decoded.messages[0].payload else {
         panic!("MCP call was not retained");
     };
     assert_eq!(call.call_id.as_deref(), Some("success"));
     assert_eq!(call.mcp_invocation.as_ref().unwrap().args["side"], "a");
+
+    let WarpDecodedMessagePayload::Output(success) = &decoded.messages[1].payload else {
+        unreachable!();
+    };
+    let McpJsonCapture::Present { value } = &success.mcp_response.as_ref().unwrap().payload else {
+        panic!("complete textual response payload was not retained");
+    };
+    assert_eq!(
+        value["success"]["results"][1]["resource"]["text"]["content"],
+        "resource text"
+    );
+
+    let WarpDecodedMessagePayload::Output(cancelled) = &decoded.messages[5].payload else {
+        unreachable!();
+    };
+    assert_eq!(
+        cancelled.mcp_response.as_ref().unwrap().payload,
+        McpJsonCapture::Absent
+    );
+    let WarpDecodedMessagePayload::Output(binary) = &decoded.messages[7].payload else {
+        unreachable!();
+    };
+    assert_eq!(
+        binary.mcp_response.as_ref().unwrap().payload,
+        McpJsonCapture::Unavailable
+    );
+    let WarpDecodedMessagePayload::Output(bodyless) = &decoded.messages[9].payload else {
+        unreachable!();
+    };
+    assert_eq!(
+        bodyless.mcp_response.as_ref().unwrap().payload,
+        McpJsonCapture::Present {
+            value: serde_json::json!({"success": {"results": []}}),
+        }
+    );
+}
+
+#[test]
+fn image_and_binary_resource_bytes_make_payload_unavailable_without_losing_mixed_text() {
+    let decoded = decode_warp_native_task(&task_messages(vec![
+        mcp_call_message("image", SERVER_A, "image_tool", Vec::new()),
+        mcp_success_message("image", vec![mcp_image_content()]),
+        mcp_call_message("binary-resource", SERVER_A, "resource_tool", Vec::new()),
+        mcp_success_message("binary-resource", vec![mcp_resource_binary_content()]),
+        mcp_call_message("mixed", SERVER_A, "mixed_tool", Vec::new()),
+        mcp_success_message(
+            "mixed",
+            vec![
+                mcp_text_content("before"),
+                mcp_image_content_with_data(&[0xff, 0xfe]),
+                mcp_resource_text_content("resource text"),
+                mcp_resource_binary_content_with_data(&[0xfd, 0xfc]),
+                mcp_text_content("after"),
+            ],
+        ),
+    ]))
+    .unwrap();
+
+    for (index, expected_body, expected_text) in [
+        (1, "", McpTextCapture::Absent),
+        (3, "", McpTextCapture::Absent),
+        (
+            5,
+            "before\nresource text\nafter",
+            McpTextCapture::NormalizedBody,
+        ),
+    ] {
+        let WarpDecodedMessagePayload::Output(output) = &decoded.messages[index].payload else {
+            panic!("policy-sensitive MCP result at {index} was not retained");
+        };
+        assert_eq!(output.body, expected_body);
+        let response = output.mcp_response.as_ref().unwrap();
+        assert_eq!(response.status, McpTerminalStatus::Succeeded);
+        assert_eq!(response.text, expected_text);
+        assert_eq!(response.payload, McpJsonCapture::Unavailable);
+        assert!(!serde_json::to_string(response)
+            .unwrap()
+            .contains("c2FuaXRpemVk"));
+    }
 }
 
 #[test]
@@ -86,8 +206,15 @@ fn invalid_duplicate_orphan_and_ambiguous_mcp_relations_abstain() {
     ];
     let decoded = decode_warp_native_task(&task_messages(messages)).unwrap();
     for message in &decoded.messages {
-        if let WarpDecodedMessagePayload::Output(output) = &message.payload {
-            assert!(output.mcp_invocation.is_none());
+        match &message.payload {
+            WarpDecodedMessagePayload::Retained(call) if call.tool_call => {
+                assert!(call.mcp_invocation.is_none());
+            }
+            WarpDecodedMessagePayload::Output(output) => {
+                assert!(output.mcp_invocation.is_none());
+                assert!(output.mcp_response.is_none());
+            }
+            _ => {}
         }
     }
 
@@ -102,6 +229,25 @@ fn invalid_duplicate_orphan_and_ambiguous_mcp_relations_abstain() {
         };
         assert_eq!(output.mcp_invocation.as_ref().unwrap().server_id, server);
     }
+}
+
+#[test]
+fn unknown_mcp_response_fields_preserve_text_and_mark_payload_unavailable() {
+    let mut response = mcp_success_payload(vec![mcp_text_content("retained response text")]);
+    push_varint_field(&mut response, 99, 1);
+    let decoded = decode_warp_native_task(&task_messages(vec![
+        mcp_call_message("unknown-response", SERVER_A, "unknown_tool", Vec::new()),
+        tool_result_message("unknown-response", 16, &response),
+    ]))
+    .unwrap();
+    let WarpDecodedMessagePayload::Output(output) = &decoded.messages[1].payload else {
+        panic!("MCP response with an unknown field was not retained");
+    };
+    assert_eq!(output.body, "retained response text");
+    let response = output.mcp_response.as_ref().unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert_eq!(response.payload, McpJsonCapture::Unavailable);
 }
 
 #[test]
@@ -485,14 +631,15 @@ fn task_messages(messages: Vec<Vec<u8>>) -> Vec<u8> {
 
 fn assert_mcp_pair_abstains(call: Vec<u8>, result: Vec<u8>) {
     let decoded = decode_warp_native_task(&task_messages(vec![call, result])).unwrap();
-    assert!(matches!(
-        decoded.messages[0].payload,
-        WarpDecodedMessagePayload::Retained(_)
-    ));
+    let WarpDecodedMessagePayload::Retained(call) = &decoded.messages[0].payload else {
+        panic!("malformed MCP call record was not retained");
+    };
+    assert!(call.mcp_invocation.is_none());
     let WarpDecodedMessagePayload::Output(output) = &decoded.messages[1].payload else {
         panic!("malformed MCP result record was not retained");
     };
     assert!(output.mcp_invocation.is_none());
+    assert!(output.mcp_response.is_none());
 }
 
 fn mcp_call_message(call_id: &str, server: &str, tool: &str, args: Vec<u8>) -> Vec<u8> {
@@ -570,8 +717,12 @@ fn mcp_text_content(text: &str) -> Vec<u8> {
 }
 
 fn mcp_image_content() -> Vec<u8> {
+    mcp_image_content_with_data(b"c2FuaXRpemVk")
+}
+
+fn mcp_image_content_with_data(data: &[u8]) -> Vec<u8> {
     let mut image = Vec::new();
-    push_length_delimited(&mut image, 1, b"c2FuaXRpemVk");
+    push_length_delimited(&mut image, 1, data);
     push_length_delimited(&mut image, 2, b"image/png");
     let mut result = Vec::new();
     push_length_delimited(&mut result, 2, &image);
@@ -584,6 +735,22 @@ fn mcp_resource_text_content(text: &str) -> Vec<u8> {
     let mut resource = Vec::new();
     push_length_delimited(&mut resource, 1, b"sanitized://resource");
     push_length_delimited(&mut resource, 2, &resource_text);
+    let mut result = Vec::new();
+    push_length_delimited(&mut result, 3, &resource);
+    result
+}
+
+fn mcp_resource_binary_content() -> Vec<u8> {
+    mcp_resource_binary_content_with_data(b"c2FuaXRpemVk")
+}
+
+fn mcp_resource_binary_content_with_data(data: &[u8]) -> Vec<u8> {
+    let mut resource_binary = Vec::new();
+    push_length_delimited(&mut resource_binary, 1, data);
+    push_length_delimited(&mut resource_binary, 2, b"application/octet-stream");
+    let mut resource = Vec::new();
+    push_length_delimited(&mut resource, 1, b"sanitized://binary-resource");
+    push_length_delimited(&mut resource, 3, &resource_binary);
     let mut result = Vec::new();
     push_length_delimited(&mut result, 3, &resource);
     result

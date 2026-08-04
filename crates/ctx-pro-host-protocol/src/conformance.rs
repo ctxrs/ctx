@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "7552eee7cae0695a98f202b02f52cbf5680845cb7bacea4ed754e283bc15f051",
+            "fingerprint": "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",

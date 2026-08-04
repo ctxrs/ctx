@@ -553,6 +553,7 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
 }
 
 const MAX_MCP_TOOL_CALL_COMPONENT_BYTES = 64 * 1024;
+const MAX_MCP_EXCHANGE_IDENTITY_BYTES = 64 * 1024;
 
 function normalizeEventRecords(values) {
   return Array.isArray(values)
@@ -570,14 +571,29 @@ function normalizeEventRecord(value) {
   if (hasSnake && hasCamel) {
     throw invalidMcpToolCall("duplicate outer wire aliases");
   }
+  const hasSnakeExchange = Object.hasOwn(value, "mcp_exchange");
+  const hasCamelExchange = Object.hasOwn(value, "mcpExchange");
+  if (hasSnakeExchange && hasCamelExchange) {
+    throw invalidMcpExchange("duplicate outer wire aliases");
+  }
 
   const outer = {};
   for (const [key, item] of Object.entries(value)) {
-    if (key === "mcp_tool_call" || key === "mcpToolCall") {
+    if (
+      key === "mcp_tool_call" ||
+      key === "mcpToolCall" ||
+      key === "mcp_exchange" ||
+      key === "mcpExchange"
+    ) {
       continue;
     }
     if (snakeToCamel(key) === "mcpToolCall") {
       throw invalidMcpToolCall("outer member collides with the canonical mcpToolCall key", {
+        member: key,
+      });
+    }
+    if (snakeToCamel(key) === "mcpExchange") {
+      throw invalidMcpExchange("outer member collides with the canonical mcpExchange key", {
         member: key,
       });
     }
@@ -590,7 +606,191 @@ function normalizeEventRecord(value) {
       hasSnake ? value.mcp_tool_call : value.mcpToolCall,
     );
   }
+  if (hasSnakeExchange || hasCamelExchange) {
+    event.mcpExchange = normalizeMcpExchange(
+      hasSnakeExchange ? value.mcp_exchange : value.mcpExchange,
+    );
+  }
+  if (
+    event.mcpExchange?.response?.text?.captureStatus === "normalized_body" &&
+    (typeof event.text !== "string" || event.text.length === 0)
+  ) {
+    throw invalidMcpExchange("normalized response body requires nonempty event text");
+  }
   return event;
+}
+
+function normalizeMcpExchange(value) {
+  const exchange = normalizeClosedMcpObject(value, "exchange", {
+    provider_call_id: "providerCallId",
+    providerCallId: "providerCallId",
+    invocation: "invocation",
+    response: "response",
+  });
+  exchange.providerCallId = validateMcpExchangeIdentity(
+    exchange.providerCallId,
+    "providerCallId",
+  );
+  if (!Object.hasOwn(exchange, "invocation") && !Object.hasOwn(exchange, "response")) {
+    throw invalidMcpExchange("requires invocation, response, or both");
+  }
+  if (Object.hasOwn(exchange, "invocation")) {
+    exchange.invocation = normalizeMcpInvocation(exchange.invocation);
+  }
+  if (Object.hasOwn(exchange, "response")) {
+    exchange.response = normalizeMcpResponse(exchange.response);
+  }
+  return exchange;
+}
+
+function normalizeMcpInvocation(value) {
+  const invocation = normalizeClosedMcpObject(value, "invocation", {
+    server: "server",
+    tool: "tool",
+    arguments: "arguments",
+  });
+  requireExactMembers(invocation, ["arguments", "server", "tool"], "invocation");
+  invocation.server = validateMcpExchangeIdentity(invocation.server, "invocation.server");
+  invocation.tool = validateMcpExchangeIdentity(invocation.tool, "invocation.tool");
+  invocation.arguments = normalizeMcpCapture(invocation.arguments, "invocation.arguments", true);
+  return invocation;
+}
+
+function normalizeMcpResponse(value) {
+  const response = normalizeClosedMcpObject(value, "response", {
+    status: "status",
+    failure_kind: "failureKind",
+    failureKind: "failureKind",
+    duration_ns: "durationNs",
+    durationNs: "durationNs",
+    text: "text",
+    payload: "payload",
+  });
+  for (const required of ["status", "text", "payload"]) {
+    if (!Object.hasOwn(response, required)) {
+      throw invalidMcpExchange(`response requires ${required}`);
+    }
+  }
+  if (!["succeeded", "failed", "cancelled", "timed_out", "unknown"].includes(response.status)) {
+    throw invalidMcpExchange("response.status is invalid");
+  }
+  if (response.status === "failed") {
+    if (!["tool_reported", "invocation", "unknown"].includes(response.failureKind)) {
+      throw invalidMcpExchange("failed response requires failureKind");
+    }
+  } else if (Object.hasOwn(response, "failureKind")) {
+    throw invalidMcpExchange("failureKind is only valid for failed responses");
+  }
+  if (Object.hasOwn(response, "durationNs")) {
+    response.durationNs = validateMcpSafeInteger(response.durationNs, "response.durationNs");
+  }
+  response.text = normalizeMcpCapture(response.text, "response.text", false, true);
+  response.payload = normalizeMcpCapture(response.payload, "response.payload", false);
+  return response;
+}
+
+function normalizeMcpCapture(value, context, argumentsCapture = false, textCapture = false) {
+  const capture = normalizeClosedMcpObject(value, context, {
+    capture_status: "captureStatus",
+    captureStatus: "captureStatus",
+    value: "value",
+    reason: "reason",
+    observed_encoded_bytes: "observedEncodedBytes",
+    observedEncodedBytes: "observedEncodedBytes",
+  });
+  if (typeof capture.captureStatus !== "string") {
+    throw invalidMcpExchange(`${context}.captureStatus is required`);
+  }
+  switch (capture.captureStatus) {
+    case "present":
+      if (textCapture) throw invalidMcpExchange(`${context} cannot use present`);
+      requireExactMembers(capture, ["captureStatus", "value"], context);
+      if (
+        argumentsCapture &&
+        (!capture.value || typeof capture.value !== "object" || Array.isArray(capture.value))
+      ) {
+        throw invalidMcpExchange("present invocation arguments must be a JSON object");
+      }
+      break;
+    case "normalized_body":
+      if (!textCapture) throw invalidMcpExchange(`${context} cannot use normalized_body`);
+      requireExactMembers(capture, ["captureStatus"], context);
+      break;
+    case "absent":
+    case "unavailable":
+      requireExactMembers(capture, ["captureStatus"], context);
+      break;
+    case "omitted":
+      if (capture.reason !== "size_limit") {
+        throw invalidMcpExchange(`${context}.reason must be size_limit`);
+      }
+      if (Object.hasOwn(capture, "observedEncodedBytes")) {
+        capture.observedEncodedBytes = validateMcpSafeInteger(
+          capture.observedEncodedBytes,
+          `${context}.observedEncodedBytes`,
+        );
+      }
+      requireExactMembers(
+        capture,
+        Object.hasOwn(capture, "observedEncodedBytes")
+          ? ["captureStatus", "observedEncodedBytes", "reason"]
+          : ["captureStatus", "reason"],
+        context,
+      );
+      break;
+    default:
+      throw invalidMcpExchange(`${context}.captureStatus is invalid`);
+  }
+  return capture;
+}
+
+function normalizeClosedMcpObject(value, context, aliases) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw invalidMcpExchange(`${context} must be an object`);
+  }
+  const out = {};
+  for (const [key, nested] of Object.entries(value)) {
+    const canonical = aliases[key];
+    if (!canonical) throw invalidMcpExchange(`${context} contains unknown member ${key}`);
+    if (Object.hasOwn(out, canonical)) {
+      throw invalidMcpExchange(`${context} contains colliding aliases for ${canonical}`);
+    }
+    out[canonical] = nested;
+  }
+  return out;
+}
+
+function requireExactMembers(value, expected, context) {
+  const actual = Object.keys(value).sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw invalidMcpExchange(`${context} has invalid members`, { members: actual });
+  }
+}
+
+function validateMcpExchangeIdentity(value, field) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw invalidMcpExchange(`${field} must be a nonempty string`);
+  }
+  if (new TextEncoder().encode(value).byteLength > MAX_MCP_EXCHANGE_IDENTITY_BYTES) {
+    throw invalidMcpExchange(`${field} exceeds ${MAX_MCP_EXCHANGE_IDENTITY_BYTES} decoded UTF-8 bytes`);
+  }
+  return value;
+}
+
+function validateMcpSafeInteger(value, field) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw invalidMcpExchange(`${field} is outside the exact JSON integer domain`, {
+      field,
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
+  }
+  return value;
+}
+
+function invalidMcpExchange(message, details = {}) {
+  return new CtxParseError(`agent-history-v1 MCP exchange ${message}`, {
+    details: { field: "mcpExchange", ...details },
+  });
 }
 
 function validateMcpToolCall(value) {

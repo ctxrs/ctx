@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    mod mcp_exchange;
     mod mcp_tool_call;
     mod semantic_fallback;
     mod show_lineage;

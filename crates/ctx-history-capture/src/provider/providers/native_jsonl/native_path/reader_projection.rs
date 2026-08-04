@@ -101,6 +101,7 @@ impl DirectJsonlProjector {
             return self.project_result_line(
                 None,
                 &value,
+                bytes,
                 ordinal,
                 line_number,
                 byte_start,
@@ -116,6 +117,7 @@ impl DirectJsonlProjector {
             return self.project_result_line(
                 Some(profile),
                 &value,
+                bytes,
                 ordinal,
                 line_number,
                 byte_start,
@@ -137,6 +139,9 @@ impl DirectJsonlProjector {
             None,
             touches,
         )?;
+        if self.provider == CaptureProvider::CopilotCli {
+            event.mcp_exchange = super::copilot::copilot_mcp_exchange(bytes, None);
+        }
         event.source_record = DirectJsonlSourceRecord {
             byte_start,
             byte_end_exclusive,
@@ -150,6 +155,7 @@ impl DirectJsonlProjector {
         &self,
         profile: Option<&str>,
         value: &Value,
+        record_bytes: &[u8],
         ordinal: u64,
         line_number: usize,
         byte_start: u64,
@@ -244,6 +250,10 @@ impl DirectJsonlProjector {
                 event.mcp_tool_call = self
                     .copilot_mcp_tool_calls
                     .attribution_for_projected_completion(ordinal, record_digest);
+                event.mcp_exchange = super::copilot::copilot_mcp_exchange(
+                    record_bytes,
+                    event.mcp_tool_call.as_ref(),
+                );
             }
             event.source_record = DirectJsonlSourceRecord {
                 byte_start,
@@ -447,6 +457,7 @@ fn direct_event(
         role,
         occurred_at,
         mcp_tool_call: None,
+        mcp_exchange: None,
         lexical_text,
         metadata: json!({
             "source": source_format,

@@ -8,9 +8,10 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
-    EventIdentityInput, McpToolCallAttribution, NativeItemKey, NativeSessionKey,
+    EventIdentityInput, McpExchangeContent, McpInvocationContent, McpJsonCapture,
+    McpPayloadOmissionReason, McpToolCallAttribution, NativeItemKey, NativeSessionKey,
     ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    StableEntityId, TypedKey,
+    StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
 use rusqlite::{limits::Limit, Connection};
 use sha2::{Digest, Sha256};
@@ -48,7 +49,7 @@ const WARP_NATIVE_ITEM_NAMESPACE: &str = "warp.task-message";
 const WARP_LOGICAL_SESSION_KIND: &str = "warp-conversation";
 const WARP_LOGICAL_ITEM_KIND: &str = "warp-task-message";
 const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
-const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v4";
+const WARP_SOURCE_BACKED_PARSER_REVISION: &str = "warp-source-backed-logical-v5";
 const WARP_SCHEMA_EVIDENCE: &[u8] = b"agent_conversations+agent_tasks+unique-task-id-v1";
 const WARP_MISSING_TREE_DOMAIN: &[u8] = b"ctx.warp.missing-logical-tree.v1\0";
 const WARP_LOGICAL_LEAF_DOMAIN: &[u8] = b"ctx.warp.logical-leaf.v1\0";
@@ -660,6 +661,7 @@ fn core_record(
         TypedKey::utf8(event.identity.task_id.clone())?,
         TypedKey::U64(u64::from(event.native_order.message_ordinal)),
     ])?;
+    let mcp_exchange = warp_mcp_exchange(&event)?;
     let body = if event.lexical_body.is_empty() {
         event.kind.to_owned()
     } else {
@@ -731,8 +733,104 @@ fn core_record(
         };
         record.content.structured_content = Some(serde_json::json!({(key): native_tool}));
     }
+    if let Some(exchange) = mcp_exchange {
+        attach_bounded_mcp_exchange(&mut record, exchange)?;
+    }
     record.validate_contract()?;
     Ok(record)
+}
+
+fn warp_mcp_exchange(
+    event: &WarpNativeEvent,
+) -> WarpSourceBackedResultV0<Option<McpExchangeContent>> {
+    if event.event_type == ctx_history_core::EventType::ToolCall {
+        let Some(invocation) = event.mcp_invocation.as_ref() else {
+            return Ok(None);
+        };
+        let call_id = event.call_id.as_ref().ok_or(CaptureError::SystemInvariant(
+            "qualified Warp MCP invocation omitted its call ID",
+        ))?;
+        return Ok(Some(McpExchangeContent {
+            provider_call_id: call_id.clone(),
+            invocation: Some(McpInvocationContent {
+                server: invocation.server_id.clone(),
+                tool: invocation.tool_name.clone(),
+                arguments: McpJsonCapture::Present {
+                    value: invocation.args.clone(),
+                },
+            }),
+            response: None,
+        }));
+    }
+    let Some(response) = event.mcp_response.as_ref() else {
+        return Ok(None);
+    };
+    if !event.mcp_attribution {
+        return Err(
+            CaptureError::SystemInvariant("Warp MCP response omitted exact attribution").into(),
+        );
+    }
+    let call_id = event.call_id.as_ref().ok_or(CaptureError::SystemInvariant(
+        "qualified Warp MCP response omitted its call ID",
+    ))?;
+    Ok(Some(McpExchangeContent {
+        provider_call_id: call_id.clone(),
+        invocation: None,
+        response: Some(response.clone()),
+    }))
+}
+
+fn attach_bounded_mcp_exchange(
+    record: &mut CoreRecord,
+    exchange: McpExchangeContent,
+) -> WarpSourceBackedResultV0<()> {
+    record.content.mcp_exchange = Some(exchange);
+    if record.content.encoded_content_bytes()? <= MAX_CORE_CONTENT_BYTES {
+        return Ok(());
+    }
+    let Some(exchange) = record.content.mcp_exchange.as_mut() else {
+        return Err(CaptureError::SystemInvariant(
+            "Warp MCP exchange disappeared during size admission",
+        )
+        .into());
+    };
+    let capture = if let Some(invocation) = exchange.invocation.as_mut() {
+        &mut invocation.arguments
+    } else if let Some(response) = exchange.response.as_mut() {
+        &mut response.payload
+    } else {
+        return Err(CaptureError::SystemInvariant(
+            "Warp MCP exchange omitted both invocation and response",
+        )
+        .into());
+    };
+    let McpJsonCapture::Present { value } = capture else {
+        record.content.mcp_exchange = None;
+        if record.content.encoded_content_bytes()? > MAX_CORE_CONTENT_BYTES {
+            return Err(CaptureError::SystemInvariant(
+                "Warp ordinary content exceeded the Core content budget",
+            )
+            .into());
+        }
+        return Ok(());
+    };
+    let observed_encoded_bytes = serde_json::to_vec(value)
+        .ok()
+        .and_then(|encoded| u64::try_from(encoded.len()).ok());
+    *capture = McpJsonCapture::Omitted {
+        reason: McpPayloadOmissionReason::SizeLimit,
+        observed_encoded_bytes,
+    };
+    if record.content.encoded_content_bytes()? > MAX_CORE_CONTENT_BYTES {
+        record.content.mcp_exchange = None;
+    }
+    if record.content.encoded_content_bytes()? > MAX_CORE_CONTENT_BYTES {
+        return Err(CaptureError::SystemInvariant(
+            "Warp ordinary content exceeded the Core content budget",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn warp_session_id(

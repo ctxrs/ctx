@@ -65,7 +65,8 @@ internal static class Program
             ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show commands", WrapsShow),
             ("exposes optional MCP tool-call metadata", ExposesOptionalMcpToolCallMetadata),
-            ("rejects raw MCP tool-call duplicate members", RejectsRawMcpToolCallDuplicateMembers),
+            ("exposes typed MCP exchange capture", ExposesTypedMcpExchangeCapture),
+            ("rejects raw MCP contract violations", RejectsRawMcpContractViolations),
             ("strictly decodes spawned stdout UTF-8", StrictlyDecodesSpawnedStdoutUtf8),
             ("reports versioning metadata", ReportsVersioning),
             ("uses agent-history-v1 error codes", UsesAgentHistoryV1ErrorCodes),
@@ -871,7 +872,124 @@ internal static class Program
         }
     }
 
-    private static async Task RejectsRawMcpToolCallDuplicateMembers()
+    private static async Task ExposesTypedMcpExchangeCapture()
+    {
+        var fixtures = FindFixtures();
+        var legacyFixture = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(fixtures, "show-event.window.json")))!.AsObject();
+        var legacy = (await ClientFor(legacyFixture["event"]).ShowEventAsync("event-1")).Event.Event
+            ?? throw new InvalidOperationException("legacy selected event did not decode");
+        Equal<McpExchange?>(null, legacy.McpExchange);
+        True(!legacy.ToJsonObject().ContainsKey("mcpExchange"), "absent MCP exchange was serialized");
+
+        var fixture = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(fixtures, "show-event.mcp-tool-call.json")))!.AsObject();
+        var result = (await ClientFor(fixture["event"]).ShowEventAsync("event-1")).Event;
+        var exchange = result.Event?.McpExchange
+            ?? throw new InvalidOperationException("fixture MCP exchange did not decode");
+        Equal("native-call-呼び出し-🦀", exchange.ProviderCallId);
+
+        var invocation = exchange.Invocation
+            ?? throw new InvalidOperationException("fixture MCP invocation did not decode");
+        Equal("mcp-サーバー-🦀", invocation.Server);
+        Equal("検索/工具/🛠️", invocation.Tool);
+        Equal(McpJsonCaptureStatus.Present, invocation.Arguments.CaptureStatus);
+        var arguments = invocation.Arguments.Value
+            ?? throw new InvalidOperationException("fixture MCP arguments value did not decode");
+        True(arguments.ContainsKey("snake_key"), "captured snake_case argument key was lost");
+        True(!arguments.ContainsKey("snakeKey"), "captured argument key was camelized");
+        var snakeValues = arguments["snake_key"] as JsonArray
+            ?? throw new InvalidOperationException("captured snake_key was not an array");
+        True(snakeValues[1] is null, "captured array null was not preserved");
+        var nestedItems = arguments["nested"]?["items"] as JsonArray
+            ?? throw new InvalidOperationException("captured nested items were not preserved");
+        var deepObject = nestedItems[1] as JsonObject
+            ?? throw new InvalidOperationException("captured deep object was not preserved");
+        True(deepObject.ContainsKey("deep_null") && deepObject["deep_null"] is null,
+            "captured nested null member was not preserved");
+
+        var response = exchange.Response
+            ?? throw new InvalidOperationException("fixture MCP response did not decode");
+        Equal(McpResponseStatus.Succeeded, response.Status);
+        Equal<McpFailureKind?>(null, response.FailureKind);
+        Equal<ulong?>(McpExchange.MaxSafeInteger, response.DurationNs);
+        Equal(McpTextCaptureStatus.NormalizedBody, response.Text.CaptureStatus);
+        Equal(McpJsonCaptureStatus.Present, response.Payload.CaptureStatus);
+        var payload = response.Payload.Value as JsonObject
+            ?? throw new InvalidOperationException("fixture MCP payload value did not decode");
+        True(payload.ContainsKey("result_key"), "captured snake_case payload key was lost");
+        True(!payload.ContainsKey("resultKey"), "captured payload key was camelized");
+        var resultValues = payload["result_key"] as JsonArray
+            ?? throw new InvalidOperationException("captured result_key was not an array");
+        True(resultValues[1] is null, "captured payload null was not preserved");
+
+        var captureStates = result.Events[1].McpExchange
+            ?? throw new InvalidOperationException("capture-state exchange did not decode");
+        Equal(McpJsonCaptureStatus.Absent, captureStates.Invocation!.Arguments.CaptureStatus);
+        Equal(McpResponseStatus.Cancelled, captureStates.Response!.Status);
+        Equal(McpTextCaptureStatus.Absent, captureStates.Response.Text.CaptureStatus);
+        Equal(McpJsonCaptureStatus.Unavailable, captureStates.Response.Payload.CaptureStatus);
+
+        var omitted = result.Events[2].McpExchange?.Response
+            ?? throw new InvalidOperationException("omitted response did not decode");
+        Equal(McpResponseStatus.Failed, omitted.Status);
+        Equal<McpFailureKind?>(McpFailureKind.ToolReported, omitted.FailureKind);
+        Equal(McpTextCaptureStatus.Omitted, omitted.Text.CaptureStatus);
+        Equal<McpPayloadOmissionReason?>(McpPayloadOmissionReason.SizeLimit, omitted.Text.Reason);
+        Equal<ulong?>(McpExchange.MaxSafeInteger, omitted.Text.ObservedEncodedBytes);
+        Equal(McpJsonCaptureStatus.Omitted, omitted.Payload.CaptureStatus);
+        Equal<McpPayloadOmissionReason?>(McpPayloadOmissionReason.SizeLimit, omitted.Payload.Reason);
+        Equal<ulong?>(null, omitted.Payload.ObservedEncodedBytes);
+        Equal<McpExchange?>(null, result.Events[3].McpExchange);
+        True(!result.Events[3].ToJsonObject().ContainsKey("mcpExchange"),
+            "absent window MCP exchange was serialized");
+
+        var snakeWire = JsonNode.Parse("""
+            {
+              "event": {
+                "text": "normalized response body",
+                "mcp_exchange": {
+                  "provider_call_id": "call-1",
+                  "invocation": {
+                    "server": "server",
+                    "tool": "tool",
+                    "arguments": {
+                      "capture_status": "present",
+                      "value": {"snake_key": {"deep_null": null}, "camelKey": [1, false]}
+                    }
+                  },
+                  "response": {
+                    "status": "succeeded",
+                    "duration_ns": 0,
+                    "text": {"capture_status": "normalized_body"},
+                    "payload": {
+                      "capture_status": "present",
+                      "value": {"result_key": ["雪", null]}
+                    }
+                  }
+                }
+              },
+              "events": []
+            }
+            """);
+        var normalized = (await ClientFor(snakeWire).ShowEventAsync("event-1")).Event.Event
+            ?? throw new InvalidOperationException("snake-case MCP exchange did not decode");
+        var normalizedExchange = normalized.McpExchange
+            ?? throw new InvalidOperationException("normalized MCP exchange was absent");
+        Equal<ulong?>(0, normalizedExchange.Response!.DurationNs);
+        var normalizedArguments = normalizedExchange.Invocation!.Arguments.Value!;
+        True(normalizedArguments.ContainsKey("snake_key") && !normalizedArguments.ContainsKey("snakeKey"),
+            "snake-case captured argument keys were rewritten");
+        var normalizedPayload = normalizedExchange.Response.Payload.Value as JsonObject
+            ?? throw new InvalidOperationException("normalized payload did not decode");
+        True(normalizedPayload.ContainsKey("result_key") && !normalizedPayload.ContainsKey("resultKey"),
+            "snake-case captured payload keys were rewritten");
+        var normalizedJson = normalized.ToJsonObject()["mcpExchange"]!.AsObject();
+        True(normalizedJson.ContainsKey("providerCallId") && !normalizedJson.ContainsKey("provider_call_id"),
+            "contract-owned MCP keys were not camelized");
+    }
+
+    private static async Task RejectsRawMcpContractViolations()
     {
         var fixtureDirectory = Path.Combine(FindFixtures(), "adversarial");
         foreach (var name in new[]
@@ -880,6 +998,15 @@ internal static class Program
             "duplicate-event-mcp-tool-call-camel.json",
             "duplicate-mcp-tool-call-server.json",
             "duplicate-mcp-tool-call-tool.json",
+            "duplicate-event-mcp-exchange-snake.json",
+            "duplicate-mcp-exchange-captured-value.json",
+            "invalid-mcp-exchange-explicit-null.json",
+            "invalid-mcp-exchange-outer-alias-collision.json",
+            "invalid-mcp-exchange-unknown-field.json",
+            "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+            "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+            "invalid-mcp-exchange-unsafe-duration-ns.json",
+            "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
             "invalid-mcp-tool-call-transformed-server.json",
             "invalid-mcp-tool-call-transformed-tool.json",
             "invalid-mcp-tool-call-transformed-collision.json",
@@ -891,6 +1018,19 @@ internal static class Program
         })
         {
             var raw = File.ReadAllText(Path.Combine(fixtureDirectory, name));
+            await ThrowsAsync<CtxAgentHistoryProtocolException>(
+                () => LocalClientForRaw(raw).ShowEventAsync("event-1"));
+        }
+
+        foreach (var raw in new[]
+        {
+            "{\"event\":{\"mcp_exchange\":{\"provider_call_id\":\"snake\",\"providerCallId\":\"camel\",\"invocation\":{\"server\":\"server\",\"tool\":\"tool\",\"arguments\":{\"capture_status\":\"absent\"}}}},\"events\":[]}",
+            "{\"event\":{\"mcp_exchange\":{\"provider_call_id\":\"call\",\"response\":{\"status\":\"succeeded\",\"duration_ns\":0,\"durationNs\":0,\"text\":{\"capture_status\":\"absent\"},\"payload\":{\"capture_status\":\"absent\"}}}},\"events\":[]}",
+            "{\"event\":{\"mcp_exchange\":{\"provider_call_id\":\"call\",\"response\":{\"status\":\"succeeded\",\"duration_ns\":-1,\"text\":{\"capture_status\":\"absent\"},\"payload\":{\"capture_status\":\"absent\"}}}},\"events\":[]}",
+            "{\"event\":{\"mcp_exchange\":{\"provider_call_id\":\"call\",\"response\":{\"status\":\"succeeded\",\"text\":{\"capture_status\":\"omitted\",\"reason\":\"size_limit\",\"observed_encoded_bytes\":-1},\"payload\":{\"capture_status\":\"absent\"}}}},\"events\":[]}",
+            "{\"event\":{\"mcp_exchange\":{\"provider_call_id\":\"call\",\"response\":{\"status\":\"succeeded\",\"text\":{\"capture_status\":\"absent\",\"captureStatus\":\"absent\"},\"payload\":{\"capture_status\":\"absent\"}}}},\"events\":[]}"
+        })
+        {
             await ThrowsAsync<CtxAgentHistoryProtocolException>(
                 () => LocalClientForRaw(raw).ShowEventAsync("event-1"));
         }

@@ -6,8 +6,8 @@
   "conformance_authority": {
     "manifest": "crates/ctx-history-capture/tests/mcp-attribution-conformance.manifest.json",
     "suite_registry": "crates/ctx-history-capture/tests/mcp_attribution_suites.bzl",
-    "manifest_sha256": "c80b234d154852175ec02e3c55416980906dedfcd4696c5039853b096b67c85f",
-    "suite_registry_sha256": "5f78f78e4a2a0df9739313067ffddc7a11eadc075ec00910f95c352bf65d10fa",
+    "manifest_sha256": "109cefe3c46232f9999b17921579333586da3fe5d1f626d8b5a0e6a7110a7b1c",
+    "suite_registry_sha256": "452cdf5eb23689df4b3d2c9460b8610705c8e4a7ee1500d0f98a05ad00786b85",
     "manifest_schema_version": 6,
     "capability_revision": 5,
     "status_mapping": {
@@ -435,7 +435,7 @@
       "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-capture/src/provider/codex/nativepath/source_backed.rs",
-      "parser_revision": "codex-nativepath-core-record-v13",
+      "parser_revision": "codex-nativepath-core-record-v16-aggregate-content-admission",
       "suite_id": "ctx-history-capture::test:codex_direct_result",
       "conformance_suite": "codex_direct_result",
       "tests": [
@@ -448,7 +448,7 @@
       "provider_id": "warp", "route": "native_import", "source_format": "warp_sqlite", "source_schema": "warp-agent-task-protobuf-v1",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-capture/src/provider/providers/warp/source_backed.rs",
-      "parser_revision": "warp-source-backed-logical-v4",
+      "parser_revision": "warp-source-backed-logical-v5",
       "suite_id": "ctx-history-capture::native_unit",
       "conformance_suite": "mcp_attribution_provider_units",
       "tests": [
@@ -461,7 +461,7 @@
       "provider_id": "copilot_cli", "route": "native_import", "source_format": "copilot_cli_session_events_jsonl", "source_schema": "copilot-cli-direct-native-jsonl-v1",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-capture/src/provider/providers/native_jsonl/native_path/copilot.rs",
-      "parser_revision": "copilot-cli-direct-native-jsonl-v4-bound-mcp-tool-call-attribution",
+      "parser_revision": "copilot-cli-direct-native-jsonl-v5-mcp-exchange",
       "suite_id": "ctx-history-capture::native_unit",
       "conformance_suite": "mcp_attribution_provider_units",
       "tests": [

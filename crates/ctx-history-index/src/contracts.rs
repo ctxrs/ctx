@@ -97,10 +97,8 @@ pub enum IndexError {
         "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
     )]
     CoreRecordContractMismatch { expected: String, actual: String },
-    #[error(
-        "allowlisted predecessor Core record contains the successor-only mcp_tool_call member"
-    )]
-    PredecessorCoreRecordShapeMismatch,
+    #[error("allowlisted predecessor Core record contains successor-only member {member}")]
+    PredecessorCoreRecordShapeMismatch { member: &'static str },
     #[error("predecessor migration source topology is not authenticated: {0}")]
     PredecessorMigrationSourceTopology(&'static str),
     #[error("predecessor migration source has too many clone files: {actual}, maximum {maximum}")]

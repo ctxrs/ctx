@@ -68,6 +68,9 @@ pub(super) fn project_event(
         .as_deref()
         .map(|cwd| bounded_chars(cwd, MAX_GEMINI_LEXICAL_METADATA_CHARS));
     record.content.structured_content = annotation.structured_content;
+    record
+        .content
+        .omit_structured_content_if_aggregate_exceeds_limit()?;
     record.metadata = annotation.metadata;
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;
     record.repository_bindings = annotation.repository_bindings;

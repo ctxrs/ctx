@@ -135,6 +135,7 @@ pub(super) fn record() -> CoreRecord {
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: Some("complete golden Core body".to_owned()),
             structured_content: None,
+            mcp_exchange: None,
         },
         mcp_tool_call: None,
         metadata: BTreeMap::new(),

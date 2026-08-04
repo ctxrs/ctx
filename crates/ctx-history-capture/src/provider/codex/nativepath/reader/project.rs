@@ -1,9 +1,11 @@
 use super::*;
 
 mod mcp;
+mod mcp_exchange;
 
 use mcp::project_mcp_tool_call_attribution;
 pub(super) use mcp::{mcp_terminal_candidate_evidence, CodexMcpTerminalAuthority};
+use mcp_exchange::{project_mcp_exchange, selected_content_fits};
 
 impl CodexNativeScanner {
     pub(super) fn process_record(
@@ -335,8 +337,30 @@ impl CodexNativeScanner {
             == Some("mcp_tool_call_end"))
         .then(|| decoded.payload.get("invocation"))
         .flatten();
-        let structured_content =
-            projected_tool_result_content(result_kind, call_id, &mut projected_output, invocation);
+        let mut structured_content =
+            projected_tool_result_content(result_kind, call_id, &mut projected_output);
+        let projected_mcp_exchange = project_mcp_exchange(record, &decoded.payload)
+            .and_then(|exchange| exchange.fit_selected_body(&projected_output.normalized_body));
+        if !selected_content_fits(
+            &projected_output.normalized_body,
+            structured_content.as_ref(),
+            projected_mcp_exchange
+                .as_ref()
+                .map(|exchange| exchange.content()),
+        ) {
+            structured_content = None;
+        }
+        if let (Some(structured), Some(invocation)) = (structured_content.as_mut(), invocation) {
+            attach_projected_invocation_if_fits(
+                structured,
+                invocation,
+                &projected_output.normalized_body,
+                projected_mcp_exchange
+                    .as_ref()
+                    .map(|exchange| exchange.content()),
+            );
+        }
+        let mcp_exchange = projected_mcp_exchange.map(|exchange| exchange.into_content());
         let core_row = build_source_backed_sparse_output_row(
             self.raw_ordinal,
             provider_event_identity(&decoded.payload),
@@ -347,6 +371,7 @@ impl CodexNativeScanner {
             projected_output.normalized_body,
             structured_content,
             mcp_tool_call,
+            mcp_exchange,
             repository_result,
             context
                 .as_ref()
@@ -720,7 +745,6 @@ fn projected_tool_result_content(
     result_kind: CodexResultKind,
     call_id: Option<&str>,
     projected: &mut ProjectedCodexOutput,
-    invocation: Option<&Value>,
 ) -> Option<Value> {
     let mut result = serde_json::Map::from_iter([
         (
@@ -749,29 +773,50 @@ fn projected_tool_result_content(
     if let Some(duration) = projected.duration.take() {
         result.insert("duration".to_owned(), duration);
     }
-    let mut structured = serde_json::json!({
+    let structured = serde_json::json!({
         "provider_native_tool_result": Value::Object(result),
     });
     let base_bytes = encoded_json_len(&structured)?;
     if base_bytes > ctx_history_core::MAX_CORE_CONTENT_BYTES {
         return None;
     }
-    if let Some(invocation) = invocation {
-        // `provider_native_tool_result` is non-empty, so adding this member
-        // contributes one comma, the fixed encoded key, and the invocation
-        // value itself. Count first and clone only when Core can admit the
-        // complete structured representation.
-        let invocation_bytes = encoded_json_len(invocation)?;
-        let candidate_bytes = base_bytes
-            .checked_add(1)?
-            .checked_add(r#""invocation":"#.len())?
-            .checked_add(invocation_bytes)?;
-        if candidate_bytes <= ctx_history_core::MAX_CORE_CONTENT_BYTES {
-            structured
-                .get_mut("provider_native_tool_result")?
-                .as_object_mut()?
-                .insert("invocation".to_owned(), invocation.clone());
-        }
-    }
     Some(structured)
+}
+
+fn attach_projected_invocation_if_fits(
+    structured: &mut Value,
+    invocation: &Value,
+    normalized_body: &str,
+    mcp_exchange: Option<&ctx_history_core::McpExchangeContent>,
+) {
+    let Some(base_bytes) = encoded_json_len(structured) else {
+        return;
+    };
+    let Some(invocation_bytes) = encoded_json_len(invocation) else {
+        return;
+    };
+    // `provider_native_tool_result` is non-empty, so adding this member
+    // contributes one comma, the fixed encoded key, and the invocation value.
+    let Some(candidate_structured_bytes) = base_bytes
+        .checked_add(1)
+        .and_then(|bytes| bytes.checked_add(r#""invocation":"#.len()))
+        .and_then(|bytes| bytes.checked_add(invocation_bytes))
+    else {
+        return;
+    };
+    let exchange_bytes = mcp_exchange.and_then(encoded_json_len).unwrap_or_default();
+    let fits = normalized_body
+        .len()
+        .checked_add(candidate_structured_bytes)
+        .and_then(|bytes| bytes.checked_add(exchange_bytes))
+        .is_some_and(|bytes| bytes <= ctx_history_core::MAX_CORE_CONTENT_BYTES);
+    if fits {
+        let Some(result) = structured
+            .get_mut("provider_native_tool_result")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        result.insert("invocation".to_owned(), invocation.clone());
+    }
 }

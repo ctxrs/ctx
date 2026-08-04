@@ -797,7 +797,7 @@ mod fidelity_identity_tests {
     }
 
     #[test]
-    fn cursor_large_tool_arguments_keep_both_complete_core_representations() {
+    fn cursor_large_tool_arguments_preserve_body_and_identity_within_aggregate_limit() {
         let tail = "cursor_large_tool_argument_tail_complete";
         let full_argument = format!("{}{tail}", "x".repeat(8 * 1024 * 1024));
         let row = json!({
@@ -815,21 +815,32 @@ mod fidelity_identity_tests {
         });
         assert!(serde_json::to_vec(&row).unwrap().len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
 
+        let expected_native_event_id = event_identity_key(&event(&row, 0), 0).unwrap();
+        let identity_source = source_key("cursor-fidelity-test").unwrap();
+        let identity_session_id = session_id(&identity_source, "cursor-fidelity-test").unwrap();
+        let expected_event_id = event_id(
+            &identity_source,
+            identity_session_id,
+            &expected_native_event_id,
+        )
+        .unwrap();
+        let duplicate_structured = row.pointer("/message/content/0").unwrap();
         let core = projected_core(&row);
         let normalized = core.content.normalized_body.as_deref().unwrap();
-        let structured = core
-            .content
-            .structured_content
-            .as_ref()
-            .expect("Cursor must not silently drop complete structured arguments");
         assert!(normalized.contains(tail));
+        assert_eq!(core.event_id, expected_event_id);
         assert_eq!(
-            structured["input"]["contents"].as_str(),
-            Some(full_argument.as_str())
+            core.native_event_id.as_ref(),
+            Some(&expected_native_event_id)
+        );
+        assert!(core.content.structured_content.is_none());
+        assert!(
+            normalized.len() + serde_json::to_vec(duplicate_structured).unwrap().len()
+                > ctx_history_core::MAX_CORE_CONTENT_BYTES
         );
         assert!(
-            normalized.len() + serde_json::to_vec(structured).unwrap().len()
-                > ctx_history_core::MAX_CORE_CONTENT_BYTES
+            core.content.encoded_content_bytes().unwrap()
+                <= ctx_history_core::MAX_CORE_CONTENT_BYTES
         );
         core.validate_contract().unwrap();
         core.encode_stored().unwrap();

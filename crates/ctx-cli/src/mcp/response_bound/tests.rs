@@ -204,6 +204,53 @@ fn query_events_content_none_overflow_recommends_lower_limit() {
 }
 
 #[test]
+fn query_events_response_bound_counts_full_mcp_exchange_payloads() {
+    let response_id = json!("mcp-exchange-bound");
+    let response = success_response(
+        response_id.clone(),
+        tool_result(json!({
+            "payload_type": "event_range_page",
+            "events": [{
+                "ctx_event_id": "018f45d0-0000-7000-8000-000000000010",
+                "text": "body",
+                "content_projection": "full",
+                "mcp_exchange": {
+                    "provider_call_id": "call",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"capture_status": "normalized_body"},
+                        "payload": {
+                            "capture_status": "present",
+                            "value": {
+                                "nested": ["雪", null, {"large": "x".repeat(2_000)}]
+                            }
+                        }
+                    }
+                }
+            }]
+        })),
+    );
+    let actual = serialized_json_line_bytes(&response).unwrap();
+    let mut without_exchange = response.clone();
+    without_exchange["result"]["structuredContent"]["events"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("mcp_exchange");
+    let without_exchange_bytes = serialized_json_line_bytes(&without_exchange).unwrap();
+    assert!(without_exchange_bytes < actual);
+    let output_limit = TEST_OUTPUT_LIMIT.max(without_exchange_bytes);
+    assert!(output_limit < actual);
+
+    let bounded = bound_query_events_mcp_response(response, response_id, output_limit);
+    assert_eq!(bounded["result"]["isError"], true);
+    assert_eq!(
+        bounded["result"]["structuredContent"]["actual_bytes"],
+        actual
+    );
+    assert!(serialized_json_line_bytes(&bounded).unwrap() <= output_limit);
+}
+
+#[test]
 fn final_mcp_serialization_is_bounded_after_json_expansion() {
     assert_eq!(
         crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,

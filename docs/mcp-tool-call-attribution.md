@@ -5,9 +5,15 @@ qualifying provider history record stores both values at an observed execution
 boundary. This is an event-local metadata capability, not a general claim that
 every tool call or every supported provider exposes MCP identity.
 
+This top-level identity is separate from the optional, content-governed
+`mcp_exchange` invocation/response capture. Presence or absence of one does not
+synthesize or qualify the other. See
+[`mcp-exchange-capture.md`](mcp-exchange-capture.md) for arguments, response
+payloads, call IDs, status, timing, and capture-state semantics.
+
 ## Wire contract
 
-Attributed CLI/Core/MCP event rows add one optional object:
+Attributed CLI/Core event rows add one optional snake_case object:
 
 ```json
 {
@@ -18,6 +24,9 @@ Attributed CLI/Core/MCP event rows add one optional object:
 }
 ```
 
+Typed SDK and MCP event output exposes the same identity as camelCase
+`mcpToolCall: {server, tool}`.
+
 `server` is the exact source-time dispatch key and `tool` is the exact
 MCP-advertised tool name. Both are required nonempty decoded UTF-8 strings and
 each is bounded to 64 KiB. Whitespace-only native values remain unchanged.
@@ -26,8 +35,10 @@ from current configuration, or truncated to fit the bound.
 
 Presence means the native terminal/result record supplied the exact pair for an
 observed execution. It does not say whether the call succeeded, identify an
-endpoint, expose arguments, or define configuration scope. Tool-level and
-transport failures may therefore still carry attribution.
+endpoint, or define configuration scope. Tool-level and transport failures may
+therefore still carry attribution. Arguments and responses, when captured, live
+under the separate optional `mcp_exchange` content field and do not broaden this
+identity claim.
 
 Absence means only that this event has no qualifying exact durable pair. It does
 not mean the event was not MCP. The complete property is omitted rather than
@@ -50,16 +61,16 @@ Deep Agents hosted trace. Capability revision 3 exact providers are
 Codex, Warp, and Copilot CLI. The exact full tuples are:
 
 - Codex `codex_session_jsonl_tree` / `codex-nativepath-jsonl-v0`, parser
-  `codex-nativepath-core-record-v13`, for unversioned producer generation 1
+  `codex-nativepath-core-record-v15`, for unversioned producer generation 1
   only. Codex producer versions 0.200.0, 0.201.0, and 0.202.0 are separate
   explicit `not-qualified` lanes and never inherit that exact status.
 - Warp `warp_sqlite` / `warp-agent-task-protobuf-v1`, parser
-  `warp-source-backed-logical-v4`, for strict unversioned format generation 1.
+  `warp-source-backed-logical-v5`, for strict unversioned format generation 1.
   The pinned Warp and protobuf source commits are evidence for that shape, not
   runtime-observable writer-version selectors.
 - Copilot CLI `copilot_cli_session_events_jsonl` /
   `copilot-cli-direct-native-jsonl-v1`, parser
-  `copilot-cli-direct-native-jsonl-v4-bound-mcp-tool-call-attribution`, for
+  `copilot-cli-direct-native-jsonl-v5-mcp-exchange`, for
   strict unversioned format generation 1. Versions 0.0.393 and 1.0.77 and the
   pinned source commit are observed evidence, not runtime admission selectors.
 
@@ -114,15 +125,22 @@ metadata. In particular, there is no `--mcp-server` or `--mcp-tool` selector;
 the names are not a search input, search result field, ranking signal, snippet
 source, or SQL column.
 
+Full-content JSON/JSONL can additionally expose `mcp_exchange`. The
+`--content text` and `--content none` projections omit that content field while
+leaving an available top-level `mcp_tool_call` intact.
+
 ## MCP access and pagination
 
-MCP `show_event`, `show_session`, and `query_events` return the same optional
-object in event rows inside `structuredContent`. Text fallback safely renders
-the values but is not the exact machine authority.
+MCP `show_event`, `show_session`, and full-content `query_events` return the
+same optional identity as camelCase `mcpToolCall` in event rows inside
+`structuredContent`. Text fallback safely renders the values but is not the
+exact machine authority. Full event rows can also include camelCase
+`mcpExchange`; `query_events` with `content: "text"` or `content: "none"`
+omits the exchange.
 
 For a complete attributed session scan, call `show_session` with the session
 ID, `mode: "log"`, and a bounded `limit`. Filter that page's `events` array on
-the client for rows containing `mcp_tool_call`. When
+the client for rows containing `mcpToolCall`. When
 `pagination.has_more` is true, repeat the call with the same session ID and
 mode plus the returned `pagination.next_cursor`. Stop only when `has_more` is
 false. Cursors are opaque and generation-bound; restart from the first page
@@ -140,13 +158,19 @@ not added to lexical terms, semantic text, usage aggregates, or the Local Pro
 graph. Reimport recomputes the field from provider history; query paths never
 reparse provider-specific structured content or consult current MCP config.
 
+The separate optional `mcp_exchange` is stored as content on selected Core
+events. Its call ID, arguments, status/timing, and response payload are not
+lexical or semantic fields, SQL columns, usage aggregates, or Local Pro facts.
+Existing normalized-body indexing behavior is unchanged.
+
 During the one allowlisted transition from the immediately preceding
 self-contained Core contract, ctx republishes verified records with
-`mcp_tool_call` absent before switching generations. This preservation step
-does not reopen provider history. A later ordinary provider refresh may enrich
-qualifying source records. Historical records can therefore remain
-unattributed when their original source is unavailable, while their existing
-ctx event and session identities remain stable.
+`mcp_tool_call` and `mcp_exchange` absent before switching generations. This
+preservation step does not reopen provider history. A later ordinary provider
+refresh may enrich qualifying source records. Historical records can therefore
+remain unattributed and have no exchange capture when their original source is
+unavailable, while their existing ctx event and session identities remain
+stable.
 
 This transition does not read or migrate the legacy pre-v0.26 Store/SQL epoch.
 Unknown, incomplete, or corrupt Core predecessors fail closed and leave the
@@ -158,7 +182,9 @@ MCP server and tool names are opaque local data. They can contain credentials,
 customer or repository names, paths, identifiers, Unicode controls, or other
 sensitive text. Exact JSON/JSONL and MCP structured output preserve the native
 strings, so this output is private and not share-safe until reviewed. MCP hosts
-may also log or forward tool results.
+may also log or forward tool results. Captured arguments and response payloads
+are likewise private local content and can contain credentials, personal data,
+or proprietary output.
 
 Human views retain the first 256 Unicode scalar values from each component
 independently. Terminal and Markdown rendering applies escaping only after that
@@ -186,6 +212,8 @@ Machine JSON, JSONL, and MCP `structuredContent` preserve the full exact values
 admitted by the 64 KiB component bound; use those machine formats whenever the
 complete values matter. Core `Redacted` or `Omitted` content policy omits
 attribution by default; this is distinct from presentation `--content none`,
-which retains already-stored metadata.
+which retains already-stored attribution metadata. Content policy also governs
+`mcp_exchange`, but presentation includes that field only in full-content event
+output.
 
 Release-note credit: Reported by [@j2h4u](https://github.com/j2h4u).

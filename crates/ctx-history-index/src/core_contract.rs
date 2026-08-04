@@ -1,4 +1,4 @@
-use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use tantivy::{schema::Value as TantivyValue, DocAddress, TantivyDocument};
 
 use crate::{fields_from_schema, CoreRecord, IndexError, Result};
@@ -41,17 +41,18 @@ pub(crate) fn classify_core_contract_generation(actual: &str) -> Result<CoreCont
 
 /// Decodes one stored record according to the manifest-selected Core shape.
 ///
-/// The successor decoder accepts an absent optional attribution member, so an
-/// allowlisted fingerprint alone is not enough to prove predecessor shape.
-/// The frozen predecessor mode first rejects the successor-only top-level
-/// member even when its value is `null`, then applies Core's exact decoder and
-/// validation to the remaining record.
+/// The successor decoder accepts absent optional MCP members, so an allowlisted
+/// fingerprint alone is not enough to prove predecessor shape. The frozen
+/// predecessor mode first rejects the successor-only top-level
+/// `mcp_tool_call` or nested `content.mcp_exchange` member even when its value
+/// is `null`, then applies Core's exact decoder and validation to the remaining
+/// record.
 pub(crate) fn decode_stored_core_record_for_contract(
     encoded: &[u8],
     contract: CoreContractGeneration,
 ) -> Result<CoreRecord> {
     if contract == CoreContractGeneration::AllowlistedPredecessor {
-        reject_predecessor_successor_member(encoded)?;
+        reject_predecessor_successor_members(encoded)?;
     }
     Ok(CoreRecord::decode_stored(encoded)?)
 }
@@ -89,9 +90,17 @@ pub(crate) fn audit_searcher_core_contract(
     Ok(())
 }
 
-fn reject_predecessor_successor_member(encoded: &[u8]) -> Result<()> {
+fn reject_predecessor_successor_members(encoded: &[u8]) -> Result<()> {
     struct MemberVisitor<'a> {
-        successor_member_found: &'a mut bool,
+        successor_member: &'a mut Option<&'static str>,
+    }
+
+    struct ContentMemberSeed<'a> {
+        successor_member: &'a mut Option<&'static str>,
+    }
+
+    struct ContentMemberVisitor<'a> {
+        successor_member: &'a mut Option<&'static str>,
     }
 
     impl<'de> Visitor<'de> for MemberVisitor<'_> {
@@ -107,7 +116,47 @@ fn reject_predecessor_successor_member(encoded: &[u8]) -> Result<()> {
         {
             while let Some(key) = map.next_key::<String>()? {
                 if key == "mcp_tool_call" {
-                    *self.successor_member_found = true;
+                    self.successor_member.get_or_insert("mcp_tool_call");
+                }
+                if key == "content" {
+                    map.next_value_seed(ContentMemberSeed {
+                        successor_member: self.successor_member,
+                    })?;
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl<'de> DeserializeSeed<'de> for ContentMemberSeed<'_> {
+        type Value = ();
+
+        fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_map(ContentMemberVisitor {
+                successor_member: self.successor_member,
+            })
+        }
+    }
+
+    impl<'de> Visitor<'de> for ContentMemberVisitor<'_> {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a stored Core content object")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<(), A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "mcp_exchange" {
+                    self.successor_member.get_or_insert("content.mcp_exchange");
                 }
                 map.next_value::<IgnoredAny>()?;
             }
@@ -115,17 +164,17 @@ fn reject_predecessor_successor_member(encoded: &[u8]) -> Result<()> {
         }
     }
 
-    let mut successor_member_found = false;
+    let mut successor_member = None;
     let mut deserializer = serde_json::Deserializer::from_slice(encoded);
     serde::Deserializer::deserialize_map(
         &mut deserializer,
         MemberVisitor {
-            successor_member_found: &mut successor_member_found,
+            successor_member: &mut successor_member,
         },
     )?;
     deserializer.end()?;
-    if successor_member_found {
-        return Err(IndexError::PredecessorCoreRecordShapeMismatch);
+    if let Some(member) = successor_member {
+        return Err(IndexError::PredecessorCoreRecordShapeMismatch { member });
     }
     Ok(())
 }
@@ -178,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn predecessor_shape_rejects_successor_member_even_when_null() {
+    fn predecessor_shape_rejects_successor_members_even_when_null() {
         let source = crate::tests::source("predecessor-shape.jsonl");
         let record = crate::tests::document(&source, 1, "predecessor body");
         let encoded = record.encode_stored().unwrap();
@@ -188,18 +237,76 @@ mod tests {
         )
         .is_ok());
 
-        let mut value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("mcp_tool_call".to_owned(), serde_json::Value::Null);
-        let malformed = serde_json::to_vec(&value).unwrap();
-        assert!(matches!(
-            decode_stored_core_record_for_contract(
-                &malformed,
-                CoreContractGeneration::AllowlistedPredecessor
-            ),
-            Err(IndexError::PredecessorCoreRecordShapeMismatch)
-        ));
+        for (member, malformed) in [
+            ("mcp_tool_call", {
+                let mut value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("mcp_tool_call".to_owned(), serde_json::Value::Null);
+                value
+            }),
+            ("content.mcp_exchange", {
+                let mut value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
+                value["content"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("mcp_exchange".to_owned(), serde_json::Value::Null);
+                value
+            }),
+            ("content.mcp_exchange", {
+                let mut value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
+                value["content"].as_object_mut().unwrap().insert(
+                    "mcp_exchange".to_owned(),
+                    serde_json::json!({"provider_call_id": "successor-call"}),
+                );
+                value
+            }),
+        ] {
+            let malformed = serde_json::to_vec(&malformed).unwrap();
+            assert!(matches!(
+                decode_stored_core_record_for_contract(
+                    &malformed,
+                    CoreContractGeneration::AllowlistedPredecessor
+                ),
+                Err(IndexError::PredecessorCoreRecordShapeMismatch { member: actual })
+                    if actual == member
+            ));
+        }
+    }
+
+    #[test]
+    fn predecessor_shape_rejects_escaped_and_duplicate_nested_successor_keys() {
+        fn insert_after(encoded: &[u8], marker: &[u8], member: &[u8]) -> Vec<u8> {
+            let offset = encoded
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .unwrap()
+                + marker.len();
+            let mut malformed = Vec::with_capacity(encoded.len() + member.len());
+            malformed.extend_from_slice(&encoded[..offset]);
+            malformed.extend_from_slice(member);
+            malformed.extend_from_slice(&encoded[offset..]);
+            malformed
+        }
+
+        let source = crate::tests::source("predecessor-nested-duplicates.jsonl");
+        let record = crate::tests::document(&source, 1, "predecessor body");
+        let encoded = record.encode_stored().unwrap();
+        for member in [
+            br#""mcp\u005fexchange":null,"#.as_slice(),
+            br#""mcp_exchange":null,"mcp_exchange":null,"#.as_slice(),
+        ] {
+            let malformed = insert_after(&encoded, br#""content":{"#, member);
+            assert!(matches!(
+                decode_stored_core_record_for_contract(
+                    &malformed,
+                    CoreContractGeneration::AllowlistedPredecessor
+                ),
+                Err(IndexError::PredecessorCoreRecordShapeMismatch {
+                    member: "content.mcp_exchange"
+                })
+            ));
+        }
     }
 }

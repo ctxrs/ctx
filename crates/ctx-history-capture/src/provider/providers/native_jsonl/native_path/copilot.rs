@@ -4,10 +4,12 @@ use std::{
 };
 
 use ctx_history_core::{
-    CaptureProvider, McpToolCallAttribution, MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+    CaptureProvider, McpExchangeContent, McpFailureKind, McpInvocationContent, McpJsonCapture,
+    McpTerminalResponseContent, McpTerminalStatus, McpTextCapture, McpToolCallAttribution,
+    MAX_MCP_EXCHANGE_CALL_ID_BYTES, MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
 };
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
-use serde_json::{value::RawValue, Value};
+use serde_json::{value::RawValue, Map, Number, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -15,10 +17,12 @@ use crate::{
 };
 
 pub(super) const COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION: &str =
-    "copilot-cli-direct-native-jsonl-v4-bound-mcp-tool-call-attribution";
+    "copilot-cli-direct-native-jsonl-v5-mcp-exchange";
 
 const COPILOT_LINKAGE_SCAN_CHUNK_BYTES: usize = 1024 * 1024;
-pub(super) const COPILOT_LINKAGE_MAX_LINE_BYTES: usize = 1024 * 1024;
+// The selector reads in fixed-size chunks, but must retain any complete line
+// that the shared JSONL reader can admit so projection and linkage agree.
+pub(super) const COPILOT_LINKAGE_MAX_LINE_BYTES: usize = crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 pub(super) const COPILOT_LINKAGE_MAX_CALL_ID_BYTES: usize = 1024;
 pub(super) const COPILOT_LINKAGE_MAX_DISTINCT_IDS: usize = 4096;
 pub(super) const COPILOT_LINKAGE_MAX_TOTAL_CANDIDATES: usize = 8192;
@@ -242,6 +246,281 @@ pub(super) fn copilot_event_identity(value: &Value) -> Option<&str> {
         .get("id")
         .and_then(Value::as_str)
         .filter(|event_id| !event_id.trim().is_empty())
+}
+
+/// Captures only the exact MCP side represented by this Copilot event.
+///
+/// Invocation records are self-contained. Terminal records additionally
+/// require the existing duplicate-aware attribution plan to prove a unique
+/// start/completion linkage; this deliberately leaves `mcp_tool_call`
+/// semantics unchanged.
+pub(super) fn copilot_mcp_exchange(
+    bytes: &[u8],
+    linked_attribution: Option<&McpToolCallAttribution>,
+) -> Option<McpExchangeContent> {
+    let (event_kind, data) = exact_copilot_exchange_data(bytes)?;
+    let provider_call_id =
+        match exact_bounded_string(data.tool_call_id.value, MAX_MCP_EXCHANGE_CALL_ID_BYTES) {
+            ExactBoundedString::Exact(provider_call_id) if !data.tool_call_id.duplicate => {
+                provider_call_id
+            }
+            ExactBoundedString::Exact(_)
+            | ExactBoundedString::Invalid
+            | ExactBoundedString::Exceeded => return None,
+        };
+
+    match event_kind {
+        CopilotEventKind::Start => {
+            let server = match exact_bounded_string(
+                data.mcp_server_name.value,
+                MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+            ) {
+                ExactBoundedString::Exact(server) if !data.mcp_server_name.duplicate => server,
+                ExactBoundedString::Exact(_)
+                | ExactBoundedString::Invalid
+                | ExactBoundedString::Exceeded => return None,
+            };
+            let tool = match exact_bounded_string(
+                data.mcp_tool_name.value,
+                MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+            ) {
+                ExactBoundedString::Exact(tool) if !data.mcp_tool_name.duplicate => tool,
+                ExactBoundedString::Exact(_)
+                | ExactBoundedString::Invalid
+                | ExactBoundedString::Exceeded => return None,
+            };
+            let arguments = capture_copilot_arguments(&data)?;
+            Some(McpExchangeContent {
+                provider_call_id,
+                invocation: Some(McpInvocationContent {
+                    server,
+                    tool,
+                    arguments,
+                }),
+                response: None,
+            })
+        }
+        CopilotEventKind::Completion => {
+            linked_attribution?;
+            let success = (!data.success.duplicate)
+                .then(|| exact_bool(data.success.value))
+                .flatten()?;
+            let (text, payload) = capture_copilot_terminal_payload(&data, success)?;
+            Some(McpExchangeContent {
+                provider_call_id,
+                invocation: None,
+                response: Some(McpTerminalResponseContent {
+                    status: if success {
+                        McpTerminalStatus::Succeeded
+                    } else {
+                        McpTerminalStatus::Failed
+                    },
+                    failure_kind: (!success).then_some(McpFailureKind::Unknown),
+                    // Copilot's persisted completion contract has no duration
+                    // field with authoritative units.
+                    duration_ns: None,
+                    text,
+                    payload,
+                }),
+            })
+        }
+    }
+}
+
+fn exact_copilot_exchange_data(bytes: &[u8]) -> Option<(CopilotEventKind, CopilotRawData<'_>)> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let envelope = CopilotRawEnvelope::deserialize(&mut deserializer).ok()?;
+    deserializer.end().ok()?;
+    if envelope.event_type.duplicate || envelope.data.duplicate || envelope.explicitly_redacted {
+        return None;
+    }
+    let event_type = match exact_bounded_string(
+        envelope.event_type.value,
+        COPILOT_LINKAGE_MAX_EVENT_TYPE_BYTES,
+    ) {
+        ExactBoundedString::Exact(event_type) => event_type,
+        ExactBoundedString::Invalid | ExactBoundedString::Exceeded => return None,
+    };
+    let event_kind = match event_type.as_str() {
+        "tool.execution_start" => CopilotEventKind::Start,
+        "tool.execution_complete" => CopilotEventKind::Completion,
+        _ => return None,
+    };
+    let raw_data = envelope.data.value?;
+    let mut deserializer = serde_json::Deserializer::from_str(raw_data.get());
+    let data = CopilotRawData::deserialize(&mut deserializer).ok()?;
+    deserializer.end().ok()?;
+    (data.object && !data.explicitly_redacted).then_some((event_kind, data))
+}
+
+fn capture_copilot_arguments(data: &CopilotRawData<'_>) -> Option<McpJsonCapture> {
+    if data.arguments.duplicate {
+        return Some(McpJsonCapture::Unavailable);
+    }
+    let Some(raw) = data.arguments.value else {
+        return Some(McpJsonCapture::Absent);
+    };
+    Some(
+        parse_complete_json_object(raw)
+            .map(|value| McpJsonCapture::Present { value })
+            .unwrap_or(McpJsonCapture::Unavailable),
+    )
+}
+
+fn capture_copilot_terminal_payload(
+    data: &CopilotRawData<'_>,
+    success: bool,
+) -> Option<(McpTextCapture, McpJsonCapture)> {
+    if data.result.duplicate || data.error.duplicate || data.content.duplicate {
+        return Some((McpTextCapture::Unavailable, McpJsonCapture::Unavailable));
+    }
+    let present_fields = [data.result.value, data.error.value, data.content.value]
+        .into_iter()
+        .flatten()
+        .count();
+    if present_fields > 1 {
+        return Some((McpTextCapture::Unavailable, McpJsonCapture::Unavailable));
+    }
+
+    let expected = if success {
+        data.result.value.map(|raw| (raw, "content"))
+    } else {
+        data.error.value.map(|raw| (raw, "message"))
+    };
+    if let Some((raw, text_field)) = expected {
+        let Some(value) = parse_complete_json_object(raw) else {
+            return Some((McpTextCapture::Unavailable, McpJsonCapture::Unavailable));
+        };
+        let text = capture_text_from_response_object(&value, text_field);
+        return Some((text, McpJsonCapture::Present { value }));
+    }
+    if data.result.value.is_some() || data.error.value.is_some() {
+        return Some((McpTextCapture::Unavailable, McpJsonCapture::Unavailable));
+    }
+    if let Some(raw) = data.content.value {
+        let text = serde_json::from_str::<String>(raw.get())
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+            .map_or(McpTextCapture::Unavailable, |_| {
+                McpTextCapture::NormalizedBody
+            });
+        return Some((text, McpJsonCapture::Unavailable));
+    }
+    Some((McpTextCapture::Absent, McpJsonCapture::Absent))
+}
+
+fn capture_text_from_response_object(value: &Value, field: &str) -> McpTextCapture {
+    match value.get(field) {
+        Some(Value::String(text)) if !text.trim().is_empty() => McpTextCapture::NormalizedBody,
+        None | Some(Value::Null) | Some(Value::String(_)) => McpTextCapture::Absent,
+        Some(_) => McpTextCapture::Unavailable,
+    }
+}
+
+fn parse_complete_json_object(raw: &RawValue) -> Option<Value> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw.get());
+    let CompleteJsonValue(value) = CompleteJsonValue::deserialize(&mut deserializer).ok()?;
+    deserializer.end().ok()?;
+    value.is_object().then_some(value)
+}
+
+struct CompleteJsonValue(Value);
+
+impl<'de> Deserialize<'de> for CompleteJsonValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(CompleteJsonValueVisitor)
+    }
+}
+
+struct CompleteJsonValueVisitor;
+
+impl<'de> Visitor<'de> for CompleteJsonValueVisitor {
+    type Value = CompleteJsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(CompleteJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(CompleteJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(CompleteJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Number::from_f64(value)
+            .map(Value::Number)
+            .map(CompleteJsonValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(CompleteJsonValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+        Ok(CompleteJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(CompleteJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(CompleteJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<CompleteJsonValue>()? {
+            values.push(value.0);
+        }
+        Ok(CompleteJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(<A::Error as serde::de::Error>::custom(
+                    "duplicate JSON object key",
+                ));
+            }
+            values.insert(key, map.next_value::<CompleteJsonValue>()?.0);
+        }
+        Ok(CompleteJsonValue(Value::Object(values)))
+    }
+}
+
+fn observe_redaction_marker(explicitly_redacted: &mut bool, key: &str, raw: &RawValue) {
+    let marked = match key {
+        "redacted" | "is_redacted" | "isRedacted" => {
+            serde_json::from_str::<bool>(raw.get()).ok() != Some(false)
+        }
+        "status" | "state" => serde_json::from_str::<String>(raw.get())
+            .ok()
+            .is_some_and(|state| matches!(state.as_str(), "redacted" | "output-redacted")),
+        _ => false,
+    };
+    *explicitly_redacted |= marked;
 }
 
 pub(super) fn copilot_mcp_tool_call_attributions(
@@ -604,6 +883,16 @@ fn parse_copilot_linkage_line(bytes: &[u8], limits: CopilotLinkageLimits) -> Cop
         ExactBoundedString::Exceeded => return CopilotParsedLine::DisableSession,
     };
     let mut retained_bytes = tool_call_id.as_ref().map_or(0, String::len);
+    if envelope.explicitly_redacted || data.explicitly_redacted {
+        return CopilotParsedLine::Candidate(CopilotCandidate {
+            tool_call_id,
+            retained_bytes,
+            kind: match event_kind {
+                CopilotEventKind::Start => CopilotCandidateKind::Start(None),
+                CopilotEventKind::Completion => CopilotCandidateKind::Completion { exact: false },
+            },
+        });
+    }
 
     let kind = match event_kind {
         CopilotEventKind::Start => {
@@ -725,6 +1014,7 @@ impl<'a> CopilotRawField<'a> {
 struct CopilotRawEnvelope<'a> {
     event_type: CopilotRawField<'a>,
     data: CopilotRawField<'a>,
+    explicitly_redacted: bool,
 }
 
 impl<'de> Deserialize<'de> for CopilotRawEnvelope<'de> {
@@ -754,6 +1044,10 @@ impl<'de> Visitor<'de> for CopilotRawEnvelopeVisitor {
             match key.as_str() {
                 "type" => envelope.event_type.observe(map.next_value::<&RawValue>()?),
                 "data" => envelope.data.observe(map.next_value::<&RawValue>()?),
+                "redacted" | "is_redacted" | "isRedacted" | "status" | "state" => {
+                    let raw = map.next_value::<&RawValue>()?;
+                    observe_redaction_marker(&mut envelope.explicitly_redacted, &key, raw);
+                }
                 _ => {
                     map.next_value::<serde::de::IgnoredAny>()?;
                 }
@@ -810,6 +1104,11 @@ struct CopilotRawData<'a> {
     mcp_server_name: CopilotRawField<'a>,
     mcp_tool_name: CopilotRawField<'a>,
     success: CopilotRawField<'a>,
+    arguments: CopilotRawField<'a>,
+    result: CopilotRawField<'a>,
+    error: CopilotRawField<'a>,
+    content: CopilotRawField<'a>,
+    explicitly_redacted: bool,
 }
 
 impl<'de> Deserialize<'de> for CopilotRawData<'de> {
@@ -840,9 +1139,9 @@ impl<'de> Visitor<'de> for CopilotRawDataVisitor {
         };
         while let Some(key) = map.next_key::<String>()? {
             let value = match key.as_str() {
-                "toolCallId" | "mcpServerName" | "mcpToolName" | "success" => {
-                    map.next_value::<&RawValue>()?
-                }
+                "toolCallId" | "mcpServerName" | "mcpToolName" | "success" | "arguments"
+                | "result" | "error" | "content" | "redacted" | "is_redacted" | "isRedacted"
+                | "status" | "state" => map.next_value::<&RawValue>()?,
                 _ => {
                     map.next_value::<serde::de::IgnoredAny>()?;
                     continue;
@@ -853,6 +1152,13 @@ impl<'de> Visitor<'de> for CopilotRawDataVisitor {
                 "mcpServerName" => data.mcp_server_name.observe(value),
                 "mcpToolName" => data.mcp_tool_name.observe(value),
                 "success" => data.success.observe(value),
+                "arguments" => data.arguments.observe(value),
+                "result" => data.result.observe(value),
+                "error" => data.error.observe(value),
+                "content" => data.content.observe(value),
+                "redacted" | "is_redacted" | "isRedacted" | "status" | "state" => {
+                    observe_redaction_marker(&mut data.explicitly_redacted, &key, value);
+                }
                 _ => unreachable!("Copilot raw data key was filtered above"),
             }
         }

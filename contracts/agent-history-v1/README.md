@@ -80,6 +80,14 @@ Important reusable records:
 - `CoreContentMetadata`: whether a shown event has complete Core content, the
   selected/redacted/omitted policy status, and an optional policy reason. `text`
   is the only textual body; there is no alternate `preview` body.
+- `McpToolCall`: projection-independent MCP server/tool attribution.
+- `McpExchange`: optional content-governed invocation/response capture. Its
+  closed camelCase envelope retains JSON arguments and response payloads as JSON
+  without adding them to `text` or normalizing keys inside captured values.
+  Identity strings are nonempty and limited to 64 KiB of decoded UTF-8. Numeric
+  sizes and durations use the same exact cross-SDK integer range as status
+  counters. A `normalized_body` response text capture requires the event's
+  canonical `text` member to be a nonempty string.
 - `SessionSummary`: typed Core session identity, including `provider`,
   `providerSessionId`, and `sourceFormat`.
 - Search hits, shown events, and session summaries expose `providerSessionId`

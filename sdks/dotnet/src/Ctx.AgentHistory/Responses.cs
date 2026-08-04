@@ -654,6 +654,14 @@ public sealed record AgentHistoryEvent
         McpToolCall = json.TryGetPropertyValue("mcpToolCall", out var mcpToolCall)
             ? Ctx.AgentHistory.McpToolCall.FromJson(mcpToolCall)
             : null;
+        McpExchange = json.TryGetPropertyValue("mcpExchange", out var mcpExchange)
+            ? Ctx.AgentHistory.McpExchange.FromJson(mcpExchange)
+            : null;
+        if (McpExchange?.Response?.Text.CaptureStatus == McpTextCaptureStatus.NormalizedBody
+            && string.IsNullOrEmpty(Text))
+        {
+            throw McpExchangeWire.Invalid("normalized response body requires nonempty event text");
+        }
         Content = CoreContentMetadata.FromJson(json["content"] as JsonObject);
         Citations = JsonHelpers.GetObjectArray(json, "citations", Citation.FromJson);
     }
@@ -669,6 +677,7 @@ public sealed record AgentHistoryEvent
     public string? OccurredAt { get; }
     public string? Text { get; }
     public McpToolCall? McpToolCall { get; }
+    public McpExchange? McpExchange { get; }
     public CoreContentMetadata? Content { get; }
     public IReadOnlyList<Citation> Citations { get; }
 
