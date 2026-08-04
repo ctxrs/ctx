@@ -316,7 +316,7 @@ fn kiro_bounded_scratch_enospc_is_typed_and_preserves_provider() {
     }
     assert_eq!(
         super::super::registration::kiro_scan_error(error).kind,
-        crate::provider::source_backed::SourceBackedRouteErrorKind::Unavailable
+        crate::provider::source_backed::SourceBackedRouteErrorKind::ResourceUnavailable
     );
     assert_eq!(directory_file_bytes(&provider), before);
     assert_eq!(
