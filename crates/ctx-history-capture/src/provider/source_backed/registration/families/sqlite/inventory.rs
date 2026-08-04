@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use sha2::Digest;
 
 use crate::{
+    provider::providers::astrbot::native_path::source_backed::{
+        AstrBotSourceBackedErrorV0, AstrBotSourceBackedResultV0,
+    },
     provider::source_backed::family::document::ChangedDocumentSink,
     provider_sources::SqliteSourceReadSnapshot,
 };
@@ -134,11 +137,24 @@ impl SqliteInventoryProvider for AstrBotInventoryProvider {
             }
             Ok(())
         });
-        if let Some(error) = sink_failure {
-            return Err(error);
-        }
-        certificate.map_err(astrbot_inventory_route_error)
+        astrbot_scan_route_result(sink_failure, certificate)
     }
+}
+
+fn astrbot_scan_route_result(
+    sink_failure: Option<SourceBackedRouteError>,
+    certificate: AstrBotSourceBackedResultV0<CertifiedSource>,
+) -> SourceBackedRouteResult<CertifiedSource> {
+    if let Some(primary) = sink_failure {
+        if let Err(AstrBotSourceBackedErrorV0::SnapshotCleanup { cleanup, .. }) = certificate {
+            return Err(combine_primary_and_cleanup_route_errors(
+                primary,
+                sqlite_source_route_error(cleanup),
+            ));
+        }
+        return Err(primary);
+    }
+    certificate.map_err(astrbot_inventory_route_error)
 }
 
 fn astrbot_inventory_route_error(
@@ -403,11 +419,24 @@ impl SqliteInventoryProvider for LingmaInventoryProvider {
             }
             Ok(())
         });
-        if let Some(error) = sink_failure {
-            return Err(error);
-        }
-        certificate.map_err(lingma_inventory_route_error)
+        lingma_scan_route_result(sink_failure, certificate)
     }
+}
+
+fn lingma_scan_route_result(
+    sink_failure: Option<SourceBackedRouteError>,
+    certificate: LingmaSourceBackedResultV0<CertifiedSource>,
+) -> SourceBackedRouteResult<CertifiedSource> {
+    if let Some(primary) = sink_failure {
+        if let Err(LingmaSourceBackedErrorV0::SnapshotCleanup { cleanup, .. }) = certificate {
+            return Err(combine_primary_and_cleanup_route_errors(
+                primary,
+                sqlite_source_route_error(cleanup),
+            ));
+        }
+        return Err(primary);
+    }
+    certificate.map_err(lingma_inventory_route_error)
 }
 
 fn shelley_inventory_route_error(

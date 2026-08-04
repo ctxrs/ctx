@@ -18,7 +18,7 @@ use crate::{
     provider::source_backed::{
         family::document::DocumentLeafExecutionPolicy, source_backed_leaf_worker_budget,
     },
-    provider_sources::ProviderCatalogSupport,
+    provider_sources::{ProviderCatalogSupport, SqliteSourceAccessError},
 };
 
 use super::{
@@ -58,6 +58,48 @@ enum TestAfterSealAction {
     RemoveEmptyWal,
     CreateNonemptyWal,
     MutateSibling,
+}
+
+fn cleanup_failure_for_test() -> SqliteSourceAccessError {
+    SqliteSourceAccessError::CleanupUnavailable {
+        operation: "remove test snapshot",
+        source: Box::new(SqliteSourceAccessError::SourceChanged),
+    }
+}
+
+#[test]
+fn provider_sink_failure_does_not_mask_snapshot_cleanup_failure() {
+    let sink_failure =
+        || SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, "staging sink failed");
+    let astrbot = astrbot_scan_route_result(
+        Some(sink_failure()),
+        Err(AstrBotSourceBackedErrorV0::SnapshotCleanup {
+            primary: Box::new(AstrBotSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload("sink sentinel".to_owned()),
+            )),
+            cleanup: cleanup_failure_for_test(),
+        }),
+    )
+    .unwrap_err();
+    let lingma = lingma_scan_route_result(
+        Some(sink_failure()),
+        Err(LingmaSourceBackedErrorV0::SnapshotCleanup {
+            primary: Box::new(LingmaSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload("sink sentinel".to_owned()),
+            )),
+            cleanup: cleanup_failure_for_test(),
+        }),
+    )
+    .unwrap_err();
+
+    for error in [astrbot, lingma] {
+        assert_eq!(error.kind, SourceBackedRouteErrorKind::Internal);
+        assert!(error.detail.contains("staging sink failed"));
+        assert!(error
+            .detail
+            .contains("explicit SQLite snapshot cleanup also failed"));
+        assert!(error.detail.contains("ctx-owned SQLite cleanup failed"));
+    }
 }
 
 #[derive(Clone)]
