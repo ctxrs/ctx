@@ -713,11 +713,8 @@ fn resolve_nanoclaw(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Di
         return report;
     }
 
-    if let Some(cwd) = context
-        .cwd()
-        .filter(|cwd| nanoclaw_supported_project_store(cwd))
-    {
-        push_selected_source(&mut report, spec, cwd.to_path_buf(), "nanoclaw_project");
+    if let Some(cwd) = context.cwd().and_then(canonical_nanoclaw_project_store) {
+        push_selected_source(&mut report, spec, cwd, "nanoclaw_project");
     }
 
     for registration in nanoclaw_service_registrations(context) {
@@ -750,6 +747,12 @@ fn resolve_nanoclaw(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Di
 fn nanoclaw_supported_project_store(project: &Path) -> bool {
     ordinary_file(&project.join("data").join("v2.db"))
         && ordinary_directory(&project.join("data").join("v2-sessions"))
+}
+
+fn canonical_nanoclaw_project_store(project: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(project).ok()?;
+    (selected_path_is_safe(&canonical, true) && nanoclaw_supported_project_store(&canonical))
+        .then_some(canonical)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1472,7 +1475,7 @@ fn validate_nanoclaw_registered_project(
     if file_name != expected_launchd && file_name != expected_systemd {
         return Err(registration.to_path_buf());
     }
-    Ok(project)
+    canonical_nanoclaw_project_store(&project).ok_or_else(|| registration.to_path_buf())
 }
 
 fn nanoclaw_sha1_slug(input: &[u8]) -> String {

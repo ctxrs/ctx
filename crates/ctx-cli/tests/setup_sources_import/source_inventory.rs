@@ -345,11 +345,19 @@ fn nanoclaw_identity_snapshot(temp: &TempDir) -> (String, String, usize) {
 #[test]
 fn nanoclaw_automatic_then_explicit_import_preserves_one_source_session_and_result() {
     let temp = tempdir();
-    let query = "nanoclaw-exact-cwd-auto-refresh-oracle";
+    let query = "nanoclaw-lexical-registration-auto-refresh-oracle";
     let project = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
+    let registered_project = project
+        .parent()
+        .unwrap()
+        .join(".")
+        .join(project.file_name().unwrap());
+    write_nanoclaw_systemd_registration(&temp, &registered_project);
+    let unrelated_cwd = temp.path().join("unrelated-cwd");
+    fs::create_dir_all(&unrelated_cwd).unwrap();
 
     let mut sources_command = ctx(&temp);
-    sources_command.current_dir(&project);
+    sources_command.current_dir(&unrelated_cwd);
     let sources = json_output(sources_command.args(["sources", "--format=json"]));
     let nanoclaw = sources["sources"]
         .as_array()
@@ -362,9 +370,10 @@ fn nanoclaw_automatic_then_explicit_import_preserves_one_source_session_and_resu
     assert_eq!(nanoclaw["native_import"], true);
     assert_eq!(nanoclaw["importable"], true);
     assert!(nanoclaw["unsupported_reason"].is_null());
+    assert_eq!(nanoclaw["path"], project.to_str().unwrap());
 
     let mut setup_command = ctx(&temp);
-    setup_command.current_dir(&project);
+    setup_command.current_dir(&unrelated_cwd);
     let imported_generation =
         json_output(setup_command.args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(
@@ -425,6 +434,14 @@ fn nanoclaw_explicit_then_automatic_import_preserves_one_source_session_and_resu
     let temp = tempdir();
     let query = "nanoclaw-explicit-then-automatic-oracle";
     let project = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
+    let registered_project = project
+        .parent()
+        .unwrap()
+        .join(".")
+        .join(project.file_name().unwrap());
+    write_nanoclaw_systemd_registration(&temp, &registered_project);
+    let unrelated_cwd = temp.path().join("unrelated-cwd");
+    fs::create_dir_all(&unrelated_cwd).unwrap();
 
     ctx(&temp).args(["daemon", "enable"]).assert().success();
     let explicit = json_output(ctx(&temp).args([
@@ -446,7 +463,7 @@ fn nanoclaw_explicit_then_automatic_import_preserves_one_source_session_and_resu
     let explicit_identity = nanoclaw_identity_snapshot(&temp);
 
     let mut automatic_command = ctx(&temp);
-    automatic_command.current_dir(&project);
+    automatic_command.current_dir(&unrelated_cwd);
     let automatic = json_output(automatic_command.args([
         "import",
         "--all",

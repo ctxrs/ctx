@@ -144,10 +144,15 @@ fn nanoclaw_exact_cwd_coexists_with_distinct_registration_and_dedupes_itself() {
     let registered = temp.path().join("registered-nanoclaw");
     write_nanoclaw_project(&cwd);
     write_nanoclaw_project(&registered);
-    write_nanoclaw_systemd_unit(&home, &cwd);
+    let lexical_cwd = cwd
+        .parent()
+        .unwrap()
+        .join(".")
+        .join(cwd.file_name().unwrap());
+    write_nanoclaw_systemd_unit(&home, &lexical_cwd);
     write_nanoclaw_systemd_unit(&home, &registered);
 
-    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    let report = report(&context(&home, &lexical_cwd), CaptureProvider::NanoClaw);
     assert_eq!(report.issues, []);
     assert_eq!(
         report
