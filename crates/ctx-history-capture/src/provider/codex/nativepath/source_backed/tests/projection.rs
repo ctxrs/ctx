@@ -38,8 +38,12 @@ pub(super) fn initialize_repository(path: &Path) {
 }
 
 pub(super) fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
+    exec_call_at("2026-07-28T12:00:01Z", call_id, command, workdir)
+}
+
+fn exec_call_at(timestamp: &str, call_id: &str, command: &str, workdir: &Path) -> String {
     serde_json::json!({
-        "timestamp": "2026-07-28T12:00:01Z",
+        "timestamp": timestamp,
         "type": "response_item",
         "payload": {
             "type": "function_call",
@@ -56,8 +60,12 @@ pub(super) fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String 
 }
 
 pub(super) fn successful_result(call_id: &str, output: Value) -> String {
+    successful_result_at("2026-07-28T12:00:02Z", call_id, output)
+}
+
+fn successful_result_at(timestamp: &str, call_id: &str, output: Value) -> String {
     serde_json::json!({
-        "timestamp": "2026-07-28T12:00:02Z",
+        "timestamp": timestamp,
         "type": "response_item",
         "payload": {
             "type": "function_call_output",
@@ -337,6 +345,57 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
     };
     assert_eq!(outcome.produced_object_ids[0].hex, child_oid);
     assert_eq!(outcome.linkage.origin_call_id, "call-child-execution");
+}
+
+#[test]
+fn codex_post_fork_execution_survives_an_unavailable_older_ancestor() {
+    use ctx_history_core::RepositoryVcsObservationKind;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let missing_root = "019fa000-0000-7000-8000-000000000198";
+    let parent = "019fa000-0000-7000-8000-000000000199";
+    let child = "019fa000-0000-7000-8000-000000000200";
+    let call_id = "call-post-fork-child";
+    let oid = "cccccccccccccccccccccccccccccccccccccccc";
+    write_forked_session_at(&sessions, parent, missing_root, "2026-07-28T12:00:00Z", &[]);
+    write_forked_session_at(
+        &sessions,
+        child,
+        parent,
+        "2026-07-28T12:30:00Z",
+        &[
+            exec_call_at(
+                "2026-07-28T12:31:00Z",
+                call_id,
+                "git commit -m child && git rev-parse HEAD",
+                &repository,
+            ),
+            successful_result_at(
+                "2026-07-28T12:31:01Z",
+                call_id,
+                Value::String(format!("[main ccccccc] child\n{oid}\n")),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(child).unwrap();
+    let session = codex_session_identity(&source, child).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let result = outcome_for_sequence(&verified, session, 2);
+    let RepositoryVcsObservationKind::Outcome(outcome) =
+        &result.repository_vcs_observations[0].kind
+    else {
+        panic!("expected exact post-fork commit outcome");
+    };
+    assert_eq!(outcome.produced_object_ids[0].hex, oid);
+    assert_eq!(outcome.linkage.origin_call_id, call_id);
+    assert!(result.repository_abstentions.is_empty());
 }
 
 #[test]

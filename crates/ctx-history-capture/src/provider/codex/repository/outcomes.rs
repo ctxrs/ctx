@@ -18,6 +18,7 @@ const MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexRepositoryResultEvidence {
+    pub(crate) origin_occurred_at_unix_ms: Option<i64>,
     pub(crate) command: Option<String>,
     pub(crate) command_too_large: bool,
     pub(crate) declared_workdir: Option<String>,
@@ -43,6 +44,7 @@ pub(crate) fn repository_result_evidence(
         return context
             .command_too_large
             .then(|| CodexRepositoryResultEvidence {
+                origin_occurred_at_unix_ms: context.origin_occurred_at_unix_ms,
                 command: None,
                 command_too_large: true,
                 declared_workdir: context.declared_workdir.clone(),
@@ -143,6 +145,7 @@ pub(crate) fn repository_result_evidence(
     let captured_outcomes = linked.outcomes.len();
     let captured_associations = linked.pull_request_associations.len();
     Some(CodexRepositoryResultEvidence {
+        origin_occurred_at_unix_ms: context.origin_occurred_at_unix_ms,
         command: Some(command.to_owned()),
         command_too_large: false,
         declared_workdir: context.declared_workdir.clone(),

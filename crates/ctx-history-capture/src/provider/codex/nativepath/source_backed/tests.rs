@@ -59,16 +59,32 @@ fn write_forked_session(
     parent_native_session_id: &str,
     events: &[String],
 ) {
+    write_forked_session_at(
+        sessions,
+        native_session_id,
+        parent_native_session_id,
+        "2026-07-28T12:30:00Z",
+        events,
+    );
+}
+
+fn write_forked_session_at(
+    sessions: &Path,
+    native_session_id: &str,
+    parent_native_session_id: &str,
+    started_at: &str,
+    events: &[String],
+) {
     let mut contents = format!(
         "{}\n",
         serde_json::json!({
-            "timestamp": "2026-07-28T12:30:00Z",
+            "timestamp": started_at,
             "type": "session_meta",
             "payload": {
                 "id": native_session_id,
                 "session_id": native_session_id,
                 "forked_from_id": parent_native_session_id,
-                "timestamp": "2026-07-28T12:30:00Z",
+                "timestamp": started_at,
                 "cwd": "/tmp/source-backed",
                 "originator": "codex_cli_rs",
                 "cli_version": "0.1.0",

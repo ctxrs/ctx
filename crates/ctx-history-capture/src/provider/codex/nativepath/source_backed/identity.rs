@@ -267,6 +267,9 @@ pub(super) fn codex_core_record(
     let result_command_too_large = repository_result
         .as_ref()
         .is_some_and(|evidence| evidence.command_too_large);
+    let result_origin_occurred_at_unix_ms = repository_result
+        .as_ref()
+        .and_then(|evidence| evidence.origin_occurred_at_unix_ms);
     if let Some(evidence) = repository_result {
         native_tool_activities.push(evidence.structured_content.clone());
         provider_native_repository_aliases = evidence.provider_native_repository_aliases;
@@ -292,6 +295,9 @@ pub(super) fn codex_core_record(
             native_session_id,
             &linkage.origin_call_id,
             &linkage.result_call_id,
+            result_origin_occurred_at_unix_ms,
+            occurred_at.timestamp_millis(),
+            owner.started_at.timestamp_millis(),
         )? {
             CodexOutcomeOriginV0::UniqueToSession => retained_outcomes.push(outcome),
             CodexOutcomeOriginV0::CopiedFromAncestor => {
@@ -309,6 +315,9 @@ pub(super) fn codex_core_record(
             native_session_id,
             &association.linkage.origin_call_id,
             &association.linkage.result_call_id,
+            result_origin_occurred_at_unix_ms,
+            occurred_at.timestamp_millis(),
+            owner.started_at.timestamp_millis(),
         )? {
             CodexOutcomeOriginV0::UniqueToSession => retained_associations.push(association),
             CodexOutcomeOriginV0::CopiedFromAncestor => copied_origin = true,

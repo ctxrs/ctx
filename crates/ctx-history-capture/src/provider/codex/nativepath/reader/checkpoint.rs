@@ -253,6 +253,7 @@ pub(super) fn decode_pending_tool_authority(
         if context.exact_command.is_some() || context.command_too_large {
             context.origin_call_id = Some(call_id.clone());
             context.origin_event_sequence = Some(authority.raw_ordinal);
+            context.origin_occurred_at_unix_ms = Some(retained.occurred_at.timestamp_millis());
         }
     }
     context.continuation_call_id_sha256 = authority.continuation_call_id_sha256().to_vec();
@@ -535,6 +536,7 @@ pub(super) fn validate_checkpoint_source(
             context.declared_workdir = origin.declared_workdir;
             context.origin_call_id = Some(origin_call_id.clone());
             context.origin_event_sequence = origin.origin_event_sequence;
+            context.origin_occurred_at_unix_ms = origin.origin_occurred_at_unix_ms;
             context.continuation_call_id_sha256 = origin.continuation_call_id_sha256;
             context.continuation_capacity_exceeded = origin.continuation_capacity_exceeded;
             context.correlation_ambiguous = origin.correlation_ambiguous;

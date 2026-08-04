@@ -330,6 +330,7 @@ pub(super) fn build_source_backed_event_row(
         if evidence.command.is_some() || evidence.command_too_large {
             context.origin_call_id = Some(call_id.clone());
             context.origin_event_sequence = Some(raw_ordinal);
+            context.origin_occurred_at_unix_ms = Some(retained.occurred_at.timestamp_millis());
         }
     }
     Ok(Ok(CodexSourceBackedBuiltRowV0 {
