@@ -106,26 +106,7 @@ fn automatic_registry_issue_failure_class(
 fn automatic_registry_issue_route_identity(
     source: &ctx_history_capture::ProviderSource,
 ) -> Result<SourceRouteIdentity> {
-    let metadata = automatic_registry_issue_metadata(source)?;
-    let mut digest = Sha256::new();
-    digest.update(b"ctx.source-route-identity-v1\0");
-    digest.update(source.provider.as_str().as_bytes());
-    digest.update([0]);
-    digest.update(metadata.certified_source_format.as_bytes());
-    digest.update([0]);
-    digest.update(b"automatic");
-    digest.update([0]);
-    digest.update(match metadata.selector_authority {
-        SourceBackedSelectorAuthority::DiscoveredWinner => b"discovered-winner".as_slice(),
-        SourceBackedSelectorAuthority::ExplicitPath => b"explicit-path".as_slice(),
-        SourceBackedSelectorAuthority::CatalogLineage => b"catalog-lineage".as_slice(),
-        SourceBackedSelectorAuthority::ExactCwd => b"exact-cwd".as_slice(),
-        SourceBackedSelectorAuthority::NamedSurface => b"named-surface".as_slice(),
-        SourceBackedSelectorAuthority::SelectedWithRetainedExplicit => {
-            b"selected-with-retained-explicit".as_slice()
-        }
-    });
-    SourceRouteIdentity::from_sha256(format!("{:x}", digest.finalize())).map_err(Into::into)
+    automatic_source_backed_route_identity(source).map_err(Into::into)
 }
 
 fn automatic_registry_issue_metadata(

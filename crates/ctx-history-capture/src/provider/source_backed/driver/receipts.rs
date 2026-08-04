@@ -646,12 +646,7 @@ impl SourceBackedRoute {
             SourceBackedRouteSelection::Automatic,
             selector_authority,
         )?;
-        let route_identity = source_backed_route_identity(
-            &source,
-            known.certified_source_format,
-            SourceBackedRouteSelection::Automatic,
-            selector_authority,
-        )?;
+        let route_identity = automatic_source_backed_route_identity(&source)?;
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
                 source,
@@ -709,12 +704,7 @@ impl SourceBackedRoute {
             SourceBackedRouteSelection::Automatic,
             selector_authority,
         )?;
-        let route_identity = source_backed_route_identity(
-            &source,
-            known.certified_source_format,
-            SourceBackedRouteSelection::Automatic,
-            selector_authority,
-        )?;
+        let route_identity = automatic_source_backed_route_identity(&source)?;
         let path = source.path.clone();
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
@@ -844,6 +834,32 @@ impl SourceBackedProviderRegistry {
             .filter(|route| route.certified_missing_paths.is_empty())
             .count()
     }
+}
+
+/// Derives the canonical identity for a source's landed automatic route.
+///
+/// This intentionally accepts sources that failed registration so callers can
+/// match route-local failures to a retained healthy route from the same source.
+pub fn automatic_source_backed_route_identity(
+    source: &ProviderSource,
+) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
+    let known = landed_format_route(source.provider, source.source_format)
+        .filter(|route| route.automatic)
+        .ok_or_else(|| {
+            invalid_route(
+                source.provider,
+                format!(
+                    "source format {:?} has no landed automatic route",
+                    source.source_format
+                ),
+            )
+        })?;
+    source_backed_route_identity(
+        source,
+        known.certified_source_format,
+        SourceBackedRouteSelection::Automatic,
+        known.selector_authority,
+    )
 }
 
 fn source_backed_route_identity(
