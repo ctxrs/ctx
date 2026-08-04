@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "1994a5d75f6bdcaa9ee24a76706e0260b3684557a8115473a45d1cef44e33684",
+            "fingerprint": "c5ad8c7bce69d5fd3f12d3b57e8e49403233db4a74f91882ed649a2bb117b19a",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -333,9 +333,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         value["golden_vectors"]["core_record_digests"],
         serde_json::json!({
             "core_record_sha256":
-                "db9e1f395689248f3a9902e8b4be4a26accae76d0f85dd076b50b4bce3b81910",
+                "a6f06c453e0bb34645bbe6e98119ab3e6c8a4ad2a4b0550ec07afd4c2ecebea7",
             "core_record_leaf_sha256":
-                "da8cecbf5cfc5bfac5a40e4374131ae18ae4d38dafd8f545fc70d2f8a4a5ed36"
+                "8d99b837102da363d7f13e1b61820d533811c7efbe7a7c6458048f6219bf4a51"
         })
     );
 
