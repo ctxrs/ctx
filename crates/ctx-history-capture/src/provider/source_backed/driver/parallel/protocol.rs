@@ -2,7 +2,7 @@ use std::{
     error::Error as StdError,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::SyncSender,
+        mpsc::{self, Receiver, SyncSender},
     },
     thread,
     time::Duration,
@@ -243,6 +243,10 @@ pub enum ParallelLeafScanProtocolError {
     TransportDisconnected { unfinished_jobs: usize },
     #[error("parallel leaf transport referenced unknown job {job_index}")]
     UnknownJob { job_index: usize },
+    #[error(
+        "parallel leaf job {job_index} disconnected before accepting its Begin acknowledgement"
+    )]
+    BeginAcknowledgementDisconnected { job_index: usize },
     #[error("parallel leaf API received a logical-source failure without requesting outcomes")]
     UnexpectedSourceFailure,
     #[error(
@@ -254,6 +258,22 @@ pub enum ParallelLeafScanProtocolError {
         expected_worker: usize,
         observed_worker: usize,
     },
+}
+
+#[derive(Debug)]
+pub(super) struct ParallelLeafBeginAcknowledgement(SyncSender<()>);
+
+impl ParallelLeafBeginAcknowledgement {
+    fn rendezvous() -> (Self, Receiver<()>) {
+        let (sender, receiver) = mpsc::sync_channel(0);
+        (Self(sender), receiver)
+    }
+
+    pub(super) fn acknowledge(self, job_index: usize) -> Result<(), ParallelLeafScanProtocolError> {
+        self.0.send(()).map_err(|_| {
+            ParallelLeafScanProtocolError::BeginAcknowledgementDisconnected { job_index }
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -366,7 +386,10 @@ where
 
 #[derive(Debug)]
 pub(super) enum ParallelLeafProtocolMessage<R> {
-    Begin(Box<ParallelLeafScanBegin>),
+    Begin {
+        begin: Box<ParallelLeafScanBegin>,
+        acknowledgement: ParallelLeafBeginAcknowledgement,
+    },
     CoreRecord(Box<CoreRecordEmission>),
     CoreRecordBatch(Box<CoreRecordEmissionBatch>),
     Complete(Box<ParallelLeafScanComplete<R>>),
@@ -417,7 +440,13 @@ pub enum ParallelLeafScanEmitError {
 
 impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
     pub fn begin(&mut self, begin: ParallelLeafScanBegin) -> Result<(), ParallelLeafScanCancelled> {
-        self.send(ParallelLeafProtocolMessage::Begin(Box::new(begin)))
+        let (acknowledgement, applied) = ParallelLeafBeginAcknowledgement::rendezvous();
+        self.send(ParallelLeafProtocolMessage::Begin {
+            begin: Box::new(begin),
+            acknowledgement,
+        })?;
+        applied.recv().map_err(|_| ParallelLeafScanCancelled)?;
+        self.require_not_cancelled()
     }
 
     pub fn emit_core_record(

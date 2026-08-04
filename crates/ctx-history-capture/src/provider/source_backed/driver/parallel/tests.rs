@@ -852,6 +852,54 @@ fn protocol_rejects_wrong_append_base() {
 }
 
 #[test]
+fn begin_rendezvous_blocks_worker_until_coordinator_acknowledgement() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let harness = SinkHarness::open(&temp.path().join("index"));
+    let source = test_source(36);
+    let cancellation = AtomicBool::new(false);
+    let resources = SourceBackedRouteResources::production(1);
+    let preparer = harness.writer.core_record_preparer();
+    let (sender, receiver) = mpsc::sync_channel(0);
+    let (returned_sender, returned_receiver) = mpsc::sync_channel(0);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut emitter = ParallelLeafScanEmitter::<(), TestWorkerFailure> {
+                worker_index: 0,
+                job_index: 0,
+                sender: &sender,
+                cancellation: &cancellation,
+                resources,
+                core_record_preparer: preparer,
+            };
+            emitter
+                .begin(ParallelLeafScanBegin::replace(source.clone()))
+                .unwrap();
+            returned_sender.send(()).unwrap();
+        });
+
+        let event = receiver.recv().unwrap();
+        assert!(matches!(
+            returned_receiver.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let ParallelLeafWorkerEvent::Protocol { message, .. } = event else {
+            panic!("worker must emit a Begin protocol message");
+        };
+        let ParallelLeafProtocolMessage::Begin {
+            acknowledgement, ..
+        } = *message
+        else {
+            panic!("worker must emit Begin before returning");
+        };
+        acknowledgement.acknowledge(0).unwrap();
+        returned_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+    });
+}
+
+#[test]
 fn protocol_rejects_duplicate_begin() {
     let error = run_single(test_source(4), |job, emitter| {
         for _ in 0..2 {

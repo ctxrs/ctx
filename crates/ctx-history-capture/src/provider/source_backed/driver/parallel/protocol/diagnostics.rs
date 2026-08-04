@@ -92,7 +92,14 @@ where
 {
     let state = state_mut(states, job_index)?;
     match message {
-        ParallelLeafProtocolMessage::Begin(begin) => apply_begin(sink, job_index, state, *begin),
+        ParallelLeafProtocolMessage::Begin {
+            begin,
+            acknowledgement,
+        } => {
+            apply_begin(sink, job_index, state, *begin)?;
+            acknowledgement.acknowledge(job_index)?;
+            Ok(())
+        }
         ParallelLeafProtocolMessage::CoreRecord(record) => {
             apply_core_record(sink, job_index, state, *record)
         }
