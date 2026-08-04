@@ -212,40 +212,66 @@ fn codex_jsonl_cold_route_publishes_beyond_old_aggregate_lineage_fact_limit() {
 #[test]
 fn codex_jsonl_configured_lineage_exhaustion_publishes_conservatively_without_retry() {
     const MARKER: &str = "lineagecapacityconservativepublicationmarker";
+    const COPIED_OID: &str = "cccccccccccccccccccccccccccccccccccccccc";
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
+    let repository = temp.path().join("repo");
     let index = temp.path().join("index");
     fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&repository).unwrap();
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "ctx test"],
+        vec!["config", "user.email", "ctx@example.invalid"],
+    ] {
+        assert!(Command::new("git")
+            .args(arguments)
+            .current_dir(&repository)
+            .status()
+            .unwrap()
+            .success());
+    }
     let parent_id = "019facf0-5555-7000-8001-000000000001";
     let child_id = "019facf0-5555-7000-8001-000000000002";
     let parent = sessions.join(format!("rollout-{parent_id}.jsonl"));
     let child = sessions.join(format!("rollout-{child_id}.jsonl"));
-    let non_display = (0..3)
-        .map(|index| {
-            serde_json::json!({
-                "timestamp": "2026-08-04T12:00:01Z",
-                "type": "response_item",
-                "payload": {
-                    "type": "tool_search_output",
-                    "call_id": format!("configured-capacity-{index}")
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    write_codex_lineage_session(&parent, parent_id, None, &non_display);
+    let mut copied_call = codex_exec_call(
+        "call-configured-capacity-copied",
+        "git commit -m copied && git rev-parse --verify HEAD",
+        &repository,
+    );
+    let mut copied_result = codex_successful_result(
+        "call-configured-capacity-copied",
+        &format!("[main ccccccc] copied\n{COPIED_OID}\n"),
+    );
+    // Keep this pair before the child's fork boundary so classification must
+    // consult the parent fact set instead of taking PR #290's post-fork fast
+    // path. The one-fact test cap makes that parent set conservative.
+    copied_call["timestamp"] = serde_json::Value::String("2026-08-04T11:59:58Z".to_owned());
+    copied_result["timestamp"] = serde_json::Value::String("2026-08-04T11:59:59Z".to_owned());
+    write_codex_lineage_session(
+        &parent,
+        parent_id,
+        None,
+        &[copied_call.clone(), copied_result.clone()],
+    );
     write_codex_lineage_session(
         &child,
         child_id,
         Some(parent_id),
-        &[serde_json::json!({
-            "timestamp": "2026-08-04T12:00:02Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": MARKER}]
-            }
-        })],
+        &[
+            copied_call,
+            copied_result,
+            serde_json::json!({
+                "timestamp": "2026-08-04T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": MARKER}]
+                }
+            }),
+        ],
     );
 
     let adapter =
@@ -286,15 +312,32 @@ fn codex_jsonl_configured_lineage_exhaustion_publishes_conservatively_without_re
     assert_eq!(refreshed.successful_route_ids.len(), 1);
     assert!(refreshed.failed_routes.is_empty());
     assert_eq!(refreshed.certified_source_count, 2);
-    assert_eq!(refreshed.commit.indexed_documents, 1);
+    let verified = VerifiedIndex::open(&index).unwrap();
     assert_eq!(
-        VerifiedIndex::open(&index)
-            .unwrap()
-            .search_event_candidates(MARKER, 8)
-            .unwrap()
-            .len(),
-        1
+        verified.search_event_candidates(MARKER, 8).unwrap().len(),
+        1,
+        "configured lineage exhaustion must not discard unrelated cold output"
     );
+    let copied_child = verified
+        .search_event_candidates(COPIED_OID, 8)
+        .unwrap()
+        .into_iter()
+        .filter_map(|candidate| {
+            verified
+                .core_record_by_id(candidate.event.event_id.as_uuid())
+                .unwrap()
+        })
+        .find(|record| record.provider_session_id.as_deref() == Some(child_id))
+        .expect("configured-capacity child result must publish");
+    assert!(copied_child.repository_vcs_observations.is_empty());
+    assert!(copied_child
+        .repository_abstentions
+        .iter()
+        .any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref()
+                    == Some("provider_execution_origin_lineage_unproven")
+        }));
 }
 
 #[test]
@@ -427,7 +470,7 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
     assert!(child_path < parent_path);
     let copied_oid = "518dedb053f04ab0b529c7d2e8dafb322974fbf6";
     let cold_child_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let warm_child_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let warm_copied_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let mut copied_call = codex_exec_call(
         "call-copied-parent",
         "git commit -m copied && git rev-parse --verify HEAD",
@@ -437,16 +480,32 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
         "call-copied-parent",
         &format!("[main 518dedb] copied\n{copied_oid}\n"),
     );
+    let mut warm_copied_call = codex_exec_call(
+        "call-warm-copied-parent",
+        "git commit -m warm-copied && git rev-parse --verify HEAD",
+        &repository,
+    );
+    let mut warm_copied_result = codex_successful_result(
+        "call-warm-copied-parent",
+        &format!("[main bbbbbbb] warm copied\n{warm_copied_oid}\n"),
+    );
     // PR #290 treats exact call/result pairs recorded strictly after a child
     // session starts as child-owned. This pair models genuinely copied parent
     // history, so keep its event times before the child's fork boundary.
     copied_call["timestamp"] = serde_json::Value::String("2026-08-04T11:59:58Z".to_owned());
     copied_result["timestamp"] = serde_json::Value::String("2026-08-04T11:59:59Z".to_owned());
+    warm_copied_call["timestamp"] = serde_json::Value::String("2026-08-04T11:59:56Z".to_owned());
+    warm_copied_result["timestamp"] = serde_json::Value::String("2026-08-04T11:59:57Z".to_owned());
     write_codex_lineage_session(
         &parent_path,
         parent_id,
         None,
-        &[copied_call.clone(), copied_result.clone()],
+        &[
+            copied_call.clone(),
+            copied_result.clone(),
+            warm_copied_call.clone(),
+            warm_copied_result.clone(),
+        ],
     );
     let cold_child_call = codex_exec_call(
         "call-cold-child",
@@ -536,21 +595,12 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
     ));
     drop(cold_index);
 
-    let warm_call = codex_exec_call(
-        "call-warm-child",
-        "git commit -m warm-child && git rev-parse --verify HEAD",
-        &repository,
-    );
-    let warm_result = codex_successful_result(
-        "call-warm-child",
-        &format!("[main bbbbbbb] warm child\n{warm_child_oid}\n"),
-    );
     let mut child = fs::OpenOptions::new()
         .append(true)
         .open(&child_path)
         .unwrap();
-    writeln!(child, "{warm_call}").unwrap();
-    writeln!(child, "{warm_result}").unwrap();
+    writeln!(child, "{warm_copied_call}").unwrap();
+    writeln!(child, "{warm_copied_result}").unwrap();
     child.sync_all().unwrap();
 
     let warm_counters = Arc::new(Mutex::new(None));
@@ -564,21 +614,26 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
     assert_eq!(warm_counters.appended_sources, 1);
 
     let warm_index = VerifiedIndex::open(&index).unwrap();
-    let warm_unique = warm_index
-        .search_event_candidates(warm_child_oid, 8)
-        .unwrap();
-    assert_eq!(warm_unique.len(), 1);
-    let warm_unique = warm_index
-        .core_record_by_id(warm_unique[0].event.event_id.as_uuid())
+    let warm_copied_child = warm_index
+        .search_event_candidates(warm_copied_oid, 8)
         .unwrap()
-        .unwrap();
-    let RepositoryVcsObservationKind::Outcome(outcome) =
-        &warm_unique.repository_vcs_observations[0].kind
-    else {
-        panic!("expected warm child outcome");
-    };
-    assert_eq!(outcome.produced_object_ids[0].hex, warm_child_oid);
-    assert_eq!(outcome.linkage.origin_call_id, "call-warm-child");
+        .into_iter()
+        .filter_map(|candidate| {
+            warm_index
+                .core_record_by_id(candidate.event.event_id.as_uuid())
+                .unwrap()
+        })
+        .find(|record| record.provider_session_id.as_deref() == Some(child_id))
+        .expect("warm copied child result must publish");
+    assert!(warm_copied_child.repository_vcs_observations.is_empty());
+    assert!(warm_copied_child
+        .repository_abstentions
+        .iter()
+        .any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref()
+                    == Some("copied_provider_history_has_ancestor_execution")
+        }));
 }
 
 fn assert_cold_route_failure(

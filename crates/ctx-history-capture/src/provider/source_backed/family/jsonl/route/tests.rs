@@ -479,6 +479,7 @@ enum SchedulerStateEvent {
 struct SchedulerStateTestAdapter {
     repository: PathBuf,
     attributed_partitions: Vec<u64>,
+    worker_affinities: HashMap<u64, u64>,
     failing_leaf: Option<SchedulerLeafState>,
     events: Arc<Mutex<Vec<SchedulerStateEvent>>>,
 }
@@ -617,6 +618,16 @@ impl JsonlFamilyAdapter for SchedulerStateTestAdapter {
 
     fn leaf_scan_partition(&self, leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
         Ok(Some(scheduler_leaf_state(leaf)?.partition))
+    }
+
+    fn leaf_worker_affinity(&self, leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
+        let partition = scheduler_leaf_state(leaf)?.partition;
+        Ok(Some(
+            self.worker_affinities
+                .get(&partition)
+                .copied()
+                .unwrap_or(partition),
+        ))
     }
 
     fn begin_leaf_scan_partition(&self, partition: u64) -> Result<()> {
@@ -1716,6 +1727,7 @@ fn partitioned_component_balances_hooks_and_preserves_parent_first_context_state
     let adapter = SchedulerStateTestAdapter {
         repository: scheduler_test_repository(temp.path()),
         attributed_partitions: vec![7],
+        worker_affinities: HashMap::new(),
         failing_leaf: None,
         events: Arc::clone(&events),
     };
@@ -1814,6 +1826,7 @@ fn partition_scan_failure_finishes_every_begun_component() {
     let adapter = SchedulerStateTestAdapter {
         repository: scheduler_test_repository(temp.path()),
         attributed_partitions: Vec::new(),
+        worker_affinities: HashMap::new(),
         failing_leaf: Some(SchedulerLeafState {
             partition: 3,
             phase: 0,
@@ -1852,6 +1865,67 @@ fn partition_scan_failure_finishes_every_begun_component() {
 }
 
 #[test]
+fn partition_lifecycle_ids_are_separate_from_colliding_worker_affinity_lanes() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    write_scheduler_test_leaf(&root, 2, 0, 0);
+    write_scheduler_test_leaf(&root, 3, 0, 0);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let adapter = SchedulerStateTestAdapter {
+        repository: scheduler_test_repository(temp.path()),
+        attributed_partitions: vec![2, 3],
+        worker_affinities: HashMap::from([(2, 5), (3, 21)]),
+        failing_leaf: None,
+        events: Arc::clone(&events),
+    };
+
+    run_scheduler_test_capture(&adapter, &root, &temp.path().join("index"), 2).unwrap();
+    let events = events.lock().unwrap().clone();
+    let hooks = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hooks,
+        [
+            SchedulerStateEvent::Begin(2),
+            SchedulerStateEvent::Begin(3),
+            SchedulerStateEvent::Finish(3),
+            SchedulerStateEvent::Finish(2),
+        ],
+        "dense lifecycle IDs must continue to drive deterministic component hooks"
+    );
+
+    let mut projects = events
+        .iter()
+        .filter_map(|event| match event {
+            SchedulerStateEvent::Project {
+                leaf,
+                full_probes_before,
+                full_probes_after,
+                ..
+            } => Some((*leaf, *full_probes_before, *full_probes_after)),
+            SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_) => None,
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by_key(|project| project.0);
+    assert_eq!(projects.len(), 2);
+    assert_eq!((projects[0].1, projects[0].2), (0, 1));
+    assert_eq!(
+        (projects[1].1, projects[1].2),
+        (1, 1),
+        "affinities 5 and 21 must share logical lane 5 for both worker placement and cache state"
+    );
+}
+
+#[test]
 fn partition_cache_lanes_are_fixed_at_sixteen_and_clear_source_semantic_state() {
     for workers in [1, 4, 16] {
         let temp = crate::test_support_paths::tempdir().unwrap();
@@ -1864,6 +1938,7 @@ fn partition_cache_lanes_are_fixed_at_sixteen_and_clear_source_semantic_state() 
         let adapter = SchedulerStateTestAdapter {
             repository: scheduler_test_repository(temp.path()),
             attributed_partitions: (0..32).collect(),
+            worker_affinities: HashMap::new(),
             failing_leaf: None,
             events: Arc::clone(&events),
         };
@@ -1967,6 +2042,7 @@ fn unpartitioned_defaults_keep_persistent_phase_worker_contexts() {
     let adapter = UnpartitionedSchedulerStateTestAdapter(SchedulerStateTestAdapter {
         repository: scheduler_test_repository(temp.path()),
         attributed_partitions: vec![0],
+        worker_affinities: HashMap::new(),
         failing_leaf: None,
         events: Arc::clone(&events),
     });

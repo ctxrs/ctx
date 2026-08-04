@@ -365,7 +365,12 @@ impl CodexOutcomeLineageAuthorityV0 {
     }
 
     pub(super) fn component_affinity(&self, native_session_id: &str) -> u64 {
-        self.component_partition(native_session_id)
+        self.indices
+            .get(native_session_id)
+            .and_then(|index| self.nodes.get(*index))
+            .and_then(|node| node.component_digest.get(..8))
+            .and_then(|prefix| <[u8; 8]>::try_from(prefix).ok())
+            .map(u64::from_le_bytes)
             .unwrap_or(u64::MAX)
     }
 
@@ -402,11 +407,15 @@ impl CodexOutcomeLineageAuthorityV0 {
         ) {
             return Ok(CodexOutcomeOriginV0::UniqueToSession);
         }
+        let mut parent = match &current.parent {
+            ParentLinkV0::Root => return Ok(CodexOutcomeOriginV0::UniqueToSession),
+            ParentLinkV0::Missing(_) => return Ok(CodexOutcomeOriginV0::Unproven),
+            ParentLinkV0::Source(index) => ParentLinkV0::Source(*index),
+        };
         let facts = self
             .facts
             .lock()
             .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-        let mut parent = current.parent.clone();
         let mut remaining = self.nodes.len().saturating_add(1);
         while remaining != 0 {
             remaining = remaining.saturating_sub(1);
@@ -705,10 +714,33 @@ mod tests {
     }
 
     #[test]
-    fn poisoned_fact_lock_is_typed_internal_failure() {
-        let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
+    fn terminal_parent_classification_bypasses_poisoned_fact_lock() {
+        let sources = vec![
+            source("root", None, 1),
+            source("child", Some("root"), 2),
+            source("missing-parent", Some("outside-route"), 3),
+        ];
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         authority.poison_facts_lock();
+        assert_eq!(
+            authority
+                .classify("root", "call", "call", None, 0, 0)
+                .unwrap(),
+            CodexOutcomeOriginV0::UniqueToSession
+        );
+        assert_eq!(
+            authority
+                .classify("missing-parent", "call", "call", None, 0, 0)
+                .unwrap(),
+            CodexOutcomeOriginV0::Unproven
+        );
+        assert_eq!(
+            authority
+                .classify("child", "call", "call", Some(101), 102, 100)
+                .unwrap(),
+            CodexOutcomeOriginV0::UniqueToSession,
+            "PR #290 exact post-fork pairs must still bypass ancestor facts"
+        );
         assert!(matches!(
             authority.classify("child", "call", "call", None, 0, 0),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
@@ -884,6 +916,52 @@ mod tests {
             authority.classify("child-a", "copied", "copied", None, 0, 0),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
         ));
+    }
+
+    #[test]
+    fn component_affinity_is_stable_digest_derived_and_has_fixed_lane_collisions() {
+        const COMPONENTS: usize = 17;
+        const LANES: u64 = 16;
+
+        let sources = (0..COMPONENTS)
+            .map(|index| source(&format!("affinity-root-{index:02}"), None, index as u8))
+            .collect::<Vec<_>>();
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        let mut reversed_sources = sources.clone();
+        reversed_sources.reverse();
+        let reversed = CodexOutcomeLineageAuthorityV0::from_sources(&reversed_sources).unwrap();
+        let mut occupied_lanes = HashMap::<u64, (u64, u64)>::new();
+        let mut collision = None;
+
+        for index in 0..COMPONENTS {
+            let native_session_id = format!("affinity-root-{index:02}");
+            let node = &authority.nodes[authority.indices[&native_session_id]];
+            let expected_affinity =
+                u64::from_le_bytes(node.component_digest[..8].try_into().unwrap());
+            let affinity = authority.component_affinity(&native_session_id);
+            let partition = authority.component_partition(&native_session_id).unwrap();
+            assert_eq!(affinity, expected_affinity);
+            assert_eq!(affinity, reversed.component_affinity(&native_session_id));
+            assert_eq!(
+                partition,
+                reversed.component_partition(&native_session_id).unwrap()
+            );
+
+            let lane = affinity % LANES;
+            if let Some((other_partition, other_affinity)) =
+                occupied_lanes.insert(lane, (partition, affinity))
+            {
+                collision = Some((lane, other_partition, partition, other_affinity, affinity));
+                break;
+            }
+        }
+
+        let (lane, left_partition, right_partition, left_affinity, right_affinity) =
+            collision.expect("17 independent component digests must occupy a shared 16-lane slot");
+        assert_ne!(left_partition, right_partition);
+        assert_ne!(left_affinity, right_affinity);
+        assert_eq!(left_affinity % LANES, lane);
+        assert_eq!(right_affinity % LANES, lane);
     }
 
     #[test]

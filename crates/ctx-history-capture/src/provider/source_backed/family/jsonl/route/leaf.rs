@@ -493,12 +493,25 @@ pub(super) fn scan_leaves(
         .collect::<Vec<_>>();
 
     if saw_partition {
-        let mut partitions = BTreeMap::<u64, Vec<JsonlFamilyLeaf>>::new();
+        let mut partitions = BTreeMap::<u64, (u64, Vec<JsonlFamilyLeaf>)>::new();
         for (leaf, (_, partition)) in leaves.iter().cloned().zip(leaf_metadata.iter()) {
             let partition = partition.ok_or_else(|| {
                 route_invalid("JSONL partition metadata disappeared before scheduling")
             })?;
-            partitions.entry(partition).or_default().push(leaf);
+            let worker_affinity = adapter
+                .leaf_worker_affinity(&leaf)
+                .map_err(|error| route_scan(adapter, error))?
+                .unwrap_or(partition);
+            let context_shard = worker_affinity % JSONL_PARTITION_CONTEXT_SHARDS;
+            let (partition_context_shard, partition_leaves) = partitions
+                .entry(partition)
+                .or_insert_with(|| (context_shard, Vec::new()));
+            if *partition_context_shard != context_shard {
+                return Err(route_invalid(
+                    "JSONL adapter returned multiple worker-affinity lanes for one partition",
+                ));
+            }
+            partition_leaves.push(leaf);
         }
         let partitions = partitions.into_iter().collect::<Vec<_>>();
         let mut evidences = Vec::with_capacity(leaves.len());
@@ -514,8 +527,7 @@ pub(super) fn scan_leaves(
                 begun.push(*partition);
             }
             let mut jobs = Vec::new();
-            for (partition, partition_leaves) in wave {
-                let context_shard = *partition % JSONL_PARTITION_CONTEXT_SHARDS;
+            for (_, (context_shard, partition_leaves)) in wave {
                 for leaf in partition_leaves.iter().cloned() {
                     let base = base_for_leaf(bases, &leaf).cloned();
                     jobs.push(
@@ -524,10 +536,10 @@ pub(super) fn scan_leaves(
                             JsonlLeafJob {
                                 leaf,
                                 base,
-                                context_shard: Some(context_shard),
+                                context_shard: Some(*context_shard),
                             },
                         )
-                        .with_worker_affinity(context_shard),
+                        .with_worker_affinity(*context_shard),
                     );
                 }
             }
