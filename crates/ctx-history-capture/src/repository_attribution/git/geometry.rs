@@ -1,7 +1,6 @@
-#[cfg(windows)]
-use std::io::Read;
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -14,6 +13,11 @@ use super::{
     canonical_symbolic_branch, lexical_absolute, metadata_is_link_like, object_format_name,
     utf8_lines, CandidateKind, ProbeFailure, MAX_GIT_OUTPUT_BYTES, MAX_PARENT_COMPONENTS,
 };
+
+// Mutable cache-fence files such as packed-refs routinely exceed the bounded
+// stdout accepted from Git. They are read directly and hashed, so retain a
+// separate finite cap without rejecting ordinary repositories.
+const MAX_MUTABLE_GIT_EVIDENCE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Cheap, non-authoritative state used only to decide whether a prior negative
 /// probe may be reused. Any route or Git-geometry change invalidates the hit.
@@ -640,9 +644,8 @@ fn update_mutable_evidence_entry(
         Ok(metadata) if metadata_is_link_like(&metadata) => {
             Err(ProbeFailure::Unsafe("mutable_git_evidence_is_symlink"))
         }
-        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_GIT_OUTPUT_BYTES as u64 => {
-            let value = fs::read(path)
-                .map_err(|_| ProbeFailure::Failed("mutable_git_evidence_read_failed"))?;
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_MUTABLE_GIT_EVIDENCE_BYTES => {
+            let value = read_mutable_evidence_file(path, &metadata)?;
             digest.update([1]);
             digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
             digest.update(value);
@@ -662,6 +665,159 @@ fn update_mutable_evidence_entry(
             Ok(())
         }
         Err(_) => Err(ProbeFailure::Failed("mutable_git_evidence_metadata_failed")),
+    }
+}
+
+fn read_mutable_evidence_bounded(
+    file: &mut fs::File,
+    opening_length: u64,
+) -> Result<Vec<u8>, ProbeFailure> {
+    let capacity =
+        usize::try_from(opening_length.min(MAX_MUTABLE_GIT_EVIDENCE_BYTES)).unwrap_or_default();
+    let mut value = Vec::with_capacity(capacity);
+    file.by_ref()
+        .take(MAX_MUTABLE_GIT_EVIDENCE_BYTES + 1)
+        .read_to_end(&mut value)
+        .map_err(|_| ProbeFailure::Failed("mutable_git_evidence_read_failed"))?;
+    if u64::try_from(value.len()).unwrap_or(u64::MAX) > MAX_MUTABLE_GIT_EVIDENCE_BYTES {
+        return Err(ProbeFailure::Failed("mutable_git_evidence_limit_exceeded"));
+    }
+    Ok(value)
+}
+
+#[cfg(unix)]
+fn read_mutable_evidence_file(
+    path: &Path,
+    named_opening: &fs::Metadata,
+) -> Result<Vec<u8>, ProbeFailure> {
+    read_mutable_evidence_file_with_after_read(path, named_opening, || {})
+}
+
+#[cfg(unix)]
+fn read_mutable_evidence_file_with_after_read(
+    path: &Path,
+    named_opening: &fs::Metadata,
+    after_read: impl FnOnce(),
+) -> Result<Vec<u8>, ProbeFailure> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| ProbeFailure::Failed("mutable_git_evidence_read_failed"))?;
+    let descriptor_opening = file
+        .metadata()
+        .map_err(|_| ProbeFailure::Failed("mutable_git_evidence_metadata_failed"))?;
+    if !descriptor_opening.is_file()
+        || metadata_is_link_like(&descriptor_opening)
+        || !unix_file_state_matches(named_opening, &descriptor_opening)
+    {
+        return Err(ProbeFailure::ConcurrentDrift);
+    }
+    if descriptor_opening.len() > MAX_MUTABLE_GIT_EVIDENCE_BYTES {
+        return Err(ProbeFailure::Failed("mutable_git_evidence_limit_exceeded"));
+    }
+    let value = read_mutable_evidence_bounded(&mut file, descriptor_opening.len())?;
+    after_read();
+    let descriptor_closing = file.metadata().map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    let named_closing = fs::symlink_metadata(path).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    if !descriptor_closing.is_file()
+        || !named_closing.is_file()
+        || metadata_is_link_like(&named_closing)
+        || !unix_file_state_matches(&descriptor_opening, &descriptor_closing)
+        || !unix_file_state_matches(&descriptor_opening, &named_closing)
+    {
+        return Err(ProbeFailure::ConcurrentDrift);
+    }
+    Ok(value)
+}
+
+#[cfg(unix)]
+fn unix_file_state_matches(first: &fs::Metadata, second: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    first.dev() == second.dev()
+        && first.ino() == second.ino()
+        && first.mode() == second.mode()
+        && first.len() == second.len()
+        && first.mtime() == second.mtime()
+        && first.mtime_nsec() == second.mtime_nsec()
+        && first.ctime() == second.ctime()
+        && first.ctime_nsec() == second.ctime_nsec()
+}
+
+#[cfg(windows)]
+fn read_mutable_evidence_file(
+    path: &Path,
+    _named_opening: &fs::Metadata,
+) -> Result<Vec<u8>, ProbeFailure> {
+    let mut file = open_windows_identity_path(path)
+        .map_err(|_| ProbeFailure::Failed("mutable_git_evidence_read_failed"))?;
+    let descriptor_opening = windows_file_state(&file)
+        .map_err(|_| ProbeFailure::Failed("mutable_git_evidence_metadata_failed"))?;
+    let named_opening = windows_path_state(path).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    if descriptor_opening.is_reparse_point() {
+        return Err(ProbeFailure::Unsafe("mutable_git_evidence_is_symlink"));
+    }
+    if descriptor_opening.is_directory() || descriptor_opening != named_opening {
+        return Err(ProbeFailure::ConcurrentDrift);
+    }
+    if descriptor_opening.length > MAX_MUTABLE_GIT_EVIDENCE_BYTES {
+        return Err(ProbeFailure::Failed("mutable_git_evidence_limit_exceeded"));
+    }
+    let value = read_mutable_evidence_bounded(&mut file, descriptor_opening.length)?;
+    let descriptor_closing =
+        windows_file_state(&file).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    let named_closing = windows_path_state(path).map_err(|_| ProbeFailure::ConcurrentDrift)?;
+    if descriptor_closing != descriptor_opening || named_closing != descriptor_opening {
+        return Err(ProbeFailure::ConcurrentDrift);
+    }
+    Ok(value)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_mutable_evidence_file(
+    _path: &Path,
+    _named_opening: &fs::Metadata,
+) -> Result<Vec<u8>, ProbeFailure> {
+    Err(ProbeFailure::PlatformUnsupported)
+}
+
+#[cfg(test)]
+mod mutable_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_descriptor_read_rejects_post_snapshot_growth() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("grown-packed-refs");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_MUTABLE_GIT_EVIDENCE_BYTES + 1).unwrap();
+        drop(file);
+        let mut file = fs::File::open(path).unwrap();
+
+        let result = read_mutable_evidence_bounded(&mut file, MAX_MUTABLE_GIT_EVIDENCE_BYTES);
+
+        assert!(matches!(
+            result,
+            Err(ProbeFailure::Failed("mutable_git_evidence_limit_exceeded"))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_read_rejects_post_read_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mutated-packed-refs");
+        fs::write(&path, b"opening\n").unwrap();
+        let opening = fs::symlink_metadata(&path).unwrap();
+
+        let result = read_mutable_evidence_file_with_after_read(&path, &opening, || {
+            fs::write(&path, b"changed-and-grown\n").unwrap();
+        });
+
+        assert!(matches!(result, Err(ProbeFailure::ConcurrentDrift)));
     }
 }
 

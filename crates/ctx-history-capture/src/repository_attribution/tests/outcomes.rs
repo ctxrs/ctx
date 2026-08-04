@@ -77,6 +77,15 @@ fn public_ctx_short_commit_resolves_full_oid_parents_and_changed_files() {
         "public-ctx",
         Some("https://github.com/ctxrs/ctx.git"),
     );
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "internal",
+            "https://github.com/ctxrs/ctx-internal.git",
+        ],
+    );
     fs::create_dir(repo.join("src")).unwrap();
     fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
     fs::write(repo.join("src/new.rs"), "pub fn added() {}\n").unwrap();
@@ -85,6 +94,13 @@ fn public_ctx_short_commit_resolves_full_oid_parents_and_changed_files() {
     let oid = git_output(&repo, &["rev-parse", "HEAD"]);
     let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
     let parent = git_output(&repo, &["rev-parse", "HEAD^"]);
+    let mut packed_refs = b"# pack-refs with: sorted\n".to_vec();
+    for index in 0..3_000 {
+        packed_refs.extend_from_slice(
+            format!("{parent} refs/heads/packed-fixture-{index:04}\n").as_bytes(),
+        );
+    }
+    fs::write(repo.join(".git/packed-refs"), packed_refs).unwrap();
     let linked = linked_short_commit(
         &repo,
         "git commit -m 'Capture public ctx outcome'",

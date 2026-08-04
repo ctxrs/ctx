@@ -85,6 +85,29 @@ fn command_candidate_limit_preserves_independent_evidence() {
 }
 
 #[test]
+fn oversized_packed_refs_fails_closed() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "oversized-packed-refs",
+        Some("https://github.com/ctxrs/ctx.git"),
+    );
+    let packed_refs = fs::File::create(repo.join(".git/packed-refs")).unwrap();
+    packed_refs.set_len(8 * 1024 * 1024 + 1).unwrap();
+
+    let annotation = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+
+    assert!(annotation.repository_bindings.is_empty());
+    assert!(annotation.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::GitProbeFailed
+            && abstention.detail.as_deref() == Some("mutable_git_evidence_limit_exceeded")
+    }));
+}
+
+#[test]
 fn one_event_is_bounded_to_two_full_certificates_and_the_git_subprocess_budget() {
     let temp = TempDir::new().unwrap();
     let repositories = [
