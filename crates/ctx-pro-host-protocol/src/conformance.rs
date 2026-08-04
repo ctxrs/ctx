@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684",
+            "fingerprint": "7552eee7cae0695a98f202b02f52cbf5680845cb7bacea4ed754e283bc15f051",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -319,11 +319,11 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
                 "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))"
             },
             "repository_contract_revision": 8,
-            "repository_observation_revision": 3,
-            "bounded_shell_subset_revision": 1,
+            "repository_observation_revision": 4,
+            "bounded_shell_subset_revision": 3,
             "repository_association_policy_revision": 6,
             "repository_pull_request_association_capture_revision": 3,
-            "repository_outcome_capture_revision": 2,
+            "repository_outcome_capture_revision": 4,
             "repository_local_root_authorization_fingerprint_revision": 1,
             "mcp_tool_call_attribution_revision": 1,
             "mcp_tool_call_attribution": {
@@ -341,9 +341,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         value["golden_vectors"]["core_record_digests"],
         serde_json::json!({
             "core_record_sha256":
-                "a6f06c453e0bb34645bbe6e98119ab3e6c8a4ad2a4b0550ec07afd4c2ecebea7",
+                "618d194dea547828014c828028e2b2cf2b06663ae9ca6e7d0a7ea4cba22961a0",
             "core_record_leaf_sha256":
-                "8d99b837102da363d7f13e1b61820d533811c7efbe7a7c6458048f6219bf4a51"
+                "1e265db24d2ed62287acfe7224df0315e53e30c52fc802a0e2364e7a73d7dd95"
         })
     );
 
@@ -355,9 +355,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     let envelope: Value = serde_json::from_slice(&frame[FRAME_HEADER_BYTES..]).unwrap();
     let evidence =
         &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
-    assert_eq!(evidence["repository_observation_revision"], 3);
+    assert_eq!(evidence["repository_observation_revision"], 4);
     assert_eq!(evidence["association_policy_revision"], 6);
-    assert_eq!(evidence["outcome_capture_revision"], 3);
+    assert_eq!(evidence["outcome_capture_revision"], 4);
     assert_eq!(
         evidence["candidates"],
         serde_json::json!([
