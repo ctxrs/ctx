@@ -1039,7 +1039,7 @@ fn native_provider_cli_requires_existing_history_or_explicit_path() {
 fn task_json_cli_imports_cline_and_roo_and_searches() {
     let temp = tempdir();
     let cline_fixture = PathBuf::from(provider_history_fixture("cline/data"));
-    let cline = temp.path().join(".cline/data");
+    let cline = temp.path().join("explicit-cline-data");
     copy_dir_all(&cline_fixture, &cline);
     let _daemon = start_isolated_provider_daemon(&temp);
     let cline = cline.display().to_string();

@@ -819,7 +819,10 @@ fn build_merged_source_backed_registry(
     // retained explicit owner out of automatic discovery while a different
     // explicit route is selected, so those base routes remain carried rather
     // than being re-scanned under a new automatic identity.
-    if let Some(catalog) = previous_explicit_source_catalog.as_ref() {
+    if let Some(catalog) = previous_explicit_source_catalog.as_ref().filter(|catalog| {
+        explicit_source_catalog
+            .is_none_or(|requested| catalog.route_lineages() != requested.route_lineages())
+    }) {
         catalog.prepare_discovery_report(data_root, &mut report)?;
     }
     if let Some(catalog) = explicit_source_catalog {
