@@ -233,6 +233,112 @@ fn trae_current_database_is_included_in_import_all_without_workspace_storage_uni
 }
 
 #[test]
+fn trae_encrypted_current_database_is_unknown_and_never_imported() {
+    let temp = tempdir();
+    let database = install_current_trae_encrypted_fixture(&temp);
+    let before_bytes = fs::read(&database).unwrap();
+    let before_entries = fs::read_dir(database.parent().unwrap()).unwrap().count();
+
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));
+    let source = assert_current_trae_default_source(&sources, "unknown", false);
+    let reason = source["unsupported_reason"].as_str().unwrap();
+    assert!(reason.contains("SQLCipher-encrypted relational history"));
+    assert!(reason.contains("cannot be imported without Trae key access"));
+
+    let output = ctx(&temp)
+        .args(["import", "--all", "--format=json", "--progress", "none"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let imported: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(imported["outcome"], "failure", "{imported:#}");
+    assert_eq!(imported["failure_scope"], "source", "{imported:#}");
+    assert_eq!(imported["totals"]["failed_sources"], 1, "{imported:#}");
+    assert_eq!(
+        imported["totals"]["current_source_count"], 0,
+        "{imported:#}"
+    );
+    assert_eq!(
+        imported["totals"]["current_indexed_documents"], 0,
+        "{imported:#}"
+    );
+    let trae_failure = imported["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "trae")
+        .unwrap_or_else(|| panic!("missing Trae source failure in {imported:#}"));
+    assert_eq!(trae_failure["status"], "failure");
+    assert_eq!(trae_failure["source_failure_class"], "incompatible");
+    assert!(trae_failure["detail"]
+        .as_str()
+        .unwrap()
+        .contains("SQLCipher-encrypted relational history"));
+
+    let stderr = failure_stderr(ctx(&temp).args([
+        "import",
+        "--provider",
+        "trae",
+        "--path",
+        database.to_str().unwrap(),
+        "--progress",
+        "none",
+    ]));
+    assert!(stderr.contains("is not importable"), "{stderr}");
+    assert!(
+        stderr.contains("SQLCipher-encrypted relational history"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&database).unwrap(), before_bytes);
+    assert_eq!(
+        fs::read_dir(database.parent().unwrap()).unwrap().count(),
+        before_entries
+    );
+}
+
+#[test]
+fn trae_current_database_imports_supported_chat_with_malformed_sibling() {
+    let temp = tempdir();
+    let query = "trae-mixed-current-oracle";
+    install_current_trae_fixture(&temp, query);
+    let database = temp
+        .path()
+        .join(".config/Trae/ModularData/ai-agent/database.db");
+    Connection::open(&database)
+        .unwrap()
+        .execute(
+            "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2)",
+            params!["chat.ChatSessionStore.index", "invalid JSON"],
+        )
+        .unwrap();
+
+    let sources = json_output(ctx(&temp).args(["sources", "--format=json"]));
+    assert_current_trae_default_source(&sources, "available", true);
+
+    let imported =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_authoritative_provider_publication_with_rejections(&imported, 1);
+    assert_eq!(
+        imported["totals"]["current_source_count"], 1,
+        "{imported:#}"
+    );
+    assert_eq!(imported["totals"]["current_rejected_records"], 1);
+    assert_eq!(provider_core_counts(&data_root(&temp), "trae"), (1, 2));
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "trae",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "trae", query, 1, "message");
+}
+
+#[test]
 fn astrbot_native_default_discovery_is_included_in_import_all() {
     let temp = tempdir();
     let query = "astrbot-import-all-oracle";

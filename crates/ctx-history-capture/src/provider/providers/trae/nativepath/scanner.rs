@@ -896,6 +896,44 @@ mod tests {
     }
 
     #[test]
+    fn malformed_sibling_key_is_isolated_as_a_record_rejection() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let data_root = crate::test_support_paths::tempdir().unwrap();
+        let source = temp.path().join("state.vscdb");
+        let connection = Connection::open(&source).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE ItemTable ([key] TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2), (?3, ?4)",
+                params![
+                    crate::provider::providers::trae::TRAE_CHAT_KEYS[0],
+                    r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                    crate::provider::providers::trae::TRAE_CHAT_KEYS[1],
+                    "invalid JSON",
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let authority = acquire_source(
+            data_root.path(),
+            &source,
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        )
+        .unwrap();
+        let mut scanner = TraeScanner::new(&authority, TraeFrontier::default());
+        let page = scanner.next_page().unwrap().unwrap();
+        assert_eq!(page.core.len(), 1);
+        assert_eq!(page.rejections.len(), 1);
+        assert!(page.rejections[0].error.contains("contains invalid JSON"));
+    }
+
+    #[test]
     fn stock_snapshot_queries_active_wal_without_persistent_writes_and_rejects_swap() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let source = temp.path().join("trae.sqlite");

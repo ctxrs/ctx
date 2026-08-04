@@ -177,6 +177,43 @@ fn trae_probe_rejects_invalid_non_text_and_unrecognized_payloads() {
 }
 
 #[test]
+fn trae_probe_reports_encrypted_or_non_database_bytes_without_mutation() {
+    let temp = tempdir();
+    let path = temp.path().join("database.db");
+    let encrypted_shape = (0..4096)
+        .map(|index| u8::try_from((index * 131 + 17) % 251).unwrap())
+        .collect::<Vec<_>>();
+    fs::write(&path, &encrypted_shape).unwrap();
+    let before_components = sqlite_component_bytes(&path);
+    let before_directory = directory_file_bytes(temp.path());
+
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(None, &path, 10_000),
+        BoundedProbe::BlockedAuthOrEncryption
+    );
+    assert_eq!(sqlite_component_bytes(&path), before_components);
+    assert_eq!(directory_file_bytes(temp.path()), before_directory);
+}
+
+#[test]
+fn trae_probe_rejects_unrecognized_plaintext_relational_schema() {
+    let temp = tempdir();
+    let path = temp.path().join("database.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "create table chat_session (id text primary key);\
+             create table chat_message_general (id text primary key, session_id text);",
+        )
+        .unwrap();
+
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(None, &path, 10_000),
+        BoundedProbe::IoError
+    );
+}
+
+#[test]
 fn trae_probe_rejects_values_over_the_importer_bound() {
     let temp = tempdir();
     let path = temp.path().join("database.db");
@@ -205,6 +242,11 @@ fn trae_probe_distinguishes_supported_content_from_valid_empty_containers() {
     let path = temp.path().join("database.db");
     let connection = trae_probe_database(&path);
 
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(None, &path, 10_000),
+        BoundedProbe::NotFound
+    );
+
     for payload in [
         r#"{"list":[]}"#,
         r#"{"list":[{"id":"session-1","messages":[]}]}"#,
@@ -226,6 +268,29 @@ fn trae_probe_distinguishes_supported_content_from_valid_empty_containers() {
                 .to_owned(),
         ),
     );
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(None, &path, 10_000),
+        BoundedProbe::Found
+    );
+}
+
+#[test]
+fn trae_probe_admits_supported_chat_despite_malformed_sibling_key() {
+    let temp = tempdir();
+    let path = temp.path().join("database.db");
+    let connection = trae_probe_database(&path);
+    connection
+        .execute(
+            "insert into ItemTable ([key], value) values (?1, ?2), (?3, ?4)",
+            rusqlite::params![
+                TRAE_CHAT_KEYS[0],
+                r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                TRAE_CHAT_KEYS[1],
+                "invalid JSON",
+            ],
+        )
+        .unwrap();
+
     assert_eq!(
         has_trae_state_vscdb_chat_history(None, &path, 10_000),
         BoundedProbe::Found

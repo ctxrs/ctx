@@ -42,6 +42,7 @@ const SQLITE_PROBE_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const SQLITE_PROBE_DEADLINE: Duration = Duration::from_millis(500);
 const SQLITE_PROBE_PROGRESS_OPS: i32 = 1_000;
 const SQLITE_PROBE_MAX_PROGRESS_CALLS: usize = 1_000;
+const SQLITE_PLAINTEXT_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[cfg(test)]
 std::thread_local! {
@@ -315,7 +316,9 @@ fn has_junie_session_events(root: &Path, max_entries: usize) -> BoundedProbe {
         }
         match path_is_file_probe(&root.join(session_id).join("events.jsonl")) {
             BoundedProbe::Found => return BoundedProbe::Found,
-            BoundedProbe::IoError => return BoundedProbe::IoError,
+            BoundedProbe::IoError | BoundedProbe::BlockedAuthOrEncryption => {
+                return BoundedProbe::IoError
+            }
             BoundedProbe::NotFound | BoundedProbe::BudgetExhausted => {}
         }
     }
@@ -340,7 +343,9 @@ fn has_junie_session_events(root: &Path, max_entries: usize) -> BoundedProbe {
         }
         match path_is_file_probe(&path.join("events.jsonl")) {
             BoundedProbe::Found => return BoundedProbe::Found,
-            BoundedProbe::IoError => return BoundedProbe::IoError,
+            BoundedProbe::IoError | BoundedProbe::BlockedAuthOrEncryption => {
+                return BoundedProbe::IoError
+            }
             BoundedProbe::NotFound | BoundedProbe::BudgetExhausted => {}
         }
     }
@@ -389,12 +394,6 @@ pub(super) fn has_trae_state_vscdb_chat_history(
             return BoundedProbe::NotFound;
         }
         Ok(metadata) if metadata.is_file() => {
-            if !matches!(
-                root.file_name().and_then(|name| name.to_str()),
-                Some("state.vscdb" | "database.db")
-            ) {
-                return BoundedProbe::NotFound;
-            }
             return has_trae_state_vscdb_chat_keys(data_root, root);
         }
         Ok(metadata) if metadata.is_dir() => {}
@@ -414,6 +413,7 @@ pub(super) fn has_trae_state_vscdb_chat_history(
     };
     let mut visited = 0usize;
     let mut saw_io_error = false;
+    let mut saw_blocked_auth_or_encryption = false;
     for path in entries {
         visited = visited.saturating_add(1);
         let metadata = match fs::symlink_metadata(&path) {
@@ -432,12 +432,15 @@ pub(super) fn has_trae_state_vscdb_chat_history(
         }
         match has_trae_state_vscdb_chat_keys(data_root, &candidate) {
             BoundedProbe::Found => return BoundedProbe::Found,
+            BoundedProbe::BlockedAuthOrEncryption => saw_blocked_auth_or_encryption = true,
             BoundedProbe::IoError => saw_io_error = true,
             BoundedProbe::NotFound | BoundedProbe::BudgetExhausted => {}
         }
     }
 
-    if saw_io_error {
+    if saw_blocked_auth_or_encryption {
+        BoundedProbe::BlockedAuthOrEncryption
+    } else if saw_io_error {
         BoundedProbe::IoError
     } else {
         BoundedProbe::NotFound
@@ -446,6 +449,10 @@ pub(super) fn has_trae_state_vscdb_chat_history(
 
 fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
     match path_is_file_probe(path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    match trae_plaintext_sqlite_header_probe(path) {
         BoundedProbe::Found => {}
         other => return other,
     }
@@ -458,7 +465,7 @@ fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> Boun
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )?;
         if table_count != 1 || column_count < 2 {
-            return Ok(false);
+            return Err(rusqlite::Error::InvalidQuery);
         }
 
         let parser_bound = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(i64::MAX);
@@ -476,11 +483,12 @@ fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> Boun
         ])?;
         let mut saw_supported_chat = false;
         let mut saw_incompatible_payload = false;
+        let mut saw_duplicate_key = false;
         while let Some(row) = rows.next()? {
             let chat_key = row.get::<_, String>(0)?;
             let cardinality = row.get::<_, i64>(1)?;
             if cardinality != 1 {
-                saw_incompatible_payload = true;
+                saw_duplicate_key = true;
                 continue;
             }
             let value_type = row.get::<_, String>(2)?;
@@ -512,14 +520,45 @@ fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> Boun
                 }
             }
         }
-        if saw_incompatible_payload {
+        if saw_duplicate_key {
+            // Duplicate known keys are source-level ambiguity: neither probe nor importer may
+            // choose between rows, even when another key contains supported chat.
+            Err(rusqlite::Error::InvalidQuery)
+        } else if saw_supported_chat {
+            // Individual malformed siblings are importer rejections, not authority to hide a
+            // separately supported chat payload from automatic discovery.
+            Ok(true)
+        } else if saw_incompatible_payload {
             // The structural-probe error path becomes Unknown at the resolver boundary. A known
             // Trae chat key with incompatible content must not collapse into NotFound/Empty.
             Err(rusqlite::Error::InvalidQuery)
         } else {
-            Ok(saw_supported_chat)
+            Ok(false)
         }
     })
+}
+
+fn trae_plaintext_sqlite_header_probe(path: &Path) -> BoundedProbe {
+    let before = match observe_ordinary_file(path) {
+        Ok(observation) => observation,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    let mut file = match open_ordinary_file_without_following(path) {
+        Ok(file) => file,
+        Err(_) => return BoundedProbe::IoError,
+    };
+    let mut header = [0_u8; SQLITE_PLAINTEXT_HEADER.len()];
+    if file.read_exact(&mut header).is_err() {
+        return BoundedProbe::IoError;
+    }
+    if !observe_ordinary_file(path).is_ok_and(|after| after == before) {
+        return BoundedProbe::IoError;
+    }
+    if &header == SQLITE_PLAINTEXT_HEADER {
+        BoundedProbe::Found
+    } else {
+        BoundedProbe::BlockedAuthOrEncryption
+    }
 }
 
 fn has_deepagents_checkpoint_tables(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
@@ -828,12 +867,16 @@ fn has_codebuddy_history_json(root: &Path, max_entries: usize) -> BoundedProbe {
         BoundedProbe::Found => {
             match has_jsonl_file_under_matching(&projects, max_entries, |_| true) {
                 BoundedProbe::Found => return BoundedProbe::Found,
-                BoundedProbe::IoError => return BoundedProbe::IoError,
+                BoundedProbe::IoError | BoundedProbe::BlockedAuthOrEncryption => {
+                    return BoundedProbe::IoError
+                }
                 BoundedProbe::BudgetExhausted => return BoundedProbe::BudgetExhausted,
                 BoundedProbe::NotFound => {}
             }
         }
-        BoundedProbe::IoError => return BoundedProbe::IoError,
+        BoundedProbe::IoError | BoundedProbe::BlockedAuthOrEncryption => {
+            return BoundedProbe::IoError
+        }
         BoundedProbe::NotFound | BoundedProbe::BudgetExhausted => {}
     }
     match has_json_file_under_matching(root, max_entries, |path| {
@@ -841,7 +884,7 @@ fn has_codebuddy_history_json(root: &Path, max_entries: usize) -> BoundedProbe {
             && path_has_component(path, "history")
     }) {
         BoundedProbe::Found => BoundedProbe::Found,
-        BoundedProbe::IoError => BoundedProbe::IoError,
+        BoundedProbe::IoError | BoundedProbe::BlockedAuthOrEncryption => BoundedProbe::IoError,
         BoundedProbe::BudgetExhausted => BoundedProbe::BudgetExhausted,
         BoundedProbe::NotFound => has_jsonl_file_under_matching(root, max_entries, |path| {
             path_has_component(path, "projects")
@@ -866,6 +909,7 @@ pub(super) enum BoundedProbe {
     NotFound,
     BudgetExhausted,
     IoError,
+    BlockedAuthOrEncryption,
 }
 
 impl BoundedProbe {

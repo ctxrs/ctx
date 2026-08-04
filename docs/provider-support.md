@@ -87,10 +87,15 @@ Factory AI Droid history is discovered automatically at `~/.factory/sessions`.
 An exact path remains available, for example
 `ctx import --provider factory-ai-droid --path /path/to/factory/sessions`.
 
-Trae history is discovered automatically from the current platform application
-data database (`Trae/ModularData/ai-agent/database.db`) on Linux, macOS, and
-Windows. Exact `--path` imports of released `User/workspaceStorage/state.vscdb`
-compatibility data remain supported.
+Trae's current platform application-data database
+(`Trae/ModularData/ai-agent/database.db`) is located automatically on Linux,
+macOS, and Windows. Current Trae 1.107.1 relational chat history is
+SQLCipher-encrypted and is not imported: the source reports `unknown` with an
+encryption/key-access diagnostic. A plaintext database at that location is
+automatic only when bounded probing recognizes the released ItemTable chat
+shape. Exact `--path` imports of released `User/workspaceStorage/state.vscdb`
+ItemTable compatibility data remain supported and are never unioned with the
+current location.
 
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific

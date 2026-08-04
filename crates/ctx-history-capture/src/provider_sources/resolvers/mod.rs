@@ -13,8 +13,8 @@ use super::{
     context::DiscoveryContext,
     probes::{default_location_import_probe, BoundedProbe},
     reasons::{
-        empty_source_reason, path_presence_unknown_reason, probe_io_error_reason,
-        unknown_source_reason,
+        blocked_auth_or_encryption_reason, empty_source_reason, path_presence_unknown_reason,
+        probe_io_error_reason, unknown_source_reason,
     },
     selectors::{
         encoded_path_within_limit, source_path_kind, SourcePathError,
@@ -247,6 +247,10 @@ pub(super) fn source_from_location(
                         BoundedProbe::IoError => (
                             ProviderSourceStatus::Unknown,
                             probe_io_error_reason(spec.provider),
+                        ),
+                        BoundedProbe::BlockedAuthOrEncryption => (
+                            ProviderSourceStatus::Unknown,
+                            blocked_auth_or_encryption_reason(spec.provider),
                         ),
                     }
                 }

@@ -558,7 +558,8 @@
           "source_format": "trae_state_vscdb",
           "fidelity": "partial",
           "notes": [
-            "Automatic discovery selects the current platform-standard Trae application-data database at Trae/ModularData/ai-agent/database.db on Linux, macOS, and Windows.",
+            "Automatic discovery selects the current platform-standard Trae application-data database at Trae/ModularData/ai-agent/database.db on Linux, macOS, and Windows, but admits it only when bounded probing recognizes plaintext ItemTable compatibility data.",
+            "Trae 1.107.1 current chat_session/chat_message_general history is SQLCipher-encrypted and is not imported; encrypted or non-plaintext database.db candidates report unknown with an encryption/key-access diagnostic.",
             "Released compatibility remains available for exact explicit Trae or Trae CN User/workspaceStorage roots, workspace directories, or state.vscdb files.",
             "Reads SQLite ItemTable values for exporter-backed keys including memento/icube-ai-agent-storage, icube-ai-agent-storage-input-history, chat.ChatSessionStore.index, and ChatStore.",
             "Trae CN input-history rows are imported as user prompts when assistant replies are not present in local state.",
@@ -588,11 +589,11 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "Automatic discovery is limited to the current platform-standard Trae application-data database. Released compatibility for User/workspaceStorage/state.vscdb remains exact `--path` only."
+        "Automatic discovery locates only the current platform-standard database.db and never unions legacy workspaceStorage. Current encrypted relational chats are not importable; released plaintext ItemTable compatibility at that location is admitted, while User/workspaceStorage/state.vscdb remains exact `--path` only."
       ],
       "public_docs": "docs/provider-support.md",
       "metadata": {
-        "import_support": "automatic current database plus exact explicit legacy paths",
+        "import_support": "automatic plaintext ItemTable compatibility at the official current database location plus exact explicit released workspaceStorage paths; current encrypted relational history is unsupported",
         "aliases": [
           "trae-cn",
           "trae_cn"

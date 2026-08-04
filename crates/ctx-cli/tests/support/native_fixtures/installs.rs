@@ -143,6 +143,18 @@ pub(crate) fn install_current_trae_fixture(temp: &TempDir, query: &str) {
     write_standard_trae_messages_database(&database, query);
 }
 
+pub(crate) fn install_current_trae_encrypted_fixture(temp: &TempDir) -> PathBuf {
+    let database = temp
+        .path()
+        .join(".config/Trae/ModularData/ai-agent/database.db");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let encrypted_shape = (0..4096)
+        .map(|index| u8::try_from((index * 131 + 17) % 251).unwrap())
+        .collect::<Vec<_>>();
+    fs::write(&database, encrypted_shape).unwrap();
+    database
+}
+
 pub(crate) fn install_default_trae_fixture(temp: &TempDir, query: &str) {
     let workspace = temp
         .path()

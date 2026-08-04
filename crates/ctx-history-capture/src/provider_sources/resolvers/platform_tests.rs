@@ -2,7 +2,7 @@ use super::super::super::context::DiscoveryPlatformDirs;
 use std::fs;
 
 use super::*;
-use crate::provider_source_spec;
+use crate::{provider_source_for_path, provider_source_spec};
 use rusqlite::Connection;
 
 fn tempdir() -> tempfile::TempDir {
@@ -806,9 +806,47 @@ fn trae_current_database_reports_missing_valid_empty_and_malformed_states() {
     let report = provider_report(&context, CaptureProvider::Trae);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
 
-    fs::write(&current, b"not sqlite").unwrap();
+    let encrypted_shape = (0..4096)
+        .map(|index| u8::try_from((index * 131 + 17) % 251).unwrap())
+        .collect::<Vec<_>>();
+    fs::write(&current, &encrypted_shape).unwrap();
+    let before_directory = fs::read_dir(current.parent().unwrap())
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_os_string(),
+                fs::read(path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
     let report = provider_report(&context, CaptureProvider::Trae);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+    assert_eq!(
+        report.sources[0].unsupported_reason,
+        Some(
+            "the Trae database is encrypted or is not plaintext SQLite; current SQLCipher-encrypted relational history cannot be imported without Trae key access"
+        )
+    );
+    assert_eq!(fs::read(&current).unwrap(), encrypted_shape);
+    let after_directory = fs::read_dir(current.parent().unwrap())
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_os_string(),
+                fs::read(path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(after_directory, before_directory);
+
+    let explicit = provider_source_for_path(CaptureProvider::Trae, current);
+    assert_eq!(explicit.status, ProviderSourceStatus::Unknown);
+    assert_eq!(
+        explicit.unsupported_reason,
+        report.sources[0].unsupported_reason
+    );
 }
 
 #[test]

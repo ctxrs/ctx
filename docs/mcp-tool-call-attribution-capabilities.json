@@ -230,7 +230,7 @@
       "provider_id": "trae", "route": "native_import", "source_format": "trae_state_vscdb", "source_schema": "trae-itemtable-state-v1",
       "producer_bound": {"kind": "versions", "versions": ["2.3.61406"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
       "status": "not-qualified", "reason": "route_mismatch",
-      "detail": "The admitted state.vscdb ItemTable values are not the current native agent database and do not preserve authoritative MCP terminal evidence.",
+      "detail": "Only released plaintext state.vscdb ItemTable compatibility is admitted. The current SQLCipher-encrypted native agent database is detected but not imported, and neither route provides authoritative MCP terminal evidence.",
       "evidence": ["https://lf-cdn.trae.ai/obj/trae-ai-us/pkg/app/releases/stable/2.3.61406/linux/Trae-linux-x64.deb"]
     },
     {

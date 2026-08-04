@@ -99,7 +99,7 @@ pub(super) fn empty_source_reason(provider: CaptureProvider) -> Option<&'static 
             Some("path exists but no Lingma chat_record table with the expected columns was found")
         }
         CaptureProvider::Trae => {
-            Some("path exists but no Trae workspace state.vscdb with known chat ItemTable keys was found")
+            Some("path exists but the recognized Trae plaintext ItemTable contains no supported chat")
         }
         CaptureProvider::Qoder => {
             Some("path exists but no Qoder transcript JSONL files were found")
@@ -183,7 +183,7 @@ pub(super) fn unknown_source_reason(provider: CaptureProvider) -> Option<&'stati
             Some("path exists but the CodeBuddy history probe hit its scan budget")
         }
         CaptureProvider::Trae => {
-            Some("path exists but the Trae workspaceStorage probe hit its scan budget")
+            Some("path exists but the bounded Trae database probe hit its scan budget")
         }
         CaptureProvider::DeepAgents => {
             Some("path exists but the Deep Agents database could not be fully probed")
@@ -300,13 +300,22 @@ pub(super) fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'stati
             Some("path exists but the Lingma chat_record SQLite database could not be read")
         }
         CaptureProvider::Trae => {
-            Some("path exists but Trae workspace state.vscdb files could not be read")
+            Some("path exists but the Trae plaintext compatibility database could not be safely admitted")
         }
         CaptureProvider::Qoder => {
             Some("path exists but Qoder transcript JSONL files could not be read; check permissions")
         }
         CaptureProvider::CodeBuddy => Some(
             "path exists but CodeBuddy history JSON files could not be read; check permissions",
+        ),
+        _ => None,
+    }
+}
+
+pub(super) fn blocked_auth_or_encryption_reason(provider: CaptureProvider) -> Option<&'static str> {
+    match provider {
+        CaptureProvider::Trae => Some(
+            "the Trae database is encrypted or is not plaintext SQLite; current SQLCipher-encrypted relational history cannot be imported without Trae key access",
         ),
         _ => None,
     }
