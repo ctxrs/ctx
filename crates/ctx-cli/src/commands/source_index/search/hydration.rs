@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fmt};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
-use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
+use ctx_history_index::{project_body_search, CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
 use uuid::Uuid;
 
 use crate::MAX_SEARCH_LIMIT;
@@ -150,10 +150,7 @@ fn search_presentation_projection<'event>(
     expected_event: &'event SearchEventMetadata,
     query_texts: &[&str],
 ) -> Result<(SearchPresentation<'event>, usize)> {
-    let CoreEventRecord {
-        event,
-        mut core_record,
-    } = record;
+    let CoreEventRecord { event, core_record } = record;
     if event.event_id != core_record.event_id
         || event.session_id != core_record.session_id
         || SearchEventMetadata::from(&event) != *expected_event
@@ -163,25 +160,19 @@ fn search_presentation_projection<'event>(
             expected_event.event_id
         ));
     }
-    let body = core_record
-        .content
-        .normalized_body
-        .take()
-        .filter(|body| !body.is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "Core search event {} has no normalized body",
-                event.event_id
-            )
-        })?;
+    let body = project_body_search(core_record.content)?.ok_or_else(|| {
+        anyhow!(
+            "Core search event {} has no searchable body projection",
+            event.event_id
+        )
+    })?;
     let (snippet, snippet_truncated) = search_snippet_fragment(&body, query_texts);
     let retained_snippet_bytes = snippet.len();
 
-    // Neither the complete body nor the remainder of Core crosses the search
-    // presentation boundary.
+    // Neither the complete searchable projection nor the remainder of Core
+    // crosses the search presentation boundary.
     drop(body);
     drop(event);
-    drop(core_record);
     Ok((
         SearchPresentation {
             event: expected_event,

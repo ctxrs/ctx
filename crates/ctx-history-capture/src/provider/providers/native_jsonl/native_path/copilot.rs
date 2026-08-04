@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub(super) const COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION: &str =
-    "copilot-cli-direct-native-jsonl-v5-mcp-exchange";
+    "copilot-cli-direct-native-jsonl-v6-mcp-start-generic-body";
 
 const COPILOT_LINKAGE_SCAN_CHUNK_BYTES: usize = 1024 * 1024;
 // The selector reads in fixed-size chunks, but must retain any complete line
@@ -246,6 +246,44 @@ pub(super) fn copilot_event_identity(value: &Value) -> Option<&str> {
         .get("id")
         .and_then(Value::as_str)
         .filter(|event_id| !event_id.trim().is_empty())
+}
+
+pub(super) fn copilot_start_requires_generic_body(bytes: &[u8]) -> bool {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let Ok(envelope) = CopilotRawEnvelope::deserialize(&mut deserializer) else {
+        return true;
+    };
+    if deserializer.end().is_err()
+        || envelope.event_type.duplicate
+        || envelope.data.duplicate
+        || envelope.explicitly_redacted
+    {
+        return true;
+    }
+    if !matches!(
+        exact_bounded_string(
+            envelope.event_type.value,
+            COPILOT_LINKAGE_MAX_EVENT_TYPE_BYTES
+        ),
+        ExactBoundedString::Exact(event_type) if event_type == "tool.execution_start"
+    ) {
+        return true;
+    }
+    let Some(raw_data) = envelope.data.value else {
+        return false;
+    };
+    let mut deserializer = serde_json::Deserializer::from_str(raw_data.get());
+    let Ok(data) = CopilotRawData::deserialize(&mut deserializer) else {
+        return true;
+    };
+    if deserializer.end().is_err() {
+        return true;
+    }
+    data.explicitly_redacted
+        || data.mcp_server_name.value.is_some()
+        || data.mcp_server_name.duplicate
+        || data.mcp_tool_name.value.is_some()
+        || data.mcp_tool_name.duplicate
 }
 
 /// Captures only the exact MCP side represented by this Copilot event.

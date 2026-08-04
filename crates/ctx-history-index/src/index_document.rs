@@ -687,7 +687,7 @@ impl IndexDocument {
         if let Some(role) = record.role {
             target.add_text(fields.role, role);
         }
-        if let Some(body) = record.content.normalized_body {
+        if let Some(body) = crate::project_body_search(record.content)? {
             target.add_text(fields.body_search, body);
         }
         for observation in record.repository_vcs_observations {

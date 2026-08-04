@@ -227,6 +227,7 @@ pub(crate) fn physical_integrity_audit(
         })
         .and_then(Path::parent)
         .ok_or(IndexError::ChecksumMismatch)?;
+    let pointer = super::load_active_generation_pointer(root)?;
     let mut paths = active_index_files(index)?;
     paths.insert(PathBuf::from(TANTIVY_META_FILE));
     let entries = paths
@@ -238,6 +239,7 @@ pub(crate) fn physical_integrity_audit(
                 generation_path,
                 &path,
                 path != Path::new(TANTIVY_META_FILE),
+                pointer.as_ref(),
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -273,8 +275,9 @@ fn hash_physical_file(
     generation_path: &Path,
     relative_path: &Path,
     validate_tantivy_footer: bool,
+    pointer: Option<&super::ActiveGenerationPointer>,
 ) -> Result<PhysicalFileDigest> {
-    let (mut file, artifact) = open_artifact(root, generation_path, relative_path)?;
+    let (mut file, artifact) = open_artifact(root, generation_path, relative_path, pointer)?;
     let length = artifact.identity.length();
     let footer_contract = if validate_tantivy_footer {
         let slice = directory
@@ -324,8 +327,13 @@ fn hash_physical_file(
             return Err(IndexError::ChecksumMismatch);
         }
     }
-    if recapture_artifact(root, generation_path, relative_path)? != artifact {
-        return Err(IndexError::ChecksumMismatch);
+    let recaptured = recapture_artifact(root, generation_path, relative_path, pointer)?;
+    if recaptured != artifact {
+        return if artifact.same_payload_identity_changed(&recaptured) {
+            Err(IndexError::ConcurrentGenerationChange)
+        } else {
+            Err(IndexError::ChecksumMismatch)
+        };
     }
     Ok(PhysicalFileDigest {
         artifact,

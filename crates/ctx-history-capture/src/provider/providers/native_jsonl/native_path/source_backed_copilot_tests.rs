@@ -555,6 +555,152 @@ fn copilot_captures_exact_invocations_and_linked_terminal_responses() {
 }
 
 #[test]
+fn copilot_mcp_start_uses_generic_body_and_typed_exchange_is_canonical() {
+    let arguments = json!({"needle": "ordinary-arguments-canary"});
+    let events = vec![json!({
+        "type": "tool.execution_start",
+        "id": "ordinary-mcp-start",
+        "timestamp": "2026-08-03T12:00:01Z",
+        "data": {
+            "toolCallId": "ordinary-call-id-canary",
+            "mcpServerName": "ordinary-server-canary",
+            "mcpToolName": "ordinary-tool-canary",
+            "arguments": arguments.clone()
+        }
+    })
+    .to_string()];
+
+    let records = project_events(&events);
+    let record = record_by_native_id(&records, "ordinary-mcp-start");
+    let body = record.content.normalized_body.as_deref().unwrap();
+    assert_eq!(body, "tool_call");
+    for canary in [
+        "ordinary-call-id-canary",
+        "ordinary-server-canary",
+        "ordinary-tool-canary",
+        "ordinary-arguments-canary",
+    ] {
+        assert!(!body.contains(canary), "normalized body leaked {canary}");
+    }
+
+    assert_eq!(record.mcp_tool_call, None);
+    let exchange = record.content.mcp_exchange.as_ref().unwrap();
+    assert_eq!(exchange.provider_call_id, "ordinary-call-id-canary");
+    assert_eq!(exchange.response, None);
+    let invocation = exchange.invocation.as_ref().unwrap();
+    assert_eq!(invocation.server, "ordinary-server-canary");
+    assert_eq!(invocation.tool, "ordinary-tool-canary");
+    assert_eq!(
+        invocation.arguments,
+        McpJsonCapture::Present { value: arguments }
+    );
+}
+
+#[test]
+fn copilot_no_id_mcp_starts_keep_distinct_fallback_ids_across_reordering() {
+    fn start_without_id(call_id: &str) -> String {
+        json!({
+            "type": "tool.execution_start",
+            "timestamp": "2026-08-03T12:00:01Z",
+            "data": {
+                "toolCallId": call_id,
+                "mcpServerName": "fallback-server",
+                "mcpToolName": "identical-fallback-tool",
+                "arguments": {"query": "identical-fallback-argument"}
+            }
+        })
+        .to_string()
+    }
+
+    fn ids_by_call(records: Vec<CoreRecord>) -> BTreeMap<String, StableEntityId> {
+        records
+            .into_iter()
+            .filter_map(|record| {
+                let exchange = record.content.mcp_exchange?;
+                exchange.invocation?;
+                Some((exchange.provider_call_id, record.event_id))
+            })
+            .collect()
+    }
+
+    let first = start_without_id("fallback-call-one");
+    let second = start_without_id("fallback-call-two");
+    let original = ids_by_call(project_events(&[first.clone(), second.clone()]));
+    let reordered = ids_by_call(project_events(&[second, first]));
+
+    assert_eq!(original, reordered);
+    assert_eq!(original.len(), 2);
+    assert_ne!(original["fallback-call-one"], original["fallback-call-two"]);
+}
+
+#[test]
+fn copilot_non_mcp_tool_start_retains_native_data_body() {
+    let data = json!({
+        "toolCallId": "ordinary-non-mcp-call",
+        "toolName": "shell",
+        "redacted": false,
+        "arguments": {"command": "printf retained-non-mcp-canary"}
+    });
+    let events = vec![json!({
+        "type": "tool.execution_start",
+        "id": "ordinary-non-mcp-start",
+        "timestamp": "2026-08-03T12:00:01Z",
+        "redacted": false,
+        "data": data.clone()
+    })
+    .to_string()];
+
+    let records = project_events(&events);
+    let record = record_by_native_id(&records, "ordinary-non-mcp-start");
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(data.to_string().as_str())
+    );
+    assert!(record
+        .content
+        .normalized_body
+        .as_deref()
+        .unwrap()
+        .contains("retained-non-mcp-canary"));
+    assert_eq!(record.content.mcp_exchange, None);
+}
+
+#[test]
+fn copilot_duplicate_sensitive_start_keys_force_generic_body_before_hashing() {
+    let events = vec![
+        r#"{"type":"tool.execution_start","id":"duplicate-envelope-redaction","timestamp":"2026-08-03T12:00:01Z","redacted":true,"redacted":false,"data":{"toolCallId":"duplicate-envelope-call-canary","arguments":{"needle":"duplicate-envelope-arguments-canary"}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"duplicate-data-redaction","timestamp":"2026-08-03T12:00:02Z","data":{"redacted":true,"r\u0065dacted":false,"toolCallId":"duplicate-data-call-canary","arguments":{"needle":"duplicate-data-arguments-canary"}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"duplicate-mcp-key","timestamp":"2026-08-03T12:00:03Z","data":{"toolCallId":"duplicate-mcp-call-canary","mcpServerName":"duplicate-mcp-server-first-canary","mcpSer\u0076erName":"duplicate-mcp-server-second-canary","mcpToolName":"duplicate-mcp-tool-canary","arguments":{"needle":"duplicate-mcp-arguments-canary"}}}"#.to_owned(),
+    ];
+
+    let records = project_events(&events);
+    for native_id in [
+        "duplicate-envelope-redaction",
+        "duplicate-data-redaction",
+        "duplicate-mcp-key",
+    ] {
+        let record = record_by_native_id(&records, native_id);
+        assert_eq!(record.mcp_tool_call, None);
+        assert_eq!(record.content.mcp_exchange, None);
+        let body = record.content.normalized_body.as_deref().unwrap();
+        assert_eq!(body, "tool_call");
+        for canary in [
+            "duplicate-envelope-call-canary",
+            "duplicate-envelope-arguments-canary",
+            "duplicate-data-call-canary",
+            "duplicate-data-arguments-canary",
+            "duplicate-mcp-call-canary",
+            "duplicate-mcp-server-first-canary",
+            "duplicate-mcp-server-second-canary",
+            "duplicate-mcp-tool-canary",
+            "duplicate-mcp-arguments-canary",
+        ] {
+            assert!(!body.contains(canary), "normalized body leaked {canary}");
+        }
+    }
+}
+
+#[test]
 fn copilot_argument_capture_distinguishes_exact_absent_and_unavailable() {
     let events = vec![
         json!({
@@ -822,19 +968,39 @@ fn copilot_tool_owned_redaction_like_keys_preserve_body_and_exchange() {
 #[test]
 fn copilot_provider_redacted_starts_do_not_leak_linkage_or_exchange() {
     let events = vec![
-        r#"{"type":"tool.execution_start","id":"redacted-envelope","timestamp":"2026-08-03T12:00:01Z","redacted":true,"data":{"toolCallId":"redacted-envelope-call","mcpServerName":"secret-server","mcpToolName":"secret-tool","arguments":{}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"redacted-envelope","timestamp":"2026-08-03T12:00:01Z","redacted":true,"data":{"toolCallId":"redacted-envelope-call-canary","mcpServerName":"redacted-envelope-server-canary","mcpToolName":"redacted-envelope-tool-canary","arguments":{"needle":"redacted-envelope-arguments-canary"}}}"#.to_owned(),
         r#"{"type":"tool.execution_complete","id":"redacted-envelope-complete","timestamp":"2026-08-03T12:00:02Z","data":{"toolCallId":"redacted-envelope-call","success":true,"result":{"content":"ordinary envelope completion"}}}"#.to_owned(),
-        r#"{"type":"tool.execution_start","id":"redacted-data","timestamp":"2026-08-03T12:00:03Z","data":{"redacted":true,"toolCallId":"redacted-data-call","mcpServerName":"secret-server","mcpToolName":"secret-tool","arguments":{}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"redacted-data","timestamp":"2026-08-03T12:00:03Z","data":{"redacted":true,"toolCallId":"redacted-data-call-canary","mcpServerName":"redacted-data-server-canary","mcpToolName":"redacted-data-tool-canary","arguments":{"needle":"redacted-data-arguments-canary"}}}"#.to_owned(),
         r#"{"type":"tool.execution_complete","id":"redacted-data-complete","timestamp":"2026-08-03T12:00:04Z","data":{"toolCallId":"redacted-data-call","success":false,"error":{"message":"ordinary data completion"}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"redacted-envelope-bool-without-names","timestamp":"2026-08-03T12:00:05Z","isRedacted":true,"data":{"toolCallId":"envelope-bool-call-canary","arguments":{"needle":"envelope-bool-arguments-canary"}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"redacted-envelope-status-without-names","timestamp":"2026-08-03T12:00:06Z","status":"redacted","data":{"toolCallId":"envelope-status-call-canary","arguments":{"needle":"envelope-status-arguments-canary"}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"redacted-data-bool-without-names","timestamp":"2026-08-03T12:00:07Z","data":{"is_redacted":true,"toolCallId":"data-bool-call-canary","arguments":{"needle":"data-bool-arguments-canary"}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"redacted-data-state-without-names","timestamp":"2026-08-03T12:00:08Z","data":{"state":"output-redacted","toolCallId":"data-state-call-canary","arguments":{"needle":"data-state-arguments-canary"}}}"#.to_owned(),
     ];
     assert!(linkage_plan(&events, super::copilot::CopilotLinkageLimits::DEFAULT).is_empty());
     let records = project_events(&events);
 
-    for native_id in ["redacted-envelope", "redacted-data"] {
+    for native_id in [
+        "redacted-envelope",
+        "redacted-data",
+        "redacted-envelope-bool-without-names",
+        "redacted-envelope-status-without-names",
+        "redacted-data-bool-without-names",
+        "redacted-data-state-without-names",
+    ] {
         let record = record_by_native_id(&records, native_id);
         assert_eq!(record.mcp_tool_call, None);
         assert_eq!(record.content.mcp_exchange, None);
-        assert!(record.content.normalized_body.is_some());
+        assert_eq!(record.content.normalized_body.as_deref(), Some("tool_call"));
+        let body = record.content.normalized_body.as_deref().unwrap();
+        for canary in [
+            "call-canary",
+            "server-canary",
+            "tool-canary",
+            "arguments-canary",
+        ] {
+            assert!(!body.contains(canary), "normalized body leaked {canary}");
+        }
     }
     for (native_id, expected_body) in [
         ("redacted-envelope-complete", "ordinary envelope completion"),
@@ -954,17 +1120,37 @@ fn copilot_budget_fitting_omits_one_capture_at_a_time() {
 
 #[test]
 fn copilot_oversized_native_arguments_become_explicit_omission_without_losing_the_event() {
+    let empty_arguments = json!({"blob": ""});
+    let empty_event = json!({
+        "type": "tool.execution_start",
+        "id": "oversized-arguments-start",
+        "timestamp": "2026-08-03T12:00:01Z",
+        "data": {
+            "toolCallId": "oversized-call-id-canary",
+            "mcpServerName": "oversized-server-canary",
+            "mcpToolName": "oversized-tool-canary",
+            "arguments": empty_arguments
+        }
+    })
+    .to_string();
+    let padding_bytes = crate::MAX_PROVIDER_JSONL_LINE_BYTES
+        .checked_sub(empty_event.len())
+        .and_then(|remaining| remaining.checked_sub(32))
+        .unwrap();
+    let arguments_canary = "oversized-arguments-canary";
     let arguments = json!({
-        "blob": "x".repeat(MAX_CORE_CONTENT_BYTES / 2 + 64 * 1024)
+        "blob": format!(
+            "{}{arguments_canary}",
+            "x".repeat(padding_bytes - arguments_canary.len())
+        )
     });
     let observed_encoded_bytes = u64::try_from(serde_json::to_vec(&arguments).unwrap().len()).ok();
     let data = json!({
-        "toolCallId": "oversized-arguments-call",
-        "mcpServerName": "oversized-server",
-        "mcpToolName": "oversized-tool",
+        "toolCallId": "oversized-call-id-canary",
+        "mcpServerName": "oversized-server-canary",
+        "mcpToolName": "oversized-tool-canary",
         "arguments": arguments
     });
-    let expected_normalized_body = data.to_string();
     let event = json!({
         "type": "tool.execution_start",
         "id": "oversized-arguments-start",
@@ -972,15 +1158,22 @@ fn copilot_oversized_native_arguments_become_explicit_omission_without_losing_th
         "data": data
     })
     .to_string();
+    assert_eq!(event.len(), crate::MAX_PROVIDER_JSONL_LINE_BYTES - 32);
     assert!(event.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
 
     let records = project_events(&[event]);
     let record = record_by_native_id(&records, "oversized-arguments-start");
     assert_eq!(record.mcp_tool_call, None);
-    assert_eq!(
-        record.content.normalized_body.as_deref(),
-        Some(expected_normalized_body.as_str())
-    );
+    let body = record.content.normalized_body.as_deref().unwrap();
+    assert_eq!(body, "tool_call");
+    for canary in [
+        "oversized-call-id-canary",
+        "oversized-server-canary",
+        "oversized-tool-canary",
+        arguments_canary,
+    ] {
+        assert!(!body.contains(canary), "normalized body leaked {canary}");
+    }
     assert_eq!(
         record
             .content
@@ -1421,6 +1614,10 @@ fn copilot_attribution_does_not_change_stable_event_ids() {
 #[test]
 fn only_copilot_bumps_the_shared_direct_jsonl_parser_revision() {
     let copilot = super::super::copilot_source_backed_adapter();
+    assert_eq!(
+        super::copilot::COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION,
+        "copilot-cli-direct-native-jsonl-v6-mcp-start-generic-body"
+    );
     assert_eq!(
         JsonlFamilyAdapter::parser_revision(&copilot),
         super::copilot::COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION

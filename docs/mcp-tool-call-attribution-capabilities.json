@@ -461,7 +461,7 @@
       "provider_id": "copilot_cli", "route": "native_import", "source_format": "copilot_cli_session_events_jsonl", "source_schema": "copilot-cli-direct-native-jsonl-v1",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-capture/src/provider/providers/native_jsonl/native_path/copilot.rs",
-      "parser_revision": "copilot-cli-direct-native-jsonl-v5-mcp-exchange",
+      "parser_revision": "copilot-cli-direct-native-jsonl-v6-mcp-start-generic-body",
       "suite_id": "ctx-history-capture::native_unit",
       "conformance_suite": "mcp_attribution_provider_units",
       "tests": [

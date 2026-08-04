@@ -126,6 +126,12 @@ over the downweighting used to mix that class into `all`. Class-aware search
 does not infer diagnostic importance and does not automatically collapse
 events with duplicate text.
 
+MCP invocation terms keep the class of the record that carries them. Separate
+Warp and Copilot CLI invocation records are calls. A combined Codex terminal
+`tool_output` remains an output, including when its searchable body projection
+contains the invocation server, tool, or arguments. The record is never
+dual-classified as both a call and an output.
+
 Changing content scope does not alter retained or indexed bodies, Core schema,
 or index generations, and it does not require an index rebuild. Search still
 uses semantic evidence only for transcript messages: `all` and `transcript`
@@ -209,26 +215,44 @@ generation binding and coverage, daemon work, and typed fallback reasons.
 
 ## Core-backed presentation
 
-Search snippets and `ctx show` presentation come from complete policy-selected
-records in the active verified Core/Tantivy generation. Query-time reads do not
-reopen provider history. Provider changes become searchable and visible to show
-after explicit import or daemon refresh publishes a new Core generation.
-`ctx show session` preserves provider event order.
+Search snippets come from the Core-backed searchable projection for complete
+policy-selected records in the active verified Core/Tantivy generation. Full
+show/list/MCP event output retrieves the exact stored Core content; it does not
+rewrite the normalized body to include projected invocation text. Query-time
+reads do not reopen provider history. Provider changes become searchable and
+visible to show after explicit import or daemon refresh publishes a new Core
+generation. `ctx show session` preserves provider event order.
 
-Exact `mcp_tool_call` server/tool metadata is not indexed and is not added to
-search inputs, filters, results, matching, ranking, snippets, or
-`why_matched`. Use log-mode `ctx show session`, `ctx show event`, or
-`ctx list events` and filter JSON/JSONL rows client-side when that metadata is
-needed.
+The top-level exact `mcp_tool_call: {server, tool}` attribution object remains
+metadata. That object is not indexed and adds no search input, filter, result
+field, selector, match, ranking signal, snippet, `why_matched` value, SQL column,
+or Local Pro fact. Use log-mode `ctx show session`, `ctx show event`, or
+`ctx list events` and filter JSON/JSONL rows client-side when exact attribution
+metadata is needed.
 
-Typed `mcp_exchange` content does not change that policy. The field itself,
-provider call IDs, arguments, response status/timing, and response payloads are
-not new Tantivy fields or tokens, semantic text, selectors, search result
-fields, ranking signals, snippets, SQL columns, or Local Pro facts. The event's
-existing normalized body keeps its pre-existing lexical and semantic
-eligibility; a response text disposition of `normalized_body` adds no second
-text copy. Retrieve the exchange with full-content show/list/MCP event output,
-not search. See [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
+The separately stored, content-governed `mcp_exchange.invocation` has a narrow
+lexical body projection. On a policy-selected record, ctx projects the
+invocation server value, tool value, and the compact JSON representation of
+arguments whose capture state is `present`. It adds no synthetic server/tool
+labels. `absent`, `unavailable`, and `omitted` arguments contribute no terms.
+These values use ordinary lexical body matching and ranking under the record's
+existing event type; they are not new fields or selectors.
+
+`mcp_exchange.provider_call_id` remains unsearchable metadata and adds no
+filter, selector, result field, ranking signal, or snippet. Response status,
+failure, timing, and structured payload capture are stored and retrievable in
+full-content event output but add no search terms. Response text represented by
+the `normalized_body` disposition retains the event's existing normalized-body
+search behavior exactly once; the exchange does not duplicate it.
+
+This projection adds no semantic text, filter, search result field, SQL column,
+Local Pro fact, or hidden network request. Sensitive invocation arguments can
+therefore become searchable in the local lexical index, but ctx does not send
+them over the network. The lexical projector revision participates in
+generation identity, so an older generation must be rebuilt or pass the narrow
+same-epoch preservation migration before the new terms are searchable; stored
+historical rows with no captured exchange remain unchanged. See
+[`mcp-exchange-capture.md`](mcp-exchange-capture.md).
 
 ## History reports
 

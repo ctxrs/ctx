@@ -534,50 +534,20 @@ fn deterministic_body(bytes: usize, sequence: u64) -> String {
     body
 }
 
-fn build_generated_predecessor(root: &Path, corpus: CorpusSpec) {
-    let _predecessor = TestCoreFingerprintOverride::set(SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT);
-    let source = source("migration-qualification.jsonl");
-    let options = WriterOptions {
-        indexer_threads: 1,
-        memory_bytes: INDEX_MEMORY_MIN_PER_THREAD,
-    };
-    let mut writer = GenerationWriter::open(root, options)
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    writer.begin_source(source.clone()).unwrap();
-    for sequence in 1..=corpus.documents {
-        let body = deterministic_body(corpus.body_bytes, sequence);
-        writer
-            .add_core_record(document(&source, sequence, &body))
-            .unwrap();
-    }
-    writer
-        .certify_source(certificate(&source, 1, corpus.documents))
-        .unwrap();
-    writer.commit(|_| true).unwrap();
-    let verified = VerifiedIndex::open(root).unwrap();
-    assert_eq!(verified.document_count(), corpus.documents);
-    assert_eq!(
-        verified.manifest().core_record_contract_fingerprint,
-        SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
-    );
-}
-
-fn relabel_as_current(root: &Path) {
-    let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
+fn relabel_active_manifest(root: &Path, mutate: impl FnOnce(&mut GenerationManifest)) {
     let pointer = load_active_generation_pointer(root).unwrap().unwrap();
     let index = open_slot_index(root, pointer.active()).unwrap();
     let metas = index.load_metas().unwrap();
     let publication = load_publication_for_metas(root, &metas).unwrap();
-    let predecessor_generation_id = publication.generation_id;
-    let mut current_manifest = publication.manifest;
-    current_manifest.core_record_contract_fingerprint = SUCCESSOR_CORE_FINGERPRINT.to_owned();
-    current_manifest.validate_contract().unwrap();
-    let current_generation_id = current_manifest.generation_id().unwrap();
-    write_manifest(root, &current_generation_id, &current_manifest).unwrap();
+    let prior_generation_id = publication.generation_id;
+    let mut manifest = publication.manifest;
+    mutate(&mut manifest);
+    manifest.validate_contract().unwrap();
+    let generation_id = manifest.generation_id().unwrap();
+    assert_ne!(generation_id, prior_generation_id);
+    write_manifest(root, &generation_id, &manifest).unwrap();
     let payload =
-        canonical_commit_payload(&current_generation_id, publication.metadata.as_deref()).unwrap();
+        canonical_commit_payload(&generation_id, publication.metadata.as_deref()).unwrap();
     let mut writer = index
         .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
         .unwrap();
@@ -589,20 +559,64 @@ fn relabel_as_current(root: &Path) {
     let generation_path = active_generation_path(root);
     sync_generation(&generation_path).unwrap();
     let slot = GenerationSlot::new(
-        current_generation_id,
+        generation_id,
         pointer.active().directory().to_owned(),
         physical_integrity_digest(&index, &generation_path).unwrap(),
     )
     .unwrap();
     publish_active_generation_pointer(root, &ActiveGenerationPointer::new(slot, None).unwrap())
         .unwrap();
-    fs::remove_file(manifest_path(root, &predecessor_generation_id)).unwrap();
-    sync_directory(
-        manifest_path(root, &predecessor_generation_id)
-            .parent()
-            .unwrap(),
-    )
-    .unwrap();
+    fs::remove_file(manifest_path(root, &prior_generation_id)).unwrap();
+    sync_directory(manifest_path(root, &prior_generation_id).parent().unwrap()).unwrap();
+}
+
+fn build_generated_predecessor(root: &Path, corpus: CorpusSpec) {
+    {
+        // Produce equivalent records through the current writer, then bind the
+        // generation to the exact deployed pre-projector-4 Core/policy pair.
+        let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
+        let source = source("migration-qualification.jsonl");
+        let options = WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: INDEX_MEMORY_MIN_PER_THREAD,
+        };
+        let mut writer = GenerationWriter::open(root, options)
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer.begin_source(source.clone()).unwrap();
+        for sequence in 1..=corpus.documents {
+            let body = deterministic_body(corpus.body_bytes, sequence);
+            writer
+                .add_core_record(document(&source, sequence, &body))
+                .unwrap();
+        }
+        writer
+            .certify_source(certificate(&source, 1, corpus.documents))
+            .unwrap();
+        writer.commit(|_| true).unwrap();
+        relabel_active_manifest(root, |manifest| {
+            manifest.core_record_contract_fingerprint =
+                SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT.to_owned();
+            manifest.policy_schema_hash =
+                SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH.to_owned();
+        });
+    }
+
+    let verified = VerifiedIndex::open(root).unwrap();
+    assert_eq!(verified.document_count(), corpus.documents);
+    assert_eq!(
+        verified.manifest().core_record_contract_fingerprint,
+        SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
+    );
+}
+
+fn relabel_as_current(root: &Path) {
+    let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
+    relabel_active_manifest(root, |manifest| {
+        manifest.core_record_contract_fingerprint = SUCCESSOR_CORE_FINGERPRINT.to_owned();
+        manifest.policy_schema_hash = current_source_generation_policy_hash().unwrap();
+    });
     assert!(!VerifiedIndex::open(root)
         .unwrap()
         .uses_allowlisted_predecessor_contract());

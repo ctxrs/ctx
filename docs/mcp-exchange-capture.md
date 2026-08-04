@@ -129,13 +129,19 @@ into one synthetic event.
 
 | Provider route | Event shape | Parser revision |
 | --- | --- | --- |
-| Codex session JSONL, including versioned lanes | The combined terminal record can carry invocation and response together. | `codex-nativepath-core-record-v15` |
+| Codex session JSONL, including versioned lanes | The combined terminal record can carry invocation and response together. | `codex-nativepath-core-record-v16-aggregate-content-admission` |
 | Warp SQLite | Separate call and result records carry invocation and response respectively, linked by the native call ID. | `warp-source-backed-logical-v5` |
-| Copilot CLI JSONL | Separate start and completion records carry invocation and response respectively, linked by the native call ID. | `copilot-cli-direct-native-jsonl-v5-mcp-exchange` |
+| Copilot CLI JSONL | Separate start and completion records carry invocation and response respectively, linked by the native call ID. | `copilot-cli-direct-native-jsonl-v6-mcp-start-generic-body` |
 
 No other provider route currently publishes this typed capture. This provider
 coverage does not change exact top-level attribution qualification or general
 provider import support.
+
+Search class follows the event type of the record that owns the capture.
+Separate Warp and Copilot CLI invocation records are calls. The combined Codex
+terminal record is one `tool_output`, so its normalized response text and any
+projected invocation terms are found under `outputs`, not `calls`. ctx does not
+duplicate or dual-classify that event.
 
 ## Content policy, projection, and limits
 
@@ -169,18 +175,34 @@ Core contract migration, existing rows keep `mcp_exchange` absent; migration
 does not reopen provider sources. A later ordinary provider refresh or
 reimport can populate the field when the source is still available.
 
-Capture does not change indexing. `mcp_exchange`, provider call IDs, arguments,
-response status/timing, and response payloads are not Tantivy fields or tokens,
-selectors, semantic text, ranking signals, snippets, SQL columns, or Local Pro
-facts. The existing normalized body keeps its pre-existing lexical and semantic
-eligibility; the `normalized_body` text disposition creates no new text.
+Lexical search derives a narrow body projection from policy-selected invocation
+content. `invocation.server`, `invocation.tool`, and the compact JSON value of
+`present` arguments contribute ordinary body-search terms without synthetic
+server/tool labels. `absent`, `unavailable`, and `omitted` arguments contribute
+no terms.
+
+The provider call ID, response status, failure kind, timing, and structured
+response payload remain stored and retrievable but unsearchable. Response text
+with the `normalized_body` disposition retains the event's existing body-search
+behavior exactly once; capture does not append a duplicate. The projection adds
+no semantic text, selector, filter, search result field, SQL column, Local Pro
+fact, or hidden network request.
+
+Full show/list/MCP/SDK output remains exact stored-content retrieval. Search
+snippets instead come from the Core-backed searchable projection and can
+therefore contain projected invocation content. Because the lexical projector
+revision participates in generation identity, an older generation must be
+rebuilt or pass the documented narrow same-epoch preservation migration before
+these terms become searchable. Historical Core rows that have no captured
+exchange remain unchanged.
 
 ## Privacy and network behavior
 
 MCP arguments and responses can contain credentials, personal data, private
-repository details, absolute paths, or proprietary output. Exact machine
-output is private local content and is not share-safe without review. MCP hosts
-may log or forward returned results.
+repository details, absolute paths, or proprietary output. Present invocation
+arguments become searchable in the local lexical index. Exact machine output
+and local search results are private content and are not share-safe without
+review. MCP hosts may log or forward returned results.
 
 Import, storage, and local retrieval of the exchange add no hidden network
 request. ctx does not send the captured invocation or response anywhere by

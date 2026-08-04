@@ -11,6 +11,11 @@ synthesize or qualify the other. See
 [`mcp-exchange-capture.md`](mcp-exchange-capture.md) for arguments, response
 payloads, call IDs, status, timing, and capture-state semantics.
 
+The top-level `mcp_tool_call` object remains unsearchable attribution metadata.
+A policy-selected `mcp_exchange.invocation` on the same record is a separate
+content source whose server, tool, and `present` arguments can contribute to
+ordinary lexical body search.
+
 ## Wire contract
 
 Attributed CLI/Core event rows add one optional snake_case object:
@@ -61,7 +66,7 @@ Deep Agents hosted trace. Capability revision 3 exact providers are
 Codex, Warp, and Copilot CLI. The exact full tuples are:
 
 - Codex `codex_session_jsonl_tree` / `codex-nativepath-jsonl-v0`, parser
-  `codex-nativepath-core-record-v15`, for unversioned producer generation 1
+  `codex-nativepath-core-record-v16-aggregate-content-admission`, for unversioned producer generation 1
   only. Codex producer versions 0.200.0, 0.201.0, and 0.202.0 are separate
   explicit `not-qualified` lanes and never inherit that exact status.
 - Warp `warp_sqlite` / `warp-agent-task-protobuf-v1`, parser
@@ -70,7 +75,7 @@ Codex, Warp, and Copilot CLI. The exact full tuples are:
   runtime-observable writer-version selectors.
 - Copilot CLI `copilot_cli_session_events_jsonl` /
   `copilot-cli-direct-native-jsonl-v1`, parser
-  `copilot-cli-direct-native-jsonl-v5-mcp-exchange`, for
+  `copilot-cli-direct-native-jsonl-v6-mcp-start-generic-body`, for
   strict unversioned format generation 1. Versions 0.0.393 and 1.0.77 and the
   pinned source commit are observed evidence, not runtime admission selectors.
 
@@ -119,11 +124,15 @@ ctx list events --provider codex --content none --format jsonl |
     {ctx_event_id, ctx_session_id, mcp_tool_call}'
 ```
 
-This is client-side filtering after ctx emits each JSONL row. There is no
-server/tool filter, no search, no query selector, and no SQL access for this
-metadata. In particular, there is no `--mcp-server` or `--mcp-tool` selector;
-the names are not a search input, search result field, ranking signal, snippet
-source, or SQL column.
+This is client-side filtering after ctx emits each JSONL row. For the top-level
+attribution metadata, there is no server/tool filter, no search, no query
+selector, and no SQL access. In particular, there is no `--mcp-server` or
+`--mcp-tool` selector. Here, "no search" means the top-level pair is not itself
+a search input, search result field, ranking signal, snippet source, or SQL
+column. A text query can match the same values only when they are separately
+retained in a policy-selected `mcp_exchange.invocation` and projected as
+ordinary lexical body content; that does not turn search results into exact
+attribution records.
 
 Full-content JSON/JSONL can additionally expose `mcp_exchange`. The
 `--content text` and `--content none` projections omit that content field while
@@ -159,9 +168,13 @@ graph. Reimport recomputes the field from provider history; query paths never
 reparse provider-specific structured content or consult current MCP config.
 
 The separate optional `mcp_exchange` is stored as content on selected Core
-events. Its call ID, arguments, status/timing, and response payload are not
-lexical or semantic fields, SQL columns, usage aggregates, or Local Pro facts.
-Existing normalized-body indexing behavior is unchanged.
+events. Its invocation server, tool, and compact `present` argument JSON are
+projected into ordinary lexical body search under the record's existing event
+type. Other argument capture states add no terms. Its provider call ID and
+response status/failure/timing/payload remain unsearchable, and response text
+with a `normalized_body` disposition retains existing body search exactly once.
+The exchange adds no semantic text, selector, filter, search result field, SQL
+column, usage aggregate, or Local Pro fact.
 
 During the one allowlisted transition from the immediately preceding
 self-contained Core contract, ctx republishes verified records with
