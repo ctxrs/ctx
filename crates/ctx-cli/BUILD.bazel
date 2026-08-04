@@ -73,6 +73,15 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-refresh:lib",
+    "//crates/ctx-pro-host-protocol:lib",
+]
+
+CTX_CLI_TEST_DEPS = [
+    "//crates/ctx-history-capture:lib",
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-refresh:test_support_lib",
     "//crates/ctx-pro-host-protocol:lib",
 ]
 
@@ -94,7 +103,6 @@ RUST_SRCS = glob(["src/**/*.rs"])
 # These files are test-only after parsing, but their parent modules reach them
 # through unconditional include! calls, so production rustc actions need them.
 PROD_INCLUDE_SRCS = [
-    "src/commands/import/explicit_source_catalog/tests.rs",
     "src/commands/source_index/tests.rs",
 ]
 
@@ -221,7 +229,7 @@ ctx_rust_test(
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
-    ) + CTX_CLI_DEPS,
+    ) + CTX_CLI_TEST_DEPS,
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,

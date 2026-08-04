@@ -11,9 +11,9 @@ use crate::semantic::query_service::{
 
 const TEST_ENDPOINT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
-fn short_socket_root() -> Result<tempfile::TempDir> {
+fn short_data_root() -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
-        .prefix("ctx-294-sock-")
+        .prefix("ctx-refresh-")
         .tempdir_in("/tmp")
         .map_err(Into::into)
 }
@@ -27,9 +27,8 @@ fn source_refresh_endpoint(socket_path: &Path) -> DaemonQueryEndpoint {
 
 #[test]
 fn pre_submission_connection_refusal_remains_typed_unavailable() -> Result<()> {
-    let data_root = tempfile::tempdir()?;
-    let socket_root = short_socket_root()?;
-    let socket_path = socket_root.path().join("refused.sock");
+    let data_root = short_data_root()?;
+    let socket_path = data_root.path().join("refused.sock");
     let listener = UnixListener::bind(&socket_path)?;
     drop(listener);
     write_daemon_service_endpoint(
@@ -58,9 +57,8 @@ fn pre_submission_connection_refusal_remains_typed_unavailable() -> Result<()> {
 
 #[test]
 fn same_id_reenqueue_replays_the_exact_payload_after_a_lost_ack() -> Result<()> {
-    let data_root = tempfile::tempdir()?;
-    let socket_root = short_socket_root()?;
-    let socket_path = socket_root.path().join("lost-ack.sock");
+    let data_root = short_data_root()?;
+    let socket_path = data_root.path().join("lost-ack.sock");
     let listener = UnixListener::bind(&socket_path)?;
     write_daemon_service_endpoint(
         data_root.path(),
@@ -110,9 +108,8 @@ fn same_id_reenqueue_replays_the_exact_payload_after_a_lost_ack() -> Result<()> 
 
 #[test]
 fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> Result<()> {
-    let data_root = tempfile::tempdir()?;
-    let socket_root = short_socket_root()?;
-    let socket_path = socket_root.path().join("lost-all-acks.sock");
+    let data_root = short_data_root()?;
+    let socket_path = data_root.path().join("lost-all-acks.sock");
     let listener = UnixListener::bind(&socket_path)?;
     write_daemon_service_endpoint(
         data_root.path(),
@@ -161,9 +158,8 @@ fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> R
 
 #[test]
 fn typed_unknown_readmission_preserves_lost_ack_retention_uncertainty() -> Result<()> {
-    let data_root = tempfile::tempdir()?;
-    let socket_root = short_socket_root()?;
-    let socket_path = socket_root.path().join("typed-unknown-lost-acks.sock");
+    let data_root = short_data_root()?;
+    let socket_path = data_root.path().join("typed-unknown-lost-acks.sock");
     let listener = UnixListener::bind(&socket_path)?;
     write_daemon_service_endpoint(
         data_root.path(),

@@ -14,7 +14,6 @@ use std::{
 
 use super::*;
 use crate::analytics::{ProviderRefreshCompletedV1, Surface};
-use crate::semantic::dirty_source_routes::EventWatermark;
 use crate::semantic::source_backed_refresh_coordinator::{
     source_backed_index_root, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
     SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
@@ -31,6 +30,7 @@ use ctx_history_core::{
     SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, WriterOptions};
+use ctx_history_refresh::EventWatermark;
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
@@ -1238,11 +1238,11 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
 
 #[test]
 fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
-    use super::super::dirty_source_routes::EventWatermark;
     use super::super::source_backed_refresh_coordinator::{
         SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshPublication,
         SourceBackedRefreshTimings,
     };
+    use ctx_history_refresh::EventWatermark;
 
     let temp = tempfile::tempdir()?;
     let route = ctx_history_index::SourceRouteIdentity::from_sha256("42".repeat(32))?;

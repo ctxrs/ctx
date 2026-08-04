@@ -6,9 +6,19 @@ use super::client::{
 };
 use super::*;
 
-use crate::semantic::{
-    model_runtime::SharedSemanticRuntime,
-    query_service::start_daemon_source_refresh_service_with_request_timeout,
+use std::sync::{Arc, Mutex};
+
+use ctx_history_index::WriterOptions;
+
+use crate::{
+    commands::import::load_explicit_source_catalog_authority,
+    semantic::{
+        model_runtime::SharedSemanticRuntime,
+        paths_status::{
+            daemon_source_backed_refresh_job_path, read_daemon_job_status, write_daemon_job_status,
+        },
+        query_service::start_daemon_source_refresh_service_with_request_timeout,
+    },
 };
 
 #[test]

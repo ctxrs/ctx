@@ -811,7 +811,7 @@ fn recover_source_refresh_coordinator_before_ipc(
     runtime: &mut DaemonRuntime,
     data_root: &Path,
 ) -> Result<Arc<CoreRefreshEngine>> {
-    let source_refresh = Arc::new(CoreRefreshEngine::new());
+    let source_refresh = Arc::new(super::source_backed_refresh_adapter::refresh_engine());
     recover_source_refresh_before_background_cadence(
         runtime,
         data_root,

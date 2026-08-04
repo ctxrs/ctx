@@ -48,7 +48,7 @@ fn persistent_admission_status_failure_uses_scheduler_backoff() {
     );
     let request_id = "019fcaaa-0000-7000-8000-0000000002b0";
     coordinator
-        .handle_listener_ipc_request(
+        .handle_ipc_request(
             &data_root,
             &json!({
                 "schema_version": 1,
@@ -61,7 +61,6 @@ fn persistent_admission_status_failure_uses_scheduler_backoff() {
         )
         .unwrap()
         .expect("durable pending admission");
-    coordinator.finish_listener_admission_response(request_id);
     let mut runtime = DaemonRuntime::default();
     runtime.config.daemon.mode = DaemonMode::SourceRefreshOnly;
 

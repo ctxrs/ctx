@@ -51,6 +51,7 @@ zstd.workspace = true
 ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-refresh = { path = "../ctx-history-refresh" }
 ctx-pro-host-protocol = { path = "../ctx-pro-host-protocol" }
 
 [target.'cfg(unix)'.dependencies]
@@ -84,6 +85,7 @@ hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rus
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "cuda", "directml"] }
 [dev-dependencies]
 assert_cmd.workspace = true
+ctx-history-refresh = { path = "../ctx-history-refresh", features = ["test-support"] }
 predicates.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

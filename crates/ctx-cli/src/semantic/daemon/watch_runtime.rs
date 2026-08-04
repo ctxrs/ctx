@@ -6,11 +6,11 @@ use crate::semantic::{
         write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup, DaemonWatchCatalog,
         SourceWatchBatch,
     },
-    dirty_source_routes::EventWatermark,
     source_backed_refresh_coordinator::{source_backed_watch_catalog, CoreRefreshEngine},
 };
 use anyhow::Result;
 use ctx_history_capture::SourceBackedWatchCatalog;
+use ctx_history_refresh::EventWatermark;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum WatchCatalogReconcileTrigger {

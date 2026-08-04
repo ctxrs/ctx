@@ -77,6 +77,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-core:cargo_package_data",
     "//crates/ctx-history-index:cargo_package_data",
+    "//crates/ctx-history-refresh:cargo_package_data",
     "//crates/ctx-pro-host-protocol:cargo_package_data",
     "//crates/ctx-protocol:cargo_package_data",
     "//crates/ctx-sdk:cargo_package_data",
@@ -90,6 +91,7 @@ LOC_CHECK_DATA = [
     "//crates/ctx-history-capture:loc_check_inputs",
     "//crates/ctx-history-core:loc_check_inputs",
     "//crates/ctx-history-index:loc_check_inputs",
+    "//crates/ctx-history-refresh:loc_check_inputs",
     "//crates/ctx-pro-host-protocol:loc_check_inputs",
     "//crates/ctx-protocol:loc_check_inputs",
     "//crates/ctx-sdk:loc_check_inputs",
@@ -109,6 +111,7 @@ RELEASE_PACKAGE_AUDIT_DATA = NON_RUST_GATE_DATA + [
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-core:cargo_package_data",
     "//crates/ctx-history-index:cargo_package_data",
+    "//crates/ctx-history-refresh:cargo_package_data",
 ]
 
 REAL_HARNESS_DATA = NON_RUST_GATE_DATA + ["//crates/ctx-cli:ctx"]
@@ -540,6 +543,7 @@ configured_license_materials(
         "//crates/ctx-history-capture:Cargo.toml",
         "//crates/ctx-history-core:Cargo.toml",
         "//crates/ctx-history-index:Cargo.toml",
+        "//crates/ctx-history-refresh:Cargo.toml",
         "//crates/ctx-pro-host-protocol:Cargo.toml",
         "//crates/ctx-protocol:Cargo.toml",
         "//crates/ctx-sdk:Cargo.toml",

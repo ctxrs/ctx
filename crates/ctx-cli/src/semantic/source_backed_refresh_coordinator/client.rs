@@ -894,20 +894,6 @@ pub(super) fn source_refresh_request_is_unknown(
     }
 }
 
-pub(super) fn unknown_refresh_request_response(request_id: &str) -> Value {
-    compact_json(json!({
-        "ok": false,
-        "schema_version": 1,
-        "owner": "daemon",
-        "request_id": request_id,
-        "request_state": SOURCE_REFRESH_UNKNOWN_REQUEST_STATE,
-        "error_code": SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE,
-        "reason": "request_not_retained_after_restart",
-        "retryable": true,
-        "error": "source refresh request is not retained by this daemon process",
-    }))
-}
-
 fn daemon_unavailable_fallback(
     data_root: &Path,
     mode: SourceBackedRefreshMode,

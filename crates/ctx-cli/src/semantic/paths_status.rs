@@ -344,13 +344,6 @@ pub(super) fn write_private_json_file(path: &Path, value: &Value) -> Result<()> 
     write_private_json_file_with_permissions(path, value, secure_private_file_permissions)
 }
 
-#[cfg(test)]
-pub(super) fn write_private_json_with_chmod_fault(path: &Path, value: &Value) -> Result<()> {
-    write_private_json_file_with_permissions(path, value, |_| {
-        anyhow::bail!("injected chmod failure")
-    })
-}
-
 fn write_private_json_file_with_permissions(
     path: &Path,
     value: &Value,
