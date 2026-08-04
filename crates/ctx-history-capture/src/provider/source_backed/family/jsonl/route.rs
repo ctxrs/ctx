@@ -193,8 +193,8 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
     /// Returns an independent dependency partition for one leaf. When every
     /// selected leaf has a partition, the shared scheduler admits a bounded
     /// wave of partitions and runs each dependency-phase frontier across that
-    /// wave in parallel. Partition-local adapter state remains live from the
-    /// begin hook through the matching finish hook.
+    /// wave on fixed logical cache lanes. Partition-local adapter state remains
+    /// live from the begin hook through the matching finish hook.
     fn leaf_scan_partition(&self, _leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
         Ok(None)
     }

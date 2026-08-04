@@ -1954,7 +1954,40 @@ fn partition_lifecycle_ids_are_separate_from_frontier_worker_lanes() {
 }
 
 #[test]
-fn partition_worker_contexts_are_bounded_and_clear_source_semantic_state() {
+fn partition_waves_admit_largest_components_first() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    for partition in 0..17 {
+        write_scheduler_test_leaf(&root, partition, 0, 0);
+    }
+    fs::write(
+        root.join("partition-16-phase-0-leaf-0.jsonl"),
+        b"{\"message\":\"large scheduler component\"}\n".repeat(128),
+    )
+    .unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let adapter = SchedulerStateTestAdapter {
+        repository: scheduler_test_repository(temp.path()),
+        attributed_partitions: Vec::new(),
+        failing_leaf: None,
+        parallel_frontier: None,
+        events: Arc::clone(&events),
+    };
+
+    run_scheduler_test_capture(&adapter, &root, &temp.path().join("index"), 4).unwrap();
+    let events = events.lock().unwrap();
+    let first_hook = events.iter().find(|event| {
+        matches!(
+            event,
+            SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_)
+        )
+    });
+    assert_eq!(first_hook, Some(&SchedulerStateEvent::Begin(16)));
+}
+
+#[test]
+fn partition_logical_cache_lanes_are_fixed_and_clear_source_semantic_state() {
     for workers in [1, 4, 16] {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let root = temp.path().join("sessions");
@@ -1985,23 +2018,28 @@ fn partition_worker_contexts_are_bounded_and_clear_source_semantic_state() {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let mut expected_hooks = Vec::new();
-        for wave_start in (0..32).step_by(workers) {
-            let wave_end = (wave_start + workers).min(32);
-            expected_hooks.extend(
-                (wave_start..wave_end)
-                    .map(|partition| SchedulerStateEvent::Begin(partition as u64)),
-            );
-            expected_hooks.extend(
-                (wave_start..wave_end)
-                    .rev()
-                    .map(|partition| SchedulerStateEvent::Finish(partition as u64)),
-            );
+        assert_eq!(hooks.len(), 64);
+        let mut begun_partitions = Vec::new();
+        for wave in hooks.chunks(32) {
+            let begun = wave[..16]
+                .iter()
+                .map(|event| match event {
+                    SchedulerStateEvent::Begin(partition) => *partition,
+                    _ => panic!("partition wave did not begin before finishing"),
+                })
+                .collect::<Vec<_>>();
+            let finished = wave[16..]
+                .iter()
+                .map(|event| match event {
+                    SchedulerStateEvent::Finish(partition) => *partition,
+                    _ => panic!("partition wave did not finish in its closing half"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(finished, begun.iter().rev().copied().collect::<Vec<_>>());
+            begun_partitions.extend(begun);
         }
-        assert_eq!(
-            hooks, expected_hooks,
-            "partition waves must be deterministic with {workers} physical workers"
-        );
+        begun_partitions.sort_unstable();
+        assert_eq!(begun_partitions, (0_u64..32).collect::<Vec<_>>());
 
         let mut projects = events
             .iter()
@@ -2029,8 +2067,8 @@ fn partition_worker_contexts_are_bounded_and_clear_source_semantic_state() {
             .map(|(_, before, after, _, _)| after.saturating_sub(*before))
             .sum::<usize>();
         assert_eq!(
-            full_probes, workers,
-            "same-repository components must reuse only the runner's bounded physical worker contexts"
+            full_probes, 16,
+            "same-repository components must reuse fixed logical cache lanes independently of physical workers"
         );
         for (leaf, _, _, event_entries_before, event_entries_after) in &projects {
             assert_eq!(
