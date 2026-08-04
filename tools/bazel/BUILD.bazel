@@ -73,6 +73,7 @@ cargo_vendor_sources(
         "@crates//:serde_json-1.0.150",
         "@crates//:tempfile-3.27.0",
         "@crates//:thiserror-1.0.69",
+        "@crates//:windows-sys-0.61.2",
     ],
 )
 

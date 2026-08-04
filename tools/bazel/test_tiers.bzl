@@ -161,6 +161,7 @@ CI_TESTS = [
     ":rust_toolchain_pin_mutation_tests",
     ":rustfmt_check",
     ":sdk_contract_checks",
+    ":sdk_no_publish_policy_tests",
     ":sdk_package_dry_run",
     ":source_diff_check",
     ":stage_github_release_assets_tests",

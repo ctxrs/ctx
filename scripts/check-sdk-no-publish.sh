@@ -29,15 +29,42 @@ require_file_contains crates/ctx-protocol/Cargo.toml '^publish[[:space:]]*=[[:sp
 require_file_contains sdks/dotnet/src/Ctx.AgentHistory/Ctx.AgentHistory.csproj '<IsPackable>false</IsPackable>' \
   '.NET SDK project must keep IsPackable=false until NuGet publishing is intentional'
 
-if rg -n --glob '!scripts/check-sdk-no-publish.sh' \
-  --glob '!contracts/agent-history-v1/README.md' \
-  --glob '!docs/sdk-production-readiness.md' \
-  --glob '!sdks/**/README.md' \
-  --glob '!crates/ctx-sdk/README.md' \
-  --glob '!target/**' \
-  --glob '!bazel-*' \
-  -e '(^|[[:space:]])(npm publish|twine upload|cargo publish|dotnet nuget push|gradle publish|mvn deploy|swift package-registry publish)([[:space:]]|$)' \
-  .; then
+publish_pattern='(^|[[:space:]])(npm publish|twine upload|cargo publish|dotnet nuget push|gradle publish|mvn deploy|swift package-registry publish)([[:space:]]|$)'
+publish_command_found=false
+publish_scan_failed=false
+
+shopt -s globstar nullglob
+for file in **/*; do
+  case "$file" in
+    scripts/check-sdk-no-publish.sh | \
+      contracts/agent-history-v1/README.md | \
+      docs/sdk-production-readiness.md | \
+      sdks/*/README.md | \
+      crates/ctx-sdk/README.md | \
+      target/* | \
+      bazel-* | \
+      bazel-*/*)
+      continue
+      ;;
+  esac
+  [[ -f "$file" ]] || continue
+
+  if grep -nHE "$publish_pattern" "$file"; then
+    publish_command_found=true
+  else
+    status=$?
+    if [[ "$status" -ne 1 ]]; then
+      printf 'SDK publish guard scan failed for %s (grep status %s)\n' \
+        "$file" "$status" >&2
+      publish_scan_failed=true
+    fi
+  fi
+done
+
+if [[ "$publish_scan_failed" == true ]]; then
+  fail 'could not inspect every SDK publish-policy input'
+fi
+if [[ "$publish_command_found" == true ]]; then
   fail 'live SDK package-manager publish command found outside docs/policy text'
 fi
 

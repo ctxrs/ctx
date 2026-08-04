@@ -824,6 +824,11 @@ non_rust_gate(
         "//crates/ctx-sdk:cargo_package_data",
     ],
 )
+sh_test(
+    name = "sdk_no_publish_policy_tests",
+    srcs = ["scripts/tests/check-sdk-no-publish-test.sh"],
+    data = ["scripts/check-sdk-no-publish.sh"],
+)
 non_rust_gate(
     name = "sdk_package_dry_run",
     mode = "sdk_package_dry_run",
