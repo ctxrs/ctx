@@ -384,13 +384,19 @@ fn nanoclaw_exact_cwd_sources_are_native_and_auto_imported() {
 }
 
 #[test]
-fn nanoclaw_service_registration_import_all_indexes_without_exact_cwd() {
+fn nanoclaw_service_registration_import_all_indexes_two_checkouts_without_exact_cwd() {
     let temp = tempdir();
-    let query = "nanoclaw-service-registration-import-all-oracle";
-    let fixture = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
-    let project = temp.path().join("registered NanoClaw checkout");
-    fs::rename(&fixture, &project).unwrap();
-    write_nanoclaw_systemd_registration(&temp, &project);
+    let first_query = "zephyrcobaltquasar";
+    let first_fixture = PathBuf::from(write_native_nanoclaw_fixture(&temp, first_query));
+    let first_project = temp.path().join("registered NanoClaw checkout one");
+    fs::rename(&first_fixture, &first_project).unwrap();
+    write_nanoclaw_systemd_registration(&temp, &first_project);
+
+    let second_query = "marigoldvelvetpulsar";
+    let second_fixture = PathBuf::from(write_native_nanoclaw_fixture(&temp, second_query));
+    let second_project = temp.path().join("registered NanoClaw checkout two");
+    fs::rename(&second_fixture, &second_project).unwrap();
+    write_nanoclaw_systemd_registration(&temp, &second_project);
     let unrelated_cwd = temp.path().join("unrelated-cwd");
     fs::create_dir_all(&unrelated_cwd).unwrap();
 
@@ -398,15 +404,24 @@ fn nanoclaw_service_registration_import_all_indexes_without_exact_cwd() {
     sources_command.current_dir(&unrelated_cwd);
     let sources =
         json_output(sources_command.args(["sources", "--provider", "nanoclaw", "--format=json"]));
-    let nanoclaw = sources["sources"]
+    let mut nanoclaw_paths = sources["sources"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|source| source["provider"] == "nanoclaw")
-        .unwrap_or_else(|| panic!("missing registered NanoClaw source in {sources:#}"));
-    assert_eq!(nanoclaw["path"], project.to_str().unwrap());
-    assert_eq!(nanoclaw["status"], "available");
-    assert_eq!(nanoclaw["import_support"], "native");
+        .filter(|source| source["provider"] == "nanoclaw")
+        .map(|source| {
+            assert_eq!(source["status"], "available");
+            assert_eq!(source["import_support"], "native");
+            source["path"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    nanoclaw_paths.sort();
+    let mut expected_paths = vec![
+        first_project.to_str().unwrap().to_owned(),
+        second_project.to_str().unwrap().to_owned(),
+    ];
+    expected_paths.sort();
+    assert_eq!(nanoclaw_paths, expected_paths, "{sources:#}");
 
     let mut import_command = ctx(&temp);
     import_command.current_dir(&unrelated_cwd);
@@ -418,11 +433,11 @@ fn nanoclaw_service_registration_import_all_indexes_without_exact_cwd() {
         "none",
     ]));
     assert_eq!(
-        imported["totals"]["current_source_count"], 1,
+        imported["totals"]["current_source_count"], 2,
         "{imported:#}"
     );
     assert_eq!(
-        imported["totals"]["current_indexed_documents"], 2,
+        imported["totals"]["current_indexed_documents"], 4,
         "{imported:#}"
     );
 
@@ -430,18 +445,20 @@ fn nanoclaw_service_registration_import_all_indexes_without_exact_cwd() {
     // searching so no background refresh can race the refresh-off assertion.
     json_output(ctx(&temp).args(["daemon", "disable", "--format=json"]));
 
-    let mut search_command = ctx(&temp);
-    search_command.current_dir(&unrelated_cwd);
-    let search = json_output(search_command.args([
-        "search",
-        query,
-        "--provider",
-        "nanoclaw",
-        "--refresh",
-        "off",
-        "--format=json",
-    ]));
-    assert_search_provider_oracle(&search, "nanoclaw", query, 1, "message");
+    for query in [first_query, second_query] {
+        let mut search_command = ctx(&temp);
+        search_command.current_dir(&unrelated_cwd);
+        let search = json_output(search_command.args([
+            "search",
+            query,
+            "--provider",
+            "nanoclaw",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+        assert_search_provider_oracle(&search, "nanoclaw", query, 1, "message");
+    }
 }
 
 fn write_nanoclaw_systemd_registration(temp: &TempDir, project: &Path) {

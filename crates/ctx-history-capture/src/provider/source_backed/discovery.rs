@@ -433,8 +433,9 @@ fn nanoclaw_automatic_catalog_lineage(source: &ProviderSource) -> [u8; 32] {
     digest.update(source.provider.as_str().as_bytes());
     digest.update(b"\0");
     digest.update(source.source_format.as_bytes());
-    digest.update(b"\0");
-    digest.update(source.path.to_string_lossy().as_bytes());
+    let path = source.path.as_os_str().as_encoded_bytes();
+    digest.update((path.len() as u64).to_be_bytes());
+    digest.update(path);
     digest.finalize().into()
 }
 

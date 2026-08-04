@@ -873,7 +873,13 @@ fn source_backed_route_identity(
             b"selected-with-retained-explicit".as_slice()
         }
     });
-    if selection == SourceBackedRouteSelection::ExplicitManual {
+    // Discovered-winner routes deliberately keep path-independent identity so
+    // moving the selected provider root remains an in-place replacement.
+    // Catalog-lineage routes instead represent independently owned catalogs;
+    // automatic NanoClaw discovery may therefore register several checkouts.
+    if selection == SourceBackedRouteSelection::ExplicitManual
+        || selector_authority == SourceBackedSelectorAuthority::CatalogLineage
+    {
         let path = source.path.as_os_str().as_encoded_bytes();
         digest.update((path.len() as u64).to_be_bytes());
         digest.update(path);

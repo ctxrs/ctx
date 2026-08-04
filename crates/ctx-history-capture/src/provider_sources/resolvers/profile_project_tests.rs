@@ -411,6 +411,37 @@ fn nanoclaw_over_limit_registry_reports_selector_limit_at_registry_directory() {
 
 #[cfg(unix)]
 #[test]
+fn nanoclaw_systemd_registry_ignores_unrelated_symlinks_and_reads_valid_unit() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("nanoclaw");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    let unit = write_nanoclaw_systemd_unit(&home, &project);
+    let registry = unit.parent().unwrap();
+
+    let unrelated_unit = temp.path().join("unrelated.service");
+    let unrelated_wants = temp.path().join("multi-user.target.wants");
+    write(&unrelated_unit, "[Service]\nExecStart=/bin/true\n");
+    fs::create_dir_all(&unrelated_wants).unwrap();
+    symlink(
+        &unrelated_unit,
+        registry.join("dbus-org.freedesktop.timesync1.service"),
+    )
+    .unwrap();
+    symlink(&unrelated_wants, registry.join("multi-user.target.wants")).unwrap();
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert_eq!(report.issues, []);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, project);
+}
+
+#[cfg(unix)]
+#[test]
 fn nanoclaw_unsafe_registry_reports_selector_issue_at_registry_directory() {
     use std::os::unix::fs::symlink;
 

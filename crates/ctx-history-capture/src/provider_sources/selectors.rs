@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    ffi::{OsStr, OsString},
     io::ErrorKind,
     path::{Path, PathBuf},
 };
@@ -527,6 +528,25 @@ pub(super) fn read_bounded_bytes(
 }
 
 pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadError> {
+    direct_entries_filtered(path, |_| true, false)
+}
+
+/// Enumerates one bounded directory by name, then opens and revalidates only
+/// selected children. Non-matching entries still count toward the directory
+/// bound and the closing name-set check, but cannot make an allowlisted
+/// registry unreadable merely because they are links or other unsafe objects.
+pub(super) fn direct_regular_files_matching(
+    path: &Path,
+    matches_name: impl Fn(&OsStr) -> bool,
+) -> Result<Vec<PathBuf>, SelectorReadError> {
+    direct_entries_filtered(path, matches_name, true)
+}
+
+fn direct_entries_filtered(
+    path: &Path,
+    matches_name: impl Fn(&OsStr) -> bool,
+    regular_files_only: bool,
+) -> Result<Vec<PathBuf>, SelectorReadError> {
     let opened = open_provider_source_path(path).map_err(selector_open_error)?;
     let OpenedProviderSourcePath::Directory(directory) = opened else {
         return Err(SelectorReadError::Unavailable);
@@ -545,11 +565,18 @@ pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadEr
         return Err(SelectorReadError::DirectoryLimit);
     }
 
-    let mut fingerprints = Vec::with_capacity(names.len());
-    for name in &names {
-        let child = directory.open_child(name).map_err(selector_open_error)?;
+    let matching_names = names
+        .iter()
+        .filter(|name| matches_name(name.as_os_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut fingerprints: Vec<(OsString, [u8; 32], bool)> =
+        Vec::with_capacity(matching_names.len());
+    for name in matching_names {
+        let child = directory.open_child(&name).map_err(selector_open_error)?;
         revalidate_opened_path(&child).map_err(selector_open_error)?;
-        fingerprints.push(child.authority_fingerprint());
+        let is_regular_file = matches!(&child, OpenedProviderSourcePath::File(_));
+        fingerprints.push((name, child.authority_fingerprint(), is_regular_file));
     }
     directory.revalidate().map_err(selector_open_error)?;
     authority.revalidate().map_err(selector_open_error)?;
@@ -567,9 +594,11 @@ pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadEr
     if closing_names != names {
         return Err(SelectorReadError::Unavailable);
     }
-    for (name, fingerprint) in names.iter().zip(fingerprints) {
+    for (name, fingerprint, is_regular_file) in &fingerprints {
         let child = directory.open_child(name).map_err(selector_open_error)?;
-        if child.authority_fingerprint() != fingerprint {
+        if child.authority_fingerprint() != *fingerprint
+            || matches!(&child, OpenedProviderSourcePath::File(_)) != *is_regular_file
+        {
             return Err(SelectorReadError::Unavailable);
         }
         revalidate_opened_path(&child).map_err(selector_open_error)?;
@@ -577,9 +606,10 @@ pub(super) fn direct_entries(path: &Path) -> Result<Vec<PathBuf>, SelectorReadEr
     directory.revalidate().map_err(selector_open_error)?;
     authority.revalidate().map_err(selector_open_error)?;
 
-    let mut paths = names
+    let mut paths = fingerprints
         .into_iter()
-        .map(|name| path.join(name))
+        .filter(|(_, _, is_regular_file)| !regular_files_only || *is_regular_file)
+        .map(|(name, _, _)| path.join(name))
         .collect::<Vec<_>>();
     sort_paths(&mut paths);
     Ok(paths)
@@ -903,6 +933,36 @@ mod tests {
         );
         assert_eq!(
             direct_entries(&linked_root),
+            Err(SelectorReadError::UnsupportedRoot)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_regular_file_filter_ignores_unmatched_links_but_rejects_matching_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let entries = temp.path().join("entries");
+        let outside = temp.path().join("outside.service");
+        std::fs::create_dir_all(&entries).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        let official = entries.join("nanoclaw-v2-aaaaaaaa.service");
+        std::fs::write(&official, "official").unwrap();
+        symlink(&outside, entries.join("unrelated.service")).unwrap();
+
+        let nanoclaw_name = |name: &OsStr| {
+            name.to_str()
+                .is_some_and(|name| name.starts_with("nanoclaw-v2-"))
+        };
+        assert_eq!(
+            direct_regular_files_matching(&entries, nanoclaw_name),
+            Ok(vec![official])
+        );
+
+        symlink(&outside, entries.join("nanoclaw-v2-bbbbbbbb.service")).unwrap();
+        assert_eq!(
+            direct_regular_files_matching(&entries, nanoclaw_name),
             Err(SelectorReadError::UnsupportedRoot)
         );
     }

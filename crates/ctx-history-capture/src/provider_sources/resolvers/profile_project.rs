@@ -11,9 +11,9 @@ use serde_json::{Map, Value};
 use super::super::{
     context::{DiscoveryContext, DiscoveryPlatform},
     selectors::{
-        direct_entries, ordinary_directory, ordinary_file, ordinary_path, read_bounded_bytes,
-        SelectorDocument, SelectorFormat, SelectorIncludeBudget, SelectorReadError, SelectorReader,
-        MAX_FINITE_SELECTOR_ENTRIES, MAX_SELECTOR_FILE_BYTES,
+        direct_entries, direct_regular_files_matching, ordinary_directory, ordinary_file,
+        ordinary_path, read_bounded_bytes, SelectorDocument, SelectorFormat, SelectorIncludeBudget,
+        SelectorReadError, SelectorReader, MAX_FINITE_SELECTOR_ENTRIES, MAX_SELECTOR_FILE_BYTES,
     },
     types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
 };
@@ -787,7 +787,7 @@ fn nanoclaw_systemd_registry_dirs(context: &DiscoveryContext) -> Vec<PathBuf> {
 
 fn nanoclaw_launchd_registrations(registry_dir: &Path) -> Vec<NanoClawServiceRegistration> {
     let mut registrations = Vec::new();
-    let entries = match nanoclaw_registration_entries(registry_dir) {
+    let entries = match nanoclaw_registration_entries(registry_dir, nanoclaw_launchd_plist_name) {
         Ok(entries) => entries,
         Err(error) => return vec![Err(error)],
     };
@@ -809,7 +809,7 @@ fn nanoclaw_launchd_registrations(registry_dir: &Path) -> Vec<NanoClawServiceReg
 
 fn nanoclaw_systemd_registrations(registry_dir: &Path) -> Vec<NanoClawServiceRegistration> {
     let mut registrations = Vec::new();
-    let entries = match nanoclaw_registration_entries(registry_dir) {
+    let entries = match nanoclaw_registration_entries(registry_dir, nanoclaw_systemd_unit_name) {
         Ok(entries) => entries,
         Err(error) => return vec![Err(error)],
     };
@@ -831,20 +831,21 @@ fn nanoclaw_systemd_registrations(registry_dir: &Path) -> Vec<NanoClawServiceReg
 
 fn nanoclaw_registration_entries(
     registry_dir: &Path,
+    official_name: fn(&str) -> bool,
 ) -> Result<Vec<PathBuf>, NanoClawServiceRegistrationError> {
     match path_presence(registry_dir) {
         PathPresence::Missing => Ok(Vec::new()),
-        PathPresence::Present if ordinary_directory(registry_dir) => direct_entries(registry_dir)
+        PathPresence::Present if ordinary_directory(registry_dir) => {
+            direct_regular_files_matching(registry_dir, |name| {
+                name.to_str().is_some_and(official_name)
+            })
             .map_err(|error| match error {
                 SelectorReadError::DirectoryLimit => {
                     NanoClawServiceRegistrationError::RegistryLimit(registry_dir.to_path_buf())
                 }
                 _ => NanoClawServiceRegistrationError::Registry(registry_dir.to_path_buf()),
             })
-            .map(|mut entries| {
-                entries.retain(|entry| ordinary_file(entry));
-                entries
-            }),
+        }
         _ => Err(NanoClawServiceRegistrationError::Registry(
             registry_dir.to_path_buf(),
         )),
