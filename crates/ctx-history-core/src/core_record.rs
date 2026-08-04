@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::{self, Write},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -492,6 +495,12 @@ impl CoreRecord {
     }
 
     pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        self.validate_contract_and_content_bytes().map(|_| ())
+    }
+
+    /// Validates the complete Core contract and returns the exact encoded size
+    /// of its policy-governed content without materializing a second payload.
+    pub fn validate_contract_and_content_bytes(&self) -> CoreRecordResult<usize> {
         if self.record_version != CORE_RECORD_VERSION {
             return Err(CoreRecordError::UnsupportedVersion(self.record_version));
         }
@@ -541,7 +550,7 @@ impl CoreRecord {
         if self.normalization_revision == 0 || self.content.policy_revision == 0 {
             return Err(CoreRecordError::InvalidContentPolicyState);
         }
-        self.content.validate_contract()?;
+        let content_bytes = self.content.validate_contract()?;
         if let (Some(attribution), Some(invocation)) = (
             self.mcp_tool_call.as_ref(),
             self.content
@@ -555,7 +564,8 @@ impl CoreRecord {
         }
         validate_json_map(&self.metadata)?;
         self.repository_candidate_evidence.validate_contract()?;
-        self.validate_repositories()
+        self.validate_repositories()?;
+        Ok(content_bytes)
     }
 
     pub fn encode_stored(&self) -> CoreRecordResult<Vec<u8>> {
@@ -812,23 +822,7 @@ impl CoreContent {
     }
 
     pub fn encoded_content_bytes(&self) -> CoreRecordResult<usize> {
-        let body_bytes = self.normalized_body.as_ref().map_or(0, String::len);
-        let structured_bytes = self
-            .structured_content
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()?
-            .map_or(0, |encoded| encoded.len());
-        let mcp_exchange_bytes = self
-            .mcp_exchange
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()?
-            .map_or(0, |encoded| encoded.len());
-        body_bytes
-            .checked_add(structured_bytes)
-            .and_then(|bytes| bytes.checked_add(mcp_exchange_bytes))
-            .ok_or(CoreRecordError::EncodedLengthOverflow)
+        Ok(self.encoded_content_byte_counts()?.total)
     }
 
     /// Omits a projector-declared redundant structured representation when it
@@ -838,16 +832,16 @@ impl CoreContent {
     /// Projectors should call this only when the normalized body is the
     /// authoritative complete representation of the event.
     pub fn omit_structured_content_if_aggregate_exceeds_limit(&mut self) -> CoreRecordResult<bool> {
-        let Some(structured_content) = self.structured_content.as_ref() else {
-            return Ok(false);
-        };
-        let aggregate_bytes = self.encoded_content_bytes()?;
-        if aggregate_bytes <= MAX_CORE_CONTENT_BYTES {
+        if self.structured_content.is_none() {
             return Ok(false);
         }
-        let structured_bytes = serde_json::to_vec(structured_content)?.len();
-        let retained_bytes = aggregate_bytes
-            .checked_sub(structured_bytes)
+        let counts = self.encoded_content_byte_counts()?;
+        if counts.total <= MAX_CORE_CONTENT_BYTES {
+            return Ok(false);
+        }
+        let retained_bytes = counts
+            .total
+            .checked_sub(counts.structured)
             .ok_or(CoreRecordError::EncodedLengthOverflow)?;
         if retained_bytes > MAX_CORE_CONTENT_BYTES {
             return Ok(false);
@@ -856,21 +850,15 @@ impl CoreContent {
         Ok(true)
     }
 
-    fn validate_contract(&self) -> CoreRecordResult<()> {
+    fn validate_contract(&self) -> CoreRecordResult<usize> {
         if self.policy_revision == 0 {
             return Err(CoreRecordError::InvalidContentPolicyState);
         }
-        let body_bytes = self.normalized_body.as_ref().map_or(0, String::len);
-        validate_size("normalized_body", body_bytes, MAX_CORE_CONTENT_BYTES)?;
-        let structured_bytes = self
-            .structured_content
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()?
-            .map_or(0, |encoded| encoded.len());
+        let counts = self.encoded_content_byte_counts()?;
+        validate_size("normalized_body", counts.body, MAX_CORE_CONTENT_BYTES)?;
         validate_size(
             "structured_content",
-            structured_bytes,
+            counts.structured,
             MAX_CORE_CONTENT_BYTES,
         )?;
         if let Some(exchange) = &self.mcp_exchange {
@@ -879,12 +867,7 @@ impl CoreContent {
             }
             exchange.validate_contract(self.normalized_body.as_deref())?;
         }
-        let selected_content_bytes = self.encoded_content_bytes()?;
-        validate_size(
-            "selected_content",
-            selected_content_bytes,
-            MAX_CORE_CONTENT_BYTES,
-        )?;
+        validate_size("selected_content", counts.total, MAX_CORE_CONTENT_BYTES)?;
         match &self.policy_status {
             CoreContentPolicyStatus::Selected => {
                 if self.normalized_body.is_none() && self.structured_content.is_none()
@@ -908,8 +891,73 @@ impl CoreContent {
                 }
             }
         }
+        Ok(counts.total)
+    }
+
+    fn encoded_content_byte_counts(&self) -> CoreRecordResult<EncodedContentByteCounts> {
+        let body = self.normalized_body.as_ref().map_or(0, String::len);
+        let structured = self
+            .structured_content
+            .as_ref()
+            .map(count_encoded_json_bytes)
+            .transpose()?
+            .unwrap_or(0);
+        let mcp_exchange = self
+            .mcp_exchange
+            .as_ref()
+            .map(count_encoded_json_bytes)
+            .transpose()?
+            .unwrap_or(0);
+        let total = body
+            .checked_add(structured)
+            .and_then(|bytes| bytes.checked_add(mcp_exchange))
+            .ok_or(CoreRecordError::EncodedLengthOverflow)?;
+        Ok(EncodedContentByteCounts {
+            body,
+            structured,
+            total,
+        })
+    }
+}
+
+struct EncodedContentByteCounts {
+    body: usize,
+    structured: usize,
+    total: usize,
+}
+
+#[derive(Default)]
+struct EncodedJsonByteCounter {
+    bytes: usize,
+    overflowed: bool,
+}
+
+impl Write for EncodedJsonByteCounter {
+    fn write(&mut self, encoded: &[u8]) -> io::Result<usize> {
+        if let Some(bytes) = self.bytes.checked_add(encoded.len()) {
+            self.bytes = bytes;
+        } else {
+            self.bytes = usize::MAX;
+            self.overflowed = true;
+        }
+        Ok(encoded.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+fn count_encoded_json_bytes<T>(value: &T) -> CoreRecordResult<usize>
+where
+    T: Serialize + ?Sized,
+{
+    let mut counter = EncodedJsonByteCounter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    if counter.overflowed {
+        return Err(CoreRecordError::EncodedLengthOverflow);
+    }
+    Ok(counter.bytes)
 }
 
 #[cfg(test)]

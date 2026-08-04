@@ -15,9 +15,9 @@ use ctx_history_core::{
 use tantivy::Searcher;
 
 use crate::{
-    index_document::{core_content_bytes, IndexSourceFields},
-    load_active_generation_pointer, prior_core_record, staging, verify_physical_integrity, Fields,
-    GenerationSlot, IndexDocument, IndexError, Result, INDEX_GENERATIONS_DIRECTORY,
+    index_document::IndexSourceFields, load_active_generation_pointer, prior_core_record, staging,
+    verify_physical_integrity, Fields, GenerationSlot, IndexDocument, IndexError, Result,
+    INDEX_GENERATIONS_DIRECTORY,
 };
 
 #[cfg(test)]
@@ -112,10 +112,9 @@ impl CoreRecordPreparer {
             }
         }
 
-        record.validate_contract()?;
+        let core_content_bytes = record.validate_contract_and_content_bytes()?;
         let source = record.source.clone();
         let source_token = crate::source_token(&source);
-        let core_content_bytes = core_content_bytes(&record.content)?;
         Ok(PreparedCoreRecordDraft {
             fields: self.fields,
             base_generation_id: self.context_generation_id.clone(),
