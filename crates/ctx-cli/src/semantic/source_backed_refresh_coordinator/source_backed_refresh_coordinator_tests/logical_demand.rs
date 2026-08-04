@@ -197,15 +197,21 @@ fn running_cold_all_satisfies_fresh_demand_with_one_full_pass() {
         &data_root,
         &routes,
         RunningAllDemand {
-            publication_observations: observations,
+            publication_observations: observations.clone(),
             admission_observations: admission,
             previous_generation: None,
             request_id: &demand_id,
             published_generation: "full-pass-generation",
         },
     );
+    let sampled_observations = observations
+        .into_iter()
+        .map(|(route, observation)| (route, Some(observation)))
+        .collect();
     let resolution = coordinator
-        .run_next(&data_root)
+        .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+            Ok(sampled_observations)
+        })
         .expect("covered logical demand resolution");
 
     assert_eq!(resolved_id, demand_id);
@@ -458,14 +464,18 @@ fn logical_demand_keeps_its_own_terminal_request_resolution() {
         &routes,
         RunningAllDemand {
             publication_observations: BTreeMap::from([(route.clone(), token.clone())]),
-            admission_observations: BTreeMap::from([(route, Some(token))]),
+            admission_observations: BTreeMap::from([(route.clone(), Some(token.clone()))]),
             previous_generation: Some("caller-admission-generation".to_owned()),
             request_id: &demand_id,
             published_generation: "shared-generation",
         },
     );
+    let sampled_route = route;
+    let sampled_observation = token;
     coordinator
-        .run_next(&data_root)
+        .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+            Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
+        })
         .expect("logical demand resolution");
 
     let predecessor = coordinator.status(&predecessor_id).unwrap();
@@ -658,8 +668,12 @@ fn restart_before_publication_preserves_logical_demand_fence() {
         )
         .expect("recovered predecessor publication");
     assert!(!predecessor.failed, "{:#}", predecessor.job);
+    let sampled_route = route;
+    let sampled_observation = token;
     let resolution = restarted
-        .run_next(&data_root)
+        .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+            Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
+        })
         .expect("recovered logical demand resolution");
 
     assert_eq!(request_id(&resolution.job), demand_id);
