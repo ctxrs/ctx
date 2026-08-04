@@ -1,7 +1,7 @@
 //! Exact, bounded Protocol V1 between the OSS `ctx` host and a local Pro helper.
 //!
-//! The public crate is the only wire authority. Private implementations mirror its
-//! generated inventory and fingerprint; they do not define a compatible range.
+//! The public crate is the only wire authority. Private products consume this
+//! crate and its generated inventory at one exact source revision.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,11 @@ pub const MAX_BLAME_EVIDENCE: usize = 3_200;
 pub const MAX_BLAME_ATTRIBUTIONS_PER_MATCH: usize = 100;
 pub const MAX_CITATIONS_PER_FACT: usize = 32;
 pub const MAX_BLAME_TARGET_BYTES: usize = 8 * 1024;
+/// Canonical generated Protocol V1 inventory shipped by this exact crate revision.
+pub const PROTOCOL_INVENTORY_JSON: &str = include_str!("../testdata/v1/inventory.json");
+/// Canonical entitlement vectors shipped by this exact crate revision.
+pub const ENTITLEMENT_GOLDEN_JSON: &str =
+    include_str!("../testdata/entitlement/v1/golden.json");
 
 mod entitlement;
 pub use entitlement::{
@@ -62,7 +67,8 @@ pub use message::{
 };
 mod query;
 pub use query::{
-    AgentAttribution, BlameContinuation, BlameMatch, BlameRequest, BlameResult, BlameTarget,
+    canonical_logical_repository_id, AgentAttribution, BlameContinuation, BlameMatch, BlameRequest,
+    BlameResult, BlameTarget,
     CommitBlameMatch, CommitFactType, CommitPredicate, ContinuationReason, FactConfidence,
     FactState, FileBlameMatch, GitSnapshot, LineRange, NumberedEvidence, ProductionRelationship,
     PullRequestAction, PullRequestActivity, PullRequestBlameMatch, PullRequestBlameRelationship,

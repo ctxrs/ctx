@@ -631,7 +631,9 @@ impl CoreEventDelta {
         }
     }
 
-    fn record(&self) -> Option<&CoreRecord> {
+    /// Returns the immutable Core record carried by an add or replacement.
+    #[must_use]
+    pub fn record(&self) -> Option<&CoreRecord> {
         match self {
             Self::Added(record) => Some(record),
             Self::Replaced(replacement) => Some(&replacement.record),

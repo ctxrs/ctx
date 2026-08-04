@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    core_source_delta_exact_eq, invalid_contract, validate_encoded_bound, validate_sha256,
+    core_source_delta_exact_eq, encoded_len, invalid_contract, validate_encoded_bound,
+    validate_sha256,
     CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied, ErrorClass, ProtocolError,
     SourceKey, MAX_CORE_CONTROL_WIRE_BYTES,
 };
@@ -21,7 +22,7 @@ pub struct ApplyCoreEventDeltaPagesRequest {
 
 impl ApplyCoreEventDeltaPagesRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        self.validate_sequence(true)?;
+        validate_event_delta_page_envelope(self.pages.iter(), CoreEventDeltaPage::validate)?;
         validate_encoded_bound(
             self,
             MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES,
@@ -29,75 +30,36 @@ impl ApplyCoreEventDeltaPagesRequest {
         )
     }
 
-    fn validate_sequence(&self, validate_pages: bool) -> Result<(), ProtocolError> {
-        if self.pages.is_empty() || self.pages.len() > MAX_CORE_EVENT_DELTA_PAGES {
+    /// Validates an ordered envelope of prepared pages using the complete
+    /// public page contract, including each page's compact JSON wire bound.
+    pub fn validate_prepared_envelope<'a>(
+        pages: impl ExactSizeIterator<Item = &'a CoreEventDeltaPage>,
+    ) -> Result<(), ProtocolError> {
+        let pages = pages.collect::<Vec<_>>();
+        validate_event_delta_page_envelope(
+            pages.iter().copied(),
+            CoreEventDeltaPage::validate,
+        )?;
+        let encoded_request_bytes = pages.iter().enumerate().try_fold(
+            b"{\"pages\":[]}".len(),
+            |total, (index, page)| -> Result<usize, ProtocolError> {
+                let page_bytes = encoded_len(*page)?;
+                total
+                    .checked_add(usize::from(index != 0))
+                    .and_then(|total| total.checked_add(page_bytes))
+                    .ok_or_else(|| {
+                        ProtocolError::new(
+                            ErrorClass::Bounds,
+                            "Core event delta page batch length overflowed",
+                        )
+                    })
+            },
+        )?;
+        if encoded_request_bytes > MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
-                "Core event delta page batch has an invalid page count",
+                "Core event delta page batch exceeds its aggregate wire bound",
             ));
-        }
-
-        let first = &self.pages[0];
-        let mut prior_page_index = None;
-        let mut prior_event_id = None;
-        let mut prior_terminal = false;
-        let mut prior_source = None;
-        let mut prior_materialize_index = None;
-        let mut seen_sources = Vec::with_capacity(self.pages.len());
-        for (position, page) in self.pages.iter().enumerate() {
-            if validate_pages {
-                page.validate()?;
-            }
-            if page.materialization_id != first.materialization_id
-                || page.core_generation_id != first.core_generation_id
-            {
-                return Err(batch_sequence_error());
-            }
-            let source = page.reconciliation.delta.source().identity().digest();
-            let same_source = prior_source == Some(source);
-            if !same_source {
-                if seen_sources.contains(&source) {
-                    return Err(batch_sequence_error());
-                }
-                seen_sources.push(source);
-            }
-            if position != 0 {
-                if same_source {
-                    if prior_terminal
-                        || prior_page_index
-                            .is_some_and(|index: u32| index.checked_add(1) != Some(page.page_index))
-                        || prior_materialize_index != Some(page.reconciliation.materialize_index)
-                        || !core_source_delta_exact_eq(
-                            &page.reconciliation.delta,
-                            &self.pages[position - 1].reconciliation.delta,
-                        )
-                    {
-                        return Err(batch_sequence_error());
-                    }
-                } else {
-                    if !prior_terminal
-                        || page.page_index != 0
-                        || prior_materialize_index
-                            .is_some_and(|prior| prior >= page.reconciliation.materialize_index)
-                    {
-                        return Err(batch_sequence_error());
-                    }
-                    prior_event_id = None;
-                }
-            }
-            if let Some(first_delta) = page.deltas.first() {
-                let current = first_delta.event_id().digest();
-                if prior_event_id.is_some_and(|prior| prior >= current) {
-                    return Err(batch_sequence_error());
-                }
-            }
-            if let Some(last_delta) = page.deltas.last() {
-                prior_event_id = Some(last_delta.event_id().digest());
-            }
-            prior_page_index = Some(page.page_index);
-            prior_terminal = page.terminal;
-            prior_source = Some(source);
-            prior_materialize_index = Some(page.reconciliation.materialize_index);
         }
         Ok(())
     }
@@ -132,7 +94,13 @@ impl ApplyCoreEventDeltaPagesRequest {
         &self,
         encoded_request_bytes: usize,
     ) -> Result<CoreEventDeltaPagesAcknowledgementIdentity, ProtocolError> {
-        self.validate_sequence(false)?;
+        self.validate()?;
+        if encoded_request_bytes != encoded_len(self)? {
+            return Err(ProtocolError::new(
+                ErrorClass::InvalidRequest,
+                "prepared Core event delta page batch length does not match canonical JSON",
+            ));
+        }
         if encoded_request_bytes > MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
@@ -151,6 +119,78 @@ impl ApplyCoreEventDeltaPagesRequest {
             pages,
         })
     }
+}
+
+fn validate_event_delta_page_envelope<'a>(
+    mut pages: impl ExactSizeIterator<Item = &'a CoreEventDeltaPage>,
+    validate_page: fn(&CoreEventDeltaPage) -> Result<(), ProtocolError>,
+) -> Result<(), ProtocolError> {
+    if pages.len() == 0 || pages.len() > MAX_CORE_EVENT_DELTA_PAGES {
+        return Err(ProtocolError::new(
+            ErrorClass::Bounds,
+            "Core event delta page batch has an invalid page count",
+        ));
+    }
+
+    let first = pages
+        .next()
+        .expect("non-empty Core event envelope was checked above");
+    validate_page(first)?;
+    let mut prior_page_index = first.page_index;
+    let mut prior_event_id = first.deltas.last().map(|delta| delta.event_id().digest());
+    let mut prior_terminal = first.terminal;
+    let mut prior_source = first.reconciliation.delta.source().identity().digest();
+    let mut prior_materialize_index = first.reconciliation.materialize_index;
+    let mut prior_reconciliation = &first.reconciliation.delta;
+    let mut seen_sources = vec![prior_source];
+    for page in pages {
+        validate_page(page)?;
+        if page.materialization_id != first.materialization_id
+            || page.core_generation_id != first.core_generation_id
+        {
+            return Err(batch_sequence_error());
+        }
+        let source = page.reconciliation.delta.source().identity().digest();
+        let same_source = prior_source == source;
+        if same_source {
+            if prior_terminal
+                || prior_page_index.checked_add(1) != Some(page.page_index)
+                || prior_materialize_index != page.reconciliation.materialize_index
+                || !core_source_delta_exact_eq(
+                    &page.reconciliation.delta,
+                    prior_reconciliation,
+                )
+            {
+                return Err(batch_sequence_error());
+            }
+        } else {
+            if seen_sources.contains(&source)
+                || !prior_terminal
+                || page.page_index != 0
+                || prior_materialize_index >= page.reconciliation.materialize_index
+            {
+                return Err(batch_sequence_error());
+            }
+            seen_sources.push(source);
+            prior_event_id = None;
+        }
+        if let Some(first_delta) = page.deltas.first() {
+            let current = first_delta.event_id().digest();
+            if prior_event_id.is_some_and(|prior| prior >= current) {
+                return Err(batch_sequence_error());
+            }
+        }
+        if let Some(last_delta) = page.deltas.last() {
+            prior_event_id = Some(last_delta.event_id().digest());
+        }
+        prior_page_index = page.page_index;
+        prior_terminal = page.terminal;
+        prior_source = source;
+        prior_materialize_index = page.reconciliation.materialize_index;
+        prior_reconciliation = &page.reconciliation.delta;
+    }
+
+    Ok(())
 }
 
 fn batch_sequence_error() -> ProtocolError {

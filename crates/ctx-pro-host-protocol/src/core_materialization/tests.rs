@@ -782,6 +782,32 @@ fn event_delta_page_batch_enforces_exact_aggregate_encoded_request_bound() {
 }
 
 #[test]
+fn prepared_event_delta_page_batch_checks_complete_pages_and_exact_length() {
+    let request = event_delta_pages_request(2, true);
+    let encoded_request_bytes = serde_json::to_vec(&request).unwrap().len();
+    ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(request.pages.iter()).unwrap();
+    request
+        .acknowledgement_identity_for_prepared_request(encoded_request_bytes)
+        .unwrap();
+    assert_eq!(
+        request
+            .acknowledgement_identity_for_prepared_request(encoded_request_bytes - 1)
+            .unwrap_err()
+            .class,
+        ErrorClass::InvalidRequest
+    );
+
+    let mut invalid = request;
+    invalid.pages[0].materialization_id = "not-a-digest".to_owned();
+    assert_eq!(
+        ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(invalid.pages.iter())
+            .unwrap_err()
+            .class,
+        ErrorClass::InvalidRequest
+    );
+}
+
+#[test]
 fn encoded_bound_counting_writer_matches_compact_json_bytes_and_errors() {
     let values = [
         serde_json::json!(null),
