@@ -58,11 +58,11 @@ fn exact_import_overlay_upgrades_queued_route_work_without_rescan() {
     assert_eq!(request["fresh_after_admitted_snapshot"], true);
 
     let upgraded = coordinator
-        .handle_ipc_request(&data_root, &request)
+        .handle_ipc_request_with_admission_fence_for_test(&data_root, &request, BTreeMap::new())
         .unwrap()
         .expect("exact-overlay import response");
     let attached = coordinator
-        .handle_ipc_request(&data_root, &request)
+        .handle_ipc_request_with_admission_fence_for_test(&data_root, &request, BTreeMap::new())
         .unwrap()
         .expect("equivalent import response");
 
@@ -529,7 +529,11 @@ fn explicit_fresh_after_admitted_snapshot_queues_one_successor() {
         });
         let request = || {
             coordinator
-                .handle_ipc_request(temp.path(), &request_value)
+                .handle_ipc_request_with_admission_fence_for_test(
+                    temp.path(),
+                    &request_value,
+                    BTreeMap::new(),
+                )
                 .unwrap()
                 .expect("fresh-after-admitted-snapshot response")
         };
@@ -596,7 +600,11 @@ fn manual_all_fresh_after_running_startup_scan_queues_one_successor() {
         });
         let request = || {
             coordinator
-                .handle_ipc_request(temp.path(), &request_value)
+                .handle_ipc_request_with_admission_fence_for_test(
+                    temp.path(),
+                    &request_value,
+                    BTreeMap::new(),
+                )
                 .unwrap()
                 .expect("fresh manual all response")
         };

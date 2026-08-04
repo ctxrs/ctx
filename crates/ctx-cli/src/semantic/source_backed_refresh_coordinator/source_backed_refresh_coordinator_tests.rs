@@ -421,7 +421,7 @@ fn manual_all_request(
     authority: &ExplicitSourceCatalogAuthority,
 ) -> Value {
     coordinator
-        .handle_ipc_request(
+        .handle_ipc_request_with_admission_fence_for_test(
             data_root,
             &json!({
                 "schema_version": 1,
@@ -432,6 +432,7 @@ fn manual_all_request(
                 "explicit_source_catalog": authority.to_json(),
                 "fresh_after_admitted_snapshot": true,
             }),
+            BTreeMap::new(),
         )
         .unwrap()
         .expect("manual all-route refresh response")
@@ -631,7 +632,9 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
         let runner_root = data_root.clone();
         scope.spawn(move || {
             let run = runner
-                .run_next(&runner_root)
+                .run_next_with_coverage_fence_for_test(&runner_root, |_catalog, routes| {
+                    Ok(routes.iter().cloned().map(|route| (route, None)).collect())
+                })
                 .expect("running startup exact");
             assert!(!run.failed, "{:#}", run.job);
         });
@@ -643,7 +646,9 @@ fn running_startup_exact_continues_manual_all_without_rescanning() {
 
     let manual_request_id = request_id(&manual);
     let successor = coordinator
-        .run_next(&data_root)
+        .run_next_with_coverage_fence_for_test(&data_root, |_catalog, routes| {
+            Ok(routes.iter().cloned().map(|route| (route, None)).collect())
+        })
         .expect("manual all continuation");
     assert!(!successor.failed, "{:#}", successor.job);
     assert_eq!(request_id(&successor.job), manual_request_id);

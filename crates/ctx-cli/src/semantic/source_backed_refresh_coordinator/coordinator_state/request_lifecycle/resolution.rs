@@ -209,6 +209,44 @@ impl CoreRefreshEngine {
     where
         Open: FnOnce(&Path) -> Result<Arc<VerifiedIndex>>,
     {
+        self.run_next_with_verified_index_opener_and_coverage_fence(
+            data_root,
+            open_verified,
+            |request_id| self.post_publication_route_coverage_fence(data_root, request_id),
+        )
+    }
+
+    #[cfg(test)]
+    pub(in super::super::super) fn run_next_with_coverage_fence_for_test<Sample>(
+        &self,
+        data_root: &Path,
+        sample: Sample,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Sample: FnOnce(
+            Option<&ExplicitSourceCatalogAuthority>,
+            &BTreeSet<SourceRouteIdentity>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
+        self.run_next_with_verified_index_opener_and_coverage_fence(
+            data_root,
+            |index_root| Ok(Arc::new(open_verified_index(index_root)?)),
+            |request_id| {
+                self.regular_post_publication_route_coverage_fence_with(request_id, sample)
+            },
+        )
+    }
+
+    fn run_next_with_verified_index_opener_and_coverage_fence<Open, Coverage>(
+        &self,
+        data_root: &Path,
+        open_verified: Open,
+        coverage_fence: Coverage,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Open: FnOnce(&Path) -> Result<Arc<VerifiedIndex>>,
+        Coverage: FnOnce(&str) -> PostPublicationRouteCoverageFence,
+    {
         let executor = Arc::clone(&self.executor);
         let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
         let publication_probe_attempted = Cell::new(false);
@@ -292,8 +330,7 @@ impl CoreRefreshEngine {
         let publication_ready = !run.failed && !run.terminal_persistence_pending;
         if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
             if !run.terminal_persistence_pending {
-                let post_publication_fence = publication_ready
-                    .then(|| self.post_publication_route_coverage_fence(data_root, request_id));
+                let post_publication_fence = publication_ready.then(|| coverage_fence(request_id));
                 let coverage_certificate = self.finish_route_admissions(
                     request_id,
                     publication_ready,

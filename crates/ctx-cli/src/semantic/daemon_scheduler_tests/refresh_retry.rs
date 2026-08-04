@@ -92,7 +92,7 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
     assert_eq!(executions.load(Ordering::SeqCst), 1);
 
     let successor = coordinator
-        .handle_ipc_request(
+        .handle_ipc_request_with_admission_fence_for_test(
             &data_root,
             &json!({
                 "op": "source_refresh_request",
@@ -101,6 +101,7 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
                 "explicit_source_catalog": authority.to_json(),
                 "fresh_after_admitted_snapshot": true,
             }),
+            BTreeMap::new(),
         )
         .unwrap()
         .expect("fresh successor during failed-terminal retry");
@@ -111,7 +112,7 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
     assert!(retry.failed);
     let later_authority = crate::commands::import::explicit_source_catalog_authority_for_test(1);
     let later = coordinator
-        .handle_ipc_request(
+        .handle_ipc_request_with_admission_fence_for_test(
             &data_root,
             &json!({
                 "op": "source_refresh_request",
@@ -120,6 +121,7 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
                 "explicit_source_catalog": later_authority.to_json(),
                 "fresh_after_admitted_snapshot": true,
             }),
+            BTreeMap::new(),
         )
         .unwrap()
         .expect("successor admitted after retry snapshot");
@@ -209,7 +211,7 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
         .expect("failed terminal persistence");
     assert!(first.failed);
     let successor = coordinator
-        .handle_ipc_request(
+        .handle_ipc_request_with_admission_fence_for_test(
             &data_root,
             &json!({
                 "op": "source_refresh_request",
@@ -218,6 +220,7 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
                 "explicit_source_catalog": first_authority.to_json(),
                 "fresh_after_admitted_snapshot": true,
             }),
+            BTreeMap::new(),
         )
         .unwrap()
         .expect("first successor");
@@ -242,7 +245,7 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
         let admission = scope.spawn(move || {
             admission_started_tx.send(()).unwrap();
             let response = admission_coordinator
-                .handle_ipc_request(
+                .handle_ipc_request_with_admission_fence_for_test(
                     &admission_root,
                     &json!({
                         "op": "source_refresh_request",
@@ -251,6 +254,7 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
                         "explicit_source_catalog": later_authority.to_json(),
                         "fresh_after_admitted_snapshot": true,
                     }),
+                    BTreeMap::new(),
                 )
                 .unwrap()
                 .expect("concurrent successor");
@@ -346,7 +350,7 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
             u64::try_from(revision).unwrap(),
         );
         let response = coordinator
-            .handle_ipc_request(
+            .handle_ipc_request_with_admission_fence_for_test(
                 &data_root,
                 &json!({
                     "op": "source_refresh_request",
@@ -355,6 +359,7 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
                     "explicit_source_catalog": authority.to_json(),
                     "fresh_after_admitted_snapshot": true,
                 }),
+                BTreeMap::new(),
             )
             .unwrap()
             .expect("bounded successor response");
@@ -381,7 +386,7 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
     assert!(!retry.terminal_persistence_pending);
     let extra_authority = crate::commands::import::explicit_source_catalog_authority_for_test(99);
     let still_full = coordinator
-        .handle_ipc_request(
+        .handle_ipc_request_with_admission_fence_for_test(
             &data_root,
             &json!({
                 "op": "source_refresh_request",
@@ -390,6 +395,7 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
                 "explicit_source_catalog": extra_authority.to_json(),
                 "fresh_after_admitted_snapshot": true,
             }),
+            BTreeMap::new(),
         )
         .unwrap()
         .expect("terminal root remains part of the durable bound");
@@ -466,7 +472,7 @@ fn generic_backoff_write_serializes_concurrent_admission_and_restart() {
         });
         status_entered.wait();
         let response = coordinator
-            .handle_ipc_request(
+            .handle_ipc_request_with_admission_fence_for_test(
                 &data_root,
                 &json!({
                     "op": "source_refresh_request",
@@ -475,6 +481,7 @@ fn generic_backoff_write_serializes_concurrent_admission_and_restart() {
                     "explicit_source_catalog": authority.to_json(),
                     "fresh_after_admitted_snapshot": true,
                 }),
+                BTreeMap::new(),
             )
             .unwrap()
             .expect("admission after scheduler snapshot");

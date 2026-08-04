@@ -626,6 +626,37 @@ impl CoreRefreshEngine {
         data_root: &Path,
         request: &Value,
     ) -> Result<Option<Value>> {
+        self.handle_ipc_request_with_admission_fence(
+            data_root,
+            request,
+            source_backed_route_admission_fence,
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn handle_ipc_request_with_admission_fence_for_test(
+        &self,
+        data_root: &Path,
+        request: &Value,
+        observations: BTreeMap<SourceRouteIdentity, Option<String>>,
+    ) -> Result<Option<Value>> {
+        self.handle_ipc_request_with_admission_fence(data_root, request, move |_, _| {
+            Ok(observations.clone())
+        })
+    }
+
+    fn handle_ipc_request_with_admission_fence<F>(
+        &self,
+        data_root: &Path,
+        request: &Value,
+        admission_fence: F,
+    ) -> Result<Option<Value>>
+    where
+        F: Fn(
+            &Path,
+            Option<&ExplicitSourceCatalogAuthority>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
         match request.get("op").and_then(Value::as_str) {
             Some(SOURCE_REFRESH_REQUEST_OP) => {
                 let mode = request.get("mode").and_then(Value::as_str).unwrap_or("");
@@ -687,7 +718,7 @@ impl CoreRefreshEngine {
                 let previous_generation = self.observed_published_generation(data_root)?;
                 let admission_route_observations =
                     if admission == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot {
-                        source_backed_route_admission_fence(data_root, requested_catalog.as_ref())?
+                        admission_fence(data_root, requested_catalog.as_ref())?
                     } else {
                         BTreeMap::new()
                     };

@@ -150,7 +150,7 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
         let _ = first.run_next_with(
             |active_id, coordinator| {
                 let successor = coordinator
-                    .handle_ipc_request(
+                    .handle_ipc_request_with_admission_fence_for_test(
                         &execution_root,
                         &json!({
                             "op": SOURCE_REFRESH_REQUEST_OP,
@@ -159,6 +159,7 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
                             "explicit_source_catalog": execution_authority.to_json(),
                             "fresh_after_admitted_snapshot": true,
                         }),
+                        BTreeMap::new(),
                     )?
                     .expect("fresh manual successor");
                 *recorded_successor.lock().unwrap() = Some(request_id(&successor));
@@ -449,7 +450,7 @@ fn failed_terminal_restart_preserves_fresh_successor() {
         .run_next_with(
             |_, coordinator| {
                 let successor = coordinator
-                    .handle_ipc_request(
+                    .handle_ipc_request_with_admission_fence_for_test(
                         &data_root,
                         &json!({
                             "op": SOURCE_REFRESH_REQUEST_OP,
@@ -458,6 +459,7 @@ fn failed_terminal_restart_preserves_fresh_successor() {
                             "explicit_source_catalog": authority.to_json(),
                             "fresh_after_admitted_snapshot": true,
                         }),
+                        BTreeMap::new(),
                     )?
                     .expect("fresh manual successor");
                 *recorded_successor.lock().unwrap() = Some(request_id(&successor));
@@ -504,7 +506,7 @@ fn failed_terminal_retry_journals_successor_before_restart() {
     assert!(failed.terminal_persistence_pending);
 
     let successor = first
-        .handle_ipc_request(
+        .handle_ipc_request_with_admission_fence_for_test(
             &data_root,
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
@@ -513,6 +515,7 @@ fn failed_terminal_retry_journals_successor_before_restart() {
                 "explicit_source_catalog": authority.to_json(),
                 "fresh_after_admitted_snapshot": true,
             }),
+            BTreeMap::new(),
         )
         .unwrap()
         .expect("fresh successor during terminal retry");
