@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use ctx_history_core::{RepositoryAlias, RepositoryAliasKind};
 use url::Url;
 
+use super::super::association::canonical_url_authority;
 use super::{strip_comments_and_bound_heredocs, tokenize, MAX_COMMAND_BYTES};
-use crate::repository_attribution::identity::canonical_url_authority;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundedPullRequestAssociationQuery {

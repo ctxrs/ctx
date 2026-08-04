@@ -7,10 +7,10 @@ use ctx_history_core::{
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use super::super::association::canonical_url_authority;
 use super::{
     ProbeFailure, ResolvedCommitFile, MAX_GIT_OUTPUT_BYTES, MAX_REMOTES, MAX_RESOLVED_COMMIT_FILES,
 };
-use crate::repository_attribution::identity::canonical_url_authority;
 
 pub(super) fn metadata_is_link_like(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {

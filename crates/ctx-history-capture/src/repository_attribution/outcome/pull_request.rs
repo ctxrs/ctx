@@ -4,8 +4,8 @@ use ctx_history_core::{
 use serde_json::{Map, Value};
 use url::Url;
 
+use super::super::association::canonical_url_authority;
 use super::{exact_json_object, keys_are_subset, object_id, BoundedOutcomePlan};
-use crate::repository_attribution::identity::canonical_url_authority;
 
 pub(super) fn exact_pr_create_result(output: &Value) -> Option<RepositoryPullRequestIdentity> {
     if let Some(url) = output.as_str() {

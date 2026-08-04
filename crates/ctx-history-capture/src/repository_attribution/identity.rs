@@ -1,14 +1,12 @@
 use std::{collections::BTreeMap, fmt::Write};
 
+use super::{git::CertifiedCandidate, outcome::UnscopedOutcomeObservation};
 use ctx_history_core::{
     CoreRecordAnnotation, RepositoryAbstention, RepositoryAbstentionReason, RepositoryAlias,
     RepositoryAliasKind, RepositoryBinding, RepositoryEvidence, RepositoryEvidenceConfidence,
     RepositoryEvidenceKind, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 use sha2::{Digest, Sha256};
-use url::{Host, Url};
-
-use super::{git::CertifiedCandidate, outcome::UnscopedOutcomeObservation};
 
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
 
@@ -192,33 +190,6 @@ pub(super) fn alias_identity_matches(left: &RepositoryAlias, right: &RepositoryA
     left.host.eq_ignore_ascii_case(&right.host)
         && left.namespace == right.namespace
         && left.name == right.name
-}
-
-/// Credential-free canonical authority for a forge URL.
-///
-/// Default transport ports are aliases of the ordinary host spelling while a
-/// nondefault port is part of repository authority. IPv6 literals retain
-/// brackets so a following port remains unambiguous.
-pub(super) fn canonical_url_authority(url: &Url) -> Option<String> {
-    let host = match url.host()? {
-        Host::Domain(host) => host.to_ascii_lowercase(),
-        Host::Ipv4(host) => host.to_string(),
-        Host::Ipv6(host) => format!("[{host}]"),
-    };
-    let port = url
-        .port()
-        .filter(|port| Some(*port) != default_port(url.scheme()));
-    Some(port.map_or(host.clone(), |port| format!("{host}:{port}")))
-}
-
-fn default_port(scheme: &str) -> Option<u16> {
-    match scheme {
-        "http" => Some(80),
-        "https" => Some(443),
-        "ssh" => Some(22),
-        "git" => Some(9418),
-        _ => None,
-    }
 }
 
 pub(super) fn binding_accepts_forge_repository(
