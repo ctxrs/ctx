@@ -13,10 +13,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_pro_host_protocol::{
-    decode_base64url, read_frame, write_frame, BlameResult, BlameTarget, Capability,
-    ConfirmGraphKeyDeletionRequest, EntitlementAccessState, GraphKeyDeletionPrepared, HelloRequest,
-    HelperEnvelope, HelperMessage, HostMessage, PrepareGraphKeyDeletionRequest, StatusRequest,
-    StatusResult, GRAPH_KEY_DELETION_CHALLENGE_BYTES, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    read_frame, write_frame, BlameResult, BlameTarget, Capability, EntitlementAccessState,
+    HelloRequest, HelperEnvelope, HelperMessage, HostMessage, StatusRequest, StatusResult,
+    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -31,7 +30,6 @@ mod support;
 use super::authorization::{
     AuthorizationProvider, EntitlementSchedule, StoredAuthorizationProvider,
 };
-use super::credential_vault::CredentialVaultNamespace;
 use super::helper_command;
 use super::verified_executable::VerifiedHelperExecutable;
 pub(crate) use support::{default_helper_path, git_executable};
@@ -97,7 +95,6 @@ mod transport;
 pub(crate) use materialization::materialize;
 use materialization::*;
 pub(crate) use operations::blame;
-pub(super) use operations::delete_graph_key;
 #[cfg(test)]
 use operations::*;
 pub(crate) use transport::ProClient;

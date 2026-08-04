@@ -236,28 +236,6 @@ fn exact_graph_artifact_paths(pro: &Path) -> Vec<PathBuf> {
     ]
 }
 
-#[cfg(unix)]
-fn make_private_directory_unsafe(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-}
-
-#[cfg(windows)]
-fn make_private_directory_unsafe(path: &Path) -> std::io::Result<()> {
-    let status = std::process::Command::new("icacls.exe")
-        .arg(path)
-        .args(["/grant", "*S-1-1-0:F"])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(
-            "failed to make Windows Pro directory ACL unsafe",
-        ))
-    }
-}
-
 #[test]
 fn direct_deletion_accepts_an_already_missing_graph_key() {
     let (root, pro) = fixture();
