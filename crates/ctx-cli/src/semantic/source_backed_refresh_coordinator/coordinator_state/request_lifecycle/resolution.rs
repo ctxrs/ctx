@@ -2,9 +2,11 @@ use super::*;
 
 impl CoreRefreshEngine {
     pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
-        if let Some(run) = self.resolve_fully_covered_continuation_with(data_root, |catalog| {
-            source_backed_route_admission_fence(data_root, catalog)
-        }) {
+        if let Some(run) =
+            self.resolve_fully_covered_continuation_with(data_root, |catalog, routes| {
+                source_backed_requested_route_observation_fence(data_root, catalog, routes)
+            })
+        {
             return Some(run);
         }
         self.run_next_with_verified_index_opener(data_root, |index_root| {
@@ -23,7 +25,9 @@ impl CoreRefreshEngine {
             Option<&ExplicitSourceCatalogAuthority>,
         ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
     {
-        if let Some(run) = self.resolve_fully_covered_continuation_with(data_root, sample) {
+        if let Some(run) = self
+            .resolve_fully_covered_continuation_with(data_root, |catalog, _routes| sample(catalog))
+        {
             return Some(run);
         }
         self.run_next_with_verified_index_opener(data_root, |index_root| {
@@ -39,6 +43,7 @@ impl CoreRefreshEngine {
     where
         Sample: FnOnce(
             Option<&ExplicitSourceCatalogAuthority>,
+            &BTreeSet<SourceRouteIdentity>,
         ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
     {
         let (sample_request_id, sample_routes) = {
@@ -342,8 +347,8 @@ impl CoreRefreshEngine {
                 .flat_map(|attempt| attempt.route_observations.keys().cloned())
                 .collect()
         };
-        self.post_publication_route_coverage_fence_with(request_id, routes, |catalog| {
-            source_backed_route_admission_fence(data_root, catalog)
+        self.post_publication_route_coverage_fence_with(request_id, routes, |catalog, routes| {
+            source_backed_requested_route_observation_fence(data_root, catalog, routes)
         })
     }
 
@@ -356,6 +361,7 @@ impl CoreRefreshEngine {
     where
         Sample: FnOnce(
             Option<&ExplicitSourceCatalogAuthority>,
+            &BTreeSet<SourceRouteIdentity>,
         ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
     {
         // Snapshot the exact seen-event boundary before touching provider
@@ -378,7 +384,7 @@ impl CoreRefreshEngine {
                 attempt.and_then(|attempt| attempt.requested_explicit_source_catalog.clone());
             (seen_watermarks, requested_catalog)
         };
-        let mut sampled = sample(requested_catalog.as_ref()).unwrap_or_default();
+        let mut sampled = sample(requested_catalog.as_ref(), &routes).unwrap_or_default();
         let sampled_observations = routes
             .into_iter()
             .map(|route| {

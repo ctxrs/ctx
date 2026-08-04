@@ -233,6 +233,12 @@ enum SourceRefreshAdmissionRequirement {
     FreshAfterAdmittedSnapshot,
 }
 
+struct SourceRefreshLogicalDemand {
+    admission: SourceRefreshAdmissionRequirement,
+    route_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
+    request_id: Option<String>,
+}
+
 impl SourceRefreshAdmissionRequirement {
     fn requires_successor(self, state: SourceBackedRefreshState) -> bool {
         self == Self::FreshAfterAdmittedSnapshot && state == SourceBackedRefreshState::Running
@@ -690,11 +696,13 @@ impl CoreRefreshEngine {
                     metadata,
                     requested_catalog,
                     SourceBackedRefreshScope::All,
-                    // Wait controls how the client observes the attempt; it is
-                    // not itself a fresh-after-admission barrier.
-                    admission,
-                    admission_route_observations,
-                    logical_request_id,
+                    SourceRefreshLogicalDemand {
+                        // Wait controls how the client observes the attempt; it is
+                        // not itself a fresh-after-admission barrier.
+                        admission,
+                        route_observations: admission_route_observations,
+                        request_id: logical_request_id,
+                    },
                 ) {
                     Ok(response) => response,
                     Err(error) => {

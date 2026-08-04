@@ -9,9 +9,11 @@ impl CoreRefreshEngine {
             SourceRefreshRuntimeMetadata::periodic(),
             None,
             SourceBackedRefreshScope::All,
-            SourceRefreshAdmissionRequirement::AttachEquivalent,
-            BTreeMap::new(),
-            None,
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::AttachEquivalent,
+                route_observations: BTreeMap::new(),
+                request_id: None,
+            },
         )
     }
 
@@ -241,9 +243,11 @@ impl CoreRefreshEngine {
             SourceRefreshRuntimeMetadata::default(),
             None,
             SourceBackedRefreshScope::All,
-            SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
-            admission_route_observations,
-            Some(request_id),
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
+                route_observations: admission_route_observations,
+                request_id: Some(request_id),
+            },
         )
     }
 
@@ -258,9 +262,11 @@ impl CoreRefreshEngine {
             metadata,
             None,
             SourceBackedRefreshScope::All,
-            SourceRefreshAdmissionRequirement::AttachEquivalent,
-            BTreeMap::new(),
-            None,
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::AttachEquivalent,
+                route_observations: BTreeMap::new(),
+                request_id: None,
+            },
         )
         .expect("requests without catalog authority always coalesce")
     }
@@ -271,10 +277,13 @@ impl CoreRefreshEngine {
         metadata: SourceRefreshRuntimeMetadata,
         requested_catalog: Option<ExplicitSourceCatalogAuthority>,
         refresh_scope: SourceBackedRefreshScope,
-        admission: SourceRefreshAdmissionRequirement,
-        mut admission_route_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
-        logical_request_id: Option<String>,
+        logical_demand: SourceRefreshLogicalDemand,
     ) -> Result<Value> {
+        let SourceRefreshLogicalDemand {
+            admission,
+            route_observations: mut admission_route_observations,
+            request_id: logical_request_id,
+        } = logical_demand;
         let mut state = self.lock_state();
         if let Some(existing) = logical_request_id
             .as_deref()

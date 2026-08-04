@@ -115,16 +115,27 @@ fn complete_verified_fully_covered_demand(
     coordinator
 }
 
+struct RunningAllDemand<'a> {
+    publication_observations: BTreeMap<SourceRouteIdentity, String>,
+    admission_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
+    previous_generation: Option<String>,
+    request_id: &'a str,
+    published_generation: &'a str,
+}
+
 fn complete_running_all_with_demand(
     coordinator: &CoreRefreshEngine,
     data_root: &Path,
     routes: &BTreeSet<SourceRouteIdentity>,
-    publication_observations: BTreeMap<SourceRouteIdentity, String>,
-    admission_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
-    demand_previous_generation: Option<String>,
-    demand_request_id: &str,
-    published_generation: &str,
+    demand: RunningAllDemand<'_>,
 ) -> (String, String) {
+    let RunningAllDemand {
+        publication_observations,
+        admission_observations,
+        previous_generation,
+        request_id: demand_request_id,
+        published_generation,
+    } = demand;
     coordinator.initialize_watch_route_authority(routes.iter().cloned());
     let predecessor = coordinator.enqueue_periodic(data_root).unwrap();
     let predecessor_request_id = request_id(&predecessor);
@@ -139,7 +150,7 @@ fn complete_running_all_with_demand(
                 running
                     .set_route_observations_for_test(running_request_id, publication_observations);
                 demand = Some(running.enqueue_fresh_demand_for_test(
-                    demand_previous_generation,
+                    previous_generation,
                     demand_request_id.to_owned(),
                     admission_observations,
                 )?);
@@ -185,11 +196,13 @@ fn running_cold_all_satisfies_fresh_demand_with_one_full_pass() {
         &coordinator,
         &data_root,
         &routes,
-        observations,
-        admission,
-        None,
-        &demand_id,
-        "full-pass-generation",
+        RunningAllDemand {
+            publication_observations: observations,
+            admission_observations: admission,
+            previous_generation: None,
+            request_id: &demand_id,
+            published_generation: "full-pass-generation",
+        },
     );
     let resolution = coordinator
         .run_next(&data_root)
@@ -309,11 +322,13 @@ fn post_snapshot_change_executes_only_exact_uncovered_delta() {
         &coordinator,
         &data_root,
         &routes,
-        publication_observations,
-        admission_observations,
-        None,
-        &demand_id,
-        "predecessor-generation",
+        RunningAllDemand {
+            publication_observations,
+            admission_observations,
+            previous_generation: None,
+            request_id: &demand_id,
+            published_generation: "predecessor-generation",
+        },
     );
 
     let mut selected_delta = None;
@@ -356,11 +371,13 @@ fn logical_demand_keeps_its_own_terminal_request_resolution() {
         &coordinator,
         &data_root,
         &routes,
-        BTreeMap::from([(route.clone(), token.clone())]),
-        BTreeMap::from([(route, Some(token))]),
-        Some("caller-admission-generation".to_owned()),
-        &demand_id,
-        "shared-generation",
+        RunningAllDemand {
+            publication_observations: BTreeMap::from([(route.clone(), token.clone())]),
+            admission_observations: BTreeMap::from([(route, Some(token))]),
+            previous_generation: Some("caller-admission-generation".to_owned()),
+            request_id: &demand_id,
+            published_generation: "shared-generation",
+        },
     );
     coordinator
         .run_next(&data_root)
@@ -393,11 +410,13 @@ fn indeterminate_admission_observation_is_not_covered() {
         &coordinator,
         &data_root,
         &routes,
-        BTreeMap::from([(route.clone(), observation(0xd1))]),
-        BTreeMap::from([(route.clone(), None)]),
-        None,
-        &demand_id,
-        "indeterminate-predecessor",
+        RunningAllDemand {
+            publication_observations: BTreeMap::from([(route.clone(), observation(0xd1))]),
+            admission_observations: BTreeMap::from([(route.clone(), None)]),
+            previous_generation: None,
+            request_id: &demand_id,
+            published_generation: "indeterminate-predecessor",
+        },
     );
 
     let mut covered_routes = None;

@@ -67,12 +67,14 @@ mod request;
 
 use capture_refresh::{
     execute_capture_owned_refresh, execute_source_backed_refresh,
-    source_backed_route_admission_fence, SourceBackedRefreshPlan,
+    source_backed_requested_route_observation_fence, source_backed_route_admission_fence,
+    SourceBackedRefreshPlan,
 };
 #[cfg(test)]
 use capture_refresh::{
     execute_capture_owned_refresh_with, refresh_all_provider_sources,
     refresh_all_provider_sources_route_local, reject_blocking_automatic_registry_issues,
+    source_backed_requested_route_observations,
 };
 use client::unknown_refresh_request_response;
 pub(crate) use client::{

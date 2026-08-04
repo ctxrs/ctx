@@ -62,6 +62,16 @@ fn post_scan_jsonl_append_is_not_certified_clean_across_restart() {
             .registry
             .watch_catalog();
     let route = catalog.route_ids().next().unwrap().clone();
+    let missing_route = route_identity(0xd1);
+    let requested_routes = BTreeSet::from([route.clone(), missing_route.clone()]);
+    let requested_observations =
+        source_backed_requested_route_observations(&catalog, &requested_routes);
+    assert_eq!(
+        requested_observations.keys().collect::<BTreeSet<_>>(),
+        requested_routes.iter().collect()
+    );
+    assert!(requested_observations[&route].is_some());
+    assert_eq!(requested_observations[&missing_route], None);
     let coordinator = CoreRefreshEngine::with_executor(make_executor());
     let request = coordinator.enqueue_periodic(&data_root).unwrap();
     let request_id = request["request_id"].as_str().unwrap().to_owned();

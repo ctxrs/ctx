@@ -738,6 +738,29 @@ pub(super) fn source_backed_route_admission_fence(
     data_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
 ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
+    source_backed_route_observation_fence(data_root, explicit_source_catalog, None)
+}
+
+/// Samples only the exact routes that can contribute to one publication
+/// coverage certificate. Requested routes absent from the current catalog are
+/// retained with an indeterminate observation so certification fails closed.
+pub(super) fn source_backed_requested_route_observation_fence(
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    requested_routes: &BTreeSet<SourceRouteIdentity>,
+) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
+    source_backed_route_observation_fence(
+        data_root,
+        explicit_source_catalog,
+        Some(requested_routes),
+    )
+}
+
+fn source_backed_route_observation_fence(
+    data_root: &Path,
+    explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    requested_routes: Option<&BTreeSet<SourceRouteIdentity>>,
+) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
     let discovery = source_backed_discovery_context()?.with_data_root(data_root);
     let work_budget = source_backed_refresh_work_budget(WriterOptions::default().indexer_threads);
     let discovery_started = StdInstant::now();
@@ -753,14 +776,33 @@ pub(super) fn source_backed_route_admission_fence(
         explicit_source_catalog,
     )?;
     let catalog = merged.build.registry.watch_catalog();
-    Ok(catalog
-        .route_ids()
+    Ok(match requested_routes {
+        Some(requested_routes) => {
+            source_backed_requested_route_observations(&catalog, requested_routes)
+        }
+        None => catalog
+            .route_ids()
+            .cloned()
+            .map(|route| {
+                let observation = catalog.certify_route_observation(&route);
+                (route, observation)
+            })
+            .collect(),
+    })
+}
+
+pub(super) fn source_backed_requested_route_observations(
+    catalog: &SourceBackedWatchCatalog,
+    requested_routes: &BTreeSet<SourceRouteIdentity>,
+) -> BTreeMap<SourceRouteIdentity, Option<String>> {
+    requested_routes
+        .iter()
         .cloned()
         .map(|route| {
             let observation = catalog.certify_route_observation(&route);
             (route, observation)
         })
-        .collect())
+        .collect()
 }
 
 fn build_merged_source_backed_registry(
