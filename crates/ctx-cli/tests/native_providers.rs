@@ -1094,6 +1094,11 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
     wait_for_imported_core(&temp, &imported);
     assert_eq!(imported["totals"]["current_rejected_records"], 0);
     assert_eq!(provider_core_counts(&data_root(&temp), "roo_code"), (2, 7));
+    assert_eq!(
+        provider_core_counts(&data_root(&temp), "cline"),
+        (1, 5),
+        "Roo route publication must carry the prior Cline source unchanged"
+    );
 
     let search = json_output(ctx(&temp).args([
         "search",

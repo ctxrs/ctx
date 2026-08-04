@@ -812,15 +812,22 @@ fn build_merged_source_backed_registry(
     data_root: &Path,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
 ) -> Result<MergedSourceBackedRegistry> {
+    let retained_generation = open_published_generation(data_root)?;
+    let (previous_explicit_source_catalog, previous_catalog_route_bindings) =
+        retained_catalog_witness(retained_generation.as_ref())?;
+    // A request overlay is not the whole durable explicit catalog. Keep every
+    // retained explicit owner out of automatic discovery while a different
+    // explicit route is selected, so those base routes remain carried rather
+    // than being re-scanned under a new automatic identity.
+    if let Some(catalog) = previous_explicit_source_catalog.as_ref() {
+        catalog.prepare_discovery_report(data_root, &mut report)?;
+    }
     if let Some(catalog) = explicit_source_catalog {
         catalog.prepare_discovery_report(data_root, &mut report)?;
     }
     let mut build =
         build_automatic_source_backed_registry_from_report(discovery, data_root, report);
     build.discovery_duration = discovery_duration;
-    let retained_generation = open_published_generation(data_root)?;
-    let (previous_explicit_source_catalog, previous_catalog_route_bindings) =
-        retained_catalog_witness(retained_generation.as_ref())?;
     let requested_catalog_route_bindings = explicit_source_catalog
         .map(|catalog| {
             catalog.register_routes_after_discovery_merge(
