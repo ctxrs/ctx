@@ -132,6 +132,25 @@ Class: 64-bit
 DataEncoding: LittleEndian
 Type: SharedObject (0x3)
 Machine: EM_X86_64 (0x3E)
+ProgramHeaders [
+  ProgramHeader {
+    Type: PT_GNU_STACK (0x6474E551)
+    Flags [ (0x6)
+      PF_R (0x4)
+      PF_W (0x2)
+    ]
+  }
+  ProgramHeader {
+    Type: PT_GNU_RELRO (0x6474E552)
+    Flags [ (0x4)
+      PF_R (0x4)
+    ]
+  }
+]
+DynamicSection [
+  0x000000000000001E FLAGS        BIND_NOW
+  0x000000006FFFFFFB FLAGS_1      NOW PIE
+]
 Interpreter: /lib64/ld-linux-x86-64.so.2
 NeededLibraries [
   libgcc_s.so.1
@@ -159,6 +178,25 @@ Class: 64-bit
 DataEncoding: LittleEndian
 Type: SharedObject (0x3)
 Machine: EM_AARCH64 (0xB7)
+ProgramHeaders [
+  ProgramHeader {
+    Type: PT_GNU_STACK (0x6474E551)
+    Flags [ (0x6)
+      PF_R (0x4)
+      PF_W (0x2)
+    ]
+  }
+  ProgramHeader {
+    Type: PT_GNU_RELRO (0x6474E552)
+    Flags [ (0x4)
+      PF_R (0x4)
+    ]
+  }
+]
+DynamicSection [
+  0x000000000000001E FLAGS        BIND_NOW
+  0x000000006FFFFFFB FLAGS_1      NOW PIE
+]
 Interpreter: /lib/ld-linux-aarch64.so.1
 NeededLibraries [
   libgcc_s.so.1
@@ -253,6 +291,11 @@ Format: COFF-x86-64
 Arch: x86_64
 Machine: IMAGE_FILE_MACHINE_AMD64 (0x8664)
 IMAGE_FILE_EXECUTABLE_IMAGE (0x2)
+Characteristics [ (0x160)
+  IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE (0x40)
+  IMAGE_DLL_CHARACTERISTICS_HIGH_ENTROPY_VA (0x20)
+  IMAGE_DLL_CHARACTERISTICS_NX_COMPAT (0x100)
+]
 Magic: 0x20B
 MajorOperatingSystemVersion: 10
 MinorOperatingSystemVersion: 0
@@ -307,6 +350,25 @@ DataEncoding: LittleEndian
 OS/ABI: FreeBSD (0x9)
 Type: SharedObject (0x3)
 Machine: EM_X86_64 (0x3E)
+ProgramHeaders [
+  ProgramHeader {
+    Type: PT_GNU_STACK (0x6474E551)
+    Flags [ (0x6)
+      PF_R (0x4)
+      PF_W (0x2)
+    ]
+  }
+  ProgramHeader {
+    Type: PT_GNU_RELRO (0x6474E552)
+    Flags [ (0x4)
+      PF_R (0x4)
+    ]
+  }
+]
+DynamicSection [
+  0x000000000000001E FLAGS        BIND_NOW
+  0x000000006FFFFFFB FLAGS_1      NOW PIE
+]
 NeededLibraries [
   libc.so.7
   libgcc_s.so.1
@@ -327,6 +389,25 @@ expect_pass windows run_check windows-x64 "${windows}"
 expect_pass windows_declared_tool run_declared_windows_check "${windows}"
 expect_pass freebsd run_check freebsd-x64 "${freebsd}"
 expect_fail malformed run_check linux-x64 "${tmp}/empty"
+grep -Fq "scanner-inputs=llvm-readobj=${tmp}/llvm-readobj" \
+  "${tmp}/linux_x64.out"
+grep -Fq "scanner-authority=authoritative-package-root:${tmp}" \
+  "${tmp}/linux_x64.out"
+
+real_unhardened_source="${tmp}/real-unhardened.c"
+real_unhardened="${tmp}/real-unhardened"
+real_unhardened_readobj="${tmp}/real-unhardened.txt"
+printf 'int main(void) { return 0; }\n' >"${real_unhardened_source}"
+cc -g -fPIE -pie -Wl,-z,norelro -Wl,-z,lazy -Wl,-z,execstack \
+  -o "${real_unhardened}" "${real_unhardened_source}"
+strip --strip-all "${real_unhardened}"
+/usr/bin/llvm-readobj \
+  --file-headers --program-headers --dynamic-table --needed-libs \
+  --version-info --notes --sections --symbols \
+  "${real_unhardened}" >"${real_unhardened_readobj}"
+expect_fail real_unhardened run_check linux-x64 "${real_unhardened_readobj}"
+grep -Fq 'expected exactly one GNU_RELRO program header' \
+  "${tmp}/real_unhardened.err"
 
 if "${checker}" linux-x64 "${tmp}/candidate" "${tmp}/llvm-readobj" \
   >"${tmp}/declared-linux.out" 2>"${tmp}/declared-linux.err"; then
@@ -355,14 +436,27 @@ mutate_and_fail() {
   local platform="$2"
   local source="$3"
   local expression="$4"
+  local expected_error="${5:-}"
   local mutated="${tmp}/${name}.txt"
   sed "${expression}" "${source}" > "${mutated}"
   expect_fail "${name}" run_check "${platform}" "${mutated}"
+  if [[ -n "${expected_error}" ]]; then
+    grep -Fq "${expected_error}" "${tmp}/${name}.err"
+  fi
 }
 
 mutate_and_fail linux_wrong_arch linux-x64 "${linux_x64}" 's/EM_X86_64/EM_AARCH64/'
 mutate_and_fail linux_endian linux-x64 "${linux_x64}" 's/DataEncoding: LittleEndian/DataEncoding: BigEndian/'
 mutate_and_fail linux_type linux-x64 "${linux_x64}" 's/Type: SharedObject/Type: Relocatable/'
+mutate_and_fail linux_missing_relro linux-x64 "${linux_x64}" \
+  '/Type: PT_GNU_RELRO/d' 'expected exactly one GNU_RELRO program header'
+mutate_and_fail linux_exec_stack linux-x64 "${linux_x64}" \
+  '0,/PF_W (0x2)/s//PF_W (0x2)\
+      PF_X (0x1)/' 'GNU_STACK is executable'
+mutate_and_fail linux_missing_bind_now linux-x64 "${linux_x64}" \
+  '/FLAGS[[:space:]]*BIND_NOW/d' 'missing BIND_NOW dynamic flag'
+mutate_and_fail linux_missing_pie linux-x64 "${linux_x64}" \
+  's/FLAGS_1      NOW PIE/FLAGS_1      NOW/' 'missing PIE dynamic flag'
 mutate_and_fail linux_interpreter linux-x64 "${linux_x64}" 's#/lib64/ld-linux-x86-64.so.2#/lib/ld-linux.so.2#'
 mutate_and_fail linux_glibc linux-x64 "${linux_x64}" 's/GLIBC_2.35/GLIBC_2.36/'
 grep -Fq 'requires GLIBC_2.36, above allowed GLIBC_2.35' "${tmp}/linux_glibc.err"
@@ -450,6 +544,15 @@ expect_fail mac_debug_section run_check macos-arm64 "${bad_mac_debug_section}" "
 mutate_and_fail windows_machine windows-x64 "${windows}" 's/IMAGE_FILE_MACHINE_AMD64/IMAGE_FILE_MACHINE_ARM64/'
 mutate_and_fail windows_magic windows-x64 "${windows}" 's/Magic: 0x20B/Magic: 0x10B/'
 mutate_and_fail windows_type windows-x64 "${windows}" 's/IMAGE_FILE_EXECUTABLE_IMAGE/IMAGE_FILE_DLL/'
+mutate_and_fail windows_missing_dynamic_base windows-x64 "${windows}" \
+  '/IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE/d' \
+  'missing PE mitigation IMAGE_DLL_CHARACTERISTICS_DYNAMIC_BASE'
+mutate_and_fail windows_missing_nx_compat windows-x64 "${windows}" \
+  '/IMAGE_DLL_CHARACTERISTICS_NX_COMPAT/d' \
+  'missing PE mitigation IMAGE_DLL_CHARACTERISTICS_NX_COMPAT'
+mutate_and_fail windows_missing_high_entropy_va windows-x64 "${windows}" \
+  '/IMAGE_DLL_CHARACTERISTICS_HIGH_ENTROPY_VA/d' \
+  'missing PE mitigation IMAGE_DLL_CHARACTERISTICS_HIGH_ENTROPY_VA'
 mutate_and_fail windows_subsystem windows-x64 "${windows}" 's/IMAGE_SUBSYSTEM_WINDOWS_CUI/IMAGE_SUBSYSTEM_WINDOWS_GUI/'
 mutate_and_fail windows_version windows-x64 "${windows}" 's/MajorOperatingSystemVersion: 10/MajorOperatingSystemVersion: 11/'
 mutate_and_fail windows_subsystem_version windows-x64 "${windows}" 's/MajorSubsystemVersion: 6/MajorSubsystemVersion: 11/'
@@ -458,6 +561,15 @@ mutate_and_fail windows_static_symbols windows-x64 "${windows}" 's/Import {/Symb
 mutate_and_fail freebsd_abi freebsd-x64 "${freebsd}" 's/OS\/ABI: FreeBSD/OS\/ABI: UNIX - System V/'
 mutate_and_fail freebsd_arch freebsd-x64 "${freebsd}" 's/EM_X86_64/EM_AARCH64/'
 mutate_and_fail freebsd_type freebsd-x64 "${freebsd}" 's/Type: SharedObject/Type: Relocatable/'
+mutate_and_fail freebsd_missing_relro freebsd-x64 "${freebsd}" \
+  '/Type: PT_GNU_RELRO/d' 'expected exactly one GNU_RELRO program header'
+mutate_and_fail freebsd_exec_stack freebsd-x64 "${freebsd}" \
+  '0,/PF_W (0x2)/s//PF_W (0x2)\
+      PF_X (0x1)/' 'GNU_STACK is executable'
+mutate_and_fail freebsd_missing_bind_now freebsd-x64 "${freebsd}" \
+  '/FLAGS[[:space:]]*BIND_NOW/d' 'missing BIND_NOW dynamic flag'
+mutate_and_fail freebsd_missing_pie freebsd-x64 "${freebsd}" \
+  's/FLAGS_1      NOW PIE/FLAGS_1      NOW/' 'missing PIE dynamic flag'
 mutate_and_fail freebsd_needed freebsd-x64 "${freebsd}" 's/libthr.so.3/libutil.so.9/'
 mutate_and_fail freebsd_rpath freebsd-x64 "${freebsd}" 's/NeededLibraries \[/RUNPATH: \/tmp\nNeededLibraries [/'
 

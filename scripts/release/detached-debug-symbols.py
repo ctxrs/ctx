@@ -28,6 +28,22 @@ PLATFORMS = {
     "macos-x64": "macho",
     "windows-x64": "pe",
 }
+PINNED_RUSTC_VERSION = "1.97.1"
+PINNED_RUSTC_COMMIT = "8bab26f4f68e0e26f0bb7960be334d5b520ea452"
+RUST_HOST_TRIPLES = {
+    "freebsd-x64": "x86_64-unknown-freebsd",
+    "linux-arm64": "aarch64-unknown-linux-gnu",
+    "linux-x64": "x86_64-unknown-linux-gnu",
+    "macos-arm64": "aarch64-apple-darwin",
+    "macos-x64": "x86_64-apple-darwin",
+    "windows-x64": "x86_64-pc-windows-msvc",
+}
+LINUX_CONSTRUCTION_RUNFILES = {
+    "linux-arm64": Path(
+        "/build/bazel-links/bin/ctx_release_linux_arm64.runfiles"
+    ),
+    "linux-x64": Path("/build/bazel-links/bin/ctx_release_linux_x64.runfiles"),
+}
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 64
 MAX_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
@@ -85,6 +101,84 @@ def command(name: str) -> str:
     if selected is None:
         fail(f"required symbol tool is unavailable: {name}")
     return selected
+
+
+def executable_tool(path: Path, label: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        fail(f"{label} is unavailable: {error}")
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
+        fail(f"{label} must be an executable regular file")
+    return resolved
+
+
+def declared_runfile(logical: str, platform: str) -> Path | None:
+    workspace = os.environ.get("TEST_WORKSPACE", "_main")
+    logical_names = [f"{workspace}/{logical}"]
+    if workspace != "_main":
+        logical_names.append(f"_main/{logical}")
+
+    roots: list[Path] = []
+    if runfiles_dir := os.environ.get("RUNFILES_DIR"):
+        roots.append(Path(runfiles_dir))
+    construction_root = LINUX_CONSTRUCTION_RUNFILES.get(platform)
+    if construction_root is not None:
+        roots.append(construction_root)
+    for root in roots:
+        for name in logical_names:
+            candidate = root / name
+            if candidate.exists():
+                return candidate
+
+    if manifest_name := os.environ.get("RUNFILES_MANIFEST_FILE"):
+        manifest = Path(manifest_name)
+        try:
+            lines = manifest.read_text(encoding="utf-8").splitlines()
+        except OSError as error:
+            fail(f"declared release runfiles manifest is unavailable: {error}")
+        wanted = set(logical_names)
+        for line in lines:
+            name, separator, physical = line.partition(" ")
+            if separator and name in wanted and physical:
+                return Path(physical)
+    return None
+
+
+def declared_rust_llvm_tool(platform: str, tool: str) -> str:
+    rustc_logical = f"ctx_release_routes/{platform}/rustc"
+    rustc_path = declared_runfile(rustc_logical, platform)
+    if rustc_path is None:
+        fail(
+            "declared Bazel Rust toolchain runfile is unavailable: "
+            f"{rustc_logical}"
+        )
+    rustc = executable_tool(rustc_path, "declared Bazel rustc")
+    version = run([str(rustc), "--version", "--verbose"], output=True)
+    expected_host = RUST_HOST_TRIPLES[platform]
+    required_version_lines = {
+        f"commit-hash: {PINNED_RUSTC_COMMIT}",
+        f"host: {expected_host}",
+        f"release: {PINNED_RUSTC_VERSION}",
+    }
+    if not required_version_lines.issubset(set(version.splitlines())):
+        fail("declared Bazel rustc does not match the pinned release toolchain")
+
+    sysroot_output = run([str(rustc), "--print", "sysroot"], output=True)
+    sysroot_lines = [line for line in sysroot_output.splitlines() if line]
+    if len(sysroot_lines) != 1 or not Path(sysroot_lines[0]).is_absolute():
+        fail("declared Bazel rustc returned an invalid sysroot")
+    suffix = ".exe" if platform == "windows-x64" else ""
+    selected = (
+        Path(sysroot_lines[0])
+        / "lib"
+        / "rustlib"
+        / expected_host
+        / "bin"
+        / f"{tool}{suffix}"
+    )
+    return str(executable_tool(selected, f"declared Rust {tool}"))
 
 
 def run(arguments: list[str], *, output: bool = False) -> str:
@@ -247,10 +341,12 @@ def verify_archive(archive: Path, expected_entries: object) -> None:
         fail("symbol archive contents differ from its inventory")
 
 
-def prepare_elf(artifact: Path, symbol_tree: Path) -> tuple[str, str]:
+def prepare_elf(
+    artifact: Path, symbol_tree: Path, platform: str
+) -> tuple[str, str]:
     identifier = elf_build_id(artifact)
     debug_file = symbol_tree / f"{artifact.name}.debug"
-    objcopy = command("objcopy")
+    objcopy = declared_rust_llvm_tool(platform, "llvm-objcopy")
     run([objcopy, "--only-keep-debug", str(artifact), str(debug_file)])
     if not elf_has_detachable_debug_material(debug_file):
         fail("ELF release intermediate contains no detachable debug information")
@@ -293,7 +389,7 @@ def prepare_macho(artifact: Path, symbol_tree: Path) -> tuple[str, str]:
 
 
 def prepare_pe(
-    artifact: Path, symbol_tree: Path, pdb: Path | None
+    artifact: Path, symbol_tree: Path, pdb: Path | None, platform: str
 ) -> tuple[str, str]:
     if pdb is not None:
         pdb = regular_file(pdb, "PDB")
@@ -304,11 +400,17 @@ def prepare_pe(
         os.chmod(destination, 0o600)
         # The exact shipped PE digest in the final manifest is the primary
         # binding. WinDbg additionally validates the PDB's embedded GUID/age.
-        run([command("llvm-strip"), "--strip-all", str(artifact)])
+        run(
+            [
+                declared_rust_llvm_tool(platform, "llvm-strip"),
+                "--strip-all",
+                str(artifact),
+            ]
+        )
         return "pdb-sha256", sha256_file(destination)
 
     debug_file = symbol_tree / f"{artifact.name}.debug"
-    objcopy = command("objcopy")
+    objcopy = declared_rust_llvm_tool(platform, "llvm-objcopy")
     run([objcopy, "--only-keep-debug", str(artifact), str(debug_file)])
     if debug_file.stat().st_size == 0:
         fail("GNU PE release intermediate produced no detached debug file")
@@ -329,13 +431,17 @@ def prepare(args: argparse.Namespace) -> None:
     if platform_kind == "elf":
         if pdb is not None:
             fail("--pdb is valid only for windows-x64")
-        identifier_type, identifier = prepare_elf(artifact, symbol_tree)
+        identifier_type, identifier = prepare_elf(
+            artifact, symbol_tree, args.platform
+        )
     elif platform_kind == "macho":
         if pdb is not None:
             fail("--pdb is valid only for windows-x64")
         identifier_type, identifier = prepare_macho(artifact, symbol_tree)
     else:
-        identifier_type, identifier = prepare_pe(artifact, symbol_tree, pdb)
+        identifier_type, identifier = prepare_pe(
+            artifact, symbol_tree, pdb, args.platform
+        )
 
     archive = output / "symbols.tar.gz"
     entries = deterministic_archive(symbol_tree, archive)

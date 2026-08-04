@@ -20,6 +20,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "scripts/release/detached-debug-symbols.py"
 SOURCE_COMMIT = "1" * 40
+if len(sys.argv) < 2:
+    raise RuntimeError("test requires the declared Bazel rustc runfile argument")
+PINNED_RUSTC = Path(sys.argv.pop(1)).resolve(strict=True)
 
 
 def elf_sections(path: Path) -> set[str]:
@@ -44,7 +47,11 @@ def forbidden_distribution_sections(path: Path) -> set[str]:
     }
 
 
-def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    *arguments: str,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(TOOL), *arguments],
         check=check,
@@ -52,6 +59,7 @@ def run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]
         stderr=subprocess.PIPE,
         text=True,
         timeout=60,
+        env=env,
     )
 
 
@@ -59,6 +67,25 @@ class DetachedDebugSymbolsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = Path(tempfile.mkdtemp(prefix="ctx-symbol-test."))
         self.addCleanup(shutil.rmtree, self.directory)
+        manifest = self.directory / "declared-runfiles-manifest"
+        manifest.write_text(
+            "_main/ctx_release_routes/linux-x64/rustc "
+            f"{PINNED_RUSTC}\n",
+            encoding="utf-8",
+        )
+        prior_manifest = os.environ.get("RUNFILES_MANIFEST_FILE")
+        prior_runfiles_dir = os.environ.pop("RUNFILES_DIR", None)
+        os.environ["RUNFILES_MANIFEST_FILE"] = str(manifest)
+
+        def restore_runfiles_environment() -> None:
+            if prior_manifest is None:
+                os.environ.pop("RUNFILES_MANIFEST_FILE", None)
+            else:
+                os.environ["RUNFILES_MANIFEST_FILE"] = prior_manifest
+            if prior_runfiles_dir is not None:
+                os.environ["RUNFILES_DIR"] = prior_runfiles_dir
+
+        self.addCleanup(restore_runfiles_environment)
         source = self.directory / "fixture.c"
         source.write_text(
             """
@@ -159,6 +186,34 @@ int main(void) { printf("%d\\n", answer()); return 0; }
             archived_debug.write_bytes(source.read())
         self.assertIn(".debug_gdb_scripts", elf_sections(archived_debug))
         self.assertEqual(forbidden_distribution_sections(self.artifact), set())
+
+    def test_ignores_hostile_ambient_objcopy(self) -> None:
+        hostile_bin = self.directory / "hostile-bin"
+        hostile_bin.mkdir()
+        marker = self.directory / "hostile-objcopy-ran"
+        for name in ("objcopy", "llvm-objcopy"):
+            executable = hostile_bin / name
+            executable.write_text(
+                '#!/bin/sh\n: > "$HOSTILE_OBJCOPY_MARKER"\nexit 99\n',
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{hostile_bin}:{environment['PATH']}"
+        environment["HOSTILE_OBJCOPY_MARKER"] = str(marker)
+        run(
+            "prepare",
+            "--artifact",
+            str(self.artifact),
+            "--output-dir",
+            str(self.output),
+            "--platform",
+            "linux-x64",
+            "--product",
+            "ctx",
+            env=environment,
+        )
+        self.assertFalse(marker.exists())
 
     def test_tampered_archive_and_binary_fail_closed(self) -> None:
         self.prepare_and_finalize()

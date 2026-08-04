@@ -631,6 +631,7 @@ py_test(
 
 sh_test(
     name = "public_cli_bazel_release_contract",
+    args = ["$(rootpath //tools/bazel:pinned_rustc)"],
     srcs = ["scripts/tests/package-public-cli-bazel-release-test.sh"],
     data = [
         ".bazelversion",
@@ -657,6 +658,7 @@ sh_test(
         "tests/fixtures/custom-history-jsonl/basic.jsonl",
         "//crates/ctx-cli:Cargo.toml",
         "//crates/ctx-history-index:Cargo.toml",
+        "//tools/bazel:pinned_rustc",
     ],
     tags = ["release-gate"],
     target_compatible_with = ["@platforms//os:linux"],
@@ -664,8 +666,12 @@ sh_test(
 
 py_test(
     name = "detached_debug_symbols_tests",
+    args = ["$(rootpath //tools/bazel:pinned_rustc)"],
     srcs = ["scripts/tests/detached-debug-symbols-test.py"],
-    data = ["scripts/release/detached-debug-symbols.py"],
+    data = [
+        "scripts/release/detached-debug-symbols.py",
+        "//tools/bazel:pinned_rustc",
+    ],
     main = "scripts/tests/detached-debug-symbols-test.py",
     tags = [
         "release-gate",

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+[[ $# -eq 1 ]] || {
+  echo "package release test requires the declared Bazel rustc runfile" >&2
+  exit 64
+}
+pinned_rustc="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+[[ -x "${pinned_rustc}" ]] || {
+  printf 'declared Bazel rustc is not executable: %s\n' "${pinned_rustc}" >&2
+  exit 1
+}
+
 if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]]; then
   source_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
 else
@@ -34,6 +44,7 @@ ln -s "${source_root}/scripts/dependency-advisory-gate.py" \
 ln -s "${TEST_SRCDIR}/_main~_repo_rules~ctx_tomli" \
   "${runfiles}/_main~_repo_rules~ctx_tomli"
 ln -s "${TEST_SRCDIR}/bazel_tools" "${runfiles}/bazel_tools"
+ln -s "${pinned_rustc}" "${route_runfiles}/rustc"
 
 cp "${source_root}/contracts/release-targets-v1.json" "${repo}/contracts/"
 cp "${source_root}/contracts/release-candidate-manifest-v1.schema.json" \
@@ -228,15 +239,9 @@ exit 99
 EOF
 done
 
-cat >"${repo}/inputs/rustc" <<'EOF'
-#!/usr/bin/env sh
-printf 'rustc 1.97.1 (8bab26f4f 2026-07-10)\n'
-EOF
-
 chmod 0755 \
   "${repo}/scripts/fake-osv-scanner.py" \
-  "${repo}/scripts/"*.sh \
-  "${repo}/inputs/rustc"
+  "${repo}/scripts/"*.sh
 
 python3 - \
   "${repo}/security/release-advisory-policy-v1.json" \
@@ -325,7 +330,8 @@ int main(int argc, char **argv) {
   return 1;
 }
 EOF
-  cc -g -O2 -Wl,--build-id=sha1 -o "${destination}" "${fixture_source}"
+  cc -g -O2 -fPIE -pie -Wl,-z,relro,-z,now -Wl,--build-id=sha1 \
+    -o "${destination}" "${fixture_source}"
   chmod 0755 "${destination}"
 }
 compile_fixture \
@@ -336,7 +342,8 @@ build_input_artifact="${repo}/inputs/ctx"
 cp "${artifact}" "${build_input_artifact}"
 chmod 0755 "${build_input_artifact}"
 prepared_symbols="${repo}/inputs/private-debug-symbols"
-python3 "${repo}/scripts/release/detached-debug-symbols.py" prepare \
+RUNFILES_DIR="${runfiles}" TEST_WORKSPACE=_main \
+  python3 "${repo}/scripts/release/detached-debug-symbols.py" prepare \
   --artifact "${build_input_artifact}" \
   --output-dir "${prepared_symbols}" \
   --platform linux-x64 \
@@ -356,7 +363,7 @@ python3 "${repo}/scripts/write-public-cli-build-info.py" \
   --target x86_64-unknown-linux-gnu \
   --source-commit "${source_commit}" \
   --source-clean true \
-  --rust-version "rustc 1.97.1 (8bab26f4f 2026-07-10)" \
+  --rust-version "rustc 1.97.1 (8bab26f4f 2026-07-14)" \
   --expected-builder-base "${builder_digest}" \
   --actual-builder-base "${builder_digest}" \
   --builder-image-id "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
@@ -393,7 +400,7 @@ value["bazel"] = {
     "release_target_matrix_sha256": hashlib.sha256(
         (repo / "contracts/release-targets-v1.json").read_bytes()
     ).hexdigest(),
-    "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-10)",
+    "rustc_version": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "version": (repo / ".bazelversion").read_text(encoding="ascii").strip(),
 }
 path.write_text(
@@ -407,7 +414,6 @@ ln -s "${source_root}/dependency_advisory_gate" \
   "${route_runfiles}/advisory-gate"
 ln -s "${repo}/scripts/release-sbom.py" "${route_runfiles}/sbom-tool"
 ln -s "${artifact}" "${route_runfiles}/artifact"
-ln -s "${repo}/inputs/rustc" "${route_runfiles}/rustc"
 cat >"${repo}/inputs/sbom-inventory.txt" <<'EOF'
 //crates/ctx-cli:ctx
 @@rules_rust~~crate~crates__dependency-1.2.3//:dependency
@@ -586,7 +592,7 @@ if package --output-dir out-caller-artifact --artifact "${artifact}" \
 fi
 grep -Fq -- '--artifact is route-owned' "${test_root}/caller.stderr"
 
-if package --output-dir out-caller-rustc --rustc "${repo}/inputs/rustc" \
+if package --output-dir out-caller-rustc --rustc "${pinned_rustc}" \
   >"${test_root}/caller-rustc.stdout" 2>"${test_root}/caller-rustc.stderr"; then
   echo "caller rustc override unexpectedly passed" >&2
   exit 1
