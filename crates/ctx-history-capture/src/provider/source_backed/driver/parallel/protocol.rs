@@ -2,29 +2,47 @@ use std::{
     error::Error as StdError,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::SyncSender,
+        mpsc::{self, Receiver, SyncSender},
     },
+    thread,
+    time::Duration,
 };
 
-use ctx_history_core::{CertifiedSource, CertifiedSourceAppend, CoreRecord, SourceKey};
-use ctx_history_index::CoreRecordPreparer;
+use ctx_history_core::{
+    CertifiedSource, CertifiedSourceAppend, CoreRecord, SourceKey, MAX_ENCODED_CORE_RECORD_BYTES,
+};
+use ctx_history_index::{CoreRecordPreparer, PreparedCoreRecordMaterialization};
 use thiserror::Error;
 
 use super::super::{
-    CoreRecordEmission, SourceBackedCoordinatorError, SourceBackedGenerationSink,
-    SourceBackedLogicalSourceFailureFact, SourceBackedRecordRejectionDrafts,
-    SourceBackedRouteError, SourceBackedRouteResources, SourceBackedSourceOutcome,
+    CoreRecordEmission, CoreRecordEmissionBatch, CoreRecordEmissionBatchBuilder,
+    SourceBackedCoordinatorError, SourceBackedGenerationSink, SourceBackedLogicalSourceFailureFact,
+    SourceBackedRecordRejectionDrafts, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedRouteResourceKind, SourceBackedRouteResources, SourceBackedSourceOutcome,
+    SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS,
 };
+
+const CORE_OUTPUT_RESERVATION_RETRY_DELAY: Duration = Duration::from_millis(1);
 
 #[derive(Debug)]
 pub struct ParallelLeafScanJob<L> {
     source: SourceKey,
     leaf: L,
+    worker_affinity: Option<u64>,
 }
 
 impl<L> ParallelLeafScanJob<L> {
     pub fn new(source: SourceKey, leaf: L) -> Self {
-        Self { source, leaf }
+        Self {
+            source,
+            leaf,
+            worker_affinity: None,
+        }
+    }
+
+    pub(crate) fn with_worker_affinity(mut self, worker_affinity: u64) -> Self {
+        self.worker_affinity = Some(worker_affinity);
+        self
     }
 
     pub fn source(&self) -> &SourceKey {
@@ -33,6 +51,10 @@ impl<L> ParallelLeafScanJob<L> {
 
     pub fn leaf(&self) -> &L {
         &self.leaf
+    }
+
+    pub(crate) fn worker_affinity(&self) -> Option<u64> {
+        self.worker_affinity
     }
 }
 
@@ -138,6 +160,7 @@ pub enum ParallelLeafScanMessageKind {
     BeginReplace,
     BeginAppend,
     CoreRecord,
+    CoreRecordBatch,
     CompleteReplace,
     CompleteAppend,
     CompleteRetain,
@@ -150,6 +173,7 @@ impl std::fmt::Display for ParallelLeafScanMessageKind {
             Self::BeginReplace => formatter.write_str("replacement begin"),
             Self::BeginAppend => formatter.write_str("append begin"),
             Self::CoreRecord => formatter.write_str("Core record"),
+            Self::CoreRecordBatch => formatter.write_str("Core record batch"),
             Self::CompleteReplace => formatter.write_str("replacement completion"),
             Self::CompleteAppend => formatter.write_str("append completion"),
             Self::CompleteRetain => formatter.write_str("retained completion"),
@@ -235,6 +259,10 @@ pub enum ParallelLeafScanProtocolError {
     TransportDisconnected { unfinished_jobs: usize },
     #[error("parallel leaf transport referenced unknown job {job_index}")]
     UnknownJob { job_index: usize },
+    #[error(
+        "parallel leaf job {job_index} disconnected before accepting its Begin acknowledgement"
+    )]
+    BeginAcknowledgementDisconnected { job_index: usize },
     #[error("parallel leaf API received a logical-source failure without requesting outcomes")]
     UnexpectedSourceFailure,
     #[error(
@@ -246,6 +274,25 @@ pub enum ParallelLeafScanProtocolError {
         expected_worker: usize,
         observed_worker: usize,
     },
+}
+
+#[derive(Debug)]
+pub(super) struct ParallelLeafBeginAcknowledgement(SyncSender<()>);
+
+impl ParallelLeafBeginAcknowledgement {
+    fn rendezvous() -> (Self, Receiver<()>) {
+        // The worker still cannot proceed before receiving this token, while
+        // one slot lets the coordinator resume servicing other ready workers
+        // immediately after applying Begin.
+        let (sender, receiver) = mpsc::sync_channel(1);
+        (Self(sender), receiver)
+    }
+
+    pub(super) fn acknowledge(self, job_index: usize) -> Result<(), ParallelLeafScanProtocolError> {
+        self.0.send(()).map_err(|_| {
+            ParallelLeafScanProtocolError::BeginAcknowledgementDisconnected { job_index }
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -286,6 +333,7 @@ pub enum ParallelLeafSinkOperation {
     BeginReplace,
     BeginAppend,
     AddCoreRecord,
+    AddCoreRecordBatch,
     CompleteReplace,
     CompleteAppend,
     RetainSource,
@@ -298,6 +346,7 @@ impl std::fmt::Display for ParallelLeafSinkOperation {
             Self::BeginReplace => formatter.write_str("begin replacement"),
             Self::BeginAppend => formatter.write_str("begin append"),
             Self::AddCoreRecord => formatter.write_str("add Core record"),
+            Self::AddCoreRecordBatch => formatter.write_str("add Core record batch"),
             Self::CompleteReplace => formatter.write_str("complete replacement"),
             Self::CompleteAppend => formatter.write_str("complete append"),
             Self::RetainSource => formatter.write_str("retain source"),
@@ -356,8 +405,11 @@ where
 
 #[derive(Debug)]
 pub(super) enum ParallelLeafProtocolMessage<R> {
-    Begin(Box<ParallelLeafScanBegin>),
-    CoreRecord(Box<CoreRecordEmission>),
+    Begin {
+        begin: Box<ParallelLeafScanBegin>,
+        acknowledgement: ParallelLeafBeginAcknowledgement,
+    },
+    CoreRecordBatch(Box<CoreRecordEmissionBatch>),
     Complete(Box<ParallelLeafScanComplete<R>>),
 }
 
@@ -406,23 +458,163 @@ pub enum ParallelLeafScanEmitError {
 
 impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
     pub fn begin(&mut self, begin: ParallelLeafScanBegin) -> Result<(), ParallelLeafScanCancelled> {
-        self.send(ParallelLeafProtocolMessage::Begin(Box::new(begin)))
+        let (acknowledgement, applied) = ParallelLeafBeginAcknowledgement::rendezvous();
+        self.send(ParallelLeafProtocolMessage::Begin {
+            begin: Box::new(begin),
+            acknowledgement,
+        })?;
+        applied.recv().map_err(|_| ParallelLeafScanCancelled)?;
+        self.require_not_cancelled()
     }
 
     pub fn emit_core_record(
         &mut self,
         record: CoreRecord,
     ) -> Result<(), ParallelLeafScanEmitError> {
-        let emission =
-            CoreRecordEmission::new(record, &self.resources, &self.core_record_preparer)?;
-        self.emit_core_record_emission(emission)
+        let mut emissions = CoreRecordEmissionBatchBuilder::default();
+        self.emit_core_record_batched(&mut emissions, record)?;
+        self.emit_core_record_batch(&mut emissions)
     }
 
-    pub(crate) fn emit_core_record_emission(
+    /// Prepares and reserves one bounded provider page on this worker, then
+    /// transports each max-64 Core-record chunk through one rendezvous with
+    /// the coordinator. Ordinary JSONL pages therefore use one message, while
+    /// projectors that fan one physical page out further remain bounded. The
+    /// shared live-byte budget is backpressure rather than a batch admission
+    /// ceiling: a worker flushes its current batch before waiting cancelably
+    /// for an individually admissible next record.
+    pub fn emit_core_records(
         &mut self,
-        emission: CoreRecordEmission,
+        records: Vec<CoreRecord>,
     ) -> Result<(), ParallelLeafScanEmitError> {
-        self.send(ParallelLeafProtocolMessage::CoreRecord(Box::new(emission)))?;
+        let mut emissions = CoreRecordEmissionBatchBuilder::default();
+        for record in records {
+            self.emit_core_record_batched(&mut emissions, record)?;
+        }
+        self.emit_core_record_batch(&mut emissions)?;
+        Ok(())
+    }
+
+    pub(crate) fn emit_core_record_batched(
+        &mut self,
+        emissions: &mut CoreRecordEmissionBatchBuilder,
+        record: CoreRecord,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        self.require_not_cancelled()?;
+        let mut draft = CoreRecordEmission::prepare_draft(record, &self.core_record_preparer)?;
+        self.require_not_cancelled()?;
+        let route_maximum_bytes = self
+            .resources
+            .maximum_bytes(SourceBackedRouteResourceKind::CoreOutput);
+        let maximum_materialization_bytes = route_maximum_bytes
+            .min(u64::try_from(MAX_ENCODED_CORE_RECORD_BYTES).unwrap_or(u64::MAX));
+
+        loop {
+            self.require_not_cancelled()?;
+            if !emissions.has_reservation() {
+                self.reserve_core_output_cancelably(
+                    emissions,
+                    self.resources.core_output_batch_reservation_bytes().max(1),
+                )?;
+            }
+            self.require_not_cancelled()?;
+            let materialization_limit = usize::try_from(
+                emissions
+                    .remaining_bytes()
+                    .min(maximum_materialization_bytes),
+            )
+            .map_err(|_| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "Core-record materialization permit does not fit this platform",
+                )
+            })?;
+            match CoreRecordEmission::materialize_draft(draft, materialization_limit)? {
+                PreparedCoreRecordMaterialization::Prepared(prepared) => {
+                    emissions.push(prepared)?;
+                    if emissions.len() == SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS {
+                        self.emit_core_record_batch(emissions)?;
+                    }
+                    return Ok(());
+                }
+                PreparedCoreRecordMaterialization::CapacityExceeded(returned_draft) => {
+                    draft = *returned_draft;
+                }
+            }
+
+            if !emissions.is_empty() {
+                self.emit_core_record_batch(emissions)?;
+                continue;
+            }
+
+            if emissions.reservation_bytes() >= maximum_materialization_bytes {
+                emissions.release_empty_reservation();
+                let maximum_core_bytes =
+                    u64::try_from(MAX_ENCODED_CORE_RECORD_BYTES).unwrap_or(u64::MAX);
+                let (kind, detail) = if route_maximum_bytes < maximum_core_bytes {
+                    (
+                        SourceBackedRouteErrorKind::ResourceUnavailable,
+                        format!(
+                            "shared route live prepared Core-record output byte limit cannot admit \
+                             one valid record: maximum {route_maximum_bytes}"
+                        ),
+                    )
+                } else {
+                    (
+                        SourceBackedRouteErrorKind::InvalidSource,
+                        format!(
+                            "encoded Core record exceeds the {MAX_ENCODED_CORE_RECORD_BYTES}-byte \
+                             contract maximum"
+                        ),
+                    )
+                };
+                return Err(SourceBackedRouteError::new(kind, detail).into());
+            }
+
+            emissions.release_empty_reservation();
+            self.reserve_core_output_cancelably(emissions, maximum_materialization_bytes)?;
+        }
+    }
+
+    pub(crate) fn emit_core_record_batch(
+        &mut self,
+        emissions: &mut CoreRecordEmissionBatchBuilder,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        if let Some(batch) = emissions.take_batch()? {
+            self.send(ParallelLeafProtocolMessage::CoreRecordBatch(Box::new(
+                batch,
+            )))?;
+        }
+        Ok(())
+    }
+
+    fn reserve_core_output_cancelably(
+        &self,
+        emissions: &mut CoreRecordEmissionBatchBuilder,
+        reservation_bytes: u64,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        let route_maximum_bytes = self
+            .resources
+            .maximum_bytes(SourceBackedRouteResourceKind::CoreOutput);
+        loop {
+            self.require_not_cancelled()?;
+            match emissions.reserve_bytes(reservation_bytes, &self.resources) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.kind == SourceBackedRouteErrorKind::ResourceUnavailable
+                        && reservation_bytes <= route_maximum_bytes =>
+                {
+                    thread::sleep(CORE_OUTPUT_RESERVATION_RETRY_DELAY);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn require_not_cancelled(&self) -> Result<(), ParallelLeafScanCancelled> {
+        if self.is_cancelled() {
+            return Err(ParallelLeafScanCancelled);
+        }
         Ok(())
     }
 
@@ -458,475 +650,9 @@ impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
     }
 }
 
-#[derive(Debug)]
-enum AcceptedBegin {
-    Replace,
-    Append { base: Box<CertifiedSource> },
-}
+mod diagnostics;
 
-impl AcceptedBegin {
-    fn mode(&self) -> ParallelLeafScanMode {
-        match self {
-            Self::Replace => ParallelLeafScanMode::Replace,
-            Self::Append { .. } => ParallelLeafScanMode::Append,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct ParallelLeafJobState {
-    source: Option<SourceKey>,
-    pub(super) worker_index: usize,
-    begin: Option<AcceptedBegin>,
-    pub(super) completion: Option<ParallelLeafScanMode>,
-    pub(super) returned: bool,
-}
-
-impl ParallelLeafJobState {
-    pub(super) fn new(source: Option<SourceKey>, worker_index: usize) -> Self {
-        Self {
-            source,
-            worker_index,
-            begin: None,
-            completion: None,
-            returned: false,
-        }
-    }
-}
-
-pub(super) fn state_mut<E>(
-    states: &mut [ParallelLeafJobState],
-    job_index: usize,
-) -> Result<&mut ParallelLeafJobState, ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    states.get_mut(job_index).ok_or_else(|| {
-        ParallelLeafScanError::Protocol(ParallelLeafScanProtocolError::UnknownJob { job_index })
-    })
-}
-
-pub(super) fn validate_worker<E>(
-    states: &[ParallelLeafJobState],
-    job_index: usize,
-    worker_index: usize,
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    let state = states.get(job_index).ok_or_else(|| {
-        ParallelLeafScanError::Protocol(ParallelLeafScanProtocolError::UnknownJob { job_index })
-    })?;
-    if state.worker_index != worker_index {
-        return Err(ParallelLeafScanProtocolError::WrongWorker {
-            job_index,
-            expected_worker: state.worker_index,
-            observed_worker: worker_index,
-        }
-        .into());
-    }
-    Ok(())
-}
-
-pub(super) fn apply_parallel_leaf_message<R, E>(
-    sink: &mut SourceBackedGenerationSink<'_>,
-    job_index: usize,
-    message: ParallelLeafProtocolMessage<R>,
-    states: &mut [ParallelLeafJobState],
-    results: &mut [Option<SourceBackedSourceOutcome<R>>],
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    let state = state_mut(states, job_index)?;
-    match message {
-        ParallelLeafProtocolMessage::Begin(begin) => apply_begin(sink, job_index, state, *begin),
-        ParallelLeafProtocolMessage::CoreRecord(record) => {
-            apply_core_record(sink, job_index, state, *record)
-        }
-        ParallelLeafProtocolMessage::Complete(completion) => {
-            let result = apply_completion(sink, job_index, state, *completion)?;
-            let slot = results.get_mut(job_index).ok_or({
-                ParallelLeafScanProtocolError::TransportDisconnected {
-                    unfinished_jobs: states.len(),
-                }
-            })?;
-            *slot = Some(result);
-            Ok(())
-        }
-    }
-}
-
-fn apply_begin<E>(
-    sink: &mut SourceBackedGenerationSink<'_>,
-    job_index: usize,
-    state: &mut ParallelLeafJobState,
-    begin: ParallelLeafScanBegin,
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    if state.begin.is_some() {
-        return Err(ParallelLeafScanProtocolError::DuplicateBegin { job_index }.into());
-    }
-    if state.completion.is_some() {
-        return Err(ParallelLeafScanProtocolError::BeginAfterCompletion { job_index }.into());
-    }
-    match begin {
-        ParallelLeafScanBegin::Replace { source } => {
-            bind_source(
-                job_index,
-                ParallelLeafScanMessageKind::BeginReplace,
-                state,
-                &source,
-            )?;
-            let exact_source = source.clone();
-            sink.begin_source(source).map_err(|error| {
-                sink_error(
-                    job_index,
-                    &exact_source,
-                    ParallelLeafSinkOperation::BeginReplace,
-                    error,
-                )
-            })?;
-            state.begin = Some(AcceptedBegin::Replace);
-        }
-        ParallelLeafScanBegin::Append { source, base } => {
-            bind_source(
-                job_index,
-                ParallelLeafScanMessageKind::BeginAppend,
-                state,
-                &source,
-            )?;
-            validate_source(
-                job_index,
-                ParallelLeafScanMessageKind::BeginAppend,
-                bound_source(job_index, ParallelLeafScanMessageKind::BeginAppend, state)?,
-                base.observation().source(),
-            )?;
-            let exact_source = source.clone();
-            let writer_base = sink.begin_source_append(source).map_err(|error| {
-                sink_error(
-                    job_index,
-                    &exact_source,
-                    ParallelLeafSinkOperation::BeginAppend,
-                    error,
-                )
-            })?;
-            if writer_base != base.as_ref() {
-                return Err(ParallelLeafScanProtocolError::AppendBaseMismatch { job_index }.into());
-            }
-            state.begin = Some(AcceptedBegin::Append { base });
-        }
-    }
-    Ok(())
-}
-
-fn apply_core_record<E>(
-    sink: &mut SourceBackedGenerationSink<'_>,
-    job_index: usize,
-    state: &mut ParallelLeafJobState,
-    emission: CoreRecordEmission,
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    if state.completion.is_some() {
-        return Err(ParallelLeafScanProtocolError::CoreRecordAfterCompletion { job_index }.into());
-    }
-    if state.begin.is_none() {
-        return Err(ParallelLeafScanProtocolError::CoreRecordBeforeBegin { job_index }.into());
-    }
-    let source = bound_source(job_index, ParallelLeafScanMessageKind::CoreRecord, state)?;
-    validate_source(
-        job_index,
-        ParallelLeafScanMessageKind::CoreRecord,
-        source,
-        emission.source(),
-    )?;
-    sink.add_core_record_emission(emission).map_err(|error| {
-        sink_error(
-            job_index,
-            source,
-            ParallelLeafSinkOperation::AddCoreRecord,
-            error,
-        )
-    })
-}
-
-fn apply_completion<R, E>(
-    sink: &mut SourceBackedGenerationSink<'_>,
-    job_index: usize,
-    state: &mut ParallelLeafJobState,
-    completion: ParallelLeafScanComplete<R>,
-) -> Result<SourceBackedSourceOutcome<R>, ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    if state.completion.is_some() {
-        return Err(ParallelLeafScanProtocolError::DuplicateCompletion { job_index }.into());
-    }
-    match completion {
-        ParallelLeafScanComplete::Replace {
-            certificate,
-            result,
-        } => {
-            require_begin_mode(job_index, state, ParallelLeafScanMode::Replace)?;
-            let source = bound_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteReplace,
-                state,
-            )?;
-            validate_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteReplace,
-                source,
-                certificate.observation().source(),
-            )?;
-            sink.certify_source(*certificate).map_err(|error| {
-                sink_error(
-                    job_index,
-                    source,
-                    ParallelLeafSinkOperation::CompleteReplace,
-                    error,
-                )
-            })?;
-            state.completion = Some(ParallelLeafScanMode::Replace);
-            Ok(SourceBackedSourceOutcome::Success(result))
-        }
-        ParallelLeafScanComplete::Append { append, result } => {
-            require_begin_mode(job_index, state, ParallelLeafScanMode::Append)?;
-            let source = bound_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteAppend,
-                state,
-            )?;
-            validate_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteAppend,
-                source,
-                append.current().observation().source(),
-            )?;
-            validate_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteAppend,
-                source,
-                append.base().observation().source(),
-            )?;
-            let Some(AcceptedBegin::Append { base }) = state.begin.as_ref() else {
-                return Err(ParallelLeafScanProtocolError::CompletionModeMismatch {
-                    job_index,
-                    begin: state
-                        .begin
-                        .as_ref()
-                        .map_or(ParallelLeafScanMode::Skipped, AcceptedBegin::mode),
-                    completion: ParallelLeafScanMode::Append,
-                }
-                .into());
-            };
-            if append.base() != base.as_ref() {
-                return Err(
-                    ParallelLeafScanProtocolError::AppendCompletionBaseMismatch { job_index }
-                        .into(),
-                );
-            }
-            sink.certify_source_append(*append).map_err(|error| {
-                sink_error(
-                    job_index,
-                    source,
-                    ParallelLeafSinkOperation::CompleteAppend,
-                    error,
-                )
-            })?;
-            state.completion = Some(ParallelLeafScanMode::Append);
-            Ok(SourceBackedSourceOutcome::Success(result))
-        }
-        ParallelLeafScanComplete::Retain {
-            certificate,
-            result,
-        } => {
-            if state.begin.is_some() {
-                return Err(ParallelLeafScanProtocolError::SkippedAfterBegin { job_index }.into());
-            }
-            let source = bound_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteRetain,
-                state,
-            )?;
-            validate_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteRetain,
-                source,
-                certificate.observation().source(),
-            )?;
-            sink.retain_source(*certificate).map_err(|error| {
-                sink_error(
-                    job_index,
-                    source,
-                    ParallelLeafSinkOperation::RetainSource,
-                    error,
-                )
-            })?;
-            state.completion = Some(ParallelLeafScanMode::Retain);
-            Ok(SourceBackedSourceOutcome::Success(result))
-        }
-        ParallelLeafScanComplete::Skipped { result } => {
-            if state.begin.is_some() {
-                return Err(ParallelLeafScanProtocolError::SkippedAfterBegin { job_index }.into());
-            }
-            state.completion = Some(ParallelLeafScanMode::Skipped);
-            Ok(SourceBackedSourceOutcome::Success(result))
-        }
-        ParallelLeafScanComplete::SourceFailure { failure } => {
-            let mut failure = failure;
-            if state.begin.is_some() {
-                return Err(ParallelLeafScanProtocolError::SkippedAfterBegin { job_index }.into());
-            }
-            if !failure.failure.kind.is_logical_source_failure() {
-                return Err(
-                    ParallelLeafScanProtocolError::InvalidSourceFailureKind { job_index }.into(),
-                );
-            }
-            let bound = bound_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteSourceFailure,
-                state,
-            )?;
-            validate_source(
-                job_index,
-                ParallelLeafScanMessageKind::CompleteSourceFailure,
-                bound,
-                &failure.source,
-            )?;
-            let carried_forward = if let Some(base) = failure.retained.as_ref() {
-                if base.observation().source() != bound {
-                    return Err(ParallelLeafScanProtocolError::SourceFailureBaseMismatch {
-                        job_index,
-                    }
-                    .into());
-                }
-                sink.retain_source(base.clone()).map_err(|error| {
-                    sink_error(
-                        job_index,
-                        bound,
-                        ParallelLeafSinkOperation::RetainSource,
-                        error,
-                    )
-                })?;
-                true
-            } else {
-                false
-            };
-            sink.record_logical_source_failure(
-                failure.source.clone(),
-                failure.failure.clone(),
-                carried_forward,
-            )
-            .map_err(|error| {
-                sink_error(
-                    job_index,
-                    bound,
-                    ParallelLeafSinkOperation::RecordSourceFailure,
-                    error,
-                )
-            })?;
-            sink.record_rejections(std::mem::take(&mut failure.record_rejections));
-            state.completion = Some(ParallelLeafScanMode::SourceFailure);
-            Ok(SourceBackedSourceOutcome::Failed(failure))
-        }
-    }
-}
-
-fn require_begin_mode<E>(
-    job_index: usize,
-    state: &ParallelLeafJobState,
-    completion: ParallelLeafScanMode,
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    let begin = state.begin.as_ref().ok_or_else(|| {
-        ParallelLeafScanError::Protocol(ParallelLeafScanProtocolError::MissingBegin {
-            job_index,
-            completion,
-        })
-    })?;
-    if begin.mode() != completion {
-        return Err(ParallelLeafScanProtocolError::CompletionModeMismatch {
-            job_index,
-            begin: begin.mode(),
-            completion,
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn bind_source<E>(
-    job_index: usize,
-    message: ParallelLeafScanMessageKind,
-    state: &mut ParallelLeafJobState,
-    observed: &SourceKey,
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    if let Some(expected) = state.source.as_ref() {
-        validate_source(job_index, message, expected, observed)
-    } else {
-        state.source = Some(observed.clone());
-        Ok(())
-    }
-}
-
-fn bound_source<E>(
-    job_index: usize,
-    message: ParallelLeafScanMessageKind,
-    state: &ParallelLeafJobState,
-) -> Result<&SourceKey, ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    state
-        .source
-        .as_ref()
-        .ok_or_else(|| ParallelLeafScanProtocolError::SourceNotBound { job_index, message }.into())
-}
-
-fn validate_source<E>(
-    job_index: usize,
-    message: ParallelLeafScanMessageKind,
-    expected: &SourceKey,
-    observed: &SourceKey,
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    if !expected.exact_descriptor_eq(observed) {
-        return Err(ParallelLeafScanProtocolError::SourceMismatch {
-            job_index,
-            message,
-            expected: Box::new(expected.clone()),
-            observed: Box::new(observed.clone()),
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn sink_error<E>(
-    job_index: usize,
-    source: &SourceKey,
-    operation: ParallelLeafSinkOperation,
-    error: SourceBackedCoordinatorError,
-) -> ParallelLeafScanError<E>
-where
-    E: StdError + 'static,
-{
-    ParallelLeafScanError::Sink {
-        job_index,
-        source_id: source.identity().to_string(),
-        operation,
-        source: error,
-    }
-}
+pub(super) use diagnostics::{
+    apply_parallel_leaf_message, finalize_parallel_leaf_diagnostics, state_mut, validate_worker,
+    ParallelLeafJobState,
+};

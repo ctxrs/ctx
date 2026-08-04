@@ -9,12 +9,7 @@ pub(crate) const CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES: usize = 512;
 
 mod nativepath;
 
-pub(crate) use nativepath::{
-    observe_custom_history_source_backed_explicit, revalidate_custom_history_source_backed,
-    scan_custom_history_source_backed_explicit, CustomHistorySourceBackedDisposition,
-    CustomHistorySourceBackedError, CustomHistorySourceBackedInput,
-    CustomHistorySourceBackedOutcome,
-};
+pub(crate) use nativepath::{custom_history_jsonl_family_adapter, CustomHistorySourceBackedInput};
 
 pub(crate) fn push_provider_import_failure(
     summary: &mut ProviderImportSummary,

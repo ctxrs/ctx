@@ -1206,8 +1206,8 @@ fn nanoclaw_plist_no_attributes(element: &quick_xml::events::BytesStart<'_>) -> 
     element.attributes().next().is_none()
 }
 
-fn parse_nanoclaw_plist_value<'a>(
-    reader: &mut Reader<&'a [u8]>,
+fn parse_nanoclaw_plist_value(
+    reader: &mut Reader<&[u8]>,
     depth: usize,
     budget: &mut usize,
 ) -> Result<NanoClawPlistValue, ()> {
@@ -1239,10 +1239,7 @@ fn parse_nanoclaw_plist_value<'a>(
     }
 }
 
-fn parse_nanoclaw_plist_text<'a>(
-    reader: &mut Reader<&'a [u8]>,
-    end_name: &[u8],
-) -> Result<String, ()> {
+fn parse_nanoclaw_plist_text(reader: &mut Reader<&[u8]>, end_name: &[u8]) -> Result<String, ()> {
     let mut value = String::new();
     loop {
         match reader.read_event().map_err(|_| ())? {
@@ -1272,8 +1269,8 @@ fn append_nanoclaw_plist_reference(
     Ok(())
 }
 
-fn parse_nanoclaw_plist_array<'a>(
-    reader: &mut Reader<&'a [u8]>,
+fn parse_nanoclaw_plist_array(
+    reader: &mut Reader<&[u8]>,
     depth: usize,
     budget: &mut usize,
 ) -> Result<NanoClawPlistValue, ()> {
@@ -1290,8 +1287,8 @@ fn parse_nanoclaw_plist_array<'a>(
     }
 }
 
-fn parse_nanoclaw_plist_dict<'a>(
-    reader: &mut Reader<&'a [u8]>,
+fn parse_nanoclaw_plist_dict(
+    reader: &mut Reader<&[u8]>,
     depth: usize,
     budget: &mut usize,
 ) -> Result<NanoClawPlistValue, ()> {

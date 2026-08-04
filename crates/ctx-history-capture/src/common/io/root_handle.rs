@@ -152,6 +152,12 @@ impl ProviderSourceRoot {
         platform::object_fingerprint(&self.inner.opened)
     }
 
+    /// Compares the immutable object identity of two retained directory
+    /// authorities while ignoring child-driven timestamp changes.
+    pub(crate) fn same_object_as(&self, other: &Self) -> bool {
+        platform::same_object(&self.inner.opened, &other.inner.opened)
+    }
+
     pub(crate) fn directory(&self) -> Result<ProviderSourceDirectory> {
         let directory = self.inner.directory.try_clone()?;
         Ok(ProviderSourceDirectory {

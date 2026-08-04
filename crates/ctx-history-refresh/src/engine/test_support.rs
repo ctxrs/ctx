@@ -106,7 +106,7 @@ impl RefreshJournal for TestFileRefreshJournal {
 }
 
 struct TestStatusWriterJournal {
-    writer: Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>,
+    writer: TestStatusWriter,
 }
 
 impl RefreshJournal for TestStatusWriterJournal {
@@ -176,7 +176,7 @@ pub(super) fn test_refresh_engine_with_executor(
 
 pub(super) fn test_refresh_engine_with_status_writer(
     executor: Arc<dyn SourceBackedRefreshExecutor>,
-    writer: Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>,
+    writer: TestStatusWriter,
 ) -> CoreRefreshEngine {
     CoreRefreshEngine::with_executor(
         Arc::new(TestStatusWriterJournal { writer }),

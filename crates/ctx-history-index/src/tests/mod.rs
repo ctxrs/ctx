@@ -221,7 +221,7 @@ fn indexed_document(record: CoreRecord) -> TantivyDocument {
     let encoded = record.encode_stored().unwrap();
     let content_bytes = core_content_bytes(&record.content).unwrap();
     let source_fields = IndexSourceFields::new(&record.source, &source_token(&record.source));
-    IndexDocument::from_core(fields, record, encoded.into(), content_bytes, source_fields)
+    IndexDocument::from_core(fields, record, encoded, content_bytes, source_fields)
         .unwrap()
         .into_tantivy_document()
 }

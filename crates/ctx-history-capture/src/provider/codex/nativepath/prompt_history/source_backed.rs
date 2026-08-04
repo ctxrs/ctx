@@ -6,13 +6,12 @@
 //! capability rather than reopening a canonicalized pathname.
 
 use std::{
-    fs::{File, Metadata},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    sync::Arc,
-    time::UNIX_EPOCH,
+    sync::{Arc, Mutex},
 };
 
+use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
     CertifiedSourceAppend, CoreRecord, CoreRecordError, EventIdentityInput, NativeItemKey,
@@ -20,20 +19,36 @@ use ctx_history_core::{
     SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
     StableEntityId, TypedKey,
 };
-use serde::{Deserialize, Serialize};
+use ctx_history_index::BaseEventIdentityLookup;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::PromptLine;
 use crate::{
-    common::io::{open_provider_source_file, OpenedProviderSourceFile},
+    common::io::{open_provider_source_file, OpenedProviderSourceFile, ProviderSourceRoot},
+    provider::source_backed::{
+        family::jsonl::{
+            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
+            JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
+            JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjector, JsonlFamilyPublication,
+            JsonlFamilyRootMissingMode, JsonlFamilyWorkerContext,
+        },
+        SourceBackedRouteErrorKind,
+    },
     CaptureError, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
 mod path;
 mod projection;
+mod snapshot;
 use path::absolute_lexical_path;
 use projection::{core_record, retained_record_bytes};
+pub(crate) use snapshot::revalidate_codex_prompt_history_source_backed_v0;
+use snapshot::{
+    decode_checkpoint, exact_ordinary_file_observation_matches, observation_wire,
+    opened_file_from_start, stable_current_ordinary_file_observation, verify_frozen_prefix,
+    CheckpointV0, CodexPromptHistoryFrozenSnapshotV0,
+};
 
 const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
@@ -118,7 +133,7 @@ impl CodexPromptHistorySourceBackedSourceV0 {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexPromptHistorySourceBackedDispositionV0 {
     Cold,
     Unchanged,
@@ -139,35 +154,8 @@ pub(crate) struct CodexPromptHistorySourceBackedScanV0 {
     pub(crate) certificate: CertifiedSource,
     pub(crate) disposition: CodexPromptHistorySourceBackedDispositionV0,
     pub(crate) emitted_documents: u64,
-    frozen: CodexPromptHistoryFrozenSnapshotV0,
     #[cfg(test)]
     pub(crate) terminal: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CodexPromptHistoryFrozenSnapshotV0 {
-    metadata: Metadata,
-    ordinary_file_token: [u8; 32],
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CheckpointV0 {
-    version: u32,
-    certified_prefix_bytes: u64,
-    complete_records: u64,
-    terminal: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ObservationWireV0 {
-    length: u64,
-    modified_after_epoch: bool,
-    modified_seconds: u64,
-    modified_nanos: u32,
-    readonly: bool,
-    ordinary_file_token: [u8; 32],
-    whole_source_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,11 +255,361 @@ pub(crate) fn observe_codex_prompt_history_source_backed_explicit_v0(
     })
 }
 
+#[derive(Default)]
+struct CodexPromptHistoryJsonlFamilyStateV0 {
+    discovered_source: Option<CodexPromptHistorySourceBackedSourceV0>,
+    terminal_source: Option<CodexPromptHistorySourceBackedSourceV0>,
+    #[cfg(test)]
+    after_scan_hook: Option<Box<dyn FnOnce() + Send>>,
+}
+
+/// Shared-family adapter for Codex's single prompt-history JSONL file. The
+/// family owns inventory, publication, deletion, and commit scheduling while
+/// the optimized leaf callback retains the native bounded prompt scanner.
+#[derive(Clone)]
+pub(crate) struct CodexPromptHistoryJsonlFamilyAdapterV0 {
+    input: CodexPromptHistorySourceBackedInputV0,
+    route_path: PathBuf,
+    state: Arc<Mutex<CodexPromptHistoryJsonlFamilyStateV0>>,
+}
+
+impl CodexPromptHistoryJsonlFamilyAdapterV0 {
+    pub(crate) fn new(
+        mut input: CodexPromptHistorySourceBackedInputV0,
+    ) -> CodexPromptHistorySourceBackedResultV0<Self> {
+        let route_path = absolute_lexical_path(input.path())?;
+        input.path = route_path.clone();
+        Ok(Self {
+            input,
+            route_path,
+            state: Arc::new(Mutex::new(CodexPromptHistoryJsonlFamilyStateV0::default())),
+        })
+    }
+
+    pub(crate) fn route_path(&self) -> &Path {
+        &self.route_path
+    }
+
+    #[cfg(test)]
+    fn set_after_scan_hook(&self, hook: impl FnOnce() + Send + 'static) {
+        let mut state = self.state.lock().expect("prompt-history state lock");
+        assert!(
+            state.after_scan_hook.is_none(),
+            "prompt-history after-scan hook is already installed"
+        );
+        state.after_scan_hook = Some(Box::new(hook));
+    }
+
+    fn remember_scanned_source(
+        &self,
+        source: CodexPromptHistorySourceBackedSourceV0,
+    ) -> crate::Result<()> {
+        let mut state = self.state.lock().map_err(|_| prompt_family_state_error())?;
+        state.terminal_source = Some(source);
+        #[cfg(test)]
+        let after_scan_hook = state.after_scan_hook.take();
+        drop(state);
+        #[cfg(test)]
+        if let Some(hook) = after_scan_hook {
+            hook();
+        }
+        Ok(())
+    }
+
+    fn discover_family(&self, route_path: &Path) -> crate::Result<JsonlFamilyInventory> {
+        if route_path != self.route_path {
+            return Err(CaptureError::InvalidPayload(
+                "Codex prompt-history JSONL route path changed".to_owned(),
+            ));
+        }
+        let source = match observe_codex_prompt_history_source_backed_explicit_v0(&self.input) {
+            Ok(source) => source,
+            Err(CodexPromptHistorySourceBackedErrorV0::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                self.state
+                    .lock()
+                    .map_err(|_| prompt_family_state_error())?
+                    .discovered_source = None;
+                return JsonlFamilyInventory::missing(CaptureProvider::Codex, route_path);
+            }
+            Err(error) => return Err(prompt_family_capture_error(error)),
+        };
+        let parent = route_path.parent().ok_or_else(|| {
+            CaptureError::InvalidPayload("Codex prompt-history JSONL path has no parent".to_owned())
+        })?;
+        let authority_path = route_path.file_name().map(PathBuf::from).ok_or_else(|| {
+            CaptureError::InvalidPayload(
+                "Codex prompt-history JSONL path has no filename".to_owned(),
+            )
+        })?;
+        let authority = Arc::new(ProviderSourceRoot::open(parent)?);
+        let opened = authority.open_file(&authority_path)?;
+        let observation = observe_opened_file(route_path, &opened)?;
+        let binding = TypedKey::bytes(source.source().exact_descriptor_digest().to_vec())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        let leaf = JsonlFamilyLeaf::bind_observed(
+            source.source().clone(),
+            route_path.to_path_buf(),
+            Arc::clone(&authority),
+            authority_path,
+            binding,
+            observation,
+        );
+        self.state
+            .lock()
+            .map_err(|_| prompt_family_state_error())?
+            .discovered_source = Some(source);
+        JsonlFamilyInventory::present(CaptureProvider::Codex, route_path, authority, vec![leaf])
+    }
+
+    fn scan_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        base: Option<&CertifiedSource>,
+        emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> crate::Result<()>,
+    ) -> crate::Result<JsonlFamilyOptimizedLeafOutcome> {
+        let source = self
+            .state
+            .lock()
+            .map_err(|_| prompt_family_state_error())?
+            .discovered_source
+            .clone()
+            .ok_or_else(|| {
+                CaptureError::InvalidPayload(
+                    "Codex prompt-history JSONL leaf has no retained source".to_owned(),
+                )
+            })?;
+        if !source.source().exact_descriptor_eq(leaf.source()) {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let scan =
+            scan_codex_prompt_history_jsonl_family_leaf_v0(source, base, |disposition, page| {
+                if !page.source.exact_descriptor_eq(leaf.source()) {
+                    return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
+                }
+                let _retained_page_bytes = page.retained_bytes;
+                let publication = match disposition {
+                    CodexPromptHistorySourceBackedDispositionV0::Append => {
+                        JsonlFamilyPublication::Append
+                    }
+                    CodexPromptHistorySourceBackedDispositionV0::Cold
+                    | CodexPromptHistorySourceBackedDispositionV0::Replacement => {
+                        JsonlFamilyPublication::Replace
+                    }
+                    CodexPromptHistorySourceBackedDispositionV0::Unchanged => {
+                        return Err(CodexPromptHistorySourceBackedErrorV0::CountMismatch);
+                    }
+                };
+                emit_page(publication, page.records)
+                    .map_err(CodexPromptHistorySourceBackedErrorV0::Capture)
+            })
+            .map_err(prompt_family_capture_error)?;
+        validate_prompt_family_scan_counts(&scan, base)?;
+        let outcome = match scan.disposition {
+            CodexPromptHistorySourceBackedDispositionV0::Cold
+            | CodexPromptHistorySourceBackedDispositionV0::Replacement => {
+                JsonlFamilyOptimizedLeafOutcome::replacement(scan.certificate.clone())
+            }
+            CodexPromptHistorySourceBackedDispositionV0::Unchanged
+            | CodexPromptHistorySourceBackedDispositionV0::Append => {
+                let base = base.ok_or_else(|| {
+                    CaptureError::InvalidPayload(
+                        "Codex prompt-history append has no base".to_owned(),
+                    )
+                })?;
+                let frontier = base.frontier().ok_or_else(|| {
+                    CaptureError::InvalidPayload(
+                        "Codex prompt-history append base has no frontier".to_owned(),
+                    )
+                })?;
+                let append = CertifiedSourceAppend::certify(
+                    base,
+                    scan.certificate.clone(),
+                    frontier.certified_prefix_bytes(),
+                    *frontier.certified_prefix_digest(),
+                )
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                JsonlFamilyOptimizedLeafOutcome::append(append)
+            }
+        };
+        self.remember_scanned_source(scan.source)?;
+        Ok(outcome)
+    }
+}
+
+impl JsonlFamilyAdapter for CodexPromptHistoryJsonlFamilyAdapterV0 {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Codex
+    }
+
+    fn source_format(&self) -> &'static str {
+        SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        SOURCE_SCHEMA_VARIANT
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn root_missing_mode(&self) -> JsonlFamilyRootMissingMode {
+        JsonlFamilyRootMissingMode::AuthoritativeEmpty
+    }
+
+    fn inventory_mode(&self) -> JsonlFamilyInventoryMode {
+        JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions
+    }
+
+    fn base_scope(&self) -> JsonlFamilyBaseScope {
+        JsonlFamilyBaseScope::Route
+    }
+
+    fn discover(&self, root: &Path) -> crate::Result<JsonlFamilyInventory> {
+        self.discover_family(root)
+    }
+
+    fn discovery_error_kind(&self, error: &CaptureError) -> SourceBackedRouteErrorKind {
+        prompt_family_error_kind(error, false)
+    }
+
+    fn scan_error_kind(&self, error: &CaptureError) -> SourceBackedRouteErrorKind {
+        prompt_family_error_kind(error, true)
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> crate::Result<Box<dyn JsonlFamilyProjector>> {
+        Err(CaptureError::SystemInvariant(
+            "Codex prompt-history JSONL requires the native optimized executor",
+        ))
+    }
+
+    fn scan_optimized_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        base: Option<&CertifiedSource>,
+        _base_event_lookup: &BaseEventIdentityLookup,
+        _worker: &mut JsonlFamilyWorkerContext,
+        emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> crate::Result<()>,
+    ) -> crate::Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
+        self.scan_leaf(leaf, base, emit_page).map(Some)
+    }
+
+    fn base_source_path(&self, _certificate: &CertifiedSource) -> crate::Result<PathBuf> {
+        Ok(self.route_path.clone())
+    }
+
+    fn revalidate_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        certificate: &CertifiedSource,
+        _checkpoint: Option<&crate::provider::source_backed::family::jsonl::JsonlCheckpoint>,
+    ) -> crate::Result<bool> {
+        let source = self
+            .state
+            .lock()
+            .map_err(|_| prompt_family_state_error())?
+            .terminal_source
+            .clone();
+        let Some(source) = source else {
+            return Ok(false);
+        };
+        if !source.source().exact_descriptor_eq(leaf.source()) {
+            return Ok(false);
+        }
+        Ok(revalidate_codex_prompt_history_source_backed_v0(&source, certificate).is_ok())
+    }
+}
+
+fn prompt_family_capture_error(error: CodexPromptHistorySourceBackedErrorV0) -> CaptureError {
+    match error {
+        CodexPromptHistorySourceBackedErrorV0::Capture(error) => error,
+        CodexPromptHistorySourceBackedErrorV0::Io(error) => CaptureError::Io(error),
+        CodexPromptHistorySourceBackedErrorV0::Json(error) => CaptureError::Json(error),
+        CodexPromptHistorySourceBackedErrorV0::PriorSourceMismatch
+        | CodexPromptHistorySourceBackedErrorV0::SourceChanged => {
+            CaptureError::SourceChangedDuringCapture
+        }
+        error => CaptureError::InvalidPayload(error.to_string()),
+    }
+}
+
+fn validate_prompt_family_scan_counts(
+    scan: &CodexPromptHistorySourceBackedScanV0,
+    base: Option<&CertifiedSource>,
+) -> crate::Result<()> {
+    let expected = match scan.disposition {
+        CodexPromptHistorySourceBackedDispositionV0::Cold
+        | CodexPromptHistorySourceBackedDispositionV0::Replacement => {
+            scan.certificate.counts().indexed_documents
+        }
+        CodexPromptHistorySourceBackedDispositionV0::Unchanged => {
+            let Some(base) = base else {
+                return Err(CaptureError::InvalidPayload(
+                    "Codex prompt-history no-op has no base".to_owned(),
+                ));
+            };
+            if scan.certificate != *base {
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
+            0
+        }
+        CodexPromptHistorySourceBackedDispositionV0::Append => {
+            let base = base.ok_or_else(|| {
+                CaptureError::InvalidPayload("Codex prompt-history append has no base".to_owned())
+            })?;
+            scan.certificate
+                .counts()
+                .indexed_documents
+                .checked_sub(base.counts().indexed_documents)
+                .ok_or(CaptureError::SourceChangedDuringCapture)?
+        }
+    };
+    if scan.emitted_documents != expected {
+        return Err(CaptureError::InvalidPayload(
+            "Codex prompt-history emitted-document count did not reconcile".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn prompt_family_state_error() -> CaptureError {
+    CaptureError::InvalidPayload(
+        "Codex prompt-history JSONL family state lock was poisoned".to_owned(),
+    )
+}
+
+fn prompt_family_error_kind(error: &CaptureError, scanning: bool) -> SourceBackedRouteErrorKind {
+    match error {
+        CaptureError::SourceChangedDuringCapture => SourceBackedRouteErrorKind::SourceChanged,
+        CaptureError::Io(error) if error.kind() == std::io::ErrorKind::NotFound && scanning => {
+            SourceBackedRouteErrorKind::SourceChanged
+        }
+        CaptureError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            SourceBackedRouteErrorKind::Unavailable
+        }
+        _ => SourceBackedRouteErrorKind::InvalidSource,
+    }
+}
+
 /// Scans through the retained source capability and emits bounded lexical pages.
+#[cfg(test)]
 pub(crate) fn scan_codex_prompt_history_source_backed_v0(
     source: CodexPromptHistorySourceBackedSourceV0,
     prior: Option<&CertifiedSource>,
-    emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
+    mut emit: impl FnMut(
+        CodexPromptHistorySourceBackedPageV0,
+    ) -> CodexPromptHistorySourceBackedResultV0<()>,
 ) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
     let (metadata, ordinary_file_token) = stable_current_ordinary_file_observation(&source.opened)?;
     scan_codex_prompt_history_source_backed_inner_v0(
@@ -282,38 +620,27 @@ pub(crate) fn scan_codex_prompt_history_source_backed_v0(
             metadata,
             ordinary_file_token,
         },
-        emit,
+        move |_, page| emit(page),
     )
 }
 
-pub(crate) fn plan_codex_prompt_history_source_backed_v0(
+fn scan_codex_prompt_history_jsonl_family_leaf_v0(
     source: CodexPromptHistorySourceBackedSourceV0,
     prior: Option<&CertifiedSource>,
+    emit: impl FnMut(
+        CodexPromptHistorySourceBackedDispositionV0,
+        CodexPromptHistorySourceBackedPageV0,
+    ) -> CodexPromptHistorySourceBackedResultV0<()>,
 ) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
     let (metadata, ordinary_file_token) = stable_current_ordinary_file_observation(&source.opened)?;
     scan_codex_prompt_history_source_backed_inner_v0(
         source,
         prior,
-        false,
+        true,
         CodexPromptHistoryFrozenSnapshotV0 {
             metadata,
             ordinary_file_token,
         },
-        |_| Ok(()),
-    )
-}
-
-pub(crate) fn stage_planned_codex_prompt_history_source_backed_v0(
-    source: CodexPromptHistorySourceBackedSourceV0,
-    prior: Option<&CertifiedSource>,
-    planned: &CodexPromptHistorySourceBackedScanV0,
-    emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
-) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
-    scan_codex_prompt_history_source_backed_inner_v0(
-        source,
-        prior,
-        true,
-        planned.frozen.clone(),
         emit,
     )
 }
@@ -323,7 +650,10 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
     prior: Option<&CertifiedSource>,
     project_records: bool,
     frozen: CodexPromptHistoryFrozenSnapshotV0,
-    emit: impl FnMut(CodexPromptHistorySourceBackedPageV0) -> CodexPromptHistorySourceBackedResultV0<()>,
+    mut emit: impl FnMut(
+        CodexPromptHistorySourceBackedDispositionV0,
+        CodexPromptHistorySourceBackedPageV0,
+    ) -> CodexPromptHistorySourceBackedResultV0<()>,
 ) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedScanV0> {
     if let Some(prior) = prior {
         prior.validate_contract()?;
@@ -349,7 +679,6 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
                 certificate: prior.clone(),
                 disposition: CodexPromptHistorySourceBackedDispositionV0::Unchanged,
                 emitted_documents: 0,
-                frozen,
                 #[cfg(test)]
                 terminal: _checkpoint.terminal,
             });
@@ -408,7 +737,7 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
         ) {
         0
     } else {
-        let mut pages = PageEmitter::new(&source, emit);
+        let mut pages = PageEmitter::new(&source, |page| emit(disposition, page));
         let projection_analysis = walk_complete_records(
             &source.opened,
             frozen_len,
@@ -433,7 +762,6 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
         certificate,
         disposition,
         emitted_documents,
-        frozen,
         #[cfg(test)]
         terminal: analysis.terminal,
     })
@@ -621,221 +949,6 @@ enum RecordClassification {
     Retained(PromptLine),
     Rejected,
     Ignored,
-}
-
-fn opened_file_from_start(
-    source: &OpenedProviderSourceFile,
-) -> CodexPromptHistorySourceBackedResultV0<File> {
-    let mut file = source.file().try_clone()?;
-    file.seek(SeekFrom::Start(0))?;
-    Ok(file)
-}
-
-fn hash_opened_prefix(
-    source: &OpenedProviderSourceFile,
-    target: u64,
-) -> CodexPromptHistorySourceBackedResultV0<Option<[u8; 32]>> {
-    for _ in 0..2 {
-        source.revalidate_same_object()?;
-        let before = source.current_ordinary_file_token()?;
-        let observed_len = source.file().metadata()?.len();
-        let before_hash = source.current_ordinary_file_token()?;
-        if before != before_hash {
-            continue;
-        }
-
-        let digest = read_opened_prefix(source, target, observed_len)?;
-        let confirmation = read_opened_prefix(source, target, observed_len)?;
-        if digest != confirmation {
-            return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-        }
-
-        let after_hash = source.current_ordinary_file_token()?;
-        source.revalidate_same_object()?;
-        let after = source.current_ordinary_file_token()?;
-        if before != after_hash || after_hash != after {
-            continue;
-        }
-        return Ok(digest);
-    }
-    Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged)
-}
-
-fn read_opened_prefix(
-    source: &OpenedProviderSourceFile,
-    target: u64,
-    observed_len: u64,
-) -> CodexPromptHistorySourceBackedResultV0<Option<[u8; 32]>> {
-    if target > observed_len {
-        return Ok(None);
-    }
-    let mut file = opened_file_from_start(source)?;
-    let mut remaining = target;
-    let mut digest = Sha256::new();
-    let mut bytes = [0_u8; 64 * 1024];
-    while remaining > 0 {
-        let take = bytes
-            .len()
-            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-        let count = file.read(&mut bytes[..take])?;
-        if count == 0 {
-            return Ok(None);
-        }
-        digest.update(&bytes[..count]);
-        remaining = remaining.saturating_sub(
-            u64::try_from(count)
-                .map_err(|_| CodexPromptHistorySourceBackedErrorV0::CountMismatch)?,
-        );
-    }
-    Ok(Some(digest.finalize().into()))
-}
-
-fn verify_frozen_prefix(
-    source: &OpenedProviderSourceFile,
-    frozen_len: u64,
-    expected_digest: [u8; 32],
-) -> CodexPromptHistorySourceBackedResultV0<()> {
-    let actual = hash_opened_prefix(source, frozen_len)?
-        .ok_or(CodexPromptHistorySourceBackedErrorV0::SourceChanged)?;
-    if actual != expected_digest {
-        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-    }
-    Ok(())
-}
-
-fn observation_wire(
-    metadata: &Metadata,
-    ordinary_file_token: [u8; 32],
-    whole_source_digest: [u8; 32],
-) -> CodexPromptHistorySourceBackedResultV0<ObservationWireV0> {
-    let (modified_after_epoch, duration) = match metadata.modified()?.duration_since(UNIX_EPOCH) {
-        Ok(duration) => (true, duration),
-        Err(error) => (false, error.duration()),
-    };
-    Ok(ObservationWireV0 {
-        length: metadata.len(),
-        modified_after_epoch,
-        modified_seconds: duration.as_secs(),
-        modified_nanos: duration.subsec_nanos(),
-        readonly: metadata.permissions().readonly(),
-        ordinary_file_token,
-        whole_source_digest,
-    })
-}
-
-fn stable_current_ordinary_file_observation(
-    source: &OpenedProviderSourceFile,
-) -> CodexPromptHistorySourceBackedResultV0<(Metadata, [u8; 32])> {
-    let opened_token = source.ordinary_file_token();
-    if source.current_ordinary_file_token()? == opened_token
-        && source.revalidate().is_ok()
-        && source.current_ordinary_file_token()? == opened_token
-    {
-        return Ok((source.metadata().clone(), opened_token));
-    }
-
-    for _ in 0..2 {
-        source.revalidate_same_object()?;
-        let before = source.current_ordinary_file_token()?;
-        let metadata = source.file().metadata()?;
-        let after_metadata = source.current_ordinary_file_token()?;
-        source.revalidate_same_object()?;
-        let after = source.current_ordinary_file_token()?;
-        if before == after_metadata && after_metadata == after {
-            return Ok((metadata, after));
-        }
-    }
-    Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged)
-}
-
-fn exact_ordinary_file_observation_matches(
-    metadata: &Metadata,
-    ordinary_file_token: [u8; 32],
-    expected: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<bool> {
-    if expected.parser_revision() != PARSER_REVISION
-        || expected.observation().revision_kind() != SOURCE_REVISION_KIND
-    {
-        return Ok(false);
-    }
-    let expected_observation = decode_observation(expected)?;
-    Ok(observation_wire(
-        metadata,
-        ordinary_file_token,
-        expected_observation.whole_source_digest,
-    )? == expected_observation)
-}
-
-fn decode_observation(
-    certificate: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<ObservationWireV0> {
-    serde_json::from_slice(certificate.observation().revision())
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)
-}
-
-/// Revalidates one previously staged prompt-history snapshot while allowing
-/// the provider to append bytes beyond its frozen observation boundary.
-pub(crate) fn revalidate_codex_prompt_history_source_backed_v0(
-    source: &CodexPromptHistorySourceBackedSourceV0,
-    expected: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<()> {
-    expected.validate_contract()?;
-    if expected.parser_revision() != PARSER_REVISION
-        || !source
-            .source
-            .exact_descriptor_eq(expected.observation().source())
-        || expected.observation().revision_kind() != SOURCE_REVISION_KIND
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-    }
-    let observation = decode_observation(expected)?;
-    let checkpoint = decode_checkpoint(expected)?;
-    if checkpoint.certified_prefix_bytes > observation.length {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    let (current_metadata, current_token) =
-        stable_current_ordinary_file_observation(&source.opened)?;
-    if observation_wire(
-        &current_metadata,
-        current_token,
-        observation.whole_source_digest,
-    )? == observation
-    {
-        return Ok(());
-    }
-    verify_frozen_prefix(
-        &source.opened,
-        observation.length,
-        observation.whole_source_digest,
-    )
-}
-
-fn decode_checkpoint(
-    certificate: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<CheckpointV0> {
-    if certificate.parser_revision() != PARSER_REVISION {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    let frontier = certificate
-        .frontier()
-        .ok_or(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)?;
-    if frontier.checkpoint_kind() != FRONTIER_KIND {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    let TypedKey::Bytes(bytes) = frontier.checkpoint() else {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    };
-    let checkpoint: CheckpointV0 = serde_json::from_slice(bytes)
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)?;
-    if checkpoint.version != CHECKPOINT_VERSION
-        || checkpoint.certified_prefix_bytes != frontier.certified_prefix_bytes()
-        || checkpoint.certified_prefix_bytes != certificate.counts().certified_bytes
-        || checkpoint.complete_records != certificate.counts().complete_records
-        || frontier.certified_prefix_digest() != certificate.content_digest()
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    Ok(checkpoint)
 }
 
 #[cfg(test)]

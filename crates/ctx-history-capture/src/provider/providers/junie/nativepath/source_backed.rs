@@ -22,7 +22,8 @@ use crate::{
         source_backed::{
             family::jsonl::{
                 JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
+                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
+                JsonlRecordRef,
             },
             FallbackEventIdentityState,
         },
@@ -216,13 +217,18 @@ impl JsonlFamilyProjector for JunieProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let rows = self.projection.project(record)?;
         self.emit_rows(rows, emit)
     }
 
-    fn finish_projecting(&mut self, emit: &mut dyn FnMut(CoreRecord) -> Result<()>) -> Result<()> {
+    fn finish_projecting(
+        &mut self,
+        _worker: &mut JsonlFamilyWorkerContext,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
         let rows = self.projection.finish()?;
         self.emit_rows(rows, emit)?;
         self.fallback_identities.finish()

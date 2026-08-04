@@ -13,17 +13,17 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::UNIX_EPOCH,
 };
 
+use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CtxHistoryJsonlEventRecord,
     CtxHistoryJsonlRecord, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionEdgeType, SessionIdentityInput, SourceAnchor, SourceFrontier,
-    SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, TypedKey,
-    CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+    SessionEdgeType, SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, StableEntityId,
+    TypedKey, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
+use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -34,27 +34,34 @@ use super::reader::{
 };
 use crate::provider::custom_history_jsonl::push_provider_import_failure;
 use crate::{
-    common::io::{open_provider_source_file, OpenedProviderSourceFile},
+    common::io::OpenedProviderSourceFile,
     provider::{
         custom_history_jsonl::{validate_custom_history_identifier, validate_custom_source_record},
         normalization::{provider_policy_event_text, provider_value_text},
+        source_backed::family::jsonl::{
+            JsonlCheckpoint, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome,
+            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRootMissingMode,
+            JsonlFamilyWorkerContext,
+        },
     },
     CaptureError, ProviderImportSummary, ProviderSourceFailureKind, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
 
+mod inventory;
 mod parser;
+#[cfg(test)]
+use inventory::open_explicit_source;
+pub(crate) use inventory::CustomHistorySourceBackedInventory;
+use inventory::{custom_history_jsonl_family_inventory, source_observation};
 use parser::parse_projection;
 
 const CUSTOM_SOURCE_IDENTITY_VERSION: u32 = 1;
 const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
 const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v1-source-backed-v1";
-const CUSTOM_SOURCE_REVISION_KIND: &str = "custom-history-ordinary-file-observation-v1";
 pub(super) const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str =
     "custom-history-jsonl-source-backed-v2";
 const CUSTOM_SOURCE_FRONTIER_KIND: &str = "custom-history-jsonl-frontier-v2";
-const CUSTOM_INVENTORY_AUTHORITY_NAMESPACE: &str = "custom-history.explicit-registration";
-const CUSTOM_INVENTORY_REVISION_KIND: &str = "custom-history-explicit-inventory-v1";
-const CUSTOM_DISCOVERY_REVISION: &str = "custom-history-explicit-only-v1";
 pub(super) const CUSTOM_SESSION_KEY_NAMESPACE: &str = "custom-history.session";
 pub(super) const CUSTOM_EVENT_KEY_NAMESPACE: &str = "custom-history.event";
 pub(super) const CUSTOM_LOGICAL_SESSION_KIND: &str = "custom-history-session";
@@ -67,7 +74,6 @@ pub(super) const CUSTOM_HISTORY_CATALOG_MAX_RECORDS: usize = 1_000_000;
 pub(super) const CUSTOM_HISTORY_CATALOG_MAX_METADATA_BYTES: usize = 256 * 1024 * 1024;
 
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx.custom-history.source-prefix.v2\0";
-const INVENTORY_DIGEST_DOMAIN: &[u8] = b"ctx.custom-history.explicit-inventory.v1\0";
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -202,131 +208,174 @@ impl CustomHistorySourceBackedInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CustomHistoryFileObservationWire {
-    length: u64,
-    modified_after_epoch: bool,
-    modified_seconds: u64,
-    modified_nanos: u32,
-    strong_token: [u8; 32],
-}
-
-impl CustomHistoryFileObservationWire {
-    fn from_opened(opened: &OpenedProviderSourceFile) -> Result<Self, CaptureError> {
-        let metadata = opened.file().metadata()?;
-        let (modified_after_epoch, duration) = match metadata.modified()?.duration_since(UNIX_EPOCH)
-        {
-            Ok(duration) => (true, duration),
-            Err(error) => (false, error.duration()),
-        };
-        let mut token = Sha256::new();
-        token.update(b"ctx.custom-history-opened-file-observation-v1\0");
-        token.update(metadata.len().to_be_bytes());
-        token.update([u8::from(metadata.permissions().readonly())]);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            token.update(metadata.dev().to_be_bytes());
-            token.update(metadata.ino().to_be_bytes());
-            token.update(metadata.ctime().to_be_bytes());
-            token.update(metadata.ctime_nsec().to_be_bytes());
-        }
-        #[cfg(not(unix))]
-        {
-            token.update([u8::from(modified_after_epoch)]);
-            token.update(duration.as_secs().to_be_bytes());
-            token.update(duration.subsec_nanos().to_be_bytes());
-        }
-        Ok(Self {
-            length: metadata.len(),
-            modified_after_epoch,
-            modified_seconds: duration.as_secs(),
-            modified_nanos: duration.subsec_nanos(),
-            strong_token: token.finalize().into(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-enum CustomHistoryInventoryState {
-    Present {
-        observation: CustomHistoryFileObservationWire,
-        opened: Arc<OpenedProviderSourceFile>,
-    },
-    Missing,
-}
-
-impl PartialEq for CustomHistoryInventoryState {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Self::Present {
-                    observation: left, ..
-                },
-                Self::Present {
-                    observation: right, ..
-                },
-            ) => left == right,
-            (Self::Missing, Self::Missing) => true,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for CustomHistoryInventoryState {}
-
-/// One finite observation of exactly the explicitly registered file.
-#[derive(Debug, Clone)]
-pub(crate) struct CustomHistorySourceBackedInventory {
+#[derive(Debug)]
+struct CustomHistoryJsonlFamilyAdapter {
     input: CustomHistorySourceBackedInput,
     source: SourceKey,
-    observation: SourceInventoryObservation,
-    state: CustomHistoryInventoryState,
 }
 
-impl CustomHistorySourceBackedInventory {
-    pub(crate) fn source(&self) -> &SourceKey {
-        &self.source
+pub(crate) fn custom_history_jsonl_family_adapter(
+    input: CustomHistorySourceBackedInput,
+) -> CustomHistorySourceBackedResult<Arc<dyn JsonlFamilyAdapter>> {
+    let source = input.source_key()?;
+    Ok(Arc::new(CustomHistoryJsonlFamilyAdapter { input, source }))
+}
+
+impl JsonlFamilyAdapter for CustomHistoryJsonlFamilyAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Custom
     }
 
-    pub(crate) fn is_missing(&self) -> bool {
-        self.state == CustomHistoryInventoryState::Missing
+    fn source_format(&self) -> &'static str {
+        CUSTOM_ROUTE_SOURCE_FORMAT
     }
 
-    pub(crate) fn certify_against(
+    fn schema_variant(&self) -> &'static str {
+        CUSTOM_SOURCE_SCHEMA_VARIANT
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        CUSTOM_SOURCE_BACKED_PARSER_REVISION
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::Replacement
+    }
+
+    fn root_missing_mode(&self) -> JsonlFamilyRootMissingMode {
+        JsonlFamilyRootMissingMode::AuthoritativeEmpty
+    }
+
+    fn base_scope(&self) -> JsonlFamilyBaseScope {
+        JsonlFamilyBaseScope::Route
+    }
+
+    fn discover(&self, root: &Path) -> crate::Result<JsonlFamilyInventory> {
+        custom_history_jsonl_family_inventory(&self.input, &self.source, root)
+            .map_err(custom_history_family_capture_error)
+    }
+
+    fn scan_error_kind(
         &self,
-        closing: &Self,
-    ) -> CustomHistorySourceBackedResult<CertifiedSourceInventory> {
-        if self.input != closing.input
-            || !self.source.exact_descriptor_eq(&closing.source)
-            || self.state != closing.state
-        {
-            return Err(CustomHistorySourceBackedError::InventoryChanged);
+        error: &CaptureError,
+    ) -> crate::provider::source_backed::SourceBackedRouteErrorKind {
+        match error {
+            CaptureError::ProviderSource {
+                kind: ProviderSourceFailureKind::SchemaIncompatible,
+                ..
+            } => crate::provider::source_backed::SourceBackedRouteErrorKind::Unsupported,
+            _ => crate::provider::source_backed::SourceBackedRouteErrorKind::InvalidSource,
         }
-        let sources = match &self.state {
-            CustomHistoryInventoryState::Present { .. } => vec![self.source.clone()],
-            CustomHistoryInventoryState::Missing => Vec::new(),
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> crate::Result<Box<dyn JsonlFamilyProjector>> {
+        Err(CaptureError::SystemInvariant(
+            "Custom History must use optimized JSONL leaf execution",
+        ))
+    }
+
+    fn scan_optimized_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        base: Option<&CertifiedSource>,
+        _base_event_lookup: &BaseEventIdentityLookup,
+        _worker: &mut JsonlFamilyWorkerContext,
+        emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> crate::Result<()>,
+    ) -> crate::Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
+        self.source
+            .validate_exact_descriptor(leaf.source())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        let outcome =
+            scan_custom_history_source_backed_explicit(&self.input, base, |disposition, page| {
+                let publication = match disposition {
+                    CustomHistorySourceBackedDisposition::Unchanged
+                    | CustomHistorySourceBackedDisposition::Append => {
+                        JsonlFamilyPublication::Append
+                    }
+                    CustomHistorySourceBackedDisposition::Cold
+                    | CustomHistorySourceBackedDisposition::Replacement => {
+                        JsonlFamilyPublication::Replace
+                    }
+                };
+                emit_page(publication, page.records).map_err(CustomHistorySourceBackedError::from)
+            })
+            .map_err(custom_history_family_capture_error)?;
+        let receipt = match outcome {
+            CustomHistorySourceBackedOutcome::Present(receipt) => receipt,
+            CustomHistorySourceBackedOutcome::Missing {
+                inventory,
+                deletion,
+            } => {
+                if deletion
+                    .as_ref()
+                    .is_some_and(|deletion| !deletion.verifies(&inventory))
+                {
+                    return Err(CaptureError::SystemInvariant(
+                        "Custom History missing-source evidence does not reconcile",
+                    ));
+                }
+                return Err(CaptureError::SourceChangedDuringCapture);
+            }
         };
-        Ok(CertifiedSourceInventory::certify(
-            self.observation.clone(),
-            closing.observation.clone(),
-            CUSTOM_DISCOVERY_REVISION,
-            sources,
-        )?)
+        let receipt = *receipt;
+        let optimized = match (receipt.disposition, receipt.append) {
+            (
+                CustomHistorySourceBackedDisposition::Unchanged
+                | CustomHistorySourceBackedDisposition::Append,
+                Some(append),
+            ) => JsonlFamilyOptimizedLeafOutcome::append(append),
+            (
+                CustomHistorySourceBackedDisposition::Cold
+                | CustomHistorySourceBackedDisposition::Replacement,
+                None,
+            ) => JsonlFamilyOptimizedLeafOutcome::replacement(receipt.certificate),
+            _ => {
+                return Err(CaptureError::SystemInvariant(
+                    "Custom History disposition and append evidence disagree",
+                ));
+            }
+        };
+        Ok(Some(optimized))
     }
 
-    fn ordinary(&self) -> Option<&CustomHistoryFileObservationWire> {
-        match &self.state {
-            CustomHistoryInventoryState::Present { observation, .. } => Some(observation),
-            CustomHistoryInventoryState::Missing => None,
-        }
+    fn base_source_path(&self, certificate: &CertifiedSource) -> crate::Result<PathBuf> {
+        certificate
+            .validate_contract()
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        self.source
+            .validate_exact_descriptor(certificate.observation().source())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        decode_checkpoint(certificate).map_err(custom_history_family_capture_error)?;
+        std::path::absolute(self.input.path()).map_err(CaptureError::from)
     }
 
-    fn opened(&self) -> Option<&Arc<OpenedProviderSourceFile>> {
-        match &self.state {
-            CustomHistoryInventoryState::Present { opened, .. } => Some(opened),
-            CustomHistoryInventoryState::Missing => None,
+    fn revalidate_leaf(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        certificate: &CertifiedSource,
+        checkpoint: Option<&JsonlCheckpoint>,
+    ) -> crate::Result<bool> {
+        if checkpoint.is_some() || !self.source.exact_descriptor_eq(leaf.source()) {
+            return Ok(false);
         }
+        revalidate_custom_history_source_backed(&self.input, certificate)
+            .map_err(custom_history_family_capture_error)
+    }
+
+    fn owns(&self, source: &SourceKey) -> bool {
+        self.source.exact_descriptor_eq(source)
+    }
+}
+
+fn custom_history_family_capture_error(error: CustomHistorySourceBackedError) -> CaptureError {
+    match error {
+        CustomHistorySourceBackedError::Capture(error) => error,
+        error => CaptureError::InvalidPayload(error.to_string()),
     }
 }
 
@@ -484,45 +533,7 @@ pub(super) struct ParsedProjection {
 pub(crate) fn observe_custom_history_source_backed_explicit(
     input: &CustomHistorySourceBackedInput,
 ) -> CustomHistorySourceBackedResult<CustomHistorySourceBackedInventory> {
-    let source = input.source_key()?;
-    let state = match open_explicit_source(input.path()) {
-        Ok(opened) => {
-            let observation = CustomHistoryFileObservationWire::from_opened(&opened)?;
-            opened.revalidate()?;
-            CustomHistoryInventoryState::Present {
-                observation,
-                opened,
-            }
-        }
-        Err(CustomHistorySourceBackedError::Capture(CaptureError::Io(error)))
-            if error.kind() == std::io::ErrorKind::NotFound =>
-        {
-            CustomHistoryInventoryState::Missing
-        }
-        Err(error) => return Err(error),
-    };
-    let mut digest = Sha256::new();
-    digest.update(INVENTORY_DIGEST_DOMAIN);
-    match &state {
-        CustomHistoryInventoryState::Present { observation, .. } => {
-            digest.update(b"present\0");
-            digest.update(serde_json::to_vec(observation)?);
-        }
-        CustomHistoryInventoryState::Missing => digest.update(b"missing\0"),
-    }
-    let observation = SourceInventoryObservation::new(
-        CaptureProvider::Custom.as_str(),
-        CUSTOM_INVENTORY_AUTHORITY_NAMESPACE,
-        TypedKey::bytes(input.catalog_lineage.to_vec())?,
-        CUSTOM_INVENTORY_REVISION_KIND,
-        digest.finalize().to_vec(),
-    )?;
-    Ok(CustomHistorySourceBackedInventory {
-        input: input.clone(),
-        source,
-        observation,
-        state,
-    })
+    inventory::observe_custom_history_source_backed_explicit(input)
 }
 
 /// Scans and projects one explicit source, returning evidence only.
@@ -702,13 +713,6 @@ pub(crate) fn revalidate_custom_history_source_backed(
     Ok(source_observation(source, ordinary)? == *certificate.observation())
 }
 
-fn open_explicit_source(
-    path: &Path,
-) -> CustomHistorySourceBackedResult<Arc<OpenedProviderSourceFile>> {
-    let path = std::path::absolute(path)?;
-    Ok(Arc::new(open_provider_source_file(&path)?))
-}
-
 #[cfg(test)]
 pub(super) fn validate_custom_history_catalog_bounds(
     input: &CustomHistorySourceBackedInput,
@@ -723,17 +727,6 @@ pub(super) fn validate_custom_history_catalog_bounds(
     )?;
     opened.revalidate()?;
     Ok(projection.counts)
-}
-
-fn source_observation(
-    source: SourceKey,
-    observation: &CustomHistoryFileObservationWire,
-) -> CustomHistorySourceBackedResult<SourceObservation> {
-    Ok(SourceObservation::new(
-        source,
-        CUSTOM_SOURCE_REVISION_KIND,
-        serde_json::to_vec(observation)?,
-    )?)
 }
 
 fn classify_projection(

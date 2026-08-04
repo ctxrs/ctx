@@ -27,8 +27,8 @@ use crate::{
             family::jsonl::{
                 observe_opened_file, probe_records_until, JsonlFamilyAdapter,
                 JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFileObservation,
-                JsonlRecordRef,
+                JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
+                JsonlFileObservation, JsonlRecordRef,
             },
             FallbackEventIdentityState,
         },
@@ -318,6 +318,7 @@ impl JsonlFamilyProjector for PiProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let evidence = record.evidence();

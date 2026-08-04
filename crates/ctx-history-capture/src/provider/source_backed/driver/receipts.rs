@@ -277,13 +277,40 @@ impl SourceBackedGenerationSink<'_> {
         &mut self,
         emission: CoreRecordEmission,
     ) -> SourceBackedCoordinatorResult<()> {
-        let (prepared, _reservation) = emission.into_prepared();
+        let (prepared, reservation) = emission.into_prepared();
         self.writer.add_prepared_core_record(prepared)?;
+        drop(reservation);
         if let Some(report_progress) = self.record_progress.as_mut() {
             report_progress(SourceBackedRecordProgressDelta {
                 accepted_records: 1,
                 completed_bytes: 0,
             })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_core_record_emission_batch(
+        &mut self,
+        batch: CoreRecordEmissionBatch,
+    ) -> SourceBackedCoordinatorResult<()> {
+        let accepted_records = u64::try_from(batch.len()).map_err(|_| {
+            SourceBackedCoordinatorError::CoreEmission(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Internal,
+                "Core-record emission batch count overflowed",
+            ))
+        })?;
+        let (prepared_records, reservation) = batch.into_prepared();
+        for prepared in prepared_records {
+            self.writer.add_prepared_core_record(prepared)?;
+        }
+        drop(reservation);
+        if accepted_records != 0 {
+            if let Some(report_progress) = self.record_progress.as_mut() {
+                report_progress(SourceBackedRecordProgressDelta {
+                    accepted_records,
+                    completed_bytes: 0,
+                })?;
+            }
         }
         Ok(())
     }

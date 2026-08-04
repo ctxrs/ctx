@@ -36,7 +36,7 @@ use crate::{
     common::io::OpenedProviderSourceFile,
     provider::source_backed::family::jsonl::{
         JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlRecordRef,
+        JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlRecordRef,
     },
     CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -240,7 +240,6 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             source: leaf.source().clone(),
             native_session_id: binding.native_session_id,
             session_id,
-            repository_attributor: crate::repository_attribution::RepositoryAttributor::default(),
             tool_contexts,
             linkage_capacity_exceeded,
             event_identities: CursorEventIdentityState::new(
@@ -256,7 +255,6 @@ struct CursorProjector {
     source: SourceKey,
     native_session_id: String,
     session_id: StableEntityId,
-    repository_attributor: crate::repository_attribution::RepositoryAttributor,
     tool_contexts: BTreeMap<String, CursorToolContextState>,
     linkage_capacity_exceeded: bool,
     event_identities: CursorEventIdentityState,
@@ -317,6 +315,7 @@ impl JsonlFamilyProjector for CursorProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         #[cfg(test)]
@@ -340,8 +339,11 @@ impl JsonlFamilyProjector for CursorProjector {
                 &mut self.event_identities,
             )?;
             let normalized_body = cursor_normalized_body(&event)?;
-            let attribution =
-                self.attribution_for_event_with_normalized_body(&event, normalized_body.as_deref());
+            let attribution = self.attribution_for_event_with_normalized_body(
+                worker,
+                &event,
+                normalized_body.as_deref(),
+            );
             if let Some(document) = core_record(
                 &self.source,
                 self.session_id,
@@ -382,14 +384,16 @@ impl CursorProjector {
     #[cfg(test)]
     fn attribution_for_event(
         &mut self,
+        worker: &mut JsonlFamilyWorkerContext,
         event: &CursorNativeEvent,
     ) -> ctx_history_core::CoreRecordAnnotation {
         let normalized_body = cursor_normalized_body(event).unwrap();
-        self.attribution_for_event_with_normalized_body(event, normalized_body.as_deref())
+        self.attribution_for_event_with_normalized_body(worker, event, normalized_body.as_deref())
     }
 
     fn attribution_for_event_with_normalized_body(
         &mut self,
+        worker: &mut JsonlFamilyWorkerContext,
         event: &CursorNativeEvent,
         normalized_body: Option<&str>,
     ) -> ctx_history_core::CoreRecordAnnotation {
@@ -498,7 +502,7 @@ impl CursorProjector {
             }
             CursorEventBody::None | CursorEventBody::Text { .. } => {}
         }
-        let mut annotation = self.repository_attributor.attribute(input);
+        let mut annotation = worker.repository_attributor().attribute(input);
         preserve_cursor_ordinary_file_observations(&mut annotation);
         append_adapter_abstentions(&mut annotation, adapter_abstentions);
         annotation

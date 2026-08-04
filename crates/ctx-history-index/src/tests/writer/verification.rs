@@ -57,7 +57,42 @@ fn identical_staging_revalidates_active_checksum_after_terminal_callback() {
 }
 
 #[test]
-fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
+fn publication_activity_uses_exhaustive_verifier_for_empty_reusable_base() {
+    let temp = tempdir().unwrap();
+    let empty = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap()
+        .commit(|_| true)
+        .unwrap();
+    assert_eq!(empty.indexed_documents, 0);
+
+    let source = source("empty-base-activity.jsonl");
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert_eq!(replacement.base_manifest().unwrap().indexed_documents, 0);
+    replacement.begin_source(source.clone()).unwrap();
+    replacement
+        .add_core_record(document(&source, 1, "first indexed body"))
+        .unwrap();
+    replacement
+        .certify_source(certificate(&source, 1, 1))
+        .unwrap();
+
+    crate::publication::reset_verification_activity();
+    replacement.commit(|_| true).unwrap();
+    assert_eq!(crate::publication::verification_activity(), (1, 1));
+    assert_eq!(
+        crate::publication::candidate_identity_verification_activity(),
+        (0, 0),
+        "an empty reusable base must dispatch to the exhaustive verifier"
+    );
+}
+
+#[test]
+fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit_for_nonempty_base() {
     const RETAINED_DOCUMENTS: u64 = 32;
 
     let cold = tempdir().unwrap();
@@ -104,6 +139,10 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
         .unwrap()
         .into_writer()
         .unwrap();
+    assert_eq!(
+        append.base_manifest().unwrap().indexed_documents,
+        RETAINED_DOCUMENTS
+    );
     let base = append
         .begin_source_append(cold_source.clone())
         .unwrap()

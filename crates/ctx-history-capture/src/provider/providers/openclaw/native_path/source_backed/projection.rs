@@ -56,6 +56,7 @@ impl OpenClawProjector {
         tool_result: Option<&NativeToolResult<'_>>,
         output: Option<&OpenClawOutputMetadata>,
         subrecord: Option<(SubrecordSelector, TypedKey, u64)>,
+        worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let event_type = if tool_call.is_some() {
@@ -152,7 +153,7 @@ impl OpenClawProjector {
         } else {
             None
         };
-        let mut annotation = self.attributor.attribute(input);
+        let mut annotation = worker.repository_attributor().attribute(input);
         if let Some(abstention) = tool_call_projection
             .as_ref()
             .and_then(|projection| projection.abstention)
@@ -409,6 +410,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
     fn project(
         &mut self,
         record: JsonlRecordRef<'_>,
+        worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let bytes = record.bytes();
@@ -459,6 +461,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
                     None,
                     None,
                     Some(subrecord),
+                    worker,
                     emit,
                 )?;
             }
@@ -474,6 +477,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
             tool_result.as_ref(),
             output.as_ref(),
             None,
+            worker,
             emit,
         )
     }

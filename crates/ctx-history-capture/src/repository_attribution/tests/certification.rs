@@ -333,6 +333,29 @@ fn independent_worker_caches_revalidate_replaced_git_identity() {
 
 #[cfg(unix)]
 #[test]
+fn source_boundary_retains_certification_cache_but_clears_event_history() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "repo", None);
+    let mut attributor = RepositoryAttributor::default();
+    let input = || AttributionInput {
+        activity_at_unix_ms: Some(100),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    };
+
+    assert_eq!(attributor.attribute(input()).repository_bindings.len(), 1);
+    assert_eq!(attributor.full_certification_probe_count(), 1);
+    assert_eq!(attributor.event_time_cache_len(), 1);
+
+    attributor.begin_source();
+    assert_eq!(attributor.event_time_cache_len(), 0);
+    assert_eq!(attributor.attribute(input()).repository_bindings.len(), 1);
+    assert_eq!(attributor.full_certification_probe_count(), 1);
+    assert_eq!(attributor.event_time_cache_len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
 fn provider_activity_time_is_exact_on_probe_and_cache_reuse() {
     use std::cmp::Ordering;
 

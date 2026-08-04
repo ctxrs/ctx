@@ -587,7 +587,7 @@ fn changed_source_scanner_v0(
 ) -> CodexSourceBackedResultV0<(ChangedSourceModeV0, CodexNativeScanner)> {
     if let Some(proof) = job.proof.as_ref() {
         if job.source.catalog_observation.len > proof.checkpoint.observation.len {
-            let facts = job.outcome_lineage.new_fact_set()?;
+            let facts = job.outcome_lineage.new_fact_set(&job.native_session_id)?;
             match CodexNativeScanner::new_source_backed_with_lineage_v0(
                 job.source.clone(),
                 Some(proof),
@@ -604,7 +604,7 @@ fn changed_source_scanner_v0(
         CodexNativeScanner::new_source_backed_with_lineage_v0(
             job.source.clone(),
             None,
-            job.outcome_lineage.new_fact_set()?,
+            job.outcome_lineage.new_fact_set(&job.native_session_id)?,
         )
         .map_err(map_lineage_capture_error)?,
     ))

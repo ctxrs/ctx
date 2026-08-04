@@ -84,9 +84,11 @@ fn project(provider: CaptureProvider, value: &Value) -> (Vec<CoreRecord>, u64) {
     };
     let encoded = serde_json::to_vec(value).unwrap();
     let mut records = Vec::new();
+    let mut worker = JsonlFamilyWorkerContext::default();
     JsonlFamilyProjector::project(
         &mut projector,
         JsonlRecordRef::for_test(&encoded, 7),
+        &mut worker,
         &mut |record| {
             records.push(record);
             Ok(())
@@ -136,11 +138,13 @@ fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>,
         rejected_records: 0,
     };
     let mut records = Vec::new();
+    let mut worker = JsonlFamilyWorkerContext::default();
     for (ordinal, value) in values.iter().enumerate() {
         let encoded = serde_json::to_vec(value).unwrap();
         JsonlFamilyProjector::project(
             &mut projector,
             JsonlRecordRef::for_test(&encoded, ordinal as u64),
+            &mut worker,
             &mut |record| {
                 records.push(record);
                 Ok(())

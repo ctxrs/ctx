@@ -18,6 +18,8 @@ mod startup_observation;
 mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+type TestStatusWriter = Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>;
 use attempt_helpers::*;
 use coverage_contract::{
     ManualAllContinuation, PostPublicationRouteCoverageFence,

@@ -53,8 +53,22 @@ impl std::ops::Deref for CoreRefreshEngine {
 }
 
 #[cfg(test)]
+type StatusWriter = Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>;
+
+#[cfg(test)]
+type AdmissionFence = Arc<
+    dyn for<'data, 'catalog> Fn(
+            &'data Path,
+            Option<&'catalog ExplicitSourceCatalogAuthority>,
+        ) -> Result<
+            std::collections::BTreeMap<ctx_history_index::SourceRouteIdentity, Option<String>>,
+        > + Send
+        + Sync,
+>;
+
+#[cfg(test)]
 struct StatusWriterRefreshJournal {
-    writer: Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>,
+    writer: StatusWriter,
 }
 
 #[cfg(test)]
@@ -133,7 +147,7 @@ impl CoreRefreshEngine {
 
     pub(in crate::semantic) fn with_status_writer_for_test(
         executor: Arc<dyn SourceBackedRefreshExecutor>,
-        writer: Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>,
+        writer: StatusWriter,
     ) -> Self {
         Self(ctx_history_refresh::RefreshEngine::with_executor(
             Arc::new(StatusWriterRefreshJournal { writer }),
@@ -144,19 +158,8 @@ impl CoreRefreshEngine {
 
     pub(in crate::semantic) fn with_runtime_for_test(
         executor: Arc<dyn SourceBackedRefreshExecutor>,
-        admission_fence: Arc<
-            dyn for<'data, 'catalog> Fn(
-                    &'data Path,
-                    Option<&'catalog ExplicitSourceCatalogAuthority>,
-                ) -> Result<
-                    std::collections::BTreeMap<
-                        ctx_history_index::SourceRouteIdentity,
-                        Option<String>,
-                    >,
-                > + Send
-                + Sync,
-        >,
-        writer: Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>,
+        admission_fence: AdmissionFence,
+        writer: StatusWriter,
     ) -> Self {
         let adapted = Arc::new(
             move |_discovery: &ctx_history_capture::DiscoveryContext,
@@ -175,18 +178,7 @@ impl CoreRefreshEngine {
     }
 
     pub(in crate::semantic) fn with_admission_fence_for_test(
-        admission_fence: Arc<
-            dyn for<'data, 'catalog> Fn(
-                    &'data Path,
-                    Option<&'catalog ExplicitSourceCatalogAuthority>,
-                ) -> Result<
-                    std::collections::BTreeMap<
-                        ctx_history_index::SourceRouteIdentity,
-                        Option<String>,
-                    >,
-                > + Send
-                + Sync,
-        >,
+        admission_fence: AdmissionFence,
     ) -> Self {
         let adapted = Arc::new(
             move |_discovery: &ctx_history_capture::DiscoveryContext,

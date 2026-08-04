@@ -602,10 +602,9 @@ impl GraphArtifacts {
         let supplied_pro_root = ProFilesystemLayout::new(data_root).pro_root();
         let pro_root = match supplied_pro_root.symlink_metadata() {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                let canonical = supplied_pro_root
+                supplied_pro_root
                     .canonicalize()
-                    .context("invalid_request: resolve Pro data directory")?;
-                canonical
+                    .context("invalid_request: resolve Pro data directory")?
             }
             Ok(_) => bail!("invalid_request: Pro data directory is not a safe directory"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

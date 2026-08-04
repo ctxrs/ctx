@@ -1,16 +1,11 @@
 use super::*;
-use std::sync::Mutex;
 
+#[cfg(test)]
+use crate::provider::codex::nativepath::CodexSourceBackedCountersV0;
 use crate::provider::codex::nativepath::{
-    discover_codex_session_tree_inventory_v0, ingest_codex_sources_v0, CodexSessionTreeInventoryV0,
-    CodexSourceBackedResultV0,
-};
-
-#[path = "codex_prompt_terminal.rs"]
-mod prompt_terminal;
-use prompt_terminal::{
-    bind_codex_prompt_target, remember_codex_prompt_terminal, revalidate_codex_prompt_inventory,
-    CodexPromptTerminalCapture, CodexPromptTerminalEvidence,
+    codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,
+    CodexExplicitSessionSourceBackedInputV0, CodexPromptHistoryJsonlFamilyAdapterV0,
+    CodexPromptHistorySourceBackedInputV0, CodexSessionTreeJsonlFamilyAdapterV0,
 };
 
 #[cfg(test)]
@@ -75,113 +70,6 @@ fn run_after_explicit_codex_stage_hook(counters: CodexSourceBackedCountersV0) {
     }
 }
 
-fn codex_source_backed_route_error(error: CodexSourceBackedErrorV0) -> SourceBackedRouteError {
-    let kind = match &error {
-        CodexSourceBackedErrorV0::LineageWorkingSetExhausted => {
-            SourceBackedRouteErrorKind::ResourceUnavailable
-        }
-        CodexSourceBackedErrorV0::LineageWorkingSetUnavailable => {
-            SourceBackedRouteErrorKind::Internal
-        }
-        CodexSourceBackedErrorV0::Index(IndexError::Io(_)) => {
-            SourceBackedRouteErrorKind::ResourceUnavailable
-        }
-        CodexSourceBackedErrorV0::Capture(CaptureError::SystemInvariant(_))
-        | CodexSourceBackedErrorV0::Index(_)
-        | CodexSourceBackedErrorV0::ColdLaneDisconnected { .. }
-        | CodexSourceBackedErrorV0::ColdWorkerPanicked { .. }
-        | CodexSourceBackedErrorV0::ColdProtocolMismatch(_) => SourceBackedRouteErrorKind::Internal,
-        CodexSourceBackedErrorV0::Capture(CaptureError::Io(_) | CaptureError::SystemIo { .. })
-        | CodexSourceBackedErrorV0::Io(_) => SourceBackedRouteErrorKind::ResourceUnavailable,
-        _ => SourceBackedRouteErrorKind::InvalidSource,
-    };
-    SourceBackedRouteError::new(kind, error.to_string())
-}
-
-fn codex_prompt_history_route_error(
-    error: CodexPromptHistorySourceBackedErrorV0,
-) -> SourceBackedRouteError {
-    let kind = match &error {
-        CodexPromptHistorySourceBackedErrorV0::Capture(CaptureError::SystemInvariant(_)) => {
-            SourceBackedRouteErrorKind::Internal
-        }
-        CodexPromptHistorySourceBackedErrorV0::Capture(
-            CaptureError::Io(_) | CaptureError::SystemIo { .. },
-        )
-        | CodexPromptHistorySourceBackedErrorV0::Io(_) => {
-            SourceBackedRouteErrorKind::ResourceUnavailable
-        }
-        CodexPromptHistorySourceBackedErrorV0::SourceChanged => {
-            SourceBackedRouteErrorKind::SourceChanged
-        }
-        _ => SourceBackedRouteErrorKind::InvalidSource,
-    };
-    SourceBackedRouteError::new(kind, error.to_string())
-}
-
-fn codex_prompt_history_terminal_route_error(
-    error: CodexPromptHistorySourceBackedErrorV0,
-) -> SourceBackedRouteError {
-    let mut route_error = codex_prompt_history_route_error(error);
-    if route_error.kind == SourceBackedRouteErrorKind::InvalidSource {
-        route_error.kind = SourceBackedRouteErrorKind::Internal;
-    }
-    route_error
-}
-
-fn codex_terminal_capture<T>(
-    result: CodexSourceBackedResultV0<T>,
-) -> SourceBackedRouteResult<Option<T>> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(error) => {
-            let error = codex_source_backed_route_error(error);
-            match error.kind {
-                SourceBackedRouteErrorKind::Internal
-                | SourceBackedRouteErrorKind::ResourceUnavailable => Err(error),
-                _ => Ok(None),
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct CodexSessionTreeTerminalEvidence {
-    inventory: CertifiedSourceInventory,
-    sources: HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
-    deletions: Vec<SourceKey>,
-}
-
-#[derive(Clone, Default)]
-struct CodexSessionTreeOwnership {
-    sources: HashMap<[u8; 32], Vec<SourceKey>>,
-}
-
-impl CodexSessionTreeOwnership {
-    fn remember(&mut self, source: &SourceKey) {
-        let sources = self
-            .sources
-            .entry(source.exact_descriptor_digest())
-            .or_default();
-        if !sources
-            .iter()
-            .any(|candidate| candidate.exact_descriptor_eq(source))
-        {
-            sources.push(source.clone());
-        }
-    }
-
-    fn owns(&self, source: &SourceKey) -> bool {
-        self.sources
-            .get(&source.exact_descriptor_digest())
-            .is_some_and(|sources| {
-                sources
-                    .iter()
-                    .any(|candidate| candidate.exact_descriptor_eq(source))
-            })
-    }
-}
-
 pub(super) fn register_codex_session_tree_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
@@ -192,25 +80,8 @@ pub(super) fn register_codex_session_tree_route(
 
 pub(in crate::provider::source_backed) fn register_codex_session_tree_routes(
     registry: &mut SourceBackedProviderRegistry,
-    sources: Vec<ProviderSource>,
-    selection: SourceBackedRouteSelection,
-) -> SourceBackedCoordinatorResult<()> {
-    // The route sink does not expose its writer options yet. The production
-    // path reserves the runtime-derived default indexer budget until a shared
-    // scheduler supplies explicit scanner capacity through this seam.
-    register_codex_session_tree_route_with_indexer_threads(
-        registry,
-        sources,
-        selection,
-        WriterOptions::default().indexer_threads,
-    )
-}
-
-fn register_codex_session_tree_route_with_indexer_threads(
-    registry: &mut SourceBackedProviderRegistry,
     mut sources: Vec<ProviderSource>,
     selection: SourceBackedRouteSelection,
-    indexer_threads: usize,
 ) -> SourceBackedCoordinatorResult<()> {
     if sources.is_empty() {
         return Err(invalid_route(
@@ -240,262 +111,14 @@ fn register_codex_session_tree_route_with_indexer_threads(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
-    let initial_inventory = discover_codex_route_inventory(&roots)
+    let adapter = CodexSessionTreeJsonlFamilyAdapterV0::new(roots)
         .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?;
-    let mut initial_ownership = CodexSessionTreeOwnership::default();
-    for (_, source_key, _) in &initial_inventory.sources {
-        initial_ownership.remember(source_key);
-    }
-
-    let capture_roots = Arc::new(roots);
-    let complete_inventory_revalidation_roots = Arc::clone(&capture_roots);
-    let capture_initial_inventory = Arc::new(Mutex::new(Some(initial_inventory)));
-    let ownership = Arc::new(Mutex::new(initial_ownership));
-    let capture_ownership = Arc::clone(&ownership);
-    let route_ownership = ownership;
-    let terminal_evidence = Arc::new(Mutex::new(None::<CodexSessionTreeTerminalEvidence>));
-    let capture_terminal_evidence = Arc::clone(&terminal_evidence);
-    let source_terminal_evidence = Arc::clone(&terminal_evidence);
-    let inventory_terminal_evidence = terminal_evidence;
-    let driver = SourceBackedRouteDriver::new_fallible(
-        move |sink| {
-            *capture_terminal_evidence.lock().map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "Codex terminal evidence lock was poisoned",
-                )
-            })? = None;
-            let opening = capture_initial_inventory
-                .lock()
-                .map_err(|_| {
-                    SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "Codex opening inventory lock was poisoned",
-                    )
-                })?
-                .take()
-                .map_or_else(
-                    || discover_codex_route_inventory(&capture_roots),
-                    Ok::<CodexSessionTreeInventoryV0, CodexSourceBackedErrorV0>,
-                )
-                .map_err(codex_source_backed_route_error)?;
-            let base_sources = sink
-                .base_route_sources()
-                .map_err(route_coordinator_error)?
-                .into_iter()
-                .filter(|(source, _)| managed_codex_session_source(source))
-                .collect::<HashMap<_, _>>();
-            let owned_opening_sources = opening
-                .sources
-                .iter()
-                .filter(|(_, source, _)| !sink.source_owned_by_other_route(source))
-                .cloned()
-                .collect::<Vec<_>>();
-            let route_inventory = CertifiedSourceInventory::certify(
-                opening.certificate.observation().clone(),
-                opening.certificate.observation().clone(),
-                opening.certificate.discovery_revision(),
-                owned_opening_sources
-                    .iter()
-                    .map(|(_, source, _)| source.clone())
-                    .collect(),
-            )
-            .map_err(route_error)?;
-            sink.certify_complete_inventory(route_inventory.clone())
-                .map_err(route_coordinator_error)?;
-            {
-                let mut current = CodexSessionTreeOwnership::default();
-                for (_, source_key, _) in &owned_opening_sources {
-                    current.remember(source_key);
-                }
-                for base in base_sources.values() {
-                    let source = base.observation().source();
-                    if managed_codex_session_source(source) {
-                        current.remember(source);
-                    }
-                }
-                let mut owned = capture_ownership.lock().map_err(|_| {
-                    SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "Codex source ownership lock was poisoned",
-                    )
-                })?;
-                *owned = current;
-            }
-            for (_, source_key, _) in &owned_opening_sources {
-                sink.claim_present(source_key)
-                    .map_err(route_coordinator_error)?;
-            }
-            let mut revalidation = HashMap::new();
-            let mut timings = CodexSourceBackedPhaseTimingsV0::default();
-            let mut counters = CodexSourceBackedCountersV0::default();
-            ingest_codex_sources_v0(
-                owned_opening_sources,
-                &base_sources,
-                sink.writer,
-                &mut revalidation,
-                &mut timings,
-                &mut counters,
-                indexer_threads,
-                None,
-            )
-            .map_err(codex_source_backed_route_error)?;
-            #[cfg(test)]
-            run_after_codex_session_tree_stage_hook(counters);
-            let mut deletions = Vec::new();
-            for base in base_sources.values() {
-                let base_source = base.observation().source();
-                if managed_codex_session_source(base_source)
-                    && !opening.certificate.contains(base_source)
-                {
-                    let disposition = sink
-                        .delete_source(
-                            CertifiedSourceDeletion::from_inventory(
-                                base_source.clone(),
-                                &route_inventory,
-                            )
-                            .map_err(route_error)?,
-                            route_inventory.clone(),
-                        )
-                        .map_err(route_coordinator_error)?;
-                    deletions.push(base_source.clone());
-                    if disposition == SourceBackedDeletionDisposition::Deleted {
-                        counters.deleted_sources = counters.deleted_sources.saturating_add(1);
-                    }
-                }
-            }
-            *capture_terminal_evidence.lock().map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "Codex terminal evidence lock was poisoned",
-                )
-            })? = Some(CodexSessionTreeTerminalEvidence {
-                inventory: route_inventory,
-                sources: revalidation,
-                deletions,
-            });
-            Ok(())
-        },
-        move |candidate| {
-            route_ownership
-                .lock()
-                .map(|owned| owned.owns(candidate))
-                .map_err(|_| {
-                    SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "Codex source ownership lock was poisoned",
-                    )
-                })
-        },
-        move |target| {
-            let evidence = source_terminal_evidence.lock().map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "Codex terminal evidence lock was poisoned",
-                )
-            })?;
-            let Some(evidence) = evidence.as_ref() else {
-                return Ok(false);
-            };
-            Ok(match target {
-                SourceBackedRevalidationTarget::Source(expected) => {
-                    let Some(source_evidence) =
-                        evidence.sources.get(expected.observation().source())
-                    else {
-                        return Ok(false);
-                    };
-                    let observation = codex_source_observation(
-                        expected.observation().source(),
-                        &source_evidence.observation,
-                    )
-                    .map_err(|error| {
-                        SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Internal,
-                            error.to_string(),
-                        )
-                    })?;
-                    observation == *expected.observation()
-                }
-                SourceBackedRevalidationTarget::Deletion(deletion) => {
-                    deletion.verifies(&evidence.inventory)
-                        && !evidence.sources.contains_key(deletion.source())
-                        && evidence
-                            .deletions
-                            .iter()
-                            .any(|source| source.exact_descriptor_eq(deletion.source()))
-                }
-            })
-        },
-    )
-    .with_fallible_complete_inventory_revalidation(move |expected| {
-        let terminal = inventory_terminal_evidence
-            .lock()
-            .map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "Codex terminal evidence lock was poisoned",
-                )
-            })?
-            .clone();
-        let Some(terminal) = terminal else {
-            return Ok(false);
-        };
-        if terminal.inventory != *expected {
-            return Ok(false);
-        }
-        let Some(current) = codex_terminal_capture(discover_codex_route_inventory(
-            &complete_inventory_revalidation_roots,
-        ))?
-        else {
-            return Ok(false);
-        };
-        let mut current_by_descriptor = HashMap::<[u8; 32], Vec<_>>::new();
-        for current_source in &current.sources {
-            current_by_descriptor
-                .entry(current_source.1.exact_descriptor_digest())
-                .or_default()
-                .push(current_source);
-        }
-        let current_source_for = |source_key: &SourceKey| {
-            current_by_descriptor
-                .get(&source_key.exact_descriptor_digest())
-                .and_then(|candidates| {
-                    candidates
-                        .iter()
-                        .copied()
-                        .find(|(_, current_key, _)| current_key.exact_descriptor_eq(source_key))
-                })
-        };
-        // The inventory certificate binds the opening observations used to
-        // stage this generation. Active Codex sessions may append or a new
-        // session may begin afterward. Source-level evidence below certifies
-        // every frozen prefix and retained ordinary-file identity from that
-        // snapshot. New members are deferred to the next eventually-consistent
-        // refresh; a missing, replaced, truncated, or rewritten captured
-        // member still fails this fence. Requiring closing inventory equality
-        // would make a large cold import impossible while Codex is active.
-        if terminal.sources.len() > current.sources.len() {
-            return Ok(false);
-        }
-        for (source_key, certified) in &terminal.sources {
-            let Some((source, _, _)) = current_source_for(source_key) else {
-                return Ok(false);
-            };
-            if !certified
-                .observation
-                .admits_append_only_growth(&source.catalog_observation)
-                || !certified
-                    .revalidate_fallible()
-                    .map_err(codex_source_backed_route_error)?
-            {
-                return Ok(false);
-            }
-        }
-        Ok(terminal
-            .deletions
-            .iter()
-            .all(|deleted| current_source_for(deleted).is_none()))
-    });
+    #[cfg(test)]
+    let adapter = adapter.with_after_stage_observer(run_after_codex_session_tree_stage_hook);
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        Arc::new(adapter),
+        source.path.clone(),
+    );
     registry.register(executable_route(
         source,
         selection,
@@ -505,20 +128,6 @@ fn register_codex_session_tree_route_with_indexer_threads(
     Ok(())
 }
 
-fn codex_session_root_rank(root: &Path) -> u8 {
-    match root.file_name().and_then(std::ffi::OsStr::to_str) {
-        Some("sessions") => 0,
-        Some("archived_sessions") => 1,
-        _ => 2,
-    }
-}
-
-fn discover_codex_route_inventory(
-    roots: &[PathBuf],
-) -> CodexSourceBackedResultV0<CodexSessionTreeInventoryV0> {
-    discover_codex_session_tree_inventory_v0(roots)
-}
-
 pub(super) fn register_codex_explicit_session_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
@@ -526,196 +135,14 @@ pub(super) fn register_codex_explicit_session_route(
 ) -> SourceBackedCoordinatorResult<()> {
     let input = CodexExplicitSessionSourceBackedInputV0::discover(&source.path)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
-    let owned_source = input.source().clone();
-    let scan_input = input.clone();
-    let complete_inventory_revalidation_input = input.clone();
-    let claimed_source = owned_source.clone();
-    let terminal_evidence = Arc::new(Mutex::new(None::<CodexSessionTreeTerminalEvidence>));
-    let capture_terminal_evidence = Arc::clone(&terminal_evidence);
-    let source_terminal_evidence = Arc::clone(&terminal_evidence);
-    let inventory_terminal_evidence = terminal_evidence;
-    let driver = SourceBackedRouteDriver::new_fallible(
-        move |sink| {
-            *capture_terminal_evidence.lock().map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "explicit Codex terminal evidence lock was poisoned",
-                )
-            })? = None;
-            let opening = observe_codex_explicit_session_source_backed_v0(&scan_input)
-                .map_err(codex_source_backed_route_error)?;
-            let base = sink.base_source(&claimed_source).cloned();
-            if opening.is_missing() {
-                let closing = observe_codex_explicit_session_source_backed_v0(&scan_input)
-                    .map_err(codex_source_backed_route_error)?;
-                let inventory = opening
-                    .certify_against(&closing)
-                    .map_err(codex_source_backed_route_error)?;
-                sink.certify_complete_inventory(inventory.clone())
-                    .map_err(route_coordinator_error)?;
-                if let Some(base) = base.as_ref() {
-                    let deletion = CertifiedSourceDeletion::from_inventory(
-                        base.observation().source().clone(),
-                        &inventory,
-                    )
-                    .map_err(route_error)?;
-                    sink.delete_source(deletion, inventory.clone())
-                        .map_err(route_coordinator_error)?;
-                }
-                *capture_terminal_evidence.lock().map_err(|_| {
-                    SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "explicit Codex terminal evidence lock was poisoned",
-                    )
-                })? = Some(CodexSessionTreeTerminalEvidence {
-                    inventory,
-                    sources: HashMap::new(),
-                    deletions: base
-                        .iter()
-                        .map(|base| base.observation().source().clone())
-                        .collect(),
-                });
-                return Ok(());
-            }
-
-            let plan = opening.source_plan().ok_or_else(|| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::SourceChanged,
-                    "explicit Codex session disappeared after its opening observation",
-                )
-            })?;
-            if !plan.1.exact_descriptor_eq(&claimed_source) {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::SourceChanged,
-                    "explicit Codex session changed its exact source identity",
-                ));
-            }
-            sink.claim_present(&claimed_source)
-                .map_err(route_coordinator_error)?;
-            let base_sources = base
-                .into_iter()
-                .map(|base| (base.observation().source().clone(), base))
-                .collect::<HashMap<_, _>>();
-            let mut revalidation = HashMap::new();
-            let mut timings = CodexSourceBackedPhaseTimingsV0::default();
-            let mut counters = CodexSourceBackedCountersV0::default();
-            ingest_codex_sources_serial_v0(
-                vec![plan],
-                &base_sources,
-                sink.writer,
-                &mut revalidation,
-                &mut timings,
-                &mut counters,
-            )
-            .map_err(codex_source_backed_route_error)?;
-            #[cfg(test)]
-            run_after_explicit_codex_stage_hook(counters);
-            let closing = observe_codex_explicit_session_source_backed_v0(&scan_input)
-                .map_err(codex_source_backed_route_error)?;
-            let inventory = opening
-                .certify_against(&closing)
-                .map_err(codex_source_backed_route_error)?;
-            sink.certify_complete_inventory(inventory.clone())
-                .map_err(route_coordinator_error)?;
-            *capture_terminal_evidence.lock().map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "explicit Codex terminal evidence lock was poisoned",
-                )
-            })? = Some(CodexSessionTreeTerminalEvidence {
-                inventory,
-                sources: revalidation,
-                deletions: Vec::new(),
-            });
-            Ok(())
-        },
-        move |candidate| Ok(candidate.exact_descriptor_eq(&owned_source)),
-        move |target| {
-            let evidence = source_terminal_evidence.lock().map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "explicit Codex terminal evidence lock was poisoned",
-                )
-            })?;
-            let Some(evidence) = evidence.as_ref() else {
-                return Ok(false);
-            };
-            Ok(match target {
-                SourceBackedRevalidationTarget::Source(expected) => {
-                    let Some(source_evidence) =
-                        evidence.sources.get(expected.observation().source())
-                    else {
-                        return Ok(false);
-                    };
-                    let observation = codex_source_observation(
-                        expected.observation().source(),
-                        &source_evidence.observation,
-                    )
-                    .map_err(|error| {
-                        SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Internal,
-                            error.to_string(),
-                        )
-                    })?;
-                    observation == *expected.observation()
-                        && source_evidence
-                            .revalidate_fallible()
-                            .map_err(codex_source_backed_route_error)?
-                }
-                SourceBackedRevalidationTarget::Deletion(deletion) => {
-                    deletion.verifies(&evidence.inventory)
-                        && !evidence.sources.contains_key(deletion.source())
-                }
-            })
-        },
-    )
-    .with_fallible_complete_inventory_revalidation(move |expected| {
-        let terminal = inventory_terminal_evidence
-            .lock()
-            .map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "explicit Codex terminal evidence lock was poisoned",
-                )
-            })?
-            .clone();
-        let Some(terminal) = terminal else {
-            return Ok(false);
-        };
-        if terminal.inventory != *expected {
-            return Ok(false);
-        }
-        let Some(opening) = codex_terminal_capture(
-            observe_codex_explicit_session_source_backed_v0(&complete_inventory_revalidation_input),
-        )?
-        else {
-            return Ok(false);
-        };
-        let Some(closing) = codex_terminal_capture(
-            observe_codex_explicit_session_source_backed_v0(&complete_inventory_revalidation_input),
-        )?
-        else {
-            return Ok(false);
-        };
-        let Some(current) = codex_terminal_capture(opening.certify_against(&closing))? else {
-            return Ok(false);
-        };
-        if current != *expected {
-            return Ok(false);
-        }
-        let Some((source, source_key, _)) = closing.source_plan() else {
-            return Ok(true);
-        };
-        let Some(evidence) = terminal.sources.get(&source_key) else {
-            return Ok(false);
-        };
-        Ok(evidence
-            .observation
-            .admits_append_only_growth(&source.catalog_observation)
-            && evidence
-                .revalidate_fallible()
-                .map_err(codex_source_backed_route_error)?)
-    });
+    let route_path = input.path().to_path_buf();
+    let adapter = CodexExplicitSessionJsonlFamilyAdapterV0::new(input);
+    #[cfg(test)]
+    let adapter = adapter.with_after_stage_observer(run_after_explicit_codex_stage_hook);
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        Arc::new(adapter),
+        route_path,
+    );
     registry.register(executable_route(
         source,
         selection,
@@ -724,7 +151,6 @@ pub(super) fn register_codex_explicit_session_route(
     )?);
     Ok(())
 }
-
 // SHA-256("ctx.codex.prompt-history.default-catalog-lineage.v0"). This is
 // catalog-route identity, not a digest of the user-specific source path.
 pub(in crate::provider::source_backed) const CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0: [u8;
@@ -745,212 +171,13 @@ pub fn register_codex_prompt_history_source_backed_route(
         source.path.clone(),
         CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0,
     );
-    let retained = observe_codex_prompt_history_source_backed_explicit_v0(&input)
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::new(input)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
-    let owned_source = retained.source().clone();
-    let capture_source = retained.clone();
-    let terminal_source = retained.clone();
-    let claimed_source = owned_source.clone();
-    let capture_route = source.clone();
-    let terminal_route = source.clone();
-    let terminal_evidence = Arc::new(Mutex::new(None::<CodexPromptTerminalEvidence>));
-    let scan_terminal_evidence = Arc::clone(&terminal_evidence);
-    let source_terminal_evidence = Arc::clone(&terminal_evidence);
-    let inventory_terminal_evidence = terminal_evidence;
-    let terminal_capture: Arc<CodexPromptTerminalCapture> = Arc::new(move |expected| {
-        revalidate_codex_prompt_history_source_backed_v0(&terminal_source, expected)
-            .map_err(codex_prompt_history_terminal_route_error)?;
-        certify_source_inventory(&terminal_route, std::slice::from_ref(expected))
-    });
-    let inventory_terminal_capture = terminal_capture;
-    let driver = SourceBackedRouteDriver::new_fallible(
-        move |sink| {
-            *scan_terminal_evidence.lock().map_err(|_| {
-                SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::Internal,
-                    "Codex prompt-history terminal evidence lock was poisoned",
-                )
-            })? = None;
-            let base = sink.base_source(&claimed_source).cloned();
-            let Some(base) = base else {
-                sink.begin_source(claimed_source.clone())
-                    .map_err(route_coordinator_error)?;
-                let mut sink_failure = None;
-                let scan = scan_codex_prompt_history_source_backed_v0(
-                    capture_source.clone(),
-                    None,
-                    |page| {
-                        if !page.source.exact_descriptor_eq(&claimed_source) {
-                            return Err(CaptureError::InvalidPayload(
-                                "Codex prompt-history page changed its source descriptor"
-                                    .to_owned(),
-                            )
-                            .into());
-                        }
-                        let _retained_page_bytes = page.retained_bytes;
-                        for record in page.records {
-                            sink.add_core_record(record).map_err(|error| {
-                                capture_coordinator_error(&mut sink_failure, error)
-                            })?;
-                        }
-                        Ok(())
-                    },
-                );
-                if let Some(error) = sink_failure {
-                    return Err(error);
-                }
-                let scan = scan.map_err(codex_prompt_history_route_error)?;
-                if !matches!(
-                    scan.disposition,
-                    CodexPromptHistorySourceBackedDispositionV0::Cold
-                ) || !scan.source.source().exact_descriptor_eq(&claimed_source)
-                    || scan.certificate.counts().indexed_documents != scan.emitted_documents
-                {
-                    return Err(SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "Codex prompt-history cold scan did not reconcile",
-                    ));
-                }
-                sink.certify_source(scan.certificate.clone())
-                    .map_err(route_coordinator_error)?;
-                let certificate = scan.certificate;
-                let inventory =
-                    certify_source_inventory(&capture_route, std::slice::from_ref(&certificate))?;
-                sink.certify_complete_inventory(inventory.clone())
-                    .map_err(route_coordinator_error)?;
-                remember_codex_prompt_terminal(&scan_terminal_evidence, certificate, inventory)?;
-                return Ok(());
-            };
-
-            let planned =
-                plan_codex_prompt_history_source_backed_v0(capture_source.clone(), Some(&base))
-                    .map_err(codex_prompt_history_route_error)?;
-            if !planned.source.source().exact_descriptor_eq(&claimed_source) {
-                return Err(SourceBackedRouteError::new(
-                    SourceBackedRouteErrorKind::SourceChanged,
-                    "Codex prompt-history replay changed its source descriptor",
-                ));
-            }
-            let certificate = match planned.disposition {
-                CodexPromptHistorySourceBackedDispositionV0::Unchanged => {
-                    if planned.certificate != base || planned.emitted_documents != 0 {
-                        return Err(SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::SourceChanged,
-                            "Codex prompt-history unchanged evidence did not match its base",
-                        ));
-                    }
-                    let frontier = base.frontier().ok_or_else(|| {
-                        SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::Internal,
-                            "Codex prompt-history replay base has no append frontier",
-                        )
-                    })?;
-                    sink.begin_source_append(claimed_source.clone())
-                        .map_err(route_coordinator_error)?;
-                    let append = CertifiedSourceAppend::certify(
-                        &base,
-                        planned.certificate.clone(),
-                        frontier.certified_prefix_bytes(),
-                        *frontier.certified_prefix_digest(),
-                    )
-                    .map_err(route_error)?;
-                    sink.certify_source_append(append)
-                        .map_err(route_coordinator_error)?;
-                    planned.certificate
-                }
-                CodexPromptHistorySourceBackedDispositionV0::Append
-                | CodexPromptHistorySourceBackedDispositionV0::Replacement => {
-                    let is_append = matches!(
-                        planned.disposition,
-                        CodexPromptHistorySourceBackedDispositionV0::Append
-                    );
-                    if is_append {
-                        sink.begin_source_append(claimed_source.clone())
-                            .map_err(route_coordinator_error)?;
-                    } else {
-                        sink.begin_source(claimed_source.clone())
-                            .map_err(route_coordinator_error)?;
-                    }
-                    let mut sink_failure = None;
-                    let scan = stage_planned_codex_prompt_history_source_backed_v0(
-                        capture_source.clone(),
-                        Some(&base),
-                        &planned,
-                        |page| {
-                            if !page.source.exact_descriptor_eq(&claimed_source) {
-                                return Err(CaptureError::InvalidPayload(
-                                    "Codex prompt-history page changed its source descriptor"
-                                        .to_owned(),
-                                )
-                                .into());
-                            }
-                            let _retained_page_bytes = page.retained_bytes;
-                            for record in page.records {
-                                sink.add_core_record(record).map_err(|error| {
-                                    capture_coordinator_error(&mut sink_failure, error)
-                                })?;
-                            }
-                            Ok(())
-                        },
-                    );
-                    if let Some(error) = sink_failure {
-                        return Err(error);
-                    }
-                    let scan = scan.map_err(codex_prompt_history_route_error)?;
-                    if scan.certificate != planned.certificate
-                        || std::mem::discriminant(&scan.disposition)
-                            != std::mem::discriminant(&planned.disposition)
-                    {
-                        return Err(SourceBackedRouteError::new(
-                            SourceBackedRouteErrorKind::SourceChanged,
-                            "Codex prompt-history changed between planning and staging",
-                        ));
-                    }
-                    if is_append {
-                        let frontier = base.frontier().ok_or_else(|| {
-                            SourceBackedRouteError::new(
-                                SourceBackedRouteErrorKind::Internal,
-                                "Codex prompt-history append base has no frontier",
-                            )
-                        })?;
-                        let append = CertifiedSourceAppend::certify(
-                            &base,
-                            scan.certificate.clone(),
-                            frontier.certified_prefix_bytes(),
-                            *frontier.certified_prefix_digest(),
-                        )
-                        .map_err(route_error)?;
-                        sink.certify_source_append(append)
-                            .map_err(route_coordinator_error)?;
-                    } else {
-                        sink.certify_source(scan.certificate.clone())
-                            .map_err(route_coordinator_error)?;
-                    }
-                    scan.certificate
-                }
-                CodexPromptHistorySourceBackedDispositionV0::Cold => {
-                    return Err(SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Internal,
-                        "Codex prompt-history replay unexpectedly returned a cold disposition",
-                    ));
-                }
-            };
-            let inventory =
-                certify_source_inventory(&capture_route, std::slice::from_ref(&certificate))?;
-            sink.certify_complete_inventory(inventory.clone())
-                .map_err(route_coordinator_error)?;
-            remember_codex_prompt_terminal(&scan_terminal_evidence, certificate, inventory)
-        },
-        move |candidate| Ok(candidate.exact_descriptor_eq(&owned_source)),
-        move |target| bind_codex_prompt_target(&source_terminal_evidence, target),
-    )
-    .with_fallible_complete_inventory_revalidation(move |expected| {
-        revalidate_codex_prompt_inventory(
-            &inventory_terminal_evidence,
-            inventory_terminal_capture.as_ref(),
-            expected,
-        )
-    });
+    let route_path = adapter.route_path().to_path_buf();
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        Arc::new(adapter),
+        route_path,
+    );
     registry.register(executable_route(
         source,
         selection,
@@ -961,5 +188,36 @@ pub fn register_codex_prompt_history_source_backed_route(
 }
 
 #[cfg(test)]
-#[path = "codex_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::{
+        ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
+    };
+
+    #[test]
+    fn codex_session_tree_registration_does_not_inventory_the_root() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let sessions = temp.path().join("sessions-not-created");
+        let source = ProviderSource {
+            provider: CaptureProvider::Codex,
+            path: sessions,
+            exists: true,
+            source_format: "codex_session_jsonl_tree",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        };
+        let mut registry = SourceBackedProviderRegistry::new();
+
+        register_codex_session_tree_routes(
+            &mut registry,
+            vec![source],
+            SourceBackedRouteSelection::Automatic,
+        )
+        .unwrap();
+
+        assert_eq!(registry.routes().count(), 1);
+    }
+}

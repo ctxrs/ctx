@@ -24,9 +24,9 @@ fn encoded_record_bytes(
                 .record(source_index, sequence, body)?
                 .encode_stored()?
                 .len();
-            Ok(total
+            total
                 .checked_add(u64::try_from(bytes)?)
-                .ok_or_else(|| anyhow!("semantic proportionality byte count overflowed"))?)
+                .ok_or_else(|| anyhow!("semantic proportionality byte count overflowed"))
         })
 }
 

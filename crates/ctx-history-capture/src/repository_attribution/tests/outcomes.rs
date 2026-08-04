@@ -154,9 +154,7 @@ fn reachable_short_amend_resolves_new_identity_without_inventing_replacement_lin
     let linked = linked_short_commit(
         &repo,
         "git commit --amend --no-edit",
-        format!(
-            "[main {short}] Amended outcome\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
-        ),
+        format!("[main {short}] Amended outcome\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"),
     );
     let annotation = attribute(AttributionInput {
         activity_at_unix_ms: Some(10),

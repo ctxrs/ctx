@@ -15,20 +15,24 @@ impl RefreshOperation {
         }
     }
 
-    pub fn from_str(value: &str) -> Result<Self> {
-        match value {
-            "refresh" => Ok(Self::Refresh),
-            "import" => Ok(Self::Import),
-            operation => Err(anyhow!("invalid source refresh operation `{operation}`")),
-        }
-    }
-
     pub(crate) fn from_request_json(request: &Value) -> Result<Self> {
         request
             .get("operation")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("daemon source refresh request operation is missing"))
-            .and_then(Self::from_str)
+            .and_then(str::parse)
+    }
+}
+
+impl std::str::FromStr for RefreshOperation {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "refresh" => Ok(Self::Refresh),
+            "import" => Ok(Self::Import),
+            operation => Err(anyhow!("invalid source refresh operation `{operation}`")),
+        }
     }
 }
 

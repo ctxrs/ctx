@@ -531,7 +531,6 @@ pub(super) enum IndexValue {
     Text(String),
     SharedText(Arc<str>),
     Bytes(Vec<u8>),
-    SharedBytes(Arc<[u8]>),
     U64(u64),
     I64(i64),
 }
@@ -545,7 +544,6 @@ impl<'a> Value<'a> for &'a IndexValue {
             IndexValue::Text(value) => ReferenceValueLeaf::Str(value),
             IndexValue::SharedText(value) => ReferenceValueLeaf::Str(value),
             IndexValue::Bytes(value) => ReferenceValueLeaf::Bytes(value),
-            IndexValue::SharedBytes(value) => ReferenceValueLeaf::Bytes(value),
             IndexValue::U64(value) => ReferenceValueLeaf::U64(*value),
             IndexValue::I64(value) => ReferenceValueLeaf::I64(*value),
         };
@@ -576,10 +574,6 @@ impl IndexDocument {
         self.fields.push((field, IndexValue::Bytes(value.into())));
     }
 
-    pub(super) fn add_shared_bytes(&mut self, field: Field, value: Arc<[u8]>) {
-        self.fields.push((field, IndexValue::SharedBytes(value)));
-    }
-
     pub(super) fn add_u64(&mut self, field: Field, value: u64) {
         self.fields.push((field, IndexValue::U64(value)));
     }
@@ -596,7 +590,6 @@ impl IndexDocument {
                 IndexValue::Text(value) => document.add_text(field, value),
                 IndexValue::SharedText(value) => document.add_text(field, value),
                 IndexValue::Bytes(value) => document.add_bytes(field, &value),
-                IndexValue::SharedBytes(value) => document.add_bytes(field, &value),
                 IndexValue::U64(value) => document.add_u64(field, value),
                 IndexValue::I64(value) => document.add_i64(field, value),
             }
@@ -607,7 +600,7 @@ impl IndexDocument {
     pub(super) fn from_core(
         fields: Fields,
         record: CoreRecord,
-        core_record_bytes: Arc<[u8]>,
+        core_record_bytes: Vec<u8>,
         core_content_bytes: usize,
         source: IndexSourceFields,
     ) -> Result<Self> {
@@ -726,7 +719,7 @@ impl IndexDocument {
                 IndexError::WriterInvariant("encoded Core record size does not fit u64")
             })?,
         );
-        target.add_shared_bytes(fields.core_record, core_record_bytes);
+        target.add_bytes(fields.core_record, core_record_bytes);
         target.add_bytes(fields.source_event_order, source_event_order.into_bytes());
         target.add_bytes(fields.session_event_order, session_event_order.into_bytes());
         target.add_bytes(

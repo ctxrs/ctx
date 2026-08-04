@@ -797,6 +797,31 @@ fn aggregate_complete_representations_share_one_content_budget() {
 }
 
 #[test]
+fn streamed_content_byte_count_matches_canonical_json_for_all_representations() {
+    let mut record = record();
+    record.content.structured_content = Some(serde_json::json!({
+        "escaped": "line one\nline two",
+        "unicode": "snowman ☃",
+        "items": [1, 2, 3]
+    }));
+    record.content.mcp_exchange = Some(mcp_exchange());
+
+    let expected = record.content.normalized_body.as_ref().unwrap().len()
+        + serde_json::to_vec(record.content.structured_content.as_ref().unwrap())
+            .unwrap()
+            .len()
+        + serde_json::to_vec(record.content.mcp_exchange.as_ref().unwrap())
+            .unwrap()
+            .len();
+
+    assert_eq!(record.content.encoded_content_bytes().unwrap(), expected);
+    assert_eq!(
+        record.validate_contract_and_content_bytes().unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn projectors_can_omit_duplicate_structured_content_without_losing_body_or_identity() {
     let tail = "aggregate_content_tail_survives";
     let body = format!("{}{tail}", "x".repeat(MAX_CORE_CONTENT_BYTES / 2 + 1_024));
@@ -1064,6 +1089,28 @@ fn prior_repository_certificate_is_bound_to_exact_generation_inputs() {
         "/different/repo".to_owned(),
     );
     assert!(!changed_candidate.reuse_prior_repository_certificate(&prior));
+}
+
+#[test]
+fn streamed_repository_reuse_fingerprint_matches_canonical_json() {
+    let mut record = record();
+    record.content.structured_content = Some(serde_json::json!({
+        "escaped": "line one\nline two",
+        "unicode": "snowman ☃"
+    }));
+    record.content.mcp_exchange = Some(mcp_exchange());
+
+    let encoded = serde_json::to_vec(&RepositoryReuseInput::from(&record)).unwrap();
+    let mut expected = Sha256::new();
+    expected.update(CORE_REPOSITORY_REUSE_INPUT_DOMAIN);
+    expected.update(CORE_REPOSITORY_CONTRACT_REVISION.to_be_bytes());
+    expected.update(u64::try_from(encoded.len()).unwrap().to_be_bytes());
+    expected.update(encoded);
+
+    assert_eq!(
+        record.repository_reuse_input_fingerprint().unwrap(),
+        <[u8; 32]>::from(expected.finalize())
+    );
 }
 
 #[test]

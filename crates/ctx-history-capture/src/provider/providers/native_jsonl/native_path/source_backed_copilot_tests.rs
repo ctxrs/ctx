@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::provider::source_backed::family::jsonl::{
-    probe_first_record, JsonlOversizedRecordPolicy, JsonlReader, JsonlSourceIdentity,
+    probe_first_record, JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy, JsonlReader,
+    JsonlSourceIdentity,
 };
 
 struct MaterializedCopilotFixture {
@@ -63,6 +64,7 @@ fn try_project_copilot_root(root: &Path) -> Result<Vec<CoreRecord>> {
     assert!(!inventory.leaves().is_empty());
     assert!(inventory.rejected_leaves().is_empty());
     let mut records = Vec::new();
+    let mut worker = JsonlFamilyWorkerContext::default();
     for leaf in inventory.leaves() {
         let source_file = leaf.open_verified()?;
         let mut projector = JsonlFamilyAdapter::projector(
@@ -85,14 +87,14 @@ fn try_project_copilot_root(root: &Path) -> Result<Vec<CoreRecord>> {
         reader.set_oversized_record_policy(JsonlFamilyAdapter::oversized_record_policy(&adapter));
         while reader
             .visit_page(&mut |record| -> Result<()> {
-                projector.project(record, &mut |record| {
+                projector.project(record, &mut worker, &mut |record| {
                     records.push(record);
                     Ok(())
                 })
             })?
             .is_some()
         {}
-        projector.finish_projecting(&mut |record| {
+        projector.finish_projecting(&mut worker, &mut |record| {
             records.push(record);
             Ok(())
         })?;

@@ -25,7 +25,7 @@ impl CoreRefreshEngine {
 
     pub(super) fn with_status_writer_for_test(
         executor: Arc<dyn SourceBackedRefreshExecutor>,
-        writer: Arc<dyn Fn(&Path, &Value) -> Result<()> + Send + Sync>,
+        writer: TestStatusWriter,
     ) -> Self {
         Self(test_refresh_engine_with_status_writer(executor, writer))
     }

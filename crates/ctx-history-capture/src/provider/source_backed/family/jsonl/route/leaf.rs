@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -12,31 +15,94 @@ use super::super::{
     JsonlSourceIdentity,
 };
 use super::{
-    binding_digest, contract_error, route_internal, route_invalid, FamilyCheckpoint,
-    JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyLeaf, JsonlFamilyProjectionMode,
+    binding_digest, contract_error, route_internal, route_invalid, route_scan, FamilyCheckpoint,
+    JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome,
+    JsonlFamilyProjectionMode, JsonlFamilyPublication, JsonlFamilyWorkerContext,
     TerminalSourceEvidence, FAMILY_FRONTIER_KIND, FAMILY_POLICY_REVISION,
     FAMILY_SOURCE_REVISION_KIND,
 };
 #[cfg(test)]
-use super::{jsonl_family_scanner_probe, record_jsonl_family_scanner_activity};
+use super::{
+    jsonl_family_scanner_probe, record_jsonl_family_scanner_activity, JsonlFamilyScannerProbe,
+};
 use crate::{
     provider::source_backed::{
-        ParallelLeafScanBegin, ParallelLeafScanComplete, ParallelLeafScanError,
-        ParallelLeafScanJob, ParallelLeafScanWorkerError, SourceBackedGenerationSink,
-        SourceBackedRouteError, SourceBackedRouteResult,
+        CoreRecordEmissionBatchBuilder, ParallelLeafScanBegin, ParallelLeafScanComplete,
+        ParallelLeafScanError, ParallelLeafScanJob, ParallelLeafScanWorkerError,
+        SourceBackedGenerationSink, SourceBackedRouteError, SourceBackedRouteResult,
     },
     CaptureError, Result,
 };
 
-struct PreparedLeaf {
-    certificate: CertifiedSource,
-    append: Option<CertifiedSourceAppend>,
-    checkpoint: JsonlCheckpoint,
+pub(super) struct PreparedLeaf {
+    pub(super) certificate: CertifiedSource,
+    pub(super) append: Option<CertifiedSourceAppend>,
+    pub(super) checkpoint: Option<JsonlCheckpoint>,
 }
 
 struct JsonlLeafJob {
     leaf: JsonlFamilyLeaf,
     base: Option<CertifiedSource>,
+    context_shard: Option<u64>,
+}
+
+const JSONL_PARTITION_CONTEXT_SHARDS: usize = 16;
+const JSONL_PARTITION_COMPONENTS_PER_WAVE: usize = 16;
+
+// Partitioned adapters receive deterministic logical cache lanes rather than
+// caches tied to the physical worker count. Source-local event-time state is
+// cleared by `begin_leaf()`, while revalidated repository certification caches
+// remain stable across worker counts and physical scheduling decisions.
+#[derive(Default)]
+struct JsonlFamilyWorkerContexts {
+    independent: JsonlFamilyWorkerContext,
+    partition_cache_lanes: BTreeMap<u64, JsonlFamilyWorkerContext>,
+}
+
+impl JsonlFamilyWorkerContexts {
+    fn for_job(&mut self, context_shard: Option<u64>) -> &mut JsonlFamilyWorkerContext {
+        match context_shard {
+            Some(context_shard) => self.partition_cache_lanes.entry(context_shard).or_default(),
+            None => &mut self.independent,
+        }
+    }
+}
+
+// The large variant deliberately carries CoreRecord by value: boxing every
+// projected record would add one allocation to the generic JSONL hot path.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum JsonlLeafOutputEvent {
+    Page {
+        append: bool,
+        records: Vec<CoreRecord>,
+    },
+    Record {
+        append: bool,
+        record: CoreRecord,
+    },
+    Flush,
+}
+
+pub(super) struct JsonlLeafOutput<'emit> {
+    emit: &'emit mut dyn FnMut(JsonlLeafOutputEvent) -> Result<()>,
+}
+
+impl<'emit> JsonlLeafOutput<'emit> {
+    pub(super) fn new(emit: &'emit mut dyn FnMut(JsonlLeafOutputEvent) -> Result<()>) -> Self {
+        Self { emit }
+    }
+
+    fn emit_page(&mut self, append: bool, records: Vec<CoreRecord>) -> Result<()> {
+        (self.emit)(JsonlLeafOutputEvent::Page { append, records })
+    }
+
+    fn emit_record(&mut self, append: bool, record: CoreRecord) -> Result<()> {
+        (self.emit)(JsonlLeafOutputEvent::Record { append, record })
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        (self.emit)(JsonlLeafOutputEvent::Flush)
+    }
 }
 
 fn scan_leaf_serial(
@@ -44,52 +110,63 @@ fn scan_leaf_serial(
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
     base_event_lookup: &BaseEventIdentityLookup,
+    worker: &mut JsonlFamilyWorkerContext,
     sink: &mut SourceBackedGenerationSink<'_>,
 ) -> SourceBackedRouteResult<TerminalSourceEvidence> {
     let mut staging_started = false;
     let mut append_staging = false;
     let mut sink_failure = None;
-    let prepared = prepare_leaf(
-        adapter,
-        leaf,
-        base,
-        base_event_lookup,
-        &mut |append, core_records| {
-            if !staging_started {
-                if append {
-                    let expected = base.ok_or_else(|| {
-                        CaptureError::InvalidPayload("JSONL append has no base".to_owned())
-                    })?;
-                    let staged = sink
-                        .begin_source_append(leaf.source().clone())
-                        .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
-                    if staged != expected {
-                        return Err(CaptureError::InvalidPayload(
-                            "JSONL append base changed before staging".to_owned(),
-                        ));
-                    }
-                } else {
-                    sink.begin_source(leaf.source().clone())
+    let mut emit = |event| {
+        let append = match &event {
+            JsonlLeafOutputEvent::Page { append, .. }
+            | JsonlLeafOutputEvent::Record { append, .. } => *append,
+            JsonlLeafOutputEvent::Flush => return Ok(()),
+        };
+        if !staging_started {
+            if append {
+                let expected = base.ok_or_else(|| {
+                    CaptureError::InvalidPayload("JSONL append has no base".to_owned())
+                })?;
+                let staged = sink
+                    .begin_source_append(leaf.source().clone())
+                    .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
+                if staged != expected {
+                    return Err(CaptureError::InvalidPayload(
+                        "JSONL append base changed before staging".to_owned(),
+                    ));
+                }
+            } else {
+                sink.begin_source(leaf.source().clone())
+                    .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
+            }
+            staging_started = true;
+            append_staging = append;
+        } else if append_staging != append {
+            return Err(CaptureError::SystemInvariant(
+                "JSONL publication mode changed during one leaf scan",
+            ));
+        }
+        match event {
+            JsonlLeafOutputEvent::Page { records, .. } => {
+                for record in records {
+                    sink.add_core_record(record)
                         .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
                 }
-                staging_started = true;
-                append_staging = append;
-            } else if append_staging != append {
-                return Err(CaptureError::SystemInvariant(
-                    "JSONL publication mode changed during one leaf scan",
-                ));
             }
-            for record in core_records {
+            JsonlLeafOutputEvent::Record { record, .. } => {
                 sink.add_core_record(record)
                     .map_err(|error| preserve_coordinator_error(&mut sink_failure, error))?;
             }
-            Ok(())
-        },
-    );
+            JsonlLeafOutputEvent::Flush => unreachable!("flush returned before staging"),
+        }
+        Ok(())
+    };
+    let mut output = JsonlLeafOutput::new(&mut emit);
+    let prepared = prepare_leaf(adapter, leaf, base, base_event_lookup, worker, &mut output);
     if let Some(error) = sink_failure {
         return Err(error);
     }
-    let prepared = prepared.map_err(route_invalid)?;
+    let prepared = prepared.map_err(|error| route_scan(adapter, error))?;
 
     let PreparedLeaf {
         certificate,
@@ -114,7 +191,7 @@ fn scan_leaf_serial(
             sink.certify_source_append(append).map_err(route_internal)?;
             Ok(TerminalSourceEvidence {
                 certificate,
-                checkpoint: Some(checkpoint),
+                checkpoint,
             })
         }
         None => {
@@ -131,68 +208,43 @@ fn scan_leaf_serial(
                 .map_err(route_internal)?;
             Ok(TerminalSourceEvidence {
                 certificate,
-                checkpoint: Some(checkpoint),
+                checkpoint,
             })
         }
     }
 }
 
-pub(super) fn scan_leaves(
+fn run_parallel_leaf_job_batch(
     adapter: &dyn JsonlFamilyAdapter,
-    leaves: &[JsonlFamilyLeaf],
-    bases: &HashMap<[u8; 32], &CertifiedSource>,
-    base_event_lookup: BaseEventIdentityLookup,
+    jobs: Vec<ParallelLeafScanJob<JsonlLeafJob>>,
+    worker_states: &mut [JsonlFamilyWorkerContexts],
+    base_event_lookup: &BaseEventIdentityLookup,
     sink: &mut SourceBackedGenerationSink<'_>,
-) -> SourceBackedRouteResult<HashMap<[u8; 32], TerminalSourceEvidence>> {
-    let worker_count = family_scanner_worker_count(sink.recommended_leaf_workers(leaves.len()));
-    #[cfg(test)]
-    let scanner_probe = jsonl_family_scanner_probe(worker_count);
-    if worker_count <= 1 {
-        let mut terminal_sources = HashMap::with_capacity(leaves.len());
-        for leaf in leaves {
+    #[cfg(test)] scanner_probe: Option<&JsonlFamilyScannerProbe>,
+) -> SourceBackedRouteResult<Vec<TerminalSourceEvidence>> {
+    sink.run_parallel_leaf_scans_with_worker_states(
+        jobs,
+        worker_states,
+        |contexts, job, emitter| {
+            let worker = contexts.for_job(job.leaf().context_shard);
             #[cfg(test)]
-            let _active_scanner = scanner_probe.as_ref().map(|probe| probe.enter());
-            let evidence = scan_leaf_serial(
-                adapter,
-                leaf,
-                base_for_leaf(bases, leaf),
-                &base_event_lookup,
-                sink,
-            )?;
-            if terminal_sources
-                .insert(leaf.source().exact_descriptor_digest(), evidence)
-                .is_some()
-            {
-                return Err(route_invalid("duplicate JSONL source identity"));
-            }
-        }
-        #[cfg(test)]
-        record_jsonl_family_scanner_activity(worker_count, scanner_probe.as_deref());
-        return Ok(terminal_sources);
-    }
-
-    let jobs = leaves
-        .iter()
-        .cloned()
-        .map(|leaf| {
-            let base = base_for_leaf(bases, &leaf).cloned();
-            ParallelLeafScanJob::new(leaf.source().clone(), JsonlLeafJob { leaf, base })
-        })
-        .collect::<Vec<_>>();
-    let evidences = sink
-        .run_parallel_leaf_scans(jobs, worker_count, |job, emitter| {
-            #[cfg(test)]
-            let _active_scanner = scanner_probe.as_ref().map(|probe| probe.enter());
+            let _active_scanner = scanner_probe.map(JsonlFamilyScannerProbe::enter);
             let leaf = &job.leaf().leaf;
             let mut staging_started = false;
             let mut append_staging = false;
             let mut emission_failure = None;
-            let prepared = prepare_leaf(
-                adapter,
-                leaf,
-                job.leaf().base.as_ref(),
-                &base_event_lookup,
-                &mut |append, core_records| {
+            let mut pending_emissions = CoreRecordEmissionBatchBuilder::default();
+            let mut emit = |event| {
+                let flush = matches!(
+                    &event,
+                    JsonlLeafOutputEvent::Page { .. } | JsonlLeafOutputEvent::Flush
+                );
+                let append = match &event {
+                    JsonlLeafOutputEvent::Page { append, .. }
+                    | JsonlLeafOutputEvent::Record { append, .. } => Some(*append),
+                    JsonlLeafOutputEvent::Flush => None,
+                };
+                if let Some(append) = append {
                     if !staging_started {
                         let begin = if append {
                             let base = job.leaf().base.clone().ok_or_else(|| {
@@ -216,19 +268,51 @@ pub(super) fn scan_leaves(
                             "parallel JSONL publication mode changed during one leaf scan",
                         ));
                     }
-                    for record in core_records {
-                        emitter.emit_core_record(record).map_err(|error| {
+                    match event {
+                        JsonlLeafOutputEvent::Page { records, .. } => {
+                            for record in records {
+                                emitter
+                                    .emit_core_record_batched(&mut pending_emissions, record)
+                                    .map_err(|error| {
+                                        preserve_parallel_emit_error(&mut emission_failure, error)
+                                    })?;
+                            }
+                        }
+                        JsonlLeafOutputEvent::Record { record, .. } => {
+                            emitter
+                                .emit_core_record_batched(&mut pending_emissions, record)
+                                .map_err(|error| {
+                                    preserve_parallel_emit_error(&mut emission_failure, error)
+                                })?;
+                        }
+                        JsonlLeafOutputEvent::Flush => {
+                            unreachable!("flush has no publication mode")
+                        }
+                    }
+                }
+                if flush {
+                    emitter
+                        .emit_core_record_batch(&mut pending_emissions)
+                        .map_err(|error| {
                             preserve_parallel_emit_error(&mut emission_failure, error)
                         })?;
-                    }
-                    Ok(())
-                },
+                }
+                Ok(())
+            };
+            let mut output = JsonlLeafOutput::new(&mut emit);
+            let prepared = prepare_leaf(
+                adapter,
+                leaf,
+                job.leaf().base.as_ref(),
+                base_event_lookup,
+                worker,
+                &mut output,
             );
             if let Some(error) = emission_failure {
                 return Err(ParallelLeafScanWorkerError::provider(error));
             }
             let prepared = prepared
-                .map_err(route_invalid)
+                .map_err(|error| route_scan(adapter, error))
                 .map_err(ParallelLeafScanWorkerError::provider)?;
 
             let PreparedLeaf {
@@ -256,7 +340,7 @@ pub(super) fn scan_leaves(
                             append,
                             TerminalSourceEvidence {
                                 certificate,
-                                checkpoint: Some(checkpoint),
+                                checkpoint,
                             },
                         ))
                         .map_err(ParallelLeafScanWorkerError::from)?;
@@ -274,7 +358,7 @@ pub(super) fn scan_leaves(
                     }
                     let evidence = TerminalSourceEvidence {
                         certificate: certificate.clone(),
-                        checkpoint: Some(checkpoint),
+                        checkpoint,
                     };
                     emitter
                         .complete(ParallelLeafScanComplete::replace(certificate, evidence))
@@ -282,12 +366,275 @@ pub(super) fn scan_leaves(
                 }
             }
             Ok(())
-        })
-        .map_err(map_parallel_leaf_error);
+        },
+    )
+    .map_err(map_parallel_leaf_error)
+}
+
+pub(super) fn scan_leaves(
+    adapter: &dyn JsonlFamilyAdapter,
+    leaves: &[JsonlFamilyLeaf],
+    bases: &HashMap<[u8; 32], &CertifiedSource>,
+    base_event_lookup: BaseEventIdentityLookup,
+    sink: &mut SourceBackedGenerationSink<'_>,
+) -> SourceBackedRouteResult<HashMap<[u8; 32], TerminalSourceEvidence>> {
+    let worker_limit = adapter
+        .prepare_leaf_scans(leaves, bases)
+        .map_err(|error| route_scan(adapter, error))?;
+    let recommended_workers = sink.recommended_leaf_workers(leaves.len());
+    let recommended_workers = worker_limit
+        .map(|limit| recommended_workers.min(limit.max(1)))
+        .unwrap_or(recommended_workers);
+    let worker_count = family_scanner_worker_count(recommended_workers);
+    let mut leaf_metadata = Vec::new();
+    leaf_metadata
+        .try_reserve_exact(leaves.len())
+        .map_err(|_| route_internal("JSONL leaf scheduling allocation failed"))?;
+    let mut saw_partition = false;
+    let mut saw_unpartitioned = false;
+    let mut previous_phase = None;
+    for leaf in leaves {
+        let phase = adapter
+            .leaf_scan_phase(leaf)
+            .map_err(|error| route_scan(adapter, error))?;
+        if previous_phase.is_some_and(|previous| previous > phase) {
+            return Err(route_invalid(
+                "JSONL adapter returned non-monotonic leaf scan phases",
+            ));
+        }
+        previous_phase = Some(phase);
+        let partition = adapter
+            .leaf_scan_partition(leaf)
+            .map_err(|error| route_scan(adapter, error))?;
+        saw_partition |= partition.is_some();
+        saw_unpartitioned |= partition.is_none();
+        leaf_metadata.push((phase, partition));
+    }
+    if saw_partition && saw_unpartitioned {
+        return Err(route_invalid(
+            "JSONL adapter mixed partitioned and unpartitioned leaf scans",
+        ));
+    }
+    let mut serial_worker = JsonlFamilyWorkerContext::default();
+    #[cfg(test)]
+    let scanner_probe = jsonl_family_scanner_probe(if saw_partition { 1 } else { worker_count });
+    // A dependency cap of one limits concurrent scanners, but a multi-leaf
+    // family still benefits from overlapping that one scanner with writer
+    // admission of the preceding page. Keep the direct path for the truly
+    // single-leaf case where spawning a pipeline cannot amortize its setup.
+    if worker_count <= 1 && leaves.len() <= 1 {
+        let mut terminal_sources = HashMap::with_capacity(leaves.len());
+        for (leaf_index, leaf) in leaves.iter().enumerate() {
+            let partition = leaf_metadata
+                .get(leaf_index)
+                .and_then(|(_, partition)| *partition);
+            if let Some(partition) = partition {
+                adapter
+                    .begin_leaf_scan_partition(partition)
+                    .map_err(|error| route_scan(adapter, error))?;
+            }
+            #[cfg(test)]
+            let _active_scanner = scanner_probe.as_ref().map(|probe| probe.enter());
+            let evidence = scan_leaf_serial(
+                adapter,
+                leaf,
+                base_for_leaf(bases, leaf),
+                &base_event_lookup,
+                &mut serial_worker,
+                sink,
+            );
+            let finish_partition = partition
+                .map(|partition| {
+                    adapter
+                        .finish_leaf_scan_partition(partition)
+                        .map_err(|error| route_scan(adapter, error))
+                })
+                .transpose();
+            let evidence = evidence?;
+            finish_partition?;
+            if terminal_sources
+                .insert(leaf.source().exact_descriptor_digest(), evidence)
+                .is_some()
+            {
+                return Err(route_invalid("duplicate JSONL source identity"));
+            }
+        }
+        #[cfg(test)]
+        record_jsonl_family_scanner_activity(worker_count, scanner_probe.as_deref());
+        return Ok(terminal_sources);
+    }
+
+    let mut worker_states = (0..worker_count)
+        .map(|_| JsonlFamilyWorkerContexts::default())
+        .collect::<Vec<_>>();
+
+    if saw_partition {
+        let mut partitions = BTreeMap::<u64, Vec<(usize, JsonlFamilyLeaf)>>::new();
+        for (leaf, (phase, partition)) in leaves.iter().cloned().zip(leaf_metadata.iter()) {
+            let partition = partition.ok_or_else(|| {
+                route_invalid("JSONL partition metadata disappeared before scheduling")
+            })?;
+            partitions
+                .entry(partition)
+                .or_default()
+                .push((*phase, leaf));
+        }
+        let mut partitions = partitions.into_iter().collect::<Vec<_>>();
+        partitions.sort_by(
+            |(left_partition, left_leaves), (right_partition, right_leaves)| {
+                let left_bytes = left_leaves.iter().fold(0_u64, |total, (_, leaf)| {
+                    total.saturating_add(leaf.estimated_scan_bytes())
+                });
+                let right_bytes = right_leaves.iter().fold(0_u64, |total, (_, leaf)| {
+                    total.saturating_add(leaf.estimated_scan_bytes())
+                });
+                right_bytes
+                    .cmp(&left_bytes)
+                    .then_with(|| left_partition.cmp(right_partition))
+            },
+        );
+        let mut evidences = Vec::with_capacity(leaves.len());
+        for wave in partitions.chunks(JSONL_PARTITION_COMPONENTS_PER_WAVE) {
+            let mut begun = Vec::with_capacity(wave.len());
+            for (partition, _) in wave {
+                if let Err(error) = adapter.begin_leaf_scan_partition(*partition) {
+                    for begun_partition in begun.into_iter().rev() {
+                        let _ = adapter.finish_leaf_scan_partition(begun_partition);
+                    }
+                    return Err(route_scan(adapter, error));
+                }
+                begun.push(*partition);
+            }
+
+            let mut frontiers = BTreeMap::<usize, Vec<JsonlFamilyLeaf>>::new();
+            for (_, partition_leaves) in wave {
+                for (phase, leaf) in partition_leaves {
+                    frontiers.entry(*phase).or_default().push(leaf.clone());
+                }
+            }
+
+            let batch = (|| {
+                let mut batch = Vec::new();
+                for (_, mut frontier) in frontiers {
+                    frontier.sort_by(|left, right| {
+                        right
+                            .estimated_scan_bytes()
+                            .cmp(&left.estimated_scan_bytes())
+                            .then_with(|| {
+                                left.source()
+                                    .exact_descriptor_digest()
+                                    .cmp(&right.source().exact_descriptor_digest())
+                            })
+                    });
+                    let logical_lane_count = JSONL_PARTITION_CONTEXT_SHARDS.min(frontier.len());
+                    let mut lane_bytes = vec![0_u64; logical_lane_count];
+                    let mut jobs = Vec::with_capacity(frontier.len());
+                    for leaf in frontier {
+                        let lane = lane_bytes
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(lane, bytes)| (**bytes, *lane))
+                            .map(|(lane, _)| lane)
+                            .ok_or_else(|| route_internal("JSONL frontier has no worker lane"))?;
+                        lane_bytes[lane] =
+                            lane_bytes[lane].saturating_add(leaf.estimated_scan_bytes());
+                        let base = base_for_leaf(bases, &leaf).cloned();
+                        jobs.push(
+                            ParallelLeafScanJob::new(
+                                leaf.source().clone(),
+                                JsonlLeafJob {
+                                    leaf,
+                                    base,
+                                    context_shard: Some(lane as u64),
+                                },
+                            )
+                            .with_worker_affinity(lane as u64),
+                        );
+                    }
+                    batch.extend(run_parallel_leaf_job_batch(
+                        adapter,
+                        jobs,
+                        &mut worker_states,
+                        &base_event_lookup,
+                        sink,
+                        #[cfg(test)]
+                        scanner_probe.as_deref(),
+                    )?);
+                }
+                Ok(batch)
+            })();
+            let mut finish_error = None;
+            for partition in begun.into_iter().rev() {
+                if let Err(error) = adapter.finish_leaf_scan_partition(partition) {
+                    if finish_error.is_none() {
+                        finish_error = Some(route_scan(adapter, error));
+                    }
+                }
+            }
+            let batch = batch?;
+            if let Some(error) = finish_error {
+                return Err(error);
+            }
+            evidences.extend(batch);
+        }
+        #[cfg(test)]
+        record_jsonl_family_scanner_activity(worker_count, scanner_probe.as_deref());
+        return collect_terminal_sources(evidences);
+    }
+
+    let phases = leaf_metadata
+        .iter()
+        .map(|(phase, _)| *phase)
+        .collect::<Vec<_>>();
+
+    let mut evidences = Vec::with_capacity(leaves.len());
+    let mut phase_start = 0_usize;
+    while phase_start < leaves.len() {
+        let phase = phases[phase_start];
+        let mut phase_end = phase_start.saturating_add(1);
+        while phase_end < leaves.len() && phases[phase_end] == phase {
+            phase_end = phase_end.saturating_add(1);
+        }
+        let mut jobs = Vec::with_capacity(phase_end.saturating_sub(phase_start));
+        for leaf in leaves[phase_start..phase_end].iter().cloned() {
+            let base = base_for_leaf(bases, &leaf).cloned();
+            let worker_affinity = adapter
+                .leaf_worker_affinity(&leaf)
+                .map_err(|error| route_scan(adapter, error))?;
+            let job = ParallelLeafScanJob::new(
+                leaf.source().clone(),
+                JsonlLeafJob {
+                    leaf,
+                    base,
+                    context_shard: None,
+                },
+            );
+            jobs.push(match worker_affinity {
+                Some(worker_affinity) => job.with_worker_affinity(worker_affinity),
+                None => job,
+            });
+        }
+        let phase_evidences = run_parallel_leaf_job_batch(
+            adapter,
+            jobs,
+            &mut worker_states,
+            &base_event_lookup,
+            sink,
+            #[cfg(test)]
+            scanner_probe.as_deref(),
+        )?;
+        evidences.extend(phase_evidences);
+        phase_start = phase_end;
+    }
     #[cfg(test)]
     record_jsonl_family_scanner_activity(worker_count, scanner_probe.as_deref());
-    let evidences = evidences?;
 
+    collect_terminal_sources(evidences)
+}
+
+fn collect_terminal_sources(
+    evidences: Vec<TerminalSourceEvidence>,
+) -> SourceBackedRouteResult<HashMap<[u8; 32], TerminalSourceEvidence>> {
     let mut terminal_sources = HashMap::with_capacity(evidences.len());
     for evidence in evidences {
         let digest = evidence
@@ -302,13 +649,35 @@ pub(super) fn scan_leaves(
     Ok(terminal_sources)
 }
 
-fn prepare_leaf(
+pub(super) fn prepare_leaf(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
     base_event_lookup: &BaseEventIdentityLookup,
-    emit_page: &mut dyn FnMut(bool, Vec<CoreRecord>) -> Result<()>,
+    worker: &mut JsonlFamilyWorkerContext,
+    output: &mut JsonlLeafOutput<'_>,
 ) -> Result<PreparedLeaf> {
+    worker.begin_leaf();
+    if let Some(outcome) = adapter.scan_optimized_leaf(
+        leaf,
+        base,
+        base_event_lookup,
+        worker,
+        &mut |publication, records| {
+            if records
+                .iter()
+                .any(|record| !record.source.exact_descriptor_eq(leaf.source()))
+            {
+                return Err(CaptureError::InvalidPayload(
+                    "optimized JSONL leaf emitted a record for another source".to_owned(),
+                ));
+            }
+            output.emit_page(publication == JsonlFamilyPublication::Append, records)
+        },
+    )? {
+        return validate_optimized_outcome(adapter, leaf, base, outcome);
+    }
+
     let (leaf, opened) = leaf.open_for_scan()?;
     let previous = base.and_then(|base| decode_checkpoint(adapter, &leaf, base).ok());
     let previous_physical = previous.as_ref().filter(|checkpoint| {
@@ -364,7 +733,7 @@ fn prepare_leaf(
         return Ok(PreparedLeaf {
             certificate: base.clone(),
             append: Some(append),
-            checkpoint: decoded.physical,
+            checkpoint: Some(decoded.physical),
         });
     }
 
@@ -409,17 +778,16 @@ fn prepare_leaf(
         resumed.map_or(0, |checkpoint| checkpoint.represented_physical_records);
     let mut documents = resumed.map_or(0, |checkpoint| checkpoint.indexed_documents);
     loop {
-        let mut page_core_records = Vec::new();
         let page = reader.visit_page(&mut |record| -> Result<()> {
             physical_records = checked_increment(physical_records)?;
             let before = documents;
-            projector.project(record, &mut |core_record| {
+            projector.project(record, worker, &mut |core_record| {
                 if !core_record.source.exact_descriptor_eq(leaf.source()) {
                     return Err(CaptureError::InvalidPayload(
                         "JSONL projector changed the bound source".to_owned(),
                     ));
                 }
-                page_core_records.push(core_record);
+                output.emit_record(is_append, core_record)?;
                 documents = checked_increment(documents)?;
                 Ok(())
             })?;
@@ -428,28 +796,23 @@ fn prepare_leaf(
             }
             Ok(())
         })?;
-        if !page_core_records.is_empty() {
-            emit_page(is_append, page_core_records)?;
-        }
+        output.flush()?;
         if page.is_none() {
             break;
         }
     }
     let before_finish = documents;
-    let mut final_core_records = Vec::new();
-    projector.finish_projecting(&mut |core_record| {
+    projector.finish_projecting(worker, &mut |core_record| {
         if !core_record.source.exact_descriptor_eq(leaf.source()) {
             return Err(CaptureError::InvalidPayload(
                 "JSONL projector changed the bound source".to_owned(),
             ));
         }
-        final_core_records.push(core_record);
+        output.emit_record(is_append, core_record)?;
         documents = checked_increment(documents)?;
         Ok(())
     })?;
-    if !final_core_records.is_empty() {
-        emit_page(is_append, final_core_records)?;
-    }
+    output.flush()?;
     let rejected_records = resumed
         .map_or(leaf.identity_probe_rejected_records, |checkpoint| {
             checkpoint.rejected_records
@@ -506,7 +869,42 @@ fn prepare_leaf(
     Ok(PreparedLeaf {
         certificate,
         append,
-        checkpoint: terminal_checkpoint,
+        checkpoint: Some(terminal_checkpoint),
+    })
+}
+
+fn validate_optimized_outcome(
+    adapter: &dyn JsonlFamilyAdapter,
+    leaf: &JsonlFamilyLeaf,
+    base: Option<&CertifiedSource>,
+    outcome: JsonlFamilyOptimizedLeafOutcome,
+) -> Result<PreparedLeaf> {
+    outcome
+        .certificate
+        .validate_contract()
+        .map_err(contract_error)?;
+    leaf.source()
+        .validate_exact_descriptor(outcome.certificate.observation().source())
+        .map_err(contract_error)?;
+    if outcome.certificate.parser_revision() != adapter.parser_revision() {
+        return Err(CaptureError::InvalidPayload(
+            "optimized JSONL leaf changed the parser revision".to_owned(),
+        ));
+    }
+    if let Some(append) = outcome.append.as_ref() {
+        let base = base.ok_or_else(|| {
+            CaptureError::InvalidPayload("optimized JSONL append has no base".to_owned())
+        })?;
+        if append.base() != base || append.current() != &outcome.certificate {
+            return Err(CaptureError::InvalidPayload(
+                "optimized JSONL append evidence does not reconcile".to_owned(),
+            ));
+        }
+    }
+    Ok(PreparedLeaf {
+        certificate: outcome.certificate,
+        append: outcome.append,
+        checkpoint: None,
     })
 }
 

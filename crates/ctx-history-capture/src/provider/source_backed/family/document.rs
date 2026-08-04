@@ -662,7 +662,7 @@ where
                 sink.record_rejections(completion.record_rejections);
                 certificates.push(completion.certificate);
             }
-            SourceBackedSourceOutcome::Failed(failure) => {
+            SourceBackedSourceOutcome::Failed(mut failure) => {
                 let source = &failure.source;
                 if !planned_sources.contains_exact(source)
                     || !failure.failure.kind.is_logical_source_failure()
@@ -671,6 +671,7 @@ where
                         "independent document source outcome no longer matches its plan",
                     ));
                 }
+                sink.record_rejections(std::mem::take(&mut failure.record_rejections));
                 if let Some(retained) = failure.retained {
                     certificates.push(retained);
                 }
