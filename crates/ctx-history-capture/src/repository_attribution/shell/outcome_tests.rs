@@ -42,9 +42,11 @@ fn outcome_recognition_is_bounded_and_alias_free() {
         "gh pr create --help",
         "gh pr create --help=true",
         "gh pr create -h",
+        "gh pr create -h=true",
         "gh pr create --web",
         "gh pr create --web=true",
         "gh pr create -w",
+        "gh pr create -w=true",
         "gh pr create --dry-run",
         "gh pr create --dry-run=true",
     ] {

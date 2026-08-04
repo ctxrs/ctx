@@ -495,7 +495,7 @@ mod tests {
             "Original token count: 122\n",
             "Output:\n",
             "remote: \n",
-            "remote: Create a pull request for 'codex/v026-checkout-token-refresh' on GitHub by visiting:\n",
+            "remote: Create a pull request for 'codex/v026-checkout-token-refresh' on GitHub by visiting:        \n",
             "remote:      https://github.com/ctxrs/ctx/pull/new/codex/v026-checkout-token-refresh        \n",
             "remote: \n",
             "To https://github.com/ctxrs/ctx.git\n",

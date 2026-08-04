@@ -467,10 +467,12 @@ fn bounded_gh_operation(
         .any(|argument| {
             matches!(argument.as_str(), "--help" | "-h")
                 || argument.starts_with("--help=")
+                || argument.starts_with("-h=")
                 || (operation == BoundedOutcomeOperation::PullRequestCreate
                     && (matches!(argument.as_str(), "--dry-run" | "--web" | "-w")
                         || argument.starts_with("--dry-run=")
-                        || argument.starts_with("--web=")))
+                        || argument.starts_with("--web=")
+                        || argument.starts_with("-w=")))
         })
     {
         return None;
