@@ -65,6 +65,7 @@ set -euo pipefail
 workspace="${TEST_WORKSPACE:-_main}"
 test -e "${RUNFILES_DIR}/${workspace}/ctx_release_routes/linux-x64/artifact"
 test -e "${RUNFILES_DIR}/${workspace}/ctx_release_routes/linux-x64/rustc"
+test -x "${RUNFILES_DIR}/${workspace}/ctx_release_routes/linux-x64/rust-objcopy"
 test -x "${RUNFILES_DIR}/${workspace}/ctx_release_routes/linux-x64/sbom-tool"
 "${RUNFILES_DIR}/${workspace}/ctx_release_routes/linux-x64/sbom-tool" --help
 """,
@@ -192,6 +193,7 @@ def release_route_analysis_test_suite(name):
             license_materials = ":_release_route_test_license_materials",
             packager = ":_release_route_test_packager",
             rustc = probe_name,
+            rust_objcopy = probe_name,
             sbom_inventory = ":_release_route_test_inventory",
             sbom_tool = ":_release_route_test_packager",
             target_id = spec.id,
@@ -216,6 +218,7 @@ def release_route_analysis_test_suite(name):
         license_materials = ":_release_route_test_license_materials",
         packager = ":_release_route_runfiles_probe_packager",
         rustc = ":_release_route_probe_linux_x64",
+        rust_objcopy = ":_release_route_probe_linux_x64",
         sbom_inventory = ":_release_route_test_inventory",
         sbom_tool = ":_release_route_test_packager",
         target_id = "linux-x64",

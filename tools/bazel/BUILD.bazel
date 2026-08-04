@@ -61,6 +61,11 @@ rust_toolchain_file(
     tool = "rustc",
 )
 
+rust_toolchain_file(
+    name = "pinned_rust_objcopy",
+    tool = "rust-objcopy",
+)
+
 cargo_vendor_sources(
     name = "sdk_cargo_vendor_sources",
     crates = [

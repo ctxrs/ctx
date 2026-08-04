@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -eq 1 ]] || {
-  echo "package release test requires the declared Bazel rustc runfile" >&2
+[[ $# -eq 2 ]] || {
+  echo "package release test requires declared Bazel Rust tool runfiles" >&2
   exit 64
 }
 pinned_rustc="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+pinned_rust_objcopy="$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")"
 [[ -x "${pinned_rustc}" ]] || {
   printf 'declared Bazel rustc is not executable: %s\n' "${pinned_rustc}" >&2
+  exit 1
+}
+[[ -x "${pinned_rust_objcopy}" ]] || {
+  printf 'declared Bazel rust-objcopy is not executable: %s\n' \
+    "${pinned_rust_objcopy}" >&2
   exit 1
 }
 
@@ -45,6 +51,7 @@ ln -s "${TEST_SRCDIR}/_main~_repo_rules~ctx_tomli" \
   "${runfiles}/_main~_repo_rules~ctx_tomli"
 ln -s "${TEST_SRCDIR}/bazel_tools" "${runfiles}/bazel_tools"
 ln -s "${pinned_rustc}" "${route_runfiles}/rustc"
+ln -s "${pinned_rust_objcopy}" "${route_runfiles}/rust-objcopy"
 
 cp "${source_root}/contracts/release-targets-v1.json" "${repo}/contracts/"
 cp "${source_root}/contracts/release-candidate-manifest-v1.schema.json" \
@@ -472,7 +479,8 @@ test -s "${repo}/out-success/ctx.dependency-advisory.json"
 test -s "${repo}/out-success.private-debug-symbols/symbols.tar.gz"
 test -s "${repo}/out-success.private-debug-symbols/manifest.json"
 test ! -e "${repo}/out-success.private-debug-symbols/prepared.json"
-python3 "${repo}/scripts/release/detached-debug-symbols.py" verify \
+RUNFILES_DIR="${runfiles}" TEST_WORKSPACE=_main \
+  python3 "${repo}/scripts/release/detached-debug-symbols.py" verify \
   --artifact "${repo}/out-success/ctx" \
   --output-dir "${repo}/out-success.private-debug-symbols" \
   --platform linux-x64 \

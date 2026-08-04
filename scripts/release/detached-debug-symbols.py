@@ -7,14 +7,16 @@ import argparse
 import gzip
 import hashlib
 import json
+import mmap
 import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
-import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -47,6 +49,9 @@ LINUX_CONSTRUCTION_RUNFILES = {
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 64
 MAX_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
+MACOS_XCODE_SELECT = Path("/usr/bin/xcode-select")
+MACOS_XCRUN = Path("/usr/bin/xcrun")
+SHT_NOTE = 7
 
 
 class SymbolError(RuntimeError):
@@ -96,13 +101,6 @@ def empty_private_directory(path: Path) -> Path:
     return resolved
 
 
-def command(name: str) -> str:
-    selected = shutil.which(name)
-    if selected is None:
-        fail(f"required symbol tool is unavailable: {name}")
-    return selected
-
-
 def executable_tool(path: Path, label: str) -> Path:
     try:
         resolved = path.resolve(strict=True)
@@ -146,7 +144,49 @@ def declared_runfile(logical: str, platform: str) -> Path | None:
     return None
 
 
-def declared_rust_llvm_tool(platform: str, tool: str) -> str:
+def tool_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    environment = {"PATH": "/usr/bin:/bin"}
+    for name in ("SystemRoot", "SYSTEMROOT", "WINDIR"):
+        if value := os.environ.get(name):
+            environment[name] = value
+    if extra:
+        environment.update(extra)
+    return environment
+
+
+def run(
+    arguments: list[str],
+    *,
+    output: bool = False,
+    environment: dict[str, str] | None = None,
+) -> str:
+    try:
+        result = subprocess.run(
+            arguments,
+            check=True,
+            env=environment or tool_environment(),
+            stdout=subprocess.PIPE if output else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        detail = getattr(error, "stderr", "") or str(error)
+        fail(f"symbol tool failed: {arguments[0]}: {detail.strip()}")
+    return result.stdout if output else ""
+
+
+def file_identity(path: Path, name: str) -> dict[str, object]:
+    return {
+        "name": name,
+        "sha256": sha256_file(path),
+        "size": path.stat().st_size,
+    }
+
+
+def declared_rust_objcopy(
+    platform: str,
+) -> tuple[dict[str, Path], dict[str, object]]:
     rustc_logical = f"ctx_release_routes/{platform}/rustc"
     rustc_path = declared_runfile(rustc_logical, platform)
     if rustc_path is None:
@@ -170,52 +210,344 @@ def declared_rust_llvm_tool(platform: str, tool: str) -> str:
     if len(sysroot_lines) != 1 or not Path(sysroot_lines[0]).is_absolute():
         fail("declared Bazel rustc returned an invalid sysroot")
     suffix = ".exe" if platform == "windows-x64" else ""
-    selected = (
+    expected = (
         Path(sysroot_lines[0])
         / "lib"
         / "rustlib"
         / expected_host
         / "bin"
-        / f"{tool}{suffix}"
+        / f"rust-objcopy{suffix}"
     )
-    return str(executable_tool(selected, f"declared Rust {tool}"))
+    logical = f"ctx_release_routes/{platform}/rust-objcopy"
+    selected_path = declared_runfile(logical, platform)
+    if selected_path is None:
+        fail(f"declared Bazel Rust tool runfile is unavailable: {logical}")
+    selected = executable_tool(selected_path, "declared Bazel rust-objcopy")
+    expected = executable_tool(expected, "pinned Rust rust-objcopy")
+    if selected != expected:
+        fail("declared Bazel rust-objcopy is outside the pinned Rust sysroot")
+    tool_version = run([str(selected), "--version"], output=True).strip()
+    if (
+        f"rust-{PINNED_RUSTC_VERSION}-stable" not in tool_version
+        and f"rust {PINNED_RUSTC_VERSION}" not in tool_version
+    ):
+        fail("declared Bazel rust-objcopy does not match the pinned Rust release")
+    identity = {
+        "authority": "declared-bazel-rust-toolchain",
+        "parser": "builtin-bounded-format-parser-v1",
+        "rustc": {
+            "commit_hash": PINNED_RUSTC_COMMIT,
+            "host": expected_host,
+            "release": PINNED_RUSTC_VERSION,
+            "sha256": sha256_file(rustc),
+        },
+        "tools": [
+            {
+                **file_identity(selected, "rust-objcopy"),
+                "version": tool_version,
+            }
+        ],
+    }
+    return {"rust-objcopy": selected}, identity
 
 
-def run(arguments: list[str], *, output: bool = False) -> str:
+def trusted_platform_file(path: Path, label: str) -> Path:
+    selected = executable_tool(path, label)
+    metadata = selected.stat()
+    if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        fail(f"{label} must be root-owned and not group/other writable")
+    return selected
+
+
+def xcode_developer_directory(xcode_select: Path) -> Path:
+    output = run([str(xcode_select), "--print-path"], output=True)
+    lines = [line for line in output.splitlines() if line]
+    if len(lines) != 1 or not Path(lines[0]).is_absolute():
+        fail("xcode-select returned an invalid developer directory")
     try:
-        result = subprocess.run(
-            arguments,
-            check=True,
-            stdout=subprocess.PIPE if output else subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=300,
+        selected = Path(lines[0]).resolve(strict=True)
+    except OSError as error:
+        fail(f"selected Xcode developer directory is unavailable: {error}")
+    parts = selected.parts
+    application = (
+        len(parts) == 5
+        and parts[1] == "Applications"
+        and parts[2].endswith(".app")
+        and parts[3:] == ("Contents", "Developer")
+    )
+    command_line_tools = selected == Path("/Library/Developer/CommandLineTools")
+    if not application and not command_line_tools:
+        fail("xcode-select chose an unsupported developer directory")
+    boundary = Path("/").joinpath(*parts[1:3]) if application else selected
+    current = selected
+    while True:
+        metadata = current.stat()
+        if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            fail("selected Xcode authority is not root-owned and immutable")
+        if current == boundary:
+            break
+        current = current.parent
+    return selected
+
+
+def xcode_tools() -> tuple[dict[str, Path], dict[str, object]]:
+    xcode_select = trusted_platform_file(MACOS_XCODE_SELECT, "platform xcode-select")
+    xcrun = trusted_platform_file(MACOS_XCRUN, "platform xcrun")
+    developer_dir = xcode_developer_directory(xcode_select)
+    environment = tool_environment({"DEVELOPER_DIR": str(developer_dir)})
+    tools: dict[str, Path] = {}
+    identities: list[dict[str, object]] = []
+    for name in ("dsymutil", "strip"):
+        output = run(
+            [str(xcrun), "--find", name],
+            output=True,
+            environment=environment,
         )
-    except (OSError, subprocess.SubprocessError) as error:
-        detail = getattr(error, "stderr", "") or str(error)
-        fail(f"symbol tool failed: {arguments[0]}: {detail.strip()}")
-    return result.stdout if output else ""
+        lines = [line for line in output.splitlines() if line]
+        if len(lines) != 1 or not Path(lines[0]).is_absolute():
+            fail(f"xcrun returned an invalid {name} path")
+        selected = trusted_platform_file(Path(lines[0]), f"Xcode {name}")
+        try:
+            selected.relative_to(developer_dir)
+        except ValueError:
+            fail(f"Xcode {name} is outside the selected developer directory")
+        tools[name] = selected
+        identities.append(file_identity(selected, name))
+    identity = {
+        "authority": "xcode-selected-developer-tools",
+        "developer_dir": str(developer_dir),
+        "parser": "builtin-bounded-format-parser-v1",
+        "selector": [
+            file_identity(xcode_select, "xcode-select"),
+            file_identity(xcrun, "xcrun"),
+        ],
+        "tools": identities,
+    }
+    return tools, identity
+
+
+def release_tools(platform: str) -> tuple[dict[str, Path], dict[str, object]]:
+    if PLATFORMS[platform] == "macho":
+        return xcode_tools()
+    return declared_rust_objcopy(platform)
+
+
+def verify_tool_authority(
+    platform: str, expected: object
+) -> dict[str, Path]:
+    tools, observed = release_tools(platform)
+    if not isinstance(expected, dict) or observed != expected:
+        fail("release symbol tool authority differs from the recorded identity")
+    return tools
+
+
+def checked_region(total: int, offset: int, size: int, label: str) -> None:
+    if offset < 0 or size < 0 or offset > total or size > total - offset:
+        fail(f"{label} is outside the artifact")
+
+
+def elf_metadata(path: Path) -> tuple[list[str], list[str]]:
+    try:
+        with path.open("rb") as source, mmap.mmap(
+            source.fileno(), 0, access=mmap.ACCESS_READ
+        ) as image:
+            if len(image) < 64 or image[:4] != b"\x7fELF":
+                fail("artifact is not a supported ELF image")
+            elf_class = image[4]
+            encoding = image[5]
+            if encoding == 1:
+                endian = "<"
+            elif encoding == 2:
+                endian = ">"
+            else:
+                fail("ELF artifact has an unsupported byte order")
+            if elf_class == 1:
+                section_offset = struct.unpack_from(endian + "I", image, 32)[0]
+                entry_size, section_count, names_index = struct.unpack_from(
+                    endian + "HHH", image, 46
+                )
+                section_format = endian + "IIIIIIIIII"
+            elif elf_class == 2:
+                section_offset = struct.unpack_from(endian + "Q", image, 40)[0]
+                entry_size, section_count, names_index = struct.unpack_from(
+                    endian + "HHH", image, 58
+                )
+                section_format = endian + "IIQQQQIIQQ"
+            else:
+                fail("ELF artifact has an unsupported word size")
+            minimum_entry_size = struct.calcsize(section_format)
+            if entry_size < minimum_entry_size or section_offset == 0:
+                fail("ELF artifact has an invalid section table")
+
+            def section(index: int) -> tuple[int, ...]:
+                offset = section_offset + index * entry_size
+                checked_region(
+                    len(image), offset, minimum_entry_size, "ELF section header"
+                )
+                return struct.unpack_from(section_format, image, offset)
+
+            section_zero = section(0)
+            if section_count == 0:
+                section_count = section_zero[5]
+            if names_index == 0xFFFF:
+                names_index = section_zero[6]
+            if section_count <= 0 or section_count > 65_536:
+                fail("ELF artifact has an invalid section count")
+            checked_region(
+                len(image),
+                section_offset,
+                section_count * entry_size,
+                "ELF section table",
+            )
+            if names_index <= 0 or names_index >= section_count:
+                fail("ELF artifact has an invalid section-name table")
+
+            sections = [section(index) for index in range(section_count)]
+            names_section = sections[names_index]
+            names_offset, names_size = names_section[4], names_section[5]
+            checked_region(
+                len(image), names_offset, names_size, "ELF section-name table"
+            )
+            names_data = image[names_offset : names_offset + names_size]
+
+            names: list[str] = []
+            build_ids: list[str] = []
+            for header in sections:
+                name_offset, section_type = header[0], header[1]
+                if name_offset >= len(names_data):
+                    fail("ELF section name is outside its string table")
+                name_end = names_data.find(b"\0", name_offset)
+                if name_end < 0:
+                    fail("ELF section name is unterminated")
+                try:
+                    name = names_data[name_offset:name_end].decode("ascii")
+                except UnicodeDecodeError:
+                    fail("ELF section name is not ASCII")
+                names.append(name)
+                if section_type != SHT_NOTE:
+                    continue
+                note_offset, note_size = header[4], header[5]
+                checked_region(len(image), note_offset, note_size, "ELF note section")
+                cursor = note_offset
+                note_end = note_offset + note_size
+                while cursor < note_end:
+                    checked_region(note_end, cursor, 12, "ELF note header")
+                    name_size, descriptor_size, note_type = struct.unpack_from(
+                        endian + "III", image, cursor
+                    )
+                    cursor += 12
+                    checked_region(note_end, cursor, name_size, "ELF note name")
+                    owner = image[cursor : cursor + name_size].rstrip(b"\0")
+                    cursor = (cursor + name_size + 3) & ~3
+                    checked_region(
+                        note_end, cursor, descriptor_size, "ELF note descriptor"
+                    )
+                    descriptor = image[cursor : cursor + descriptor_size]
+                    cursor = (cursor + descriptor_size + 3) & ~3
+                    if cursor > note_end:
+                        fail("ELF note padding is outside its section")
+                    if owner == b"GNU" and note_type == 3 and descriptor:
+                        build_ids.append(descriptor.hex())
+            return names, build_ids
+    except (OSError, ValueError) as error:
+        fail(f"ELF artifact is unreadable: {error}")
 
 
 def elf_build_id(path: Path) -> str:
-    output = run([command("readelf"), "-nW", str(path)], output=True)
-    matches = re.findall(r"Build ID:\s*([0-9a-fA-F]+)", output)
-    if len(matches) != 1 or len(matches[0]) < 16:
+    _, build_ids = elf_metadata(path)
+    if len(build_ids) != 1 or len(build_ids[0]) < 16:
         fail("ELF artifact has no unique GNU build ID")
-    return matches[0].lower()
-
-
-def macho_uuid(path: Path) -> str:
-    output = run([command("dwarfdump"), "--uuid", str(path)], output=True)
-    matches = re.findall(r"UUID:\s*([0-9A-Fa-f-]{36})", output)
-    if len(matches) != 1:
-        fail("Mach-O artifact has no unique UUID")
-    return matches[0].lower()
+    return build_ids[0]
 
 
 def elf_section_names(path: Path) -> list[str]:
-    output = run([command("readelf"), "-SW", str(path)], output=True)
-    return re.findall(r"\[\s*\d+\]\s+(\S+)", output)
+    names, _ = elf_metadata(path)
+    return names
+
+
+def macho_uuids(image: mmap.mmap, offset: int, size: int) -> list[str]:
+    checked_region(len(image), offset, size, "Mach-O image")
+    checked_region(offset + size, offset, 8, "Mach-O header")
+    magic = image[offset : offset + 4]
+    thin = {
+        b"\xce\xfa\xed\xfe": ("<", 28),
+        b"\xcf\xfa\xed\xfe": ("<", 32),
+        b"\xfe\xed\xfa\xce": (">", 28),
+        b"\xfe\xed\xfa\xcf": (">", 32),
+    }
+    if magic in thin:
+        endian, header_size = thin[magic]
+        checked_region(offset + size, offset, header_size, "Mach-O header")
+        command_count, commands_size = struct.unpack_from(
+            endian + "II", image, offset + 16
+        )
+        if command_count > 100_000:
+            fail("Mach-O image has too many load commands")
+        cursor = offset + header_size
+        commands_end = cursor + commands_size
+        checked_region(offset + size, cursor, commands_size, "Mach-O load commands")
+        identifiers: list[str] = []
+        for _unused in range(command_count):
+            checked_region(commands_end, cursor, 8, "Mach-O load command")
+            command, command_size = struct.unpack_from(endian + "II", image, cursor)
+            if command_size < 8:
+                fail("Mach-O image has an invalid load command")
+            checked_region(commands_end, cursor, command_size, "Mach-O load command")
+            if command == 0x1B:
+                if command_size != 24:
+                    fail("Mach-O image has an invalid UUID command")
+                identifiers.append(
+                    str(uuid.UUID(bytes=image[cursor + 8 : cursor + 24]))
+                )
+            cursor += command_size
+        if cursor != commands_end:
+            fail("Mach-O load command sizes are inconsistent")
+        return identifiers
+
+    fat = {
+        b"\xca\xfe\xba\xbe": (">", "IIIII"),
+        b"\xbe\xba\xfe\xca": ("<", "IIIII"),
+        b"\xca\xfe\xba\xbf": (">", "IIQQII"),
+        b"\xbf\xba\xfe\xca": ("<", "IIQQII"),
+    }
+    if magic not in fat:
+        fail("artifact is not a supported Mach-O image")
+    endian, architecture_format = fat[magic]
+    architecture_count = struct.unpack_from(endian + "I", image, offset + 4)[0]
+    if architecture_count <= 0 or architecture_count > 64:
+        fail("Mach-O universal image has an invalid architecture count")
+    architecture_size = struct.calcsize(endian + architecture_format)
+    checked_region(
+        offset + size,
+        offset + 8,
+        architecture_count * architecture_size,
+        "Mach-O universal architecture table",
+    )
+    identifiers = []
+    for index in range(architecture_count):
+        fields = struct.unpack_from(
+            endian + architecture_format,
+            image,
+            offset + 8 + index * architecture_size,
+        )
+        architecture_offset, architecture_length = fields[2], fields[3]
+        identifiers.extend(
+            macho_uuids(image, offset + architecture_offset, architecture_length)
+        )
+    return identifiers
+
+
+def macho_uuid(path: Path) -> str:
+    try:
+        with path.open("rb") as source, mmap.mmap(
+            source.fileno(), 0, access=mmap.ACCESS_READ
+        ) as image:
+            identifiers = macho_uuids(image, 0, len(image))
+    except (OSError, ValueError) as error:
+        fail(f"Mach-O artifact is unreadable: {error}")
+    if len(identifiers) != 1:
+        fail("Mach-O artifact has no unique UUID")
+    return identifiers[0]
 
 
 def elf_has_detachable_debug_material(path: Path) -> bool:
@@ -243,8 +575,12 @@ def deterministic_archive(source_root: Path, output: Path) -> list[dict[str, obj
     if not paths:
         fail("detached symbol set is empty")
     with output.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=9) as gz:
-            with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        with gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=9
+        ) as gz:
+            with tarfile.open(
+                fileobj=gz, mode="w", format=tarfile.PAX_FORMAT
+            ) as archive:
                 for path in paths:
                     regular_file(path, "symbol archive member")
                     relative = path.relative_to(source_root).as_posix()
@@ -342,15 +678,15 @@ def verify_archive(archive: Path, expected_entries: object) -> None:
 
 
 def prepare_elf(
-    artifact: Path, symbol_tree: Path, platform: str
+    artifact: Path, symbol_tree: Path, tools: dict[str, Path]
 ) -> tuple[str, str]:
     identifier = elf_build_id(artifact)
     debug_file = symbol_tree / f"{artifact.name}.debug"
-    objcopy = declared_rust_llvm_tool(platform, "llvm-objcopy")
-    run([objcopy, "--only-keep-debug", str(artifact), str(debug_file)])
+    objcopy = tools["rust-objcopy"]
+    run([str(objcopy), "--only-keep-debug", str(artifact), str(debug_file)])
     if not elf_has_detachable_debug_material(debug_file):
         fail("ELF release intermediate contains no detachable debug information")
-    run([objcopy, "--strip-all", str(artifact)])
+    run([str(objcopy), "--strip-all", str(artifact)])
     remaining_debug_sections = [
         name
         for name in elf_distribution_symbol_sections(artifact)
@@ -359,12 +695,12 @@ def prepare_elf(
     if remaining_debug_sections:
         run(
             [
-                objcopy,
+                str(objcopy),
                 *(f"--remove-section={name}" for name in remaining_debug_sections),
                 str(artifact),
             ]
         )
-    run([objcopy, f"--add-gnu-debuglink={debug_file}", str(artifact)])
+    run([str(objcopy), f"--add-gnu-debuglink={debug_file}", str(artifact)])
     if elf_build_id(artifact) != identifier:
         fail("ELF build ID changed while detaching symbols")
     if elf_distribution_symbol_sections(artifact):
@@ -373,24 +709,30 @@ def prepare_elf(
     return "gnu-build-id", identifier
 
 
-def prepare_macho(artifact: Path, symbol_tree: Path) -> tuple[str, str]:
+def prepare_macho(
+    artifact: Path, symbol_tree: Path, tools: dict[str, Path]
+) -> tuple[str, str]:
     identifier = macho_uuid(artifact)
     dsym = symbol_tree / f"{artifact.name}.dSYM"
-    run([command("dsymutil"), str(artifact), "-o", str(dsym)])
+    run([str(tools["dsymutil"]), str(artifact), "-o", str(dsym)])
     dwarf_files = sorted((dsym / "Contents" / "Resources" / "DWARF").glob("*"))
     if len(dwarf_files) != 1 or dwarf_files[0].stat().st_size == 0:
         fail("dsymutil did not produce one nonempty DWARF image")
     if macho_uuid(dwarf_files[0]) != identifier:
         fail("dSYM UUID differs from the release intermediate")
-    run([command("strip"), "-S", "-x", str(artifact)])
+    run([str(tools["strip"]), "-S", "-x", str(artifact)])
     if macho_uuid(artifact) != identifier:
         fail("Mach-O UUID changed while detaching symbols")
     return "mach-o-uuid", identifier
 
 
 def prepare_pe(
-    artifact: Path, symbol_tree: Path, pdb: Path | None, platform: str
+    artifact: Path,
+    symbol_tree: Path,
+    pdb: Path | None,
+    tools: dict[str, Path],
 ) -> tuple[str, str]:
+    objcopy = tools["rust-objcopy"]
     if pdb is not None:
         pdb = regular_file(pdb, "PDB")
         if pdb.stat().st_size == 0:
@@ -402,7 +744,7 @@ def prepare_pe(
         # binding. WinDbg additionally validates the PDB's embedded GUID/age.
         run(
             [
-                declared_rust_llvm_tool(platform, "llvm-strip"),
+                str(objcopy),
                 "--strip-all",
                 str(artifact),
             ]
@@ -410,12 +752,11 @@ def prepare_pe(
         return "pdb-sha256", sha256_file(destination)
 
     debug_file = symbol_tree / f"{artifact.name}.debug"
-    objcopy = declared_rust_llvm_tool(platform, "llvm-objcopy")
-    run([objcopy, "--only-keep-debug", str(artifact), str(debug_file)])
+    run([str(objcopy), "--only-keep-debug", str(artifact), str(debug_file)])
     if debug_file.stat().st_size == 0:
         fail("GNU PE release intermediate produced no detached debug file")
-    run([objcopy, "--strip-all", str(artifact)])
-    run([objcopy, f"--add-gnu-debuglink={debug_file}", str(artifact)])
+    run([str(objcopy), "--strip-all", str(artifact)])
+    run([str(objcopy), f"--add-gnu-debuglink={debug_file}", str(artifact)])
     os.chmod(debug_file, 0o600)
     return "gnu-pe-debug-sha256", sha256_file(debug_file)
 
@@ -428,20 +769,19 @@ def prepare(args: argparse.Namespace) -> None:
     before_sha = sha256_file(artifact)
     platform_kind = PLATFORMS[args.platform]
     pdb = Path(args.pdb) if args.pdb else None
+    tools, tool_authority = release_tools(args.platform)
     if platform_kind == "elf":
         if pdb is not None:
             fail("--pdb is valid only for windows-x64")
-        identifier_type, identifier = prepare_elf(
-            artifact, symbol_tree, args.platform
-        )
+        identifier_type, identifier = prepare_elf(artifact, symbol_tree, tools)
     elif platform_kind == "macho":
         if pdb is not None:
             fail("--pdb is valid only for windows-x64")
-        identifier_type, identifier = prepare_macho(artifact, symbol_tree)
+        identifier_type, identifier = prepare_macho(artifact, symbol_tree, tools)
     else:
-        identifier_type, identifier = prepare_pe(
-            artifact, symbol_tree, pdb, args.platform
-        )
+        identifier_type, identifier = prepare_pe(artifact, symbol_tree, pdb, tools)
+
+    verify_tool_authority(args.platform, tool_authority)
 
     archive = output / "symbols.tar.gz"
     entries = deterministic_archive(symbol_tree, archive)
@@ -456,6 +796,7 @@ def prepare(args: argparse.Namespace) -> None:
         "prepared_binary_sha256": sha256_file(artifact),
         "debug_identifier_type": identifier_type,
         "debug_identifier": identifier,
+        "tool_authority": tool_authority,
         "archive_file": archive.name,
         "archive_format": "tar.gz",
         "archive_sha256": sha256_file(archive),
@@ -508,6 +849,7 @@ def finalize(args: argparse.Namespace) -> None:
 
     identifier_type = str(prepared["debug_identifier_type"])
     identifier = str(prepared["debug_identifier"])
+    verify_tool_authority(args.platform, prepared.get("tool_authority"))
     platform_kind = PLATFORMS[args.platform]
     if platform_kind == "elf" and elf_build_id(artifact) != identifier:
         fail("final ELF build ID differs from detached symbols")
@@ -526,6 +868,7 @@ def finalize(args: argparse.Namespace) -> None:
         "binary_size": artifact.stat().st_size,
         "debug_identifier_type": identifier_type,
         "debug_identifier": identifier,
+        "tool_authority": prepared["tool_authority"],
         "archive_file": archive.name,
         "archive_format": prepared["archive_format"],
         "archive_sha256": prepared["archive_sha256"],
@@ -565,6 +908,7 @@ def verify_prepared(args: argparse.Namespace) -> None:
     require_private_mode(output, "symbol output directory")
     require_private_mode(archive, "symbol archive")
     verify_archive(archive, prepared.get("entries"))
+    verify_tool_authority(args.platform, prepared.get("tool_authority"))
     identifier = str(prepared.get("debug_identifier", ""))
     if PLATFORMS[args.platform] == "elf" and elf_build_id(artifact) != identifier:
         fail("prepared ELF build ID differs from detached symbols")
@@ -592,6 +936,7 @@ def verify(args: argparse.Namespace) -> None:
     require_private_mode(output, "symbol output directory")
     require_private_mode(archive, "symbol archive")
     verify_archive(archive, manifest.get("entries"))
+    verify_tool_authority(args.platform, manifest.get("tool_authority"))
     identifier = str(manifest.get("debug_identifier", ""))
     if PLATFORMS[args.platform] == "elf" and elf_build_id(artifact) != identifier:
         fail("verified ELF build ID differs from the manifest")
