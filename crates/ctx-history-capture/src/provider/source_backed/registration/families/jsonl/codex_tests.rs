@@ -16,6 +16,20 @@ fn lineage_working_set_failures_are_route_systemic() {
         codex_ingestion_route_error(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable).kind,
         SourceBackedRouteErrorKind::Internal,
     );
+    assert_eq!(
+        codex_ingestion_route_error(CodexSourceBackedErrorV0::Capture(CaptureError::Io(
+            std::io::Error::from_raw_os_error(24)
+        ),))
+        .kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable,
+    );
+    assert_eq!(
+        codex_ingestion_route_error(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SystemInvariant("poisoned ctx-owned lock"),
+        ))
+        .kind,
+        SourceBackedRouteErrorKind::Internal,
+    );
 }
 
 #[test]

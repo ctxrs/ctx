@@ -14,6 +14,8 @@ std::thread_local! {
     static AFTER_CODEX_DIRECTORY_VISIT_HOOK:
         std::cell::RefCell<Option<CodexDirectoryVisitHook>> =
         const { std::cell::RefCell::new(None) };
+    static AFTER_CODEX_CATALOG_AUTHORITY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -30,6 +32,25 @@ pub(crate) fn install_after_codex_metadata_inventory_hook(hook: impl FnOnce() + 
 #[cfg(test)]
 fn run_after_codex_metadata_inventory_hook() {
     let hook = AFTER_CODEX_METADATA_INVENTORY_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_codex_catalog_authority_hook(hook: impl FnOnce() + 'static) {
+    AFTER_CODEX_CATALOG_AUTHORITY_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex catalog-authority hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_codex_catalog_authority_hook() {
+    let hook = AFTER_CODEX_CATALOG_AUTHORITY_HOOK.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
         hook();
     }
@@ -227,6 +248,14 @@ fn open_codex_explicit_source_plan_v0(
     path: &Path,
 ) -> CodexSourceBackedResultV0<(CodexCatalogSource, SourceKey, String)> {
     let opened = Arc::new(open_provider_source_file(path)?);
+    let frozen_observation = opened_codex_file_observation(path, opened.file())?;
+    let frozen_prefix_sha256 = opened_file_prefix_sha256(opened.file(), frozen_observation.len)?;
+    let after = opened_codex_file_observation(path, opened.file())?;
+    if !frozen_observation.admits_append_only_growth(&after) {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
     let catalog = catalog_codex_explicit_session_opened(path, &opened)?;
     let discovery = super::discover_codex_catalog_sources(&[catalog]);
     if discovery.ineligible != 0 || !discovery.rejections.is_empty() {
@@ -242,6 +271,13 @@ fn open_codex_explicit_source_plan_v0(
             failed: 0,
         });
     };
+    if !frozen_observation.admits_append_only_growth(&source.catalog_observation) {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
+    source.catalog_observation = frozen_observation;
+    source.catalog_prefix_sha256 = Some(frozen_prefix_sha256);
     source.opened = Some(opened);
     let mut bound = bind_source_keys(sources)?;
     if bound.len() != 1 {
@@ -357,6 +393,9 @@ pub(crate) fn discover_codex_session_tree_inventory_from_plans_v0(
                 parent_native_session_id: source.catalog_parent_native_session_id.clone(),
                 root_native_session_id: source.catalog_root_native_session_id.clone(),
                 observation: source.catalog_observation.clone(),
+                prefix_sha256: source
+                    .catalog_prefix_sha256
+                    .ok_or(CodexSourceBackedErrorV0::InvalidCheckpoint)?,
             })
         })
         .collect::<CodexSourceBackedResultV0<Vec<_>>>()?;
@@ -369,6 +408,7 @@ struct CodexIncrementalInventorySeedV0 {
     parent_native_session_id: Option<String>,
     root_native_session_id: Option<String>,
     observation: CodexFileObservation,
+    prefix_sha256: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -377,6 +417,7 @@ struct CodexMetadataInventoryLeafV0 {
     source_path: PathBuf,
     relative_path: PathBuf,
     observation: CodexFileObservation,
+    prefix_sha256: [u8; 32],
     authority: ProviderSourceRoot,
 }
 
@@ -405,26 +446,20 @@ fn incremental_seed_from_certificate(
         Ok(observation) => observation,
         Err(error) => return Some(Err(error.into())),
     };
-    let (parent_native_session_id, root_native_session_id) = certificate
+    let checkpoint = certificate
         .frontier()
         .filter(|frontier| frontier.checkpoint_kind() == CODEX_FRONTIER_KIND)
         .and_then(|frontier| match frontier.checkpoint() {
             TypedKey::Bytes(bytes) => CodexNativeCheckpoint::decode(bytes).ok(),
             _ => None,
         })
-        .filter(|checkpoint| checkpoint.owner.native_session_id == *native_session_id)
-        .map(|checkpoint| {
-            (
-                checkpoint.owner.parent_native_session_id,
-                checkpoint.owner.root_native_session_id,
-            )
-        })
-        .unwrap_or_default();
+        .filter(|checkpoint| checkpoint.owner.native_session_id == *native_session_id)?;
     Some(Ok(CodexIncrementalInventorySeedV0 {
         native_session_id: native_session_id.clone(),
-        parent_native_session_id,
-        root_native_session_id,
+        parent_native_session_id: checkpoint.owner.parent_native_session_id,
+        root_native_session_id: checkpoint.owner.root_native_session_id,
         observation,
+        prefix_sha256: checkpoint.full_revision_sha256,
     }))
 }
 
@@ -456,7 +491,7 @@ fn discover_codex_session_tree_inventory_incremental_v0(
     let mut catalog_sources = Vec::with_capacity(leaves.len());
     for (leaf, seed_index) in leaves.into_iter().zip(candidates) {
         let source = match seed_index {
-            Some(seed_index) => catalog_source_from_seed(&leaf, &seeds[seed_index]),
+            Some(seed_index) => catalog_source_from_seed(&leaf, &seeds[seed_index])?,
             None => {
                 work.source_body_reads = work.source_body_reads.saturating_add(1);
                 work.session_meta_parses = work.session_meta_parses.saturating_add(1);
@@ -465,6 +500,8 @@ fn discover_codex_session_tree_inventory_incremental_v0(
         };
         catalog_sources.push(source);
     }
+    #[cfg(test)]
+    run_after_codex_catalog_authority_hook();
     for authority in &authorities {
         authority.revalidate()?;
     }
@@ -567,12 +604,20 @@ fn discover_codex_metadata_inventory_root_v0(
                 {
                     crate::provider::provider_path_identity(&source_path)?;
                     let observation = opened_codex_file_observation(&source_path, opened.file())?;
+                    let prefix_sha256 = opened_file_prefix_sha256(opened.file(), observation.len)?;
+                    let after = opened_codex_file_observation(&source_path, opened.file())?;
+                    if !observation.admits_append_only_growth(&after) {
+                        return Err(CodexSourceBackedErrorV0::Capture(
+                            CaptureError::SourceChangedDuringCapture,
+                        ));
+                    }
                     opened.revalidate_leaf()?;
                     leaves.push(CodexMetadataInventoryLeafV0 {
                         source_root: session_root.display().to_string(),
                         source_path,
                         relative_path,
                         observation,
+                        prefix_sha256,
                         authority: authority.clone(),
                     });
                     crate::provider::codex::catalog::ensure_catalog_source_bound(leaves.len())?;
@@ -684,25 +729,36 @@ fn exact_seed_candidates(
 fn catalog_source_from_seed(
     leaf: &CodexMetadataInventoryLeafV0,
     seed: &CodexIncrementalInventorySeedV0,
-) -> CodexCatalogSource {
-    CodexCatalogSource {
+) -> CodexSourceBackedResultV0<CodexCatalogSource> {
+    if leaf.prefix_sha256 != seed.prefix_sha256 {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
+    Ok(CodexCatalogSource {
         source_root: leaf.source_root.clone(),
         source_path: leaf.source_path.clone(),
         cataloged_at_ms: 0,
         catalog_observation: leaf.observation.clone(),
+        catalog_prefix_sha256: Some(leaf.prefix_sha256),
         catalog_native_session_id: Some(seed.native_session_id.clone()),
         catalog_parent_native_session_id: seed.parent_native_session_id.clone(),
         catalog_root_native_session_id: seed.root_native_session_id.clone(),
         opened: None,
         authority_root: Some(leaf.authority.clone()),
         authority_relative_path: Some(leaf.relative_path.clone()),
-    }
+    })
 }
 
 fn catalog_source_from_body(
     leaf: &CodexMetadataInventoryLeafV0,
 ) -> CodexSourceBackedResultV0<CodexCatalogSource> {
     let opened = leaf.authority.open_file(&leaf.relative_path)?;
+    if opened_file_prefix_sha256(opened.file(), leaf.observation.len)? != leaf.prefix_sha256 {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture,
+        ));
+    }
     let mut catalog = catalog_codex_explicit_session_opened(&leaf.source_path, &opened)?;
     catalog.source_root = leaf.source_root.clone();
     let discovery = super::discover_codex_catalog_sources(&[catalog]);
@@ -725,11 +781,9 @@ fn catalog_source_from_body(
             rejected: 1,
             failed: 0,
         })?;
-    // Metadata discovery and session-meta parsing are separate bounded reads.
-    // A live Codex session may append between them. Keep the newer
-    // observation when it is the same retained ordinary file with monotonic
-    // growth; the scanner will freeze and certify that newer prefix. Rewrites,
-    // truncation, and object replacement still fail closed here.
+    // Metadata discovery froze this refresh's EOF. Prove those exact bytes on
+    // the retained ordinary-file authority before handing them to the parser;
+    // growth is intentionally deferred to the next refresh.
     if !leaf
         .observation
         .admits_append_only_growth(&source.catalog_observation)
@@ -738,6 +792,8 @@ fn catalog_source_from_body(
             CaptureError::SourceChangedDuringCapture,
         ));
     }
+    source.catalog_prefix_sha256 = Some(leaf.prefix_sha256);
+    source.catalog_observation = leaf.observation.clone();
     source.authority_root = Some(leaf.authority.clone());
     source.authority_relative_path = Some(leaf.relative_path.clone());
     Ok(source)

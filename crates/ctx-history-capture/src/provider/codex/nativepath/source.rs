@@ -60,6 +60,10 @@ pub(crate) struct CodexCatalogSource {
     pub(crate) source_path: PathBuf,
     pub(crate) cataloged_at_ms: i64,
     pub(crate) catalog_observation: CodexFileObservation,
+    /// SHA-256 of exactly `catalog_observation.len` bytes from the retained
+    /// discovery authority. This is task-local admission evidence, not a
+    /// second transcript store.
+    pub(crate) catalog_prefix_sha256: Option<[u8; 32]>,
     pub(crate) catalog_native_session_id: Option<String>,
     pub(crate) catalog_parent_native_session_id: Option<String>,
     pub(crate) catalog_root_native_session_id: Option<String>,
@@ -74,6 +78,7 @@ impl PartialEq for CodexCatalogSource {
             && self.source_path == other.source_path
             && self.cataloged_at_ms == other.cataloged_at_ms
             && self.catalog_observation == other.catalog_observation
+            && self.catalog_prefix_sha256 == other.catalog_prefix_sha256
             && self.catalog_native_session_id == other.catalog_native_session_id
             && self.catalog_parent_native_session_id == other.catalog_parent_native_session_id
             && self.catalog_root_native_session_id == other.catalog_root_native_session_id
@@ -160,6 +165,7 @@ fn catalog_source(session: &CatalogSession) -> Result<CodexCatalogSource, &'stat
             stable_token,
             change_token,
         },
+        catalog_prefix_sha256: None,
         catalog_native_session_id: session.external_session_id.clone(),
         catalog_parent_native_session_id: session.parent_external_session_id.clone(),
         catalog_root_native_session_id: session

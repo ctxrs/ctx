@@ -30,7 +30,10 @@ use thiserror::Error;
 
 use super::{
     discover_codex_catalog_sources,
-    reader::{CodexParseDisposition, CodexScanCounters},
+    reader::{
+        opened_file_prefix_sha256, CodexLineageFactBudgetV0, CodexLineageFactsV0,
+        CodexParseDisposition, CodexScanCounters, CODEX_LINEAGE_EXHAUSTED_SENTINEL,
+    },
     rows::{CodexProviderEventIdentityV0, CodexSourceBackedRowV0},
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
@@ -57,8 +60,8 @@ const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
-const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v8";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v11";
+const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v9";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v12";
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 const CODEX_INVENTORY_REVISION_KIND: &str = "codex-session-tree-inventory-v1";
 const CODEX_DISCOVERY_REVISION: &str = "codex-session-catalog-v1";
@@ -310,12 +313,13 @@ mod identity;
 mod ingestion;
 mod lineage;
 
-use lineage::{CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
+use lineage::{map_lineage_capture_error, CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
 
 #[cfg(test)]
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
-    discover_codex_session_tree_inventory_from_plans_v0, install_after_codex_directory_visit_hook,
+    discover_codex_session_tree_inventory_from_plans_v0,
+    install_after_codex_catalog_authority_hook, install_after_codex_directory_visit_hook,
     install_after_codex_metadata_inventory_hook, writer_base_sources, CodexCatalogWorkV0,
 };
 pub(crate) use catalog::{

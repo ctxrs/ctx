@@ -325,7 +325,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert!(!wire.contains("command"));
     assert!(!wire.contains("arguments_preview"));
     let decoded_wire = serde_json::from_str::<Value>(&wire).unwrap();
-    assert_eq!(decoded_wire["version"], 8);
+    assert_eq!(decoded_wire["version"], 9);
     assert_eq!(
         decoded_wire["lineage_dependency_sha256"],
         json!(vec![0; 32])
@@ -340,7 +340,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert_eq!(CodexNativeCheckpoint::decode(&encoded).unwrap(), checkpoint);
 
     let mut old_version = decoded_wire.clone();
-    old_version["version"] = json!(7);
+    old_version["version"] = json!(8);
     assert!(CodexNativeCheckpoint::decode(&serde_json::to_vec(&old_version).unwrap()).is_err());
 
     let mut oversized_contexts = decoded_wire;

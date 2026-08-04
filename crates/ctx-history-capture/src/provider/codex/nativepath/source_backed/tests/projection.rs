@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::codex::nativepath::tests::discover_one;
 use serde_json::Value;
 
 pub(super) fn initialize_repository(path: &Path) {
@@ -289,13 +290,11 @@ fn codex_active_parent_append_during_lineage_publishes_prefix_then_imports_suffi
     );
 
     let deferred = message("user", "deferred active-parent suffix");
-    super::super::lineage::install_after_lineage_prefix_hook_v0(
-        session_path(&sessions, parent_native_session_id),
-        Box::new(move |path| {
-            let mut file = OpenOptions::new().append(true).open(path).unwrap();
-            writeln!(file, "{deferred}").unwrap();
-        }),
-    );
+    let parent_path = session_path(&sessions, parent_native_session_id);
+    install_after_codex_catalog_authority_hook(move || {
+        let mut file = OpenOptions::new().append(true).open(&parent_path).unwrap();
+        writeln!(file, "{deferred}").unwrap();
+    });
     let cold = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
     assert_eq!(cold.counters.cold_sources, 2);
 
@@ -338,7 +337,7 @@ fn codex_active_parent_append_during_lineage_publishes_prefix_then_imports_suffi
 }
 
 #[test]
-fn codex_parent_prefix_rewrite_after_lineage_hash_rolls_back_refresh() {
+fn codex_discovery_prefix_rewrite_and_append_rolls_back_refresh() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -384,15 +383,18 @@ fn codex_parent_prefix_rewrite_after_lineage_hash_rolls_back_refresh() {
         .windows(marker.len())
         .position(|window| window == marker)
         .unwrap();
-    super::super::lineage::install_after_lineage_prefix_hook_v0(
-        parent_path.clone(),
-        Box::new(move |path| {
-            let mut file = OpenOptions::new().write(true).open(path).unwrap();
-            file.seek(SeekFrom::Start(marker_offset as u64)).unwrap();
-            file.write_all(b"Git commit -m exact").unwrap();
-            file.sync_all().unwrap();
-        }),
-    );
+    install_after_codex_catalog_authority_hook(move || {
+        let mut file = OpenOptions::new().write(true).open(&parent_path).unwrap();
+        file.seek(SeekFrom::Start(marker_offset as u64)).unwrap();
+        file.write_all(b"Git commit -m exact").unwrap();
+        drop(file);
+        writeln!(
+            OpenOptions::new().append(true).open(&parent_path).unwrap(),
+            "{}",
+            message("user", "rewrite-plus-append race suffix")
+        )
+        .unwrap();
+    });
 
     assert!(ingest_codex_source_backed_v0(&sessions, &index).is_err());
     let after = VerifiedIndex::open(&index).unwrap();
@@ -1265,11 +1267,10 @@ fn source_backed_scanner_keeps_full_message_tail_and_exact_display_text() {
         &[message("assistant", &full_text)],
     );
 
-    let (catalog_summary, catalog_sessions) = discover_codex_session_catalog(&sessions).unwrap();
-    assert_eq!(catalog_summary.failed_sessions, 0);
-    let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
-    assert!(discovery.rejections.is_empty());
-    let catalog_source = discovery.sources.into_iter().next().unwrap();
+    let catalog_source = discover_one(
+        &session_path(&sessions, native_session_id),
+        native_session_id,
+    );
     let source = codex_source_key(native_session_id).unwrap();
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let mut scanner =
@@ -1342,10 +1343,10 @@ fn codex_large_tool_arguments_keep_both_complete_core_representations() {
     assert!(tool_call.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
     write_session(&sessions, native_session_id, &[tool_call]);
 
-    let (_, catalog_sessions) = discover_codex_session_catalog(&sessions).unwrap();
-    let discovery = super::super::discover_codex_catalog_sources(&catalog_sessions);
-    assert!(discovery.rejections.is_empty());
-    let catalog_source = discovery.sources.into_iter().next().unwrap();
+    let catalog_source = discover_one(
+        &session_path(&sessions, native_session_id),
+        native_session_id,
+    );
     let source = codex_source_key(native_session_id).unwrap();
     let session_id = codex_session_identity(&source, native_session_id).unwrap();
     let mut scanner = CodexNativeScanner::new_source_backed_v0(catalog_source, None).unwrap();

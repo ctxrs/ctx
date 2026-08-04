@@ -62,7 +62,7 @@ impl ActiveColdScannerV0<'_> {
             .ok_or(CodexSourceBackedErrorV0::ColdProtocolMismatch(
                 "active scanner finished more than once",
             ))?;
-        let scan = scanner.finish()?;
+        let scan = scanner.finish().map_err(map_lineage_capture_error)?;
         self.activity
             .sources_completed
             .fetch_add(1, AtomicOrdering::Relaxed);
@@ -492,7 +492,10 @@ fn run_cold_scan_lane_v0(
                 return Ok(());
             }
             let busy_started = Instant::now();
-            let page = scanner.scanner_mut()?.next_page()?;
+            let page = scanner
+                .scanner_mut()?
+                .next_page()
+                .map_err(map_lineage_capture_error)?;
             worker_busy += busy_started.elapsed();
             let Some(page) = page else {
                 break;
@@ -547,7 +550,13 @@ fn run_cold_scan_lane_v0(
             return Ok(());
         }
         let busy_started = Instant::now();
-        let scan = scanner.finish()?;
+        let mut scan = scanner.finish()?;
+        let lineage_facts = scan
+            .lineage_facts
+            .take()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        job.outcome_lineage
+            .register(&job.native_session_id, lineage_facts)?;
         worker_busy += busy_started.elapsed();
         if !send_cold_lane_message_v0(
             sender,
@@ -578,16 +587,26 @@ fn changed_source_scanner_v0(
 ) -> CodexSourceBackedResultV0<(ChangedSourceModeV0, CodexNativeScanner)> {
     if let Some(proof) = job.proof.as_ref() {
         if job.source.catalog_observation.len > proof.checkpoint.observation.len {
-            match CodexNativeScanner::new_source_backed_v0(job.source.clone(), Some(proof)) {
+            let facts = job.outcome_lineage.new_fact_set()?;
+            match CodexNativeScanner::new_source_backed_with_lineage_v0(
+                job.source.clone(),
+                Some(proof),
+                facts,
+            ) {
                 Ok(scanner) => return Ok((ChangedSourceModeV0::AppendDelta, scanner)),
                 Err(error) if invalid_changed_append_proof_v0(&error) => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(map_lineage_capture_error(error)),
             }
         }
     }
     Ok((
         ChangedSourceModeV0::FullGeneration,
-        CodexNativeScanner::new_source_backed_v0(job.source.clone(), None)?,
+        CodexNativeScanner::new_source_backed_with_lineage_v0(
+            job.source.clone(),
+            None,
+            job.outcome_lineage.new_fact_set()?,
+        )
+        .map_err(map_lineage_capture_error)?,
     ))
 }
 

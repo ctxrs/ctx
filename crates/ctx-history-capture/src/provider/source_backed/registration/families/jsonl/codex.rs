@@ -83,9 +83,31 @@ fn codex_ingestion_route_error(error: CodexSourceBackedErrorV0) -> SourceBackedR
         CodexSourceBackedErrorV0::LineageWorkingSetUnavailable => {
             SourceBackedRouteErrorKind::Internal
         }
+        CodexSourceBackedErrorV0::Index(IndexError::Io(_)) => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        CodexSourceBackedErrorV0::Capture(CaptureError::SystemInvariant(_))
+        | CodexSourceBackedErrorV0::Index(_)
+        | CodexSourceBackedErrorV0::ColdLaneDisconnected { .. }
+        | CodexSourceBackedErrorV0::ColdWorkerPanicked { .. }
+        | CodexSourceBackedErrorV0::ColdProtocolMismatch(_) => SourceBackedRouteErrorKind::Internal,
+        CodexSourceBackedErrorV0::Capture(CaptureError::SystemIo { .. }) => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        CodexSourceBackedErrorV0::Capture(CaptureError::Io(error))
+        | CodexSourceBackedErrorV0::Io(error)
+            if resource_io_error(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
         _ => SourceBackedRouteErrorKind::InvalidSource,
     };
     SourceBackedRouteError::new(kind, error.to_string())
+}
+
+fn resource_io_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::OutOfMemory
+        || matches!(error.raw_os_error(), Some(12 | 23 | 24 | 28 | 122))
 }
 
 #[derive(Clone)]
