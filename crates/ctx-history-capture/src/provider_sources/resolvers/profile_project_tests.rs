@@ -1,7 +1,7 @@
 use super::super::super::{
     context::DiscoveryPlatformDirs,
     discovery::{discover_provider_sources_for_provider_with_context, provider_source_for_path},
-    types::ProviderSourceStatus,
+    types::{ProviderImportSupport, ProviderSourceStatus},
 };
 use std::fs;
 
@@ -36,8 +36,195 @@ fn write(path: &Path, body: impl AsRef<[u8]>) {
     fs::write(path, body).unwrap();
 }
 
+fn write_nanoclaw_project(root: &Path) {
+    write(&root.join("data/v2.db"), "sqlite fixture");
+    fs::create_dir_all(root.join("data/v2-sessions")).unwrap();
+}
+
+fn nanoclaw_slug_for(root: &Path) -> String {
+    nanoclaw_sha1_slug(root.to_string_lossy().as_bytes())
+}
+
+fn write_nanoclaw_systemd_unit(home: &Path, project: &Path) -> PathBuf {
+    let slug = nanoclaw_slug_for(project);
+    let unit = home
+        .join(".config/systemd/user")
+        .join(format!("nanoclaw-v2-{slug}.service"));
+    write(
+        &unit,
+        format!(
+            "[Unit]\nDescription=NanoClaw Personal Assistant\n\n[Service]\nType=simple\nExecStart=/usr/bin/node {}/dist/index.js\nWorkingDirectory={}\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
+            project.display(),
+            project.display()
+        ),
+    );
+    unit
+}
+
+fn write_nanoclaw_launchd_plist(home: &Path, project: &Path) -> PathBuf {
+    let slug = nanoclaw_slug_for(project);
+    let label = format!("com.nanoclaw-v2-{slug}");
+    let plist = home
+        .join("Library/LaunchAgents")
+        .join(format!("{label}.plist"));
+    write(
+        &plist,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>ProgramArguments</key><array><string>/usr/local/bin/node</string><string>{}/dist/index.js</string></array><key>WorkingDirectory</key><string>{}</string><key>RunAtLoad</key><true/></dict></plist>\n",
+            project.display(),
+            project.display()
+        ),
+    );
+    plist
+}
+
 fn report(context: &DiscoveryContext, provider: CaptureProvider) -> DiscoveryReport {
     discover_provider_sources_for_provider_with_context(context, provider)
+}
+
+#[test]
+fn nanoclaw_linux_service_registration_discovers_checkout_without_cwd() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("nanoclaw");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    write_nanoclaw_systemd_unit(&home, &project);
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert_eq!(report.issues, []);
+    assert_eq!(report.sources.len(), 1);
+    let source = &report.sources[0];
+    assert_eq!(source.path, project);
+    assert_eq!(source.source_format, "nanoclaw_project");
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+    assert_eq!(source.import_support, ProviderImportSupport::Native);
+}
+
+#[test]
+fn nanoclaw_macos_launchd_registration_discovers_checkout() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("nanoclaw");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    write_nanoclaw_launchd_plist(&home, &project);
+
+    let context = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::MacOS,
+        DiscoveryPlatformDirs::default(),
+    );
+    let report = report(&context, CaptureProvider::NanoClaw);
+    assert_eq!(report.issues, []);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, project);
+    assert_eq!(
+        report.sources[0].import_support,
+        ProviderImportSupport::Native
+    );
+}
+
+#[test]
+fn nanoclaw_exact_cwd_takes_precedence_over_registered_checkout() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd-nanoclaw");
+    let registered = temp.path().join("registered-nanoclaw");
+    write_nanoclaw_project(&cwd);
+    write_nanoclaw_project(&registered);
+    write_nanoclaw_systemd_unit(&home, &registered);
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert_eq!(report.issues, []);
+    assert_eq!(
+        report
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>(),
+        vec![cwd]
+    );
+}
+
+#[test]
+fn nanoclaw_no_install_has_no_sources_or_issues() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    fs::create_dir_all(&cwd).unwrap();
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert!(report.sources.is_empty());
+    assert!(report.issues.is_empty());
+}
+
+#[test]
+fn nanoclaw_malformed_or_mismatched_service_registration_fails_closed() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("nanoclaw");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    let unit = write_nanoclaw_systemd_unit(&home, &project);
+    let wrong_project = temp.path().join("wrong");
+    write(
+        &unit,
+        format!(
+            "[Service]\nExecStart=/usr/bin/node {}/dist/index.js\nWorkingDirectory={}\n",
+            wrong_project.display(),
+            project.display()
+        ),
+    );
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].path.as_deref(), Some(unit.as_path()));
+    assert_eq!(
+        report.issues[0].kind,
+        DiscoveryIssueKind::SelectorUnreconstructible
+    );
+}
+
+#[test]
+fn nanoclaw_registration_to_missing_checkout_fails_closed() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("missing-nanoclaw");
+    fs::create_dir_all(&cwd).unwrap();
+    let unit = write_nanoclaw_systemd_unit(&home, &project);
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].path.as_deref(), Some(unit.as_path()));
+}
+
+#[cfg(unix)]
+#[test]
+fn nanoclaw_registration_to_symlink_checkout_fails_closed() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("nanoclaw");
+    let linked = temp.path().join("linked-nanoclaw");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    symlink(&project, &linked).unwrap();
+    let unit = write_nanoclaw_systemd_unit(&home, &linked);
+
+    let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(report.issues[0].path.as_deref(), Some(unit.as_path()));
 }
 
 #[test]
@@ -301,7 +488,7 @@ fn hermes_windows_default_prefers_modern_then_conditional_legacy() {
 }
 
 #[test]
-fn nanoclaw_requires_the_exact_cwd_shape_and_remains_explicit() {
+fn nanoclaw_exact_cwd_requires_project_shape_and_is_native() {
     let temp = tempdir();
     let home = temp.path().join("home");
     let root = temp.path().join("nanoclaw");
@@ -317,7 +504,7 @@ fn nanoclaw_requires_the_exact_cwd_shape_and_remains_explicit() {
     assert_eq!(exact.sources[0].path, root);
     assert_eq!(
         exact.sources[0].import_support,
-        super::super::super::types::ProviderImportSupport::Explicit
+        super::super::super::types::ProviderImportSupport::Native
     );
 }
 

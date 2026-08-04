@@ -388,6 +388,17 @@ fn register_discovered_automatic_route(
                 discovery.clone(),
             )
         }
+        (SourceBackedRouteConstructor::CatalogLineage, CaptureProvider::NanoClaw) => {
+            let lineage = nanoclaw_automatic_catalog_lineage(&source);
+            register_nanoclaw_source_backed_route_with_selection(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                data_root,
+                lineage,
+                &[],
+            )
+        }
         (SourceBackedRouteConstructor::ExactCwd, CaptureProvider::Shelley) => {
             let exact_cwd = discovery.cwd().ok_or(
                 SourceBackedAutomaticUnavailableReason::SelectorAuthorityUnavailable {
@@ -414,6 +425,17 @@ fn register_discovered_automatic_route(
             detail: error.to_string(),
         },
     )
+}
+
+fn nanoclaw_automatic_catalog_lineage(source: &ProviderSource) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-nanoclaw-service-registration-catalog-lineage-v1\0");
+    digest.update(source.provider.as_str().as_bytes());
+    digest.update(b"\0");
+    digest.update(source.source_format.as_bytes());
+    digest.update(b"\0");
+    digest.update(source.path.to_string_lossy().as_bytes());
+    digest.finalize().into()
 }
 
 fn goose_platform_root(discovery: &DiscoveryContext, database: &Path) -> Option<PathBuf> {

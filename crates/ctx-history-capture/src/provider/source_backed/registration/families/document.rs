@@ -102,6 +102,24 @@ pub fn register_nanoclaw_source_backed_route_with_base_sources(
     catalog_lineage: [u8; 32],
     base_sources: &[CertifiedSource],
 ) -> SourceBackedCoordinatorResult<()> {
+    register_nanoclaw_source_backed_route_with_selection(
+        registry,
+        source,
+        SourceBackedRouteSelection::ExplicitManual,
+        data_root,
+        catalog_lineage,
+        base_sources,
+    )
+}
+
+pub fn register_nanoclaw_source_backed_route_with_selection(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    catalog_lineage: [u8; 32],
+    base_sources: &[CertifiedSource],
+) -> SourceBackedCoordinatorResult<()> {
     let adapter = NanoClawDocumentTreeAdapter::new_with_base_sources(
         data_root,
         source.path.clone(),
@@ -112,7 +130,7 @@ pub fn register_nanoclaw_source_backed_route_with_base_sources(
     crate::provider::source_backed::family::document::register_replacement_document_tree_route_with_authority(
         registry,
         source,
-        SourceBackedRouteSelection::ExplicitManual,
+        selection,
         SourceBackedSelectorAuthority::CatalogLineage,
         adapter,
     )

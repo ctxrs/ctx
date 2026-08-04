@@ -323,9 +323,9 @@ fn sources_discovers_forgecode_env_and_legacy_db() {
     assert_eq!(source["path"], legacy_db.to_str().unwrap());
 }
 #[test]
-fn explicit_native_sources_are_listed_but_not_auto_imported() {
+fn nanoclaw_exact_cwd_sources_are_native_and_auto_imported() {
     let temp = tempdir();
-    let query = "nanoclaw-explicit-auto-refresh-oracle";
+    let query = "nanoclaw-exact-cwd-auto-refresh-oracle";
     let project = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
 
     let mut sources_command = ctx(&temp);
@@ -338,33 +338,24 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
         .find(|source| source["provider"] == "nanoclaw")
         .unwrap();
     assert_eq!(nanoclaw["status"], "available");
-    assert_eq!(nanoclaw["import_support"], "explicit");
-    assert_eq!(nanoclaw["native_import"], false);
+    assert_eq!(nanoclaw["import_support"], "native");
+    assert_eq!(nanoclaw["native_import"], true);
     assert_eq!(nanoclaw["importable"], true);
     assert!(nanoclaw["unsupported_reason"].is_null());
 
-    let empty_generation =
-        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
+    let mut setup_command = ctx(&temp);
+    setup_command.current_dir(&project);
+    let imported_generation =
+        json_output(setup_command.args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(
-        empty_generation["refresh_request"]["receipt"]["current"]["current_source_count"], 0,
-        "{empty_generation:#}"
+        imported_generation["refresh_request"]["receipt"]["current"]["current_source_count"], 1,
+        "{imported_generation:#}"
     );
-
-    let mut search_command = ctx(&temp);
-    search_command.current_dir(&project);
-    let search = json_output(search_command.args([
-        "search",
-        query,
-        "--provider",
-        "nanoclaw",
-        "--refresh",
-        "background",
-        "--format=json",
-    ]));
-    assert_eq!(search["freshness"]["mode"], "background");
-    assert_eq!(search["freshness"]["status"], "daemon_background");
-    assert_eq!(search["freshness"]["source_count"], 0);
-    assert!(search["results"].as_array().unwrap().is_empty());
+    assert_eq!(
+        imported_generation["refresh_request"]["receipt"]["current"]["current_indexed_documents"],
+        2,
+        "{imported_generation:#}"
+    );
 
     ctx(&temp).args(["daemon", "enable"]).assert().success();
     let imported = json_output(ctx(&temp).args([
@@ -380,7 +371,14 @@ fn explicit_native_sources_are_listed_but_not_auto_imported() {
         .as_u64()
         .is_some_and(|count| count >= 1));
 
-    let search_after_import =
-        json_output(ctx(&temp).args(["search", query, "--provider", "nanoclaw", "--format=json"]));
-    assert_search_provider_oracle(&search_after_import, "nanoclaw", query, 1, "message");
+    let search_after_import = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "nanoclaw",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search_after_import, "nanoclaw", query, 2, "message");
 }

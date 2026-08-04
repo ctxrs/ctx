@@ -5,6 +5,7 @@ use std::{
 };
 
 use ctx_history_core::CaptureProvider;
+use quick_xml::{events::Event, Reader};
 use serde_json::{Map, Value};
 
 use super::super::{
@@ -12,7 +13,7 @@ use super::super::{
     selectors::{
         direct_entries, ordinary_directory, ordinary_file, ordinary_path, read_bounded_bytes,
         SelectorDocument, SelectorFormat, SelectorIncludeBudget, SelectorReadError, SelectorReader,
-        MAX_FINITE_SELECTOR_ENTRIES,
+        MAX_FINITE_SELECTOR_ENTRIES, MAX_SELECTOR_FILE_BYTES,
     },
     types::{DiscoveryIssueKind, DiscoveryReport, ProviderSourceKind, ProviderSourceSpec},
 };
@@ -36,6 +37,8 @@ const SELECTOR_LIMIT_REASON: &str =
     "the finite provider registry exceeds discovery limits; use an exact --path for omitted roots";
 const REMOTE_OPENHANDS_REASON: &str =
     "OpenHands selected remote event storage, so there is no local filesystem history root";
+const NANOCLAW_SERVICE_REGISTRATION_REASON: &str =
+    "the NanoClaw service registration is malformed, unsafe, or does not match the selected checkout; use an exact --path";
 
 pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
     let report = match spec.provider {
@@ -707,16 +710,376 @@ fn resolve_nanoclaw(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Di
     if !supported_posix_host(context) {
         return report;
     }
-    let Some(cwd) = context.cwd() else {
-        issue_manual(&mut report, spec.provider, None);
-        return report;
-    };
-    if ordinary_file(&cwd.join("data").join("v2.db"))
-        && ordinary_directory(&cwd.join("data").join("v2-sessions"))
+
+    if let Some(cwd) = context
+        .cwd()
+        .filter(|cwd| nanoclaw_supported_project_store(cwd))
     {
         push_selected_source(&mut report, spec, cwd.to_path_buf(), "nanoclaw_project");
+        return report;
+    }
+
+    for registration in nanoclaw_service_registrations(context) {
+        match registration {
+            Ok(project) => push_selected_source(&mut report, spec, project, "nanoclaw_project"),
+            Err(path) => report.issues.push(issue(
+                spec.provider,
+                Some(path),
+                DiscoveryIssueKind::SelectorUnreconstructible,
+                NANOCLAW_SERVICE_REGISTRATION_REASON,
+            )),
+        }
     }
     report
+}
+
+fn nanoclaw_supported_project_store(project: &Path) -> bool {
+    ordinary_file(&project.join("data").join("v2.db"))
+        && ordinary_directory(&project.join("data").join("v2-sessions"))
+}
+
+fn nanoclaw_service_registrations(context: &DiscoveryContext) -> Vec<Result<PathBuf, PathBuf>> {
+    match context.platform() {
+        DiscoveryPlatform::MacOS => {
+            nanoclaw_launchd_registrations(&context.home().join("Library").join("LaunchAgents"))
+        }
+        DiscoveryPlatform::Linux => {
+            let mut registrations =
+                nanoclaw_systemd_registrations(&context.home().join(".config/systemd/user"));
+            if context.home() == Path::new("/root") {
+                registrations.extend(nanoclaw_systemd_registrations(Path::new(
+                    "/etc/systemd/system",
+                )));
+            }
+            registrations
+        }
+        DiscoveryPlatform::Windows | DiscoveryPlatform::OtherUnix => Vec::new(),
+    }
+}
+
+fn nanoclaw_launchd_registrations(registry_dir: &Path) -> Vec<Result<PathBuf, PathBuf>> {
+    let mut registrations = Vec::new();
+    let Ok(entries) = nanoclaw_registration_entries(registry_dir) else {
+        return registrations;
+    };
+    for path in entries {
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if !nanoclaw_launchd_plist_name(name) {
+            continue;
+        }
+        registrations.push(
+            parse_nanoclaw_launchd_plist(&path)
+                .and_then(|project| validate_nanoclaw_registered_project(&path, project)),
+        );
+    }
+    registrations
+}
+
+fn nanoclaw_systemd_registrations(registry_dir: &Path) -> Vec<Result<PathBuf, PathBuf>> {
+    let mut registrations = Vec::new();
+    let Ok(entries) = nanoclaw_registration_entries(registry_dir) else {
+        return registrations;
+    };
+    for path in entries {
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if !nanoclaw_systemd_unit_name(name) {
+            continue;
+        }
+        registrations.push(
+            parse_nanoclaw_systemd_unit(&path)
+                .and_then(|project| validate_nanoclaw_registered_project(&path, project)),
+        );
+    }
+    registrations
+}
+
+fn nanoclaw_registration_entries(registry_dir: &Path) -> Result<Vec<PathBuf>, ()> {
+    match path_presence(registry_dir) {
+        PathPresence::Missing => Ok(Vec::new()),
+        PathPresence::Present if ordinary_directory(registry_dir) => direct_entries(registry_dir)
+            .map_err(|_| ())
+            .map(|mut entries| {
+                entries.retain(|entry| ordinary_file(entry));
+                entries
+            }),
+        _ => Err(()),
+    }
+}
+
+fn nanoclaw_launchd_plist_name(name: &str) -> bool {
+    name.strip_prefix("com.nanoclaw-v2-")
+        .and_then(|rest| rest.strip_suffix(".plist"))
+        .is_some_and(nanoclaw_slug)
+}
+
+fn nanoclaw_systemd_unit_name(name: &str) -> bool {
+    name.strip_prefix("nanoclaw-v2-")
+        .and_then(|rest| rest.strip_suffix(".service"))
+        .is_some_and(nanoclaw_slug)
+}
+
+fn nanoclaw_slug(value: &str) -> bool {
+    value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_nanoclaw_systemd_unit(path: &Path) -> Result<PathBuf, PathBuf> {
+    let bytes =
+        read_bounded_bytes(path, MAX_SELECTOR_FILE_BYTES).map_err(|_| path.to_path_buf())?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| path.to_path_buf())?;
+    let mut section = "";
+    let mut working_directory = None::<String>;
+    let mut exec_start = None::<String>;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = &line[1..line.len().saturating_sub(1)];
+            continue;
+        }
+        if section != "Service" {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(path.to_path_buf());
+        };
+        let value = value.trim();
+        match key.trim() {
+            "WorkingDirectory" => set_unique_string(&mut working_directory, value, path)?,
+            "ExecStart" => set_unique_string(&mut exec_start, value, path)?,
+            _ => {}
+        }
+    }
+
+    let project = PathBuf::from(working_directory.ok_or_else(|| path.to_path_buf())?);
+    reject_untrusted_service_path(&project).map_err(|_| path.to_path_buf())?;
+    let exec_start = exec_start.ok_or_else(|| path.to_path_buf())?;
+    let mut args = exec_start.split_ascii_whitespace();
+    let node = args.next().ok_or_else(|| path.to_path_buf())?;
+    let script = args.next().ok_or_else(|| path.to_path_buf())?;
+    if args.next().is_some() {
+        return Err(path.to_path_buf());
+    }
+    let node = Path::new(node);
+    reject_untrusted_service_path(node).map_err(|_| path.to_path_buf())?;
+    if Path::new(script) != project.join("dist/index.js") {
+        return Err(path.to_path_buf());
+    }
+    Ok(project)
+}
+
+fn parse_nanoclaw_launchd_plist(path: &Path) -> Result<PathBuf, PathBuf> {
+    let bytes =
+        read_bounded_bytes(path, MAX_SELECTOR_FILE_BYTES).map_err(|_| path.to_path_buf())?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| path.to_path_buf())?;
+    let values = parse_launchd_plist_values(text).map_err(|_| path.to_path_buf())?;
+    let label = exactly_one(values.labels).ok_or_else(|| path.to_path_buf())?;
+    let expected_label = path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| path.to_path_buf())?;
+    if label != expected_label || !label.starts_with("com.nanoclaw-v2-") {
+        return Err(path.to_path_buf());
+    }
+    let project =
+        PathBuf::from(exactly_one(values.working_directories).ok_or_else(|| path.to_path_buf())?);
+    reject_untrusted_service_path(&project).map_err(|_| path.to_path_buf())?;
+    if values.program_arguments.len() != 2 {
+        return Err(path.to_path_buf());
+    }
+    reject_untrusted_service_path(Path::new(&values.program_arguments[0]))
+        .map_err(|_| path.to_path_buf())?;
+    if Path::new(&values.program_arguments[1]) != project.join("dist/index.js") {
+        return Err(path.to_path_buf());
+    }
+    Ok(project)
+}
+
+#[derive(Default)]
+struct NanoClawLaunchdValues {
+    labels: Vec<String>,
+    working_directories: Vec<String>,
+    program_arguments: Vec<String>,
+}
+
+fn parse_launchd_plist_values(text: &str) -> Result<NanoClawLaunchdValues, ()> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut stack = Vec::<String>::new();
+    let mut last_key = None::<String>;
+    let mut active_array = None::<String>;
+    let mut values = NanoClawLaunchdValues::default();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => {
+                let name = std::str::from_utf8(element.name().as_ref())
+                    .map_err(|_| ())?
+                    .to_owned();
+                if name == "array" {
+                    active_array = last_key.clone();
+                }
+                stack.push(name);
+            }
+            Ok(Event::End(_)) => {
+                let ended = stack.pop().ok_or(())?;
+                if ended == "array" {
+                    active_array = None;
+                }
+            }
+            Ok(Event::Text(value)) => {
+                let text = value.decode().map_err(|_| ())?.into_owned();
+                match stack.last().map(String::as_str) {
+                    Some("key") => last_key = Some(text),
+                    Some("string") if active_array.as_deref() == Some("ProgramArguments") => {
+                        values.program_arguments.push(text)
+                    }
+                    Some("string") => match last_key.as_deref() {
+                        Some("Label") => values.labels.push(text),
+                        Some("WorkingDirectory") => values.working_directories.push(text),
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::DocType(_)) => {}
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return Err(()),
+        }
+    }
+    if !stack.is_empty() {
+        return Err(());
+    }
+    Ok(values)
+}
+
+fn exactly_one(mut values: Vec<String>) -> Option<String> {
+    if values.len() == 1 {
+        values.pop()
+    } else {
+        None
+    }
+}
+
+fn set_unique_string(slot: &mut Option<String>, value: &str, path: &Path) -> Result<(), PathBuf> {
+    if slot.replace(value.to_owned()).is_some() {
+        return Err(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn reject_untrusted_service_path(path: &Path) -> Result<(), ()> {
+    if !path.is_absolute() {
+        return Err(());
+    }
+    let text = path.to_string_lossy();
+    if text.is_empty()
+        || text.contains('$')
+        || text.contains('{')
+        || text.contains('}')
+        || text.contains('%')
+        || text.starts_with('~')
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_nanoclaw_registered_project(
+    registration: &Path,
+    project: PathBuf,
+) -> Result<PathBuf, PathBuf> {
+    if !selected_path_is_safe(&project, true) || !nanoclaw_supported_project_store(&project) {
+        return Err(registration.to_path_buf());
+    }
+    let slug = nanoclaw_sha1_slug(project.to_string_lossy().as_bytes());
+    let expected_launchd = format!("com.nanoclaw-v2-{slug}.plist");
+    let expected_systemd = format!("nanoclaw-v2-{slug}.service");
+    let Some(file_name) = registration.file_name().and_then(OsStr::to_str) else {
+        return Err(registration.to_path_buf());
+    };
+    if file_name != expected_launchd && file_name != expected_systemd {
+        return Err(registration.to_path_buf());
+    }
+    Ok(project)
+}
+
+fn nanoclaw_sha1_slug(input: &[u8]) -> String {
+    let mut message = input.to_vec();
+    let bit_len = (message.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut h0 = 0x6745_2301_u32;
+    let mut h1 = 0xefcd_ab89_u32;
+    let mut h2 = 0x98ba_dcfe_u32;
+    let mut h3 = 0x1032_5476_u32;
+    let mut h4 = 0xc3d2_e1f0_u32;
+
+    for chunk in message.chunks_exact(64) {
+        let mut w = [0_u32; 80];
+        for (index, word) in w.iter_mut().take(16).enumerate() {
+            let start = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[start],
+                chunk[start + 1],
+                chunk[start + 2],
+                chunk[start + 3],
+            ]);
+        }
+        for index in 16..80 {
+            w[index] = (w[index - 3] ^ w[index - 8] ^ w[index - 14] ^ w[index - 16]).rotate_left(1);
+        }
+
+        let mut a = h0;
+        let mut b = h1;
+        let mut c = h2;
+        let mut d = h3;
+        let mut e = h4;
+
+        for (index, word) in w.iter().enumerate() {
+            let (f, k) = match index {
+                0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+                _ => (b ^ c ^ d, 0xca62_c1d6),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+
+    let bytes = h0.to_be_bytes();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
 }
 
 fn resolve_astrbot(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {

@@ -232,7 +232,8 @@ Current rows include:
   `history_locations` list remain available through exact compatible
   `--path` imports;
 - AstrBot `data_v4.db` history when those files exist;
-- explicit-import rows for NanoClaw project roots when those paths are discoverable;
+- NanoClaw project stores from exact CWD or official launchd/systemd service
+  registration;
 - local history-source plugin manifests under `$CTX_DATA_ROOT/plugins` or
   `CTX_HISTORY_PLUGIN_PATH`.
 
@@ -788,11 +789,10 @@ published generations without refreshing or scheduling work, or
 complete. Results are rendered from Core under every refresh mode. Foreground
 refresh skips isolated malformed records with a
 warning and publishes valid records; source-level and system-level failures
-remain fatal. Explicit-only native sources such as
-NanoClaw, plus search-only sources without native import support, are searched
-from the active Core generation until they are explicitly imported through a
-supported path. Supported AstrBot `data_v4.db` locations participate in bounded
-native discovery and may also be imported with an explicit `--path`. Search
+remain fatal. NanoClaw and supported AstrBot `data_v4.db` locations participate
+in bounded native discovery and may also be imported with an explicit `--path`.
+Search-only sources without native import support are searched from the active
+Core generation until they are explicitly imported through a supported path. Search
 requires a non-empty query, at least one non-empty `--term`, or
 `--file <path>`; provider, workspace, time, session, event, source, and result
 flags only narrow an actual search. Default results are session-diverse: ctx

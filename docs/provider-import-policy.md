@@ -172,7 +172,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Trae | `trae_state_vscdb` | SQLite encoded/blob store | VS Code-style state database with JSON chat values. |
 | OpenClaw | `openclaw_session_jsonl_tree` | JSONL transcript stream/tree | Session tree with possible sidecar data. |
 | Hermes Agent | `hermes_state_sqlite` | SQLite message store | SQLite state/history rows. |
-| NanoClaw | `nanoclaw_project` | SQLite message store | Explicit project root containing central and per-session SQLite databases; automatic refresh stays disabled. |
+| NanoClaw | `nanoclaw_project` | SQLite message store | Native project root containing central and per-session SQLite databases, discovered from exact CWD or official launchd/systemd service registration; exact `--path` remains available. |
 | AstrBot | `astrbot_data_v4_sqlite` | SQLite message store | SQLite conversation/platform rows. |
 | Shelley | `shelley_sqlite` | SQLite message store | SQLite conversations, messages, and tool rows. |
 | Continue | `continue_cli_sessions_json` | JSON session/task document | JSON session files. |

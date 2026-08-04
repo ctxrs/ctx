@@ -9,7 +9,7 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
             .iter()
             .filter(|route| route.automatic)
             .count(),
-        41
+        42
     );
     assert_eq!(
         LANDED_SOURCE_BACKED_ROUTES
@@ -23,7 +23,7 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
             .iter()
             .filter(|route| route.automatic && route.unsupported_reason.is_none())
             .count(),
-        41
+        42
     );
     let unsupported = LANDED_SOURCE_BACKED_ROUTES
         .iter()

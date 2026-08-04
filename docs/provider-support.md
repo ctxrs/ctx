@@ -94,9 +94,10 @@ compatibility data remain supported.
 
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific
-transcript files exist and match the documented format. NanoClaw remains
-explicit-import only; it is not included in `ctx import --all` or pre-search
-refresh.
+transcript files exist and match the documented format. NanoClaw participates in
+native automatic import from an exact project CWD or official launchd/systemd
+service registration; exact `--path` imports remain available for unregistered
+project roots.
 
 ## Local Checks
 

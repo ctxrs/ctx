@@ -691,13 +691,13 @@
           "source_format": "nanoclaw_project",
           "fidelity": "partial",
           "notes": [
-            "Explicit-path importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
-            "Automatic project discovery checks only the exact current working directory; ancestors are not searched, and alternate roots require an exact explicit path."
+            "Native importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
+            "Automatic project discovery checks exact CWD first, then finite official service registrations: macOS ~/Library/LaunchAgents/com.nanoclaw-v2-<sha1>.plist, Linux user ~/.config/systemd/user/nanoclaw-v2-<sha1>.service, and root Linux /etc/systemd/system/nanoclaw-v2-<sha1>.service."
           ]
         }
       ],
       "history_locations": [
-        "Project default: exact-CWD checkout containing `data/v2.db` and required `data/v2-sessions`; alternate roots are explicit-only."
+        "Exact-CWD checkout containing `data/v2.db` and required `data/v2-sessions`; otherwise official launchd/systemd service registrations pinning a checkout WorkingDirectory. Alternate unregistered roots require exact `--path`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -716,7 +716,7 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "`import_support: explicit` excludes NanoClaw from setup, `--all`, daemon, and search refresh. Other clones/mounts require exact `--path`; no home/ancestor scan."
+        "Missing service metadata returns after fixed exact lookups. Malformed, oversized, unsafe, mismatched, missing-checkout, or symlinked registration data is rejected fail-closed; no checkout/ancestor scan and no nohup/WSL wrapper discovery because that wrapper is checkout-local."
       ],
       "public_docs": "docs/providers.md"
     },
