@@ -454,7 +454,7 @@ mod tests {
             "Output:\n",
             "[codex/v026-checkout-token-refresh 0c1ce19ed] ",
             "fix(pro): refresh auth while Checkout polls\n",
-            " 2 files changed, 290 insertions(+), 34 deletions(-)"
+            " 2 files changed, 290 insertions(+), 34 deletions(-)\n"
         );
         let captured = repository_result_evidence(
             &json!({"output": commit_output}),
