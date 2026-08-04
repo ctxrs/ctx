@@ -292,7 +292,8 @@ fn exact_reuse_skips_factory_and_returns_old_metadata_as_reused() {
     );
     assert_eq!(active_payload(temp.path()), payload_before);
     assert_eq!(constructions.load(Ordering::SeqCst), 0);
-    assert_eq!(crate::publication::verification_activity(), (1, 0));
+    assert_eq!(crate::publication::verification_activity(), (0, 0));
+    assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
     assert_eq!(crate::reader::verified_index_reopen_count(), 0);
     assert_eq!(
         crate::reader::verified_index_publication_construction_count(),

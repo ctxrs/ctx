@@ -26,6 +26,7 @@ struct VerifiedCandidate {
     searcher: Searcher,
     manifest: std::sync::Arc<GenerationManifest>,
     publication_metadata: Option<std::sync::Arc<[u8]>>,
+    physical_integrity_audit: PhysicalIntegrityAudit,
 }
 
 impl GenerationWriter {
@@ -375,7 +376,7 @@ impl GenerationWriter {
             )?;
         drop(manifest);
         let next_pointer = ActiveGenerationPointer::new(
-            verified.slot,
+            verified.slot.clone(),
             self.base_manifest.as_ref().and_then(|_| {
                 self.active_pointer
                     .as_ref()
@@ -404,6 +405,14 @@ impl GenerationWriter {
         let _ = clear_active_generation_rebuild_marker(&root);
         let _ = reclaim_inactive_generation_directories(&root, Some(&next_pointer));
         let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
+        let _ = reclaim_unreferenced_certifications(&root, Some(&next_pointer));
+        let _ = publication::certify_activated_generation(
+            &root,
+            &next_pointer,
+            next_pointer.active(),
+            verified.searcher.index(),
+            &verified.physical_integrity_audit,
+        );
 
         let receipt = CommitReceipt::from_verified_manifest(
             opstamp,
@@ -464,18 +473,19 @@ impl GenerationWriter {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        let physical_integrity_digest = physical_integrity_digest(&index, candidate_path)?;
+        let physical_integrity_audit = physical_integrity_audit(&index, candidate_path)?;
         verify_publication_candidate(&searcher, manifest, self.base_searcher.as_ref())?;
         let slot = GenerationSlot::new(
             generation_id.to_owned(),
             directory_name.to_owned(),
-            physical_integrity_digest,
+            physical_integrity_audit.digest().to_owned(),
         )?;
         Ok(VerifiedCandidate {
             slot,
             searcher,
             manifest: std::sync::Arc::new(loaded_publication.manifest),
             publication_metadata: loaded_publication.metadata,
+            physical_integrity_audit,
         })
     }
 
@@ -526,11 +536,15 @@ impl GenerationWriter {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         let active_index = open_slot_index(&self.root, active)?;
-        if let Err(error) = verify_physical_integrity(
-            &active_index,
-            &publication::slot_path(&self.root, active),
-            active.physical_integrity_digest(),
-        ) {
+        let pointer = self
+            .active_pointer
+            .as_ref()
+            .ok_or(IndexError::WriterInvariant(
+                "no-op integrity validation is missing its active pointer",
+            ))?;
+        if let Err(error) =
+            verify_or_certify_physical_integrity(&self.root, pointer, active, &active_index)
+        {
             let detail =
                 match writer_support::mark_active_generation_for_rebuild(&self.root, active) {
                     Ok(()) => error.to_string(),

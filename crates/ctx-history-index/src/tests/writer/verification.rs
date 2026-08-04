@@ -83,7 +83,8 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit() {
     stage_exact_replay(&mut noop, &cold_source);
     noop.commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
         .unwrap();
-    assert_eq!(crate::publication::verification_activity(), (1, 0));
+    assert_eq!(crate::publication::verification_activity(), (0, 0));
+    assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
     assert_eq!(constructions.load(Ordering::SeqCst), 0);
 
     crate::publication::reset_verification_activity();

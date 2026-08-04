@@ -7,9 +7,10 @@ use std::{
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory, is_generation_id,
     load_active_generation_pointer, load_publication_for_metas, meta_generation, open_slot_index,
-    payload_generation_id, searcher_generation, validate_schema, verify_complete_searcher,
-    verify_physical_integrity, verify_searcher_structure, ActiveGenerationPointer,
-    GenerationManifest, GenerationSlot, IndexError, Result,
+    payload_generation_id, scrub_and_certify_physical_integrity, searcher_generation,
+    validate_schema, verify_or_certify_physical_integrity, verify_searcher,
+    verify_searcher_structure, ActiveGenerationPointer, GenerationManifest, GenerationSlot,
+    IndexError, Result,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
@@ -50,20 +51,29 @@ impl VerifiedIndex {
         Ok(Some(generation_id))
     }
 
-    /// Opens a generation, verifies every physical checksum, and audits every
-    /// stored Core record plus its source and identity aggregates.
+    /// Opens a generation, validates its durable physical identity
+    /// certification (rehashing if it is unavailable or stale), and audits
+    /// every stored Core record plus its source and identity aggregates.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), true)
+        Self::open_inner(root.as_ref(), true, false)
+    }
+
+    /// Forces a complete physical SHA-256/CRC scrub and exhaustive stored-Core
+    /// audit, then refreshes the durable identity certification.
+    pub fn scrub(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(root.as_ref(), true, true)
     }
 
     /// Opens a previously audited immutable generation for querying.
     ///
-    /// The manifest digest, generation payload, schema/policy contract,
-    /// Tantivy generation pin, and total document count are verified on every
-    /// open. The publication-time O(document-count) identity audit is not
-    /// repeated for every query.
+    /// The pointer, manifest, generation payload, schema/policy contract,
+    /// Tantivy generation pin, certified artifact identities, and total
+    /// document count are verified on every open. Artifact bodies are rehashed
+    /// only when the durable certification is unavailable or stale. The
+    /// publication-time O(document-count) identity audit is not repeated for
+    /// every query.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), false)
+        Self::open_inner(root.as_ref(), false, false)
     }
 
     /// Opens exactly the requested active or retained previous generation.
@@ -73,11 +83,11 @@ impl VerifiedIndex {
     /// being resolved, the complete resolution is retried once against the
     /// new pointer and then fails closed on any second change.
     ///
-    /// Like [`Self::open_pinned`], this performs reopen-time structural
-    /// verification of the selected manifest, payload, schema/policy contract,
-    /// Tantivy generation pin, and total document count. It does not repeat
-    /// publication-time physical checksums or the O(document-count) stored-Core
-    /// identity and source audit.
+    /// Like [`Self::open_pinned`], this performs reopen-time certified physical
+    /// identity and structural verification of the selected manifest, payload,
+    /// schema/policy contract, Tantivy generation pin, and total document
+    /// count. It does not repeat the O(document-count) stored-Core identity and
+    /// source audit.
     pub fn open_pinned_generation(
         root: impl AsRef<Path>,
         expected_generation_id: &str,
@@ -164,7 +174,7 @@ impl VerifiedIndex {
                     .map(|slot| slot.generation_id().to_owned()),
             });
         };
-        Self::open_slot(root, slot, false, |actual_generation_id| {
+        Self::open_slot(root, pointer, slot, false, false, |actual_generation_id| {
             IndexError::PinnedGenerationMismatch {
                 expected_generation_id: expected_generation_id.to_owned(),
                 actual_generation_id,
@@ -172,7 +182,11 @@ impl VerifiedIndex {
         })
     }
 
-    fn open_inner(root: &Path, audit_stored_core: bool) -> Result<Self> {
+    fn open_inner(
+        root: &Path,
+        audit_stored_core: bool,
+        force_physical_scrub: bool,
+    ) -> Result<Self> {
         if !root.is_dir() {
             return Err(IndexError::MissingActiveGenerationPointer);
         }
@@ -181,15 +195,22 @@ impl VerifiedIndex {
         let root = control_directory.root_path().to_path_buf();
         let pointer = load_active_generation_pointer(&root)?
             .ok_or(IndexError::MissingActiveGenerationPointer)?;
-        Self::open_slot(&root, pointer.active(), audit_stored_core, |_| {
-            IndexError::InvalidActiveGenerationPointer
-        })
+        Self::open_slot(
+            &root,
+            &pointer,
+            pointer.active(),
+            audit_stored_core,
+            force_physical_scrub,
+            |_| IndexError::InvalidActiveGenerationPointer,
+        )
     }
 
     fn open_slot<F>(
         root: &Path,
+        pointer: &ActiveGenerationPointer,
         slot: &GenerationSlot,
         audit_stored_core: bool,
+        force_physical_scrub: bool,
         generation_mismatch: F,
     ) -> Result<Self>
     where
@@ -215,19 +236,14 @@ impl VerifiedIndex {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        if audit_stored_core {
-            verify_complete_searcher(
-                &searcher,
-                &manifest,
-                &crate::publication::slot_path(root, slot),
-                slot.physical_integrity_digest(),
-            )?;
+        if force_physical_scrub {
+            scrub_and_certify_physical_integrity(root, pointer, slot, &index)?;
         } else {
-            verify_physical_integrity(
-                &index,
-                &crate::publication::slot_path(root, slot),
-                slot.physical_integrity_digest(),
-            )?;
+            verify_or_certify_physical_integrity(root, pointer, slot, &index)?;
+        }
+        if audit_stored_core {
+            verify_searcher(&searcher, &manifest)?;
+        } else {
             verify_searcher_structure(&searcher, &manifest)?;
         }
         Ok(Self {

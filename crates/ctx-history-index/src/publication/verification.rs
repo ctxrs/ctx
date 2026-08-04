@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fs::File,
     io::Read,
     path::{Path, PathBuf},
     sync::{
@@ -32,6 +31,8 @@ use crate::{
     staging::{accumulate_core_record, core_record_accumulator_leaf},
     GenerationManifest, IndexError, Result,
 };
+
+use super::certification::{open_artifact, recapture_artifact, ArtifactIdentity};
 
 mod spill;
 
@@ -112,6 +113,7 @@ struct VerificationRunMetrics {
 #[cfg(test)]
 thread_local! {
     static CHECKSUM_WALKS: Cell<usize> = const { Cell::new(0) };
+    static HASHED_ARTIFACT_BYTES: Cell<u64> = const { Cell::new(0) };
     static LOGICAL_PASSES: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_TERMS: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_DOCUMENTS: Cell<usize> = const { Cell::new(0) };
@@ -143,9 +145,38 @@ const MAX_VERIFICATION_WORKERS: usize = 24;
 
 #[derive(Debug)]
 struct PhysicalFileDigest {
+    artifact: ArtifactIdentity,
+    sha256: [u8; 32],
+}
+
+#[derive(Debug)]
+struct PhysicalDigestPart {
     path: String,
     length: u64,
     sha256: [u8; 32],
+}
+
+#[derive(Debug)]
+pub(crate) struct PhysicalIntegrityAudit {
+    digest: String,
+    artifacts: Vec<ArtifactIdentity>,
+}
+
+impl PhysicalIntegrityAudit {
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(super) fn artifacts(&self) -> &[ArtifactIdentity] {
+        &self.artifacts
+    }
+
+    pub(super) fn artifact_paths(&self) -> Vec<String> {
+        self.artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect()
+    }
 }
 
 /// Computes one physical generation's canonical integrity digest.
@@ -157,27 +188,38 @@ struct PhysicalFileDigest {
 /// and temporary files are deliberately excluded because queries do not read them.
 /// Segment bytes are streamed once and checked against their Tantivy CRC footer
 /// while their stronger SHA-256 is computed.
+#[cfg(test)]
 pub(crate) fn physical_integrity_digest(
     index: &tantivy::Index,
     generation_path: &Path,
 ) -> Result<String> {
-    #[cfg(test)]
-    CHECKSUM_WALKS.with(|count| count.set(count.get() + 1));
-    physical_integrity_digest_inner(index, generation_path)
+    Ok(physical_integrity_audit(index, generation_path)?.digest)
 }
 
-fn physical_integrity_digest_inner(
+pub(crate) fn physical_integrity_audit(
     index: &tantivy::Index,
     generation_path: &Path,
-) -> Result<String> {
+) -> Result<PhysicalIntegrityAudit> {
+    #[cfg(test)]
+    CHECKSUM_WALKS.with(|count| count.set(count.get() + 1));
     let directory =
         DurableMmapDirectory::open(generation_path).map_err(|_| IndexError::ChecksumMismatch)?;
+    let root = generation_path
+        .parent()
+        .filter(|parent| {
+            parent
+                .file_name()
+                .is_some_and(|name| name == "index-generations")
+        })
+        .and_then(Path::parent)
+        .ok_or(IndexError::ChecksumMismatch)?;
     let mut paths = active_index_files(index)?;
     paths.insert(PathBuf::from(TANTIVY_META_FILE));
     let entries = paths
         .into_iter()
         .map(|path| {
             hash_physical_file(
+                root,
                 &directory,
                 generation_path,
                 &path,
@@ -185,7 +227,17 @@ fn physical_integrity_digest_inner(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    canonical_physical_integrity_digest(&entries)
+    let parts = entries
+        .iter()
+        .map(|entry| PhysicalDigestPart {
+            path: entry.artifact.path.clone(),
+            length: entry.artifact.identity.length(),
+            sha256: entry.sha256,
+        })
+        .collect::<Vec<_>>();
+    let digest = canonical_physical_integrity_digest(&parts)?;
+    let artifacts = entries.into_iter().map(|entry| entry.artifact).collect();
+    Ok(PhysicalIntegrityAudit { digest, artifacts })
 }
 
 /// Verifies a generation against the physical authority in its pointer slot.
@@ -194,36 +246,22 @@ pub(crate) fn verify_physical_integrity(
     generation_path: &Path,
     expected_digest: &str,
 ) -> Result<()> {
-    #[cfg(test)]
-    CHECKSUM_WALKS.with(|count| count.set(count.get() + 1));
-    let actual = physical_integrity_digest_inner(index, generation_path)?;
-    if actual != expected_digest {
+    let audit = physical_integrity_audit(index, generation_path)?;
+    if audit.digest != expected_digest {
         return Err(IndexError::ChecksumMismatch);
     }
     Ok(())
 }
 
 fn hash_physical_file(
+    root: &Path,
     directory: &DurableMmapDirectory,
     generation_path: &Path,
     relative_path: &Path,
     validate_tantivy_footer: bool,
 ) -> Result<PhysicalFileDigest> {
-    if relative_path.components().count() != 1 {
-        return Err(IndexError::ChecksumMismatch);
-    }
-    let path = relative_path
-        .to_str()
-        .ok_or(IndexError::ChecksumMismatch)?
-        .to_owned();
-    let full_path = generation_path.join(relative_path);
-    let metadata = full_path
-        .metadata()
-        .map_err(|_| IndexError::ChecksumMismatch)?;
-    if !metadata.is_file() {
-        return Err(IndexError::ChecksumMismatch);
-    }
-    let length = metadata.len();
+    let (mut file, artifact) = open_artifact(root, generation_path, relative_path)?;
+    let length = artifact.identity.length();
     let footer_contract = if validate_tantivy_footer {
         let slice = directory
             .open_read(relative_path)
@@ -238,7 +276,6 @@ fn hash_physical_file(
         None
     };
 
-    let mut file = File::open(&full_path).map_err(|_| IndexError::ChecksumMismatch)?;
     let mut sha256 = Sha256::new();
     let mut crc32 = footer_contract.map(|_| Crc32::new());
     let mut body_remaining = footer_contract.map_or(0, |(body_length, _)| body_length);
@@ -255,6 +292,8 @@ fn hash_physical_file(
         bytes_read = bytes_read
             .checked_add(count_u64)
             .ok_or(IndexError::CountOverflow)?;
+        #[cfg(test)]
+        HASHED_ARTIFACT_BYTES.with(|bytes| bytes.set(bytes.get().saturating_add(count_u64)));
         sha256.update(&buffer[..count]);
         if let Some(crc32) = crc32.as_mut() {
             let body_count = usize::try_from(body_remaining.min(count_u64))
@@ -271,14 +310,16 @@ fn hash_physical_file(
             return Err(IndexError::ChecksumMismatch);
         }
     }
+    if recapture_artifact(root, generation_path, relative_path)? != artifact {
+        return Err(IndexError::ChecksumMismatch);
+    }
     Ok(PhysicalFileDigest {
-        path,
-        length,
+        artifact,
         sha256: sha256.finalize().into(),
     })
 }
 
-fn canonical_physical_integrity_digest(entries: &[PhysicalFileDigest]) -> Result<String> {
+fn canonical_physical_integrity_digest(entries: &[PhysicalDigestPart]) -> Result<String> {
     let mut digest = Sha256::new();
     digest.update(PHYSICAL_INTEGRITY_DOMAIN);
     digest.update(
@@ -323,7 +364,7 @@ fn sha256_physical_authority_distinguishes_stubbed_crc_collision() {
     assert_eq!(first.bytes.len(), second.bytes.len());
     assert_eq!(first.crc32, second.crc32);
 
-    let entry = |file: &StubbedCrcFile<'_>| PhysicalFileDigest {
+    let entry = |file: &StubbedCrcFile<'_>| PhysicalDigestPart {
         path: file.path.to_owned(),
         length: u64::try_from(file.bytes.len()).unwrap(),
         sha256: Sha256::digest(file.bytes).into(),
@@ -334,7 +375,7 @@ fn sha256_physical_authority_distinguishes_stubbed_crc_collision() {
     );
 }
 
-fn active_index_files(index: &tantivy::Index) -> Result<BTreeSet<PathBuf>> {
+pub(super) fn active_index_files(index: &tantivy::Index) -> Result<BTreeSet<PathBuf>> {
     let directory = index.directory();
     let metas = index.load_metas()?;
     let mut expected_files = BTreeSet::new();
@@ -360,25 +401,6 @@ fn active_index_files(index: &tantivy::Index) -> Result<BTreeSet<PathBuf>> {
         }
     }
     Ok(expected_files)
-}
-
-/// Verifies the complete publication authority carried by one immutable searcher.
-///
-/// This is the shared publication/startup path: physical Tantivy checksums are
-/// checked before the exhaustive stored-Core, source aggregate, and identity
-/// audit.
-pub(crate) fn verify_complete_searcher(
-    searcher: &Searcher,
-    manifest: &GenerationManifest,
-    generation_path: &Path,
-    expected_physical_integrity_digest: &str,
-) -> Result<()> {
-    verify_physical_integrity(
-        searcher.index(),
-        generation_path,
-        expected_physical_integrity_digest,
-    )?;
-    verify_searcher(searcher, manifest)
 }
 
 /// Verifies a writer-produced candidate without replaying an already-audited base.
@@ -723,6 +745,7 @@ pub(crate) fn verify_searcher_with_metrics(
 #[cfg(test)]
 pub(crate) fn reset_verification_activity() {
     CHECKSUM_WALKS.with(|count| count.set(0));
+    HASHED_ARTIFACT_BYTES.with(|bytes| bytes.set(0));
     LOGICAL_PASSES.with(|count| count.set(0));
     CANDIDATE_IDENTITY_TERMS.with(|count| count.set(0));
     CANDIDATE_IDENTITY_DOCUMENTS.with(|count| count.set(0));
@@ -734,6 +757,11 @@ pub(crate) fn verification_activity() -> (usize, usize) {
         CHECKSUM_WALKS.with(Cell::get),
         LOGICAL_PASSES.with(Cell::get),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn hashed_artifact_bytes() -> u64 {
+    HASHED_ARTIFACT_BYTES.with(Cell::get)
 }
 
 #[cfg(test)]
