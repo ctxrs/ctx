@@ -23,7 +23,6 @@ pub(crate) struct VerificationRecord {
     pub(crate) session_event_order: [u8; SESSION_EVENT_ORDER_KEY_LEN],
     pub(crate) semantic_event_order: [u8; SEMANTIC_EVENT_ORDER_KEY_LEN],
     pub(crate) event_range_order: [u8; EVENT_RANGE_ORDER_KEY_LEN],
-    pub(crate) body: Option<String>,
     pub(crate) identities: CompactVerificationIdentities,
     pub(crate) stored_core_bytes: usize,
 }
@@ -104,7 +103,6 @@ pub(crate) fn stored_verification_record(
         core_content_bytes(&core.content)?,
     )?
     .into_bytes();
-    let body = core.content.normalized_body.clone();
     let identities = CompactVerificationIdentities {
         event: core.event_id.into(),
         session: core.session_id.into(),
@@ -120,7 +118,6 @@ pub(crate) fn stored_verification_record(
         session_event_order,
         semantic_event_order,
         event_range_order,
-        body,
         identities,
         stored_core_bytes,
     })

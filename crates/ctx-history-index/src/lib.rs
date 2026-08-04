@@ -17,6 +17,7 @@ mod publication;
 mod query;
 mod reader;
 mod schema;
+mod search_projection;
 mod staging;
 mod writer_deletion;
 mod writer_publication;
@@ -102,6 +103,7 @@ pub use reader::VerifiedIndex;
 #[cfg(test)]
 pub(crate) use schema::required_field;
 pub(crate) use schema::{fields_from_schema, lexical_schema, validate_schema, Fields};
+pub use search_projection::project_body_search;
 pub use writer_support::BaseEventIdentityLookup;
 
 use std::{

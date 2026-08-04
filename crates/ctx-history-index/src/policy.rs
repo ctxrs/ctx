@@ -13,7 +13,7 @@ pub const SOURCE_ROUTE_SNAPSHOT_REVISION: u32 = 1;
 pub const AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS: u32 = 3;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 17;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
-pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 3;
+pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 4;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
 pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 2;
@@ -283,10 +283,13 @@ mod tests {
             .as_object()
             .unwrap()
             .contains_key("core_repository_association_policy_revision"));
+        assert_eq!(first.policy_version, 10);
+        assert_eq!(first.lexical.event_projector_revision, 4);
         assert_eq!(first.lexical.schema_revision, 17);
+        assert_eq!(first.lexical.tokenizer_revision, 2);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "e728b5d7b76d04248e9dccc91fc11d915fcbcd714b445090725ba0604b8e8b37"
+            "f9204898f2c6783d94954d1aad4e374bd507f538b547fb0d66c8b8174c6838a3"
         );
     }
 

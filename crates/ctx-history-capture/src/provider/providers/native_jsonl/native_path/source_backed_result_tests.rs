@@ -233,7 +233,7 @@ fn copilot_and_windsurf_replay_preserve_current_revision_ids_and_records() {
             "c1ebd99c-7338-859b-891d-1c7e04d9ae9d",
             "5ff93a01-4aa3-82f8-8d9e-784490016567",
             "8d4627ce-c12c-8d64-af2d-d85ac722121f",
-            "e4ff824c4d7ee3d0013103491db678391e7558a0795decc86ec7ff62c88ab505",
+            "80dad7726d3955a9d853a053fa886ce204b45f41abfd5025f8b478da943ff0e4",
         ),
     ];
 

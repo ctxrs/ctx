@@ -175,11 +175,11 @@ never checkpoint or write provider data.
 
 A qualifying normalized event may carry
 `mcp_tool_call: {server, tool}` as event-local Core metadata. The pair is stored
-only with that Core event. It is not copied into lexical terms, semantic text,
-`usage.sqlite`, or the Local Pro graph, and query paths do not reconstruct it
-from provider-specific content or current MCP configuration. Presentation
-`--content none` retains already-stored metadata; Core `Redacted` or `Omitted`
-policy omits the sensitive pair by default.
+only with that Core event. The top-level pair is not copied into lexical terms,
+semantic text, `usage.sqlite`, or the Local Pro graph, and query paths do not
+reconstruct it from provider-specific content or current MCP configuration.
+Presentation `--content none` retains already-stored metadata; Core `Redacted`
+or `Omitted` policy omits the sensitive pair by default.
 
 A selected Core event may separately carry content-governed `mcp_exchange`
 with a provider call ID and invocation and/or terminal response. Present
@@ -189,20 +189,32 @@ exchange share the 16 MiB Core encoded-content budget. Oversized JSON channels
 become explicit `omitted` capture states without truncation; if the compact
 exchange cannot fit, the ordinary event remains stored without it.
 
-The exchange is retrievable from full-content event output but is not copied
-into Tantivy fields or tokens, semantic text, `usage.sqlite`, SQL columns, or
-the Local Pro graph. Provider call IDs, arguments, status/timing, and response
-payloads add no selectors, snippets, or ranking signals. Existing normalized
-body indexing behavior is unchanged. See
+The exchange is retrievable from full-content event output. Lexical publication
+projects the invocation server, tool, and compact JSON value of `present`
+arguments into ordinary body search for a policy-selected record. Other
+argument capture states add no terms. The projection follows the record's
+existing event type: separate invocation records are calls, while a combined
+Codex terminal `tool_output` remains an output and is not also classified as a
+call.
+
+The provider call ID, response status/failure/timing, and structured response
+payload are not copied into search terms. Response text with a
+`normalized_body` disposition retains its existing body-search behavior exactly
+once. The exchange adds no semantic text, selector, filter, search result field,
+`usage.sqlite` value, SQL column, or Local Pro fact. See
 [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
 
 Search, show, list, locate, and MCP retrieval read verified Core/Tantivy
 generations. List continuations remain bound to the named active or retained
 generation, and JSONL holds one generation pin for its whole traversal. Show
-and list present complete policy-selected normalized records stored in Core,
-while locate returns bounded Core source identity metadata. None of these read
+and list present the exact, complete policy-selected normalized records stored
+in Core, while search snippets come from the Core-backed searchable projection
+and locate returns bounded Core source identity metadata. None of these read
 paths reopens provider history. Provider changes become visible after import or
-daemon refresh publishes a new Core generation.
+daemon refresh publishes a new Core generation. Search projection changes are
+part of lexical generation identity, so an older active generation is rebuilt
+or passes the narrow same-epoch preservation migration before newly projected
+invocation terms become searchable.
 
 Lexical publication keeps the active generation and one previous generation
 for recovery and pinned readers; their manifests and integrity receipts use the

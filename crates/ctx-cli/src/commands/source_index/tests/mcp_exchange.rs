@@ -6,6 +6,10 @@ use ctx_history_core::{
 use super::*;
 use crate::commands::source_index::mcp_show_event;
 
+const ARGUMENT_SEARCH_CANARY: &str = "zzargumentcanary8h63";
+const CALL_ID_SEARCH_CANARY: &str = "zzcallidcanary7g52";
+const RESPONSE_SEARCH_CANARY: &str = "zzresponsecanary9j74";
+
 fn complete_exchange(payload: Value) -> McpExchangeContent {
     McpExchangeContent {
         provider_call_id: "native-call-呼び出し-🦀".to_owned(),
@@ -119,4 +123,99 @@ fn full_show_surfaces_mcp_exchange_losslessly_and_accounts_for_its_output_bytes(
         "no exchange",
     );
     assert!(render_event_value(&absent).get("mcp_exchange").is_none());
+}
+
+#[test]
+fn search_snippets_use_mcp_invocation_arguments_but_exclude_response_and_call_id() {
+    let temp = tempdir().unwrap();
+    let event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 96, 1);
+    let exchange = McpExchangeContent {
+        provider_call_id: CALL_ID_SEARCH_CANARY.to_owned(),
+        invocation: Some(McpInvocationContent {
+            server: "mcp-検索サーバー".to_owned(),
+            tool: "nested_lookup_tool".to_owned(),
+            arguments: McpJsonCapture::Present {
+                value: json!({
+                    "outer": {
+                        "雪": ["東京", {"argument_only": ARGUMENT_SEARCH_CANARY}],
+                    },
+                }),
+            },
+        }),
+        response: Some(McpTerminalResponseContent {
+            status: McpTerminalStatus::Succeeded,
+            failure_kind: None,
+            duration_ns: Some(42),
+            text: McpTextCapture::NormalizedBody,
+            payload: McpJsonCapture::Present {
+                value: json!({"response_only": RESPONSE_SEARCH_CANARY}),
+            },
+        }),
+    };
+    let exact_exchange = serde_json::to_value(&exchange).unwrap();
+    let mut stored = fixture_core_event(&event, "ordinary stored response body");
+    stored.core_record.mcp_tool_call = Some(McpToolCallAttribution {
+        server: "mcp-検索サーバー".to_owned(),
+        tool: "nested_lookup_tool".to_owned(),
+    });
+    stored.core_record.content.mcp_exchange = Some(exchange);
+    stored.core_record.validate_contract().unwrap();
+    append_fixture_session(temp.path(), std::slice::from_ref(&stored), 96);
+
+    let mut argument_request = request(RefreshArg::Off);
+    argument_request.query = ARGUMENT_SEARCH_CANARY.to_owned();
+    argument_request.events = true;
+    argument_request.limit = 1;
+    let (value, collection, _) = search_existing_generation(
+        &argument_request,
+        open_index(temp.path()).unwrap(),
+        temp.path(),
+        argument_request.semantic_weight,
+        "existing_generation",
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(collection.result_window.hits.len(), 1);
+    assert_eq!(
+        value["results"][0]["ctx_event_id"],
+        json!(event.event_id.as_uuid())
+    );
+    let snippet = value["results"][0]["snippet"].as_str().unwrap();
+    assert!(snippet.contains(ARGUMENT_SEARCH_CANARY));
+    assert!(snippet.contains("東京"));
+    assert!(!snippet.contains(CALL_ID_SEARCH_CANARY));
+    assert!(!snippet.contains(RESPONSE_SEARCH_CANARY));
+
+    let (mcp_value, _) = mcp_search(argument_request, temp.path()).unwrap();
+    assert_eq!(mcp_value["results"][0]["snippet"], snippet);
+
+    let shown = mcp_show_event(
+        temp.path(),
+        &stored.event_id.as_uuid().to_string(),
+        0,
+        0,
+        None,
+        crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+    )
+    .unwrap();
+    assert_eq!(shown["event"]["text"], "ordinary stored response body");
+    assert_eq!(shown["event"]["mcp_exchange"], exact_exchange);
+
+    for excluded in [CALL_ID_SEARCH_CANARY, RESPONSE_SEARCH_CANARY] {
+        let mut excluded_request = request(RefreshArg::Off);
+        excluded_request.query = excluded.to_owned();
+        excluded_request.events = true;
+        let (value, collection, _) = search_existing_generation(
+            &excluded_request,
+            open_index(temp.path()).unwrap(),
+            temp.path(),
+            excluded_request.semantic_weight,
+            "existing_generation",
+            1,
+        )
+        .unwrap();
+        assert!(collection.result_window.hits.is_empty());
+        assert!(value["results"].as_array().unwrap().is_empty());
+    }
 }

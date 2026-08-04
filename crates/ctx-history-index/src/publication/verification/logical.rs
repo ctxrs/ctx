@@ -129,9 +129,7 @@ fn verify_searcher_with_options(
             index: total_documents,
         });
     }
-    if live_body_token_count(searcher, fields.body_search)? != expected_body_tokens {
-        return Err(IndexError::InvalidStoredDocumentField("body_search"));
-    }
+    verify_live_body_token_count(searcher, fields.body_search, expected_body_tokens)?;
     let mut projection_deltas = verification_spill.load_projection_deltas()?;
     metrics.verification_tracked_heap_bytes = metrics
         .verification_tracked_heap_bytes
@@ -210,15 +208,6 @@ fn verify_segment(
             )
             .ok_or(IndexError::CountOverflow)?;
         verify_query_fast_fields(segment, doc_id, &record)?;
-        body_tokens = body_tokens
-            .checked_add(verify_body_projection(
-                &body_search,
-                &mut body_analyzer,
-                fields.body_search,
-                record.body.as_deref(),
-                doc_id,
-            )?)
-            .ok_or(IndexError::CountOverflow)?;
         let projection_delta = expected_query_projection_delta(fields, &record)?;
         let source_ordinal = *source_ordinals
             .get(&record.source_owner)
@@ -233,6 +222,16 @@ fn verify_segment(
         accumulate_core_record(&mut source.accumulator, &accumulator_leaf);
         parent_session_documents = parent_session_documents
             .checked_add(u64::from(record.identities.parent_session.is_some()))
+            .ok_or(IndexError::CountOverflow)?;
+        let body_projection = crate::project_body_search(record.core_record.content)?;
+        body_tokens = body_tokens
+            .checked_add(verify_body_projection(
+                &body_search,
+                &mut body_analyzer,
+                fields.body_search,
+                body_projection.as_deref(),
+                doc_id,
+            )?)
             .ok_or(IndexError::CountOverflow)?;
         identity_writer.write_record(
             doc_id,
@@ -713,6 +712,13 @@ fn live_body_token_count(searcher: &Searcher, field: Field) -> Result<u64> {
     Ok(total)
 }
 
+fn verify_live_body_token_count(searcher: &Searcher, field: Field, expected: u64) -> Result<()> {
+    if live_body_token_count(searcher, field)? != expected {
+        return Err(IndexError::InvalidStoredDocumentField("body_search"));
+    }
+    Ok(())
+}
+
 fn merge_source_aggregates(
     target: &mut BTreeMap<String, SourceAggregate>,
     source: BTreeMap<String, SourceAggregate>,
@@ -925,4 +931,85 @@ fn canonical_uuid_term(term: &[u8], field: &'static str) -> Result<Uuid> {
         return Err(IndexError::InvalidStoredDocumentField(field));
     }
     Ok(uuid)
+}
+
+#[cfg(test)]
+mod body_projection_tests {
+    use ctx_history_core::{
+        CoreContent, CoreContentPolicyStatus, McpExchangeContent, McpInvocationContent,
+        McpJsonCapture,
+    };
+    use tantivy::TantivyDocument;
+
+    use super::*;
+
+    fn expected_invocation_projection() -> String {
+        crate::project_body_search(CoreContent {
+            policy_revision: 1,
+            policy_status: CoreContentPolicyStatus::Selected,
+            normalized_body: Some("normalized body".to_owned()),
+            structured_content: None,
+            mcp_exchange: Some(McpExchangeContent {
+                provider_call_id: "excluded-call-id".to_owned(),
+                invocation: Some(McpInvocationContent {
+                    server: "verificationservercanary".to_owned(),
+                    tool: "verificationtoolcanary".to_owned(),
+                    arguments: McpJsonCapture::Present {
+                        value: serde_json::json!({
+                            "verificationargumentkey": "verificationargumentvalue"
+                        }),
+                    },
+                }),
+                response: None,
+            }),
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn searcher_with_body(body: &str) -> (Searcher, Field) {
+        let schema = crate::lexical_schema();
+        let fields = crate::fields_from_schema(&schema).unwrap();
+        let index = tantivy::Index::create_in_ram(schema);
+        crate::analyzer::register_body_analyzer(&index);
+        let mut writer = index.writer(20_000_000).unwrap();
+        let mut document = TantivyDocument::default();
+        document.add_text(fields.body_search, body);
+        writer.add_document(document).unwrap();
+        writer.commit().unwrap();
+        writer.wait_merging_threads().unwrap();
+        let reader = index.reader().unwrap();
+        (reader.searcher(), fields.body_search)
+    }
+
+    #[test]
+    fn body_verification_rejects_missing_and_extra_invocation_terms() {
+        let expected = expected_invocation_projection();
+        let mut analyzer = crate::analyzer::body_analyzer();
+
+        let (missing_searcher, field) =
+            searcher_with_body("normalized body\nverificationservercanary\nverificationtoolcanary");
+        let missing_inverted = missing_searcher
+            .segment_reader(0)
+            .inverted_index(field)
+            .unwrap();
+        assert!(matches!(
+            verify_body_projection(&missing_inverted, &mut analyzer, field, Some(&expected), 0,),
+            Err(IndexError::InvalidStoredDocumentField("body_search"))
+        ));
+
+        let (extra_searcher, field) =
+            searcher_with_body(&format!("{expected}\nextrainvocationterm"));
+        let extra_inverted = extra_searcher
+            .segment_reader(0)
+            .inverted_index(field)
+            .unwrap();
+        let expected_token_count =
+            verify_body_projection(&extra_inverted, &mut analyzer, field, Some(&expected), 0)
+                .unwrap();
+        assert!(matches!(
+            verify_live_body_token_count(&extra_searcher, field, expected_token_count),
+            Err(IndexError::InvalidStoredDocumentField("body_search"))
+        ));
+    }
 }

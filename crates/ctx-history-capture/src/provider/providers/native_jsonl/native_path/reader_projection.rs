@@ -128,6 +128,23 @@ impl DirectJsonlProjector {
         }
 
         let touches = direct_jsonl_touches(&value, event_type, false);
+        let generic_tool_call_body = self.provider == CaptureProvider::CopilotCli
+            && event_type == EventType::ToolCall
+            && super::copilot::copilot_start_requires_generic_body(bytes);
+        let mcp_exchange = (self.provider == CaptureProvider::CopilotCli)
+            .then(|| super::copilot::copilot_mcp_exchange(bytes, None))
+            .flatten();
+        let fallback_identity_discriminator = mcp_exchange
+            .as_ref()
+            .filter(|exchange| exchange.invocation.is_some())
+            .map(|exchange| {
+                crate::compute_payload_hash(&json!({
+                    "domain": "ctx.copilot-mcp-invocation-fallback-v1",
+                    "provider_call_id": exchange.provider_call_id,
+                    "invocation": exchange.invocation,
+                }))
+            })
+            .transpose()?;
         let mut event = direct_event(
             self.provider,
             &self.source_format,
@@ -138,10 +155,10 @@ impl DirectJsonlProjector {
             occurred_at,
             None,
             touches,
+            generic_tool_call_body,
+            fallback_identity_discriminator.as_deref(),
         )?;
-        if self.provider == CaptureProvider::CopilotCli {
-            event.mcp_exchange = super::copilot::copilot_mcp_exchange(bytes, None);
-        }
+        event.mcp_exchange = mcp_exchange;
         event.source_record = DirectJsonlSourceRecord {
             byte_start,
             byte_end_exclusive,
@@ -245,6 +262,8 @@ impl DirectJsonlProjector {
                 occurred_at,
                 Some(&subrecord),
                 touches,
+                false,
+                None,
             )?;
             if self.provider == CaptureProvider::CopilotCli {
                 event.mcp_tool_call = self
@@ -394,11 +413,13 @@ fn direct_event(
     occurred_at: DateTime<Utc>,
     result: Option<&super::result_content::NativeJsonlResultSubrecord<'_>>,
     touches: Vec<DirectJsonlTouch>,
+    generic_tool_call_body: bool,
+    fallback_identity_discriminator: Option<&str>,
 ) -> Result<DirectJsonlEvent> {
     let event_type = direct_jsonl_event_type(provider, value);
     let entry_type = native_jsonl_entry_type(provider, value);
     let role = direct_jsonl_role(provider, value);
-    let text = if event_type == EventType::ToolOutput {
+    let text = if generic_tool_call_body || event_type == EventType::ToolOutput {
         String::new()
     } else {
         direct_jsonl_event_text(provider, value, event_type, &entry_type)
@@ -436,7 +457,7 @@ fn direct_event(
         _ => None,
     };
     let provider_event_sequence_index = positional_event_index;
-    let provider_event_hash = crate::compute_payload_hash(&json!({
+    let mut provider_event_hash_input = json!({
         "event_type": event_type.as_str(),
         "role": role.as_str(),
         "native_record_id": native_record_id,
@@ -445,7 +466,21 @@ fn direct_event(
         "lexical_text": lexical_text,
         "tool_result": tool_result.clone(),
         "touches": touches,
-    }))?;
+    });
+    if native_record_id.is_none() {
+        if let Some(discriminator) = fallback_identity_discriminator {
+            provider_event_hash_input
+                .as_object_mut()
+                .ok_or(CaptureError::SystemInvariant(
+                    "direct JSONL fallback hash input is not an object",
+                ))?
+                .insert(
+                    "fallback_identity_discriminator".to_owned(),
+                    Value::String(discriminator.to_owned()),
+                );
+        }
+    }
+    let provider_event_hash = crate::compute_payload_hash(&provider_event_hash_input)?;
     Ok(DirectJsonlEvent {
         raw_ordinal,
         sub_ordinal,
