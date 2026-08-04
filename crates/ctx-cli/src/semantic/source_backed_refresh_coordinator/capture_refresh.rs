@@ -816,14 +816,12 @@ fn build_merged_source_backed_registry(
     let (previous_explicit_source_catalog, previous_catalog_route_bindings) =
         retained_catalog_witness(retained_generation.as_ref())?;
     // A request overlay is not the whole durable explicit catalog. Keep every
-    // retained explicit owner out of automatic discovery while a different
-    // explicit route is selected, so those base routes remain carried rather
-    // than being re-scanned under a new automatic identity.
-    if let Some(catalog) = previous_explicit_source_catalog.as_ref().filter(|catalog| {
-        explicit_source_catalog
-            .is_none_or(|requested| catalog.route_lineages() != requested.route_lineages())
-    }) {
-        catalog.prepare_discovery_report(data_root, &mut report)?;
+    // unmatched retained explicit owner out of automatic discovery so those
+    // base routes remain carried rather than being re-scanned under a new
+    // automatic identity. Deduplicate only exact provider/format/path keys:
+    // relocation deliberately preserves lineage while changing the path.
+    if let Some(catalog) = previous_explicit_source_catalog.as_ref() {
+        catalog.prepare_retained_discovery_report(explicit_source_catalog, &mut report)?;
     }
     if let Some(catalog) = explicit_source_catalog {
         catalog.prepare_discovery_report(data_root, &mut report)?;

@@ -46,6 +46,53 @@ mod tests {
     }
 
     #[test]
+    fn retained_shadow_deduplication_uses_exact_route_keys_not_lineage() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let old_path = temp.path().join("old.jsonl");
+        let new_path = temp.path().join("new.jsonl");
+        fs::write(&old_path, b"\n").unwrap();
+        fs::write(&new_path, b"\n").unwrap();
+
+        let retained = upsert_explicit_source(&data_root, &custom_source(old_path.clone()))
+            .unwrap()
+            .authority;
+        let mut relocated = upsert_explicit_source(&data_root, &custom_source(new_path.clone()))
+            .unwrap()
+            .authority;
+        relocated.entries[0].catalog_lineage = retained.entries[0].catalog_lineage.clone();
+        relocated = authority_for(relocated.revision, &relocated.entries).unwrap();
+
+        let mut report = DiscoveryReport {
+            sources: vec![custom_source(old_path.clone()), custom_source(new_path.clone())],
+            issues: Vec::new(),
+        };
+        retained
+            .prepare_retained_discovery_report(Some(&relocated), &mut report)
+            .unwrap();
+        assert_eq!(report.sources.len(), 1);
+        assert_eq!(report.sources[0].path, new_path);
+
+        relocated
+            .prepare_discovery_report(&data_root, &mut report)
+            .unwrap();
+        assert!(report.sources.is_empty());
+
+        let mut repeated = DiscoveryReport {
+            sources: vec![custom_source(old_path.clone())],
+            issues: Vec::new(),
+        };
+        retained
+            .prepare_retained_discovery_report(Some(&retained), &mut repeated)
+            .unwrap();
+        assert_eq!(repeated.sources.len(), 1);
+        retained
+            .prepare_discovery_report(&data_root, &mut repeated)
+            .unwrap();
+        assert!(repeated.sources.is_empty());
+    }
+
+    #[test]
     fn request_overlay_cannot_encode_deletion_authority() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history.jsonl");

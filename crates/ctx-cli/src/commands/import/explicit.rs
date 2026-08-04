@@ -142,6 +142,7 @@ pub(crate) fn run_explicit_source_catalog_import(
         source_files: stats.files,
         source_bytes: stats.bytes,
         imported_sources: usize::from(requested_succeeded),
+        sources_completed_with_rejections: usize::from(requested_rejected),
         failed_sources: requested_outcome.source_failure_total,
         // This is the exact terminal outcome of the selected route, not an
         // inferred delta from whole-generation current counts.

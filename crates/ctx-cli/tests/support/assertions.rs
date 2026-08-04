@@ -1,6 +1,6 @@
 #[cfg(any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures))]
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub(crate) fn assert_omits_keys(value: &Value, forbidden_keys: &[&str]) {
     match value {
@@ -29,10 +29,40 @@ pub(crate) fn assert_explicit_source_publication<'a>(
     provider: &str,
     source_format: &str,
 ) -> &'a Value {
+    assert_explicit_source_publication_with_rejections(packet, provider, source_format, 0)
+}
+
+pub(crate) fn assert_explicit_source_publication_with_rejections<'a>(
+    packet: &'a Value,
+    provider: &str,
+    source_format: &str,
+    rejected_records: u64,
+) -> &'a Value {
     assert_eq!(packet["schema_version"], 2, "{packet:#}");
-    assert_eq!(packet["outcome"], "success", "{packet:#}");
-    assert_eq!(packet["failure_scope"], "none", "{packet:#}");
-    assert_eq!(packet["failure_type"], "none", "{packet:#}");
+    let has_rejections = rejected_records != 0;
+    assert_eq!(
+        packet["outcome"],
+        if has_rejections {
+            "completed_with_rejections"
+        } else {
+            "success"
+        },
+        "{packet:#}"
+    );
+    assert_eq!(
+        packet["failure_scope"],
+        if has_rejections { "record" } else { "none" },
+        "{packet:#}"
+    );
+    assert_eq!(
+        packet["failure_type"],
+        if has_rejections {
+            "record_rejection"
+        } else {
+            "none"
+        },
+        "{packet:#}"
+    );
     let sources = packet["sources"]
         .as_array()
         .unwrap_or_else(|| panic!("missing explicit source receipts in {packet:#}"));
@@ -40,7 +70,20 @@ pub(crate) fn assert_explicit_source_publication<'a>(
     let source = &sources[0];
     assert_eq!(source["provider"], provider, "{packet:#}");
     assert_eq!(source["source_format"], source_format, "{packet:#}");
-    assert_eq!(source["status"], "published", "{packet:#}");
+    assert_eq!(
+        source["status"],
+        if has_rejections {
+            "partial"
+        } else {
+            "published"
+        },
+        "{packet:#}"
+    );
+    assert_eq!(
+        source["failure_scope"], packet["failure_scope"],
+        "{packet:#}"
+    );
+    assert_eq!(source["failure_type"], packet["failure_type"], "{packet:#}");
     assert!(source["published_generation"].is_string(), "{packet:#}");
     for key in [
         "current_source_count",
@@ -60,12 +103,27 @@ pub(crate) fn assert_explicit_source_publication<'a>(
         assert_eq!(packet["totals"][key], source[key], "{packet:#}");
     }
     assert_eq!(packet["totals"]["failed_sources"], 0, "{packet:#}");
-    assert_eq!(packet["totals"]["rejected_records"], 0, "{packet:#}");
     assert_eq!(
-        packet["totals"]["sources_completed_with_rejections"], 0,
+        packet["totals"]["rejected_records"], rejected_records,
         "{packet:#}"
     );
-    assert!(packet["totals"]["rejections"].is_object(), "{packet:#}");
+    let rejected_sources = usize::from(has_rejections);
+    assert_eq!(
+        packet["totals"]["sources_completed_with_rejections"], rejected_sources,
+        "{packet:#}"
+    );
+    assert_eq!(
+        packet["totals"]["rejections"],
+        json!({
+            "rejected_records": rejected_records,
+            "sources_completed_with_rejections": rejected_sources,
+        }),
+        "{packet:#}"
+    );
+    assert_eq!(
+        source["rejected_record_total"], rejected_records,
+        "{packet:#}"
+    );
     assert_omits_keys(
         packet,
         &["imported_sessions", "imported_events", "skipped_events"],
