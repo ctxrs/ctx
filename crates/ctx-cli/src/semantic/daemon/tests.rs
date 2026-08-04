@@ -922,7 +922,7 @@ fn due_consumer_retry_wait_loop_blocks_and_wakes_when_query_becomes_idle() -> Re
 }
 
 #[test]
-fn due_dirty_route_waits_for_background_cadence_instead_of_spinning() {
+fn due_dirty_route_wait_is_classified_as_scheduled_refresh_instead_of_spinning() {
     let coordinator =
         CoreRefreshEngine::with_executor(Arc::new(|_: SourceBackedRefreshExecution<'_>| {
             anyhow::bail!("executor must remain idle")
@@ -949,6 +949,18 @@ fn due_dirty_route_waits_for_background_cadence_instead_of_spinning() {
         wait_for,
         super::super::daemon_scheduler::DAEMON_BACKGROUND_REFRESH_MIN_REST
     );
+    assert!(!daemon_scheduled_refresh_due(
+        &runtime,
+        Some(&coordinator),
+        now,
+        1_000,
+    ));
+    assert!(daemon_scheduled_refresh_due(
+        &runtime,
+        Some(&coordinator),
+        now + super::super::daemon_scheduler::DAEMON_BACKGROUND_REFRESH_MIN_REST,
+        1_000,
+    ));
 }
 
 #[test]

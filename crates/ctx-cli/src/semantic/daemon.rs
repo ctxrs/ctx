@@ -35,7 +35,7 @@ use super::{
     },
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
-        daemon_retry_due, daemon_run_start_mode,
+        daemon_retry_due, daemon_run_start_mode, daemon_scheduled_refresh_due,
         preserve_daemon_background_refresh_recovery_provenance,
         restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
         restore_daemon_source_refresh_retry, run_daemon_scheduler_cycle_with_activity,
@@ -639,15 +639,26 @@ pub(super) fn run_daemon_inner(
             if retry_wakeup_due {
                 wakeup.record_scheduled_retry_wakeup();
             }
+            let source_refresh = refresh_service
+                .as_ref()
+                .map(|service| service.source_refresh.as_ref());
+            let scheduled_refresh_wakeup_due = wake.timed_out
+                && !retry_wakeup_due
+                && daemon_scheduled_refresh_due(
+                    &runtime,
+                    source_refresh,
+                    Instant::now(),
+                    source_route_ledger_now_ms(),
+                );
+            if scheduled_refresh_wakeup_due {
+                wakeup.record_scheduled_refresh_wakeup();
+            }
             let source_retry_due = retry_wakeup_due
                 && runtime.history_retry.consecutive_failures > 0
                 && runtime.history_retry.ready();
             if safety_due {
                 next_safety_reconcile = Instant::now() + safety_interval;
             }
-            let source_refresh = refresh_service
-                .as_ref()
-                .map(|service| service.source_refresh.as_ref());
             let watch_reconcile_trigger = wake
                 .source_watch
                 .reconcile
@@ -675,12 +686,17 @@ pub(super) fn run_daemon_inner(
                     .record_watch_routes(wake.source_watch.routes, source_route_ledger_now_ms());
             }
             if let Some(watcher) = watch_runtime.file_watcher.as_ref() {
-                let _ =
-                    watcher.write_receipt(if safety_due || wake.filesystem || source_retry_due {
+                let _ = watcher.write_receipt(
+                    if safety_due
+                        || wake.filesystem
+                        || source_retry_due
+                        || scheduled_refresh_wakeup_due
+                    {
                         "active"
                     } else {
                         "idle"
-                    });
+                    },
+                );
             }
             if daemon_upgrade_handoff_blocks_current_process(data_root)
                 || installation_upgrade_blocks_current_process(data_root)

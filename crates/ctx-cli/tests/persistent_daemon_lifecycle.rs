@@ -457,8 +457,9 @@ mod native {
         let stopped_wakeup = read_json_file(&wakeup_path(harness.root()));
         assert_eq!(stopped_wakeup["status"], "stopped", "{stopped_wakeup:#}");
         assert_eq!(
-            stopped_wakeup["wakeup"]["timeout_wakeups"],
-            stopped_wakeup["wakeup"]["scheduled_retry_wakeups"],
+            counter(&stopped_wakeup, "timeout_wakeups"),
+            counter(&stopped_wakeup, "scheduled_retry_wakeups")
+                .saturating_add(counter(&stopped_wakeup, "scheduled_refresh_wakeups")),
             "bounded qualification observed an unclassified timeout wake: {stopped_wakeup:#}"
         );
         assert!(

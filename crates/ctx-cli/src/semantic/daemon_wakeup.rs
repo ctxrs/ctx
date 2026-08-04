@@ -147,6 +147,7 @@ struct DaemonWakeupState {
     blocking_waits: u64,
     timeout_wakeups: u64,
     scheduled_retry_wakeups: u64,
+    scheduled_refresh_wakeups: u64,
     work_cycles: u64,
     no_work_cycles: u64,
     // One merged batch replaces a queue of batches. Route entries therefore
@@ -328,6 +329,11 @@ impl DaemonWakeup {
         state.scheduled_retry_wakeups = state.scheduled_retry_wakeups.saturating_add(1);
     }
 
+    pub(super) fn record_scheduled_refresh_wakeup(&self) {
+        let mut state = self.lock_state();
+        state.scheduled_refresh_wakeups = state.scheduled_refresh_wakeups.saturating_add(1);
+    }
+
     fn snapshot(&self) -> Value {
         let state = self.lock_state();
         compact_json(json!({
@@ -337,6 +343,7 @@ impl DaemonWakeup {
             "shutdown_signals": state.shutdown_signals,
             "timeout_wakeups": state.timeout_wakeups,
             "scheduled_retry_wakeups": state.scheduled_retry_wakeups,
+            "scheduled_refresh_wakeups": state.scheduled_refresh_wakeups,
             "work_cycles": state.work_cycles,
             "no_work_cycles": state.no_work_cycles,
         }))
