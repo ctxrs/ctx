@@ -14,6 +14,8 @@ impl CoreRefreshEngine {
                 admission: SourceRefreshAdmissionRequirement::AttachEquivalent,
                 route_observations: BTreeMap::new(),
                 request_id: None,
+                request_fingerprint: None,
+                admission_pending: false,
             },
         )
     }
@@ -47,6 +49,8 @@ impl CoreRefreshEngine {
                 admission: SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
                 route_observations: admission_route_observations,
                 request_id: Some(request_id),
+                request_fingerprint: None,
+                admission_pending: false,
             },
         )
     }
@@ -73,6 +77,8 @@ impl CoreRefreshEngine {
                 admission: SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
                 route_observations: BTreeMap::new(),
                 request_id: Some(request_id),
+                request_fingerprint: None,
+                admission_pending: false,
             },
         ) {
             Ok(response) => response,
@@ -106,6 +112,8 @@ impl CoreRefreshEngine {
                 admission: SourceRefreshAdmissionRequirement::AttachEquivalent,
                 route_observations: BTreeMap::new(),
                 request_id: None,
+                request_fingerprint: None,
+                admission_pending: false,
             },
         )
         .expect("requests without catalog authority always coalesce")
@@ -119,16 +127,44 @@ impl CoreRefreshEngine {
         refresh_scope: SourceBackedRefreshScope,
         logical_demand: SourceRefreshLogicalDemand,
     ) -> Result<Value> {
+        let mut state = self.lock_state();
+        let response = Self::enqueue_with_catalog_metadata_locked(
+            &mut state,
+            observed_generation,
+            metadata,
+            requested_catalog,
+            refresh_scope,
+            logical_demand,
+        )?;
+        trim_terminal_attempt_history(&mut state);
+        Ok(response)
+    }
+
+    pub(super) fn enqueue_with_catalog_metadata_locked(
+        state: &mut CoreRefreshEngineState,
+        observed_generation: Option<String>,
+        metadata: SourceRefreshRuntimeMetadata,
+        requested_catalog: Option<ExplicitSourceCatalogAuthority>,
+        refresh_scope: SourceBackedRefreshScope,
+        logical_demand: SourceRefreshLogicalDemand,
+    ) -> Result<Value> {
         let SourceRefreshLogicalDemand {
             admission,
             route_observations: mut admission_route_observations,
             request_id: logical_request_id,
+            request_fingerprint,
+            admission_pending,
         } = logical_demand;
-        let mut state = self.lock_state();
         if let Some(existing) = logical_request_id
             .as_deref()
-            .and_then(|request_id| find_attempt(&state, request_id))
+            .and_then(|request_id| find_attempt(state, request_id))
         {
+            if existing.request_fingerprint.as_ref() != request_fingerprint.as_ref() {
+                return Err(SourceBackedRefreshIdempotencyConflict {
+                    request_id: existing.request_id.clone(),
+                }
+                .into());
+            }
             return Ok(existing.to_json());
         }
         let is_manual_all = admission
@@ -136,12 +172,26 @@ impl CoreRefreshEngine {
             && refresh_scope == SourceBackedRefreshScope::All;
         let mut continuation_predecessor = None;
         if let Some(active_request_id) = state.active_request_id.clone() {
-            if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
+            if let Some(active) = find_attempt_mut(state, &active_request_id) {
                 if active.state.is_active() {
-                    if is_manual_all && active.state == SourceBackedRefreshState::Running {
+                    if is_manual_all {
                         continuation_predecessor = Some(active.request_id.clone());
-                    }
-                    if admission.requires_successor(active.state) {
+                        if active.state == SourceBackedRefreshState::Queued {
+                            if let Some(requested_catalog) = requested_catalog.as_ref() {
+                                if active.requested_explicit_source_catalog.is_none() {
+                                    active.requested_explicit_source_catalog =
+                                        Some(requested_catalog.clone());
+                                }
+                            }
+                            active.refresh_scope = SourceBackedRefreshScope::All;
+                            let _ = coalesce_attempt(active, metadata);
+                            active.coalesced_logical_demands =
+                                active.coalesced_logical_demands.saturating_add(1);
+                        } else {
+                            active.coalesced_logical_demands =
+                                active.coalesced_logical_demands.saturating_add(1);
+                        }
+                    } else if admission.requires_successor(active.state) {
                         // A logical freshness demand attaches to the immutable
                         // physical attempt, then proves coverage after its
                         // publication instead of eagerly repeating the pass.
@@ -182,7 +232,7 @@ impl CoreRefreshEngine {
             && requested_catalog.is_some()
         {
             let coalesced_request_id = state.pending_request_ids.iter().find_map(|request_id| {
-                find_attempt(&state, request_id)
+                find_attempt(state, request_id)
                     .filter(|attempt| {
                         attempt.state.is_active()
                             && attempt.requested_explicit_source_catalog.as_ref()
@@ -192,13 +242,13 @@ impl CoreRefreshEngine {
                     .map(|attempt| attempt.request_id.clone())
             });
             if let Some(coalesced_request_id) = coalesced_request_id {
-                let attempt = find_attempt_mut(&mut state, &coalesced_request_id)
+                let attempt = find_attempt_mut(state, &coalesced_request_id)
                     .expect("pending source refresh attempt");
                 return Ok(coalesce_attempt(attempt, metadata));
             }
         }
 
-        let active_pending_requests = durable_queue_entry_count(&state);
+        let active_pending_requests = durable_queue_entry_count(state);
         if active_pending_requests >= SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             return Err(SourceBackedRefreshQueueFull {
                 active_pending_requests,
@@ -215,13 +265,15 @@ impl CoreRefreshEngine {
         if let Some(logical_request_id) = logical_request_id {
             attempt.request_id = logical_request_id;
         }
-        let response = attempt.to_json();
+        attempt.request_fingerprint = request_fingerprint;
+        attempt.fresh_after_admitted_snapshot =
+            admission == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot;
         let request_id = attempt.request_id.clone();
         let terminal_persistence_owns_root = state.pending_terminal_persistence.is_some();
         let active_attempt_owns_root = state
             .active_request_id
             .as_deref()
-            .and_then(|request_id| find_attempt(&state, request_id))
+            .and_then(|request_id| find_attempt(state, request_id))
             .is_some_and(|attempt| attempt.state.is_active());
         if terminal_persistence_owns_root || active_attempt_owns_root {
             state.pending_request_ids.push_back(request_id.clone());
@@ -229,46 +281,60 @@ impl CoreRefreshEngine {
             state.active_request_id = Some(request_id.clone());
         }
         if let Some(predecessor_request_id) = continuation_predecessor {
-            let ledger_eligible_routes = state
-                .known_route_ids
-                .iter()
-                .filter(|route| !admission_route_observations.contains_key(*route))
-                .cloned()
-                .collect();
-            for route in &state.known_route_ids {
-                admission_route_observations
-                    .entry(route.clone())
-                    .or_insert(None);
-            }
-            let admission_event_watermarks = admission_route_observations
-                .keys()
-                .filter_map(|route| {
-                    state
-                        .route_event_watermarks
-                        .get(route)
-                        .copied()
-                        .map(|watermark| (route.clone(), watermark))
-                })
-                .collect();
-            let predecessor_event_watermarks = state
-                .route_admission_watermarks
-                .get(&predecessor_request_id)
-                .cloned()
-                .unwrap_or_default();
-            state.manual_all_continuations.insert(
-                request_id,
+            attempt.coalesced_into_request_id = Some(predecessor_request_id.clone());
+            let continuation = if admission_pending {
+                ManualAllContinuation::pending(predecessor_request_id)
+            } else {
+                let ledger_eligible_routes = state
+                    .known_route_ids
+                    .iter()
+                    .filter(|route| {
+                        admission_route_observations
+                            .get(*route)
+                            .is_none_or(Option::is_none)
+                    })
+                    .cloned()
+                    .collect();
+                for route in &state.known_route_ids {
+                    admission_route_observations
+                        .entry(route.clone())
+                        .or_insert(None);
+                }
+                let admission_event_watermarks = admission_route_observations
+                    .keys()
+                    .filter_map(|route| {
+                        state
+                            .route_event_watermarks
+                            .get(route)
+                            .copied()
+                            .map(|watermark| (route.clone(), watermark))
+                    })
+                    .collect();
+                let predecessor_event_watermarks = state
+                    .route_admission_watermarks
+                    .get(&predecessor_request_id)
+                    .cloned()
+                    .unwrap_or_default();
                 ManualAllContinuation::new(
                     predecessor_request_id,
                     admission_route_observations,
                     ledger_eligible_routes,
                     admission_event_watermarks,
                     predecessor_event_watermarks,
-                ),
-            );
+                )
+            };
+            state
+                .manual_all_continuations
+                .insert(request_id.clone(), continuation);
+        }
+        if admission_pending {
+            attempt.state = SourceBackedRefreshState::AdmissionPending;
+            attempt.progress.phase = "admission_pending".to_owned();
         }
         state.attempts.push_back(attempt);
-        trim_terminal_attempt_history(&mut state);
-        Ok(response)
+        Ok(find_attempt(state, &request_id)
+            .expect("new source refresh request")
+            .to_json())
     }
 
     pub(in super::super) fn status(&self, request_id: &str) -> Option<Value> {
@@ -771,7 +837,7 @@ impl CoreRefreshEngine {
     }
 
     #[cfg(test)]
-    pub(in super::super) fn run_next_with<Execute, Probe, Published, Failed>(
+    pub(in crate::semantic) fn run_next_with<Execute, Probe, Published, Failed>(
         &self,
         execute: Execute,
         probe: Probe,

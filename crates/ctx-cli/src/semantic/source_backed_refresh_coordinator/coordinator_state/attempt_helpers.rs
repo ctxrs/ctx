@@ -104,6 +104,11 @@ pub(super) fn new_refresh_attempt(
         refresh_scope,
         operation: metadata.operation,
         requested_explicit_source_catalog: requested_catalog,
+        fresh_after_admitted_snapshot: false,
+        request_fingerprint: None,
+        admission_durability_indeterminate: false,
+        coalesced_into_request_id: None,
+        coalesced_logical_demands: 0,
         coalesced_requests: 0,
         progress: SourceBackedRefreshProgress::default(),
         scanned_routes: None,
@@ -120,6 +125,19 @@ pub(super) fn new_refresh_attempt(
         trigger_provenance: metadata.trigger_provenance,
         failure_type: None,
         last_error: None,
+    }
+}
+
+pub(super) fn recover_admission_durability(job: &Value, context: &str) -> Result<bool> {
+    match (
+        job.get("admission_acknowledgement").and_then(Value::as_str),
+        job.get("admission_durability").and_then(Value::as_str),
+    ) {
+        (None, None) => Ok(false),
+        (Some("retained_after_durability_error"), Some("replacement_visible_or_indeterminate")) => {
+            Ok(true)
+        }
+        _ => bail!("{context} has invalid admission durability state"),
     }
 }
 

@@ -1,5 +1,11 @@
 use super::*;
 
+#[path = "client_observation_recovery.rs"]
+mod observation_recovery;
+use observation_recovery::{
+    request_bound_status_with_recovery, retained_request_unobservable, DISCONNECT_POLICY,
+};
+
 type SourceBackedRefreshProgressReporter<'a> =
     &'a mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>;
 
@@ -37,24 +43,52 @@ pub(crate) struct SourceBackedRefreshObservation {
     pub(crate) source_count: usize,
     pub(crate) request_previous_generation: Option<String>,
     pub(crate) request_generation_changed: bool,
+    pub(crate) scanned_routes: Option<usize>,
     pub(crate) receipt: Option<SourceBackedRefreshReceipt>,
     pub(crate) pin: PinnedSourceBackedGeneration,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum SourceRefreshProtocolState {
+    AdmissionPending,
     Queued,
     Running,
     Published,
     Failed,
 }
 
+const AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT: usize = 3;
 const TYPED_UNKNOWN_RECOVERY_ATTEMPT_LIMIT: usize = 3;
+
+#[derive(Debug)]
+struct SourceRefreshAdmissionRecoveryFailed {
+    request_id: String,
+    recovery_attempts: usize,
+}
+
+impl fmt::Display for SourceRefreshAdmissionRecoveryFailed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "daemon source refresh admission acknowledgement for {} remains unresolved after {} same-request recovery attempts; the request may be durably admitted and disconnect does not cancel it",
+            self.request_id, self.recovery_attempts
+        )
+    }
+}
+
+impl std::error::Error for SourceRefreshAdmissionRecoveryFailed {}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum SourceRefreshRequestRecoveryFailureReason {
     AttemptsExhausted,
     RequestIdChanged,
+    ReenqueueFailed,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum SourceRefreshRequestRetention {
+    NotRetained,
+    MayBeRetained,
 }
 
 #[derive(Debug)]
@@ -62,6 +96,9 @@ pub(super) struct SourceRefreshRequestRecoveryFailed {
     pub(super) request_id: String,
     pub(super) recovery_attempts: usize,
     pub(super) reason: SourceRefreshRequestRecoveryFailureReason,
+    pub(super) retention: SourceRefreshRequestRetention,
+    pub(super) disconnect_policy: Option<&'static str>,
+    pub(super) detail: Option<String>,
 }
 
 impl fmt::Display for SourceRefreshRequestRecoveryFailed {
@@ -73,12 +110,31 @@ impl fmt::Display for SourceRefreshRequestRecoveryFailed {
             SourceRefreshRequestRecoveryFailureReason::RequestIdChanged => {
                 "typed unknown-request recovery returned a different logical request ID"
             }
+            SourceRefreshRequestRecoveryFailureReason::ReenqueueFailed => {
+                "same-ID recovery could not durably re-admit the logical request"
+            }
         };
         write!(
             formatter,
-            "daemon source refresh request {} was lost after {} recovery attempts: {reason}",
+            "daemon source refresh request {} could not be conclusively recovered after {} recovery attempts: {reason}",
             self.request_id, self.recovery_attempts
-        )
+        )?;
+        match self.retention {
+            SourceRefreshRequestRetention::NotRetained => {
+                formatter.write_str("; request_retained=false")?;
+            }
+            SourceRefreshRequestRetention::MayBeRetained => {
+                write!(
+                    formatter,
+                    "; request_retained=unknown; disconnect_policy={}",
+                    self.disconnect_policy.unwrap_or(DISCONNECT_POLICY)
+                )?;
+            }
+        }
+        if let Some(detail) = self.detail.as_deref() {
+            write!(formatter, ": {detail}")?;
+        }
+        Ok(())
     }
 }
 
@@ -100,6 +156,9 @@ impl TypedUnknownRequestRecovery {
                 request_id: request_id.to_owned(),
                 recovery_attempts: self.attempts,
                 reason: SourceRefreshRequestRecoveryFailureReason::AttemptsExhausted,
+                retention: SourceRefreshRequestRetention::NotRetained,
+                disconnect_policy: None,
+                detail: None,
             }
             .into());
         }
@@ -119,9 +178,14 @@ impl TypedUnknownRequestRecovery {
     ) -> Result<String> {
         if recovered_request_id != previous_request_id {
             return Err(SourceRefreshRequestRecoveryFailed {
-                request_id: recovered_request_id,
+                request_id: previous_request_id.to_owned(),
                 recovery_attempts: self.attempts,
                 reason: SourceRefreshRequestRecoveryFailureReason::RequestIdChanged,
+                retention: SourceRefreshRequestRetention::NotRetained,
+                disconnect_policy: None,
+                detail: Some(format!(
+                    "recovery response named logical request {recovered_request_id}"
+                )),
             }
             .into());
         }
@@ -141,8 +205,68 @@ where
 {
     let backoff = recovery.begin_attempt(request_id)?;
     sleep(backoff);
-    let recovered_request_id = reenqueue()?;
+    let recovered_request_id = reenqueue().map_err(|error| {
+        let retention = if error
+            .downcast_ref::<SourceRefreshAdmissionRecoveryFailed>()
+            .is_some()
+        {
+            SourceRefreshRequestRetention::MayBeRetained
+        } else {
+            SourceRefreshRequestRetention::NotRetained
+        };
+        SourceRefreshRequestRecoveryFailed {
+            request_id: request_id.to_owned(),
+            recovery_attempts: recovery.attempts,
+            reason: SourceRefreshRequestRecoveryFailureReason::ReenqueueFailed,
+            retention,
+            disconnect_policy: (retention == SourceRefreshRequestRetention::MayBeRetained)
+                .then_some(DISCONNECT_POLICY),
+            detail: Some(format!("{error:#}")),
+        }
+    })?;
     recovery.accept_recovered_request_id(request_id, recovered_request_id)
+}
+
+fn request_admission_with_recovery<S, R>(
+    request_id: &str,
+    mut sleep: S,
+    mut roundtrip: R,
+) -> Result<Option<Value>>
+where
+    S: FnMut(StdDuration),
+    R: FnMut() -> Result<Option<Value>>,
+{
+    match roundtrip() {
+        Ok(response) => return Ok(response),
+        Err(error)
+            if error
+                .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                .is_some() =>
+        {
+            return Err(error)
+        }
+        Err(error)
+            if DaemonSourceRefreshServiceUnavailable::request_may_have_been_submitted(&error) => {}
+        Err(error) => return Err(error),
+    }
+
+    for recovery_attempt in 0..AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT {
+        let backoff = match recovery_attempt {
+            0 => StdDuration::from_millis(25),
+            1 => StdDuration::from_millis(50),
+            _ => StdDuration::from_millis(100),
+        };
+        sleep(backoff);
+        if let Ok(Some(response)) = roundtrip() {
+            return Ok(Some(response));
+        }
+    }
+
+    Err(SourceRefreshAdmissionRecoveryFailed {
+        request_id: request_id.to_owned(),
+        recovery_attempts: AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT,
+    }
+    .into())
 }
 
 /// Coordinates source-backed refresh without ever falling back to a foreground
@@ -224,6 +348,7 @@ fn coordinate_source_backed_refresh_with_catalog(
             source_count: 0,
             request_previous_generation: None,
             request_generation_changed: false,
+            scanned_routes: None,
             receipt: None,
             pin,
         });
@@ -241,28 +366,43 @@ fn coordinate_source_backed_refresh_with_catalog(
     }
 
     let logical_request_id = Uuid::now_v7().to_string();
-    let response = match send_wait_authority_request(
+    let admission_request = wait_authority_request_json(
         data_root,
         &logical_request_id,
         mode,
         operation,
         explicit_source_catalog,
         fresh_after_admitted_snapshot,
-    ) {
-        Ok(Some(response)) => response,
-        Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
-        Err(error)
-            if error
-                .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                .is_some() =>
-        {
-            return daemon_unavailable_fallback(data_root, mode, Some(error))
-        }
-        Err(error) => return Err(error.context("request daemon-owned source-backed refresh")),
-    };
+    )?;
+    let response =
+        match request_admission_with_recovery(&logical_request_id, std::thread::sleep, || {
+            daemon_source_refresh_request(
+                data_root,
+                admission_request.clone(),
+                SOURCE_REFRESH_IPC_TIMEOUT,
+                SOURCE_REFRESH_RESPONSE_MAX_BYTES,
+            )
+        }) {
+            Ok(Some(response)) => response,
+            Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
+            Err(error)
+                if error
+                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                    .is_some() =>
+            {
+                return daemon_unavailable_fallback(data_root, mode, Some(error))
+            }
+            Err(error) => return Err(error),
+        };
     validate_daemon_refresh_response(&response)?;
-    let request_id = response_request_id(&response, "daemon source refresh response")?;
-    validate_source_refresh_status_response_authority(&response, &request_id)?;
+    let accepted_request_id = response_request_id(&response, "daemon source refresh response")?;
+    let request_id = if fresh_after_admitted_snapshot {
+        validate_source_refresh_status_response_authority(&response, &logical_request_id)?;
+        logical_request_id
+    } else {
+        validate_source_refresh_status_response_authority(&response, &accepted_request_id)?;
+        accepted_request_id
+    };
     source_refresh_protocol_state(&response)?;
 
     if mode == SourceBackedRefreshMode::Background {
@@ -283,6 +423,7 @@ fn coordinate_source_backed_refresh_with_catalog(
             source_count: response_source_count(&response),
             request_previous_generation: None,
             request_generation_changed: false,
+            scanned_routes: None,
             receipt: None,
             pin,
         });
@@ -351,18 +492,28 @@ fn wait_for_published_generation_inner(
     let mut last_reported_progress = None;
     let mut last_reported_at = None;
     loop {
-        let response = match daemon_source_refresh_request(
-            data_root,
-            compact_json(json!({
-                "schema_version": 1,
-                "op": SOURCE_REFRESH_STATUS_OP,
-                "request_id": request_id,
-            })),
-            SOURCE_REFRESH_IPC_TIMEOUT,
-            SOURCE_REFRESH_RESPONSE_MAX_BYTES,
+        let status_request = compact_json(json!({
+            "schema_version": 1,
+            "op": SOURCE_REFRESH_STATUS_OP,
+            "request_id": request_id,
+        }));
+        let response = match request_bound_status_with_recovery(
+            &request_id,
+            std::thread::sleep,
+            || {
+                daemon_source_refresh_request(
+                    data_root,
+                    status_request.clone(),
+                    SOURCE_REFRESH_IPC_TIMEOUT,
+                    SOURCE_REFRESH_RESPONSE_MAX_BYTES,
+                )
+            },
         ) {
             Ok(Some(response)) => response,
             Ok(None) => {
+                if !allow_daemon_autostart {
+                    return Err(retained_request_unobservable(&request_id, 0));
+                }
                 request_id = recover_wait_refresh_request(
                     data_root,
                     &request_id,
@@ -381,6 +532,9 @@ fn wait_for_published_generation_inner(
                     .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                     .is_some() =>
             {
+                if !allow_daemon_autostart {
+                    return Err(retained_request_unobservable(&request_id, 0));
+                }
                 request_id = recover_wait_refresh_request(
                     data_root,
                     &request_id,
@@ -479,6 +633,13 @@ fn wait_for_published_generation_inner(
                     })?;
                 let request_previous_generation =
                     optional_generation(response.get("previous_generation"))?;
+                let scanned_routes = response
+                    .get("scanned_routes")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| {
+                        anyhow!("published daemon source refresh has no scanned route count")
+                    })?;
                 return Ok(SourceBackedRefreshObservation {
                     mode,
                     status: "published".to_owned(),
@@ -487,6 +648,7 @@ fn wait_for_published_generation_inner(
                     source_count: response_source_count(&response),
                     request_previous_generation,
                     request_generation_changed,
+                    scanned_routes: Some(scanned_routes),
                     receipt: Some(receipt),
                     pin,
                 });
@@ -494,7 +656,9 @@ fn wait_for_published_generation_inner(
             SourceRefreshProtocolState::Failed => {
                 return failed_refresh_response(&response);
             }
-            SourceRefreshProtocolState::Queued | SourceRefreshProtocolState::Running => {
+            SourceRefreshProtocolState::AdmissionPending
+            | SourceRefreshProtocolState::Queued
+            | SourceRefreshProtocolState::Running => {
                 std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
             }
         }
@@ -587,32 +751,33 @@ fn recover_wait_refresh_request(
     allow_daemon_autostart: bool,
 ) -> Result<String> {
     if !allow_daemon_autostart {
-        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
-            "the explicit source import disabled daemon autostart".to_owned(),
-        ))
-        .into());
+        return Err(retained_request_unobservable(request_id, 0));
     }
-    let config =
-        AppConfig::load(data_root).context("load daemon configuration for refresh recovery")?;
-    if !config.daemon.enabled {
-        return Err(SourceBackedRefreshDaemonUnavailable::new(Some(
-            "daemon was disabled while waiting for source refresh".to_owned(),
+    let recovery = (|| {
+        let config =
+            AppConfig::load(data_root).context("load daemon configuration for refresh recovery")?;
+        if !config.daemon.enabled {
+            bail!("daemon was disabled while waiting for source refresh");
+        }
+        super::super::daemon_autostart::autostart_daemon_and_wait(
+            data_root,
+            &config,
+            crate::DaemonTriggerCommandArg::Search,
+        )
+        .context("restart daemon-owned source refresh service")?;
+        enqueue_equivalent_wait_refresh_request(
+            data_root,
+            request_id,
+            operation,
+            explicit_source_catalog,
+            fresh_after_admitted_snapshot,
+        )
+    })();
+    recovery.map_err(|error| {
+        retained_request_unobservable(request_id, 0).context(format!(
+            "recover daemon observation for durably admitted request {request_id}: {error:#}"
         ))
-        .into());
-    }
-    super::super::daemon_autostart::autostart_daemon_and_wait(
-        data_root,
-        &config,
-        crate::DaemonTriggerCommandArg::Search,
-    )
-    .context("restart daemon-owned source refresh service")?;
-    enqueue_equivalent_wait_refresh_request(
-        data_root,
-        request_id,
-        operation,
-        explicit_source_catalog,
-        fresh_after_admitted_snapshot,
-    )
+    })
 }
 
 fn enqueue_equivalent_wait_refresh_request(
@@ -622,48 +787,45 @@ fn enqueue_equivalent_wait_refresh_request(
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     fresh_after_admitted_snapshot: bool,
 ) -> Result<String> {
-    let response = send_wait_authority_request(
+    let request = wait_authority_request_json(
         data_root,
         request_id,
         SourceBackedRefreshMode::Wait,
         operation,
         explicit_source_catalog,
         fresh_after_admitted_snapshot,
-    )?
-    .ok_or_else(|| {
-        SourceBackedRefreshDaemonUnavailable::new(Some(
-            "daemon did not publish a source refresh endpoint".to_owned(),
-        ))
-    })?;
+    )?;
+    let response = request_admission_with_recovery(request_id, std::thread::sleep, || {
+        daemon_source_refresh_request(
+            data_root,
+            request.clone(),
+            SOURCE_REFRESH_IPC_TIMEOUT,
+            SOURCE_REFRESH_RESPONSE_MAX_BYTES,
+        )
+    })?
+    .ok_or_else(|| retained_request_unobservable(request_id, 0))?;
     validate_daemon_refresh_response(&response)?;
-    let request_id = response_request_id(&response, "recovered daemon source refresh response")?;
-    validate_source_refresh_status_response_authority(&response, &request_id)?;
+    validate_source_refresh_status_response_authority(&response, request_id)?;
     source_refresh_protocol_state(&response)?;
-    Ok(request_id)
+    Ok(request_id.to_owned())
 }
 
-fn send_wait_authority_request(
+fn wait_authority_request_json(
     data_root: &Path,
     request_id: &str,
     mode: SourceBackedRefreshMode,
     operation: SourceBackedRefreshOperation,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     fresh_after_admitted_snapshot: bool,
-) -> Result<Option<Value>> {
-    let request = SourceBackedRefreshRequest::new(
+) -> Result<Value> {
+    SourceBackedRefreshRequest::new(
         mode,
         operation,
         explicit_source_catalog,
         fresh_after_admitted_snapshot,
     )
     .with_request_id(request_id)
-    .to_json(data_root)?;
-    daemon_source_refresh_request(
-        data_root,
-        request,
-        SOURCE_REFRESH_IPC_TIMEOUT,
-        SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-    )
+    .to_json(data_root)
 }
 
 fn response_request_id(response: &Value, label: &str) -> Result<String> {
@@ -677,6 +839,7 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
 
 fn source_refresh_protocol_state(response: &Value) -> Result<SourceRefreshProtocolState> {
     match response.get("request_state").and_then(Value::as_str) {
+        Some("admission_pending") => Ok(SourceRefreshProtocolState::AdmissionPending),
         Some("queued") => Ok(SourceRefreshProtocolState::Queued),
         Some("running") => Ok(SourceRefreshProtocolState::Running),
         Some("published") => Ok(SourceRefreshProtocolState::Published),
@@ -760,6 +923,7 @@ fn daemon_unavailable_fallback(
                 source_count: 0,
                 request_previous_generation: None,
                 request_generation_changed: false,
+                scanned_routes: None,
                 receipt: None,
                 pin,
             });
@@ -822,3 +986,11 @@ mod progress_poll_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "client_admission_recovery_tests.rs"]
+mod admission_recovery_tests;
+
+#[cfg(all(test, unix))]
+#[path = "client_transport_recovery_tests.rs"]
+mod transport_recovery_tests;

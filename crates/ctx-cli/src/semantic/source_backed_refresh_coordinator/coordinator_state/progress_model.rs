@@ -19,6 +19,7 @@ impl SourceBackedRefreshTimings {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum SourceBackedRefreshState {
+    AdmissionPending,
     Queued,
     Running,
     Published,
@@ -28,6 +29,7 @@ pub(super) enum SourceBackedRefreshState {
 impl SourceBackedRefreshState {
     pub(super) fn as_str(self) -> &'static str {
         match self {
+            Self::AdmissionPending => "admission_pending",
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Published => "published",
@@ -36,7 +38,7 @@ impl SourceBackedRefreshState {
     }
 
     pub(super) fn is_active(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
+        matches!(self, Self::AdmissionPending | Self::Queued | Self::Running)
     }
 }
 

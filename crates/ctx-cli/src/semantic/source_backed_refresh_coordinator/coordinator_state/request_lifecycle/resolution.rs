@@ -2,6 +2,14 @@ use super::*;
 
 impl CoreRefreshEngine {
     pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
+        match self.resolve_active_pending_admission(data_root) {
+            Ok(Some(run)) => return Some(run),
+            Ok(None) => {}
+            Err(error) => return self.admission_persistence_retry_run(error),
+        }
+        if self.active_request_admission_pending() {
+            return None;
+        }
         if let Some(run) =
             self.resolve_fully_covered_continuation_with(data_root, |catalog, routes| {
                 source_backed_requested_route_observation_fence(data_root, catalog, routes)
@@ -15,7 +23,7 @@ impl CoreRefreshEngine {
     }
 
     #[cfg(test)]
-    pub(in super::super::super) fn run_next_with_post_publication_sampler_for_test<Sample>(
+    pub(in crate::semantic) fn run_next_with_post_publication_sampler_for_test<Sample>(
         &self,
         data_root: &Path,
         sample: Sample,
@@ -33,6 +41,20 @@ impl CoreRefreshEngine {
         self.run_next_with_verified_index_opener(data_root, |index_root| {
             Ok(Arc::new(open_verified_index(index_root)?))
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn resolve_fully_covered_continuation_for_test<Sample>(
+        &self,
+        data_root: &Path,
+        sample: Sample,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Sample: FnOnce(
+            Option<&ExplicitSourceCatalogAuthority>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
+        self.resolve_fully_covered_continuation_with(data_root, |catalog, _routes| sample(catalog))
     }
 
     fn resolve_fully_covered_continuation_with<Sample>(
@@ -61,7 +83,12 @@ impl CoreRefreshEngine {
             if publication_receipt.published_generation.is_empty() {
                 return None;
             }
-            let routes = continuation.covered_route_results.keys().cloned().collect();
+            let routes = continuation
+                .covered_route_results
+                .keys()
+                .filter(|route| !continuation.ledger_eligible_routes.contains(*route))
+                .cloned()
+                .collect();
             (request_id, routes)
         };
         let post_publication_fence = self.post_publication_route_coverage_fence_with(
@@ -97,6 +124,10 @@ impl CoreRefreshEngine {
             .covered_route_results
             .keys()
             .filter(|route| {
+                if continuation.ledger_eligible_routes.contains(*route) {
+                    return continuation.admission_event_watermarks.get(*route)
+                        != state.route_event_watermarks.get(*route);
+                }
                 let admitted_observation = continuation
                     .admission_route_observations
                     .get(*route)
@@ -185,8 +216,30 @@ impl CoreRefreshEngine {
             attempt.last_error = None;
             receipt
         };
+        // A fresh logical demand can be admitted while the provider sample
+        // above runs without the state lock. Its exact predecessor is this
+        // logical request, so release that durable fence with this terminal
+        // image. Coverage is intentionally not inherited transitively here:
+        // the later snapshot executes unless it establishes its own proof.
+        let successor_fence_snapshots = state
+            .manual_all_continuations
+            .iter_mut()
+            .filter_map(|(successor_id, successor)| {
+                (successor.predecessor_request_id == request_id && !successor.predecessor_finished)
+                    .then(|| {
+                        let snapshot = successor.clone();
+                        successor.predecessor_finished = true;
+                        (successor_id.clone(), snapshot)
+                    })
+            })
+            .collect::<BTreeMap<_, _>>();
         let terminal_job = durable_job_json(&state, &request_id)?;
         if let Err(error) = self.write_status(data_root, &terminal_job) {
+            for (successor_id, snapshot) in successor_fence_snapshots {
+                state
+                    .manual_all_continuations
+                    .insert(successor_id, snapshot);
+            }
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             attempt.state = SourceBackedRefreshState::Queued;
             attempt.progress.phase = "persisting_terminal".to_owned();
@@ -456,6 +509,9 @@ impl CoreRefreshEngine {
             &BTreeSet<SourceRouteIdentity>,
         ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
     {
+        if routes.is_empty() {
+            return PostPublicationRouteCoverageFence::fail_closed();
+        }
         // Snapshot the exact seen-event boundary before touching provider
         // targets. Events delivered after this lock is released are outside
         // the certificate even if their content-free observation is equal.

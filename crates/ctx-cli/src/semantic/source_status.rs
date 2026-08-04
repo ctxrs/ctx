@@ -188,7 +188,9 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
             )
         }
         Some("published") if generation_matches => ("ready", None),
-        Some("queued" | "running") => ("pending", Some("core_refresh_pending")),
+        Some("admission_pending" | "queued" | "running") => {
+            ("pending", Some("core_refresh_pending"))
+        }
         Some("failed") => ("unavailable", Some("core_refresh_failed")),
         Some("published") => ("stale", Some("published_generation_mismatch")),
         Some(_) => ("unavailable", Some("refresh_state_unrecognized")),
@@ -288,7 +290,9 @@ fn lexical_report(
         }
         Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => {
             let (status, reason) = match request_state {
-                Some("queued" | "running") => ("pending", "generation_not_published"),
+                Some("admission_pending" | "queued" | "running") => {
+                    ("pending", "generation_not_published")
+                }
                 Some("failed") => ("unavailable", "core_refresh_failed"),
                 Some("published") => ("unavailable", "published_generation_missing"),
                 _ => ("unavailable", "generation_not_published"),

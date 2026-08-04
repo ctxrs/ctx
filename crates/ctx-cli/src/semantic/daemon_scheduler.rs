@@ -67,6 +67,9 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         if let Some(activity) = query_activity {
             activity.cancel_idle_wakeup();
         }
+        if source_refresh_requested && !runtime.history_retry.ready() {
+            return Ok(deferred_pending_core_refresh(data_root, runtime));
+        }
         if let Some(iteration) = run_pending_core_refresh(data_root, runtime, source_refresh)? {
             return Ok(iteration);
         }
@@ -77,6 +80,9 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         runtime.consumer_retry_deferral.reset();
         if let Some(activity) = query_activity {
             activity.cancel_idle_wakeup();
+        }
+        if !runtime.history_retry.ready() {
+            return Ok(deferred_pending_core_refresh(data_root, runtime));
         }
         return run_core_refresh(data_root, runtime, source_refresh, false);
     }
@@ -146,6 +152,11 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         return run_core_refresh(data_root, runtime, source_refresh, true);
     }
     run_dirty_core_refresh(data_root, runtime, source_refresh)
+}
+
+fn deferred_pending_core_refresh(data_root: &Path, runtime: &DaemonRuntime) -> DaemonIteration {
+    let job = core_refresh_retry_backoff_job(data_root, &runtime.history_retry);
+    DaemonIteration::new(false, false, daemon_core_cycle_state(&job))
 }
 
 fn run_pending_core_semantic_catch_up(
@@ -305,8 +316,13 @@ fn run_pending_core_refresh(
     let Some(run) = coordinator.run_next(data_root) else {
         return Ok(None);
     };
-    let job =
-        record_source_refresh_retry(data_root, &mut runtime.history_retry, coordinator, run.job)?;
+    let job = record_source_refresh_retry(
+        data_root,
+        &mut runtime.history_retry,
+        coordinator,
+        run.job,
+        run.terminal_persistence_pending,
+    )?;
     Ok(Some(DaemonIteration::new(
         run.did_work,
         run.failed || run.terminal_persistence_pending,
@@ -370,6 +386,7 @@ fn run_dirty_core_refresh(
         &mut runtime.history_retry,
         source_refresh,
         run.job,
+        terminal_persistence_pending,
     )?;
     let published_generation = (!run.failed
         && !terminal_persistence_pending
@@ -443,8 +460,13 @@ fn run_core_refresh(
         );
     };
     let terminal_persistence_pending = run.terminal_persistence_pending;
-    let job =
-        record_source_refresh_retry(data_root, &mut runtime.history_retry, coordinator, run.job)?;
+    let job = record_source_refresh_retry(
+        data_root,
+        &mut runtime.history_retry,
+        coordinator,
+        run.job,
+        terminal_persistence_pending,
+    )?;
     let failed = run.failed || terminal_persistence_pending;
     let state = daemon_core_cycle_state(&job);
     if !failed && job.get("status").and_then(Value::as_str) == Some("completed") {
@@ -825,11 +847,15 @@ fn record_source_refresh_retry(
     data_root: &Path,
     backoff: &mut DaemonRetryBackoff,
     coordinator: &CoreRefreshEngine,
-    job: Value,
+    mut job: Value,
+    status_persistence_pending: bool,
 ) -> Result<Value> {
+    if status_persistence_pending {
+        job["retryable"] = Value::Bool(true);
+    }
     let persist_retry = daemon_job_should_backoff(&job);
     let job = record_daemon_job_retry(backoff, job);
-    if persist_retry {
+    if persist_retry && !status_persistence_pending {
         return coordinator.persist_retry_status(data_root, job);
     }
     Ok(job)

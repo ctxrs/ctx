@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "query_service_transport_tests/admission_lifecycle.rs"]
+mod admission_lifecycle;
+
 #[cfg(unix)]
 use std::io::Read as _;
 
@@ -761,7 +764,7 @@ fn unavailable_cleanup_waits_for_replacement_daemon_ownership() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn unix_disconnect_kinds_are_classified_as_unavailable() {
+fn unix_pre_submission_disconnect_kinds_are_classified_as_unavailable() {
     for kind in [
         std::io::ErrorKind::NotFound,
         std::io::ErrorKind::ConnectionRefused,
@@ -770,25 +773,29 @@ fn unix_disconnect_kinds_are_classified_as_unavailable() {
         std::io::ErrorKind::BrokenPipe,
         std::io::ErrorKind::NotConnected,
     ] {
-        assert!(daemon_query_unix_io_error_is_unavailable(kind));
+        assert!(daemon_query_unix_io_error_is_pre_submission_unavailable(
+            kind
+        ));
     }
-    assert!(!daemon_query_unix_io_error_is_unavailable(
+    assert!(!daemon_query_unix_io_error_is_pre_submission_unavailable(
         std::io::ErrorKind::TimedOut
     ));
 }
 
 #[test]
-fn windows_disconnect_codes_are_classified_without_native_io() {
+fn windows_pre_submission_disconnect_codes_are_classified_without_native_io() {
     for raw_os_error in [2, 3, 109, 230, 232, 233] {
-        assert!(daemon_query_windows_io_error_is_unavailable(
+        assert!(daemon_query_windows_io_error_is_pre_submission_unavailable(
             std::io::ErrorKind::Other,
             Some(raw_os_error),
         ));
     }
-    assert!(!daemon_query_windows_io_error_is_unavailable(
-        std::io::ErrorKind::TimedOut,
-        None,
-    ));
+    assert!(
+        !daemon_query_windows_io_error_is_pre_submission_unavailable(
+            std::io::ErrorKind::TimedOut,
+            None,
+        )
+    );
 }
 
 #[test]

@@ -84,8 +84,19 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
     }
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     if service == DaemonIpcService::SourceRefresh {
-        if let Some(response) = source_refresh.handle_ipc_request(data_root, &request)? {
-            writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+        if let Some(response) = source_refresh.handle_listener_ipc_request(data_root, &request)? {
+            let response_request_id = response
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let response_write = (|| -> Result<()> {
+                writeln!(stream, "{}", serde_json::to_string(&response)?)?;
+                Ok(())
+            })();
+            if let Some(request_id) = response_request_id.as_deref() {
+                source_refresh.finish_listener_admission_response(request_id);
+            }
+            response_write?;
             return Ok(());
         }
         if op == "ping" {

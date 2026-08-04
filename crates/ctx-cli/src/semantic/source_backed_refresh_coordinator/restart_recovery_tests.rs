@@ -2,7 +2,7 @@ use super::client::{
     recover_typed_unknown_request_with, source_refresh_request_is_unknown,
     validate_source_refresh_status_response_authority, wait_for_published_generation,
     SourceRefreshRequestRecoveryFailed, SourceRefreshRequestRecoveryFailureReason,
-    TypedUnknownRequestRecovery,
+    SourceRefreshRequestRetention, TypedUnknownRequestRecovery,
 };
 use super::*;
 
@@ -82,6 +82,7 @@ fn persistent_typed_unknown_loss_is_bounded_with_backoff_and_typed_failure() {
         .expect("persistent loss returns a typed recovery failure");
     assert_eq!(typed.request_id, "lost-0");
     assert_eq!(typed.recovery_attempts, 3);
+    assert_eq!(typed.retention, SourceRefreshRequestRetention::NotRetained);
     assert_eq!(
         typed.reason,
         SourceRefreshRequestRecoveryFailureReason::AttemptsExhausted
@@ -94,6 +95,65 @@ fn persistent_typed_unknown_loss_is_bounded_with_backoff_and_typed_failure() {
             StdDuration::from_millis(100),
         ]
     );
+}
+
+#[test]
+fn typed_unknown_then_prewrite_unavailable_is_typed_lost_after_acknowledgement() {
+    let request_id = "019fcaaa-0000-7000-8000-000000000305";
+    let mut recovery = TypedUnknownRequestRecovery::new(request_id);
+    let error = recover_typed_unknown_request_with(
+        &mut recovery,
+        request_id,
+        |_| {},
+        || Err(DaemonSourceRefreshServiceUnavailable.into()),
+    )
+    .unwrap_err();
+
+    let typed = error
+        .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
+        .expect("post-ack recovery failure stays request-bound");
+    assert_eq!(typed.request_id, request_id);
+    assert_eq!(typed.recovery_attempts, 1);
+    assert_eq!(
+        typed.reason,
+        SourceRefreshRequestRecoveryFailureReason::ReenqueueFailed
+    );
+    assert_eq!(typed.retention, SourceRefreshRequestRetention::NotRetained);
+    assert!(typed
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("daemon source refresh service is unavailable")));
+    assert!(error
+        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+        .is_none());
+}
+
+#[test]
+fn typed_unknown_then_queue_full_is_typed_lost_after_acknowledgement() {
+    let request_id = "019fcaaa-0000-7000-8000-000000000306";
+    let mut recovery = TypedUnknownRequestRecovery::new(request_id);
+    let error = recover_typed_unknown_request_with(
+        &mut recovery,
+        request_id,
+        |_| {},
+        || bail!("source_refresh_queue_full: bounded daemon queue is full"),
+    )
+    .unwrap_err();
+
+    let typed = error
+        .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
+        .expect("post-ack queue pressure stays request-bound");
+    assert_eq!(typed.request_id, request_id);
+    assert_eq!(typed.recovery_attempts, 1);
+    assert_eq!(
+        typed.reason,
+        SourceRefreshRequestRecoveryFailureReason::ReenqueueFailed
+    );
+    assert_eq!(typed.retention, SourceRefreshRequestRetention::NotRetained);
+    assert!(typed
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("source_refresh_queue_full")));
 }
 
 #[cfg(any(unix, windows))]

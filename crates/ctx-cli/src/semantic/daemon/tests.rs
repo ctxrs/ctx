@@ -1,4 +1,6 @@
 mod recovery_cadence;
+#[path = "tests/startup_recovery.rs"]
+mod startup_recovery;
 
 use std::{
     cell::Cell,
@@ -965,6 +967,32 @@ fn due_dirty_route_wait_is_classified_as_scheduled_refresh_instead_of_spinning()
         now + super::super::daemon_scheduler::DAEMON_BACKGROUND_REFRESH_MIN_REST,
         1_000,
     ));
+}
+
+#[test]
+fn pending_source_refresh_wait_respects_retry_backoff() {
+    let coordinator =
+        CoreRefreshEngine::with_executor(Arc::new(|_: SourceBackedRefreshExecution<'_>| {
+            anyhow::bail!("executor must remain backed off")
+        }));
+    coordinator.enqueue_for_test(None);
+    let now = Instant::now();
+    let mut runtime = DaemonRuntime::default();
+    runtime.history_retry.consecutive_failures = 1;
+    runtime.history_retry.retry_not_before = Some(now + StdDuration::from_secs(5));
+    runtime.history_retry.retry_not_before_at_ms = Some(utc_now().timestamp_millis() + 5_000);
+
+    let wait_for = daemon_wait_duration(
+        &runtime,
+        Some(&coordinator),
+        now + StdDuration::from_secs(30),
+        None,
+        None,
+        now,
+    );
+
+    assert!(wait_for > StdDuration::from_secs(4));
+    assert!(wait_for <= StdDuration::from_secs(5));
 }
 
 #[test]

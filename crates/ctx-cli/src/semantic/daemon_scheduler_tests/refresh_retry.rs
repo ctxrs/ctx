@@ -15,6 +15,173 @@ fn enqueue_synthetic_refresh_successor(
         .expect("synthetic refresh successor")
 }
 
+fn make_history_retry_due(runtime: &mut DaemonRuntime) {
+    runtime.history_retry.retry_not_before = Some(std::time::Instant::now());
+    runtime.history_retry.retry_not_before_at_ms =
+        Some(ctx_history_core::utc_now().timestamp_millis());
+}
+
+#[test]
+fn persistent_admission_status_failure_uses_scheduler_backoff() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let fence_calls = Arc::new(AtomicUsize::new(0));
+    let observed_fence_calls = Arc::clone(&fence_calls);
+    let queued_writes = Arc::new(AtomicUsize::new(0));
+    let observed_queued_writes = Arc::clone(&queued_writes);
+    let coordinator = CoreRefreshEngine::with_runtime_for_test(
+        Arc::new(|_execution: SourceBackedRefreshExecution<'_>| {
+            panic!("admission persistence failure must stop before execution")
+        }),
+        Arc::new(move |_data_root, _catalog| {
+            observed_fence_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(BTreeMap::new())
+        }),
+        Arc::new(move |path, job| {
+            if job.get("request_state").and_then(Value::as_str) == Some("queued") {
+                observed_queued_writes.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("injected persistent admission status failure");
+            }
+            write_daemon_job_status(path, job)
+        }),
+    );
+    let request_id = "019fcaaa-0000-7000-8000-0000000002b0";
+    coordinator
+        .handle_listener_ipc_request(
+            &data_root,
+            &json!({
+                "schema_version": 1,
+                "op": "source_refresh_request",
+                "request_id": request_id,
+                "mode": "wait",
+                "operation": "refresh",
+                "fresh_after_admitted_snapshot": true,
+            }),
+        )
+        .unwrap()
+        .expect("durable pending admission");
+    coordinator.finish_listener_admission_response(request_id);
+    let mut runtime = DaemonRuntime::default();
+    runtime.config.daemon.mode = DaemonMode::SourceRefreshOnly;
+
+    let first = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(first.failed);
+    assert_eq!(runtime.history_retry.consecutive_failures, 1);
+    assert_eq!(fence_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(queued_writes.load(Ordering::SeqCst), 1);
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(!deferred.did_work);
+    assert_eq!(fence_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(queued_writes.load(Ordering::SeqCst), 1);
+
+    make_history_retry_due(&mut runtime);
+    let retry = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(retry.failed);
+    assert_eq!(runtime.history_retry.consecutive_failures, 2);
+    assert_eq!(fence_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(queued_writes.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn persistent_terminal_status_failure_retries_without_reexecution_or_hot_spin() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed_executions = Arc::clone(&executions);
+    let executor = Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+        observed_executions.fetch_add(1, Ordering::SeqCst);
+        Ok(publish_empty_authoritative_generation(execution.index_root))
+    });
+    let terminal_writes = Arc::new(AtomicUsize::new(0));
+    let observed_terminal_writes = Arc::clone(&terminal_writes);
+    let writer = Arc::new(move |path: &Path, job: &Value| {
+        if job.get("request_state").and_then(Value::as_str) == Some("published") {
+            observed_terminal_writes.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("injected persistent terminal status failure");
+        }
+        write_daemon_job_status(path, job)
+    });
+    let coordinator = CoreRefreshEngine::with_status_writer_for_test(executor, writer);
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    let mut runtime = DaemonRuntime::default();
+    runtime.config.daemon.mode = DaemonMode::SourceRefreshOnly;
+
+    let first = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(first.failed);
+    assert_eq!(runtime.history_retry.consecutive_failures, 1);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(terminal_writes.load(Ordering::SeqCst), 1);
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(!deferred.did_work);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(terminal_writes.load(Ordering::SeqCst), 1);
+
+    make_history_retry_due(&mut runtime);
+    let retry = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(retry.failed);
+    assert_eq!(runtime.history_retry.consecutive_failures, 2);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(terminal_writes.load(Ordering::SeqCst), 2);
+}
+
 #[test]
 fn scheduler_retries_terminal_status_without_republishing_core() {
     let temp = tempfile::tempdir().unwrap();
@@ -119,6 +286,7 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
         &mut runtime.history_retry,
         &coordinator,
         retry.job,
+        false,
     )
     .unwrap();
     assert_eq!(recorded["queued_successors"].as_array().unwrap().len(), 2);
@@ -258,7 +426,8 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
     });
     let mut backoff = DaemonRetryBackoff::default();
     let recorded =
-        record_source_refresh_retry(&data_root, &mut backoff, &coordinator, retry.job).unwrap();
+        record_source_refresh_retry(&data_root, &mut backoff, &coordinator, retry.job, false)
+            .unwrap();
     assert_eq!(recorded["queued_successors"].as_array().unwrap().len(), 2);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     let before_restart = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
@@ -361,6 +530,7 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
         &mut runtime.history_retry,
         &coordinator,
         retry.job,
+        false,
     )
     .unwrap();
     assert_eq!(
