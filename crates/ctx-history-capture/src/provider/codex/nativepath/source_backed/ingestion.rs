@@ -92,7 +92,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
             match CodexNativeScanner::new_source_backed_with_lineage_v0(
                 source.clone(),
                 Some(proof),
-                context.outcome_lineage.new_fact_set()?,
+                context.outcome_lineage.new_fact_set(&native_session_id)?,
             ) {
                 Ok(scanner) => Some((base, scanner)),
                 Err(error) if invalid_append_proof(&error) => None,
@@ -109,7 +109,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
             CodexNativeScanner::new_source_backed_with_lineage_v0(
                 source.clone(),
                 None,
-                context.outcome_lineage.new_fact_set()?,
+                context.outcome_lineage.new_fact_set(&native_session_id)?,
             )
             .map_err(map_lineage_capture_error)?,
         ),
@@ -519,7 +519,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             (Some(base), Some(proof))
                 if source.catalog_observation.len > proof.checkpoint.observation.len =>
             {
-                let facts = outcome_lineage.new_fact_set()?;
+                let facts = outcome_lineage.new_fact_set(&native_session_id)?;
                 match CodexNativeScanner::new_source_backed_with_lineage_v0(
                     source.clone(),
                     Some(proof),
@@ -549,7 +549,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     CodexNativeScanner::new_source_backed_with_lineage_v0(
                         source.clone(),
                         None,
-                        outcome_lineage.new_fact_set()?,
+                        outcome_lineage.new_fact_set(&native_session_id)?,
                     )
                     .map_err(map_lineage_capture_error)?,
                 )
@@ -694,7 +694,7 @@ pub(super) fn prepare_replayed_lineage_v0(
         let mut scanner = CodexNativeScanner::new_source_backed_with_lineage_v0(
             source.clone(),
             Some(proof),
-            outcome_lineage.new_fact_set()?,
+            outcome_lineage.new_fact_set(native_session_id)?,
         )
         .map_err(map_lineage_capture_error)?;
         while scanner

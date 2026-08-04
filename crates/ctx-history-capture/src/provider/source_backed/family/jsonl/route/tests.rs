@@ -1,9 +1,10 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -12,6 +13,7 @@ use super::*;
 use crate::provider::source_backed::{
     SourceBackedLogicalSourceFailures, SourceBackedRecordRejections, SourceBackedRouteResources,
 };
+use crate::repository_attribution::AttributionInput;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
     NativeSessionKey, SessionIdentityInput, SourceAnchor,
@@ -451,6 +453,245 @@ impl JsonlFamilyAdapter for PhasedTestAdapter {
             completed_first_phase: Arc::clone(&self.completed_first_phase),
             second_phase_started_early: Arc::clone(&self.second_phase_started_early),
         }))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SchedulerLeafState {
+    partition: u64,
+    phase: usize,
+    ordinal: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SchedulerStateEvent {
+    Begin(u64),
+    Finish(u64),
+    Project {
+        leaf: SchedulerLeafState,
+        full_probes_before: usize,
+        full_probes_after: usize,
+        event_time_entries_before: usize,
+        event_time_entries_after: usize,
+    },
+}
+
+struct SchedulerStateTestAdapter {
+    repository: PathBuf,
+    attributed_partitions: Vec<u64>,
+    failing_leaf: Option<SchedulerLeafState>,
+    events: Arc<Mutex<Vec<SchedulerStateEvent>>>,
+}
+
+struct UnpartitionedSchedulerStateTestAdapter(SchedulerStateTestAdapter);
+
+struct SchedulerStateTestProjector {
+    leaf: SchedulerLeafState,
+    repository: PathBuf,
+    attribute_repository: bool,
+    fail: bool,
+    events: Arc<Mutex<Vec<SchedulerStateEvent>>>,
+}
+
+fn scheduler_leaf_state(leaf: &JsonlFamilyLeaf) -> Result<SchedulerLeafState> {
+    let name = leaf
+        .source_path()
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|name| name.strip_suffix(".jsonl"))
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("scheduler test leaf name is malformed".to_owned())
+        })?;
+    let fields = name.split('-').collect::<Vec<_>>();
+    if fields.len() != 6 || fields[0] != "partition" || fields[2] != "phase" || fields[4] != "leaf"
+    {
+        return Err(CaptureError::InvalidPayload(
+            "scheduler test leaf name is malformed".to_owned(),
+        ));
+    }
+    let partition = fields[1].parse::<u64>().map_err(|_| {
+        CaptureError::InvalidPayload("scheduler test partition is malformed".to_owned())
+    })?;
+    let phase = fields[3].parse::<usize>().map_err(|_| {
+        CaptureError::InvalidPayload("scheduler test phase is malformed".to_owned())
+    })?;
+    let ordinal = fields[5].parse::<usize>().map_err(|_| {
+        CaptureError::InvalidPayload("scheduler test ordinal is malformed".to_owned())
+    })?;
+    Ok(SchedulerLeafState {
+        partition,
+        phase,
+        ordinal,
+    })
+}
+
+impl JsonlFamilyProjector for SchedulerStateTestProjector {
+    fn project(
+        &mut self,
+        _record: JsonlRecordRef<'_>,
+        worker: &mut JsonlFamilyWorkerContext,
+        _emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
+        if self.fail {
+            return Err(CaptureError::InvalidPayload(
+                "scheduler test requested scan failure".to_owned(),
+            ));
+        }
+        let full_probes_before = worker
+            .repository_attributor()
+            .full_certification_probe_count();
+        let event_time_entries_before = worker.repository_attributor().event_time_cache_len();
+        if self.attribute_repository {
+            let annotation = worker.repository_attributor().attribute(AttributionInput {
+                activity_at_unix_ms: Some(
+                    1_700_000_000_000_i64
+                        .saturating_add(self.leaf.phase as i64)
+                        .saturating_add(self.leaf.ordinal as i64),
+                ),
+                declared_tool_workdir: Some(self.repository.to_string_lossy().into_owned()),
+                ..AttributionInput::default()
+            });
+            if annotation.repository_bindings.len() != 1 {
+                return Err(CaptureError::InvalidPayload(
+                    "scheduler test repository attribution did not bind".to_owned(),
+                ));
+            }
+        }
+        let full_probes_after = worker
+            .repository_attributor()
+            .full_certification_probe_count();
+        let event_time_entries_after = worker.repository_attributor().event_time_cache_len();
+        self.events
+            .lock()
+            .map_err(|_| CaptureError::SystemInvariant("scheduler test event log was poisoned"))?
+            .push(SchedulerStateEvent::Project {
+                leaf: self.leaf,
+                full_probes_before,
+                full_probes_after,
+                event_time_entries_before,
+                event_time_entries_after,
+            });
+        Ok(())
+    }
+}
+
+impl JsonlFamilyAdapter for SchedulerStateTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "scheduler-state-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        TestAdapter.discover(root)
+    }
+
+    fn order_leaf_scans(&self, leaves: &mut [JsonlFamilyLeaf]) -> Result<()> {
+        leaves.sort_by_key(|leaf| {
+            scheduler_leaf_state(leaf).unwrap_or(SchedulerLeafState {
+                partition: u64::MAX,
+                phase: usize::MAX,
+                ordinal: usize::MAX,
+            })
+        });
+        Ok(())
+    }
+
+    fn leaf_scan_phase(&self, leaf: &JsonlFamilyLeaf) -> Result<usize> {
+        Ok(scheduler_leaf_state(leaf)?.phase)
+    }
+
+    fn leaf_scan_partition(&self, leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
+        Ok(Some(scheduler_leaf_state(leaf)?.partition))
+    }
+
+    fn begin_leaf_scan_partition(&self, partition: u64) -> Result<()> {
+        self.events
+            .lock()
+            .map_err(|_| CaptureError::SystemInvariant("scheduler test event log was poisoned"))?
+            .push(SchedulerStateEvent::Begin(partition));
+        Ok(())
+    }
+
+    fn finish_leaf_scan_partition(&self, partition: u64) -> Result<()> {
+        self.events
+            .lock()
+            .map_err(|_| CaptureError::SystemInvariant("scheduler test event log was poisoned"))?
+            .push(SchedulerStateEvent::Finish(partition));
+        Ok(())
+    }
+
+    fn projector(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        let leaf = scheduler_leaf_state(leaf)?;
+        Ok(Box::new(SchedulerStateTestProjector {
+            leaf,
+            repository: self.repository.clone(),
+            attribute_repository: self.attributed_partitions.contains(&leaf.partition),
+            fail: self.failing_leaf == Some(leaf),
+            events: Arc::clone(&self.events),
+        }))
+    }
+}
+
+impl JsonlFamilyAdapter for UnpartitionedSchedulerStateTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        self.0.provider()
+    }
+
+    fn source_format(&self) -> &'static str {
+        self.0.source_format()
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        self.0.schema_variant()
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        self.0.parser_revision()
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        self.0.append_mode()
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        self.0.discover(root)
+    }
+
+    fn order_leaf_scans(&self, leaves: &mut [JsonlFamilyLeaf]) -> Result<()> {
+        self.0.order_leaf_scans(leaves)
+    }
+
+    fn leaf_scan_phase(&self, leaf: &JsonlFamilyLeaf) -> Result<usize> {
+        self.0.leaf_scan_phase(leaf)
+    }
+
+    fn projector(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        self.0.projector(leaf, source_file, imported_at)
     }
 }
 
@@ -970,6 +1211,90 @@ fn capture_checkpoint_test_generation(
         .unwrap()
 }
 
+fn run_scheduler_test_capture(
+    adapter: &dyn JsonlFamilyAdapter,
+    root: &Path,
+    index_root: &Path,
+    workers: usize,
+) -> SourceBackedRouteResult<JsonlFamilyScannerActivity> {
+    let resident = Mutex::new(FamilyResident::default());
+    let mut writer = GenerationWriter::open(
+        index_root,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
+    let mut owners = HashMap::new();
+    let mut complete_inventories = Vec::new();
+    let mut logical_source_failures = SourceBackedLogicalSourceFailures::default();
+    let mut record_rejections = SourceBackedRecordRejections::default();
+    let result = {
+        let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: writer.core_record_preparer(),
+            writer: &mut writer,
+            owners: &mut owners,
+            complete_inventories: &mut complete_inventories,
+            route_index: 0,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(workers),
+            logical_source_failures: &mut logical_source_failures,
+            record_rejections: &mut record_rejections,
+            applied_removals: &mut Vec::new(),
+            record_progress: None,
+            current_source_progress: None,
+        };
+        with_family_scanner_workers(workers, || capture(adapter, root, &resident, &mut sink))
+    };
+    result.map(|()| jsonl_family_scanner_activity())
+}
+
+fn scheduler_test_repository(parent: &Path) -> PathBuf {
+    let repository = parent.join("attributed-repository");
+    fs::create_dir(&repository).unwrap();
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "ctx test"],
+        vec!["config", "user.email", "ctx@example.invalid"],
+    ] {
+        let status = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+    for arguments in [vec!["add", "tracked.txt"], vec!["commit", "-qm", "fixture"]] {
+        let status = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    repository
+}
+
+fn write_scheduler_test_leaf(root: &Path, partition: u64, phase: usize, ordinal: usize) {
+    fs::write(
+        root.join(format!(
+            "partition-{partition:02}-phase-{phase}-leaf-{ordinal}.jsonl"
+        )),
+        b"{\"message\":\"scheduler\"}\n",
+    )
+    .unwrap();
+}
+
 fn provider_checkpoints(receipt: &CommitReceipt) -> Vec<Option<TypedKey>> {
     receipt
         .manifest()
@@ -1377,6 +1702,312 @@ fn dependency_phases_bar_later_jsonl_scans_without_serializing_each_phase() {
     assert_eq!(activity.sources_started, 8);
     assert_eq!(activity.sources_completed, 8);
     assert_eq!(activity.peak_active_scanners, 4);
+}
+
+#[test]
+fn partitioned_component_balances_hooks_and_preserves_parent_first_context_state() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    write_scheduler_test_leaf(&root, 7, 0, 0);
+    write_scheduler_test_leaf(&root, 7, 1, 0);
+    write_scheduler_test_leaf(&root, 7, 1, 1);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let adapter = SchedulerStateTestAdapter {
+        repository: scheduler_test_repository(temp.path()),
+        attributed_partitions: vec![7],
+        failing_leaf: None,
+        events: Arc::clone(&events),
+    };
+
+    let activity =
+        run_scheduler_test_capture(&adapter, &root, &temp.path().join("index"), 4).unwrap();
+    let events = events.lock().unwrap().clone();
+    let hooks = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hooks,
+        [
+            SchedulerStateEvent::Begin(7),
+            SchedulerStateEvent::Finish(7)
+        ]
+    );
+    let projects = events
+        .iter()
+        .filter_map(|event| match event {
+            SchedulerStateEvent::Project {
+                leaf,
+                full_probes_before,
+                full_probes_after,
+                event_time_entries_before,
+                event_time_entries_after,
+            } => Some((
+                *leaf,
+                *full_probes_before,
+                *full_probes_after,
+                *event_time_entries_before,
+                *event_time_entries_after,
+            )),
+            SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        projects,
+        [
+            (
+                SchedulerLeafState {
+                    partition: 7,
+                    phase: 0,
+                    ordinal: 0,
+                },
+                0,
+                1,
+                0,
+                1,
+            ),
+            (
+                SchedulerLeafState {
+                    partition: 7,
+                    phase: 1,
+                    ordinal: 0,
+                },
+                1,
+                1,
+                0,
+                1,
+            ),
+            (
+                SchedulerLeafState {
+                    partition: 7,
+                    phase: 1,
+                    ordinal: 1,
+                },
+                1,
+                1,
+                0,
+                1,
+            ),
+        ],
+        "one component must run parent-first on one context, retaining certification state while clearing source-local event-time state"
+    );
+    assert_eq!(activity.worker_count, 1);
+    assert_eq!(activity.sources_started, 3);
+    assert_eq!(activity.sources_completed, 3);
+}
+
+#[test]
+fn partition_scan_failure_finishes_every_begun_component() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    write_scheduler_test_leaf(&root, 2, 0, 0);
+    write_scheduler_test_leaf(&root, 3, 0, 0);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let adapter = SchedulerStateTestAdapter {
+        repository: scheduler_test_repository(temp.path()),
+        attributed_partitions: Vec::new(),
+        failing_leaf: Some(SchedulerLeafState {
+            partition: 3,
+            phase: 0,
+            ordinal: 0,
+        }),
+        events: Arc::clone(&events),
+    };
+
+    let error =
+        run_scheduler_test_capture(&adapter, &root, &temp.path().join("index"), 2).unwrap_err();
+    assert!(error
+        .detail
+        .contains("scheduler test requested scan failure"));
+    let hooks = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hooks,
+        [
+            SchedulerStateEvent::Begin(2),
+            SchedulerStateEvent::Begin(3),
+            SchedulerStateEvent::Finish(3),
+            SchedulerStateEvent::Finish(2),
+        ],
+        "every begun component must finish exactly once even when its wave fails"
+    );
+}
+
+#[test]
+fn partition_cache_lanes_are_fixed_at_sixteen_and_clear_source_semantic_state() {
+    for workers in [1, 4, 16] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        fs::create_dir_all(&root).unwrap();
+        for partition in 0..32 {
+            write_scheduler_test_leaf(&root, partition, 0, 0);
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let adapter = SchedulerStateTestAdapter {
+            repository: scheduler_test_repository(temp.path()),
+            attributed_partitions: (0..32).collect(),
+            failing_leaf: None,
+            events: Arc::clone(&events),
+        };
+
+        let activity =
+            run_scheduler_test_capture(&adapter, &root, &temp.path().join("index"), workers)
+                .unwrap();
+        let events = events.lock().unwrap().clone();
+        let hooks = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_)
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut expected_hooks = Vec::new();
+        for wave_start in (0..32).step_by(workers) {
+            let wave_end = (wave_start + workers).min(32);
+            expected_hooks.extend(
+                (wave_start..wave_end)
+                    .map(|partition| SchedulerStateEvent::Begin(partition as u64)),
+            );
+            expected_hooks.extend(
+                (wave_start..wave_end)
+                    .rev()
+                    .map(|partition| SchedulerStateEvent::Finish(partition as u64)),
+            );
+        }
+        assert_eq!(
+            hooks, expected_hooks,
+            "partition waves must be deterministic with {workers} physical workers"
+        );
+
+        let mut projects = events
+            .iter()
+            .filter_map(|event| match event {
+                SchedulerStateEvent::Project {
+                    leaf,
+                    full_probes_before,
+                    full_probes_after,
+                    event_time_entries_before,
+                    event_time_entries_after,
+                } => Some((
+                    *leaf,
+                    *full_probes_before,
+                    *full_probes_after,
+                    *event_time_entries_before,
+                    *event_time_entries_after,
+                )),
+                SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_) => None,
+            })
+            .collect::<Vec<_>>();
+        projects.sort_by_key(|project| project.0);
+        assert_eq!(projects.len(), 32);
+        let full_probes = projects
+            .iter()
+            .map(|(_, before, after, _, _)| after.saturating_sub(*before))
+            .sum::<usize>();
+        assert!(
+            full_probes <= 16,
+            "32 same-repository components exceeded 16 full probes with {workers} physical workers: {full_probes}"
+        );
+        for (leaf, _, _, event_entries_before, event_entries_after) in &projects {
+            assert_eq!(
+                *event_entries_before, 0,
+                "component {} leaked source-semantic event-time state on its shared cache lane",
+                leaf.partition
+            );
+            assert_eq!(*event_entries_after, 1);
+        }
+        for lane in 0..16 {
+            let (_, first_before, first_after, _, _) = projects[lane];
+            let (_, second_before, second_after, _, _) = projects[lane + 16];
+            assert_eq!(first_before, 0);
+            assert_eq!(second_before, first_after);
+            assert_eq!(second_after, second_before);
+        }
+        assert_eq!(projects[0].2, 1);
+        assert_eq!(projects[16].1, 1);
+        assert_eq!(projects[16].2, 1);
+        assert_eq!(activity.worker_count, workers);
+        assert_eq!(activity.sources_started, 32);
+        assert_eq!(activity.sources_completed, 32);
+    }
+}
+
+#[test]
+fn unpartitioned_defaults_keep_persistent_phase_worker_contexts() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    for phase in 0..=1 {
+        for ordinal in 0..=1 {
+            write_scheduler_test_leaf(&root, 0, phase, ordinal);
+        }
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let adapter = UnpartitionedSchedulerStateTestAdapter(SchedulerStateTestAdapter {
+        repository: scheduler_test_repository(temp.path()),
+        attributed_partitions: vec![0],
+        failing_leaf: None,
+        events: Arc::clone(&events),
+    });
+
+    let activity =
+        run_scheduler_test_capture(&adapter, &root, &temp.path().join("index"), 2).unwrap();
+    let mut projects = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| match event {
+            SchedulerStateEvent::Project {
+                leaf,
+                full_probes_before,
+                full_probes_after,
+                event_time_entries_before,
+                event_time_entries_after,
+            } => (
+                *leaf,
+                *full_probes_before,
+                *full_probes_after,
+                *event_time_entries_before,
+                *event_time_entries_after,
+            ),
+            SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_) => {
+                panic!("unpartitioned defaults must not call partition hooks")
+            }
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by_key(|project| project.0);
+    assert_eq!(projects.len(), 4);
+    for (leaf, probes_before, probes_after, event_entries_before, event_entries_after) in projects {
+        assert_eq!(probes_before, usize::from(leaf.phase == 1));
+        assert_eq!(probes_after, 1);
+        assert_eq!(event_entries_before, 0);
+        assert_eq!(event_entries_after, 1);
+    }
+    assert_eq!(activity.worker_count, 2);
+    assert_eq!(activity.sources_started, 4);
+    assert_eq!(activity.sources_completed, 4);
+    assert_eq!(activity.peak_active_scanners, 2);
 }
 
 #[test]

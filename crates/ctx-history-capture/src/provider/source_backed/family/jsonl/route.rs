@@ -54,7 +54,7 @@ mod scanner;
 use scanner::{
     jsonl_family_scanner_activity, jsonl_family_scanner_probe,
     record_jsonl_family_scanner_activity, with_family_scanner_workers, JsonlFamilyScannerActivity,
-    FAMILY_SCANNER_WORKERS_OVERRIDE,
+    JsonlFamilyScannerProbe, FAMILY_SCANNER_WORKERS_OVERRIDE,
 };
 pub(crate) use scanner::{
     JsonlFamilyAppendMode, JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjectionMode,
@@ -188,6 +188,25 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
     /// every leaf in one fully parallel phase.
     fn leaf_scan_phase(&self, _leaf: &JsonlFamilyLeaf) -> Result<usize> {
         Ok(0)
+    }
+
+    /// Returns an independent dependency partition for one leaf. When every
+    /// selected leaf has a partition, the shared scheduler runs a bounded wave
+    /// of partitions in parallel while preserving adapter phase order inside
+    /// each partition. Worker-local semantic caches are fresh at the partition
+    /// boundary and may be reused only by leaves in that partition.
+    fn leaf_scan_partition(&self, _leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Prepares partition-local state immediately before its first leaf runs.
+    fn begin_leaf_scan_partition(&self, _partition: u64) -> Result<()> {
+        Ok(())
+    }
+
+    /// Releases partition-local state after all of its leaves have joined.
+    fn finish_leaf_scan_partition(&self, _partition: u64) -> Result<()> {
+        Ok(())
     }
 
     /// Pins related leaves to one persistent worker-state slot across

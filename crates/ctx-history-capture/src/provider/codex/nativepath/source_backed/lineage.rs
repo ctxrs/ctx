@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::provider::codex::nativepath::reader::CodexLineageFactPresenceV0;
 
-const LINEAGE_DEPENDENCY_DOMAIN: &[u8] = b"ctx/codex-lineage-dependency/v2\0";
+// V3 binds component-scoped lifetime and conservative capacity behavior into
+// the warm-replay proof, so checkpoints produced under the route-wide policy
+// cannot bypass the new lineage authority.
+const LINEAGE_DEPENDENCY_DOMAIN: &[u8] = b"ctx/codex-lineage-dependency/v3\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CodexOutcomeOriginV0 {
@@ -37,10 +40,11 @@ struct LineageNodeV0 {
     native_session_id: String,
     observation: CodexFileObservation,
     parent: ParentLinkV0,
-    has_children: bool,
     dependency_digest: [u8; 32],
     relationship_state: RelationshipStateV0,
     depth: usize,
+    component_digest: [u8; 32],
+    component: usize,
 }
 
 #[derive(Debug)]
@@ -49,6 +53,7 @@ enum LineageFactsStateV0 {
     OutsideRoute,
     CompleteLeaf,
     Ready(CodexLineageFactsV0),
+    Released,
 }
 
 #[derive(Debug)]
@@ -56,7 +61,9 @@ pub(super) struct CodexOutcomeLineageAuthorityV0 {
     nodes: Vec<LineageNodeV0>,
     indices: HashMap<String, usize>,
     facts: Mutex<Vec<LineageFactsStateV0>>,
-    budget: Arc<CodexLineageFactBudgetV0>,
+    needs_descendant_facts: Mutex<Vec<bool>>,
+    component_budgets: Vec<Arc<CodexLineageFactBudgetV0>>,
+    component_members: Vec<Box<[usize]>>,
     #[cfg(test)]
     dependency_work_units: usize,
 }
@@ -65,12 +72,20 @@ impl CodexOutcomeLineageAuthorityV0 {
     pub(super) fn from_sources(
         sources: &[(CodexCatalogSource, SourceKey, String)],
     ) -> CodexSourceBackedResultV0<Self> {
-        Self::from_sources_with_budget(sources, Arc::new(CodexLineageFactBudgetV0::default()))
+        Self::from_sources_with_optional_budget(sources, None)
     }
 
-    fn from_sources_with_budget(
+    #[cfg(test)]
+    pub(super) fn from_sources_with_budget(
         sources: &[(CodexCatalogSource, SourceKey, String)],
         budget: Arc<CodexLineageFactBudgetV0>,
+    ) -> CodexSourceBackedResultV0<Self> {
+        Self::from_sources_with_optional_budget(sources, Some(budget))
+    }
+
+    fn from_sources_with_optional_budget(
+        sources: &[(CodexCatalogSource, SourceKey, String)],
+        budget_override: Option<Arc<CodexLineageFactBudgetV0>>,
     ) -> CodexSourceBackedResultV0<Self> {
         let mut indices = HashMap::new();
         indices
@@ -101,22 +116,23 @@ impl CodexOutcomeLineageAuthorityV0 {
                 native_session_id: native_session_id.clone(),
                 observation: source.catalog_observation.clone(),
                 parent,
-                has_children: false,
                 dependency_digest: [0; 32],
                 relationship_state: RelationshipStateV0::Root,
                 depth: 0,
+                component_digest: [0; 32],
+                component: 0,
             });
         }
-        for index in 0..nodes.len() {
-            let parent = match nodes[index].parent {
-                ParentLinkV0::Source(parent) => Some(parent),
-                ParentLinkV0::Root | ParentLinkV0::Missing(_) => None,
-            };
-            if let Some(parent) = parent {
-                nodes
+        // Direct/native scanner callers do not bind a route selection. Keep
+        // their historical all-source behavior as the initial policy; the
+        // shared family replaces this with the narrower route-local set before
+        // any leaf workers start.
+        let mut needs_descendant_facts = vec![false; nodes.len()];
+        for node in &nodes {
+            if let ParentLinkV0::Source(parent) = node.parent {
+                *needs_descendant_facts
                     .get_mut(parent)
-                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
-                    .has_children = true;
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)? = true;
             }
         }
         let dependency_work_units = compute_dependency_digests(&mut nodes)?;
@@ -128,11 +144,44 @@ impl CodexOutcomeLineageAuthorityV0 {
             .try_reserve_exact(nodes.len())
             .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
         facts.resize_with(nodes.len(), || LineageFactsStateV0::Pending);
+        let mut component_digests = nodes
+            .iter()
+            .map(|node| node.component_digest)
+            .collect::<Vec<_>>();
+        component_digests.sort_unstable();
+        component_digests.dedup();
+        for node in &mut nodes {
+            node.component = component_digests
+                .binary_search(&node.component_digest)
+                .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        }
+        let mut component_members = (0..component_digests.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
+        for (index, node) in nodes.iter().enumerate() {
+            component_members
+                .get_mut(node.component)
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+                .push(index);
+        }
+        let component_members = component_members
+            .into_iter()
+            .map(Vec::into_boxed_slice)
+            .collect();
+        let component_budgets = (0..component_digests.len())
+            .map(|_| {
+                budget_override
+                    .as_ref()
+                    .map_or_else(|| Arc::new(CodexLineageFactBudgetV0::default()), Arc::clone)
+            })
+            .collect();
         Ok(Self {
             nodes,
             indices,
             facts: Mutex::new(facts),
-            budget,
+            needs_descendant_facts: Mutex::new(needs_descendant_facts),
+            component_budgets,
+            component_members,
             #[cfg(test)]
             dependency_work_units,
         })
@@ -144,19 +193,55 @@ impl CodexOutcomeLineageAuthorityV0 {
             nodes: Vec::new(),
             indices: HashMap::new(),
             facts: Mutex::new(Vec::new()),
-            budget: Arc::new(CodexLineageFactBudgetV0::default()),
+            needs_descendant_facts: Mutex::new(Vec::new()),
+            component_budgets: Vec::new(),
+            component_members: Vec::new(),
             dependency_work_units: 0,
         }
     }
 
-    pub(super) fn new_fact_set(&self) -> CodexSourceBackedResultV0<CodexLineageFactsV0> {
-        CodexLineageFactsV0::new(Arc::clone(&self.budget)).map_err(map_lineage_capture_error)
+    pub(super) fn new_fact_set(
+        &self,
+        native_session_id: &str,
+    ) -> CodexSourceBackedResultV0<CodexLineageFactsV0> {
+        let component = self
+            .indices
+            .get(native_session_id)
+            .and_then(|index| self.nodes.get(*index))
+            .map(|node| node.component)
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let budget = self
+            .component_budgets
+            .get(component)
+            .cloned()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        CodexLineageFactsV0::new(budget).map_err(map_lineage_capture_error)
     }
 
     pub(super) fn bind_route_sources(
         &self,
         selected_native_session_ids: &HashSet<String>,
     ) -> CodexSourceBackedResultV0<()> {
+        let mut needs_descendant_facts = vec![false; self.nodes.len()];
+        for node in &self.nodes {
+            if !selected_native_session_ids.contains(&node.native_session_id) {
+                continue;
+            }
+            if let ParentLinkV0::Source(parent) = node.parent {
+                if self.nodes.get(parent).is_some_and(|parent| {
+                    selected_native_session_ids.contains(&parent.native_session_id)
+                }) {
+                    *needs_descendant_facts
+                        .get_mut(parent)
+                        .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)? = true;
+                }
+            }
+        }
+        *self
+            .needs_descendant_facts
+            .lock()
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)? =
+            needs_descendant_facts;
         let mut facts = self
             .facts
             .lock()
@@ -183,11 +268,12 @@ impl CodexOutcomeLineageAuthorityV0 {
             .get(native_session_id)
             .copied()
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-        let retain_facts = self
-            .nodes
+        let retain_facts = *self
+            .needs_descendant_facts
+            .lock()
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
             .get(index)
-            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
-            .has_children;
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
         let mut registered = self
             .facts
             .lock()
@@ -210,10 +296,57 @@ impl CodexOutcomeLineageAuthorityV0 {
             }
             LineageFactsStateV0::OutsideRoute
             | LineageFactsStateV0::CompleteLeaf
-            | LineageFactsStateV0::Ready(_) => {
+            | LineageFactsStateV0::Ready(_)
+            | LineageFactsStateV0::Released => {
                 Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
             }
         }
+    }
+
+    pub(super) fn component_partition(&self, native_session_id: &str) -> Option<u64> {
+        self.indices
+            .get(native_session_id)
+            .and_then(|index| self.nodes.get(*index))
+            .and_then(|node| u64::try_from(node.component).ok())
+    }
+
+    pub(super) fn needs_descendant_facts(
+        &self,
+        native_session_id: &str,
+    ) -> CodexSourceBackedResultV0<bool> {
+        let index = self
+            .indices
+            .get(native_session_id)
+            .copied()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        self.needs_descendant_facts
+            .lock()
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+            .get(index)
+            .copied()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+    }
+
+    pub(super) fn release_component(&self, component: u64) -> CodexSourceBackedResultV0<()> {
+        let component = usize::try_from(component)
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let members = self
+            .component_members
+            .get(component)
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let mut facts = self
+            .facts
+            .lock()
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        for index in members {
+            let state = facts
+                .get_mut(*index)
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            if !matches!(state, LineageFactsStateV0::OutsideRoute) {
+                *state = LineageFactsStateV0::Released;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn dependency_digest(&self, native_session_id: &str) -> [u8; 32] {
@@ -232,31 +365,8 @@ impl CodexOutcomeLineageAuthorityV0 {
     }
 
     pub(super) fn component_affinity(&self, native_session_id: &str) -> u64 {
-        let Some(mut current) = self.indices.get(native_session_id).copied() else {
-            return u64::MAX;
-        };
-        let mut remaining = self.nodes.len().saturating_add(1);
-        while remaining != 0 {
-            remaining = remaining.saturating_sub(1);
-            let Some(node) = self.nodes.get(current) else {
-                return u64::MAX;
-            };
-            if node.depth == 0 {
-                let digest: [u8; 32] = if node.relationship_state == RelationshipStateV0::Cycle {
-                    node.dependency_digest
-                } else {
-                    let mut hasher = dependency_hasher(b"component\0");
-                    hash_text(&mut hasher, &node.native_session_id);
-                    hasher.finalize().into()
-                };
-                return u64::from_le_bytes(digest[..8].try_into().unwrap_or([0; 8]));
-            }
-            match node.parent {
-                ParentLinkV0::Source(parent) => current = parent,
-                ParentLinkV0::Root | ParentLinkV0::Missing(_) => return u64::MAX,
-            }
-        }
-        u64::MAX
+        self.component_partition(native_session_id)
+            .unwrap_or(u64::MAX)
     }
 
     pub(super) fn classify(
@@ -317,7 +427,7 @@ impl CodexOutcomeLineageAuthorityV0 {
                 Some(LineageFactsStateV0::CompleteLeaf) => {
                     return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
                 }
-                Some(LineageFactsStateV0::Pending) | None => {
+                Some(LineageFactsStateV0::Pending | LineageFactsStateV0::Released) | None => {
                     return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
                 }
             };
@@ -391,6 +501,9 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
                     }
                     ParentLinkV0::Root => {
                         nodes[current].dependency_digest = digest_marker(b"root\0");
+                        let mut component = dependency_hasher(b"component\0");
+                        hash_text(&mut component, &nodes[current].native_session_id);
+                        nodes[current].component_digest = component.finalize().into();
                         nodes[current].relationship_state = RelationshipStateV0::Root;
                         nodes[current].depth = 0;
                         colors[current] = 2;
@@ -399,6 +512,9 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
                         let mut hasher = dependency_hasher(b"missing\0");
                         hash_text(&mut hasher, parent);
                         nodes[current].dependency_digest = hasher.finalize().into();
+                        let mut component = dependency_hasher(b"component\0");
+                        hash_text(&mut component, &nodes[current].native_session_id);
+                        nodes[current].component_digest = component.finalize().into();
                         nodes[current].relationship_state = RelationshipStateV0::Missing;
                         nodes[current].depth = 0;
                         colors[current] = 2;
@@ -443,6 +559,7 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
                 for index in cycle {
                     work_units = work_units.saturating_add(1);
                     nodes[*index].dependency_digest = cycle_digest;
+                    nodes[*index].component_digest = cycle_digest;
                     nodes[*index].relationship_state = RelationshipStateV0::Cycle;
                     nodes[*index].depth = 0;
                     colors[*index] = 2;
@@ -468,6 +585,7 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
             hasher.update(nodes[parent].dependency_digest);
             hasher.update([nodes[parent].relationship_state as u8]);
             nodes[index].dependency_digest = hasher.finalize().into();
+            nodes[index].component_digest = nodes[parent].component_digest;
             nodes[index].relationship_state = match nodes[parent].relationship_state {
                 RelationshipStateV0::Root | RelationshipStateV0::Acyclic => {
                     RelationshipStateV0::Acyclic
@@ -523,6 +641,7 @@ pub(super) fn map_lineage_capture_error(error: CaptureError) -> CodexSourceBacke
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::codex::nativepath::record::CodexLineageRecordEvidence;
 
     fn source(id: &str, parent: Option<&str>, byte: u8) -> (CodexCatalogSource, SourceKey, String) {
         let source_key = codex_source_key(id).unwrap();
@@ -597,17 +716,19 @@ mod tests {
     }
 
     #[test]
-    fn fact_budget_exhaustion_is_typed() {
+    fn fact_budget_exhaustion_is_conservative_and_nonfatal() {
         let sources = vec![source("root", None, 1)];
         let authority = CodexOutcomeLineageAuthorityV0::from_sources_with_budget(
             &sources,
             Arc::new(CodexLineageFactBudgetV0::with_limits(1, 1)),
         )
         .unwrap();
-        assert!(matches!(
-            authority.new_fact_set(),
-            Err(CodexSourceBackedErrorV0::LineageWorkingSetExhausted)
-        ));
+        let facts = authority.new_fact_set("root").unwrap();
+        assert_eq!(
+            facts.presence("call", "call"),
+            CodexLineageFactPresenceV0::Unproven
+        );
+        authority.register("root", facts).unwrap();
     }
 
     #[test]
@@ -691,15 +812,171 @@ mod tests {
             .unwrap();
 
         authority
-            .register("child", authority.new_fact_set().unwrap())
+            .register("child", authority.new_fact_set("child").unwrap())
             .unwrap();
         let facts = authority.facts.lock().unwrap();
         let child = authority.indices["child"];
         assert!(matches!(facts[child], LineageFactsStateV0::CompleteLeaf));
         drop(facts);
         assert!(matches!(
-            authority.register("child", authority.new_fact_set().unwrap()),
+            authority.register("child", authority.new_fact_set("child").unwrap()),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
         ));
+    }
+
+    #[test]
+    fn independent_components_have_stable_partitions_and_release_in_isolation() {
+        let sources = vec![
+            source("root-a", None, 1),
+            source("child-a", Some("root-a"), 2),
+            source("root-b", None, 3),
+            source("child-b", Some("root-b"), 4),
+        ];
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        authority
+            .bind_route_sources(&HashSet::from([
+                "root-a".to_owned(),
+                "child-a".to_owned(),
+                "root-b".to_owned(),
+                "child-b".to_owned(),
+            ]))
+            .unwrap();
+        let component_a = authority.component_partition("root-a").unwrap();
+        let component_b = authority.component_partition("root-b").unwrap();
+        assert_eq!(
+            component_a,
+            authority.component_partition("child-a").unwrap()
+        );
+        assert_eq!(
+            component_b,
+            authority.component_partition("child-b").unwrap()
+        );
+        assert_ne!(component_a, component_b);
+
+        let mut reversed_sources = sources.clone();
+        reversed_sources.reverse();
+        let reversed = CodexOutcomeLineageAuthorityV0::from_sources(&reversed_sources).unwrap();
+        for native_session_id in ["root-a", "child-a", "root-b", "child-b"] {
+            assert_eq!(
+                authority.component_partition(native_session_id),
+                reversed.component_partition(native_session_id)
+            );
+        }
+
+        for root in ["root-a", "root-b"] {
+            let mut facts = authority.new_fact_set(root).unwrap();
+            facts
+                .record_for_test(CodexLineageRecordEvidence::Call("copied"))
+                .unwrap();
+            facts
+                .record_for_test(CodexLineageRecordEvidence::Result("copied"))
+                .unwrap();
+            authority.register(root, facts).unwrap();
+        }
+        authority.release_component(component_a).unwrap();
+        assert_eq!(
+            authority
+                .classify("child-b", "copied", "copied", None, 0, 0)
+                .unwrap(),
+            CodexOutcomeOriginV0::CopiedFromAncestor
+        );
+        assert!(matches!(
+            authority.classify("child-a", "copied", "copied", None, 0, 0),
+            Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+        ));
+    }
+
+    #[test]
+    fn component_release_reclaims_its_budget_for_a_conservative_retry() {
+        let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
+        let budget = Arc::new(CodexLineageFactBudgetV0::with_limits(4096, 2));
+        let authority =
+            CodexOutcomeLineageAuthorityV0::from_sources_with_budget(&sources, budget).unwrap();
+        authority
+            .bind_route_sources(&HashSet::from(["root".to_owned(), "child".to_owned()]))
+            .unwrap();
+        let mut root_facts = authority.new_fact_set("root").unwrap();
+        root_facts
+            .record_for_test(CodexLineageRecordEvidence::Call("root-call"))
+            .unwrap();
+        authority.register("root", root_facts).unwrap();
+        authority
+            .release_component(authority.component_partition("root").unwrap())
+            .unwrap();
+
+        let mut retried = authority.new_fact_set("child").unwrap();
+        retried
+            .record_for_test(CodexLineageRecordEvidence::Call("retry-call"))
+            .unwrap();
+        assert_eq!(
+            retried.presence("retry-call", "missing"),
+            CodexLineageFactPresenceV0::Unproven
+        );
+    }
+
+    #[test]
+    fn component_lifetimes_process_more_than_the_old_262144_fact_route_limit() {
+        const COMPONENTS: usize = 1_025;
+        const FACTS_PER_COMPONENT: usize = 256;
+        const OLD_ROUTE_FACT_LIMIT: usize = 262_144;
+        const {
+            assert!(COMPONENTS * FACTS_PER_COMPONENT > OLD_ROUTE_FACT_LIMIT);
+        }
+
+        let mut sources = Vec::with_capacity(COMPONENTS * 2);
+        let mut pairs = Vec::with_capacity(COMPONENTS);
+        for component in 0..COMPONENTS {
+            let root = format!("root-{component:04}");
+            let child = format!("child-{component:04}");
+            sources.push(source(&root, None, (component % 251) as u8));
+            sources.push(source(&child, Some(&root), ((component + 1) % 251) as u8));
+            pairs.push((root, child));
+        }
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        authority
+            .bind_route_sources(
+                &pairs
+                    .iter()
+                    .flat_map(|(root, child)| [root.clone(), child.clone()])
+                    .collect(),
+            )
+            .unwrap();
+        pairs.sort_by_key(|(root, _)| authority.component_partition(root).unwrap());
+
+        let mut processed_facts = 0_usize;
+        for (component_index, (root, child)) in pairs.iter().enumerate() {
+            let marker = format!("copied-{component_index:04}");
+            let mut facts = authority.new_fact_set(root).unwrap();
+            facts
+                .record_for_test(CodexLineageRecordEvidence::Call(&marker))
+                .unwrap();
+            facts
+                .record_for_test(CodexLineageRecordEvidence::Result(&marker))
+                .unwrap();
+            for fact in 2..FACTS_PER_COMPONENT {
+                facts
+                    .record_for_test(CodexLineageRecordEvidence::Call(&format!(
+                        "fact-{component_index:04}-{fact:03}"
+                    )))
+                    .unwrap();
+            }
+            processed_facts += FACTS_PER_COMPONENT;
+            authority.register(root, facts).unwrap();
+            assert_eq!(
+                authority
+                    .classify(child, &marker, &marker, None, 0, 0)
+                    .unwrap(),
+                CodexOutcomeOriginV0::CopiedFromAncestor
+            );
+            authority
+                .register(child, authority.new_fact_set(child).unwrap())
+                .unwrap();
+            let component = authority.component_partition(root).unwrap();
+            authority.release_component(component).unwrap();
+            let budget = &authority.component_budgets[component as usize];
+            assert_eq!(budget.charges_for_test(), (0, 0));
+        }
+        assert_eq!(processed_facts, COMPONENTS * FACTS_PER_COMPONENT);
+        assert!(processed_facts > OLD_ROUTE_FACT_LIMIT);
     }
 }

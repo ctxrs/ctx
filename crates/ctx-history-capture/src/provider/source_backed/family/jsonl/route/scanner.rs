@@ -67,6 +67,13 @@ impl JsonlFamilyOptimizedLeafOutcome {
 }
 
 #[cfg(test)]
+pub(super) use activity::{
+    jsonl_family_scanner_activity, jsonl_family_scanner_probe,
+    record_jsonl_family_scanner_activity, with_family_scanner_workers, JsonlFamilyScannerActivity,
+    JsonlFamilyScannerProbe, FAMILY_SCANNER_WORKERS_OVERRIDE,
+};
+
+#[cfg(test)]
 mod activity {
     use std::{
         cell::Cell,
@@ -195,10 +202,3 @@ mod activity {
         run()
     }
 }
-
-#[cfg(test)]
-pub(super) use activity::{
-    jsonl_family_scanner_activity, jsonl_family_scanner_probe,
-    record_jsonl_family_scanner_activity, with_family_scanner_workers, JsonlFamilyScannerActivity,
-    FAMILY_SCANNER_WORKERS_OVERRIDE,
-};

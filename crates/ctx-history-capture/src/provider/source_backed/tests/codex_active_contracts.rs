@@ -1,4 +1,7 @@
-use std::{io::Write, process::Command};
+use std::{
+    io::{BufWriter, Write},
+    process::Command,
+};
 
 use ctx_history_core::{RepositoryAbstentionReason, RepositoryVcsObservationKind};
 
@@ -66,6 +69,232 @@ fn codex_successful_result(call_id: &str, output: &str) -> serde_json::Value {
             "output": output
         }
     })
+}
+
+fn append_codex_non_display_lineage_results(path: &Path, component: usize, facts: usize) {
+    let file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let mut writer = BufWriter::new(file);
+    for fact in 0..facts {
+        writeln!(
+            writer,
+            r#"{{"timestamp":"2026-08-04T12:00:01Z","type":"response_item","payload":{{"type":"tool_search_output","call_id":"lineage-capacity-{component:02}-{fact:04}"}}}}"#,
+        )
+        .unwrap();
+    }
+    writer.flush().unwrap();
+}
+
+#[test]
+fn codex_jsonl_cold_route_publishes_beyond_old_aggregate_lineage_fact_limit() {
+    const COMPONENTS: usize = 65;
+    const FACTS_PER_PARENT: usize = 4_096;
+    const OLD_AGGREGATE_LINEAGE_FACT_LIMIT: usize = 262_144;
+    const LINEAGE_FACTS: usize = COMPONENTS * FACTS_PER_PARENT;
+    const LATE_COMPONENT_MARKER: &str = "latecomponentlineagecapacitymarker";
+
+    assert_eq!(LINEAGE_FACTS, 266_240);
+    const {
+        assert!(LINEAGE_FACTS > OLD_AGGREGATE_LINEAGE_FACT_LIMIT);
+    }
+
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let mut corpus_bytes = 0_u64;
+    for component in 0..COMPONENTS {
+        let parent_id = format!("019facf0-5555-7000-8000-{component:012x}");
+        let child_id = format!("019facf1-5555-7000-8000-{component:012x}");
+        let parent_path = sessions.join(format!("rollout-{parent_id}.jsonl"));
+        let child_path = sessions.join(format!("rollout-{child_id}.jsonl"));
+
+        write_codex_lineage_session(&parent_path, &parent_id, None, &[]);
+        append_codex_non_display_lineage_results(&parent_path, component, FACTS_PER_PARENT);
+        let child_events = (component + 1 == COMPONENTS)
+            .then(|| {
+                serde_json::json!({
+                    "timestamp": "2026-08-04T12:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": LATE_COMPONENT_MARKER
+                        }]
+                    }
+                })
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        write_codex_lineage_session(&child_path, &child_id, Some(&parent_id), &child_events);
+        corpus_bytes = corpus_bytes
+            .checked_add(fs::metadata(parent_path).unwrap().len())
+            .and_then(|bytes| bytes.checked_add(fs::metadata(child_path).unwrap().len()))
+            .unwrap();
+    }
+    assert!(corpus_bytes > 32 * 1024 * 1024);
+    assert!(corpus_bytes < 64 * 1024 * 1024);
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    super::super::set_after_codex_session_tree_stage_hook(move |counters| {
+        *observed_from_hook.lock().unwrap() = Some(counters);
+    });
+
+    let refreshed = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let expected_sources = COMPONENTS * 2;
+    let expected_complete_records = LINEAGE_FACTS + expected_sources + 1;
+    let counters = observed.lock().unwrap().expect("stage hook must run");
+    assert_eq!(counters.cold_sources, expected_sources as u64);
+    assert_eq!(counters.scanner_sources_started, expected_sources as u64);
+    assert_eq!(counters.scanner_sources_completed, expected_sources as u64);
+    assert_eq!(
+        counters.complete_records_scanned,
+        expected_complete_records as u64
+    );
+    assert_eq!(counters.staged_documents, 1);
+
+    assert_eq!(refreshed.successful_route_ids.len(), 1);
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(
+        refreshed.record_completion(),
+        SourceBackedRecordCompletion::Completed
+    );
+    assert_eq!(refreshed.certified_source_count, expected_sources);
+    assert_eq!(refreshed.commit.certified_sources, expected_sources);
+    assert_eq!(refreshed.commit.indexed_documents, 1);
+    let certified_complete_records = refreshed
+        .sources
+        .iter()
+        .map(|source| source.counts().complete_records)
+        .sum::<u64>();
+    assert_eq!(certified_complete_records, expected_complete_records as u64);
+    assert!(certified_complete_records > OLD_AGGREGATE_LINEAGE_FACT_LIMIT as u64);
+    assert_eq!(
+        refreshed
+            .sources
+            .iter()
+            .map(|source| source.counts().rejected_records)
+            .sum::<u64>(),
+        0
+    );
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates(LATE_COMPONENT_MARKER, 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn codex_jsonl_configured_lineage_exhaustion_publishes_conservatively_without_retry() {
+    const MARKER: &str = "lineagecapacityconservativepublicationmarker";
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent_id = "019facf0-5555-7000-8001-000000000001";
+    let child_id = "019facf0-5555-7000-8001-000000000002";
+    let parent = sessions.join(format!("rollout-{parent_id}.jsonl"));
+    let child = sessions.join(format!("rollout-{child_id}.jsonl"));
+    let non_display = (0..3)
+        .map(|index| {
+            serde_json::json!({
+                "timestamp": "2026-08-04T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "tool_search_output",
+                    "call_id": format!("configured-capacity-{index}")
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    write_codex_lineage_session(&parent, parent_id, None, &non_display);
+    write_codex_lineage_session(
+        &child,
+        child_id,
+        Some(parent_id),
+        &[serde_json::json!({
+            "timestamp": "2026-08-04T12:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": MARKER}]
+            }
+        })],
+    );
+
+    let adapter =
+        crate::provider::codex::nativepath::CodexSessionTreeJsonlFamilyAdapterV0::new(vec![
+            sessions.clone(),
+        ])
+        .unwrap()
+        .with_lineage_budget_limits(4_096, 1);
+    let driver =
+        super::super::family::jsonl::jsonl_family_driver(Arc::new(adapter), sessions.clone());
+    let route = SourceBackedRoute::automatic(
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            &sessions,
+        ),
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        driver,
+    )
+    .unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+
+    let refreshed = refresh_source_backed_generation(
+        &index,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        refreshed.record_completion(),
+        SourceBackedRecordCompletion::Completed
+    );
+    assert_eq!(refreshed.successful_route_ids.len(), 1);
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(refreshed.certified_source_count, 2);
+    assert_eq!(refreshed.commit.indexed_documents, 1);
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates(MARKER, 8)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -199,15 +428,20 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
     let copied_oid = "518dedb053f04ab0b529c7d2e8dafb322974fbf6";
     let cold_child_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let warm_child_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    let copied_call = codex_exec_call(
+    let mut copied_call = codex_exec_call(
         "call-copied-parent",
         "git commit -m copied && git rev-parse --verify HEAD",
         &repository,
     );
-    let copied_result = codex_successful_result(
+    let mut copied_result = codex_successful_result(
         "call-copied-parent",
         &format!("[main 518dedb] copied\n{copied_oid}\n"),
     );
+    // PR #290 treats exact call/result pairs recorded strictly after a child
+    // session starts as child-owned. This pair models genuinely copied parent
+    // history, so keep its event times before the child's fork boundary.
+    copied_call["timestamp"] = serde_json::Value::String("2026-08-04T11:59:58Z".to_owned());
+    copied_result["timestamp"] = serde_json::Value::String("2026-08-04T11:59:59Z".to_owned());
     write_codex_lineage_session(
         &parent_path,
         parent_id,
