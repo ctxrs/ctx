@@ -21,6 +21,10 @@ mod windows;
 use self::windows::ProcessTree;
 
 pub(super) const MAX_RETAINED_SUBPROCESS_STDERR_BYTES: usize = 64 * 1024;
+// Matches the public complete-content IPC frame payload ceiling. This leaves
+// the existing wire allowance for encoded content and its response envelope
+// without permitting an unbounded SDK-side subprocess buffer.
+pub(super) const MAX_RETAINED_MCP_STDOUT_BYTES: usize = 80 * 1024 * 1024;
 
 pub(super) fn spawn_configured(command: &mut Command) -> io::Result<Child> {
     configure_command(command);
@@ -36,9 +40,10 @@ fn configure_command(command: &mut Command) {
     let _ = command;
 }
 
+#[derive(Debug)]
 pub(super) struct McpOutput {
     pub(super) status: ExitStatus,
-    pub(super) stdout: Vec<u8>,
+    pub(super) tool_response: Option<Value>,
     pub(super) stderr: Vec<u8>,
 }
 
@@ -251,7 +256,7 @@ pub(super) fn collect_ctx_mcp_output(
     };
     let stdout_reader = match thread::Builder::new()
         .name("ctx-sdk-mcp-stdout".to_owned())
-        .spawn(move || read_pipe(stdout))
+        .spawn(move || read_mcp_stdout(stdout, MAX_RETAINED_MCP_STDOUT_BYTES))
     {
         Ok(reader) => reader,
         Err(err) => {
@@ -261,7 +266,7 @@ pub(super) fn collect_ctx_mcp_output(
     };
     let stderr_reader = match thread::Builder::new()
         .name("ctx-sdk-mcp-stderr".to_owned())
-        .spawn(move || read_pipe(stderr))
+        .spawn(move || read_bounded_pipe(stderr, MAX_RETAINED_SUBPROCESS_STDERR_BYTES))
     {
         Ok(reader) => reader,
         Err(err) => {
@@ -317,11 +322,7 @@ pub(super) fn collect_ctx_mcp_output(
         "ctx MCP stdin writer panicked",
         "failed to write ctx MCP request",
     )?;
-    let stdout = join_mcp_io(
-        stdout_reader,
-        "ctx MCP stdout reader panicked",
-        "failed to read ctx MCP stdout",
-    )?;
+    let stdout = join_mcp_stdout_reader(stdout_reader)?;
     let stderr = join_mcp_io(
         stderr_reader,
         "ctx MCP stderr reader panicked",
@@ -335,9 +336,10 @@ pub(super) fn collect_ctx_mcp_output(
             true,
         ));
     };
+    let tool_response = resolve_mcp_stdout(stdout, status.success())?;
     Ok(McpOutput {
         status,
-        stdout,
+        tool_response,
         stderr,
     })
 }
@@ -374,10 +376,114 @@ pub(super) fn read_bounded_pipe(mut pipe: impl Read, maximum: usize) -> io::Resu
     }
 }
 
-fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
-    Ok(bytes)
+enum McpStdoutError {
+    Decode(serde_json::Error),
+    LimitExceeded { maximum: usize },
+    Read(io::Error),
+}
+
+fn read_mcp_stdout(
+    mut pipe: impl Read,
+    maximum_response_bytes: usize,
+) -> Result<Option<Value>, McpStdoutError> {
+    let mut response = None;
+    let mut line = Vec::new();
+    let mut failure = None;
+    let mut observed_bytes = 0_usize;
+    let mut buffer = [0_u8; 8 * 1024];
+
+    loop {
+        let read = pipe.read(&mut buffer).map_err(McpStdoutError::Read)?;
+        if read == 0 {
+            if failure.is_none() && !line.is_empty() {
+                finish_mcp_stdout_line(&mut line, &mut response, &mut failure);
+            }
+            return failure.map_or(Ok(response), Err);
+        }
+
+        observed_bytes = observed_bytes.saturating_add(read);
+        if observed_bytes > maximum_response_bytes {
+            failure = Some(McpStdoutError::LimitExceeded {
+                maximum: maximum_response_bytes,
+            });
+            line.clear();
+            continue;
+        }
+
+        for &byte in &buffer[..read] {
+            if failure.is_some() {
+                continue;
+            }
+            if byte == b'\n' {
+                finish_mcp_stdout_line(&mut line, &mut response, &mut failure);
+            } else {
+                line.push(byte);
+            }
+        }
+    }
+}
+
+fn finish_mcp_stdout_line(
+    line: &mut Vec<u8>,
+    response: &mut Option<Value>,
+    failure: &mut Option<McpStdoutError>,
+) {
+    if line.is_empty() {
+        return;
+    }
+    match serde_json::from_slice::<Value>(line) {
+        Ok(value) => {
+            if value.get("id") == Some(&Value::from(2)) {
+                *response = Some(value);
+            }
+        }
+        Err(err) => *failure = Some(McpStdoutError::Decode(err)),
+    }
+    line.clear();
+}
+
+fn join_mcp_stdout_reader(
+    task: thread::JoinHandle<Result<Option<Value>, McpStdoutError>>,
+) -> Result<Result<Option<Value>, McpStdoutError>, AgentHistoryError> {
+    task.join().map_err(|_| {
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "ctx MCP stdout reader panicked",
+            true,
+        )
+    })
+}
+
+fn resolve_mcp_stdout(
+    stdout: Result<Option<Value>, McpStdoutError>,
+    status_success: bool,
+) -> Result<Option<Value>, AgentHistoryError> {
+    match stdout {
+        Ok(response) if status_success => Ok(response),
+        Ok(_) => Ok(None),
+        Err(McpStdoutError::Decode(_) | McpStdoutError::LimitExceeded { .. })
+            if !status_success =>
+        {
+            Ok(None)
+        }
+        Err(McpStdoutError::Decode(err)) => Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::DecodeError,
+            "failed to decode ctx MCP response",
+            false,
+        )
+        .with_cause(err.to_string())),
+        Err(McpStdoutError::LimitExceeded { maximum }) => Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            format!("ctx MCP stdout exceeded the {maximum}-byte response limit"),
+            false,
+        )),
+        Err(McpStdoutError::Read(err)) => Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "failed to read ctx MCP stdout",
+            true,
+        )
+        .with_cause(err.to_string())),
+    }
 }
 
 fn join_mcp_io<T>(

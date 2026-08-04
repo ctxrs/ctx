@@ -20,6 +20,17 @@ fn spawn_json_shell(body: &str) -> Child {
 }
 
 #[cfg(unix)]
+fn spawn_mcp_shell(body: &str) -> Child {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", body])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_configured(&mut command).unwrap()
+}
+
+#[cfg(unix)]
 fn make_test_executable(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     // Bazel's sandbox can briefly report ETXTBSY immediately after publishing
@@ -228,6 +239,121 @@ printf '%s\n' '{{"initialized":true,"local_only":true}}'"#,
     )
     .unwrap();
     assert_eq!(retained.len(), MAX_RETAINED_SUBPROCESS_STDERR_BYTES);
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_collector_rejects_oversized_stdout_without_partial_json() {
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "x".repeat(CHUNK_BYTES);
+    let body = format!(
+        r#"cat >/dev/null
+printf '%s' '{{"jsonrpc":"2.0","id":2,"result":{{"padding":"'
+chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk"
+  i=$((i + 1))
+done
+printf '%s\n' '"}}}}'"#,
+        MAX_RETAINED_MCP_STDOUT_BYTES / CHUNK_BYTES + 1
+    );
+    let error = collect_ctx_mcp_output(spawn_mcp_shell(&body), Vec::new(), Duration::from_secs(10))
+        .unwrap_err();
+
+    assert_eq!(error.body.code, AgentHistoryErrorCode::AdapterError);
+    assert_eq!(
+        error.body.message,
+        format!(
+            "ctx MCP stdout exceeded the {}-byte response limit",
+            MAX_RETAINED_MCP_STDOUT_BYTES
+        )
+    );
+    assert!(error.body.cause.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_collector_drains_oversized_stderr_with_bounded_retention() {
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "e".repeat(CHUNK_BYTES);
+    let body = format!(
+        r#"cat >/dev/null
+chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk" >&2
+  i=$((i + 1))
+done
+exit 7"#,
+        (MAX_RETAINED_SUBPROCESS_STDERR_BYTES * 4) / CHUNK_BYTES
+    );
+    let output =
+        collect_ctx_mcp_output(spawn_mcp_shell(&body), Vec::new(), Duration::from_secs(5)).unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(output.stderr.len(), MAX_RETAINED_SUBPROCESS_STDERR_BYTES);
+    assert!(output.stderr.iter().all(|byte| *byte == b'e'));
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_nonzero_exit_prefers_typed_stderr_to_invalid_stdout() {
+    const CHUNK_BYTES: usize = 4 * 1024;
+
+    let chunk = "x".repeat(CHUNK_BYTES);
+    let oversized = format!(
+        r#"cat >/dev/null
+printf '%s' '{{"jsonrpc":"2.0","id":2,"result":{{"padding":"'
+chunk='{chunk}'
+i=0
+while [ "$i" -lt {} ]; do
+  printf '%s' "$chunk"
+  i=$((i + 1))
+done
+printf '%s\n' '"}}}}'
+printf '%s\n' 'not found: fixture session' >&2
+exit 7"#,
+        MAX_RETAINED_MCP_STDOUT_BYTES / CHUNK_BYTES + 1
+    );
+    let cases = [
+        (
+            "malformed",
+            "cat >/dev/null\nprintf '%s\\n' '{\"jsonrpc\":'\nprintf '%s\\n' 'not found: fixture session' >&2\nexit 7"
+                .to_owned(),
+        ),
+        ("oversized", oversized),
+    ];
+
+    for (case, body) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join(format!("ctx-mcp-{case}"));
+        fs::write(&script, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+        make_test_executable(&script);
+        let client = AgentHistoryClient::local(LocalBackendConfig {
+            ctx_binary: script,
+            data_root: Some(temp.path().to_path_buf()),
+            env: BTreeMap::new(),
+            timeout: Duration::from_secs(10),
+        });
+
+        let error = client
+            .show_session(
+                "session-1",
+                ShowSessionOptions {
+                    mode: "log".to_owned(),
+                    limit: Some(1),
+                    cursor: None,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.body.code, AgentHistoryErrorCode::NotFound, "{case}");
+        assert_eq!(error.body.message, "not found: fixture session", "{case}");
+        assert!(!error.body.retryable, "{case}");
+    }
 }
 
 #[cfg(target_os = "linux")]

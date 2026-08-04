@@ -26,7 +26,9 @@ mod subprocess;
 
 use subprocess::{collect_ctx_json, collect_ctx_mcp_output, spawn_configured};
 #[cfg(all(test, unix))]
-use subprocess::{read_bounded_pipe, MAX_RETAINED_SUBPROCESS_STDERR_BYTES};
+use subprocess::{
+    read_bounded_pipe, MAX_RETAINED_MCP_STDOUT_BYTES, MAX_RETAINED_SUBPROCESS_STDERR_BYTES,
+};
 
 #[derive(Debug, Error)]
 #[error("{body:?}")]
@@ -529,25 +531,7 @@ fn run_ctx_mcp_show_session(
         ));
     }
 
-    let mut tool_response = None;
-    for line in output
-        .stdout
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let response: Value = serde_json::from_slice(line).map_err(|err| {
-            AgentHistoryError::new(
-                AgentHistoryErrorCode::DecodeError,
-                "failed to decode ctx MCP response",
-                false,
-            )
-            .with_cause(err.to_string())
-        })?;
-        if response.get("id") == Some(&json!(2)) {
-            tool_response = Some(response);
-        }
-    }
-    let response = tool_response.ok_or_else(|| {
+    let response = output.tool_response.ok_or_else(|| {
         AgentHistoryError::new(
             AgentHistoryErrorCode::DecodeError,
             "ctx MCP response omitted show_session result",
