@@ -443,6 +443,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
     let route =
         |byte: u8| SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap();
     let routes = BTreeSet::from([route(0x81), route(0x82), route(0x83)]);
+    let startup_routes = routes.iter().take(2).cloned().collect::<BTreeSet<_>>();
     let scans = Arc::new(Mutex::new(BTreeMap::<SourceRouteIdentity, usize>::new()));
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(Barrier::new(2));
@@ -500,8 +501,9 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
             Ok(publication)
         },
     )));
-    coordinator.reconcile_watch_routes(
-        routes.clone(),
+    coordinator.initialize_watch_route_authority(routes.clone());
+    coordinator.schedule_startup_route_reconciliation(
+        startup_routes,
         EventWatermark::new(1, 0),
         super::source_route_ledger_now_ms().saturating_sub(1_000),
     );
@@ -532,7 +534,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
         });
         entered.wait();
         let response = coordinator
-            .handle_ipc_request(
+            .handle_ipc_request_with_admission_fence_for_test(
                 &data_root,
                 &json!({
                     "schema_version": 1,
@@ -540,7 +542,9 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                     "mode": "wait",
                     "operation": "import",
                     "explicit_source_catalog": authority.to_json(),
+                    "fresh_after_admitted_snapshot": true,
                 }),
+                BTreeMap::new(),
             )
             .unwrap()
             .expect("manual all continuation response");
