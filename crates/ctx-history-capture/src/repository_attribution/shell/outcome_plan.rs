@@ -130,6 +130,23 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
                     plan,
                 );
             }
+            if plan.as_ref().is_some_and(|plan| {
+                matches!(
+                    plan.operation,
+                    BoundedOutcomeOperation::Commit {
+                        producer: BoundedCommitProducer::Commit,
+                        rewrites_history: false,
+                        exact_oid_output: true,
+                    }
+                )
+            }) {
+                // A later, unrelated command cannot revoke a commit that the
+                // same bounded route has already observed exactly. The result
+                // parser still requires one canonical commit receipt and the
+                // certifier resolves that receipt against this repository;
+                // multiple or conflicting receipts continue to fail closed.
+                continue;
+            }
             if plan.is_some() {
                 return outcome_abstained_with_plan(
                     RepositoryAbstentionReason::Ambiguous,

@@ -896,6 +896,7 @@ mod outcome_tests {
             "git commit -m exact && git pull && git rev-parse HEAD",
             "git commit -m exact && git branch --show-current && git rev-parse HEAD",
             "git commit -m exact && git commit --allow-empty -m second && git rev-parse HEAD",
+            "git commit -m exact && git rev-parse HEAD && git commit --allow-empty -m second",
             "git commit -m exact && custom-command && git rev-parse HEAD",
         ] {
             assert!(
@@ -913,6 +914,16 @@ mod outcome_tests {
         assert_eq!(
             bounded_outcome_operation(
                 "git commit -m exact && git status --short && git rev-parse --verify HEAD"
+            ),
+            Some(BoundedOutcomeOperation::Commit {
+                producer: BoundedCommitProducer::Commit,
+                rewrites_history: false,
+                exact_oid_output: true,
+            })
+        );
+        assert_eq!(
+            bounded_outcome_operation(
+                "git commit -m exact && git status --short && git rev-parse HEAD && sed -n '12,18p' src/lib.rs"
             ),
             Some(BoundedOutcomeOperation::Commit {
                 producer: BoundedCommitProducer::Commit,

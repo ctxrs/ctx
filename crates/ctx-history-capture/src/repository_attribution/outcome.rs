@@ -745,6 +745,38 @@ mod tests {
     }
 
     #[test]
+    fn exact_commit_receipt_survives_unrelated_output_after_exact_head() {
+        let oid = "cbbccc92da81bbe173789b873b2e579327b7c2e1";
+        let output = Value::String(format!(
+            "[ctx/v026-locator-sidecar-envelope-backfill cbbccc92d] fix(pro): reserve result bytes before source admission\n 2 files changed, 24 insertions(+), 5 deletions(-)\n{oid}\npub const MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;\n"
+        ));
+        let command = concat!(
+            "git commit -m 'fix(pro): reserve result bytes before source admission' && ",
+            "git status --short && git rev-parse HEAD && ",
+            "sed -n '12,18p' crates/ctx-pro-host-protocol/src/lib.rs"
+        );
+        let evidence = linked_outcome_evidence(input(command, &output)).unwrap();
+        let UnscopedOutcomeObservation::DeferredCommit(deferred) = &evidence.outcomes[0] else {
+            panic!("expected certified-receipt candidate");
+        };
+        assert_eq!(deferred.oid_prefix, "cbbccc92d");
+        assert_eq!(
+            deferred.subject,
+            "fix(pro): reserve result bytes before source admission"
+        );
+
+        let ambiguous = Value::String(format!(
+            "[main cbbccc92d] fix(pro): reserve result bytes before source admission\n{oid}\n[main 1111111] unrelated second commit\n"
+        ));
+        let evidence = linked_outcome_evidence(input(command, &ambiguous)).unwrap();
+        assert!(evidence.outcomes.is_empty());
+        assert_eq!(
+            evidence.abstentions[0].0,
+            RepositoryAbstentionReason::OutcomeResultInadmissible
+        );
+    }
+
+    #[test]
     fn canonical_merge_graph_head_is_deferred_and_ambiguous_summaries_abstain() {
         let output = Value::String(
             "Merge made by the 'ort' strategy.\n README.md | 11 +++++++++++\n*   efdfa9e Merge retry validation documentation\n|\\  \n| * a69f7ff Document retry validation contract\n* | 9747be9 Fail closed on invalid retry headers\n"
