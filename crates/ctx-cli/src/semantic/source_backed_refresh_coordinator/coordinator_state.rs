@@ -511,6 +511,14 @@ impl CoreRefreshEngine {
             .insert(route, watermark);
     }
 
+    #[cfg(test)]
+    pub(in super::super) fn route_event_watermark_for_test(
+        &self,
+        route: &SourceRouteIdentity,
+    ) -> Option<EventWatermark> {
+        self.lock_state().route_event_watermarks.get(route).copied()
+    }
+
     /// Projects only durable retained-route missing grace back into the exact
     /// watcher ledger. Healthy routes never enter this safety path.
     pub(in crate::semantic) fn schedule_pending_missing_route_rechecks(

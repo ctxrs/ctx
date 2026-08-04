@@ -340,16 +340,46 @@ impl CoreRefreshEngine {
         data_root: &Path,
         request_id: &str,
     ) -> PostPublicationRouteCoverageFence {
-        let routes = {
-            let state = self.lock_state();
-            find_attempt(&state, request_id)
-                .into_iter()
-                .flat_map(|attempt| attempt.route_observations.keys().cloned())
-                .collect()
-        };
-        self.post_publication_route_coverage_fence_with(request_id, routes, |catalog, routes| {
+        self.regular_post_publication_route_coverage_fence_with(request_id, |catalog, routes| {
             source_backed_requested_route_observation_fence(data_root, catalog, routes)
         })
+    }
+
+    fn regular_post_publication_route_coverage_fence_with<Sample>(
+        &self,
+        request_id: &str,
+        sample: Sample,
+    ) -> PostPublicationRouteCoverageFence
+    where
+        Sample: FnOnce(
+            Option<&ExplicitSourceCatalogAuthority>,
+            &BTreeSet<SourceRouteIdentity>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
+        // A verified publication already covers each route through its exact
+        // admission watermark. Provider sampling is needed only to prove that
+        // watcher events delivered during capture did not change its content.
+        let routes = {
+            let state = self.lock_state();
+            let admitted = state.route_admission_watermarks.get(request_id);
+            find_attempt(&state, request_id).map_or_else(BTreeSet::new, |attempt| {
+                attempt
+                    .route_observations
+                    .keys()
+                    .filter(|route| {
+                        admitted
+                            .and_then(|watermarks| watermarks.get(*route))
+                            .zip(state.route_event_watermarks.get(*route))
+                            .is_some_and(|(admitted, current)| current > admitted)
+                    })
+                    .cloned()
+                    .collect()
+            })
+        };
+        if routes.is_empty() {
+            return PostPublicationRouteCoverageFence::fail_closed();
+        }
+        self.post_publication_route_coverage_fence_with(request_id, routes, sample)
     }
 
     fn post_publication_route_coverage_fence_with<Sample>(
@@ -405,5 +435,21 @@ impl CoreRefreshEngine {
         observations: BTreeMap<SourceRouteIdentity, String>,
     ) {
         self.set_route_observations(request_id, observations);
+    }
+
+    #[cfg(test)]
+    pub(in super::super::super) fn regular_post_publication_route_coverage_fence_for_test<Sample>(
+        &self,
+        request_id: &str,
+        sample: Sample,
+    ) -> PostPublicationRouteCoverageFence
+    where
+        Sample: FnOnce(
+            &BTreeSet<SourceRouteIdentity>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
+        self.regular_post_publication_route_coverage_fence_with(request_id, |_catalog, routes| {
+            sample(routes)
+        })
     }
 }

@@ -384,13 +384,20 @@ impl<'a> VerifiedSourceRefreshRouteBoundary<'a> {
     }
 }
 
-pub(super) struct PostPublicationRouteCoverageFence {
+pub(in crate::semantic) struct PostPublicationRouteCoverageFence {
     pub(super) seen_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
     pub(super) sampled_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
 }
 
 impl PostPublicationRouteCoverageFence {
-    pub(super) fn certified_boundary(
+    pub(super) fn fail_closed() -> Self {
+        Self {
+            seen_watermarks: BTreeMap::new(),
+            sampled_observations: BTreeMap::new(),
+        }
+    }
+
+    pub(in crate::semantic) fn certified_boundary(
         &self,
         route: &SourceRouteIdentity,
         admitted_watermark: EventWatermark,

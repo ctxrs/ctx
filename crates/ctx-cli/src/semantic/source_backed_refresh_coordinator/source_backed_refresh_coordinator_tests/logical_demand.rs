@@ -300,6 +300,91 @@ fn fully_covered_resolver_mismatch_and_unavailable_samples_do_not_extend_coverag
 }
 
 #[test]
+fn regular_publication_fence_skips_sampling_without_a_post_admission_event() {
+    let route = route_identity(0x6c);
+    let observation = observation(0xac);
+    let coordinator = CoreRefreshEngine::new();
+    coordinator.initialize_watch_route_authority([route.clone()]);
+    let request = coordinator.enqueue_for_test(None);
+    let request_id = request_id(&request);
+    coordinator
+        .admit_refresh_scope_for_test(&request_id, &SourceBackedRefreshScope::All)
+        .unwrap();
+    coordinator.set_route_observations_for_test(
+        &request_id,
+        BTreeMap::from([(route.clone(), observation.clone())]),
+    );
+    let admitted = EventWatermark::new(0, 0);
+    assert_eq!(
+        coordinator.route_event_watermark_for_test(&route),
+        Some(admitted)
+    );
+    let mut sampled = false;
+
+    let fence = coordinator.regular_post_publication_route_coverage_fence_for_test(
+        &request_id,
+        |_routes| {
+            sampled = true;
+            Ok(BTreeMap::new())
+        },
+    );
+
+    assert!(!sampled);
+    assert_eq!(
+        fence.certified_boundary(&route, admitted, &observation),
+        admitted
+    );
+}
+
+#[test]
+fn regular_publication_fence_samples_only_advanced_route_and_bounds_later_event() {
+    let advanced = route_identity(0x6d);
+    let steady = route_identity(0x6e);
+    let advanced_observation = observation(0xad);
+    let steady_observation = observation(0xae);
+    let coordinator = CoreRefreshEngine::new();
+    coordinator.initialize_watch_route_authority([advanced.clone(), steady.clone()]);
+    let request = coordinator.enqueue_for_test(None);
+    let request_id = request_id(&request);
+    coordinator
+        .admit_refresh_scope_for_test(&request_id, &SourceBackedRefreshScope::All)
+        .unwrap();
+    coordinator.set_route_observations_for_test(
+        &request_id,
+        BTreeMap::from([
+            (advanced.clone(), advanced_observation.clone()),
+            (steady.clone(), steady_observation.clone()),
+        ]),
+    );
+    let admitted = EventWatermark::new(0, 0);
+    let seen_before_fence = EventWatermark::new(0, 1);
+    let event_after_fence = EventWatermark::new(0, 2);
+    coordinator.set_route_event_watermark_for_test(advanced.clone(), seen_before_fence);
+    let sampled_route = advanced.clone();
+    let sampled_observation = advanced_observation.clone();
+
+    let fence =
+        coordinator.regular_post_publication_route_coverage_fence_for_test(&request_id, |routes| {
+            assert_eq!(routes, &BTreeSet::from([sampled_route.clone()]));
+            coordinator
+                .set_route_event_watermark_for_test(sampled_route.clone(), event_after_fence);
+            Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
+        });
+
+    let advanced_boundary = fence.certified_boundary(&advanced, admitted, &advanced_observation);
+    assert_eq!(advanced_boundary, seen_before_fence);
+    assert_eq!(
+        fence.certified_boundary(&steady, admitted, &steady_observation),
+        admitted
+    );
+    assert_eq!(
+        coordinator.route_event_watermark_for_test(&advanced),
+        Some(event_after_fence)
+    );
+    assert!(advanced_boundary < event_after_fence);
+}
+
+#[test]
 fn post_snapshot_change_executes_only_exact_uncovered_delta() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
