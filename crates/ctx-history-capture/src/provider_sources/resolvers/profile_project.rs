@@ -1102,7 +1102,7 @@ const NANOCLAW_PLIST_MAX_DEPTH: usize = 32;
 
 fn parse_launchd_plist_values(text: &str) -> Result<NanoClawLaunchdValues, ()> {
     let mut reader = Reader::from_str(text);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut declaration_seen = false;
     let mut doctype_seen = false;
     loop {
@@ -1135,7 +1135,12 @@ fn parse_launchd_plist_values(text: &str) -> Result<NanoClawLaunchdValues, ()> {
 fn next_nanoclaw_plist_event<'a>(reader: &mut Reader<&'a [u8]>) -> Result<Event<'a>, ()> {
     loop {
         match reader.read_event().map_err(|_| ())? {
-            Event::Text(text) if text.decode().map_err(|_| ())?.trim().is_empty() => {}
+            Event::Text(text)
+                if text
+                    .decode()
+                    .map_err(|_| ())?
+                    .chars()
+                    .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n')) => {}
             Event::Comment(_) => {}
             event => return Ok(event),
         }
@@ -1196,17 +1201,29 @@ fn parse_nanoclaw_plist_text<'a>(
     loop {
         match reader.read_event().map_err(|_| ())? {
             Event::Text(text) => {
-                let decoded = text.decode().map_err(|_| ())?;
-                value.push_str(
-                    &quick_xml::escape::unescape(&decoded)
-                        .map_err(|_| ())?
-                        .into_owned(),
-                );
+                value.push_str(&text.decode().map_err(|_| ())?);
+            }
+            Event::GeneralRef(reference) => {
+                append_nanoclaw_plist_reference(&mut value, &reference)?;
             }
             Event::End(element) if element.name().as_ref() == end_name => return Ok(value),
             _ => return Err(()),
         }
     }
+}
+
+fn append_nanoclaw_plist_reference(
+    value: &mut String,
+    reference: &quick_xml::events::BytesRef<'_>,
+) -> Result<(), ()> {
+    if let Some(character) = reference.resolve_char_ref().map_err(|_| ())? {
+        value.push(character);
+        return Ok(());
+    }
+    let name = reference.decode().map_err(|_| ())?;
+    let resolved = quick_xml::escape::resolve_predefined_entity(&name).ok_or(())?;
+    value.push_str(resolved);
+    Ok(())
 }
 
 fn parse_nanoclaw_plist_array<'a>(

@@ -296,6 +296,49 @@ fn nanoclaw_launchd_rejects_nested_misordered_duplicate_and_malformed_fields() {
 }
 
 #[test]
+fn nanoclaw_launchd_decodes_entities_without_trimming_key_or_path_text() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("nanoclaw & checkout");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    let plist = write_nanoclaw_launchd_plist(&home, &project);
+    let label = format!("com.nanoclaw-v2-{}", nanoclaw_slug_for(&project));
+    let encoded_project = project.to_string_lossy().replace('&', "&amp;");
+    let body = |label_key: &str, label_value: &str, working_directory: &str| {
+        format!(
+            "<plist version=\"1.0\"><dict><key>{label_key}</key><string>{label_value}</string><key>ProgramArguments</key><array><string>/usr/local/bin/node</string><string>{encoded_project}/dist/index.js</string></array><key>WorkingDirectory</key><string>{working_directory}</string></dict></plist>"
+        )
+    };
+    let discovery = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::MacOS,
+        DiscoveryPlatformDirs::default(),
+    );
+
+    write(&plist, body("Lab&#x65;l", &label, &encoded_project));
+    let valid = report(&discovery, CaptureProvider::NanoClaw);
+    assert_eq!(valid.issues, []);
+    assert_eq!(valid.sources[0].path, project);
+
+    for invalid in [
+        body(" Label ", &label, &encoded_project),
+        body("&#32;Label&#32;", &label, &encoded_project),
+        body("Label", &format!(" {label} "), &encoded_project),
+        body("Label", &label, &format!(" {encoded_project} ")),
+        body("Label", &label, &format!("&#32;{encoded_project}&#32;")),
+    ] {
+        write(&plist, invalid);
+        let report = report(&discovery, CaptureProvider::NanoClaw);
+        assert!(report.sources.is_empty());
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].path.as_deref(), Some(plist.as_path()));
+    }
+}
+
+#[test]
 fn nanoclaw_sha1_slug_matches_external_known_vectors() {
     // FIPS PUB 180-1's standard "abc" vector and the standard empty digest.
     assert_eq!(nanoclaw_sha1_slug(b"abc"), "a9993e36");
