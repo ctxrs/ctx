@@ -19,6 +19,15 @@ pub(crate) const TRAE_CHAT_KEYS: &[&str] = &[
 ];
 
 pub(crate) const TRAE_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 16 * 64;
+pub(crate) const TRAE_CHAT_ROWS_QUERY: &str =
+    "select [key], count(*), typeof(value), coalesce(octet_length(value), 0), \
+            case when count(*) = 1 \
+                       and typeof(value) = 'text' \
+                       and octet_length(value) + octet_length([key]) + ?7 <= ?8 \
+                 then cast(value as text) end \
+     from ItemTable \
+     where [key] in (?1, ?2, ?3, ?4, ?5, ?6) \
+     group by [key]";
 
 pub(crate) fn trae_sqlite_value_fits_parser_bound(chat_key: &str, retained_bytes: u64) -> bool {
     retained_bytes

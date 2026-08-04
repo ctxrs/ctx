@@ -233,6 +233,31 @@ fn trae_probe_distinguishes_supported_content_from_valid_empty_containers() {
 }
 
 #[test]
+fn trae_probe_rejects_duplicate_known_keys_before_payload_precedence() {
+    let temp = tempdir();
+    let path = temp.path().join("database.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute("create table ItemTable ([key] text, value text)", [])
+        .unwrap();
+    connection
+        .execute(
+            "insert into ItemTable ([key], value) values (?1, ?2), (?1, ?3)",
+            rusqlite::params![
+                TRAE_CHAT_KEYS[0],
+                r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                r#"{"list":[]}"#,
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(None, &path, 10_000),
+        BoundedProbe::IoError
+    );
+}
+
+#[test]
 fn sqlite_probe_deadline_interrupts_expensive_queries() {
     let temp = tempdir();
     let path = temp.path().join("deadline.db");

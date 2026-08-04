@@ -834,6 +834,38 @@ fn trae_current_database_does_not_union_stale_workspace_storage() {
 }
 
 #[test]
+fn trae_duplicate_known_keys_are_unknown_for_automatic_discovery() {
+    let temp = tempdir();
+    let context = context(temp.path(), DiscoveryPlatform::Linux);
+    let current = context
+        .platform_dirs()
+        .config
+        .as_ref()
+        .unwrap()
+        .join("Trae/ModularData/ai-agent/database.db");
+    fs::create_dir_all(current.parent().unwrap()).unwrap();
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute("CREATE TABLE ItemTable ([key] TEXT, value TEXT)", [])
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2), (?1, ?3)",
+            rusqlite::params![
+                "memento/icube-ai-agent-storage",
+                r#"{"list":[{"id":"supported","messages":[{"content":"hello"}]}]}"#,
+                r#"{"list":[]}"#,
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+}
+
+#[test]
 fn antigravity_accepts_only_official_fixed_transcript_leaves() {
     let temp = tempdir();
     let linux_context = context(temp.path(), DiscoveryPlatform::Linux);

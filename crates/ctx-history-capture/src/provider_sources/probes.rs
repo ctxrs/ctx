@@ -26,7 +26,7 @@ use crate::provider::{
         cursor::{discover_cursor_transcripts, CursorDiscoveryIssueKind},
         trae::{
             trae_payload_admission, trae_sqlite_value_fits_parser_bound, TraePayloadAdmission,
-            TRAE_CHAT_KEYS, TRAE_SQLITE_VALUE_OVERHEAD_BYTES,
+            TRAE_CHAT_KEYS, TRAE_CHAT_ROWS_QUERY, TRAE_SQLITE_VALUE_OVERHEAD_BYTES,
         },
     },
     sqlite::sqlite_component_change_token,
@@ -463,14 +463,7 @@ fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> Boun
 
         let parser_bound = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(i64::MAX);
         let parser_overhead = i64::try_from(TRAE_SQLITE_VALUE_OVERHEAD_BYTES).unwrap_or(i64::MAX);
-        let mut statement = conn.prepare(
-            "select [key], typeof(value), coalesce(octet_length(value), 0), \
-                    case when typeof(value) = 'text' \
-                              and octet_length(value) + octet_length([key]) + ?7 <= ?8 \
-                         then cast(value as text) end \
-             from ItemTable \
-             where [key] in (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
+        let mut statement = conn.prepare(TRAE_CHAT_ROWS_QUERY)?;
         let mut rows = statement.query(rusqlite::params![
             TRAE_CHAT_KEYS[0],
             TRAE_CHAT_KEYS[1],
@@ -485,9 +478,14 @@ fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> Boun
         let mut saw_incompatible_payload = false;
         while let Some(row) = rows.next()? {
             let chat_key = row.get::<_, String>(0)?;
-            let value_type = row.get::<_, String>(1)?;
-            let retained_bytes = row.get::<_, i64>(2)?;
-            let value = row.get::<_, Option<String>>(3)?;
+            let cardinality = row.get::<_, i64>(1)?;
+            if cardinality != 1 {
+                saw_incompatible_payload = true;
+                continue;
+            }
+            let value_type = row.get::<_, String>(2)?;
+            let retained_bytes = row.get::<_, i64>(3)?;
+            let value = row.get::<_, Option<String>>(4)?;
             let Ok(retained_bytes) = u64::try_from(retained_bytes) else {
                 saw_incompatible_payload = true;
                 continue;
