@@ -15,7 +15,7 @@ filegroup(
 
 filegroup(
     name = "predecessor_fixture",
-    srcs = glob(["testdata/core-predecessor-c5ad8c7b/**"]),
+    srcs = glob(["testdata/core-predecessor-7552eee7/**"]),
 )
 
 COMMON_RUSTC_ENV = {

@@ -5,9 +5,9 @@ use tantivy::{indexer::NoMergePolicy, Index, ReloadPolicy};
 use crate::{
     audit_searcher_core_contract, classify_core_contract_generation,
     current_core_record_contract_fingerprint, durable_directory::DurableMmapDirectory,
-    fields_from_schema, validate_schema, writer_support::construct_index_writer_with_retry,
-    CommittedPredecessorMigrationRecovery, CoreContractGeneration, GenerationManifest, IndexError,
-    Result, WriterOptions,
+    expected_source_generation_policy_hash, fields_from_schema, validate_schema,
+    writer_support::construct_index_writer_with_retry, CommittedPredecessorMigrationRecovery,
+    CoreContractGeneration, GenerationManifest, IndexError, Result, WriterOptions,
 };
 
 use super::{
@@ -114,6 +114,8 @@ pub(crate) fn migrate_allowlisted_predecessor(
 
     let mut current_manifest = predecessor_publication.manifest.clone();
     current_manifest.core_record_contract_fingerprint = current_core_record_contract_fingerprint();
+    current_manifest.policy_schema_hash =
+        expected_source_generation_policy_hash(CoreContractGeneration::Current)?;
     if classify_core_contract_generation(&current_manifest.core_record_contract_fingerprint)?
         != CoreContractGeneration::Current
     {

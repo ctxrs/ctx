@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source_commit="1f400fc7ac37e87c107e7665e8decccc8c30fe91"
-expected_fingerprint="c5ad8c7bce69d5fd3f12d3b57e8e49403233db4a74f91882ed649a2bb117b19a"
+source_commit="a0ff045f8a223468b2f00b1e6e1d9a51709d208f"
+expected_fingerprint="7552eee7cae0695a98f202b02f52cbf5680845cb7bacea4ed754e283bc15f051"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(git -C "${script_dir}" rev-parse --show-toplevel)"
 staging="$(mktemp -d "${TMPDIR:-/tmp}/ctx-predecessor-fixture.XXXXXX")"

@@ -12,8 +12,9 @@ use tantivy::{directory::Directory, IndexMeta, Searcher};
 use uuid::Uuid;
 
 use crate::{
-    classify_core_contract_generation, current_source_generation_policy_hash,
+    classify_core_contract_generation,
     durable_directory::DurableMmapDirectory,
+    expected_source_generation_policy_hash,
     identity::{is_generation_id, sha256_hex},
     CommitPayload, CoreContractGeneration, GenerationManifest, IndexError, Result,
     COMMIT_PAYLOAD_VERSION, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
@@ -91,7 +92,7 @@ pub(crate) fn load_publication_for_metas(
     }
     let core_contract =
         classify_core_contract_generation(&manifest.core_record_contract_fingerprint)?;
-    let expected_policy_hash = current_source_generation_policy_hash()?;
+    let expected_policy_hash = expected_source_generation_policy_hash(core_contract)?;
     if manifest.policy_schema_hash != expected_policy_hash {
         return Err(IndexError::GenerationPolicyMismatch {
             expected: expected_policy_hash,

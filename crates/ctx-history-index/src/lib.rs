@@ -41,11 +41,14 @@ pub use contracts::{
     GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
     LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_PUBLICATION_METADATA_BYTES,
 };
-#[cfg(test)]
-pub(crate) use core_contract::SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT;
 pub(crate) use core_contract::{
     audit_searcher_core_contract, classify_core_contract_generation,
-    current_core_record_contract_fingerprint, CoreContractGeneration,
+    current_core_record_contract_fingerprint, expected_source_generation_policy_hash,
+    CoreContractGeneration,
+};
+#[cfg(test)]
+pub(crate) use core_contract::{
+    SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT, SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH,
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{

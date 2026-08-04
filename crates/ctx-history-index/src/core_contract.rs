@@ -1,12 +1,17 @@
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
 use tantivy::{schema::Value as TantivyValue, DocAddress, TantivyDocument};
 
-use crate::{fields_from_schema, CoreRecord, IndexError, Result};
+use crate::{
+    current_source_generation_policy_hash, fields_from_schema, CoreRecord, IndexError, Result,
+};
 
 /// The one deployed self-contained Core contract that this build may read
 /// across a same-epoch additive transition.
 pub(crate) const SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT: &str =
-    "c5ad8c7bce69d5fd3f12d3b57e8e49403233db4a74f91882ed649a2bb117b19a";
+    "7552eee7cae0695a98f202b02f52cbf5680845cb7bacea4ed754e283bc15f051";
+/// The exact source-generation policy carried by that deployed predecessor.
+pub(crate) const SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH: &str =
+    "e728b5d7b76d04248e9dccc91fc11d915fcbcd714b445090725ba0604b8e8b37";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoreContractGeneration {
@@ -39,14 +44,29 @@ pub(crate) fn classify_core_contract_generation(actual: &str) -> Result<CoreCont
     })
 }
 
+/// Returns the only source-generation policy authorized for this Core shape.
+///
+/// The predecessor pair is immutable deployed evidence. Current generations
+/// always use the policy derived from the current Core revisions.
+pub(crate) fn expected_source_generation_policy_hash(
+    contract: CoreContractGeneration,
+) -> Result<String> {
+    match contract {
+        CoreContractGeneration::Current => Ok(current_source_generation_policy_hash()?),
+        CoreContractGeneration::AllowlistedPredecessor => {
+            Ok(SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH.to_owned())
+        }
+    }
+}
+
 /// Decodes one stored record according to the manifest-selected Core shape.
 ///
-/// The successor decoder accepts absent optional MCP members, so an allowlisted
+/// The predecessor already supports exact MCP tool-call attribution. The
+/// successor decoder also accepts an absent exchange, so an allowlisted
 /// fingerprint alone is not enough to prove predecessor shape. The frozen
-/// predecessor mode first rejects the successor-only top-level
-/// `mcp_tool_call` or nested `content.mcp_exchange` member even when its value
-/// is `null`, then applies Core's exact decoder and validation to the remaining
-/// record.
+/// predecessor mode first rejects the successor-only nested MCP exchange
+/// member even when its value is null, then applies Core's exact decoder and
+/// validation to the remaining record.
 pub(crate) fn decode_stored_core_record_for_contract(
     encoded: &[u8],
     contract: CoreContractGeneration,
@@ -115,9 +135,6 @@ fn reject_predecessor_successor_members(encoded: &[u8]) -> Result<()> {
             A: MapAccess<'de>,
         {
             while let Some(key) = map.next_key::<String>()? {
-                if key == "mcp_tool_call" {
-                    self.successor_member.get_or_insert("mcp_tool_call");
-                }
                 if key == "content" {
                     map.next_value_seed(ContentMemberSeed {
                         successor_member: self.successor_member,
@@ -224,12 +241,29 @@ mod tests {
             classify_core_contract_generation(&"b".repeat(64)),
             Err(IndexError::CoreRecordContractMismatch { actual, .. }) if actual == "b".repeat(64)
         ));
+        assert_eq!(
+            expected_source_generation_policy_hash(CoreContractGeneration::Current).unwrap(),
+            current_source_generation_policy_hash().unwrap()
+        );
+        assert_eq!(
+            expected_source_generation_policy_hash(CoreContractGeneration::AllowlistedPredecessor)
+                .unwrap(),
+            SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH
+        );
+        assert_eq!(
+            current_source_generation_policy_hash().unwrap(),
+            SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH
+        );
     }
 
     #[test]
-    fn predecessor_shape_rejects_successor_members_even_when_null() {
+    fn predecessor_shape_accepts_attribution_and_rejects_successor_exchange() {
         let source = crate::tests::source("predecessor-shape.jsonl");
-        let record = crate::tests::document(&source, 1, "predecessor body");
+        let mut record = crate::tests::document(&source, 1, "predecessor body");
+        record.mcp_tool_call = Some(ctx_history_core::McpToolCallAttribution {
+            server: "fixture-server".to_owned(),
+            tool: "fixture-tool".to_owned(),
+        });
         let encoded = record.encode_stored().unwrap();
         assert!(decode_stored_core_record_for_contract(
             &encoded,
@@ -237,31 +271,23 @@ mod tests {
         )
         .is_ok());
 
-        for (member, malformed) in [
-            ("mcp_tool_call", {
-                let mut value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
-                value
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("mcp_tool_call".to_owned(), serde_json::Value::Null);
-                value
-            }),
-            ("content.mcp_exchange", {
+        for malformed in [
+            {
                 let mut value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
                 value["content"]
                     .as_object_mut()
                     .unwrap()
                     .insert("mcp_exchange".to_owned(), serde_json::Value::Null);
                 value
-            }),
-            ("content.mcp_exchange", {
+            },
+            {
                 let mut value = serde_json::from_slice::<serde_json::Value>(&encoded).unwrap();
                 value["content"].as_object_mut().unwrap().insert(
                     "mcp_exchange".to_owned(),
                     serde_json::json!({"provider_call_id": "successor-call"}),
                 );
                 value
-            }),
+            },
         ] {
             let malformed = serde_json::to_vec(&malformed).unwrap();
             assert!(matches!(
@@ -270,7 +296,7 @@ mod tests {
                     CoreContractGeneration::AllowlistedPredecessor
                 ),
                 Err(IndexError::PredecessorCoreRecordShapeMismatch { member: actual })
-                    if actual == member
+                    if actual == "content.mcp_exchange"
             ));
         }
     }

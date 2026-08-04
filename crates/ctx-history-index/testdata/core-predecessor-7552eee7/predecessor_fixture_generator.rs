@@ -13,7 +13,7 @@ use ctx_history_index::{GenerationWriter, WriterOptions};
 use sha2::{Digest, Sha256};
 
 const EXPECTED_FINGERPRINT: &str =
-    "c5ad8c7bce69d5fd3f12d3b57e8e49403233db4a74f91882ed649a2bb117b19a";
+    "7552eee7cae0695a98f202b02f52cbf5680845cb7bacea4ed754e283bc15f051";
 
 fn main() {
     let fixture_root = std::env::args_os()
@@ -25,12 +25,13 @@ fn main() {
     fs::create_dir_all(&fixture_root).unwrap();
     let index_root = fixture_root.join("index");
     let source = source();
-    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for sequence in 1..=3 {
-        writer
-            .add_core_record(document(&source, sequence))
-            .unwrap();
+        writer.add_core_record(document(&source, sequence)).unwrap();
     }
     writer.certify_source(certificate(&source)).unwrap();
     let receipt = writer
@@ -42,7 +43,7 @@ fn main() {
         .into_parts()
         .0;
 
-    remove_lock_files(&index_root);
+    remove_ephemeral_files(&index_root);
     let pointer: serde_json::Value =
         serde_json::from_slice(&fs::read(index_root.join("active-generation.json")).unwrap())
             .unwrap();
@@ -67,7 +68,7 @@ fn main() {
         "generation_id": receipt.generation_id,
         "physical_integrity_digest": physical_integrity_digest,
         "generator": "predecessor_fixture_generator.rs",
-        "command": "testdata/core-predecessor-c5ad8c7b/regenerate.sh",
+        "command": "testdata/core-predecessor-7552eee7/regenerate.sh",
         "sanitization": "synthetic source and records; no user or provider files",
         "files": files,
     });
@@ -153,15 +154,14 @@ fn certificate(source: &SourceKey) -> CertifiedSource {
             certified_bytes: 30,
             ..ScannedSourceCounts::default()
         },
-        Some(
-            SourceFrontier::new("jsonl-byte-offset", TypedKey::U64(30), 30, [1; 32]).unwrap(),
-        ),
+        Some(SourceFrontier::new("jsonl-byte-offset", TypedKey::U64(30), 30, [1; 32]).unwrap()),
     )
     .unwrap()
 }
 
-fn remove_lock_files(index_root: &Path) {
+fn remove_ephemeral_files(index_root: &Path) {
     let _ = fs::remove_file(index_root.join(".ctx-generation-writer.lock"));
+    let _ = fs::remove_dir_all(index_root.join("integrity-certifications"));
     for entry in fs::read_dir(index_root.join("index-generations")).unwrap() {
         let generation = entry.unwrap().path();
         for lock in [".tantivy-meta.lock", ".tantivy-writer.lock"] {
