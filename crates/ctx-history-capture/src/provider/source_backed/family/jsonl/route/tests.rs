@@ -1809,6 +1809,45 @@ fn partitioned_component_balances_hooks_and_parallelizes_parent_first_frontiers(
 }
 
 #[test]
+fn partitioned_generation_is_identical_with_one_and_three_workers() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    write_scheduler_test_leaf(&root, 7, 0, 0);
+    write_scheduler_test_leaf(&root, 7, 1, 0);
+    write_scheduler_test_leaf(&root, 7, 1, 1);
+
+    let repository = scheduler_test_repository(temp.path());
+    let one = SchedulerStateTestAdapter {
+        repository: repository.clone(),
+        attributed_partitions: vec![7],
+        failing_leaf: None,
+        parallel_frontier: None,
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let three = SchedulerStateTestAdapter {
+        repository,
+        attributed_partitions: vec![7],
+        failing_leaf: None,
+        parallel_frontier: Some((7, 1, Arc::new(std::sync::Barrier::new(2)))),
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    let (one_receipt, one_activity) =
+        capture_parallel_test_generation(&one, &root, &temp.path().join("one"), 1);
+    let (three_receipt, three_activity) =
+        capture_parallel_test_generation(&three, &root, &temp.path().join("three"), 3);
+
+    assert_eq!(one_activity.peak_active_scanners, 1);
+    assert!(three_activity.peak_active_scanners >= 2);
+    assert_eq!(one_receipt.generation_id, three_receipt.generation_id);
+    assert_eq!(
+        one_receipt.manifest().sources,
+        three_receipt.manifest().sources
+    );
+}
+
+#[test]
 fn partition_scan_failure_finishes_every_begun_component() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
