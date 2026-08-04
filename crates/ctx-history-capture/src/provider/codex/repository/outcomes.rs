@@ -474,7 +474,14 @@ mod tests {
         let pull_request_command = concat!(
             "git push -u origin codex/v026-checkout-token-refresh\n",
             "gh pr create --base main --head codex/v026-checkout-token-refresh ",
-            "--title \"fix(pro): refresh auth while Checkout polls\""
+            "--title \"fix(pro): refresh auth while Checkout polls\" --body '",
+            "## Summary\n",
+            "- refresh a rejected WorkOS access token noninteractively during long Checkout polling\n",
+            "- keep account and subject identity pinned across refresh\n\n",
+            "## Validation\n",
+            "- `bazel test //crates/ctx-cli:unit_tests --config=ci`\n",
+            "- `git diff --check`\n",
+            "'"
         );
         let pull_request_output = concat!(
             "Chunk ID: 6c59d6\n",
@@ -482,7 +489,13 @@ mod tests {
             "Process exited with code 0\n",
             "Original token count: 122\n",
             "Output:\n",
+            "remote: \n",
+            "remote: Create a pull request for 'codex/v026-checkout-token-refresh' on GitHub by visiting:\n",
+            "remote:      https://github.com/ctxrs/ctx/pull/new/codex/v026-checkout-token-refresh\n",
+            "remote: \n",
             "To https://github.com/ctxrs/ctx.git\n",
+            " * [new branch]          codex/v026-checkout-token-refresh -> codex/v026-checkout-token-refresh\n",
+            "branch 'codex/v026-checkout-token-refresh' set up to track 'origin/codex/v026-checkout-token-refresh'.\n",
             "https://github.com/ctxrs/ctx/pull/203"
         );
         let captured = repository_result_evidence(
@@ -508,6 +521,24 @@ mod tests {
             &real_context(pull_request_command, "/repo", "call-pr-ambiguous"),
             "call-pr-ambiguous",
             [0x45; 32],
+            10,
+            &success(),
+        )
+        .unwrap();
+        assert!(captured.outcomes.is_empty());
+        assert_eq!(
+            captured.abstentions[0].0,
+            RepositoryAbstentionReason::OutcomeResultInadmissible
+        );
+
+        let truncated = format!(
+            "{pull_request_output}\n…42 tokens truncated…\nhttps://github.com/ctxrs/ctx/pull/204"
+        );
+        let captured = repository_result_evidence(
+            &json!({"output": truncated}),
+            &real_context(pull_request_command, "/repo", "call-pr-truncated"),
+            "call-pr-truncated",
+            [0x46; 32],
             10,
             &success(),
         )

@@ -9,6 +9,9 @@ use super::{exact_json_object, keys_are_subset, object_id, BoundedOutcomePlan};
 
 pub(super) fn exact_pr_create_result(output: &Value) -> Option<RepositoryPullRequestIdentity> {
     if let Some(url) = output.as_str() {
+        if pr_output_has_truncation_marker(url) {
+            return None;
+        }
         if let Some(identity) = pull_request_from_url(url.trim()) {
             return Some(identity);
         }
@@ -19,6 +22,15 @@ pub(super) fn exact_pr_create_result(output: &Value) -> Option<RepositoryPullReq
         return candidates.next().is_none().then_some(selected);
     }
     pull_request_from_exact_object(exact_json_object(output)?)
+}
+
+fn pr_output_has_truncation_marker(output: &str) -> bool {
+    output.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("Warning: truncated output (original token count: ")
+            || line.starts_with("Warning: truncated output (original char count: ")
+            || (line.starts_with('…') && line.contains(" tokens truncated") && line.ends_with('…'))
+    })
 }
 
 pub(super) fn exact_pr_merge_result(

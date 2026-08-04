@@ -94,10 +94,12 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
         );
     }
 
+    let unconditional_separators = tokenization.unconditional_separators_after_segments;
     let mut current = Some(base.to_path_buf());
     let mut plan = None;
+    let mut operation_segment_index = None;
     let mut prior_git_segment = false;
-    for segment in tokenization.segments {
+    for (segment_index, segment) in tokenization.segments.into_iter().enumerate() {
         if segment.first().is_some_and(|token| token == "cd") {
             let destination = match segment.as_slice() {
                 [_, path] => literal_cd_destination(path, current.as_deref()),
@@ -208,6 +210,7 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
                                 plan,
                             );
                         }
+                        operation_segment_index = Some(segment_index);
                         plan = Some(candidate);
                     }
                     "rev-parse" if exact_head_oid_request(arguments) => {
@@ -293,6 +296,7 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
                         "gh_outcome_has_no_bounded_workdir",
                     );
                 };
+                operation_segment_index = Some(segment_index);
                 plan = Some(BoundedOutcomePlan {
                     operation,
                     operation_repository_path: repository_path,
@@ -308,6 +312,17 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
     let Some(plan) = plan else {
         return BoundedOutcomePlanDisposition::Unrecognized;
     };
+    if operation_segment_index.is_some_and(|operation| {
+        unconditional_separators
+            .iter()
+            .any(|separator| *separator >= operation)
+    }) {
+        return outcome_abstained_with_plan(
+            RepositoryAbstentionReason::OutcomeResultInadmissible,
+            "outcome_operation_is_not_terminal_across_unconditional_separator",
+            Some(plan),
+        );
+    }
     if plan
         .output_repository_path
         .as_ref()
@@ -446,6 +461,17 @@ fn bounded_gh_operation(
         "merge" => BoundedOutcomeOperation::PullRequestMerge,
         _ => return None,
     };
+    if arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| {
+            matches!(argument.as_str(), "--help" | "-h")
+                || (operation == BoundedOutcomeOperation::PullRequestCreate
+                    && matches!(argument.as_str(), "--dry-run" | "--web" | "-w"))
+        })
+    {
+        return None;
+    }
     let mut expected_pr_number = None;
     let mut expected_repository = None;
     let mut index = 0;

@@ -143,6 +143,48 @@ fn public_ctx_short_commit_resolves_full_oid_parents_and_changed_files() {
 }
 
 #[test]
+fn reachable_short_amend_resolves_new_identity_without_inventing_replacement_lineage() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "amended", None);
+    fs::write(repo.join("tracked.txt"), "amended\n").unwrap();
+    run_git(&repo, &["add", "tracked.txt"]);
+    run_git(&repo, &["commit", "--amend", "-qm", "Amended outcome"]);
+    let oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    let linked = linked_short_commit(
+        &repo,
+        "git commit --amend --no-edit",
+        format!(
+            "[main {short}] Amended outcome\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+        ),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some("git commit --amend --no-edit".to_owned()),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+    let outcome = annotation
+        .repository_vcs_observations
+        .iter()
+        .find_map(|observation| match &observation.kind {
+            RepositoryVcsObservationKind::Outcome(outcome) => Some(outcome),
+            _ => None,
+        })
+        .expect("expected exact amended commit outcome");
+    assert_eq!(outcome.produced_object_ids[0].hex, oid);
+    assert!(outcome.replacement_lineage.is_empty());
+    assert!(has_reason(
+        &annotation,
+        RepositoryAbstentionReason::HistoryRewriteUnlinked
+    ));
+}
+
+#[test]
 fn short_merge_resolves_ordered_parents_and_first_parent_files() {
     let temp = TempDir::new().unwrap();
     let repo = repository(temp.path(), "merge", None);
