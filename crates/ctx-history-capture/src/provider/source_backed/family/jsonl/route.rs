@@ -191,10 +191,10 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
     }
 
     /// Returns an independent dependency partition for one leaf. When every
-    /// selected leaf has a partition, the shared scheduler runs a bounded wave
-    /// of partitions in parallel while preserving adapter phase order inside
-    /// each partition. Worker-local semantic caches are fresh at the partition
-    /// boundary and may be reused only by leaves in that partition.
+    /// selected leaf has a partition, the shared scheduler admits a bounded
+    /// wave of partitions and runs each dependency-phase frontier across that
+    /// wave in parallel. Partition-local adapter state remains live from the
+    /// begin hook through the matching finish hook.
     fn leaf_scan_partition(&self, _leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
         Ok(None)
     }
@@ -209,9 +209,10 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         Ok(())
     }
 
-    /// Pins related leaves to one persistent worker-state slot across
-    /// dependency phases. Equal affinities must denote leaves that may safely
-    /// serialize on one worker; the default leaves assignment round-robin.
+    /// Pins unpartitioned leaves to one persistent worker-state slot across
+    /// dependency phases. Partitioned scans use size-balanced frontier lanes
+    /// instead. Equal affinities must denote leaves that may safely serialize
+    /// on one worker; the default leaves assignment round-robin.
     fn leaf_worker_affinity(&self, _leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
         Ok(None)
     }
@@ -440,6 +441,10 @@ impl JsonlFamilyLeaf {
 
     pub(crate) fn observation(&self) -> &JsonlFileObservation {
         &self.observation
+    }
+
+    pub(super) fn estimated_scan_bytes(&self) -> u64 {
+        self.observation.length
     }
 
     pub(crate) fn binding(&self) -> &TypedKey {

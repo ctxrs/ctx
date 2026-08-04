@@ -282,22 +282,6 @@ fn codex_session_jsonl_scan_phase_v0(
     Ok(outcome_lineage.depth(native_session_id))
 }
 
-fn codex_session_jsonl_worker_affinity_v0(
-    state: &Mutex<CodexSessionJsonlFamilyStateV0>,
-    leaf: &JsonlFamilyLeaf,
-) -> Result<Option<u64>> {
-    let state = state.lock().map_err(|_| codex_family_state_error())?;
-    let outcome_lineage = state.outcome_lineage.as_ref().ok_or_else(|| {
-        CaptureError::InvalidPayload(
-            "Codex JSONL family has no opening lineage authority".to_owned(),
-        )
-    })?;
-    let (_, _, native_session_id) = state.plans.get(leaf.source()).ok_or_else(|| {
-        CaptureError::InvalidPayload("Codex JSONL family leaf has no native source plan".to_owned())
-    })?;
-    Ok(Some(outcome_lineage.component_affinity(native_session_id)))
-}
-
 fn order_codex_session_jsonl_scans_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaves: &mut [JsonlFamilyLeaf],
@@ -585,10 +569,6 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
 
     fn finish_leaf_scan_partition(&self, partition: u64) -> Result<()> {
         finish_codex_session_jsonl_scan_partition_v0(&self.state, partition)
-    }
-
-    fn leaf_worker_affinity(&self, leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
-        codex_session_jsonl_worker_affinity_v0(&self.state, leaf)
     }
 
     fn finish_leaf_scans(&self) -> Result<()> {
@@ -1039,15 +1019,17 @@ mod tests {
             .map(|leaf| JsonlFamilyAdapter::leaf_scan_phase(&adapter, leaf).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(phases, vec![0, 1, 1, 2]);
-        let affinities = leaves
+        let partitions = leaves
             .iter()
             .map(|leaf| {
-                JsonlFamilyAdapter::leaf_worker_affinity(&adapter, leaf)
+                JsonlFamilyAdapter::leaf_scan_partition(&adapter, leaf)
                     .unwrap()
                     .unwrap()
             })
             .collect::<Vec<_>>();
-        assert!(affinities.iter().all(|affinity| *affinity == affinities[0]));
+        assert!(partitions
+            .iter()
+            .all(|partition| *partition == partitions[0]));
     }
 
     #[test]

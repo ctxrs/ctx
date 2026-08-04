@@ -479,8 +479,8 @@ enum SchedulerStateEvent {
 struct SchedulerStateTestAdapter {
     repository: PathBuf,
     attributed_partitions: Vec<u64>,
-    worker_affinities: HashMap<u64, u64>,
     failing_leaf: Option<SchedulerLeafState>,
+    parallel_frontier: Option<(u64, usize, Arc<std::sync::Barrier>)>,
     events: Arc<Mutex<Vec<SchedulerStateEvent>>>,
 }
 
@@ -491,6 +491,7 @@ struct SchedulerStateTestProjector {
     repository: PathBuf,
     attribute_repository: bool,
     fail: bool,
+    parallel_frontier: Option<Arc<std::sync::Barrier>>,
     events: Arc<Mutex<Vec<SchedulerStateEvent>>>,
 }
 
@@ -537,6 +538,9 @@ impl JsonlFamilyProjector for SchedulerStateTestProjector {
             return Err(CaptureError::InvalidPayload(
                 "scheduler test requested scan failure".to_owned(),
             ));
+        }
+        if let Some(barrier) = &self.parallel_frontier {
+            barrier.wait();
         }
         let full_probes_before = worker
             .repository_attributor()
@@ -620,16 +624,6 @@ impl JsonlFamilyAdapter for SchedulerStateTestAdapter {
         Ok(Some(scheduler_leaf_state(leaf)?.partition))
     }
 
-    fn leaf_worker_affinity(&self, leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
-        let partition = scheduler_leaf_state(leaf)?.partition;
-        Ok(Some(
-            self.worker_affinities
-                .get(&partition)
-                .copied()
-                .unwrap_or(partition),
-        ))
-    }
-
     fn begin_leaf_scan_partition(&self, partition: u64) -> Result<()> {
         self.events
             .lock()
@@ -653,11 +647,17 @@ impl JsonlFamilyAdapter for SchedulerStateTestAdapter {
         _imported_at: DateTime<Utc>,
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let leaf = scheduler_leaf_state(leaf)?;
+        let parallel_frontier = self
+            .parallel_frontier
+            .as_ref()
+            .filter(|(partition, phase, _)| *partition == leaf.partition && *phase == leaf.phase)
+            .map(|(_, _, barrier)| Arc::clone(barrier));
         Ok(Box::new(SchedulerStateTestProjector {
             leaf,
             repository: self.repository.clone(),
             attribute_repository: self.attributed_partitions.contains(&leaf.partition),
             fail: self.failing_leaf == Some(leaf),
+            parallel_frontier,
             events: Arc::clone(&self.events),
         }))
     }
@@ -1716,7 +1716,7 @@ fn dependency_phases_bar_later_jsonl_scans_without_serializing_each_phase() {
 }
 
 #[test]
-fn partitioned_component_balances_hooks_and_preserves_parent_first_context_state() {
+fn partitioned_component_balances_hooks_and_parallelizes_parent_first_frontiers() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
@@ -1727,8 +1727,8 @@ fn partitioned_component_balances_hooks_and_preserves_parent_first_context_state
     let adapter = SchedulerStateTestAdapter {
         repository: scheduler_test_repository(temp.path()),
         attributed_partitions: vec![7],
-        worker_affinities: HashMap::new(),
         failing_leaf: None,
+        parallel_frontier: Some((7, 1, Arc::new(std::sync::Barrier::new(2)))),
         events: Arc::clone(&events),
     };
 
@@ -1752,7 +1752,21 @@ fn partitioned_component_balances_hooks_and_preserves_parent_first_context_state
             SchedulerStateEvent::Finish(7)
         ]
     );
-    let projects = events
+    let project_order = events
+        .iter()
+        .filter_map(|event| match event {
+            SchedulerStateEvent::Project { leaf, .. } => Some(*leaf),
+            SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let parent = SchedulerLeafState {
+        partition: 7,
+        phase: 0,
+        ordinal: 0,
+    };
+    assert_eq!(project_order.first(), Some(&parent));
+
+    let mut projects = events
         .iter()
         .filter_map(|event| match event {
             SchedulerStateEvent::Project {
@@ -1771,48 +1785,27 @@ fn partitioned_component_balances_hooks_and_preserves_parent_first_context_state
             SchedulerStateEvent::Begin(_) | SchedulerStateEvent::Finish(_) => None,
         })
         .collect::<Vec<_>>();
+    projects.sort_by_key(|project| project.0);
+    assert_eq!(projects.len(), 3);
+    assert_eq!((projects[0].1, projects[0].2), (0, 1));
     assert_eq!(
-        projects,
-        [
-            (
-                SchedulerLeafState {
-                    partition: 7,
-                    phase: 0,
-                    ordinal: 0,
-                },
-                0,
-                1,
-                0,
-                1,
-            ),
-            (
-                SchedulerLeafState {
-                    partition: 7,
-                    phase: 1,
-                    ordinal: 0,
-                },
-                1,
-                1,
-                0,
-                1,
-            ),
-            (
-                SchedulerLeafState {
-                    partition: 7,
-                    phase: 1,
-                    ordinal: 1,
-                },
-                1,
-                1,
-                0,
-                1,
-            ),
-        ],
-        "one component must run parent-first on one context, retaining certification state while clearing source-local event-time state"
+        projects
+            .iter()
+            .map(|(_, before, after, _, _)| after.saturating_sub(*before))
+            .sum::<usize>(),
+        2,
+        "the parent lane should reuse its repository certificate while the parallel sibling lane probes once"
     );
-    assert_eq!(activity.worker_count, 1);
+    assert!(projects
+        .iter()
+        .all(|(_, _, _, event_entries_before, event_entries_after)| (
+            *event_entries_before,
+            *event_entries_after
+        ) == (0, 1)));
+    assert_eq!(activity.worker_count, 3);
     assert_eq!(activity.sources_started, 3);
     assert_eq!(activity.sources_completed, 3);
+    assert_eq!(activity.peak_active_scanners, 2);
 }
 
 #[test]
@@ -1826,12 +1819,12 @@ fn partition_scan_failure_finishes_every_begun_component() {
     let adapter = SchedulerStateTestAdapter {
         repository: scheduler_test_repository(temp.path()),
         attributed_partitions: Vec::new(),
-        worker_affinities: HashMap::new(),
         failing_leaf: Some(SchedulerLeafState {
             partition: 3,
             phase: 0,
             ordinal: 0,
         }),
+        parallel_frontier: None,
         events: Arc::clone(&events),
     };
 
@@ -1865,7 +1858,7 @@ fn partition_scan_failure_finishes_every_begun_component() {
 }
 
 #[test]
-fn partition_lifecycle_ids_are_separate_from_colliding_worker_affinity_lanes() {
+fn partition_lifecycle_ids_are_separate_from_frontier_worker_lanes() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
@@ -1875,8 +1868,8 @@ fn partition_lifecycle_ids_are_separate_from_colliding_worker_affinity_lanes() {
     let adapter = SchedulerStateTestAdapter {
         repository: scheduler_test_repository(temp.path()),
         attributed_partitions: vec![2, 3],
-        worker_affinities: HashMap::from([(2, 5), (3, 21)]),
         failing_leaf: None,
+        parallel_frontier: None,
         events: Arc::clone(&events),
     };
 
@@ -1918,15 +1911,11 @@ fn partition_lifecycle_ids_are_separate_from_colliding_worker_affinity_lanes() {
     projects.sort_by_key(|project| project.0);
     assert_eq!(projects.len(), 2);
     assert_eq!((projects[0].1, projects[0].2), (0, 1));
-    assert_eq!(
-        (projects[1].1, projects[1].2),
-        (1, 1),
-        "affinities 5 and 21 must share logical lane 5 for both worker placement and cache state"
-    );
+    assert_eq!((projects[1].1, projects[1].2), (0, 1));
 }
 
 #[test]
-fn partition_cache_lanes_are_fixed_at_sixteen_and_clear_source_semantic_state() {
+fn partition_worker_contexts_are_bounded_and_clear_source_semantic_state() {
     for workers in [1, 4, 16] {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let root = temp.path().join("sessions");
@@ -1938,8 +1927,8 @@ fn partition_cache_lanes_are_fixed_at_sixteen_and_clear_source_semantic_state() 
         let adapter = SchedulerStateTestAdapter {
             repository: scheduler_test_repository(temp.path()),
             attributed_partitions: (0..32).collect(),
-            worker_affinities: HashMap::new(),
             failing_leaf: None,
+            parallel_frontier: None,
             events: Arc::clone(&events),
         };
 
@@ -2000,9 +1989,9 @@ fn partition_cache_lanes_are_fixed_at_sixteen_and_clear_source_semantic_state() 
             .iter()
             .map(|(_, before, after, _, _)| after.saturating_sub(*before))
             .sum::<usize>();
-        assert!(
-            full_probes <= 16,
-            "32 same-repository components exceeded 16 full probes with {workers} physical workers: {full_probes}"
+        assert_eq!(
+            full_probes, workers,
+            "same-repository components must reuse only the runner's bounded physical worker contexts"
         );
         for (leaf, _, _, event_entries_before, event_entries_after) in &projects {
             assert_eq!(
@@ -2012,16 +2001,6 @@ fn partition_cache_lanes_are_fixed_at_sixteen_and_clear_source_semantic_state() 
             );
             assert_eq!(*event_entries_after, 1);
         }
-        for lane in 0..16 {
-            let (_, first_before, first_after, _, _) = projects[lane];
-            let (_, second_before, second_after, _, _) = projects[lane + 16];
-            assert_eq!(first_before, 0);
-            assert_eq!(second_before, first_after);
-            assert_eq!(second_after, second_before);
-        }
-        assert_eq!(projects[0].2, 1);
-        assert_eq!(projects[16].1, 1);
-        assert_eq!(projects[16].2, 1);
         assert_eq!(activity.worker_count, workers);
         assert_eq!(activity.sources_started, 32);
         assert_eq!(activity.sources_completed, 32);
@@ -2042,8 +2021,8 @@ fn unpartitioned_defaults_keep_persistent_phase_worker_contexts() {
     let adapter = UnpartitionedSchedulerStateTestAdapter(SchedulerStateTestAdapter {
         repository: scheduler_test_repository(temp.path()),
         attributed_partitions: vec![0],
-        worker_affinities: HashMap::new(),
         failing_leaf: None,
+        parallel_frontier: None,
         events: Arc::clone(&events),
     });
 

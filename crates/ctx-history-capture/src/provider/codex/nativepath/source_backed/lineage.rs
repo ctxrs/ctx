@@ -364,16 +364,6 @@ impl CodexOutcomeLineageAuthorityV0 {
             .map_or(usize::MAX, |node| node.depth)
     }
 
-    pub(super) fn component_affinity(&self, native_session_id: &str) -> u64 {
-        self.indices
-            .get(native_session_id)
-            .and_then(|index| self.nodes.get(*index))
-            .and_then(|node| node.component_digest.get(..8))
-            .and_then(|prefix| <[u8; 8]>::try_from(prefix).ok())
-            .map(u64::from_le_bytes)
-            .unwrap_or(u64::MAX)
-    }
-
     pub(super) fn classify(
         &self,
         native_session_id: &str,
@@ -916,52 +906,6 @@ mod tests {
             authority.classify("child-a", "copied", "copied", None, 0, 0),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
         ));
-    }
-
-    #[test]
-    fn component_affinity_is_stable_digest_derived_and_has_fixed_lane_collisions() {
-        const COMPONENTS: usize = 17;
-        const LANES: u64 = 16;
-
-        let sources = (0..COMPONENTS)
-            .map(|index| source(&format!("affinity-root-{index:02}"), None, index as u8))
-            .collect::<Vec<_>>();
-        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
-        let mut reversed_sources = sources.clone();
-        reversed_sources.reverse();
-        let reversed = CodexOutcomeLineageAuthorityV0::from_sources(&reversed_sources).unwrap();
-        let mut occupied_lanes = HashMap::<u64, (u64, u64)>::new();
-        let mut collision = None;
-
-        for index in 0..COMPONENTS {
-            let native_session_id = format!("affinity-root-{index:02}");
-            let node = &authority.nodes[authority.indices[&native_session_id]];
-            let expected_affinity =
-                u64::from_le_bytes(node.component_digest[..8].try_into().unwrap());
-            let affinity = authority.component_affinity(&native_session_id);
-            let partition = authority.component_partition(&native_session_id).unwrap();
-            assert_eq!(affinity, expected_affinity);
-            assert_eq!(affinity, reversed.component_affinity(&native_session_id));
-            assert_eq!(
-                partition,
-                reversed.component_partition(&native_session_id).unwrap()
-            );
-
-            let lane = affinity % LANES;
-            if let Some((other_partition, other_affinity)) =
-                occupied_lanes.insert(lane, (partition, affinity))
-            {
-                collision = Some((lane, other_partition, partition, other_affinity, affinity));
-                break;
-            }
-        }
-
-        let (lane, left_partition, right_partition, left_affinity, right_affinity) =
-            collision.expect("17 independent component digests must occupy a shared 16-lane slot");
-        assert_ne!(left_partition, right_partition);
-        assert_ne!(left_affinity, right_affinity);
-        assert_eq!(left_affinity % LANES, lane);
-        assert_eq!(right_affinity % LANES, lane);
     }
 
     #[test]
