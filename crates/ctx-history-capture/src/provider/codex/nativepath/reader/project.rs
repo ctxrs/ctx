@@ -41,6 +41,10 @@ impl CodexNativeScanner {
         if let Some(lineage_facts) = self.lineage_facts.as_mut() {
             lineage_facts.record(lineage_evidence)?;
         }
+        if probe.lineage_malformed() {
+            self.reject(false);
+            return Ok(CodexRecordProjection::default());
+        }
         match probe.class {
             CodexRecordClass::SessionMeta => {
                 self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);

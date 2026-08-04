@@ -7,7 +7,7 @@ fn current_source_progress_failure_is_latched_when_driver_suppresses_it() {
     let scan = Arc::clone(&original.scan);
     let owns = Arc::clone(&original.owns_source);
     let revalidate = Arc::clone(&original.revalidate);
-    route.driver = Some(SourceBackedRouteDriver::new(
+    route.driver = Some(SourceBackedRouteDriver::new_fallible(
         move |sink| {
             let progress = SourceBackedCurrentSourceProgress::new(
                 SourceBackedCurrentSourceProgressStage::LogicalScan,

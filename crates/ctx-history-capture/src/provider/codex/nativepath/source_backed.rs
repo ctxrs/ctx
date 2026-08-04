@@ -156,14 +156,29 @@ impl CodexTerminalSourceEvidenceV0 {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn revalidate(&self) -> bool {
-        revalidate_codex_source_observation(
+        self.revalidate_fallible().unwrap_or(false)
+    }
+
+    pub(crate) fn revalidate_fallible(&self) -> CodexSourceBackedResultV0<bool> {
+        match revalidate_codex_source_observation(
             &self.source,
             &self.observation,
             self.certified_len,
             self.full_revision_sha256,
-        )
-        .is_ok()
+        ) {
+            Ok(()) => Ok(true),
+            Err(
+                CaptureError::InvalidPayload(_)
+                | CaptureError::InvalidProviderTranscriptPath { .. }
+                | CaptureError::SourceChangedDuringCapture,
+            ) => Ok(false),
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

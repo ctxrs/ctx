@@ -107,6 +107,7 @@ struct CodexEnvelopeProbe<'a> {
     timestamp: Option<Cow<'a, str>>,
     payload: Option<CodexPayloadProbe<'a>>,
     relationship_escaped: bool,
+    lineage_malformed: bool,
 }
 
 impl<'de> Deserialize<'de> for CodexEnvelopeProbe<'de> {
@@ -138,12 +139,15 @@ impl<'de> Visitor<'de> for CodexEnvelopeProbeVisitor {
         let mut saw_timestamp = false;
         let mut saw_payload = false;
         let mut relationship_escaped = false;
+        let mut lineage_malformed = false;
         while let Some(key) = map.next_key::<CodexText<'de>>()? {
             let key_escaped = key.escaped;
             match key.as_str() {
                 "type" => {
                     if saw_record_type {
-                        return Err(serde::de::Error::duplicate_field("type"));
+                        map.next_value::<IgnoredAny>()?;
+                        lineage_malformed = true;
+                        continue;
                     }
                     saw_record_type = true;
                     let value = map.next_value::<CodexText<'de>>()?;
@@ -152,7 +156,9 @@ impl<'de> Visitor<'de> for CodexEnvelopeProbeVisitor {
                 }
                 "payload" => {
                     if saw_payload {
-                        return Err(serde::de::Error::duplicate_field("payload"));
+                        map.next_value::<IgnoredAny>()?;
+                        lineage_malformed = true;
+                        continue;
                     }
                     saw_payload = true;
                     relationship_escaped |= key_escaped;
@@ -175,6 +181,7 @@ impl<'de> Visitor<'de> for CodexEnvelopeProbeVisitor {
             timestamp,
             payload,
             relationship_escaped,
+            lineage_malformed,
         })
     }
 }
@@ -184,6 +191,7 @@ struct CodexPayloadProbe<'a> {
     item_type: Option<CodexText<'a>>,
     call_id: Option<CodexText<'a>>,
     relationship_escaped: bool,
+    lineage_malformed: bool,
 }
 
 impl<'de> Deserialize<'de> for CodexPayloadProbe<'de> {
@@ -213,12 +221,15 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
         let mut saw_item_type = false;
         let mut saw_call_id = false;
         let mut relationship_escaped = false;
+        let mut lineage_malformed = false;
         while let Some(key) = map.next_key::<CodexText<'de>>()? {
             let key_escaped = key.escaped;
             match key.as_str() {
                 "type" => {
                     if saw_item_type {
-                        return Err(serde::de::Error::duplicate_field("type"));
+                        map.next_value::<IgnoredAny>()?;
+                        lineage_malformed = true;
+                        continue;
                     }
                     saw_item_type = true;
                     let value = map.next_value::<Option<CodexText<'de>>>()?;
@@ -228,7 +239,9 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
                 }
                 "call_id" => {
                     if saw_call_id {
-                        return Err(serde::de::Error::duplicate_field("call_id"));
+                        map.next_value::<IgnoredAny>()?;
+                        lineage_malformed = true;
+                        continue;
                     }
                     saw_call_id = true;
                     let value = map.next_value::<Option<CodexText<'de>>>()?;
@@ -245,6 +258,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type,
             call_id,
             relationship_escaped,
+            lineage_malformed,
         })
     }
 
@@ -257,6 +271,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -265,6 +280,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -273,6 +289,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -281,6 +298,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -289,6 +307,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -297,6 +316,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -305,6 +325,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -313,6 +334,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -321,6 +343,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 
@@ -329,6 +352,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             item_type: None,
             call_id: None,
             relationship_escaped: false,
+            lineage_malformed: false,
         })
     }
 }
@@ -340,6 +364,13 @@ pub(super) struct CodexRecordProbe<'a> {
     pub(super) call_id: Option<Cow<'a, str>>,
     pub(super) output: Option<CodexStructuralOutput>,
     relationship_escaped: bool,
+    lineage_malformed: bool,
+}
+
+impl CodexRecordProbe<'_> {
+    pub(super) const fn lineage_malformed(&self) -> bool {
+        self.lineage_malformed
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -360,14 +391,20 @@ pub(super) struct CodexStructuralOutput {
 
 pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexRecordProbe<'_>> {
     let envelope = serde_json::from_slice::<CodexEnvelopeProbe<'_>>(line)?;
+    let lineage_malformed = envelope.lineage_malformed
+        || envelope
+            .payload
+            .as_ref()
+            .is_some_and(|payload| payload.lineage_malformed);
     let item_type = envelope
         .payload
         .as_ref()
         .and_then(|payload| payload.item_type.as_ref().map(CodexText::as_str));
     let class = codex_record_class(envelope.record_type.as_str(), item_type);
-    let output = match class {
-        CodexRecordClass::ExcludedResult(_) => Some(probe_structural_output(line)?),
-        _ => None,
+    let output = match (lineage_malformed, class) {
+        (true, _) => None,
+        (false, CodexRecordClass::ExcludedResult(_)) => Some(probe_structural_output(line)?),
+        (false, _) => None,
     };
     let relationship_escaped = envelope.relationship_escaped
         || envelope
@@ -382,12 +419,16 @@ pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexReco
             .and_then(|payload| payload.call_id.map(|call_id| call_id.value)),
         output,
         relationship_escaped,
+        lineage_malformed,
     })
 }
 
 pub(super) fn codex_lineage_record_evidence<'a>(
     probe: &'a CodexRecordProbe<'_>,
 ) -> CodexLineageRecordEvidence<'a> {
+    if probe.lineage_malformed {
+        return CodexLineageRecordEvidence::UnattributedAmbiguity;
+    }
     let is_call = matches!(
         probe.class,
         CodexRecordClass::Retained(CodexRetainedKind::ToolCall)
@@ -584,10 +625,26 @@ mod lineage_tests {
     }
 
     #[test]
-    fn duplicate_relationship_fields_reject_at_the_record_boundary() {
+    fn duplicate_relationship_fields_are_malformed_and_unattributed() {
         let record = br#"{"type":"response_item","payload":{"type":"function_call","call_id":"first","call_id":"second"}}"#;
-        assert!(classify_codex_record(record).is_err());
-        assert!(malformed_record_may_contain_lineage(record));
+        let probe = classify_codex_record(record).unwrap();
+        assert!(probe.lineage_malformed());
+        assert_eq!(
+            codex_lineage_record_evidence(&probe),
+            CodexLineageRecordEvidence::UnattributedAmbiguity
+        );
+    }
+
+    #[test]
+    fn fully_escaped_duplicate_lineage_fields_do_not_evade_ambiguity() {
+        let record = br#"{"\u0074\u0079\u0070\u0065":"\u0072\u0065\u0073\u0070\u006f\u006e\u0073\u0065\u005f\u0069\u0074\u0065\u006d","\u0070\u0061\u0079\u006c\u006f\u0061\u0064":{"\u0074\u0079\u0070\u0065":"\u0066\u0075\u006e\u0063\u0074\u0069\u006f\u006e\u005f\u0063\u0061\u006c\u006c","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"first","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"second"}}"#;
+        assert!(!malformed_record_may_contain_lineage(record));
+        let probe = classify_codex_record(record).unwrap();
+        assert!(probe.lineage_malformed());
+        assert_eq!(
+            codex_lineage_record_evidence(&probe),
+            CodexLineageRecordEvidence::UnattributedAmbiguity
+        );
     }
 }
 

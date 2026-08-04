@@ -14,7 +14,8 @@ pub(crate) use prompt_history::{
     plan_codex_prompt_history_source_backed_v0, revalidate_codex_prompt_history_source_backed_v0,
     scan_codex_prompt_history_source_backed_v0,
     stage_planned_codex_prompt_history_source_backed_v0,
-    CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedInputV0,
+    CodexPromptHistorySourceBackedDispositionV0, CodexPromptHistorySourceBackedErrorV0,
+    CodexPromptHistorySourceBackedInputV0,
 };
 #[cfg(test)]
 pub(crate) use reader::{

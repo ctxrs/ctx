@@ -60,7 +60,7 @@ fn fail_route_after_scan(
     let scan = Arc::clone(&original.scan);
     let owns = Arc::clone(&original.owns_source);
     let revalidate = Arc::clone(&original.revalidate);
-    route.driver = Some(SourceBackedRouteDriver::new(
+    route.driver = Some(SourceBackedRouteDriver::new_fallible(
         move |sink| {
             scan(sink)?;
             Err(SourceBackedRouteError::new(kind, "fixture route failure"))
@@ -77,10 +77,10 @@ fn fail_route_before_scan(
 ) -> SourceBackedRoute {
     let original = route.driver.take().unwrap();
     let owns = Arc::clone(&original.owns_source);
-    route.driver = Some(SourceBackedRouteDriver::new(
+    route.driver = Some(SourceBackedRouteDriver::new_fallible(
         move |_| Err(SourceBackedRouteError::new(kind, "fixture route failure")),
         move |source| owns(source),
-        |_| false,
+        |_| Ok(false),
     ));
     route
 }
@@ -89,7 +89,7 @@ fn empty_route(mut route: SourceBackedRoute) -> SourceBackedRoute {
     let original = route.driver.take().unwrap();
     let owns = Arc::clone(&original.owns_source);
     let revalidate = Arc::clone(&original.revalidate);
-    route.driver = Some(SourceBackedRouteDriver::new(
+    route.driver = Some(SourceBackedRouteDriver::new_fallible(
         |_| Ok(()),
         move |source| owns(source),
         move |target| revalidate(target),
@@ -110,14 +110,39 @@ fn explicit_route_at(mut route: SourceBackedRoute, path: PathBuf) -> SourceBacke
 
 fn fail_route_at_final_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
     let mut driver = route.driver.take().unwrap();
-    driver.revalidate = Arc::new(|_| false);
+    driver.revalidate = Arc::new(|_| Ok(false));
     route.driver = Some(driver);
     route
 }
 
 fn fail_route_at_final_inventory_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
     let mut driver = route.driver.take().unwrap();
-    driver.revalidate_complete_inventory = Some(Arc::new(|_| false));
+    driver.revalidate_complete_inventory = Some(Arc::new(|_| Ok(false)));
+    route.driver = Some(driver);
+    route
+}
+
+fn fail_route_with_terminal_callback_error(
+    mut route: SourceBackedRoute,
+    inventory: bool,
+    kind: SourceBackedRouteErrorKind,
+) -> SourceBackedRoute {
+    let mut driver = route.driver.take().unwrap();
+    if inventory {
+        driver.revalidate_complete_inventory = Some(Arc::new(move |_| {
+            Err(SourceBackedRouteError::new(
+                kind,
+                "injected terminal inventory callback failure",
+            ))
+        }));
+    } else {
+        driver.revalidate = Arc::new(move |_| {
+            Err(SourceBackedRouteError::new(
+                kind,
+                "injected terminal source callback failure",
+            ))
+        });
+    }
     route.driver = Some(driver);
     route
 }
@@ -144,7 +169,7 @@ fn fail_route_with_systemic_writer_error(
     let scan = Arc::clone(&original.scan);
     let owns = Arc::clone(&original.owns_source);
     let revalidate = Arc::clone(&original.revalidate);
-    route.driver = Some(SourceBackedRouteDriver::new(
+    route.driver = Some(SourceBackedRouteDriver::new_fallible(
         move |sink| {
             scan(sink)?;
             sink.begin_source(source.clone())
@@ -372,6 +397,57 @@ fn internal_route_failure_aborts_the_whole_cold_refresh() {
         1,
         "a systemic abort must not restart already completed route work"
     );
+}
+
+#[test]
+fn terminal_callback_errors_are_route_fatal_not_source_changed() {
+    let source_route = fail_route_with_terminal_callback_error(
+        fixture_route(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 41),
+        false,
+        SourceBackedRouteErrorKind::Internal,
+    );
+    let mut source_registry = SourceBackedProviderRegistry::new();
+    source_registry.register(source_route);
+    let source_root = tempdir().unwrap();
+    assert!(matches!(
+        refresh_source_backed_generation(
+            source_root.path(),
+            &source_registry,
+            WriterOptions::default(),
+        ),
+        Err(SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::Internal,
+                ..
+            },
+            ..
+        })
+    ));
+
+    let source = fixture_source(CaptureProvider::Gemini, GEMINI_CLI_SOURCE_FORMAT, 42);
+    let mut inventory_registry = inventory_replay_registry(Arc::new(Mutex::new(vec![source])));
+    let inventory_route = fail_route_with_terminal_callback_error(
+        inventory_registry.routes.pop().unwrap(),
+        true,
+        SourceBackedRouteErrorKind::ResourceUnavailable,
+    );
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(inventory_route);
+    let inventory_root = tempdir().unwrap();
+    assert!(matches!(
+        refresh_source_backed_generation(
+            inventory_root.path(),
+            &registry,
+            WriterOptions::default(),
+        ),
+        Err(SourceBackedCoordinatorError::RouteScan {
+            source: SourceBackedRouteError {
+                kind: SourceBackedRouteErrorKind::ResourceUnavailable,
+                ..
+            },
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -716,7 +792,7 @@ fn selected_route_refresh_carries_unselected_route_and_reports_exact_noop_succes
     let original_second = second.driver.clone().unwrap();
     let scans = Arc::clone(&second_scans);
     let second = SourceBackedRoute {
-        driver: Some(SourceBackedRouteDriver::new(
+        driver: Some(SourceBackedRouteDriver::new_fallible(
             move |sink| {
                 scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 (original_second.scan)(sink)

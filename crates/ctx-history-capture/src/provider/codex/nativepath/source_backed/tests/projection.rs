@@ -37,7 +37,7 @@ pub(super) fn initialize_repository(path: &Path) {
     }
 }
 
-fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
+pub(super) fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
     serde_json::json!({
         "timestamp": "2026-07-28T12:00:01Z",
         "type": "response_item",
@@ -55,7 +55,7 @@ fn exec_call(call_id: &str, command: &str, workdir: &Path) -> String {
     .to_string()
 }
 
-fn successful_result(call_id: &str, output: Value) -> String {
+pub(super) fn successful_result(call_id: &str, output: Value) -> String {
     serde_json::json!({
         "timestamp": "2026-07-28T12:00:02Z",
         "type": "response_item",

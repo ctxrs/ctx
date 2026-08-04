@@ -9,6 +9,8 @@ use super::*;
 
 mod invocation_evidence;
 mod lifecycle;
+mod lineage_regressions;
+mod migration;
 mod projection;
 
 fn assert_no_legacy_operations(counters: CodexSourceBackedCountersV0) {

@@ -118,7 +118,8 @@ fn prefilter_matches_the_reader_without_a_payload_type() {
 }
 
 /// A skip is a proof that the structural probe would have succeeded. Anything
-/// the probe rejects has to reach the probe so the rejection is still recorded.
+/// rejected by parsing or the narrow malformed-lineage boundary has to reach
+/// the probe so the rejection is still recorded.
 #[test]
 fn prefilter_never_skips_a_record_the_probe_rejects() {
     let rejected = [
@@ -129,11 +130,7 @@ fn prefilter_never_skips_a_record_the_probe_rejects() {
         r#"{"type":"event_msg","payload":{"type":"token_count"}} {"type":"event_msg"}"#,
         // Envelope-grammar violations the probe reports as parse errors.
         r#"{"payload":{"type":"token_count"}}"#,
-        r#"{"type":"event_msg","type":"event_msg","payload":{"type":"token_count"}}"#,
-        r#"{"type":"event_msg","payload":{"type":"token_count"},"payload":{}}"#,
         r#"{"timestamp":"a","timestamp":"b","type":"event_msg"}"#,
-        r#"{"type":"event_msg","payload":{"type":"token_count","type":"token_count"}}"#,
-        r#"{"type":"event_msg","payload":{"call_id":"a","call_id":"b","type":"token_count"}}"#,
         r#"{"type":7,"payload":{"type":"token_count"}}"#,
         r#"{"type":"event_msg","timestamp":7}"#,
         r#"{"type":"event_msg","payload":{"type":7}}"#,
@@ -160,6 +157,26 @@ fn prefilter_never_skips_a_record_the_probe_rejects() {
             prefilter_codex_record(raw.as_bytes()),
             CodexRecordAdmission::Probe,
             "prefilter skipped a record the probe rejects: {raw}"
+        );
+    }
+
+    let malformed_lineage = [
+        r#"{"type":"event_msg","type":"event_msg","payload":{"type":"token_count"}}"#,
+        r#"{"type":"event_msg","payload":{"type":"token_count"},"payload":{}}"#,
+        r#"{"type":"event_msg","payload":{"type":"token_count","type":"token_count"}}"#,
+        r#"{"type":"event_msg","payload":{"call_id":"a","call_id":"b","type":"token_count"}}"#,
+    ];
+    for raw in malformed_lineage {
+        let probe = classify_codex_record(raw.as_bytes())
+            .unwrap_or_else(|error| panic!("malformed lineage must reach its boundary: {error}"));
+        assert!(
+            probe.lineage_malformed(),
+            "fixture was expected to be rejected at the lineage boundary: {raw}"
+        );
+        assert_eq!(
+            prefilter_codex_record(raw.as_bytes()),
+            CodexRecordAdmission::Probe,
+            "prefilter skipped malformed lineage: {raw}"
         );
     }
 }

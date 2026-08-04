@@ -199,6 +199,11 @@ pub(super) fn decode_pending_tool_authority(
     let probe = classify_codex_record(record).map_err(|_| {
         invalid_checkpoint_proof("pending tool-call authority is not valid Codex JSON")
     })?;
+    if probe.lineage_malformed() {
+        return Err(invalid_checkpoint_proof(
+            "pending tool-call authority has malformed lineage fields",
+        ));
+    }
     let CodexRecordClass::Retained(kind @ super::super::record::CodexRetainedKind::ToolCall) =
         probe.class
     else {
@@ -448,6 +453,16 @@ pub(super) fn validate_checkpoint_source(
             return Err(invalid_checkpoint_proof(
                 "checkpoint incomplete-tail proof does not match source bytes",
             ));
+        }
+    }
+    if checkpoint.incomplete_tail().is_some() {
+        if let Some(facts) = lineage_facts {
+            // A fresh bounded scan records every unterminated tail as
+            // unattributed relationship ambiguity. Exact checkpoint replay
+            // must rederive that same fact from the certified boundary; the
+            // tail bytes were hashed above but intentionally never parsed as
+            // a complete JSONL record.
+            facts.record(CodexLineageRecordEvidence::UnattributedAmbiguity)?;
         }
     }
 

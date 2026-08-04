@@ -49,7 +49,7 @@ pub(super) struct CodexOutcomeLineageAuthorityV0 {
     facts: Mutex<Vec<Option<CodexLineageFactsV0>>>,
     budget: Arc<CodexLineageFactBudgetV0>,
     #[cfg(test)]
-    dependency_edges_visited: usize,
+    dependency_work_units: usize,
 }
 
 impl CodexOutcomeLineageAuthorityV0 {
@@ -97,9 +97,9 @@ impl CodexOutcomeLineageAuthorityV0 {
                 depth: 0,
             });
         }
-        let dependency_edges_visited = compute_dependency_digests(&mut nodes)?;
+        let dependency_work_units = compute_dependency_digests(&mut nodes)?;
         #[cfg(not(test))]
-        let _ = dependency_edges_visited;
+        let _ = dependency_work_units;
 
         let mut facts = Vec::new();
         facts
@@ -112,7 +112,7 @@ impl CodexOutcomeLineageAuthorityV0 {
             facts: Mutex::new(facts),
             budget,
             #[cfg(test)]
-            dependency_edges_visited,
+            dependency_work_units,
         })
     }
 
@@ -123,7 +123,7 @@ impl CodexOutcomeLineageAuthorityV0 {
             indices: HashMap::new(),
             facts: Mutex::new(Vec::new()),
             budget: Arc::new(CodexLineageFactBudgetV0::default()),
-            dependency_edges_visited: 0,
+            dependency_work_units: 0,
         }
     }
 
@@ -238,7 +238,7 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
         .try_reserve_exact(nodes.len())
         .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
     colors.resize(nodes.len(), 0_u8);
-    let mut edges_visited = 0_usize;
+    let mut work_units = 0_usize;
 
     for start in 0..nodes.len() {
         if colors[start] == 2 {
@@ -258,7 +258,7 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
                 path.push(current);
                 match nodes[current].parent {
                     ParentLinkV0::Source(parent) => {
-                        edges_visited = edges_visited.saturating_add(1);
+                        work_units = work_units.saturating_add(1);
                         current = parent;
                         continue;
                     }
@@ -278,27 +278,43 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
                     }
                 }
             } else if colors[current] == 1 {
-                let cycle_start = path
-                    .iter()
-                    .position(|candidate| *candidate == current)
+                let mut cycle_start = None;
+                for (position, candidate) in path.iter().enumerate() {
+                    work_units = work_units.saturating_add(1);
+                    if *candidate == current {
+                        cycle_start = Some(position);
+                        break;
+                    }
+                }
+                let cycle_start =
+                    cycle_start.ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+                let cycle = &path[cycle_start..];
+                let mut canonical = *cycle
+                    .first()
                     .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-                let mut cycle = Vec::new();
-                cycle
-                    .try_reserve_exact(path.len().saturating_sub(cycle_start))
-                    .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
-                cycle.extend_from_slice(&path[cycle_start..]);
-                cycle.sort_unstable_by(|left, right| {
-                    nodes[*left]
-                        .native_session_id
-                        .cmp(&nodes[*right].native_session_id)
-                });
+                for index in &cycle[1..] {
+                    work_units = work_units.saturating_add(1);
+                    if nodes[*index].native_session_id < nodes[canonical].native_session_id {
+                        canonical = *index;
+                    }
+                }
                 let mut hasher = dependency_hasher(b"cycle\0");
-                for index in cycle {
-                    hash_text(&mut hasher, &nodes[index].native_session_id);
-                    hash_observation(&mut hasher, &nodes[index].observation);
+                let mut cycle_index = canonical;
+                for _ in 0..cycle.len() {
+                    work_units = work_units.saturating_add(1);
+                    hash_text(&mut hasher, &nodes[cycle_index].native_session_id);
+                    hash_observation(&mut hasher, &nodes[cycle_index].observation);
+                    let ParentLinkV0::Source(parent) = nodes[cycle_index].parent else {
+                        return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
+                    };
+                    cycle_index = parent;
+                }
+                if cycle_index != canonical {
+                    return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
                 }
                 let cycle_digest: [u8; 32] = hasher.finalize().into();
-                for index in &path[cycle_start..] {
+                for index in cycle {
+                    work_units = work_units.saturating_add(1);
                     nodes[*index].dependency_digest = cycle_digest;
                     nodes[*index].relationship_state = RelationshipStateV0::Cycle;
                     nodes[*index].depth = 0;
@@ -309,6 +325,7 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
         }
 
         for index in path.into_iter().rev() {
+            work_units = work_units.saturating_add(1);
             if colors[index] == 2 {
                 continue;
             }
@@ -335,7 +352,7 @@ fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedR
             colors[index] = 2;
         }
     }
-    Ok(edges_visited)
+    Ok(work_units)
 }
 
 fn dependency_hasher(marker: &[u8]) -> Sha256 {
@@ -415,8 +432,30 @@ mod tests {
             sources.push(source(&id, parent.as_deref(), (index % 251) as u8));
         }
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
-        assert!(authority.dependency_edges_visited <= sources.len().saturating_mul(2));
+        assert!(authority.dependency_work_units <= sources.len().saturating_mul(3));
         assert_ne!(authority.dependency_digest("node-4095"), [0; 32]);
+    }
+
+    #[test]
+    fn dependency_digest_walk_is_linear_and_canonical_for_one_large_cycle() {
+        const NODES: usize = 4096;
+        let mut sources = Vec::new();
+        for index in 0..NODES {
+            let id = format!("cycle-{index:04}");
+            let parent = format!("cycle-{:04}", (index + 1) % NODES);
+            sources.push(source(&id, Some(&parent), (index % 251) as u8));
+        }
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        assert!(authority.dependency_work_units <= NODES.saturating_mul(7));
+        let expected = authority.dependency_digest("cycle-0000");
+        assert_ne!(expected, [0; 32]);
+        assert!((1..NODES)
+            .all(|index| authority.dependency_digest(&format!("cycle-{index:04}")) == expected));
+
+        sources.reverse();
+        let reversed = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        assert_eq!(reversed.dependency_digest("cycle-0000"), expected);
+        assert!(reversed.dependency_work_units <= NODES.saturating_mul(7));
     }
 
     #[test]

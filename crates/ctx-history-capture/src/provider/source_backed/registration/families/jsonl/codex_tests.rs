@@ -9,27 +9,61 @@ use crate::ProviderCatalogSupport;
 #[test]
 fn lineage_working_set_failures_are_route_systemic() {
     assert_eq!(
-        codex_ingestion_route_error(CodexSourceBackedErrorV0::LineageWorkingSetExhausted).kind,
+        codex_source_backed_route_error(CodexSourceBackedErrorV0::LineageWorkingSetExhausted).kind,
         SourceBackedRouteErrorKind::ResourceUnavailable,
     );
     assert_eq!(
-        codex_ingestion_route_error(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable).kind,
+        codex_source_backed_route_error(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+            .kind,
         SourceBackedRouteErrorKind::Internal,
     );
     assert_eq!(
-        codex_ingestion_route_error(CodexSourceBackedErrorV0::Capture(CaptureError::Io(
+        codex_source_backed_route_error(CodexSourceBackedErrorV0::Capture(CaptureError::Io(
             std::io::Error::from_raw_os_error(24)
         ),))
         .kind,
         SourceBackedRouteErrorKind::ResourceUnavailable,
     );
     assert_eq!(
-        codex_ingestion_route_error(CodexSourceBackedErrorV0::Capture(
+        codex_source_backed_route_error(CodexSourceBackedErrorV0::Capture(
             CaptureError::SystemInvariant("poisoned ctx-owned lock"),
         ))
         .kind,
         SourceBackedRouteErrorKind::Internal,
     );
+    assert_eq!(
+        codex_prompt_history_route_error(CodexPromptHistorySourceBackedErrorV0::Io(
+            std::io::Error::from_raw_os_error(24),
+        ))
+        .kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable,
+    );
+}
+
+#[test]
+fn codex_terminal_capture_distinguishes_source_drift_from_systemic_failure() {
+    assert!(
+        codex_terminal_capture::<()>(Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::SourceChangedDuringCapture
+        ),))
+        .unwrap()
+        .is_none()
+    );
+
+    let resource = codex_terminal_capture::<()>(Err(CodexSourceBackedErrorV0::Capture(
+        CaptureError::Io(std::io::Error::from_raw_os_error(24)),
+    )))
+    .unwrap_err();
+    assert_eq!(
+        resource.kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+
+    let internal = codex_terminal_capture::<()>(Err(CodexSourceBackedErrorV0::Capture(
+        CaptureError::SystemInvariant("poisoned ctx-owned lock"),
+    )))
+    .unwrap_err();
+    assert_eq!(internal.kind, SourceBackedRouteErrorKind::Internal);
 }
 
 #[test]
@@ -69,7 +103,8 @@ fn active_source_family_contract_prompt_history_terminal_inventory_accepts_defer
     assert!(bind_codex_prompt_target(
         &state,
         SourceBackedRevalidationTarget::Source(&scan.certificate),
-    ));
+    )
+    .unwrap());
 
     let second = serde_json::json!({
         "session_id": "terminal-session",
@@ -83,12 +118,23 @@ fn active_source_family_contract_prompt_history_terminal_inventory_accepts_defer
     .unwrap();
     let capture = move |expected: &CertifiedSource| {
         revalidate_codex_prompt_history_source_backed_v0(&retained, expected)
-            .map_err(route_error)?;
+            .map_err(codex_prompt_history_terminal_route_error)?;
         certify_source_inventory(&route, std::slice::from_ref(expected))
     };
-    assert!(revalidate_codex_prompt_inventory(
-        &state, &capture, &inventory,
-    ));
+    assert!(revalidate_codex_prompt_inventory(&state, &capture, &inventory,).unwrap());
+
+    let unavailable_capture = |_: &CertifiedSource| {
+        Err(SourceBackedRouteError::new(
+            SourceBackedRouteErrorKind::ResourceUnavailable,
+            "injected prompt-history terminal I/O failure",
+        ))
+    };
+    assert_eq!(
+        revalidate_codex_prompt_inventory(&state, &unavailable_capture, &inventory)
+            .unwrap_err()
+            .kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable,
+    );
 
     let mut rewritten = fs::read(&history).unwrap();
     let offset = rewritten
@@ -97,7 +143,16 @@ fn active_source_family_contract_prompt_history_terminal_inventory_accepts_defer
         .unwrap();
     rewritten[offset] = b'B';
     fs::write(&history, rewritten).unwrap();
-    assert!(!revalidate_codex_prompt_inventory(
-        &state, &capture, &inventory,
-    ));
+    assert!(!revalidate_codex_prompt_inventory(&state, &capture, &inventory,).unwrap());
+
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = state.lock().unwrap();
+        panic!("poison prompt-history terminal evidence");
+    }));
+    assert_eq!(
+        revalidate_codex_prompt_inventory(&state, &capture, &inventory)
+            .unwrap_err()
+            .kind,
+        SourceBackedRouteErrorKind::Internal,
+    );
 }

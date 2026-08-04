@@ -598,6 +598,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                     }))
                     .map_err(SourceBackedCoordinatorError::Progress)?;
                     if revalidate_staged_source_route(
+                        route.metadata.source.provider,
                         route_index,
                         driver,
                         &owners,

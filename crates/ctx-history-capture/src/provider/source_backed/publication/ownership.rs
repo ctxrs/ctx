@@ -46,6 +46,7 @@ pub(super) fn capture_staged_source_route_revalidation_receipts(
 }
 
 pub(super) fn revalidate_staged_source_route(
+    provider: CaptureProvider,
     route_index: usize,
     driver: &SourceBackedRouteDriver,
     owners: &HashMap<[u8; 32], SourceOwner>,
@@ -71,14 +72,20 @@ pub(super) fn revalidate_staged_source_route(
             SourceBackedRouteRevalidation::Source(certificate) if owner.present => {
                 let source = certificate.observation().source();
                 owner.source.exact_descriptor_eq(source)
-                    && (driver.owns_source)(source)
-                    && (driver.revalidate)(SourceBackedRevalidationTarget::Source(certificate))
+                    && route_callback(provider, (driver.owns_source)(source))?
+                    && route_callback(
+                        provider,
+                        (driver.revalidate)(SourceBackedRevalidationTarget::Source(certificate)),
+                    )?
             }
             SourceBackedRouteRevalidation::Deletion(deletion) if !owner.present => {
                 let source = deletion.source();
                 owner.source.exact_descriptor_eq(source)
-                    && (driver.owns_source)(source)
-                    && (driver.revalidate)(SourceBackedRevalidationTarget::Deletion(deletion))
+                    && route_callback(provider, (driver.owns_source)(source))?
+                    && route_callback(
+                        provider,
+                        (driver.revalidate)(SourceBackedRevalidationTarget::Deletion(deletion)),
+                    )?
             }
             _ => {
                 return Err(IndexError::WriterInvariant(
@@ -96,15 +103,22 @@ pub(super) fn revalidate_staged_source_route(
         .iter()
         .filter(|owner| owner.route_index == route_index)
     {
-        let valid = driver
-            .revalidate_complete_inventory
-            .as_ref()
-            .is_some_and(|revalidate| revalidate(&owner.inventory));
+        let valid = match driver.revalidate_complete_inventory.as_ref() {
+            Some(revalidate) => route_callback(provider, revalidate(&owner.inventory))?,
+            None => false,
+        };
         if !valid {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+fn route_callback(
+    provider: CaptureProvider,
+    result: SourceBackedRouteResult<bool>,
+) -> SourceBackedCoordinatorResult<bool> {
+    result.map_err(|source| SourceBackedCoordinatorError::RouteScan { provider, source })
 }
 
 pub(super) fn require_complete_base_source_ownership(
