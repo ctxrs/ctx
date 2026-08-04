@@ -28,6 +28,8 @@ use crate::analytics::{
 
 #[path = "client_support.rs"]
 mod support;
+#[cfg(ctx_pro_qualification)]
+use super::authorization::QualificationAuthorizationProvider;
 use super::authorization::{
     AuthorizationProvider, EntitlementSchedule, StoredAuthorizationProvider,
 };
