@@ -57,9 +57,10 @@ if [[ ! -x "$cargo_bin" || ! -x "$rustc_bin" || ! -f "$vendor_manifest" ]]; then
 fi
 
 run bash scripts/check-sdk-no-publish.sh
+run python3 scripts/check-typescript-package-contents.py
 
 if [[ -n "${TEST_SRCDIR:-}" ]]; then
-  skip "TypeScript npm pack dry-run (npm pack is not reliable in Bazel runfiles)"
+  printf '\n==> TypeScript npm package contents were validated deterministically in Bazel runfiles\n'
 elif command -v npm >/dev/null 2>&1; then
   run npm pack --dry-run ./sdks/typescript
 else

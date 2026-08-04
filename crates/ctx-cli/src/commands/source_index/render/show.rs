@@ -1,12 +1,16 @@
 use serde_json::Value;
 
-use crate::ui::{Document, RenderContext, Token};
+use crate::{
+    commands::mcp_tool_call::{mcp_tool_call_display, MCP_TOOL_CALL_JSON_GUIDANCE},
+    ui::{Document, RenderContext, Token},
+};
 
 use super::human::{push_field, push_heading, push_prefixed, push_wrapped};
 
 const HEADER_LABEL_WIDTH: usize = 16;
 const EVENT_INDENT: usize = 3;
 const EVENT_LABEL_WIDTH: usize = 5;
+const MCP_EVENT_LABEL_WIDTH: usize = 10;
 
 pub(in crate::commands::source_index) fn render_show_document(
     value: &Value,
@@ -255,6 +259,35 @@ fn render_event(document: &mut Document, context: &RenderContext, position: usiz
             event_id,
             Token::Reference,
         );
+    }
+    if let Some(attribution) = mcp_tool_call_display(event) {
+        push_field(
+            document,
+            context,
+            EVENT_INDENT,
+            "MCP server",
+            MCP_EVENT_LABEL_WIDTH,
+            &attribution.server,
+            Token::Reference,
+        );
+        push_field(
+            document,
+            context,
+            EVENT_INDENT,
+            "MCP tool",
+            MCP_EVENT_LABEL_WIDTH,
+            &attribution.tool,
+            Token::Accent,
+        );
+        if attribution.truncated {
+            push_wrapped(
+                document,
+                context,
+                EVENT_INDENT,
+                MCP_TOOL_CALL_JSON_GUIDANCE,
+                Token::Warning,
+            );
+        }
     }
 
     document.push_blank();

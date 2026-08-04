@@ -23,7 +23,7 @@ pub(crate) fn render_event(
         .then_some(content.structured_content.as_ref())
         .flatten();
     let occurred_at = format_timestamp(event.occurred_at_unix_ms);
-    Ok(json!({
+    let mut rendered = json!({
         "schema_version": EVENT_QUERY_SCHEMA_VERSION,
         "record_version": record.record_version,
         "ctx_event_id": event.event_id.as_uuid(),
@@ -76,7 +76,9 @@ pub(crate) fn render_event(
         "repository_file_observations": record.repository_file_observations,
         "repository_vcs_observations": record.repository_vcs_observations,
         "content_projection": projection.as_str(),
-    }))
+    });
+    crate::commands::mcp_tool_call::insert_mcp_tool_call(&mut rendered, record);
+    Ok(rendered)
 }
 
 pub(super) fn format_timestamp(value: Option<i64>) -> Option<String> {

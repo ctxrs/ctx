@@ -25,6 +25,8 @@ fn scheduler_retries_terminal_status_without_republishing_core() {
     let executor = Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
         execution_count.fetch_add(1, Ordering::SeqCst);
         let commit = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit(|_| true)?;
         Ok(SourceBackedRefreshPublication {
             generation_id: commit.generation_id,

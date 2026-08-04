@@ -115,7 +115,7 @@ REAL_HARNESS_DATA = NON_RUST_GATE_DATA + ["//crates/ctx-cli:ctx"]
 
 filegroup(
     name = "agent_history_contract_fixtures",
-    srcs = glob(["contracts/agent-history-v1/fixtures/*.json"]),
+    srcs = glob(["contracts/agent-history-v1/fixtures/**/*.json"]),
     visibility = ["//visibility:public"],
 )
 
@@ -785,7 +785,13 @@ sh_test(
 non_rust_gate(
     name = "docs_check",
     mode = "docs_check",
-    data = NON_RUST_GATE_DATA,
+    data = NON_RUST_GATE_DATA + [
+        "//crates/ctx-history-capture:BUILD.bazel",
+        "//crates/ctx-history-capture:Cargo.toml",
+        "//crates/ctx-history-capture:provider_architecture_sources",
+        "//crates/ctx-history-capture:tests/codex_direct_result.rs",
+        "//tools/bazel:rust-target-inventory.json",
+    ],
 )
 non_rust_gate(name = "installer_path_smoke", mode = "installer_path_smoke", data = NON_RUST_GATE_DATA)
 non_rust_gate(name = "buildkite_pipeline_check", mode = "buildkite_pipeline_check", data = NON_RUST_GATE_DATA)

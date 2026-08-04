@@ -32,6 +32,17 @@ use uuid::Uuid;
 use ctx_history_core::utc_now;
 
 #[cfg(test)]
+fn committed_generation_recovery_error(
+    recovery: ctx_history_index::CommittedPredecessorMigrationRecovery,
+) -> ctx_history_index::IndexError {
+    ctx_history_index::IndexError::CommittedGenerationNeedsRecovery {
+        generation_id: recovery.generation_id().to_owned(),
+        stage: "predecessor migration recovery",
+        detail: recovery.detail().to_owned(),
+    }
+}
+
+#[cfg(test)]
 use crate::config::CONFIG_FILE;
 #[cfg(test)]
 use crate::output::compact_json;

@@ -100,7 +100,10 @@ fn source_backed_zed_two_threads_project_distinct_sessions_with_complete_core() 
     let mut snapshot = acquire_snapshot(&data_root, &database).unwrap();
     let snapshot_revision = snapshot.snapshot_revision.clone();
     let source = zed_source_key().unwrap();
-    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     let mut sink =
         ZedSourceBackedSinkV0::new(&mut writer, snapshot.connection().unwrap(), source.clone())

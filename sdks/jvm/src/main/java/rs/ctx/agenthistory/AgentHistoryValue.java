@@ -159,7 +159,7 @@ final class AgentHistoryValue {
         return value;
     }
 
-    private static String snakeToCamel(String value) {
+    static String snakeToCamel(String value) {
         StringBuilder out = new StringBuilder();
         boolean upper = false;
         for (int i = 0; i < value.length(); i++) {

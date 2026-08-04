@@ -13,7 +13,10 @@ fn staged_replacement(
     revision: u8,
     body: &str,
 ) -> GenerationWriter {
-    let mut writer = GenerationWriter::open(root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(document(source, 1, body)).unwrap();
     writer
@@ -254,7 +257,10 @@ fn exact_reuse_skips_factory_and_returns_old_metadata_as_reused() {
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
     let payload_before = active_payload(temp.path());
     let inventory = complete_inventory(&source, 1, vec![source.clone()]);
-    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replay = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let constructions = replay.index_writer_constructions.clone();
     replay
         .certify_complete_inventory(inventory.clone())
@@ -409,7 +415,10 @@ fn assert_metadata_crash_stage(stage: CrashStage) {
             retained.publication_metadata(),
             Some(b"old-metadata".as_slice())
         );
-        let reopened = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let reopened = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         assert_eq!(
             reopened.base_manifest().unwrap().generation_id().unwrap(),
             active.generation_id()

@@ -12,7 +12,9 @@ use std::os::windows::process::CommandExt as _;
 
 use serde_json::Value;
 
-use super::{classify_stderr, AgentHistoryError, AgentHistoryErrorCode};
+use super::{
+    classify_stderr, exact_json::parse_json_value_exact, AgentHistoryError, AgentHistoryErrorCode,
+};
 
 #[cfg(windows)]
 mod windows;
@@ -21,23 +23,34 @@ mod windows;
 use self::windows::ProcessTree;
 
 pub(super) const MAX_RETAINED_SUBPROCESS_STDERR_BYTES: usize = 64 * 1024;
+const MAX_RETAINED_JSON_STDOUT_BYTES: usize = 64 * 1024 * 1024;
 // Matches the public complete-content IPC frame payload ceiling. This leaves
 // the existing wire allowance for encoded content and its response envelope
 // without permitting an unbounded SDK-side subprocess buffer.
 pub(super) const MAX_RETAINED_MCP_STDOUT_BYTES: usize = 80 * 1024 * 1024;
 
 pub(super) fn spawn_configured(command: &mut Command) -> io::Result<Child> {
-    configure_command(command);
-    command.spawn()
+    #[cfg(any(unix, windows))]
+    {
+        configure_command(command);
+        command.spawn()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = command;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "ctx SDK subprocess containment is unavailable on this platform",
+        ))
+    }
 }
 
+#[cfg(any(unix, windows))]
 fn configure_command(command: &mut Command) {
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
-    #[cfg(not(any(unix, windows)))]
-    let _ = command;
 }
 
 #[derive(Debug)]
@@ -144,6 +157,7 @@ pub(super) fn collect_ctx_json(
         thread::sleep(Duration::from_millis(20).min(timeout.saturating_sub(started.elapsed())));
     }
 
+    stop_and_reap(&mut child, &process_tree);
     let stdout = stdout_reader.join();
     let stderr = stderr_reader.join();
     let stderr = stderr
@@ -193,6 +207,11 @@ pub(super) fn collect_ctx_json(
             false,
         )
         .with_cause(err.to_string())),
+        Err(JsonPipeError::LimitExceeded { maximum }) => Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            format!("ctx CLI stdout exceeded the {maximum}-byte response limit"),
+            false,
+        )),
         Err(JsonPipeError::Read(err)) => Err(AgentHistoryError::new(
             AgentHistoryErrorCode::AdapterError,
             "failed to read ctx CLI stdout",
@@ -317,6 +336,7 @@ pub(super) fn collect_ctx_mcp_output(
         thread::sleep(Duration::from_millis(20).min(timeout.saturating_sub(started.elapsed())));
     }
 
+    stop_and_reap(&mut child, &process_tree);
     join_mcp_io(
         stdin_writer,
         "ctx MCP stdin writer panicked",
@@ -346,21 +366,36 @@ pub(super) fn collect_ctx_mcp_output(
 
 enum JsonPipeError {
     Decode(serde_json::Error),
+    LimitExceeded { maximum: usize },
     Read(io::Error),
 }
 
 fn read_json_pipe(mut pipe: impl Read) -> Result<Value, JsonPipeError> {
-    match serde_json::from_reader(&mut pipe) {
-        Ok(value) => Ok(value),
-        Err(err) if err.is_io() => Err(JsonPipeError::Read(io::Error::new(
-            err.io_error_kind().unwrap_or(io::ErrorKind::Other),
-            err.to_string(),
-        ))),
-        Err(err) => {
-            io::copy(&mut pipe, &mut io::sink()).map_err(JsonPipeError::Read)?;
-            Err(JsonPipeError::Decode(err))
+    read_json_pipe_bounded(&mut pipe, MAX_RETAINED_JSON_STDOUT_BYTES)
+}
+
+fn read_json_pipe_bounded(
+    mut pipe: impl Read,
+    maximum_response_bytes: usize,
+) -> Result<Value, JsonPipeError> {
+    let mut retained = Vec::new();
+    let mut exceeded = false;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = pipe.read(&mut buffer).map_err(JsonPipeError::Read)?;
+        if read == 0 {
+            break;
         }
+        let remaining = maximum_response_bytes.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+        exceeded |= read > remaining;
     }
+    if exceeded {
+        return Err(JsonPipeError::LimitExceeded {
+            maximum: maximum_response_bytes,
+        });
+    }
+    parse_json_value_exact(&retained).map_err(JsonPipeError::Decode)
 }
 
 pub(super) fn read_bounded_pipe(mut pipe: impl Read, maximum: usize) -> io::Result<Vec<u8>> {
@@ -431,7 +466,7 @@ fn finish_mcp_stdout_line(
     if line.is_empty() {
         return;
     }
-    match serde_json::from_slice::<Value>(line) {
+    match parse_json_value_exact(line) {
         Ok(value) => {
             if value.get("id") == Some(&Value::from(2)) {
                 *response = Some(value);
@@ -580,8 +615,32 @@ struct ProcessTree;
 #[cfg(not(any(unix, windows)))]
 impl ProcessTree {
     fn start(_child: &Child) -> io::Result<Self> {
-        Ok(Self)
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "ctx SDK subprocess containment is unavailable on this platform",
+        ))
     }
 
     fn terminate(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_stdout_limits_remain_distinct_and_bounded() {
+        assert_eq!(MAX_RETAINED_JSON_STDOUT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_RETAINED_MCP_STDOUT_BYTES, 80 * 1024 * 1024);
+
+        let error = read_json_pipe_bounded(io::Cursor::new(br#"{"ok":true}"#), 8).unwrap_err();
+        assert!(matches!(error, JsonPipeError::LimitExceeded { maximum: 8 }));
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn unsupported_platforms_fail_closed_before_spawn() {
+        let error = spawn_configured(&mut Command::new("unused-command")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    }
 }

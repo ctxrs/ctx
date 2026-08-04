@@ -136,6 +136,7 @@ pub(super) fn record() -> CoreRecord {
             normalized_body: Some("complete golden Core body".to_owned()),
             structured_content: None,
         },
+        mcp_tool_call: None,
         metadata: BTreeMap::new(),
         repository_candidate_evidence,
         repository_bindings: Vec::new(),

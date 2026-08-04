@@ -607,6 +607,43 @@ pub(super) fn malformed_record_may_contain_lineage(record: &[u8]) -> bool {
     .any(|needle| record.windows(needle.len()).any(|window| window == needle))
 }
 
+/// Recovers only the canonical MCP terminal shape when the strict selector
+/// probe rejected duplicate envelope or payload selectors. Ordinary result
+/// projection follows serde_json's existing last-value semantics, while the
+/// raw MCP evidence visitor independently marks every such row ambiguous for
+/// attribution.
+pub(super) fn classify_mcp_terminal_after_selector_ambiguity(
+    line: &[u8],
+) -> Option<CodexRecordProbe<'_>> {
+    let envelope = serde_json::from_slice::<Value>(line).ok()?;
+    if envelope.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let timestamp = match envelope.get("timestamp") {
+        Some(Value::String(timestamp)) => Some(Cow::Owned(timestamp.clone())),
+        Some(Value::Null) | None => None,
+        Some(_) => return None,
+    };
+    let payload = envelope.get("payload")?.as_object()?;
+    if payload.get("type").and_then(Value::as_str) != Some("mcp_tool_call_end") {
+        return None;
+    }
+    let call_id = match payload.get("call_id") {
+        Some(Value::String(call_id)) => Some(Cow::Owned(call_id.clone())),
+        Some(Value::Null) | None => None,
+        Some(_) => return None,
+    };
+    Some(CodexRecordProbe {
+        class: CodexRecordClass::ExcludedResult(CodexResultKind::OtherResult),
+        timestamp,
+        call_id,
+        output: Some(probe_structural_output(line).ok()?),
+        relationship_escaped: true,
+        lineage_malformed: false,
+        lineage_call_ids: CodexLineageCallIds::default(),
+    })
+}
+
 /// The single authority that maps a Codex envelope/payload type pair onto the
 /// class the reader projects.
 ///
@@ -902,7 +939,10 @@ pub(super) fn parse_decoded_record(
     line: &[u8],
     owner: &CodexSessionRow,
 ) -> Option<CodexDecodedRecord> {
-    let envelope = serde_json::from_slice::<CodexDecodedEnvelope>(line).ok()?;
+    let envelope = match serde_json::from_slice::<CodexDecodedEnvelope>(line) {
+        Ok(envelope) => envelope,
+        Err(_) => parse_mcp_terminal_after_selector_ambiguity(line)?,
+    };
     let occurred_at = match envelope.timestamp {
         Some(timestamp) => parse_rfc3339_utc(&timestamp)?,
         None => owner.started_at,
@@ -911,4 +951,22 @@ pub(super) fn parse_decoded_record(
         occurred_at,
         payload: envelope.payload,
     })
+}
+
+fn parse_mcp_terminal_after_selector_ambiguity(line: &[u8]) -> Option<CodexDecodedEnvelope> {
+    let mut envelope = serde_json::from_slice::<Value>(line).ok()?;
+    let object = envelope.as_object_mut()?;
+    if object.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let timestamp = match object.remove("timestamp") {
+        Some(Value::String(timestamp)) => Some(timestamp),
+        Some(Value::Null) | None => None,
+        Some(_) => return None,
+    };
+    let payload = object.remove("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("mcp_tool_call_end") {
+        return None;
+    }
+    Some(CodexDecodedEnvelope { timestamp, payload })
 }

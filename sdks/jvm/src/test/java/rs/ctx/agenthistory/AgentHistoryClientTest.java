@@ -2,23 +2,43 @@ package rs.ctx.agenthistory;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 public final class AgentHistoryClientTest {
+    private static final String PROCESS_FIXTURE_MODE = "CTX_MCP289_JVM_PROCESS_FIXTURE_MODE";
+    private static final String PROCESS_FIXTURE_ROOT_PID = "CTX_MCP289_JVM_PROCESS_FIXTURE_ROOT_PID";
+    private static final String PROCESS_FIXTURE_DESCENDANT_PID = "CTX_MCP289_JVM_PROCESS_FIXTURE_DESCENDANT_PID";
+    private static final String PROCESS_FIXTURE_COMPLETION = "CTX_MCP289_JVM_PROCESS_FIXTURE_COMPLETION";
+
     public static void main(String[] args) throws Exception {
         wrapsRawStatusAsTypedEnvelope();
         normalizesSetupJsonAsInitStatus();
         rejectsStatusCountersOutsideExactCrossSDKDomain();
+        rejectsMalformedJsonGrammar();
         acceptsCanonicalSearchFixture();
+        exposesOptionalMcpToolCallMetadata();
+        rejectsRawMcpToolCallDuplicateMembers();
+        strictlyDecodesSpawnedProcessStdoutUtf8();
         camelizesSearchRetrievalJson();
         decodesAllCanonicalFixturesThroughTypedResponses();
         normalizesRawShowResponses();
         preservesLegitimateNestedSourceSemantics();
         buildsSearchCommand();
         localCliForcesAnalyticsOffAfterAmbientAndUserEnvironment();
+        localCliPreservesLaunchFailureContract();
+        localCliDoesNotLaunchThroughTheParentPath();
+        localCliDrainsLargeOutputWithinTheRetentionBound();
+        localCliBoundsOutputWhileContinuingToDrain();
+        localCliAcceptsValidOutputAboveLegacyRetentionLimit();
+        localCliRejectsOversizeSuccessfulOutputAsProtocolFailure();
+        localCliWaitsForPipeEofAfterSuccessfulRootExit();
+        posixProcessScopeOwnsRootExitedClosedPipeDescendantWithoutPolling();
+        localCliSuccessOwnsClosedPipeDescendantAfterRootExit();
+        localCliDeadlineOwnsPipeDescendantsAndForcesCleanup();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
     }
@@ -39,6 +59,362 @@ public final class AgentHistoryClientTest {
 
         assertEquals("true", config.env().get("CTX_ANALYTICS_ENABLED"));
         assertEquals("false", captured[0].env().get("CTX_ANALYTICS_ENABLED"));
+    }
+
+    private static void localCliPreservesLaunchFailureContract() {
+        Path missing = Paths.get(
+                System.getProperty("java.io.tmpdir"),
+                "ctx-mcp289-jvm-missing-" + System.nanoTime());
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath(missing.toString())
+                .timeoutMillis(1_000)
+                .build());
+
+        try {
+            adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+            throw new AssertionError("expected missing CLI launch to fail");
+        } catch (CtxAgentHistoryException.Cli error) {
+            assertEquals("adapter_error", error.code());
+            assertEquals(Integer.valueOf(-1), Integer.valueOf(error.exitCode()));
+            assertEquals(Boolean.FALSE, Boolean.valueOf(error.retryable()));
+        }
+    }
+
+    private static void localCliDoesNotLaunchThroughTheParentPath() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        Path emptyPath = Files.createTempDirectory("ctx-jvm-empty-path-");
+        Path marker = emptyPath.resolve("escaped.marker");
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath("sh")
+                .env("PATH", emptyPath.toString())
+                .timeoutMillis(1_000)
+                .build());
+
+        try {
+            adapter.execute(new AgentHistoryOperation(
+                    "status",
+                    List.of(
+                            "-c",
+                            "printf escaped > \"$1\"; printf '{}'",
+                            "ctx-jvm-parent-path-regression",
+                            marker.toString())));
+            throw new AssertionError("expected unresolved child PATH command to fail closed");
+        } catch (CtxAgentHistoryException.Cli error) {
+            assertEquals("adapter_error", error.code());
+            assertEquals(Integer.valueOf(-1), Integer.valueOf(error.exitCode()));
+        } finally {
+            boolean escaped = Files.exists(marker);
+            Files.deleteIfExists(marker);
+            Files.deleteIfExists(emptyPath);
+            assertEquals(Boolean.FALSE, Boolean.valueOf(escaped));
+        }
+    }
+
+    private static void localCliDrainsLargeOutputWithinTheRetentionBound() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath(mcp289ProcessFixture().toString())
+                .env(PROCESS_FIXTURE_MODE, "large-stdout")
+                .timeoutMillis(5_000)
+                .build());
+
+        String output = adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+
+        assertEquals(Integer.valueOf(2 * 1024 * 1024), Integer.valueOf(output.length()));
+    }
+
+    private static void localCliBoundsOutputWhileContinuingToDrain() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath(mcp289ProcessFixture().toString())
+                .env(PROCESS_FIXTURE_MODE, "oversize-nonzero")
+                .timeoutMillis(10_000)
+                .build());
+
+        long started = System.nanoTime();
+        try {
+            adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+            throw new AssertionError("expected oversized nonzero fixture to fail");
+        } catch (CtxAgentHistoryException.Cli error) {
+            assertEquals(Integer.valueOf(23), Integer.valueOf(error.exitCode()));
+            assertEquals(
+                    Integer.valueOf(16 * 1024 * 1024 + 64 * 1024),
+                    Integer.valueOf(error.stdout().getBytes(StandardCharsets.UTF_8).length));
+            assertEquals(
+                    Integer.valueOf(LocalCliAdapter.MAX_RETAINED_STDERR_BYTES),
+                    Integer.valueOf(error.stderr().getBytes(StandardCharsets.UTF_8).length));
+        }
+        assertElapsedLessThan(started, 8_000, "oversize output drain");
+    }
+
+    private static void localCliAcceptsValidOutputAboveLegacyRetentionLimit() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath(mcp289ProcessFixture().toString())
+                .env(PROCESS_FIXTURE_MODE, "valid-above-legacy-stdout-cap")
+                .timeoutMillis(10_000)
+                .build());
+
+        String output = adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+
+        assertEquals(Boolean.TRUE, Boolean.valueOf(output.startsWith("{\"payload\":\"")));
+        assertEquals(Boolean.TRUE, Boolean.valueOf(output.endsWith("\"}")));
+        assertEquals(Boolean.TRUE, Boolean.valueOf(
+                output.getBytes(StandardCharsets.UTF_8).length > 16 * 1024 * 1024));
+        assertEquals(Boolean.TRUE, Boolean.valueOf(
+                output.getBytes(StandardCharsets.UTF_8).length <= LocalCliAdapter.MAX_RETAINED_STDOUT_BYTES));
+    }
+
+    private static void localCliRejectsOversizeSuccessfulOutputAsProtocolFailure() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        Path completion = Files.createTempFile("ctx-mcp289-jvm-overflow-", ".complete");
+        Files.delete(completion);
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath(mcp289ProcessFixture().toString())
+                .env(PROCESS_FIXTURE_MODE, "stdout-overflow-success")
+                .env(PROCESS_FIXTURE_COMPLETION, completion.toString())
+                .timeoutMillis(15_000)
+                .build());
+
+        try {
+            adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+            throw new AssertionError("expected oversized successful output to fail closed");
+        } catch (CtxAgentHistoryException.Protocol error) {
+            assertEquals("decode_error", error.code());
+            assertEquals(
+                    Integer.valueOf(LocalCliAdapter.MAX_RETAINED_STDOUT_BYTES),
+                    error.details().get("maximumBytes"));
+        }
+        assertEquals("completed", Files.readString(completion, StandardCharsets.UTF_8));
+        completion.toFile().deleteOnExit();
+    }
+
+    private static void localCliSuccessOwnsClosedPipeDescendantAfterRootExit() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        Path descendantPid = Files.createTempFile("ctx-mcp289-jvm-closed-pipe-descendant-", ".pid");
+        Files.delete(descendantPid);
+        long descendant = -1;
+        try {
+            LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                    .ctxPath(mcp289ProcessFixture().toString())
+                    .env(PROCESS_FIXTURE_MODE, "root-exits-closed-pipe-descendant")
+                    .env(PROCESS_FIXTURE_DESCENDANT_PID, descendantPid.toString())
+                    .timeoutMillis(2_000)
+                    .build());
+
+            String output = adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+
+            assertEquals("{}", output);
+            descendant = readPid(descendantPid);
+            assertProcessStops(descendant, "root-exited closed-pipe descendant");
+        } finally {
+            forceProcessStop(descendant);
+        }
+    }
+
+    private static void posixProcessScopeOwnsRootExitedClosedPipeDescendantWithoutPolling() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        Path descendantPid = Files.createTempFile("ctx-mcp289-jvm-scope-descendant-", ".pid");
+        Files.delete(descendantPid);
+        Map<String, String> environment = new LinkedHashMap<>();
+        environment.put(PROCESS_FIXTURE_MODE, "root-exits-closed-pipe-descendant");
+        environment.put(PROCESS_FIXTURE_DESCENDANT_PID, descendantPid.toString());
+        ProcessTreeScope scope = null;
+        long descendant = -1;
+        try {
+            scope = ProcessTreeScope.start(
+                    List.of(mcp289ProcessFixture().toString(), "status"),
+                    null,
+                    environment);
+            Process root = scope.process();
+            String stdout = new String(root.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            if (!root.waitFor(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                throw new AssertionError("fixture root did not exit");
+            }
+
+            assertEquals(Integer.valueOf(0), Integer.valueOf(root.exitValue()));
+            assertEquals("{}", stdout);
+            descendant = readPid(descendantPid);
+            assertEquals(Boolean.TRUE, Boolean.valueOf(
+                    ProcessHandle.of(descendant).map(ProcessHandle::isAlive).orElse(false)));
+            assertEquals(Boolean.TRUE, Boolean.valueOf(scope.terminate(true)));
+            assertProcessStops(descendant, "directly scoped root-exited descendant");
+        } finally {
+            if (scope != null) {
+                scope.terminate(true);
+                scope.close();
+            }
+            forceProcessStop(descendant);
+        }
+    }
+
+    private static void localCliWaitsForPipeEofAfterSuccessfulRootExit() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                .ctxPath(mcp289ProcessFixture().toString())
+                .env(PROCESS_FIXTURE_MODE, "short-lived-pipe-owner")
+                .timeoutMillis(2_000)
+                .build());
+
+        long started = System.nanoTime();
+        String output = adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+
+        assertEquals("{}", output);
+        assertElapsedAtLeast(started, 150, "pipe EOF wait");
+        assertElapsedLessThan(started, 1_500, "pipe EOF wait");
+    }
+
+    private static void localCliDeadlineOwnsPipeDescendantsAndForcesCleanup() throws Exception {
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        Path rootPid = Files.createTempFile("ctx-mcp289-jvm-root-", ".pid");
+        Path descendantPid = Files.createTempFile("ctx-mcp289-jvm-descendant-", ".pid");
+        Files.delete(rootPid);
+        Files.delete(descendantPid);
+        long root = -1;
+        long descendant = -1;
+        try {
+            LocalCliAdapter adapter = new LocalCliAdapter(LocalCliConfig.builder()
+                    .ctxPath(mcp289ProcessFixture().toString())
+                    .env(PROCESS_FIXTURE_MODE, "detached-pipe-owner")
+                    .env(PROCESS_FIXTURE_ROOT_PID, rootPid.toString())
+                    .env(PROCESS_FIXTURE_DESCENDANT_PID, descendantPid.toString())
+                    .timeoutMillis(900)
+                    .build());
+
+            long started = System.nanoTime();
+            try {
+                adapter.execute(new AgentHistoryOperation("status", List.of("status")));
+                throw new AssertionError("expected pipe-owning descendant fixture to time out");
+            } catch (CtxAgentHistoryException.Cli error) {
+                assertEquals("timeout", error.code());
+                assertEquals(Boolean.TRUE, Boolean.valueOf(error.retryable()));
+            }
+            assertElapsedLessThan(started, 4_000, "absolute process/EOF deadline");
+
+            root = readPid(rootPid);
+            descendant = readPid(descendantPid);
+            assertProcessStops(root, "fixture root");
+            assertProcessStops(descendant, "pipe-owning descendant");
+        } finally {
+            forceProcessStop(root);
+            forceProcessStop(descendant);
+        }
+    }
+
+    private static Path mcp289ProcessFixture() throws Exception {
+        Path script = Files.createTempFile("ctx-mcp289-jvm-process-fixture-", ".sh");
+        String source = "#!/bin/sh\n"
+                + "case \"$" + PROCESS_FIXTURE_MODE + "\" in\n"
+                + "  large-stdout)\n"
+                + "    head -c 2097152 /dev/zero | tr '\\000' 'j'\n"
+                + "    ;;\n"
+                + "  oversize-nonzero)\n"
+                + "    head -c 16842752 /dev/zero | tr '\\000' 'o'\n"
+                + "    head -c 16842752 /dev/zero | tr '\\000' 'e' >&2\n"
+                + "    exit 23\n"
+                + "    ;;\n"
+                + "  valid-above-legacy-stdout-cap)\n"
+                + "    printf '{\"payload\":\"'\n"
+                + "    head -c 17825792 /dev/zero | tr '\\000' 's'\n"
+                + "    printf '\"}'\n"
+                + "    ;;\n"
+                + "  stdout-overflow-success)\n"
+                + "    printf '{\"payload\":\"'\n"
+                + "    head -c 67174400 /dev/zero | tr '\\000' 's'\n"
+                + "    printf '\"}'\n"
+                + "    printf completed > \"$" + PROCESS_FIXTURE_COMPLETION + "\"\n"
+                + "    ;;\n"
+                + "  root-exits-closed-pipe-descendant)\n"
+                + "    sh -c 'exec >/dev/null 2>/dev/null; trap \"\" TERM; echo $$ > \"$1\"; exec sleep 300' sh \"$"
+                + PROCESS_FIXTURE_DESCENDANT_PID + "\" &\n"
+                + "    while [ ! -s \"$" + PROCESS_FIXTURE_DESCENDANT_PID + "\" ]; do :; done\n"
+                + "    printf '{}\\n'\n"
+                + "    exit 0\n"
+                + "    ;;\n"
+                + "  short-lived-pipe-owner)\n"
+                + "    sh -c 'sleep 0.25' &\n"
+                + "    printf '{}\\n'\n"
+                + "    exit 0\n"
+                + "    ;;\n"
+                + "  detached-pipe-owner)\n"
+                + "    echo $$ > \"$" + PROCESS_FIXTURE_ROOT_PID + "\"\n"
+                + "    sh -c 'trap \"\" TERM; echo $$ > \"$1\"; exec sleep 300' sh \"$"
+                + PROCESS_FIXTURE_DESCENDANT_PID + "\" &\n"
+                + "    while [ ! -s \"$" + PROCESS_FIXTURE_DESCENDANT_PID + "\" ]; do sleep 0.01; done\n"
+                + "    sleep 0.25\n"
+                + "    exit 0\n"
+                + "    ;;\n"
+                + "  *) exit 64 ;;\n"
+                + "esac\n";
+        Files.write(script, source.getBytes(StandardCharsets.UTF_8));
+        if (!script.toFile().setExecutable(true)) {
+            throw new IllegalStateException("failed to make MCP #289 JVM process fixture executable");
+        }
+        script.toFile().deleteOnExit();
+        return script;
+    }
+
+    private static long readPid(Path path) throws Exception {
+        if (!Files.isRegularFile(path)) {
+            throw new AssertionError("fixture did not write PID file " + path);
+        }
+        path.toFile().deleteOnExit();
+        return Long.parseLong(Files.readString(path, StandardCharsets.UTF_8).trim());
+    }
+
+    private static void assertProcessStops(long pid, String label) throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadline) {
+            if (ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false) == false) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError(label + " remained alive: " + pid);
+    }
+
+    private static void forceProcessStop(long pid) throws Exception {
+        if (pid <= 1) {
+            return;
+        }
+        ProcessHandle.of(pid).ifPresent(ProcessHandle::destroyForcibly);
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadline
+                && ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+            Thread.sleep(10);
+        }
+    }
+
+    private static void assertElapsedLessThan(long started, long maximumMillis, String label) {
+        long elapsed = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        if (elapsed >= maximumMillis) {
+            throw new AssertionError(label + " exceeded " + maximumMillis + "ms: " + elapsed + "ms");
+        }
+    }
+
+    private static void assertElapsedAtLeast(long started, long minimumMillis, String label) {
+        long elapsed = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        if (elapsed < minimumMillis) {
+            throw new AssertionError(label + " completed before " + minimumMillis + "ms: " + elapsed + "ms");
+        }
     }
 
     private static void normalizesSetupJsonAsInitStatus() {
@@ -71,6 +447,23 @@ public final class AgentHistoryClientTest {
                     "{\"initialized\":true,\"indexed_items\":" + rejected + "}"));
             assertProtocol(client::status);
         }
+    }
+
+    private static void rejectsMalformedJsonGrammar() {
+        for (String invalid : new String[] {
+                "{\"initialized\":true,\"future\":01}",
+                "{\"initialized\":true,\"future\":-01}",
+                "{\"initialized\":true,\"future\":\"line\nbreak\"}",
+                "{\"initialized\":true,\"future\":\"control" + ((char) 1) + "character\"}"
+        }) {
+            AgentHistoryClient client = AgentHistoryClient.withTransport(
+                    new FakeTransport("local-cli", invalid));
+            assertProtocol(client::status);
+        }
+
+        assertEquals(
+                "line\nbreak",
+                Json.parseObject("{\"future\":\"line\\nbreak\"}").get("future"));
     }
 
     private static void wrapsRawStatusAsTypedEnvelope() {
@@ -123,6 +516,144 @@ public final class AgentHistoryClientTest {
         assertEquals("codex_session_jsonl", hit.getSourceFormat());
         assertEquals("event", hit.getCitations().get(0).getTargetType());
         assertEquals("codex event", hit.getCitations().get(0).getLabel());
+    }
+
+    private static void exposesOptionalMcpToolCallMetadata() throws Exception {
+        ShowEventResponse oldResponse = new ShowEventResponse(
+                Json.parseObject(readFixture("show-event.window.json")));
+        Event oldEvent = oldResponse.getEvent().getEvent();
+        assertEquals(null, oldEvent.getMcpToolCall());
+        assertEquals(Boolean.FALSE, Boolean.valueOf(oldEvent.asMap().containsKey("mcpToolCall")));
+
+        ShowEventResponse newResponse = new ShowEventResponse(
+                Json.parseObject(readFixture("show-event.mcp-tool-call.json")));
+        McpToolCall call = newResponse.getEvent().getEvent().getMcpToolCall();
+        assertEquals("mcp-サーバー-🦀", call.getServer());
+        assertEquals("検索/工具/🛠️", call.getTool());
+        assertEquals(Boolean.TRUE, newResponse.getEvent().getEvent()
+                .asMap().get("futureEventField") instanceof Map<?, ?>);
+
+        Map<String, Object> normalized = AgentHistoryEnvelope.normalize(
+                "showEvent",
+                new Backend("local", null, null),
+                Json.parseObject("{\"event\":{\"mcp_tool_call\":{"
+                        + "\"server\":\"mcp-サーバー-🦀\","
+                        + "\"tool\":\"検索/工具/🛠️\"},"
+                        + "\"future_event_field\":true},\"events\":[{}]}"));
+        McpToolCall normalizedCall = new ShowEventResponse(normalized)
+                .getEvent().getEvent().getMcpToolCall();
+        assertEquals("mcp-サーバー-🦀", normalizedCall.getServer());
+        assertEquals("検索/工具/🛠️", normalizedCall.getTool());
+        assertEquals(Boolean.TRUE, new ShowEventResponse(normalized)
+                .getEvent().getEvent().asMap().get("futureEventField"));
+
+        String exact = "🦀".repeat(McpToolCall.MAX_COMPONENT_BYTES / 4);
+        assertEquals(Integer.valueOf(McpToolCall.MAX_COMPONENT_BYTES), Integer.valueOf(
+                new McpToolCall(Map.of("server", " ", "tool", exact))
+                        .getTool().getBytes(StandardCharsets.UTF_8).length));
+
+        for (String invalid : new String[] {
+                "{\"mcpToolCall\":{\"server\":\"only-server\"}}",
+                "{\"mcpToolCall\":{\"tool\":\"only-tool\"}}",
+                "{\"mcpToolCall\":{\"server\":\"server\",\"tool\":\"tool\",\"future\":true}}",
+                "{\"mcpToolCall\":{\"server\":\"\",\"tool\":\"tool\"}}",
+                "{\"mcpToolCall\":{\"server\":\"server\",\"tool\":7}}",
+                "{\"mcpToolCall\":{\"server\":\"server\",\"tool\":\"\\ud800\"}}",
+                "{\"mcpToolCall\":null}"
+        }) {
+            assertProtocol(() -> new Event(Json.parseObject(invalid)));
+        }
+        assertProtocol(() -> new McpToolCall(Map.of(
+                "server", "server",
+                "tool", "a".repeat(McpToolCall.MAX_COMPONENT_BYTES + 1))));
+    }
+
+    private static void rejectsRawMcpToolCallDuplicateMembers() throws Exception {
+        for (String name : new String[] {
+                "duplicate-event-mcp-tool-call-snake.json",
+                "duplicate-event-mcp-tool-call-camel.json",
+                "duplicate-mcp-tool-call-server.json",
+                "duplicate-mcp-tool-call-tool.json",
+                "invalid-mcp-tool-call-transformed-server.json",
+                "invalid-mcp-tool-call-transformed-tool.json",
+                "invalid-mcp-tool-call-transformed-collision.json",
+                "invalid-mcp-tool-call-outer-alias-collision.json",
+                "invalid-mcp-tool-call-outer-mixed-case.json",
+                "invalid-mcp-tool-call-outer-repeated-separator.json",
+                "invalid-mcp-tool-call-outer-trailing-separator.json",
+                "invalid-mcp-tool-call-outer-camel-snake.json"
+        }) {
+            AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
+                    "local-cli", readAdversarialFixture(name)));
+            assertProtocol(() -> client.showEvent("event-1"));
+        }
+
+        AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport(
+                "local-cli", readAdversarialFixture("valid-repeated-string-contents.json")));
+        Event event = client.showEvent("event-1").getEvent().getEvent();
+        assertEquals("server server", event.getMcpToolCall().getServer());
+        assertEquals("tool tool", event.getMcpToolCall().getTool());
+        assertEquals(
+                "server tool mcpToolCall mcp_tool_call server tool mcpToolCall mcp_tool_call",
+                event.getText());
+
+        AgentHistoryClient aliasesClient = AgentHistoryClient.withTransport(new FakeTransport(
+                "local-cli", readAdversarialFixture("valid-mcp-tool-call-outer-aliases.json")));
+        EventResult aliases = aliasesClient.showEvent("event-1").getEvent();
+        assertEquals("snake-server", aliases.getEvent().getMcpToolCall().getServer());
+        assertEquals("snake-extra", aliases.getEvent().asMap().get("futureEventField"));
+        assertEquals("camel-server", aliases.getEvents().get(0).getMcpToolCall().getServer());
+        assertEquals("camel-extra", aliases.getEvents().get(0).asMap().get("futureEventField"));
+    }
+
+    private static void strictlyDecodesSpawnedProcessStdoutUtf8() throws Exception {
+        assertProtocol(() -> LocalCliAdapter.decodeUtf8Output(new byte[] {(byte) 0xff}));
+        assertEquals("�", LocalCliAdapter.decodeUtf8Output("�".getBytes(StandardCharsets.UTF_8)));
+
+        if (java.io.File.separatorChar == '\\') {
+            return;
+        }
+        byte[] prefix = "{\"event\":{\"mcp_tool_call\":{\"server\":\""
+                .getBytes(StandardCharsets.UTF_8);
+        byte[] suffix = "\",\"tool\":\"tool\"}},\"events\":[]}"
+                .getBytes(StandardCharsets.UTF_8);
+        byte[] invalid = new byte[prefix.length + 1 + suffix.length];
+        System.arraycopy(prefix, 0, invalid, 0, prefix.length);
+        invalid[prefix.length] = (byte) 0xff;
+        System.arraycopy(suffix, 0, invalid, prefix.length + 1, suffix.length);
+        AgentHistoryClient invalidClient = AgentHistoryClient.local(LocalCliConfig.builder()
+                .ctxPath(spawnedStdoutCli(invalid).toString())
+                .build());
+        assertProtocol(() -> invalidClient.showEvent("event-1"));
+
+        byte[] valid = "{\"event\":{\"mcp_tool_call\":{\"server\":\"�\",\"tool\":\"tool\"}},\"events\":[]}"
+                .getBytes(StandardCharsets.UTF_8);
+        AgentHistoryClient validClient = AgentHistoryClient.local(LocalCliConfig.builder()
+                .ctxPath(spawnedStdoutCli(valid).toString())
+                .build());
+        assertEquals("�", validClient.showEvent("event-1")
+                .getEvent().getEvent().getMcpToolCall().getServer());
+    }
+
+    private static Path spawnedStdoutCli(byte[] payload) throws Exception {
+        StringBuilder octal = new StringBuilder();
+        for (byte value : payload) {
+            String encoded = Integer.toOctalString(value & 0xff);
+            octal.append('\\');
+            for (int index = encoded.length(); index < 3; index++) {
+                octal.append('0');
+            }
+            octal.append(encoded);
+        }
+        Path script = Files.createTempFile("ctx-agent-history-jvm-stdout-", ".sh");
+        Files.write(
+                script,
+                ("#!/bin/sh\nprintf '" + octal + "'\n").getBytes(StandardCharsets.UTF_8));
+        if (!script.toFile().setExecutable(true)) {
+            throw new IllegalStateException("failed to make spawned stdout fixture executable");
+        }
+        script.toFile().deleteOnExit();
+        return script;
     }
 
     private static void camelizesSearchRetrievalJson() {
@@ -322,6 +853,12 @@ public final class AgentHistoryClientTest {
 
     private static String readFixture(String name) throws Exception {
         byte[] bytes = Files.readAllBytes(Paths.get("../../contracts/agent-history-v1/fixtures", name));
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static String readAdversarialFixture(String name) throws Exception {
+        byte[] bytes = Files.readAllBytes(Paths.get(
+                "../../contracts/agent-history-v1/fixtures/adversarial", name));
         return new String(bytes, StandardCharsets.UTF_8);
     }
 

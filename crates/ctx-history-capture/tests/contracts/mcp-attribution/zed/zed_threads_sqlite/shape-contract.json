@@ -1,0 +1,20 @@
+{
+  "contract_schema_version": 1,
+  "classification": "route_schema_contract",
+  "provider": "zed",
+  "route": "native_import",
+  "source_format": "zed_threads_sqlite",
+  "format_schema": {
+    "kind": "embedded_semver",
+    "version": "0.3.0"
+  },
+  "producer_domain": {
+    "kind": "discrete",
+    "versions": [
+      {
+        "kind": "semver",
+        "version": "0.3.0"
+      }
+    ]
+  }
+}

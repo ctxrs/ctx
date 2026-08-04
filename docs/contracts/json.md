@@ -502,6 +502,22 @@ or `structured_content` when policy permits. Each rendered event also includes
 `content.complete`, `content.policy_status`, and an optional
 `content.policy_reason`.
 
+A qualifying terminal/result event can also include the optional top-level
+event field `mcp_tool_call: {"server": <string>, "tool": <string>}`. Both
+members are required nonempty decoded UTF-8 strings, each bounded to 64 KiB.
+Machine output preserves them exactly. The complete object is omitted, never
+`null`, when no exact pair is available; absence does not mean the event was
+not MCP. Event-range `--content none` removes payload content but retains this
+metadata. Ordinary tool results appear in session output only with
+`ctx show session --mode log`. Historical rows preserved across the immediate
+Core contract transition may remain unattributed until an ordinary provider
+refresh can recompute the field from source. See
+[`mcp-tool-call-attribution.md`](../mcp-tool-call-attribution.md).
+
+The 256-Unicode-scalar display bound and `… [display truncated]` marker apply
+only to human rendering. JSON, JSONL, and MCP `structuredContent` retain the
+full exact values admitted by the 64 KiB per-component contract.
+
 Show reads the active Core/Tantivy generation without reopening provider
 history. It does not return provider source paths, existence checks, or source
 cursors. With `--out`, a
@@ -745,6 +761,13 @@ error, and zero semantic weight performs no vector work. MCP search does not
 itself import provider history. It also excludes the active Codex session tree
 by default when `CODEX_THREAD_ID` is set; pass
 `include_current_session: true` to opt back in.
+
+MCP `show_event`, `show_session`, and `query_events` structured event rows reuse
+the exact CLI `mcp_tool_call` object. Text fallback is display-safe rather than
+the exact machine authority. The field is not added to MCP or CLI search
+results, inputs, matching, ranking, snippets, selectors, or SQL. Paginated MCP
+callers filter each returned page client-side and continue with the existing
+opaque cursor; `show_session` requires `mode: "log"` for ordinary tool results.
 
 The MCP `sources` tool includes the same bounded `issues` and
 `issues_truncated` fields as `ctx sources --format json`.

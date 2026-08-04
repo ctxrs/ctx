@@ -14,6 +14,8 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
         move |execution: SourceBackedRefreshExecution<'_>| {
             let request_id = execution.request_id.to_owned();
             let published = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+                .into_writer()
+                .map_err(crate::semantic::committed_generation_recovery_error)?
                 .commit_with_publication_metadata(
                     |_| true,
                     |context| {
@@ -70,6 +72,8 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
         move |execution: SourceBackedRefreshExecution<'_>| {
             executor_calls.fetch_add(1, Ordering::SeqCst);
             let receipt = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+                .into_writer()
+                .map_err(crate::semantic::committed_generation_recovery_error)?
                 .commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
                 generation_id: receipt.generation_id,
@@ -141,6 +145,8 @@ fn recovered_periodic_no_op_restores_cooldown_from_original_request() -> Result<
             .map(|index| index.generation_id().to_owned());
         let request_id = execution.request_id.to_owned();
         let published = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit_with_publication_metadata(
                 |_| true,
                 move |context| {

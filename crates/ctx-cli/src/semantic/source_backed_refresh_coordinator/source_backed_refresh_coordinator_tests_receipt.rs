@@ -9,6 +9,8 @@ fn empty_terminal_receipt_fixture() -> (tempfile::TempDir, Value, PinnedSourceBa
                 execution.index_root,
                 WriterOptions::default(),
             )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit(|_| true)?;
             Ok(empty_test_publication(receipt.generation_id))
         },
@@ -219,6 +221,8 @@ fn terminal_response_is_bounded_while_route_results_remain_exact() {
                 execution.index_root,
                 WriterOptions::default(),
             )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit(|_| true)?;
             let route_results = (0..256)
                 .map(|index| {

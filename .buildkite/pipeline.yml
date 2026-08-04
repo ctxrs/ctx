@@ -55,6 +55,42 @@ steps:
       - "bazel-testlogs/**/*.zip"
       - "target/ctx-artifacts/check/**"
 
+  - label: ":swift: required macOS SDK implementations"
+    key: "sdk-swift-required"
+    if: build.source != "schedule" || build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
+    command: |
+      javac -version
+      swift --version
+      bash scripts/check-sdks.sh --groups=jvm,swift --required-groups=jvm,swift
+    agents:
+      queue: "mac-shared"
+      os: "darwin"
+      arch: "arm64"
+    concurrency: 1
+    concurrency_group: "ctx/sdk-swift-required/mac-shared"
+    timeout_in_minutes: 30
+
+  - label: ":windows: required Windows SDK implementations"
+    key: "sdk-windows-required"
+    if: build.source != "schedule" || build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
+    command: |
+      export DOTNET_CLI_TELEMETRY_OPTOUT=1
+      export DOTNET_NOLOGO=1
+      node --version
+      npm --version
+      python3 --version
+      go version
+      dotnet --info
+      bash scripts/check-sdks.sh --groups=typescript,python,go,dotnet --required-groups=typescript,python,go,dotnet
+      bash scripts/bazelw test //crates/ctx-sdk:unit_tests --config=ci
+    agents:
+      queue: "windows-x64"
+      os: "windows"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx/sdk-windows-required/windows-x64"
+    timeout_in_minutes: 30
+
   - wait: ~
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
 

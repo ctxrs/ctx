@@ -1,0 +1,474 @@
+{
+  "schema_version": 3,
+  "capability": "exact_mcp_tool_call_attribution",
+  "capability_revision": 3,
+  "scope": "Exact event-local MCP dispatch server alias and advertised tool identity only; general provider import support is defined separately.",
+  "conformance_authority": {
+    "manifest": "crates/ctx-history-capture/tests/mcp-attribution-conformance.manifest.json",
+    "suite_registry": "crates/ctx-history-capture/tests/mcp_attribution_suites.bzl",
+    "manifest_sha256": "c80b234d154852175ec02e3c55416980906dedfcd4696c5039853b096b67c85f",
+    "suite_registry_sha256": "5f78f78e4a2a0df9739313067ffddc7a11eadc075ec00910f95c352bf65d10fa",
+    "manifest_schema_version": 6,
+    "capability_revision": 5,
+    "status_mapping": {
+      "exact": "supported",
+      "not-qualified": "not_qualified",
+      "excluded": "excluded"
+    },
+    "expected_counts": {
+      "providers": 41,
+      "base_routes": 43,
+      "schema_generations": 42,
+      "capability_lanes": 46,
+      "status_rows": {
+        "supported": 3,
+        "not_qualified": 42,
+        "excluded": 1
+      }
+    }
+  },
+  "key_fields": [
+    "provider_id",
+    "route",
+    "source_format",
+    "source_schema",
+    "producer_bound"
+  ],
+  "producer_bound_grammar": {
+    "allowed_kinds": [
+      "unversioned",
+      "source_commits",
+      "versions",
+      "hosted_boundary"
+    ],
+    "unversioned_fields": [
+      "kind",
+      "generation",
+      "unknown_generations"
+    ],
+    "source_commits_fields": [
+      "kind",
+      "commits",
+      "unknown_generations"
+    ],
+    "versions_fields": [
+      "kind",
+      "versions",
+      "ranges",
+      "source_commits",
+      "unknown_generations"
+    ],
+    "hosted_boundary_fields": [
+      "kind",
+      "unknown_generations"
+    ],
+    "version_range_fields": [
+      "minimum",
+      "maximum"
+    ],
+    "version_pattern": "^\\d+(?:\\.\\d+){1,3}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$",
+    "source_commit_pattern": "^[0-9a-f]{40}$",
+    "unknown_generations_by_status": {
+      "exact": "not-qualified",
+      "not-qualified": "not-qualified",
+      "excluded": "excluded"
+    },
+    "exact_requires_source_commits": false
+  },
+  "expected_counts": {
+    "providers": 41,
+    "base_routes": 43,
+    "capability_lanes": 46,
+    "lane_statuses": {
+      "exact": 3,
+      "not-qualified": 42,
+      "excluded": 1
+    },
+    "provider_statuses": {
+      "exact": 3,
+      "not-qualified": 38,
+      "excluded": 0
+    }
+  },
+  "status_definitions": {
+    "exact": "ctx may publish mcp_tool_call only for a uniquely linked canonical terminal record carrying the authoritative raw server alias and advertised tool name within this exact tuple.",
+    "not-qualified": "The tuple was evaluated and fails the exact-attribution evidence rule; general local history import may still be Supported.",
+    "excluded": "The candidate route is outside ctx's local-only history import boundary."
+  },
+  "failure_reason_definitions": {
+    "lossy_composite": "Persistence sanitizes, normalizes, truncates, flattens, or otherwise combines identity fields non-injectively.",
+    "exact_pair_transient_or_config": "The exact pair exists only in transient runtime, configuration, discovery, or provider-overridable state rather than authoritative call-local terminal evidence.",
+    "no_server_field": "The durable call record does not retain an authoritative MCP server alias.",
+    "no_unique_terminal_link": "The durable format cannot link the exact invocation to one canonical terminal record without order, FIFO, timing, or name inference.",
+    "route_mismatch": "A richer producer route exists or existed, but it is not the route imported by this tuple or it loses identity before this boundary.",
+    "writer_version_unproven": "The admitted format has no public first-party writer or durable version boundary proving the required fields and lifecycle."
+  },
+  "exclusion_reason_definitions": {
+    "outside_local_only_boundary": "The evidence source is a hosted remote trace rather than local agent history."
+  },
+  "routes": [
+    {
+      "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "exact",
+      "detail": "The terminal record carries invocation.server, invocation.tool, a stable call identity, and the canonical result together; malformed or ambiguous attribution abstains without dropping the result.",
+      "evidence": ["https://github.com/openai/codex/blob/60c722e07514d46d980034319dfcbfe4e74e659f/codex-rs/protocol/src/protocol.rs#L2452-L2518"]
+    },
+    {
+      "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {"kind": "versions", "versions": ["0.200.0"], "ranges": [], "source_commits": ["60c722e07514d46d980034319dfcbfe4e74e659f"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "writer_version_unproven",
+      "detail": "This observed producer version is a separate lane and does not inherit the unversioned generation-1 exact classification.",
+      "evidence": ["https://github.com/openai/codex/blob/60c722e07514d46d980034319dfcbfe4e74e659f/codex-rs/protocol/src/protocol.rs#L2452-L2518"]
+    },
+    {
+      "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {"kind": "versions", "versions": ["0.201.0"], "ranges": [], "source_commits": ["60c722e07514d46d980034319dfcbfe4e74e659f"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "writer_version_unproven",
+      "detail": "This observed producer version is a separate lane and does not inherit the unversioned generation-1 exact classification.",
+      "evidence": ["https://github.com/openai/codex/blob/60c722e07514d46d980034319dfcbfe4e74e659f/codex-rs/protocol/src/protocol.rs#L2452-L2518"]
+    },
+    {
+      "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {"kind": "versions", "versions": ["0.202.0"], "ranges": [], "source_commits": ["60c722e07514d46d980034319dfcbfe4e74e659f"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "writer_version_unproven",
+      "detail": "This observed producer version is a separate lane and does not inherit the unversioned generation-1 exact classification.",
+      "evidence": ["https://github.com/openai/codex/blob/60c722e07514d46d980034319dfcbfe4e74e659f/codex-rs/protocol/src/protocol.rs#L2452-L2518"]
+    },
+    {
+      "provider_id": "codex", "route": "native_import", "source_format": "codex_history_jsonl", "source_schema": "unversioned-prompt-history",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "route_mismatch",
+      "detail": "The legacy prompt-history route is not the session transcript route carrying mcp_tool_call_end terminal evidence; migration never infers attribution across the two routes.",
+      "evidence": ["https://github.com/openai/codex"]
+    },
+    {
+      "provider_id": "pi", "route": "native_import", "source_format": "pi_session_jsonl", "source_schema": "pi-session-v1-v3",
+      "producer_bound": {"kind": "versions", "versions": ["0.83.0"], "ranges": [], "source_commits": ["845d6ff1f6643aba440341cce877ce1c43ebbc39"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_server_field",
+      "detail": "The durable generic tool call/result carries name and ID but no MCP protocol or server field.",
+      "evidence": ["https://github.com/earendil-works/pi/releases/tag/v0.83.0"]
+    },
+    {
+      "provider_id": "claude_code", "route": "native_import", "source_format": "claude_projects_jsonl_tree", "source_schema": "claude-nativepath-jsonl-v6",
+      "producer_bound": {"kind": "versions", "versions": ["2.1.220"], "ranges": [], "source_commits": ["7ef6eec9d9ba84ea6f233f26c45f1df5c5991843"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "Runtime identity is exact, but the imported transcript persists a non-injective model-facing composite rather than separate raw server and tool fields.",
+      "evidence": ["https://github.com/anthropics/claude-code/releases/tag/v2.1.220"]
+    },
+    {
+      "provider_id": "open_code", "route": "native_import", "source_format": "opencode_sqlite", "source_schema": "opencode-tool-part-sqlite-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "1.2.0", "maximum": "1.18.11"}], "source_commits": ["012c2f57f976489d88bd4598a056b4bdcdd428ee"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The durable ToolPart name joins sanitized server and tool components and is not injective.",
+      "evidence": ["https://github.com/anomalyco/opencode/commit/012c2f57f976489d88bd4598a056b4bdcdd428ee"]
+    },
+    {
+      "provider_id": "kilo", "route": "native_import", "source_format": "kilo_sqlite", "source_schema": "opencode-tool-part-sqlite-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "7.0.26", "maximum": "7.4.18"}], "source_commits": ["f00da9a75b012e712c94ac115b068e35dede1683"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The OpenCode-family durable ToolPart retains a lossy composite; dual-write storage does not restore the original pair.",
+      "evidence": ["https://github.com/Kilo-Org/kilocode/commit/f00da9a75b012e712c94ac115b068e35dede1683"]
+    },
+    {
+      "provider_id": "mimocode", "route": "native_import", "source_format": "mimocode_sqlite", "source_schema": "opencode-tool-part-sqlite-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "0.1.1", "maximum": "0.1.9"}], "source_commits": ["c045a9891069000b112079bb10bdc8828d75eb6e"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The OpenCode-family durable ToolPart persists a non-injective sanitized composite and can record pre-dispatch terminal policy states.",
+      "evidence": ["https://github.com/XiaomiMiMo/MiMo-Code/commit/c045a9891069000b112079bb10bdc8828d75eb6e"]
+    },
+    {
+      "provider_id": "kiro_cli", "route": "native_import", "source_format": "kiro_cli_sqlite", "source_schema": "kiro-legacy-conversations-sqlite-v1",
+      "producer_bound": {"kind": "versions", "versions": ["2.10.0"], "ranges": [], "source_commits": ["9930f7030a1e09db227228a65b6d082a68ecd2ef"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "exact_pair_transient_or_config",
+      "detail": "The registry map knows the exact pair, but serialization retains only generic ID/name data and omits the registry map.",
+      "evidence": ["https://github.com/aws/amazon-q-developer-cli/tree/9930f7030a1e09db227228a65b6d082a68ecd2ef"]
+    },
+    {
+      "provider_id": "crush", "route": "native_import", "source_format": "crush_sqlite", "source_schema": "crush-project-sqlite-v0",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "0.13.0", "maximum": "0.88.0"}], "source_commits": ["9179c6129317c887a1779dbbf4d342de0f22e124"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "All audited releases persist a non-injective mcp_<server>_<tool> name; call/result IDs are not a uniqueness constraint.",
+      "evidence": ["https://github.com/charmbracelet/crush/commit/9179c6129317c887a1779dbbf4d342de0f22e124"]
+    },
+    {
+      "provider_id": "goose", "route": "native_import", "source_format": "goose_sessions_sqlite", "source_schema": "goose-session-schema-15",
+      "producer_bound": {"kind": "versions", "versions": ["1.45.0"], "ranges": [], "source_commits": ["2db0e31fe77c7f626293f44a19d9f6c18db36ac5"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "exact_pair_transient_or_config",
+      "detail": "Runtime registry ownership is exact, but persisted _meta is provider-overridable and cannot serve as authoritative raw server evidence; older rows also lack it.",
+      "evidence": ["https://github.com/aaif-goose/goose/commit/2db0e31fe77c7f626293f44a19d9f6c18db36ac5"]
+    },
+    {
+      "provider_id": "lingma", "route": "native_import", "source_format": "lingma_sqlite", "source_schema": "lingma-chat-record-v1",
+      "producer_bound": {"kind": "versions", "versions": ["2.6.3"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "route_mismatch",
+      "detail": "The imported chat_record route has no native call/result records; the richer chat_message table is a different route and still flattens identity.",
+      "evidence": ["https://www.alibabacloud.com/help/en/lingma/qoder-cn/user-guide/guide-for-using-mcp"]
+    },
+    {
+      "provider_id": "qoder", "route": "native_import", "source_format": "qoder_transcript_jsonl_tree", "source_schema": "unversioned-transcript-jsonl",
+      "producer_bound": {"kind": "versions", "versions": ["0.1.18", "1.0.1", "1.1.13"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "Current and legacy artifacts persist a lossy sanitized composite; the unversioned layouts cannot gate unknown generations.",
+      "evidence": ["https://registry.npmjs.org/@qoder-ai/qodercli/-/qodercli-1.1.13.tgz"]
+    },
+    {
+      "provider_id": "warp", "route": "native_import", "source_format": "warp_sqlite", "source_schema": "warp-agent-task-protobuf-v1",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "exact",
+      "detail": "Qualified grouped MCP protobuf records retain the configured server UUID, advertised tool name, stable tool_call_id, and uniquely linked success, error, or cancellation terminal.",
+      "evidence": ["https://github.com/warpdotdev/warp/tree/a93a68cff0d551fa7e4fb506852705c8a93f2c5b", "https://github.com/warpdotdev/warp-proto-apis/tree/b0886a9523e2e05d102f61bd0a212dc15ade4835"]
+    },
+    {
+      "provider_id": "codebuddy", "route": "native_import", "source_format": "codebuddy_history_json", "source_schema": "ide-structured-message-v1",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "writer_version_unproven",
+      "detail": "No versioned first-party durable writer proves raw MCP identity or a call/result key in the admitted IDE history records.",
+      "evidence": ["https://www.codebuddy.ai/docs/"]
+    },
+    {
+      "provider_id": "trae", "route": "native_import", "source_format": "trae_state_vscdb", "source_schema": "trae-itemtable-state-v1",
+      "producer_bound": {"kind": "versions", "versions": ["2.3.61406"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "route_mismatch",
+      "detail": "The admitted state.vscdb ItemTable values are not the current native agent database and do not preserve authoritative MCP terminal evidence.",
+      "evidence": ["https://lf-cdn.trae.ai/obj/trae-ai-us/pkg/app/releases/stable/2.3.61406/linux/Trae-linux-x64.deb"]
+    },
+    {
+      "provider_id": "openclaw", "route": "native_import", "source_format": "openclaw_session_jsonl_tree", "source_schema": "openclaw-legacy-jsonl-v2",
+      "producer_bound": {"kind": "source_commits", "commits": ["554a6f3bbf6d8173efc2f1c92e30139f88dc26d6"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "route_mismatch",
+      "detail": "Legacy JSONL has stable result linkage but only a lossy generated name; exact current MCP metadata belongs to the newer SQLite route, which this tuple does not import.",
+      "evidence": ["https://github.com/openclaw/openclaw/tree/554a6f3bbf6d8173efc2f1c92e30139f88dc26d6"]
+    },
+    {
+      "provider_id": "hermes", "route": "native_import", "source_format": "hermes_state_sqlite", "source_schema": "hermes-state-db-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "2026.3.12", "maximum": "2026.8.3"}], "source_commits": ["a991dfc25daf68994c21d6adcdfbafb1b3dc23cf"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "Both historical single-underscore and current double-underscore durable names are non-injective composites even though call IDs survive.",
+      "evidence": ["https://github.com/NousResearch/hermes-agent/tree/a991dfc25daf68994c21d6adcdfbafb1b3dc23cf"]
+    },
+    {
+      "provider_id": "nanoclaw", "route": "native_import", "source_format": "nanoclaw_project", "source_schema": "nanoclaw-compound-project-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "2.0.54", "maximum": "2.1.54"}], "source_commits": ["86017fffd09377467d9d8633ed27111ea1b1760a"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_unique_terminal_link",
+      "detail": "Ambient active/last MCP fields are not attached to a tool_use ID, and the imported project stores provide no durable per-call exact pair plus terminal join.",
+      "evidence": ["https://github.com/nanocoai/nanoclaw/tree/86017fffd09377467d9d8633ed27111ea1b1760a"]
+    },
+    {
+      "provider_id": "astrbot", "route": "native_import", "source_format": "astrbot_data_v4_sqlite", "source_schema": "astrbot-data-v4-logical-v0",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "4.0.0", "maximum": "4.27.1"}], "source_commits": ["573367b7f36662f9948ba4e39ca2758bf7f5a424"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_server_field",
+      "detail": "V4 persistence drops server identity and MCP isError and also permits ambiguous call IDs without a call-local cancellation terminal.",
+      "evidence": ["https://github.com/AstrBotDevs/AstrBot/tree/573367b7f36662f9948ba4e39ca2758bf7f5a424"]
+    },
+    {
+      "provider_id": "shelley", "route": "native_import", "source_format": "shelley_sqlite", "source_schema": "shelley-exact-cwd-sqlite-v1",
+      "producer_bound": {"kind": "versions", "versions": ["0.913.914464056"], "ranges": [], "source_commits": ["32682e1aa1a0257bf05d1ae293724cb3c5cc1278"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_server_field",
+      "detail": "The audited producer history has no MCP implementation or durable server field; generic IDs are not unique execution evidence.",
+      "evidence": ["https://github.com/boldsoftware/shelley/tree/32682e1aa1a0257bf05d1ae293724cb3c5cc1278"]
+    },
+    {
+      "provider_id": "continue", "route": "native_import", "source_format": "continue_cli_sessions_json", "source_schema": "continue-nativepath-document-v0",
+      "producer_bound": {"kind": "source_commits", "commits": ["5522c6f44ca0ac3528b37244818fbfa39b5af470"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "Exact MCP URI and original function name exist in memory, but CLI persistence stores only a normalized synthetic function name with call status/output.",
+      "evidence": ["https://github.com/continuedev/continue/tree/5522c6f44ca0ac3528b37244818fbfa39b5af470"]
+    },
+    {
+      "provider_id": "openhands", "route": "native_import", "source_format": "openhands_file_events", "source_schema": "openhands-v1-conversation-tree-v1",
+      "producer_bound": {"kind": "versions", "versions": ["0.50.0", "1.39.1"], "ranges": [], "source_commits": ["2ead80595c2eac36baecfbb60ca790012c7aca2f", "bf57d16f3dde05b0b03fa0af3f7e0ae924043b80"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "route_mismatch",
+      "detail": "The imported v1_conversations writer and producer version are unproven; the richer current SDK route is different and still loses server identity when flattened.",
+      "evidence": ["https://github.com/OpenHands/OpenHands/tree/2ead80595c2eac36baecfbb60ca790012c7aca2f", "https://github.com/OpenHands/software-agent-sdk/tree/bf57d16f3dde05b0b03fa0af3f7e0ae924043b80"]
+    },
+    {
+      "provider_id": "antigravity_cli", "route": "native_import", "source_format": "antigravity_cli_transcript_jsonl_tree", "source_schema": "antigravity-direct-native-jsonl-v1",
+      "producer_bound": {"kind": "versions", "versions": ["1.1.10"], "ranges": [], "source_commits": ["bfab12dac5bd090015a89cf82e65093d13b567d9"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "writer_version_unproven",
+      "detail": "The runtime has an exact internal tuple, but survival in the unversioned transcript is unproven and observed call/result association is type-only FIFO rather than a durable unique key.",
+      "evidence": ["https://github.com/Google-Antigravity/antigravity-cli/tree/bfab12dac5bd090015a89cf82e65093d13b567d9"]
+    },
+    {
+      "provider_id": "gemini_cli", "route": "native_import", "source_format": "gemini_cli_chat_recording_jsonl", "source_schema": "gemini-chat-recording-jsonl-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "0.39.0", "maximum": "0.53.1"}], "source_commits": ["19a68016bdc9cd4177a155846dd51f282c3c1c59"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "Exact runtime fields are dropped and the recording retains a lossy or truncated model-facing name.",
+      "evidence": ["https://github.com/google-gemini/gemini-cli/commit/19a68016bdc9cd4177a155846dd51f282c3c1c59"]
+    },
+    {
+      "provider_id": "tabnine", "route": "native_import", "source_format": "tabnine_cli_chat_recording_jsonl", "source_schema": "unversioned-chat-recording-jsonl",
+      "producer_bound": {"kind": "versions", "versions": ["0.29.3"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The runtime pair is exact, but durable history stores only a lossy model/display name; duplicate IDs do not establish a safe fallback.",
+      "evidence": ["https://console.tabnine.com/update/cli/0.29.3/tabnine.tar"]
+    },
+    {
+      "provider_id": "cursor", "route": "native_import", "source_format": "cursor_agent_transcript_jsonl_tree", "source_schema": "unversioned-agent-transcript",
+      "producer_bound": {"kind": "versions", "versions": ["2026.07.23-e383d2b"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_unique_terminal_link",
+      "detail": "The current imported transcript strips call IDs, results, and server identity; older observed rows are also ungated and lack a durable exact server link.",
+      "evidence": ["https://downloads.cursor.com/lab/2026.07.23-e383d2b/linux/x64/agent-cli-package.tar.gz"]
+    },
+    {
+      "provider_id": "windsurf", "route": "native_import", "source_format": "windsurf_cascade_hook_transcript_jsonl_tree", "source_schema": "windsurf-direct-native-jsonl-v1",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "route_mismatch",
+      "detail": "Separate MCP fields exist on pre/post hook input, but the imported transcript hook is a different route and its execution_id identifies a turn rather than one call.",
+      "evidence": ["https://docs.devin.ai/desktop/cascade/hooks#post_cascade_response_with_transcript"]
+    },
+    {
+      "provider_id": "zed", "route": "native_import", "source_format": "zed_threads_sqlite", "source_schema": "zed-dbthread-json-0.3.0",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "1.11.0", "maximum": "1.15.0"}], "source_commits": ["4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The zstd-compressed DbThread JSON stores a sanitized model-facing name without a separate server field; linkage is only conditionally unique.",
+      "evidence": ["https://github.com/zed-industries/zed/commit/4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1"]
+    },
+    {
+      "provider_id": "copilot_cli", "route": "native_import", "source_format": "copilot_cli_session_events_jsonl", "source_schema": "copilot-cli-direct-native-jsonl-v1",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "exact",
+      "detail": "tool.execution_start carries mcpServerName, mcpToolName, and toolCallId; the uniquely linked completion carries the same ID and canonical success or error terminal.",
+      "evidence": ["https://github.com/github/copilot-cli/blob/2392889bf7d2d3f3f9a7ad354c6017a21e4f9928/changelog.md"]
+    },
+    {
+      "provider_id": "factory_ai_droid", "route": "native_import", "source_format": "factory_ai_droid_sessions_jsonl", "source_schema": "factory-droid-direct-native-jsonl-v1",
+      "producer_bound": {"kind": "versions", "versions": ["0.6.0", "0.186.0"], "ranges": [], "source_commits": ["655254a50ddb48bbb2c6e0ff1704b659e62b9616"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The SDK runtime has separate identity, but the version-2 session persists a lossy composite even though logical call IDs survive.",
+      "evidence": ["https://github.com/Factory-AI/droid-sdk-typescript/blob/655254a50ddb48bbb2c6e0ff1704b659e62b9616/src/protocol/messages.ts"]
+    },
+    {
+      "provider_id": "qwen_code", "route": "native_import", "source_format": "qwen_code_chat_jsonl_tree", "source_schema": "qwen-chat-recording-jsonl-v1",
+      "producer_bound": {"kind": "versions", "versions": ["0.21.4"], "ranges": [], "source_commits": ["f670c3d112f1adb46482047eb4bf7107ee1e1c2a"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The durable terminal is strongly linked but stores only a non-injective provider alias instead of the raw server/tool pair.",
+      "evidence": ["https://github.com/QwenLM/qwen-code/blob/f670c3d112f1adb46482047eb4bf7107ee1e1c2a/packages/core/src/services/chatRecordingService.ts"]
+    },
+    {
+      "provider_id": "kimi_code_cli", "route": "native_import", "source_format": "kimi_code_cli_wire_jsonl_tree", "source_schema": "compound-wire-tree-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "0.23.0", "maximum": "0.31.1"}], "source_commits": ["6b56c11697771fe596099b38bafae539820309a4"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "exact_pair_transient_or_config",
+      "detail": "The exact pair appears in discovery state, while call/result journal records retain a lossy qualified name and no durable link back to that discovery entry.",
+      "evidence": ["https://github.com/MoonshotAI/kimi-code/tree/6b56c11697771fe596099b38bafae539820309a4"]
+    },
+    {
+      "provider_id": "auggie", "route": "native_import", "source_format": "auggie_session_json", "source_schema": "unversioned-session-json",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "0.32.0", "maximum": "0.34.0"}], "source_commits": ["3cf88f8e19d168a88c4e780551f681556dd4cbd6"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "Exact identity exists at runtime, but session persistence keeps a sanitized or truncated name and interruption does not guarantee a universal result link.",
+      "evidence": ["https://github.com/augmentcode/auggie/tree/3cf88f8e19d168a88c4e780551f681556dd4cbd6"]
+    },
+    {
+      "provider_id": "junie", "route": "native_import", "source_format": "junie_session_events_jsonl_tree", "source_schema": "unversioned-session-events-jsonl",
+      "producer_bound": {"kind": "versions", "versions": ["2548.5"], "ranges": [], "source_commits": ["aa4c8ea93743759d202734db6bc13ca9428d1ddf"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "Separate runtime fields collapse into non-injective action and durable slash-joined names; execution state does not make either encoding reversible.",
+      "evidence": ["https://github.com/JetBrains/junie/releases/tag/2548.5"]
+    },
+    {
+      "provider_id": "firebender", "route": "native_import", "source_format": "firebender_chat_history_sqlite", "source_schema": "unversioned-chat-history-sqlite",
+      "producer_bound": {"kind": "versions", "versions": ["1.0.10", "1.0.12"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The durable mcp_<server>_<tool> name is non-injective and the ID relationship is not enforced as a unique terminal join.",
+      "evidence": ["https://plugins.jetbrains.com/files/25224/1109733/Firebender-1.0.12.zip"]
+    },
+    {
+      "provider_id": "forgecode", "route": "native_import", "source_format": "forgecode_sqlite", "source_schema": "forgecode-conversation-sqlite-v1",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "2.12.2", "maximum": "2.13.21"}], "source_commits": ["9b60797ef67cc88d7acc2593775e165ffcf2b8f7"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The durable mcp_<server>_tool_<tool> name is sanitized and non-injective; call_id is optional and not a uniqueness constraint.",
+      "evidence": ["https://github.com/tailcallhq/forgecode/commit/9b60797ef67cc88d7acc2593775e165ffcf2b8f7"]
+    },
+    {
+      "provider_id": "deepagents", "route": "native_import", "source_format": "deepagents_sessions_sqlite", "source_schema": "deepagents-sqlite-write-messages-v0",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The local checkpoint retains call linkage and an MCP wire name shaped as mcp__server__tool, but not a separate authoritative server field; ctx does not split the composite or join it with configuration.",
+      "evidence": ["https://github.com/langchain-ai/deepagents/blob/f4cc5160c75eb44e8ddee8b049048690ea0f8616/libs/code/deepagents_code/hooks/tools.py#L80-L145"]
+    },
+    {
+      "provider_id": "deepagents", "route": "hosted_trace", "source_format": "langsmith_trace", "source_schema": "hosted-trace-v1",
+      "producer_bound": {"kind": "hosted_boundary", "unknown_generations": "excluded"},
+      "status": "excluded", "reason": "outside_local_only_boundary",
+      "detail": "Hosted traces are remote observability data and are outside ctx's local-only history contract; this does not change general support for local Deep Agents SQLite history.",
+      "evidence": ["https://docs.langchain.com/langsmith/observability-quickstart"]
+    },
+    {
+      "provider_id": "mistral_vibe", "route": "native_import", "source_format": "mistral_vibe_session_jsonl_tree", "source_schema": "meta-json-messages-jsonl-v1",
+      "producer_bound": {"kind": "versions", "versions": ["2.23.3"], "ranges": [], "source_commits": ["68ff32e6a92e80a874c8153312f0aa8ae4955477"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The durable result stores the advertised tool and transport URL or command, while the server alias is embedded only in a combined function name; recovering it would require prohibited suffix splitting.",
+      "evidence": ["https://github.com/mistralai/mistral-vibe/tree/68ff32e6a92e80a874c8153312f0aa8ae4955477"]
+    },
+    {
+      "provider_id": "mux", "route": "native_import", "source_format": "mux_session_jsonl_tree", "source_schema": "mux-session-tree-source-backed-v2",
+      "producer_bound": {"kind": "versions", "versions": [], "ranges": [{"minimum": "0.15.0", "maximum": "0.28.1"}], "source_commits": ["63d3acbbd1d3c8d2f22ccec542a8479bc1c9e567"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The durable dynamic-tool toolName is normalized and truncated, so exact server and advertised tool cannot be reconstructed.",
+      "evidence": ["https://github.com/coder/mux/tree/63d3acbbd1d3c8d2f22ccec542a8479bc1c9e567"]
+    },
+    {
+      "provider_id": "rovodev", "route": "native_import", "source_format": "rovodev_session_json_tree", "source_schema": "rovodev-session-json-tree-v1",
+      "producer_bound": {"kind": "versions", "versions": ["202606.25.1", "202607.21.1"], "ranges": [], "source_commits": [], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "lossy_composite",
+      "detail": "The session excludes mcp_servers and retains a lossy wrapper/backend alias; the unversioned file cannot inherit claims beyond the observed artifacts.",
+      "evidence": ["https://acli.atlassian.com/plugins/rovodev/linux/amd64/202607.21.1/rovodev.zip"]
+    },
+    {
+      "provider_id": "cline", "route": "native_import", "source_format": "cline_task_directory_json", "source_schema": "unversioned-cline-message-array",
+      "producer_bound": {"kind": "source_commits", "commits": ["864419d8b0c2467ec37ccb8837ddd08f96ea31f9"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_unique_terminal_link",
+      "detail": "The durable request has the pair, but start and response rows are unkeyed; associating them by lifecycle order is prohibited.",
+      "evidence": ["https://github.com/cline/cline/tree/864419d8b0c2467ec37ccb8837ddd08f96ea31f9"]
+    },
+    {
+      "provider_id": "roo_code", "route": "native_import", "source_format": "roo_task_directory_json", "source_schema": "unversioned-roo-message-array",
+      "producer_bound": {"kind": "source_commits", "commits": ["b867ec9145750d0ae1ff7f02d35406e9bf2a0b16"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_unique_terminal_link",
+      "detail": "The exact request pair is durable, but execution ID is webview-only and response grouping is order-based; the durable no-response text is also ambiguous.",
+      "evidence": ["https://github.com/RooCodeInc/Roo-Code/tree/b867ec9145750d0ae1ff7f02d35406e9bf2a0b16"]
+    }
+  ],
+  "exact_checks": [
+    {
+      "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "implementation_source": "crates/ctx-history-capture/src/provider/codex/nativepath/source_backed.rs",
+      "parser_revision": "codex-nativepath-core-record-v13",
+      "suite_id": "ctx-history-capture::test:codex_direct_result",
+      "conformance_suite": "codex_direct_result",
+      "tests": [
+        {"id": "exact_error_attribution_and_ambiguous_pair_abstention_survive_publication", "source": "crates/ctx-history-capture/tests/codex_direct_result.rs"},
+        {"id": "invalid_attribution_preserves_terminal_content_and_all_stable_identities", "source": "crates/ctx-history-capture/tests/codex_direct_result.rs"},
+        {"id": "appended_duplicate_terminal_retracts_prior_attribution_and_preserves_ids", "source": "crates/ctx-history-capture/tests/codex_direct_result.rs"}
+      ]
+    },
+    {
+      "provider_id": "warp", "route": "native_import", "source_format": "warp_sqlite", "source_schema": "warp-agent-task-protobuf-v1",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "implementation_source": "crates/ctx-history-capture/src/provider/providers/warp/source_backed.rs",
+      "parser_revision": "warp-source-backed-logical-v4",
+      "suite_id": "ctx-history-capture::native_unit",
+      "conformance_suite": "mcp_attribution_provider_units",
+      "tests": [
+        {"id": "provider::providers::warp::nativepath::decode::tests::qualified_mcp_success_error_cancellation_and_nontext_results_link_exactly", "source": "crates/ctx-history-capture/src/provider/providers/warp/nativepath/decode/tests.rs"},
+        {"id": "provider::providers::warp::nativepath::decode::tests::invalid_duplicate_orphan_and_ambiguous_mcp_relations_abstain", "source": "crates/ctx-history-capture/src/provider/providers/warp/nativepath/decode/tests.rs"},
+        {"id": "provider::providers::warp::source_backed::result_tests::sanitized_mcp_fixture_projects_only_unique_qualified_terminal_pairs", "source": "crates/ctx-history-capture/src/provider/providers/warp/source_backed/result_tests.rs"}
+      ]
+    },
+    {
+      "provider_id": "copilot_cli", "route": "native_import", "source_format": "copilot_cli_session_events_jsonl", "source_schema": "copilot-cli-direct-native-jsonl-v1",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "implementation_source": "crates/ctx-history-capture/src/provider/providers/native_jsonl/native_path/copilot.rs",
+      "parser_revision": "copilot-cli-direct-native-jsonl-v4-bound-mcp-tool-call-attribution",
+      "suite_id": "ctx-history-capture::native_unit",
+      "conformance_suite": "mcp_attribution_provider_units",
+      "tests": [
+        {"id": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_attributes_only_unique_exact_terminal_completions", "source": "crates/ctx-history-capture/src/provider/providers/native_jsonl/native_path/source_backed_copilot_tests.rs"},
+        {"id": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_malformed_ambiguous_or_orphan_linkage_abstains", "source": "crates/ctx-history-capture/src/provider/providers/native_jsonl/native_path/source_backed_copilot_tests.rs"},
+        {"id": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_attribution_does_not_change_stable_event_ids", "source": "crates/ctx-history-capture/src/provider/providers/native_jsonl/native_path/source_backed_copilot_tests.rs"}
+      ]
+    }
+  ]
+}

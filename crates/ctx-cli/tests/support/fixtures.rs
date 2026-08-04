@@ -79,6 +79,8 @@ pub(crate) fn initialize_generation_only_core(data_root: &Path) -> String {
             memory_bytes: 32 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let core_receipt = writer.commit(|_| true).unwrap();
     let verified = VerifiedIndex::open(index_root).unwrap();

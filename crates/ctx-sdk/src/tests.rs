@@ -38,6 +38,19 @@ fn make_test_executable(path: &Path) {
     thread::sleep(Duration::from_millis(25));
 }
 
+#[cfg(unix)]
+fn run_json_shell(body: &str, timeout: Duration) -> Result<Value, AgentHistoryError> {
+    run_ctx_json(
+        &LocalBackendConfig {
+            ctx_binary: PathBuf::from("/bin/sh"),
+            data_root: None,
+            env: BTreeMap::new(),
+            timeout,
+        },
+        &["-c".to_owned(), body.to_owned()],
+    )
+}
+
 #[test]
 fn reads_shared_search_fixture() {
     let value: AgentHistoryEnvelope = serde_json::from_str(include_str!(
@@ -128,6 +141,247 @@ fn show_normalization_exposes_core_identity_and_content() {
     assert_eq!(
         summary.source_format.as_deref(),
         Some("codex_session_jsonl")
+    );
+}
+
+#[test]
+fn show_normalization_exposes_typed_mcp_tool_call_metadata() {
+    let canonical: AgentHistoryEnvelope = serde_json::from_str(include_str!(
+        "../../../contracts/agent-history-v1/fixtures/show-event.mcp-tool-call.json"
+    ))
+    .unwrap();
+    let canonical_result = canonical.event.unwrap();
+    let canonical_selected = canonical_result.event.unwrap();
+    let canonical_call = canonical_selected.mcp_tool_call.unwrap();
+    assert_eq!(canonical_call.server, "mcp-サーバー-🦀");
+    assert_eq!(canonical_call.tool, "検索/工具/🛠️");
+    assert_eq!(
+        canonical_selected.extra["futureEventField"]["preserved"],
+        true
+    );
+    assert!(canonical_result.events[0].mcp_tool_call.is_none());
+
+    let normalized = normalize_event(&json!({
+        "event": {
+            "ctx_event_id": "event-1",
+            "mcp_tool_call": {
+                "server": "mcp-サーバー-🦀",
+                "tool": "検索/工具/🛠️"
+            },
+            "future_event_field": {"preserved": true}
+        },
+        "events": [{"ctx_event_id": "event-2"}]
+    }))
+    .unwrap();
+    let selected = normalized.event.unwrap();
+    let call = selected.mcp_tool_call.unwrap();
+    assert_eq!(call.server, "mcp-サーバー-🦀");
+    assert_eq!(call.tool, "検索/工具/🛠️");
+    assert_eq!(selected.extra["futureEventField"]["preserved"], true);
+    assert!(normalized.events[0].mcp_tool_call.is_none());
+
+    for invalid in [
+        json!({"server": "server", "tool": "tool", "future_label": true}),
+        json!({"server": "", "tool": "tool"}),
+        json!({"server": "server", "tool": "a".repeat(MAX_MCP_TOOL_CALL_COMPONENT_BYTES + 1)}),
+    ] {
+        assert!(
+            normalize_event(&json!({"event": {"mcp_tool_call": invalid}, "events": []})).is_err()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn show_event_local_cli_drains_max_valid_mcp_attribution() {
+    assert_eq!(MAX_MCP_TOOL_CALL_COMPONENT_BYTES, 65_536);
+
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("ctx-fake");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+emit_component() {
+  awk -v byte="$1" 'BEGIN { for (i = 0; i < 65536; i++) printf "%s", byte }'
+}
+printf '%s' '{"event":{"ctx_event_id":"event-1","ctx_session_id":"session-1","mcp_tool_call":{"server":"'
+emit_component s
+printf '%s' '","tool":"'
+emit_component t
+printf '%s\n' '"}},"events":[]}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: script,
+        data_root: None,
+        env: BTreeMap::new(),
+        timeout: Duration::from_secs(5),
+    });
+    let selected = client
+        .show_event("event-1", ShowEventOptions::default())
+        .unwrap()
+        .event
+        .unwrap()
+        .event
+        .unwrap();
+    let call = selected.mcp_tool_call.unwrap();
+    assert_eq!(call.server.len(), MAX_MCP_TOOL_CALL_COMPONENT_BYTES);
+    assert_eq!(call.tool.len(), MAX_MCP_TOOL_CALL_COMPONENT_BYTES);
+    assert!(call.server.bytes().all(|byte| byte == b's'));
+    assert!(call.tool.bytes().all(|byte| byte == b't'));
+}
+
+#[cfg(unix)]
+#[test]
+fn local_cli_drains_large_stderr_while_collecting_stdout() {
+    let raw = run_json_shell(
+        r#"awk 'BEGIN { for (i = 0; i < 262144; i++) printf "e" }' >&2
+printf '%s\n' '{"initialized":true,"local_only":true}'"#,
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert_eq!(raw["initialized"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_cli_preserves_exit_utf8_and_exact_decode_errors() {
+    let error = run_json_shell(
+        "printf '%s\\n' 'not found: café 🦀' >&2\nexit 7",
+        Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert_eq!(error.body.code, AgentHistoryErrorCode::NotFound);
+    assert_eq!(error.body.message, "not found: café 🦀");
+    assert!(!error.body.retryable);
+
+    let error = run_json_shell(
+        r#"printf '%s\n' '{"event":{"mcp_tool_call":{"server":"first","server":"second","tool":"one"}},"events":[]}'"#,
+        Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+    assert!(error
+        .body
+        .cause
+        .as_deref()
+        .is_some_and(|cause| cause.contains("duplicate JSON object member")));
+}
+
+#[test]
+fn raw_json_decode_rejects_duplicate_members_without_scanning_string_contents() {
+    assert!(serde_json::from_str::<AgentHistoryEvent>(
+        r#"{"mcpToolCall":{"server":"first","tool":"one"},"mcpToolCall":{"server":"second","tool":"two"}}"#
+    )
+    .is_err());
+    assert!(serde_json::from_str::<AgentHistoryEvent>(
+        r#"{"mcpToolCall":{"server":"first","server":"second","tool":"one"}}"#
+    )
+    .is_err());
+
+    for duplicate in [
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-event-mcp-tool-call-snake.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-event-mcp-tool-call-camel.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-mcp-tool-call-server.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/duplicate-mcp-tool-call-tool.json"
+        )
+        .as_slice(),
+    ] {
+        let error = decode_json_value_exact(duplicate, "failed to decode ctx JSON").unwrap_err();
+        assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+        assert!(error
+            .body
+            .cause
+            .as_deref()
+            .is_some_and(|cause| cause.contains("duplicate JSON object member")));
+    }
+
+    for transformed in [
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-transformed-server.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-transformed-tool.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-transformed-collision.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-alias-collision.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-mixed-case.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-repeated-separator.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-trailing-separator.json"
+        )
+        .as_slice(),
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/invalid-mcp-tool-call-outer-camel-snake.json"
+        )
+        .as_slice(),
+    ] {
+        let raw = decode_json_value_exact(transformed, "failed to decode ctx JSON").unwrap();
+        let error = normalize_event(&raw).unwrap_err();
+        assert_eq!(error.body.code, AgentHistoryErrorCode::DecodeError);
+    }
+
+    let repeated = decode_json_value_exact(
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/valid-repeated-string-contents.json"
+        ),
+        "failed to decode ctx JSON",
+    )
+    .unwrap();
+    let normalized = normalize_event(&repeated).unwrap();
+    let call = normalized.event.unwrap().mcp_tool_call.unwrap();
+    assert_eq!(call.server, "server server");
+    assert_eq!(call.tool, "tool tool");
+
+    let aliases = decode_json_value_exact(
+        include_bytes!(
+            "../../../contracts/agent-history-v1/fixtures/adversarial/valid-mcp-tool-call-outer-aliases.json"
+        ),
+        "failed to decode ctx JSON",
+    )
+    .unwrap();
+    let normalized = normalize_event(&aliases).unwrap();
+    let primary = normalized.event.unwrap();
+    assert_eq!(primary.mcp_tool_call.unwrap().server, "snake-server");
+    assert_eq!(
+        primary.extra.get("futureEventField"),
+        Some(&json!("snake-extra"))
+    );
+    assert_eq!(
+        normalized.events[0].mcp_tool_call.as_ref().unwrap().server,
+        "camel-server"
+    );
+    assert_eq!(
+        normalized.events[0].extra.get("futureEventField"),
+        Some(&json!("camel-extra"))
     );
 }
 
@@ -367,6 +621,98 @@ fn local_json_timeout_kills_and_reaps_the_child() {
         !Path::new("/proc").join(&pid).exists(),
         "timed-out ctx child {pid} was not reaped"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn local_json_ordinary_completion_reaps_descendants_on_success_and_failure() {
+    let cases = [
+        (
+            "success",
+            "printf '%s\\n' '{\"initialized\":true,\"local_only\":true}'",
+            true,
+        ),
+        (
+            "nonzero",
+            "printf '%s\\n' 'not found: fixture session' >&2\nexit 7",
+            false,
+        ),
+    ];
+
+    for (case, completion, succeeds) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let body = format!(
+            r#"set -eu
+sleep 30 </dev/null >/dev/null 2>&1 &
+printf '%s\n' "$!" > "$CTX_DATA_ROOT/descendant.pid"
+{completion}"#
+        );
+        let child = spawn_tree_shell(&body, temp.path(), false);
+        let wrapper_pid = child.id();
+        let mut cleanup = ProcessGroupCleanup(Some(wrapper_pid));
+
+        let result = collect_ctx_json(child, Duration::from_secs(5));
+        assert_eq!(result.is_ok(), succeeds, "{case}: {result:?}");
+        assert_ordinary_process_tree_reaped(temp.path(), wrapper_pid);
+        cleanup.0 = None;
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mcp_ordinary_completion_reaps_descendants_on_success_and_failure() {
+    let cases = [
+        (
+            "success",
+            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}'",
+            true,
+        ),
+        (
+            "nonzero",
+            "printf '%s\\n' 'not found: fixture session' >&2\nexit 7",
+            false,
+        ),
+    ];
+
+    for (case, completion, succeeds) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let body = format!(
+            r#"set -eu
+sleep 30 </dev/null >/dev/null 2>&1 &
+printf '%s\n' "$!" > "$CTX_DATA_ROOT/descendant.pid"
+cat >/dev/null
+{completion}"#
+        );
+        let child = spawn_tree_shell(&body, temp.path(), true);
+        let wrapper_pid = child.id();
+        let mut cleanup = ProcessGroupCleanup(Some(wrapper_pid));
+
+        let output =
+            collect_ctx_mcp_output(child, b"fixture request\n".to_vec(), Duration::from_secs(5))
+                .unwrap();
+        assert_eq!(output.status.success(), succeeds, "{case}");
+        assert_ordinary_process_tree_reaped(temp.path(), wrapper_pid);
+        cleanup.0 = None;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_tree_shell(body: &str, data_root: &Path, mcp: bool) -> Child {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", body])
+        .env("CTX_DATA_ROOT", data_root)
+        .stdin(if mcp { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_configured(&mut command).unwrap()
+}
+
+#[cfg(target_os = "linux")]
+fn assert_ordinary_process_tree_reaped(data_root: &Path, wrapper_pid: u32) {
+    let descendant_pid = wait_for_test_pid(&data_root.join("descendant.pid"));
+    wait_for_process_termination(wrapper_pid);
+    wait_for_process_termination(descendant_pid);
 }
 
 #[cfg(target_os = "linux")]

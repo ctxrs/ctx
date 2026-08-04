@@ -1,0 +1,1 @@
+{"event":{"text":"exact outer aliases must not compete for attribution","mcp_tool_call":{"server":"snake-server","tool":"snake-tool"},"mcpToolCall":{"server":"camel-server","tool":"camel-tool"},"future_event_field":"unrelated-extension"},"events":[]}

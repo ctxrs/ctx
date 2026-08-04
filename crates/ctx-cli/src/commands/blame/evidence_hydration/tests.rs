@@ -217,6 +217,8 @@ fn publish(index_root: &std::path::Path, record: &CoreRecord, revision: u8) -> S
             memory_bytes: 32 * 1_024 * 1_024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(record.source.clone()).unwrap();
     writer.add_core_record(record.clone()).unwrap();

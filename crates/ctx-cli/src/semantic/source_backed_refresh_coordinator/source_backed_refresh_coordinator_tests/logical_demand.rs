@@ -36,6 +36,8 @@ fn verified_publication_for_observations(
     let covered_publication = execution.covered_publication.clone();
     let published =
         ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit_with_publication_metadata(
                 |_| true,
                 move |context| {

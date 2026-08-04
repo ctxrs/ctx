@@ -1,9 +1,15 @@
 package ctxagenthistory
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strconv"
+	"unicode/utf8"
 )
+
+const maxMCPToolCallComponentBytes = 64 * 1024
 
 // Object stores JSON sub-documents whose shape can grow across ctx releases.
 type Object map[string]any
@@ -372,9 +378,163 @@ type Event struct {
 	Role              string               `json:"role,omitempty"`
 	OccurredAt        string               `json:"occurredAt,omitempty"`
 	Text              string               `json:"text,omitempty"`
+	MCPToolCall       *MCPToolCall         `json:"mcpToolCall,omitempty"`
 	StructuredContent json.RawMessage      `json:"structuredContent,omitempty"`
 	Content           *CoreContentMetadata `json:"content,omitempty"`
 	Citations         []Citation           `json:"citations,omitempty"`
+}
+
+// UnmarshalJSON preserves Event's permissive outer-field policy while requiring
+// a present mcpToolCall value to be the exact nested object rather than null.
+func (value *Event) UnmarshalJSON(data []byte) error {
+	if err := rejectDuplicateJSONMembers(data); err != nil {
+		return err
+	}
+	type eventWire Event
+	var wire eventWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if raw, exists := fields["mcpToolCall"]; exists && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("mcpToolCall must be an object when present")
+	}
+	*value = Event(wire)
+	return nil
+}
+
+// MCPToolCall identifies the MCP server and tool represented by an event.
+type MCPToolCall struct {
+	Server string `json:"server"`
+	Tool   string `json:"tool"`
+}
+
+// UnmarshalJSON enforces the exact closed MCP tool-call pair.
+func (value *MCPToolCall) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return fmt.Errorf("mcpToolCall must be an object")
+	}
+
+	components := make(map[string]string, 2)
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("mcpToolCall member name must be a string")
+		}
+		if key != "server" && key != "tool" {
+			return fmt.Errorf("mcpToolCall contains unknown member %q", key)
+		}
+		if _, duplicate := components[key]; duplicate {
+			return fmt.Errorf("mcpToolCall contains duplicate member %q", key)
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return err
+		}
+		component, err := decodeMCPToolCallComponent(raw, key)
+		if err != nil {
+			return err
+		}
+		components[key] = component
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	if err := ensureJSONEnd(decoder); err != nil {
+		return err
+	}
+
+	server, hasServer := components["server"]
+	if !hasServer {
+		return fmt.Errorf("mcpToolCall.server is required")
+	}
+	tool, hasTool := components["tool"]
+	if !hasTool {
+		return fmt.Errorf("mcpToolCall.tool is required")
+	}
+	value.Server = server
+	value.Tool = tool
+	return nil
+}
+
+func decodeMCPToolCallComponent(raw json.RawMessage, field string) (string, error) {
+	if !utf8.Valid(raw) {
+		return "", fmt.Errorf("mcpToolCall.%s contains invalid UTF-8", field)
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("mcpToolCall.%s must be a string: %w", field, err)
+	}
+	if hasUnpairedJSONSurrogate(raw) {
+		return "", fmt.Errorf("mcpToolCall.%s contains an invalid Unicode surrogate", field)
+	}
+	if value == "" {
+		return "", fmt.Errorf("mcpToolCall.%s must be nonempty", field)
+	}
+	if len(value) > maxMCPToolCallComponentBytes {
+		return "", fmt.Errorf(
+			"mcpToolCall.%s exceeds %d decoded UTF-8 bytes",
+			field,
+			maxMCPToolCallComponentBytes,
+		)
+	}
+	return value, nil
+}
+
+func hasUnpairedJSONSurrogate(raw []byte) bool {
+	for index := 1; index+1 < len(raw); index++ {
+		if raw[index] != '\\' {
+			continue
+		}
+		index++
+		if index >= len(raw)-1 || raw[index] != 'u' {
+			continue
+		}
+		if index+4 >= len(raw) {
+			return true
+		}
+		code, err := strconv.ParseUint(string(raw[index+1:index+5]), 16, 16)
+		if err != nil {
+			return true
+		}
+		index += 4
+		if code >= 0xd800 && code <= 0xdbff {
+			if index+6 >= len(raw) || raw[index+1] != '\\' || raw[index+2] != 'u' {
+				return true
+			}
+			low, err := strconv.ParseUint(string(raw[index+3:index+7]), 16, 16)
+			if err != nil || low < 0xdc00 || low > 0xdfff {
+				return true
+			}
+			index += 6
+		} else if code >= 0xdc00 && code <= 0xdfff {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureJSONEnd(decoder *json.Decoder) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("mcpToolCall has trailing JSON data")
+		}
+		return err
+	}
+	return nil
 }
 
 // CoreContentMetadata describes completeness and Core policy for shown content.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"unicode/utf8"
 )
 
 const analyticsEnabledEnvironment = "CTX_ANALYTICS_ENABLED"
@@ -92,32 +93,8 @@ func (a *LocalCLIAdapter) Do(ctx context.Context, op Operation) ([]byte, error) 
 	if len(stdout) == 0 {
 		return nil, sdkError(ErrorKindDecode, "ctx command returned empty stdout", nil)
 	}
+	if !utf8.Valid(stdout) {
+		return nil, sdkError(ErrorKindDecode, "ctx command returned invalid UTF-8 on stdout", nil)
+	}
 	return stdout, nil
-}
-
-type execCommandRunner struct{}
-
-func (execCommandRunner) Run(ctx context.Context, path string, args []string, env []string) commandResult {
-	cmd := exec.CommandContext(ctx, path, args...)
-	if len(env) > 0 {
-		cmd.Env = append(cmd.Environ(), env...)
-	}
-	stdout, stderr := bytes.Buffer{}, bytes.Buffer{}
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		exitCode = -1
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		}
-	}
-	return commandResult{
-		Stdout:   stdout.Bytes(),
-		Stderr:   stderr.Bytes(),
-		ExitCode: exitCode,
-		Err:      err,
-	}
 }

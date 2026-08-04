@@ -101,7 +101,10 @@ fn fixture_certificate(fixture: &MissingRouteFixture) -> CertifiedSource {
 
 fn establish_fixture_generation(data_root: &Path, fixtures: &[MissingRouteFixture]) {
     let index_root = source_backed_index_root(data_root);
-    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let mut routes = Vec::new();
     for fixture in fixtures {
         fs::create_dir_all(fixture.path.parent().unwrap()).unwrap();
@@ -152,7 +155,9 @@ fn missing_fixture_executor(
             .collect::<BTreeSet<_>>();
         drop(base);
         let carried = base_routes.difference(&selected).cloned().collect();
-        let mut writer = GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+        let mut writer = GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
         writer.set_source_route_plan(selected.clone(), carried)?;
         let mut present = Vec::new();
         let mut removed_source_count = 0_usize;

@@ -1,0 +1,3297 @@
+{
+  "schema_version": 6,
+  "capability": "mcp_tool_call_attribution",
+  "capability_revision": 5,
+  "expected_provider_count": 41,
+  "expected_base_route_count": 43,
+  "expected_schema_generation_count": 42,
+  "expected_capability_lane_count": 46,
+  "expected_status_rows": {
+    "supported": 3,
+    "not_qualified": 42,
+    "excluded": 1
+  },
+  "required_supported_evidence_classes": [
+    "ambiguity_duplicate_linkage",
+    "canonical_terminal_outcomes",
+    "exact_boundary",
+    "exact_positive_pair",
+    "malformed_identity",
+    "max_plus_one",
+    "privacy_sinks",
+    "result_preservation",
+    "search_nonindexing",
+    "stable_ids"
+  ],
+  "base_routes": [
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_session_jsonl_tree"
+    },
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_history_jsonl"
+    },
+    {
+      "provider": "pi",
+      "route": "native_import",
+      "source_format": "pi_session_jsonl"
+    },
+    {
+      "provider": "claude_code",
+      "route": "native_import",
+      "source_format": "claude_projects_jsonl_tree"
+    },
+    {
+      "provider": "open_code",
+      "route": "native_import",
+      "source_format": "opencode_sqlite"
+    },
+    {
+      "provider": "kilo",
+      "route": "native_import",
+      "source_format": "kilo_sqlite"
+    },
+    {
+      "provider": "mimocode",
+      "route": "native_import",
+      "source_format": "mimocode_sqlite"
+    },
+    {
+      "provider": "kiro_cli",
+      "route": "native_import",
+      "source_format": "kiro_cli_sqlite"
+    },
+    {
+      "provider": "crush",
+      "route": "native_import",
+      "source_format": "crush_sqlite"
+    },
+    {
+      "provider": "goose",
+      "route": "native_import",
+      "source_format": "goose_sessions_sqlite"
+    },
+    {
+      "provider": "lingma",
+      "route": "native_import",
+      "source_format": "lingma_sqlite"
+    },
+    {
+      "provider": "qoder",
+      "route": "native_import",
+      "source_format": "qoder_transcript_jsonl_tree"
+    },
+    {
+      "provider": "warp",
+      "route": "native_import",
+      "source_format": "warp_sqlite"
+    },
+    {
+      "provider": "codebuddy",
+      "route": "native_import",
+      "source_format": "codebuddy_history_json"
+    },
+    {
+      "provider": "trae",
+      "route": "native_import",
+      "source_format": "trae_state_vscdb"
+    },
+    {
+      "provider": "openclaw",
+      "route": "native_import",
+      "source_format": "openclaw_session_jsonl_tree"
+    },
+    {
+      "provider": "hermes",
+      "route": "native_import",
+      "source_format": "hermes_state_sqlite"
+    },
+    {
+      "provider": "nanoclaw",
+      "route": "native_import",
+      "source_format": "nanoclaw_project"
+    },
+    {
+      "provider": "astrbot",
+      "route": "native_import",
+      "source_format": "astrbot_data_v4_sqlite"
+    },
+    {
+      "provider": "shelley",
+      "route": "native_import",
+      "source_format": "shelley_sqlite"
+    },
+    {
+      "provider": "continue",
+      "route": "native_import",
+      "source_format": "continue_cli_sessions_json"
+    },
+    {
+      "provider": "openhands",
+      "route": "native_import",
+      "source_format": "openhands_file_events"
+    },
+    {
+      "provider": "antigravity_cli",
+      "route": "native_import",
+      "source_format": "antigravity_cli_transcript_jsonl_tree"
+    },
+    {
+      "provider": "gemini_cli",
+      "route": "native_import",
+      "source_format": "gemini_cli_chat_recording_jsonl"
+    },
+    {
+      "provider": "tabnine",
+      "route": "native_import",
+      "source_format": "tabnine_cli_chat_recording_jsonl"
+    },
+    {
+      "provider": "cursor",
+      "route": "native_import",
+      "source_format": "cursor_agent_transcript_jsonl_tree"
+    },
+    {
+      "provider": "windsurf",
+      "route": "native_import",
+      "source_format": "windsurf_cascade_hook_transcript_jsonl_tree"
+    },
+    {
+      "provider": "zed",
+      "route": "native_import",
+      "source_format": "zed_threads_sqlite"
+    },
+    {
+      "provider": "copilot_cli",
+      "route": "native_import",
+      "source_format": "copilot_cli_session_events_jsonl"
+    },
+    {
+      "provider": "factory_ai_droid",
+      "route": "native_import",
+      "source_format": "factory_ai_droid_sessions_jsonl"
+    },
+    {
+      "provider": "qwen_code",
+      "route": "native_import",
+      "source_format": "qwen_code_chat_jsonl_tree"
+    },
+    {
+      "provider": "kimi_code_cli",
+      "route": "native_import",
+      "source_format": "kimi_code_cli_wire_jsonl_tree"
+    },
+    {
+      "provider": "auggie",
+      "route": "native_import",
+      "source_format": "auggie_session_json"
+    },
+    {
+      "provider": "junie",
+      "route": "native_import",
+      "source_format": "junie_session_events_jsonl_tree"
+    },
+    {
+      "provider": "firebender",
+      "route": "native_import",
+      "source_format": "firebender_chat_history_sqlite"
+    },
+    {
+      "provider": "forgecode",
+      "route": "native_import",
+      "source_format": "forgecode_sqlite"
+    },
+    {
+      "provider": "deepagents",
+      "route": "native_import",
+      "source_format": "deepagents_sessions_sqlite"
+    },
+    {
+      "provider": "mistral_vibe",
+      "route": "native_import",
+      "source_format": "mistral_vibe_session_jsonl_tree"
+    },
+    {
+      "provider": "mux",
+      "route": "native_import",
+      "source_format": "mux_session_jsonl_tree"
+    },
+    {
+      "provider": "rovodev",
+      "route": "native_import",
+      "source_format": "rovodev_session_json_tree"
+    },
+    {
+      "provider": "cline",
+      "route": "native_import",
+      "source_format": "cline_task_directory_json"
+    },
+    {
+      "provider": "roo_code",
+      "route": "native_import",
+      "source_format": "roo_task_directory_json"
+    },
+    {
+      "provider": "deepagents",
+      "route": "hosted_trace",
+      "source_format": "langsmith_trace"
+    }
+  ],
+  "schema_generations": [
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "29a770236fb8476cb870afd74f9ec8a9046c18d34cb6329e3615f0898b129538"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.200.0"
+          },
+          {
+            "kind": "semver",
+            "version": "0.201.0"
+          },
+          {
+            "kind": "semver",
+            "version": "0.202.0"
+          },
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/codex/codex_session_jsonl_tree/shape-contract.json",
+        "sha256": "29a770236fb8476cb870afd74f9ec8a9046c18d34cb6329e3615f0898b129538"
+      }
+    },
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_history_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "26d3031938e30649641397cdd37d4384f3a704e7f042e61c62005af5c02dd683"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/codex/codex_history_jsonl/shape-contract.json",
+        "sha256": "26d3031938e30649641397cdd37d4384f3a704e7f042e61c62005af5c02dd683"
+      }
+    },
+    {
+      "provider": "pi",
+      "route": "native_import",
+      "source_format": "pi_session_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "312ae120e3bfa7f48dee1fff8900f72f080754ef70c4b6a4c94bf66dc6671e93"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/pi/pi_session_jsonl/shape-contract.json",
+        "sha256": "312ae120e3bfa7f48dee1fff8900f72f080754ef70c4b6a4c94bf66dc6671e93"
+      }
+    },
+    {
+      "provider": "claude_code",
+      "route": "native_import",
+      "source_format": "claude_projects_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8528b7ab5f04d133b84c3aeb84398ad7494e66c8dd9dd15d9fba5789d8d909bb"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/claude_code/claude_projects_jsonl_tree/shape-contract.json",
+        "sha256": "8528b7ab5f04d133b84c3aeb84398ad7494e66c8dd9dd15d9fba5789d8d909bb"
+      }
+    },
+    {
+      "provider": "open_code",
+      "route": "native_import",
+      "source_format": "opencode_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "ab32c60967eff0ae4b283782d9d1375478b1e7057d645d5a9a001e1f21544ad8"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/open_code/opencode_sqlite/shape-contract.json",
+        "sha256": "ab32c60967eff0ae4b283782d9d1375478b1e7057d645d5a9a001e1f21544ad8"
+      }
+    },
+    {
+      "provider": "kilo",
+      "route": "native_import",
+      "source_format": "kilo_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8f402029d07f7db7db2bf349ade36026764849a605610923213b0afac2bc4268"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/kilo/kilo_sqlite/shape-contract.json",
+        "sha256": "8f402029d07f7db7db2bf349ade36026764849a605610923213b0afac2bc4268"
+      }
+    },
+    {
+      "provider": "mimocode",
+      "route": "native_import",
+      "source_format": "mimocode_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "608630749cd9c88c383b62c6493453774f3a97ffef78980d15809a1ec146b287"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/mimocode/mimocode_sqlite/shape-contract.json",
+        "sha256": "608630749cd9c88c383b62c6493453774f3a97ffef78980d15809a1ec146b287"
+      }
+    },
+    {
+      "provider": "kiro_cli",
+      "route": "native_import",
+      "source_format": "kiro_cli_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8c12a2beecb245b10bb0d5c66c5a58d61ffd1805c3114c50929a911ac48c75ec"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/kiro_cli/kiro_cli_sqlite/shape-contract.json",
+        "sha256": "8c12a2beecb245b10bb0d5c66c5a58d61ffd1805c3114c50929a911ac48c75ec"
+      }
+    },
+    {
+      "provider": "crush",
+      "route": "native_import",
+      "source_format": "crush_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "a84fb4d0de1f712eb9f47928d22a0834bfef36df34ec9f7a07db4702f0e3c7e7"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/crush/crush_sqlite/shape-contract.json",
+        "sha256": "a84fb4d0de1f712eb9f47928d22a0834bfef36df34ec9f7a07db4702f0e3c7e7"
+      }
+    },
+    {
+      "provider": "goose",
+      "route": "native_import",
+      "source_format": "goose_sessions_sqlite",
+      "format_schema": {
+        "kind": "embedded_integer",
+        "version": 14,
+        "shape_sha256": "28f5c2799267dd380088934ba9f6fe1ee91ba7faf187b08fe282830f07502204"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "integer",
+            "version": 14
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/goose/goose_sessions_sqlite/shape-contract.json",
+        "sha256": "28f5c2799267dd380088934ba9f6fe1ee91ba7faf187b08fe282830f07502204"
+      }
+    },
+    {
+      "provider": "lingma",
+      "route": "native_import",
+      "source_format": "lingma_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "01009dcb3b38a5418c789481339d0d344c4f4f501bf59de9c85394098af2ac06"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/lingma/lingma_sqlite/shape-contract.json",
+        "sha256": "01009dcb3b38a5418c789481339d0d344c4f4f501bf59de9c85394098af2ac06"
+      }
+    },
+    {
+      "provider": "qoder",
+      "route": "native_import",
+      "source_format": "qoder_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "d09d759125e75035c989a2dc50d80fe1c94d33d27d687e4044484780ed57cfe3"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/qoder/qoder_transcript_jsonl_tree/shape-contract.json",
+        "sha256": "d09d759125e75035c989a2dc50d80fe1c94d33d27d687e4044484780ed57cfe3"
+      }
+    },
+    {
+      "provider": "warp",
+      "route": "native_import",
+      "source_format": "warp_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "80a2ea15b4ef1f8a81bda4ba29ddf97ce777f868f49e20aa4a04e28d29d20c3b"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/warp/warp_sqlite/shape-contract.json",
+        "sha256": "80a2ea15b4ef1f8a81bda4ba29ddf97ce777f868f49e20aa4a04e28d29d20c3b"
+      }
+    },
+    {
+      "provider": "codebuddy",
+      "route": "native_import",
+      "source_format": "codebuddy_history_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "59811cb3ff2bfbbd2539ae4f3bde1bbade05aff7c0ddacbda0f806cc32481a38"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/codebuddy/codebuddy_history_json/shape-contract.json",
+        "sha256": "59811cb3ff2bfbbd2539ae4f3bde1bbade05aff7c0ddacbda0f806cc32481a38"
+      }
+    },
+    {
+      "provider": "trae",
+      "route": "native_import",
+      "source_format": "trae_state_vscdb",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "611d3fa61c4c7dffddaedf583f533aa23541a5f6580acb5eb0e6fbf1c491a92c"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/trae/trae_state_vscdb/shape-contract.json",
+        "sha256": "611d3fa61c4c7dffddaedf583f533aa23541a5f6580acb5eb0e6fbf1c491a92c"
+      }
+    },
+    {
+      "provider": "openclaw",
+      "route": "native_import",
+      "source_format": "openclaw_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "50bf882171d86e819e9cecb7102e13c1a986fb7b116c7862e59669362a5989d5"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/openclaw/openclaw_session_jsonl_tree/shape-contract.json",
+        "sha256": "50bf882171d86e819e9cecb7102e13c1a986fb7b116c7862e59669362a5989d5"
+      }
+    },
+    {
+      "provider": "hermes",
+      "route": "native_import",
+      "source_format": "hermes_state_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "a8b8c0ac1c965c69ad04af96d617c1db3d3c3754717aa37cdb091d148188a9a6"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/hermes/hermes_state_sqlite/shape-contract.json",
+        "sha256": "a8b8c0ac1c965c69ad04af96d617c1db3d3c3754717aa37cdb091d148188a9a6"
+      }
+    },
+    {
+      "provider": "nanoclaw",
+      "route": "native_import",
+      "source_format": "nanoclaw_project",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "d59453b912a787e434bbcd533ad8e8ae1c3ae2c355f2842dc5f62d9239c5656c"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/nanoclaw/nanoclaw_project/shape-contract.json",
+        "sha256": "d59453b912a787e434bbcd533ad8e8ae1c3ae2c355f2842dc5f62d9239c5656c"
+      }
+    },
+    {
+      "provider": "astrbot",
+      "route": "native_import",
+      "source_format": "astrbot_data_v4_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c15b3c07062e80a48ef15a4eb7edf3c936e026435f9ac9da42b69234d3fd4fbf"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/astrbot/astrbot_data_v4_sqlite/shape-contract.json",
+        "sha256": "c15b3c07062e80a48ef15a4eb7edf3c936e026435f9ac9da42b69234d3fd4fbf"
+      }
+    },
+    {
+      "provider": "shelley",
+      "route": "native_import",
+      "source_format": "shelley_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "47196da8b691e3beb25f326bd291b1bc65eb4cb395042e05df9502e02d603bd6"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/shelley/shelley_sqlite/shape-contract.json",
+        "sha256": "47196da8b691e3beb25f326bd291b1bc65eb4cb395042e05df9502e02d603bd6"
+      }
+    },
+    {
+      "provider": "continue",
+      "route": "native_import",
+      "source_format": "continue_cli_sessions_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c2afc94dc5dfd7635603302dff1299d23c22f63e4910092a36c9a1dc3d00d022"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/continue/continue_cli_sessions_json/shape-contract.json",
+        "sha256": "c2afc94dc5dfd7635603302dff1299d23c22f63e4910092a36c9a1dc3d00d022"
+      }
+    },
+    {
+      "provider": "openhands",
+      "route": "native_import",
+      "source_format": "openhands_file_events",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "31b6d6cc22cd29da84bc5fd2bdc8e78737e6537a7bec8be59b36e9a4a4c43059"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/openhands/openhands_file_events/shape-contract.json",
+        "sha256": "31b6d6cc22cd29da84bc5fd2bdc8e78737e6537a7bec8be59b36e9a4a4c43059"
+      }
+    },
+    {
+      "provider": "antigravity_cli",
+      "route": "native_import",
+      "source_format": "antigravity_cli_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8bc46c32ad1b44b7b739d9710b934bf257104780e524676f9b2691b023cbb138"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/antigravity_cli/antigravity_cli_transcript_jsonl_tree/shape-contract.json",
+        "sha256": "8bc46c32ad1b44b7b739d9710b934bf257104780e524676f9b2691b023cbb138"
+      }
+    },
+    {
+      "provider": "gemini_cli",
+      "route": "native_import",
+      "source_format": "gemini_cli_chat_recording_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c595460f4c7be4c6a733fb82f8e89651edcc8fb144ff9c91874a9ecd6ecfdabb"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/gemini_cli/gemini_cli_chat_recording_jsonl/shape-contract.json",
+        "sha256": "c595460f4c7be4c6a733fb82f8e89651edcc8fb144ff9c91874a9ecd6ecfdabb"
+      }
+    },
+    {
+      "provider": "tabnine",
+      "route": "native_import",
+      "source_format": "tabnine_cli_chat_recording_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "44e8b4745339c8c8f6ded23c213c39ac46a519e7a4eca2ce18f4a2203b8bf92d"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/tabnine/tabnine_cli_chat_recording_jsonl/shape-contract.json",
+        "sha256": "44e8b4745339c8c8f6ded23c213c39ac46a519e7a4eca2ce18f4a2203b8bf92d"
+      }
+    },
+    {
+      "provider": "cursor",
+      "route": "native_import",
+      "source_format": "cursor_agent_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "d3acdb294a7dbad229abca076f4270b48be2a225feb8f2a0ad79ead1e0f45326"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "calendar_date",
+            "version": "2026-06-24"
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/cursor/cursor_agent_transcript_jsonl_tree/shape-contract.json",
+        "sha256": "d3acdb294a7dbad229abca076f4270b48be2a225feb8f2a0ad79ead1e0f45326"
+      }
+    },
+    {
+      "provider": "windsurf",
+      "route": "native_import",
+      "source_format": "windsurf_cascade_hook_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "44be3095787812a224ad320fe1dda479e7f0ae9669403fbf8edf40a5a0b5b15a"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/windsurf/windsurf_cascade_hook_transcript_jsonl_tree/shape-contract.json",
+        "sha256": "44be3095787812a224ad320fe1dda479e7f0ae9669403fbf8edf40a5a0b5b15a"
+      }
+    },
+    {
+      "provider": "zed",
+      "route": "native_import",
+      "source_format": "zed_threads_sqlite",
+      "format_schema": {
+        "kind": "embedded_semver",
+        "version": "0.3.0",
+        "shape_sha256": "111306f4241f51c1ae407c28fff194c4dd90e5e54237bb0910a91e7241dab1ee"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.3.0"
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/zed/zed_threads_sqlite/shape-contract.json",
+        "sha256": "111306f4241f51c1ae407c28fff194c4dd90e5e54237bb0910a91e7241dab1ee"
+      }
+    },
+    {
+      "provider": "copilot_cli",
+      "route": "native_import",
+      "source_format": "copilot_cli_session_events_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "06fcbf74ad103a010480c7698063ef2430dfc1ffb07345b54ff63d2014591315"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/copilot_cli/copilot_cli_session_events_jsonl/shape-contract.json",
+        "sha256": "06fcbf74ad103a010480c7698063ef2430dfc1ffb07345b54ff63d2014591315"
+      }
+    },
+    {
+      "provider": "factory_ai_droid",
+      "route": "native_import",
+      "source_format": "factory_ai_droid_sessions_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "7659b24671c901e785c14195b9ef73cd11c9de5d0369410523f33e4b33d2fb69"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/factory_ai_droid/factory_ai_droid_sessions_jsonl/shape-contract.json",
+        "sha256": "7659b24671c901e785c14195b9ef73cd11c9de5d0369410523f33e4b33d2fb69"
+      }
+    },
+    {
+      "provider": "qwen_code",
+      "route": "native_import",
+      "source_format": "qwen_code_chat_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "dfc2c21cdcb12243f7c92fd44011e9cd38eddda79c5ae4a82d64a794f2138351"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/qwen_code/qwen_code_chat_jsonl_tree/shape-contract.json",
+        "sha256": "dfc2c21cdcb12243f7c92fd44011e9cd38eddda79c5ae4a82d64a794f2138351"
+      }
+    },
+    {
+      "provider": "kimi_code_cli",
+      "route": "native_import",
+      "source_format": "kimi_code_cli_wire_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "81f726f19bd5b594913e674c2026d13f8249f1c76c6cd2137a1173d8f8d8756b"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/kimi_code_cli/kimi_code_cli_wire_jsonl_tree/shape-contract.json",
+        "sha256": "81f726f19bd5b594913e674c2026d13f8249f1c76c6cd2137a1173d8f8d8756b"
+      }
+    },
+    {
+      "provider": "auggie",
+      "route": "native_import",
+      "source_format": "auggie_session_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "799b7f14644b67be7d63815debfee8214fa4dc8b75e46c2232a39137da8fc90f"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.32.0"
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/auggie/auggie_session_json/shape-contract.json",
+        "sha256": "799b7f14644b67be7d63815debfee8214fa4dc8b75e46c2232a39137da8fc90f"
+      }
+    },
+    {
+      "provider": "junie",
+      "route": "native_import",
+      "source_format": "junie_session_events_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "7773c6294853954138c0c092433807eda800f3802af67faf4c40d2bbbf6ae934"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/junie/junie_session_events_jsonl_tree/shape-contract.json",
+        "sha256": "7773c6294853954138c0c092433807eda800f3802af67faf4c40d2bbbf6ae934"
+      }
+    },
+    {
+      "provider": "firebender",
+      "route": "native_import",
+      "source_format": "firebender_chat_history_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "5103eb68d01a2d87a64234a7ba8450338fa926390eef4ca0238fa6deed42d5cd"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/firebender/firebender_chat_history_sqlite/shape-contract.json",
+        "sha256": "5103eb68d01a2d87a64234a7ba8450338fa926390eef4ca0238fa6deed42d5cd"
+      }
+    },
+    {
+      "provider": "forgecode",
+      "route": "native_import",
+      "source_format": "forgecode_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c0349f257a7d2018dcf44d31508691ad36d69f40c2056f6c092b74b1aa3b735d"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/forgecode/forgecode_sqlite/shape-contract.json",
+        "sha256": "c0349f257a7d2018dcf44d31508691ad36d69f40c2056f6c092b74b1aa3b735d"
+      }
+    },
+    {
+      "provider": "deepagents",
+      "route": "native_import",
+      "source_format": "deepagents_sessions_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "45909d6839401de18bc1f786a141dd23593767e884352fb9373fe6181a95a3f3"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/deepagents/deepagents_sessions_sqlite/shape-contract.json",
+        "sha256": "45909d6839401de18bc1f786a141dd23593767e884352fb9373fe6181a95a3f3"
+      }
+    },
+    {
+      "provider": "mistral_vibe",
+      "route": "native_import",
+      "source_format": "mistral_vibe_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "78e8623d873853238b9d3f708b6ed3936d30b12fe0a1ae6f913a4f376ba39f43"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/mistral_vibe/mistral_vibe_session_jsonl_tree/shape-contract.json",
+        "sha256": "78e8623d873853238b9d3f708b6ed3936d30b12fe0a1ae6f913a4f376ba39f43"
+      }
+    },
+    {
+      "provider": "mux",
+      "route": "native_import",
+      "source_format": "mux_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "458c2b2840f0a46a36d30bf0fbbbaa58b20cce2b040d428bd9b8e955446eb34a"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.27.0"
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/mux/mux_session_jsonl_tree/shape-contract.json",
+        "sha256": "458c2b2840f0a46a36d30bf0fbbbaa58b20cce2b040d428bd9b8e955446eb34a"
+      }
+    },
+    {
+      "provider": "rovodev",
+      "route": "native_import",
+      "source_format": "rovodev_session_json_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "a4f64eaf4e8f51d9b8032a7c1139c87731edc887a883dc826845fa2acd8a3e89"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/rovodev/rovodev_session_json_tree/shape-contract.json",
+        "sha256": "a4f64eaf4e8f51d9b8032a7c1139c87731edc887a883dc826845fa2acd8a3e89"
+      }
+    },
+    {
+      "provider": "cline",
+      "route": "native_import",
+      "source_format": "cline_task_directory_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "22bddf16863c2d29d15a5763e25f1b6168d9aeef21bc2b4abfdfa3e50fa78468"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/cline/cline_task_directory_json/shape-contract.json",
+        "sha256": "22bddf16863c2d29d15a5763e25f1b6168d9aeef21bc2b4abfdfa3e50fa78468"
+      }
+    },
+    {
+      "provider": "roo_code",
+      "route": "native_import",
+      "source_format": "roo_task_directory_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "473a32367bc738909da0082b1f18dfbb8a06ed44c00951f60f5c677df0ec6ad3"
+      },
+      "producer_domain": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "provenance": {
+        "kind": "route_schema_contract",
+        "classification": "route_schema_contract",
+        "reference": "crates/ctx-history-capture/tests/contracts/mcp-attribution/roo_code/roo_task_directory_json/shape-contract.json",
+        "sha256": "473a32367bc738909da0082b1f18dfbb8a06ed44c00951f60f5c677df0ec6ad3"
+      }
+    }
+  ],
+  "capability_lanes": [
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "29a770236fb8476cb870afd74f9ec8a9046c18d34cb6329e3615f0898b129538"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.200.0"
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "extraction_not_implemented",
+          "evidence_ref": "core-contract:a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684;codex-native-terminal-shape"
+        }
+      },
+      "evidence": [],
+      "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.200.0"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "60c722e07514d46d980034319dfcbfe4e74e659f"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "29a770236fb8476cb870afd74f9ec8a9046c18d34cb6329e3615f0898b129538"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.201.0"
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "extraction_not_implemented",
+          "evidence_ref": "core-contract:a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684;codex-native-terminal-shape"
+        }
+      },
+      "evidence": [],
+      "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.201.0"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "60c722e07514d46d980034319dfcbfe4e74e659f"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "29a770236fb8476cb870afd74f9ec8a9046c18d34cb6329e3615f0898b129538"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.202.0"
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "extraction_not_implemented",
+          "evidence_ref": "core-contract:a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684;codex-native-terminal-shape"
+        }
+      },
+      "evidence": [],
+      "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.202.0"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "60c722e07514d46d980034319dfcbfe4e74e659f"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "29a770236fb8476cb870afd74f9ec8a9046c18d34cb6329e3615f0898b129538"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "supported"
+      },
+      "evidence": [
+        {
+          "class": "ambiguity_duplicate_linkage",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "appended_duplicate_terminal_retracts_prior_attribution_and_preserves_ids",
+          "scope": "tuple"
+        },
+        {
+          "class": "canonical_terminal_outcomes",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "exact_error_attribution_and_ambiguous_pair_abstention_survive_publication",
+          "scope": "tuple"
+        },
+        {
+          "class": "exact_boundary",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::codex::nativepath::tests::profiles::exact_mcp_attribution_preserves_opaque_names_and_component_bound",
+          "scope": "tuple"
+        },
+        {
+          "class": "exact_positive_pair",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "redacted_real_shape_fixture_is_admitted_with_linkage_and_metadata",
+          "scope": "tuple"
+        },
+        {
+          "class": "malformed_identity",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "malformed_mcp_results_are_rejected_without_hiding_later_valid_content",
+          "scope": "tuple"
+        },
+        {
+          "class": "max_plus_one",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "exact_raw_limit_omits_oversized_invocation_but_publishes_result",
+          "scope": "tuple"
+        },
+        {
+          "class": "result_preservation",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "over_8_mib_mcp_result_is_admitted_once_and_indexable",
+          "scope": "tuple"
+        },
+        {
+          "class": "search_nonindexing",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "mcp_attribution_canaries_are_not_indexed_or_ranked",
+          "scope": "tuple"
+        },
+        {
+          "class": "stable_ids",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "invalid_attribution_preserves_terminal_content_and_all_stable_identities",
+          "scope": "tuple"
+        },
+        {
+          "class": "max_plus_one",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_core",
+          "test": "core_record::tests::mcp_tool_call_bounds_each_decoded_utf8_component_at_exact_64_kib",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "privacy_sinks",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_privacy",
+          "test": "mcp_attribution_canaries_stay_out_of_search_analytics_usage_and_diagnostics",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "search_nonindexing",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_search",
+          "test": "mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "ambiguity_duplicate_linkage",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "appended_malformed_duplicate_retracts_attribution_without_touching_neighbor_ids",
+          "scope": "tuple"
+        },
+        {
+          "class": "malformed_identity",
+          "kind": "rust_test",
+          "suite": "codex_direct_result",
+          "test": "malformed_duplicate_terminals_abstain_without_losing_public_content_or_ids",
+          "scope": "tuple"
+        }
+      ],
+      "source_schema": "codex-nativepath-jsonl-v0",
+      "producer_bound": {
+        "kind": "unversioned",
+        "generation": 1,
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "codex",
+      "route": "native_import",
+      "source_format": "codex_history_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "26d3031938e30649641397cdd37d4384f3a704e7f042e61c62005af5c02dd683"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:codex/codex_history_jsonl"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-prompt-history",
+      "producer_bound": {
+        "kind": "unversioned",
+        "generation": 1,
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "pi",
+      "route": "native_import",
+      "source_format": "pi_session_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "312ae120e3bfa7f48dee1fff8900f72f080754ef70c4b6a4c94bf66dc6671e93"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:pi/pi_session_jsonl"
+        }
+      },
+      "evidence": [],
+      "source_schema": "pi-session-v1-v3",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.83.0"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "845d6ff1f6643aba440341cce877ce1c43ebbc39"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "claude_code",
+      "route": "native_import",
+      "source_format": "claude_projects_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8528b7ab5f04d133b84c3aeb84398ad7494e66c8dd9dd15d9fba5789d8d909bb"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:claude_code/claude_projects_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "claude-nativepath-jsonl-v6",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "2.1.220"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "7ef6eec9d9ba84ea6f233f26c45f1df5c5991843"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "open_code",
+      "route": "native_import",
+      "source_format": "opencode_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "ab32c60967eff0ae4b283782d9d1375478b1e7057d645d5a9a001e1f21544ad8"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:open_code/opencode_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "opencode-tool-part-sqlite-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "1.2.0",
+            "maximum": "1.18.11"
+          }
+        ],
+        "source_commits": [
+          "012c2f57f976489d88bd4598a056b4bdcdd428ee"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "kilo",
+      "route": "native_import",
+      "source_format": "kilo_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8f402029d07f7db7db2bf349ade36026764849a605610923213b0afac2bc4268"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:kilo/kilo_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "opencode-tool-part-sqlite-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "7.0.26",
+            "maximum": "7.4.18"
+          }
+        ],
+        "source_commits": [
+          "f00da9a75b012e712c94ac115b068e35dede1683"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "mimocode",
+      "route": "native_import",
+      "source_format": "mimocode_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "608630749cd9c88c383b62c6493453774f3a97ffef78980d15809a1ec146b287"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:mimocode/mimocode_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "opencode-tool-part-sqlite-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "0.1.1",
+            "maximum": "0.1.9"
+          }
+        ],
+        "source_commits": [
+          "c045a9891069000b112079bb10bdc8828d75eb6e"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "kiro_cli",
+      "route": "native_import",
+      "source_format": "kiro_cli_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8c12a2beecb245b10bb0d5c66c5a58d61ffd1805c3114c50929a911ac48c75ec"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:kiro_cli/kiro_cli_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "kiro-legacy-conversations-sqlite-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "2.10.0"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "9930f7030a1e09db227228a65b6d082a68ecd2ef"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "crush",
+      "route": "native_import",
+      "source_format": "crush_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "a84fb4d0de1f712eb9f47928d22a0834bfef36df34ec9f7a07db4702f0e3c7e7"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:crush/crush_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "crush-project-sqlite-v0",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "0.13.0",
+            "maximum": "0.88.0"
+          }
+        ],
+        "source_commits": [
+          "9179c6129317c887a1779dbbf4d342de0f22e124"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "goose",
+      "route": "native_import",
+      "source_format": "goose_sessions_sqlite",
+      "format_schema": {
+        "kind": "embedded_integer",
+        "version": 14,
+        "shape_sha256": "28f5c2799267dd380088934ba9f6fe1ee91ba7faf187b08fe282830f07502204"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "integer",
+            "version": 14
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:goose/goose_sessions_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "goose-session-schema-15",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "1.45.0"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "2db0e31fe77c7f626293f44a19d9f6c18db36ac5"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "lingma",
+      "route": "native_import",
+      "source_format": "lingma_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "01009dcb3b38a5418c789481339d0d344c4f4f501bf59de9c85394098af2ac06"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:lingma/lingma_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "lingma-chat-record-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "2.6.3"
+        ],
+        "ranges": [],
+        "source_commits": [],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "qoder",
+      "route": "native_import",
+      "source_format": "qoder_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "d09d759125e75035c989a2dc50d80fe1c94d33d27d687e4044484780ed57cfe3"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:qoder/qoder_transcript_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-transcript-jsonl",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.1.18",
+          "1.0.1",
+          "1.1.13"
+        ],
+        "ranges": [],
+        "source_commits": [],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "warp",
+      "route": "native_import",
+      "source_format": "warp_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "80a2ea15b4ef1f8a81bda4ba29ddf97ce777f868f49e20aa4a04e28d29d20c3b"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "supported"
+      },
+      "evidence": [
+        {
+          "class": "ambiguity_duplicate_linkage",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::warp::nativepath::decode::tests::invalid_duplicate_orphan_and_ambiguous_mcp_relations_abstain",
+          "scope": "tuple"
+        },
+        {
+          "class": "canonical_terminal_outcomes",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::warp::nativepath::decode::tests::textual_success_failure_and_unknown_results_are_complete",
+          "scope": "tuple"
+        },
+        {
+          "class": "exact_boundary",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::warp::nativepath::decode::tests::validated_uuid_text_is_preserved_exactly",
+          "scope": "tuple"
+        },
+        {
+          "class": "exact_positive_pair",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::warp::nativepath::decode::tests::qualified_mcp_success_error_cancellation_and_nontext_results_link_exactly",
+          "scope": "tuple"
+        },
+        {
+          "class": "malformed_identity",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::warp::nativepath::decode::tests::invalid_then_valid_required_strings_permanently_invalidate_attribution",
+          "scope": "tuple"
+        },
+        {
+          "class": "result_preservation",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::warp::source_backed::result_tests::core_projection_keeps_success_failure_unknown_and_large_result_bodies_once",
+          "scope": "tuple"
+        },
+        {
+          "class": "stable_ids",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::warp::source_backed::result_tests::sanitized_mcp_fixture_projects_only_unique_qualified_terminal_pairs",
+          "scope": "tuple"
+        },
+        {
+          "class": "max_plus_one",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_core",
+          "test": "core_record::tests::mcp_tool_call_bounds_each_decoded_utf8_component_at_exact_64_kib",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "privacy_sinks",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_privacy",
+          "test": "mcp_attribution_canaries_stay_out_of_search_analytics_usage_and_diagnostics",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "search_nonindexing",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_search",
+          "test": "mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked",
+          "scope": "provider_neutral"
+        }
+      ],
+      "source_schema": "warp-agent-task-protobuf-v1",
+      "producer_bound": {
+        "kind": "unversioned",
+        "generation": 1,
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "codebuddy",
+      "route": "native_import",
+      "source_format": "codebuddy_history_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "59811cb3ff2bfbbd2539ae4f3bde1bbade05aff7c0ddacbda0f806cc32481a38"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:codebuddy/codebuddy_history_json"
+        }
+      },
+      "evidence": [],
+      "source_schema": "ide-structured-message-v1",
+      "producer_bound": {
+        "kind": "unversioned",
+        "generation": 1,
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "trae",
+      "route": "native_import",
+      "source_format": "trae_state_vscdb",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "611d3fa61c4c7dffddaedf583f533aa23541a5f6580acb5eb0e6fbf1c491a92c"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:trae/trae_state_vscdb"
+        }
+      },
+      "evidence": [],
+      "source_schema": "trae-itemtable-state-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "2.3.61406"
+        ],
+        "ranges": [],
+        "source_commits": [],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "openclaw",
+      "route": "native_import",
+      "source_format": "openclaw_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "50bf882171d86e819e9cecb7102e13c1a986fb7b116c7862e59669362a5989d5"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:openclaw/openclaw_session_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "openclaw-legacy-jsonl-v2",
+      "producer_bound": {
+        "kind": "source_commits",
+        "commits": [
+          "554a6f3bbf6d8173efc2f1c92e30139f88dc26d6"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "hermes",
+      "route": "native_import",
+      "source_format": "hermes_state_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "a8b8c0ac1c965c69ad04af96d617c1db3d3c3754717aa37cdb091d148188a9a6"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:hermes/hermes_state_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "hermes-state-db-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "2026.3.12",
+            "maximum": "2026.8.3"
+          }
+        ],
+        "source_commits": [
+          "a991dfc25daf68994c21d6adcdfbafb1b3dc23cf"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "nanoclaw",
+      "route": "native_import",
+      "source_format": "nanoclaw_project",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "d59453b912a787e434bbcd533ad8e8ae1c3ae2c355f2842dc5f62d9239c5656c"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:nanoclaw/nanoclaw_project"
+        }
+      },
+      "evidence": [],
+      "source_schema": "nanoclaw-compound-project-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "2.0.54",
+            "maximum": "2.1.54"
+          }
+        ],
+        "source_commits": [
+          "86017fffd09377467d9d8633ed27111ea1b1760a"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "astrbot",
+      "route": "native_import",
+      "source_format": "astrbot_data_v4_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c15b3c07062e80a48ef15a4eb7edf3c936e026435f9ac9da42b69234d3fd4fbf"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:astrbot/astrbot_data_v4_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "astrbot-data-v4-logical-v0",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "4.0.0",
+            "maximum": "4.27.1"
+          }
+        ],
+        "source_commits": [
+          "573367b7f36662f9948ba4e39ca2758bf7f5a424"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "shelley",
+      "route": "native_import",
+      "source_format": "shelley_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "47196da8b691e3beb25f326bd291b1bc65eb4cb395042e05df9502e02d603bd6"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:shelley/shelley_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "shelley-exact-cwd-sqlite-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.913.914464056"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "32682e1aa1a0257bf05d1ae293724cb3c5cc1278"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "continue",
+      "route": "native_import",
+      "source_format": "continue_cli_sessions_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c2afc94dc5dfd7635603302dff1299d23c22f63e4910092a36c9a1dc3d00d022"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:continue/continue_cli_sessions_json"
+        }
+      },
+      "evidence": [],
+      "source_schema": "continue-nativepath-document-v0",
+      "producer_bound": {
+        "kind": "source_commits",
+        "commits": [
+          "5522c6f44ca0ac3528b37244818fbfa39b5af470"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "openhands",
+      "route": "native_import",
+      "source_format": "openhands_file_events",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "31b6d6cc22cd29da84bc5fd2bdc8e78737e6537a7bec8be59b36e9a4a4c43059"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:openhands/openhands_file_events"
+        }
+      },
+      "evidence": [],
+      "source_schema": "openhands-v1-conversation-tree-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.50.0",
+          "1.39.1"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "2ead80595c2eac36baecfbb60ca790012c7aca2f",
+          "bf57d16f3dde05b0b03fa0af3f7e0ae924043b80"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "antigravity_cli",
+      "route": "native_import",
+      "source_format": "antigravity_cli_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "8bc46c32ad1b44b7b739d9710b934bf257104780e524676f9b2691b023cbb138"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:antigravity_cli/antigravity_cli_transcript_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "antigravity-direct-native-jsonl-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "1.1.10"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "bfab12dac5bd090015a89cf82e65093d13b567d9"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "gemini_cli",
+      "route": "native_import",
+      "source_format": "gemini_cli_chat_recording_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c595460f4c7be4c6a733fb82f8e89651edcc8fb144ff9c91874a9ecd6ecfdabb"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:gemini_cli/gemini_cli_chat_recording_jsonl"
+        }
+      },
+      "evidence": [],
+      "source_schema": "gemini-chat-recording-jsonl-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "0.39.0",
+            "maximum": "0.53.1"
+          }
+        ],
+        "source_commits": [
+          "19a68016bdc9cd4177a155846dd51f282c3c1c59"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "tabnine",
+      "route": "native_import",
+      "source_format": "tabnine_cli_chat_recording_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "44e8b4745339c8c8f6ded23c213c39ac46a519e7a4eca2ce18f4a2203b8bf92d"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:tabnine/tabnine_cli_chat_recording_jsonl"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-chat-recording-jsonl",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.29.3"
+        ],
+        "ranges": [],
+        "source_commits": [],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "cursor",
+      "route": "native_import",
+      "source_format": "cursor_agent_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "d3acdb294a7dbad229abca076f4270b48be2a225feb8f2a0ad79ead1e0f45326"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "calendar_date",
+            "version": "2026-06-24"
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:cursor/cursor_agent_transcript_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-agent-transcript",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "2026.07.23-e383d2b"
+        ],
+        "ranges": [],
+        "source_commits": [],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "windsurf",
+      "route": "native_import",
+      "source_format": "windsurf_cascade_hook_transcript_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "44be3095787812a224ad320fe1dda479e7f0ae9669403fbf8edf40a5a0b5b15a"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:windsurf/windsurf_cascade_hook_transcript_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "windsurf-direct-native-jsonl-v1",
+      "producer_bound": {
+        "kind": "unversioned",
+        "generation": 1,
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "zed",
+      "route": "native_import",
+      "source_format": "zed_threads_sqlite",
+      "format_schema": {
+        "kind": "embedded_semver",
+        "version": "0.3.0",
+        "shape_sha256": "111306f4241f51c1ae407c28fff194c4dd90e5e54237bb0910a91e7241dab1ee"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.3.0"
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:zed/zed_threads_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "zed-dbthread-json-0.3.0",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "1.11.0",
+            "maximum": "1.15.0"
+          }
+        ],
+        "source_commits": [
+          "4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "copilot_cli",
+      "route": "native_import",
+      "source_format": "copilot_cli_session_events_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "06fcbf74ad103a010480c7698063ef2430dfc1ffb07345b54ff63d2014591315"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "supported"
+      },
+      "evidence": [
+        {
+          "class": "ambiguity_duplicate_linkage",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_late_duplicate_retracts_the_previously_attributed_completion",
+          "scope": "tuple"
+        },
+        {
+          "class": "canonical_terminal_outcomes",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_attributes_only_unique_exact_terminal_completions",
+          "scope": "tuple"
+        },
+        {
+          "class": "exact_boundary",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::source_backed::tests::copilot::copilot_route_enforces_independent_exact_identity_component_boundaries",
+          "scope": "tuple"
+        },
+        {
+          "class": "exact_positive_pair",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_same_call_id_in_separate_sessions_remains_independent",
+          "scope": "tuple"
+        },
+        {
+          "class": "malformed_identity",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_malformed_ambiguous_or_orphan_linkage_abstains",
+          "scope": "tuple"
+        },
+        {
+          "class": "result_preservation",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_oversized_or_malformed_linkage_never_aborts_neighbor_projection",
+          "scope": "tuple"
+        },
+        {
+          "class": "stable_ids",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_provider_units",
+          "test": "provider::providers::native_jsonl::native_path::source_backed::copilot_tests::copilot_attribution_does_not_change_stable_event_ids",
+          "scope": "tuple"
+        },
+        {
+          "class": "max_plus_one",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_core",
+          "test": "core_record::tests::mcp_tool_call_bounds_each_decoded_utf8_component_at_exact_64_kib",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "privacy_sinks",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_privacy",
+          "test": "mcp_attribution_canaries_stay_out_of_search_analytics_usage_and_diagnostics",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "search_nonindexing",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_search",
+          "test": "mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked",
+          "scope": "provider_neutral"
+        }
+      ],
+      "source_schema": "copilot-cli-direct-native-jsonl-v1",
+      "producer_bound": {
+        "kind": "unversioned",
+        "generation": 1,
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "factory_ai_droid",
+      "route": "native_import",
+      "source_format": "factory_ai_droid_sessions_jsonl",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "7659b24671c901e785c14195b9ef73cd11c9de5d0369410523f33e4b33d2fb69"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:factory_ai_droid/factory_ai_droid_sessions_jsonl"
+        }
+      },
+      "evidence": [],
+      "source_schema": "factory-droid-direct-native-jsonl-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.6.0",
+          "0.186.0"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "655254a50ddb48bbb2c6e0ff1704b659e62b9616"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "qwen_code",
+      "route": "native_import",
+      "source_format": "qwen_code_chat_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "dfc2c21cdcb12243f7c92fd44011e9cd38eddda79c5ae4a82d64a794f2138351"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:qwen_code/qwen_code_chat_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "qwen-chat-recording-jsonl-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "0.21.4"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "f670c3d112f1adb46482047eb4bf7107ee1e1c2a"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "kimi_code_cli",
+      "route": "native_import",
+      "source_format": "kimi_code_cli_wire_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "81f726f19bd5b594913e674c2026d13f8249f1c76c6cd2137a1173d8f8d8756b"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:kimi_code_cli/kimi_code_cli_wire_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "compound-wire-tree-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "0.23.0",
+            "maximum": "0.31.1"
+          }
+        ],
+        "source_commits": [
+          "6b56c11697771fe596099b38bafae539820309a4"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "auggie",
+      "route": "native_import",
+      "source_format": "auggie_session_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "799b7f14644b67be7d63815debfee8214fa4dc8b75e46c2232a39137da8fc90f"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.32.0"
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:auggie/auggie_session_json"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-session-json",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "0.32.0",
+            "maximum": "0.34.0"
+          }
+        ],
+        "source_commits": [
+          "3cf88f8e19d168a88c4e780551f681556dd4cbd6"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "junie",
+      "route": "native_import",
+      "source_format": "junie_session_events_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "7773c6294853954138c0c092433807eda800f3802af67faf4c40d2bbbf6ae934"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:junie/junie_session_events_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-session-events-jsonl",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "2548.5"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "aa4c8ea93743759d202734db6bc13ca9428d1ddf"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "firebender",
+      "route": "native_import",
+      "source_format": "firebender_chat_history_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "5103eb68d01a2d87a64234a7ba8450338fa926390eef4ca0238fa6deed42d5cd"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:firebender/firebender_chat_history_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-chat-history-sqlite",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "1.0.10",
+          "1.0.12"
+        ],
+        "ranges": [],
+        "source_commits": [],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "forgecode",
+      "route": "native_import",
+      "source_format": "forgecode_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "c0349f257a7d2018dcf44d31508691ad36d69f40c2056f6c092b74b1aa3b735d"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:forgecode/forgecode_sqlite"
+        }
+      },
+      "evidence": [],
+      "source_schema": "forgecode-conversation-sqlite-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "2.12.2",
+            "maximum": "2.13.21"
+          }
+        ],
+        "source_commits": [
+          "9b60797ef67cc88d7acc2593775e165ffcf2b8f7"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "deepagents",
+      "route": "hosted_trace",
+      "source_format": "langsmith_trace",
+      "format_schema": {
+        "kind": "hosted_boundary",
+        "source_schema": "hosted-trace-v1"
+      },
+      "producer_partition": {
+        "kind": "hosted_boundary"
+      },
+      "status": {
+        "kind": "excluded",
+        "reason": {
+          "kind": "hosted_only",
+          "evidence_ref": "provider-boundary:deepagents-hosted-route"
+        }
+      },
+      "evidence": [],
+      "source_schema": "hosted-trace-v1",
+      "producer_bound": {
+        "kind": "hosted_boundary",
+        "unknown_generations": "excluded"
+      }
+    },
+    {
+      "provider": "mistral_vibe",
+      "route": "native_import",
+      "source_format": "mistral_vibe_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "78e8623d873853238b9d3f708b6ed3936d30b12fe0a1ae6f913a4f376ba39f43"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "required_evidence_incomplete",
+          "evidence_ref": "capability-audit:mistral-vibe-provider-review"
+        }
+      },
+      "evidence": [],
+      "source_schema": "meta-json-messages-jsonl-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "2.23.3"
+        ],
+        "ranges": [],
+        "source_commits": [
+          "68ff32e6a92e80a874c8153312f0aa8ae4955477"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "mux",
+      "route": "native_import",
+      "source_format": "mux_session_jsonl_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "458c2b2840f0a46a36d30bf0fbbbaa58b20cce2b040d428bd9b8e955446eb34a"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "semver",
+            "version": "0.27.0"
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:mux/mux_session_jsonl_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "mux-session-tree-source-backed-v2",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [],
+        "ranges": [
+          {
+            "minimum": "0.15.0",
+            "maximum": "0.28.1"
+          }
+        ],
+        "source_commits": [
+          "63d3acbbd1d3c8d2f22ccec542a8479bc1c9e567"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "rovodev",
+      "route": "native_import",
+      "source_format": "rovodev_session_json_tree",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "a4f64eaf4e8f51d9b8032a7c1139c87731edc887a883dc826845fa2acd8a3e89"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:rovodev/rovodev_session_json_tree"
+        }
+      },
+      "evidence": [],
+      "source_schema": "rovodev-session-json-tree-v1",
+      "producer_bound": {
+        "kind": "versions",
+        "versions": [
+          "202606.25.1",
+          "202607.21.1"
+        ],
+        "ranges": [],
+        "source_commits": [],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "cline",
+      "route": "native_import",
+      "source_format": "cline_task_directory_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "22bddf16863c2d29d15a5763e25f1b6168d9aeef21bc2b4abfdfa3e50fa78468"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:cline/cline_task_directory_json"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-cline-message-array",
+      "producer_bound": {
+        "kind": "source_commits",
+        "commits": [
+          "864419d8b0c2467ec37ccb8837ddd08f96ea31f9"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "roo_code",
+      "route": "native_import",
+      "source_format": "roo_task_directory_json",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "473a32367bc738909da0082b1f18dfbb8a06ed44c00951f60f5c677df0ec6ad3"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "format_not_audited",
+          "evidence_ref": "provider-support-matrix:roo_code/roo_task_directory_json"
+        }
+      },
+      "evidence": [],
+      "source_schema": "unversioned-roo-message-array",
+      "producer_bound": {
+        "kind": "source_commits",
+        "commits": [
+          "b867ec9145750d0ae1ff7f02d35406e9bf2a0b16"
+        ],
+        "unknown_generations": "not-qualified"
+      }
+    },
+    {
+      "provider": "deepagents",
+      "route": "native_import",
+      "source_format": "deepagents_sessions_sqlite",
+      "format_schema": {
+        "kind": "structural_revision",
+        "revision": 1,
+        "shape_sha256": "45909d6839401de18bc1f786a141dd23593767e884352fb9373fe6181a95a3f3"
+      },
+      "producer_partition": {
+        "kind": "discrete",
+        "versions": [
+          {
+            "kind": "unversioned_generation",
+            "generation": 1
+          }
+        ]
+      },
+      "status": {
+        "kind": "not_qualified",
+        "reason": {
+          "kind": "identity_not_proven",
+          "evidence_ref": "capability-audit:deepagents-no-durable-server-field"
+        }
+      },
+      "evidence": [],
+      "source_schema": "deepagents-sqlite-write-messages-v0",
+      "producer_bound": {
+        "kind": "unversioned",
+        "generation": 1,
+        "unknown_generations": "not-qualified"
+      }
+    }
+  ],
+  "expected_provider_status_rows": {
+    "supported": 3,
+    "not_qualified": 38,
+    "excluded": 0
+  }
+}

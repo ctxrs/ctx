@@ -178,7 +178,9 @@ fn publish_selected_routes(
     let retain_rejection_fixture = open_verified_index(execution.index_root)
         .is_ok_and(|index| !index.manifest().sources.is_empty());
     let mut writer =
-        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
     if retain_rejection_fixture {
         let source = publication_pin_source_with_anchor(0x93);
         writer.begin_source(source.clone())?;
@@ -227,7 +229,9 @@ fn publish_selected_routes_with_rejection(
 ) -> Result<SourceBackedRefreshPublication> {
     let source = publication_pin_source_with_anchor(0x93);
     let mut writer =
-        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
     writer.begin_source(source.clone())?;
     writer.add_core_record(publication_pin_record(&source))?;
     writer.certify_source(publication_rejection_certificate(&source))?;
@@ -296,7 +300,10 @@ fn publication_pin_source_with_anchor(anchor: u8) -> SourceKey {
 
 fn publish_pin_source(index_root: &Path, source: SourceKey) -> String {
     let mut writer =
-        ctx_history_index::GenerationWriter::open(index_root, WriterOptions::default()).unwrap();
+        ctx_history_index::GenerationWriter::open(index_root, WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(publication_pin_record(&source))
@@ -370,7 +377,9 @@ fn publish_pin_fixture(
     nonempty: bool,
 ) -> Result<SourceBackedRefreshPublication> {
     let mut writer =
-        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?;
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
     if nonempty {
         let source = publication_pin_source();
         writer.begin_source(source.clone())?;
@@ -506,6 +515,8 @@ fn warm_dirty_route_burst_uses_one_bounded_refresh_and_publication() {
         source_backed_index_root(&data_root),
         WriterOptions::default(),
     )
+    .unwrap()
+    .into_writer()
     .unwrap()
     .commit(|_| true)
     .unwrap();
@@ -915,6 +926,8 @@ fn exact_route_event_during_execution_creates_one_successor_and_noop_ack_cleans_
                 execution.index_root,
                 WriterOptions::default(),
             )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit(|_| true)?;
             let mut publication = empty_test_publication(commit.generation_id);
             publication.published_explicit_source_catalog =
@@ -972,6 +985,8 @@ fn route_failure_executor(
             execution.index_root,
             WriterOptions::default(),
         )?
+        .into_writer()
+        .map_err(crate::semantic::committed_generation_recovery_error)?
         .commit(|_| true)?;
         let mut publication = empty_test_publication(commit.generation_id);
         publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();

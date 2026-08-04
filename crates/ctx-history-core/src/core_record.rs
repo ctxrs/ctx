@@ -28,6 +28,7 @@ use validation::{
 pub const CORE_RECORD_VERSION: u32 = 1;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
 pub const CORE_CONTENT_POLICY_REVISION: u32 = 2;
+pub const CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION: u32 = 1;
 /// Frozen domain for the exact canonical Core-record leaf algorithm.
 pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 /// Frozen identity of the per-source Core-record accumulator algorithm.
@@ -53,6 +54,8 @@ pub const MAX_CORE_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 /// JSON escaping can expand content beyond its decoded size. This is a decode
 /// and storage bound, not a preview or truncation policy.
 pub const MAX_ENCODED_CORE_RECORD_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum decoded UTF-8 size of each MCP tool-call attribution component.
+pub const MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES: usize = 64 * 1024;
 
 const MAX_TEXT_METADATA_BYTES: usize = 64 * 1024;
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
@@ -80,6 +83,7 @@ struct CoreContractRevisions {
     record: u32,
     normalization: u32,
     content_policy: u32,
+    mcp_tool_call_attribution: u32,
     accumulator_identity: &'static [u8],
     repository_contract: u32,
     repository_observation: u32,
@@ -96,6 +100,7 @@ impl CoreContractRevisions {
             record: CORE_RECORD_VERSION,
             normalization: CORE_NORMALIZATION_REVISION,
             content_policy: CORE_CONTENT_POLICY_REVISION,
+            mcp_tool_call_attribution: CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION,
             accumulator_identity: CORE_RECORD_ACCUMULATOR_IDENTITY,
             repository_contract: CORE_REPOSITORY_CONTRACT_REVISION,
             repository_observation: CORE_REPOSITORY_OBSERVATION_REVISION,
@@ -116,6 +121,7 @@ fn core_record_contract_fingerprint_for(revisions: CoreContractRevisions) -> Str
     digest.update(revisions.record.to_be_bytes());
     digest.update(revisions.normalization.to_be_bytes());
     digest.update(revisions.content_policy.to_be_bytes());
+    digest.update(revisions.mcp_tool_call_attribution.to_be_bytes());
     digest.update(revisions.repository_contract.to_be_bytes());
     digest.update(revisions.repository_observation.to_be_bytes());
     digest.update(revisions.bounded_shell_subset.to_be_bytes());
@@ -272,6 +278,18 @@ pub enum CoreContentPolicyStatus {
     Omitted { reason: String },
 }
 
+/// Provider-neutral attribution for a confirmed MCP tool call.
+///
+/// Provider adapters are responsible for deciding whether their native
+/// evidence proves this shape. Core stores only the exact decoded components
+/// and rejects malformed persisted values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpToolCallAttribution {
+    pub server: String,
+    pub tool: String,
+}
+
 /// One complete, generation-owned normalized history event.
 ///
 /// Provider read-time locators are intentionally absent. `source` identifies
@@ -290,6 +308,14 @@ pub struct CoreRecord {
     pub event_sequence: u64,
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_mcp_tool_call"
+    )]
+    /// Durable attribution is admitted only for policy-selected Core content.
+    /// Presentation-time content suppression does not change this field.
+    pub mcp_tool_call: Option<McpToolCallAttribution>,
     pub role: Option<String>,
     pub agent_type: String,
     pub is_primary: bool,
@@ -316,6 +342,7 @@ pub struct CoreRecord {
 /// index writer while sharing one bounded annotation shape across adapters.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CoreRecordAnnotation {
+    pub mcp_tool_call: Option<McpToolCallAttribution>,
     pub structured_content: Option<serde_json::Value>,
     pub metadata: BTreeMap<String, serde_json::Value>,
     pub repository_candidate_evidence: RepositoryCandidateEvidence,
@@ -339,6 +366,8 @@ struct RepositoryReuseInput<'a> {
     event_sequence: u64,
     occurred_at_unix_ms: Option<i64>,
     event_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_tool_call: &'a Option<McpToolCallAttribution>,
     role: &'a Option<String>,
     agent_type: &'a str,
     is_primary: bool,
@@ -366,6 +395,7 @@ impl<'a> From<&'a CoreRecord> for RepositoryReuseInput<'a> {
             event_sequence: record.event_sequence,
             occurred_at_unix_ms: record.occurred_at_unix_ms,
             event_type: &record.event_type,
+            mcp_tool_call: &record.mcp_tool_call,
             role: &record.role,
             agent_type: &record.agent_type,
             is_primary: record.is_primary,
@@ -413,6 +443,7 @@ impl CoreRecord {
             event_sequence,
             occurred_at_unix_ms: None,
             event_type: event_type.into(),
+            mcp_tool_call: None,
             role: None,
             agent_type: agent_type.into(),
             is_primary,
@@ -463,6 +494,15 @@ impl CoreRecord {
                 .map_err(|_| CoreRecordError::InvalidIdentityRelationship)?;
         }
         validate_text("event_type", &self.event_type, MAX_TEXT_METADATA_BYTES)?;
+        if let Some(attribution) = &self.mcp_tool_call {
+            if !matches!(
+                &self.content.policy_status,
+                CoreContentPolicyStatus::Selected
+            ) {
+                return Err(CoreRecordError::InvalidContentPolicyState);
+            }
+            attribution.validate_contract()?;
+        }
         validate_optional_text("role", self.role.as_deref(), MAX_TEXT_METADATA_BYTES)?;
         validate_text("agent_type", &self.agent_type, MAX_TEXT_METADATA_BYTES)?;
         validate_optional_text(
@@ -699,6 +739,30 @@ impl CoreRecord {
         }
         Ok(())
     }
+}
+
+impl McpToolCallAttribution {
+    pub fn validate_contract(&self) -> CoreRecordResult<()> {
+        validate_text(
+            "mcp_tool_call.server",
+            &self.server,
+            MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+        )?;
+        validate_text(
+            "mcp_tool_call.tool",
+            &self.tool,
+            MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+        )
+    }
+}
+
+fn deserialize_present_mcp_tool_call<'de, D>(
+    deserializer: D,
+) -> Result<Option<McpToolCallAttribution>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    McpToolCallAttribution::deserialize(deserializer).map(Some)
 }
 
 impl CoreContent {

@@ -83,6 +83,28 @@ than a cursor. The in-repo Rust SDK follows the complete CLI path when both
 `ShowSessionOptions.limit` and `.cursor` are absent, and uses this MCP page
 contract when either is supplied.
 
+Qualifying event rows from `show_event`, `show_session`, and `query_events`
+include the same optional `mcp_tool_call: {server, tool}` object as CLI JSON.
+Its presence identifies the exact source-time MCP dispatch server and
+advertised tool on an observed execution; absence means only that no qualifying
+exact pair was published. The complete object is omitted rather than `null`.
+The names are opaque private local data and can contain sensitive identifiers
+or controls. `structuredContent` preserves exact values; text fallback escapes
+them for display. Text fallback retains the first 256 Unicode scalar values of
+each component independently, appends `… [display truncated]` when a component
+is longer, and emits
+`MCP identity display truncated; inspect structuredContent for exact JSON values.`
+
+Ordinary tool results are selected by `show_session` only in `mode: "log"`.
+To filter an entire session, request one bounded log-mode page, retain event
+rows that contain `mcp_tool_call` on the client, and repeat with the returned
+`pagination.next_cursor` while `pagination.has_more` is true. Keep the session
+ID and mode unchanged. For cross-session enumeration, use the existing
+`query_events` cursor, optionally request `content: "none"`, and apply the same
+presence filter to each page. Attribution adds no MCP selector, query input,
+tool, SQL surface, or search behavior. See
+[`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md).
+
 The `status` tool returns the CLI JSON status read model unchanged in
 `structuredContent`: the Core history report plus `upgrade`, `pro`,
 compact `local_usage`, and `read_only: true`. The added facts remain

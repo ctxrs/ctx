@@ -16,6 +16,9 @@ go_library(
         "errors.go",
         "hosted.go",
         "local_cli.go",
+        "local_process.go",
+        "local_process_posix.go",
+        "local_process_windows.go",
         "normalize.go",
         "types.go",
         "version.go",
@@ -26,6 +29,10 @@ go_library(
 
 go_test(
     name = "go_sdk_tests",
-    srcs = ["client_test.go"],
+    srcs = [
+        "client_test.go",
+        "local_process_test.go",
+    ],
+    data = ["//:agent_history_contract_fixtures"],
     embed = [":go_sdk"],
 )

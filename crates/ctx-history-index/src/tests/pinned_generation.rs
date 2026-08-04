@@ -6,7 +6,10 @@ fn publish_pinned_test_generation(
     revision: u8,
     body: &str,
 ) -> CommitReceipt {
-    let mut writer = GenerationWriter::open(root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(document(source, 1, body)).unwrap();
     writer

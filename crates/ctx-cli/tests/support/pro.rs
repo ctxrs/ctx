@@ -109,6 +109,8 @@ pub(crate) fn initialize_empty_current_query_store(data_root: &Path) -> String {
         },
     )
     .unwrap()
+    .into_writer()
+    .unwrap()
     .commit(|_| true)
     .unwrap();
     let verified = VerifiedIndex::open(index_root).unwrap();
@@ -355,16 +357,16 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
             "normalized_body": "provider-neutral Pro query fixture",
             "structured_content": null,
         },
-        "metadata": {},
-        "repository_candidate_evidence": {
-            "repository_observation_revision":
-                ctx_history_core::CORE_REPOSITORY_OBSERVATION_REVISION,
+         "metadata": {},
+         "repository_candidate_evidence": {
+             "repository_observation_revision":
+                 ctx_history_core::CORE_REPOSITORY_OBSERVATION_REVISION,
             "bounded_shell_subset_revision":
                 ctx_history_core::CORE_BOUNDED_SHELL_SUBSET_REVISION,
             "association_policy_revision":
                 ctx_history_core::CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
-            "outcome_capture_revision":
-                ctx_history_core::CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+             "outcome_capture_revision":
+                 ctx_history_core::CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             "candidates": [
                 {"kind": "session_cwd", "path": "/fixture/repository"},
                 {"kind": "file_activity_path", "path": "/fixture/repository/src/lib.rs"},
@@ -408,6 +410,8 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
             memory_bytes: 32 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source).unwrap();
     writer.add_core_record(record).unwrap();

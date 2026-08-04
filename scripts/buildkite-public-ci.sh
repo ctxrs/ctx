@@ -64,9 +64,11 @@ install_ubuntu_tools() {
     ca-certificates \
     curl \
     default-jdk-headless \
+    dotnet-sdk-8.0 \
     git \
     jq \
     nodejs \
+    npm \
     openssl \
     pkg-config \
     python3 \
@@ -125,6 +127,7 @@ print_tool_versions() {
   npm --version
   javac -version
   java -version
+  dotnet --info
   ruby --version
   jq --version
   rg --version
@@ -136,4 +139,8 @@ init_buildkite_job_tool_env
 install_ubuntu_tools
 configure_bazelisk
 print_tool_versions
+bash scripts/check-sdks.sh --groups=contracts,typescript,python,go,jvm,dotnet --required-groups=contracts,typescript,python,go,jvm,dotnet
+# Rust SDK compilation and tests remain authoritative native targets in every
+# check.sh mode; the direct gate above owns the other Linux SDK toolchains,
+# including the Linux-specific .NET process-tree implementation.
 bash scripts/check.sh "${check_args[@]}"

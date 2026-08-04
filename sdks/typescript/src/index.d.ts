@@ -271,6 +271,11 @@ export interface Citation {
   eventSeq?: number | null;
 }
 
+export interface McpToolCall {
+  server: string;
+  tool: string;
+}
+
 export interface AgentHistoryEvent {
   ctxEventId?: string | null;
   ctxSessionId?: string | null;
@@ -282,6 +287,7 @@ export interface AgentHistoryEvent {
   role?: string | null;
   occurredAt?: string | null;
   text?: string | null;
+  mcpToolCall?: McpToolCall;
   content?: CoreContentMetadata;
   citations?: Citation[];
 }

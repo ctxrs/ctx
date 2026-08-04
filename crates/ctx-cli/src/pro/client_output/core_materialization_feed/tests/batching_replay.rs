@@ -440,7 +440,10 @@ fn source_page_admission_rejects_an_oversized_singleton_with_typed_error() {
 fn same_certificate_and_count_with_changed_core_record_is_reconciled() {
     let temp = tempdir().unwrap();
     let source = source("changed.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(
         &mut writer,
         &source,
@@ -459,7 +462,10 @@ fn same_certificate_and_count_with_changed_core_record_is_reconciled() {
     drop(first);
     consumer.event_pages.clear();
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(
         &mut writer,
         &source,
@@ -501,7 +507,10 @@ fn unchanged_large_source_is_not_resent_when_another_source_changes() {
     let temp = tempdir().unwrap();
     let large = source("large.jsonl");
     let changed = source("changed.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &large, 1, vec!["L".repeat(32 * 1024)]);
     add_source(&mut writer, &changed, 2, vec!["changed body".to_owned()]);
     writer.commit(|_| true).unwrap();
@@ -541,7 +550,10 @@ fn unchanged_large_source_is_not_resent_when_another_source_changes() {
 fn current_replay_is_a_no_op_with_no_delta_or_event_pages() {
     let temp = tempdir().unwrap();
     let source = source("replay.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
@@ -570,7 +582,10 @@ fn missing_route_grace_rollover_finishes_without_source_or_event_mutations() {
     let temp = tempdir().unwrap();
     let source = source("missing-route-grace.jsonl");
     let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &source, 1, vec!["unchanged body".to_owned()]);
     writer
         .set_present_source_routes(vec![SourceRouteSnapshot::present(
@@ -592,7 +607,10 @@ fn missing_route_grace_rollover_finishes_without_source_or_event_mutations() {
     consumer.event_pages.clear();
     consumer.finish = None;
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.set_present_source_routes(Vec::new()).unwrap();
     let grace = writer
         .observe_certified_missing_route(route.clone(), 100, DELETE_AFTER, || true)
@@ -920,7 +938,10 @@ fn journaled_source_state_and_event_retries_are_exact_and_divergence_fails_close
 fn event_item_boundary_batches_pages_without_changing_finish_counts_or_page_ids() {
     let temp = tempdir().unwrap();
     let source = source("item-boundary.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(
         &mut writer,
         &source,
@@ -966,7 +987,10 @@ fn event_item_boundary_batches_pages_without_changing_finish_counts_or_page_ids(
 fn tiny_sources_scale_event_envelopes_as_ceiling_total_pages_over_sixteen() {
     const SOURCE_COUNT: usize = 1_024;
     let temp = tempdir().unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     for index in 0..SOURCE_COUNT {
         let source = source(&format!("tiny-source-{index:04}.jsonl"));
         add_source(&mut writer, &source, 1, vec![format!("body {index}")]);
@@ -1015,7 +1039,10 @@ fn tiny_sources_scale_event_envelopes_as_ceiling_total_pages_over_sixteen() {
 fn mixed_multi_page_and_tiny_sources_share_globally_bounded_envelopes() {
     const TINY_SOURCES: usize = 31;
     let temp = tempdir().unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let large = source("mixed-large-source.jsonl");
     add_source(
         &mut writer,

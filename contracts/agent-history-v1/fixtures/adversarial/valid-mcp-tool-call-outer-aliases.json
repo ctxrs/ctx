@@ -1,0 +1,1 @@
+{"event":{"text":"snake outer alias","mcp_tool_call":{"server":"snake-server","tool":"snake-tool"},"mcp_tool_calls":{"note":"ordinary unknown"},"future_event_field":"snake-extra"},"events":[{"text":"camel outer alias","mcpToolCall":{"server":"camel-server","tool":"camel-tool"},"mcpToolCalls":{"note":"ordinary unknown"},"futureEventField":"camel-extra"}]}

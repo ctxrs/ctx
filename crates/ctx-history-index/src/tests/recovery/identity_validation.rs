@@ -2,7 +2,10 @@
 fn certificate_count_mismatch_is_rejected_before_commit() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -20,7 +23,10 @@ fn certificate_count_mismatch_is_rejected_before_commit() {
 fn duplicate_event_identity_is_rejected_by_prepublication_term_audit() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     let duplicate = document(&source, 1, "first");
     writer.add_core_record(duplicate.clone()).unwrap();
@@ -37,7 +43,10 @@ fn duplicate_event_identity_is_rejected_by_prepublication_term_audit() {
 fn verified_generation_rejects_a_forged_duplicate_event_identity() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -75,7 +84,10 @@ fn verified_generation_rejects_forged_source_ownership() {
     let temp = tempdir().unwrap();
     let first = source("first.jsonl");
     let second = source("second.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(first.clone()).unwrap();
     writer.add_core_record(document(&first, 1, "body")).unwrap();
     writer.certify_source(certificate(&first, 1, 1)).unwrap();
@@ -126,7 +138,10 @@ fn verified_generation_rejects_forged_source_ownership() {
 fn verified_generation_rejects_malformed_stored_core_during_exhaustive_audit() {
     let temp = tempdir().unwrap();
     let source = source("malformed-core.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     let event = document(&source, 1, "complete body");
     writer.add_core_record(event).unwrap();
@@ -170,7 +185,10 @@ fn verified_generation_rejects_malformed_stored_core_during_exhaustive_audit() {
 fn document_identity_kinds_are_checked() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     let mut invalid = document(&source, 1, "body");
     invalid.event_id = invalid.session_id;
@@ -183,7 +201,10 @@ fn document_identities_must_belong_to_the_document_source() {
     let temp = tempdir().unwrap();
     let first = source("first");
     let second = source("second");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(second.clone()).unwrap();
     let mut invalid = document(&first, 1, "body");
     invalid.source = second;
@@ -195,7 +216,10 @@ fn document_identities_must_belong_to_the_document_source() {
 fn empty_core_body_is_rejected_by_the_canonical_writer_validation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     let mut invalid = document(&source, 1, "body");
     invalid.content.normalized_body = Some(String::new());

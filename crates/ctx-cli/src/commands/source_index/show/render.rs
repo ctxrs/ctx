@@ -125,7 +125,7 @@ pub(in crate::commands::source_index) fn render_event_value(event: &CoreEventRec
         CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), false),
         CoreContentPolicyStatus::Omitted { reason } => ("omitted", Some(reason.as_str()), false),
     };
-    compact_json(json!({
+    let mut rendered = compact_json(json!({
         "ctx_event_id": event.event_id.as_uuid(),
         "item_id": event.event_id.as_uuid(),
         "record_type": "event",
@@ -152,5 +152,7 @@ pub(in crate::commands::source_index) fn render_event_value(event: &CoreEventRec
             "policy_status": policy_status,
             "policy_reason": policy_reason,
         },
-    }))
+    }));
+    crate::commands::mcp_tool_call::insert_mcp_tool_call(&mut rendered, &event.core_record);
+    rendered
 }

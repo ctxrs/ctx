@@ -3,6 +3,9 @@ set -euo pipefail
 
 pipeline=".buildkite/pipeline.yml"
 public_ci_script="scripts/buildkite-public-ci.sh"
+sdk_check_script="scripts/check-sdks.sh"
+sdk_pipeline_check_script="scripts/check-sdk-ci-pipeline.py"
+sdk_required_groups_test="scripts/tests/check-sdks-required-groups-test.sh"
 artifact_script="scripts/build-public-cli-artifact.sh"
 artifact_check_script="scripts/check-public-cli-artifact.sh"
 compat_check_script="scripts/check-release-binary-compat.sh"
@@ -21,6 +24,9 @@ semantic_append_script="scripts/append-semantic-release-metadata.sh"
 staging_script="scripts/stage-github-release-assets.sh"
 test -f "${pipeline}"
 test -f "${public_ci_script}"
+test -f "${sdk_check_script}"
+test -f "${sdk_pipeline_check_script}"
+test -f "${sdk_required_groups_test}"
 test -f "${artifact_script}"
 test -f "${artifact_check_script}"
 test -f "${compat_check_script}"
@@ -42,6 +48,10 @@ if [[ -e ".github/workflows/public-ci.yml" ]]; then
   printf 'public GitHub Actions CI workflow should be migrated to Buildkite\n' >&2
   exit 1
 fi
+
+bash "${sdk_required_groups_test}"
+python3 "${sdk_pipeline_check_script}" \
+  "${pipeline}" "${public_ci_script}" "${sdk_check_script}"
 
 python3 - "${pipeline}" <<'PY'
 from collections import Counter
@@ -232,6 +242,8 @@ def validate_validation_routes(blocks):
     for index, block in enumerate(blocks):
         if index in (release_index, release_wait_index):
             continue
+        if step_key(block) in ("sdk-swift-required", "sdk-windows-required"):
+            continue
         condition = scalar(block, "if", required=False)
         if condition and release_condition in condition:
             require_route(
@@ -255,7 +267,7 @@ def expect_rejection(name, blocks):
 pipeline = open(sys.argv[1], encoding="utf-8").read()
 steps = split_steps(pipeline)
 require_route(
-    len(steps) == 19,
+    len(steps) == 21,
     "pipeline should include public validation and bounded release matrices",
 )
 validate_validation_routes(steps)
@@ -293,7 +305,7 @@ if command -v ruby >/dev/null 2>&1; then
     data = YAML.load_file(ARGV.fetch(0))
     abort "pipeline must have steps" unless data.is_a?(Hash) && data["steps"].is_a?(Array)
     steps = data["steps"]
-    abort "pipeline should include public validation and bounded release matrices" unless steps.length == 19
+    abort "pipeline should include public validation and bounded release matrices" unless steps.length == 21
     smoke = steps.fetch(0)
     abort "pipeline step must be a mapping" unless smoke.is_a?(Hash)
     abort "pipeline public smoke step must be keyed" unless smoke.key?("key")
@@ -322,6 +334,9 @@ if command -v ruby >/dev/null 2>&1; then
       semantic-release-handoff
     ]
     actual_keys = steps.filter_map { |step| step["key"] if step.is_a?(Hash) }
+    %w[sdk-swift-required sdk-windows-required].each do |key|
+      abort "missing required SDK step #{key}" unless actual_keys.include?(key)
+    end
     required_keys.each { |key| abort "missing gated artifact step #{key}" unless actual_keys.include?(key) }
     artifact_keys = required_keys.first(6)
     artifact_bases = {
@@ -609,6 +624,12 @@ for required in \
   'build.source != "schedule"' \
   'queue: "default"' \
   'bash scripts/buildkite-public-ci.sh --mode=ci' \
+  'key: "sdk-swift-required"' \
+  'key: "sdk-windows-required"' \
+  'bash scripts/check-sdks.sh --groups=jvm,swift --required-groups=jvm,swift' \
+  'bash scripts/check-sdks.sh --groups=typescript,python,go,dotnet --required-groups=typescript,python,go,dotnet' \
+  'bash scripts/bazelw test //crates/ctx-sdk:unit_tests --config=ci' \
+  'bash scripts/check-sdks.sh --groups=contracts,typescript,python,go,jvm,dotnet --required-groups=contracts,typescript,python,go,jvm,dotnet' \
   'target/ctx-artifacts/check/**' \
   'concurrency_group: "ctx/public-smoke/default-hosted"' \
   'CTX_RUST_TOOLCHAIN: "1.97.1"' \
@@ -692,6 +713,9 @@ for required in \
   for checked_file in \
     "${pipeline}" \
     "${public_ci_script}" \
+    "${sdk_check_script}" \
+    "${sdk_pipeline_check_script}" \
+    "${sdk_required_groups_test}" \
     "${artifact_script}" \
     "${artifact_check_script}" \
     "${compat_check_script}" \

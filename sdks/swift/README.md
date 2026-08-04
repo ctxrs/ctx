@@ -74,6 +74,11 @@ let client = AgentHistoryClient.local(
 )
 ```
 
+The built-in local process adapter is supported on macOS 12 and newer, where it
+creates a dedicated process group before the CLI can run. Other operating
+systems fail closed with a structured `not_supported` error; injected fake
+`CommandRunner` implementations remain platform independent.
+
 For tests, inject a `CommandRunner` through `LocalCLIAdapter` so no real ctx
 binary is required.
 

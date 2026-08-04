@@ -63,7 +63,7 @@ final class Json {
                 expect("null");
                 return null;
             }
-            if (ch == '-' || Character.isDigit(ch)) {
+            if (ch == '-' || isDigit(ch)) {
                 return parseNumber();
             }
             throw error("unexpected character");
@@ -80,6 +80,9 @@ final class Json {
             while (true) {
                 skipWhitespace();
                 String key = parseString();
+                if (object.containsKey(key)) {
+                    throw error("duplicate JSON object member " + key);
+                }
                 skipWhitespace();
                 expect(':');
                 Object value = parseValue();
@@ -152,6 +155,8 @@ final class Json {
                         default:
                             throw error("invalid escape");
                     }
+                } else if (ch <= 0x1f) {
+                    throw error("unescaped control character in string");
                 } else {
                     out.append(ch);
                 }
@@ -177,7 +182,14 @@ final class Json {
             if (peek('-')) {
                 index++;
             }
-            readDigits();
+            if (peek('0')) {
+                index++;
+                if (index < input.length() && isDigit(input.charAt(index))) {
+                    throw error("leading zero in number");
+                }
+            } else {
+                readDigits();
+            }
             boolean decimal = false;
             if (peek('.')) {
                 decimal = true;
@@ -202,7 +214,7 @@ final class Json {
 
         private void readDigits() {
             int start = index;
-            while (index < input.length() && Character.isDigit(input.charAt(index))) {
+            while (index < input.length() && isDigit(input.charAt(index))) {
                 index++;
             }
             if (start == index) {
@@ -226,6 +238,10 @@ final class Json {
 
         private boolean peek(char ch) {
             return index < input.length() && input.charAt(index) == ch;
+        }
+
+        private static boolean isDigit(char ch) {
+            return ch >= '0' && ch <= '9';
         }
 
         private void skipWhitespace() {

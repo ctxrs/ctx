@@ -387,8 +387,18 @@ impl GenerationWriter {
         if let Some(hook) = self.before_pointer_publication.take() {
             hook(&candidate_path);
         }
-        if let Err(error) = publish_active_generation_pointer(&root, &next_pointer) {
-            return Err(self.classify_pointer_failure(&generation_id, &next_pointer, error));
+        match publish_active_generation_pointer(&root, &next_pointer) {
+            Ok(PointerPublicationOutcome::Durable) => {}
+            Ok(PointerPublicationOutcome::CommittedVisible { detail }) => {
+                return Err(IndexError::CommittedGenerationNeedsRecovery {
+                    generation_id,
+                    stage: "active generation pointer durability",
+                    detail,
+                });
+            }
+            Err(error) => {
+                return Err(self.classify_pointer_failure(&generation_id, &next_pointer, error));
+            }
         }
         #[cfg(test)]
         if let Some(hook) = self.after_pointer_switch.take() {

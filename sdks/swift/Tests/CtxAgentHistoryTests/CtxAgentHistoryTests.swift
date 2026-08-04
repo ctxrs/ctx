@@ -238,6 +238,8 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(event.event.event?.sourceFormat, "codex_session_jsonl")
         XCTAssertEqual(event.event.event?.content?.complete, true)
         XCTAssertEqual(event.event.event?.content?.policyStatus, .selected)
+        XCTAssertEqual(event.event.event?.mcpToolCall?.server, "mcp-サーバー-🦀")
+        XCTAssertEqual(event.event.event?.mcpToolCall?.tool, "検索/工具/🛠️")
         XCTAssertEqual(event.event.event?.structuredContent?["kind"]?.stringValue, "toolResult")
         let structuredItems = event.event.event?.structuredContent?["payload"]?["items"]?.arrayValue
         let nestedStructuredValues = structuredItems?[2]["nested"]?.arrayValue
@@ -322,6 +324,146 @@ final class CtxAgentHistoryTests: XCTestCase {
             XCTAssertEqual(decoded.code, code)
             XCTAssertEqual(decoded.message, code.rawValue)
         }
+    }
+
+    func testMCPToolCallIsExactBoundedAndOuterEventRemainsExtensible() throws {
+        let decoder = JSONDecoder()
+        for invalid in [
+            #"{"server":"only-server"}"#,
+            #"{"tool":"only-tool"}"#,
+            #"{"server":"server","tool":"tool","futureLabel":true}"#,
+            #"{"server":"","tool":"tool"}"#,
+            #"{"server":"server","tool":7}"#
+        ] {
+            XCTAssertThrowsError(
+                try decoder.decode(AgentHistoryMCPToolCall.self, from: Data(invalid.utf8))
+            )
+        }
+
+        let decoded = try decoder.decode(
+            AgentHistoryMCPToolCall.self,
+            from: Data(#"{"server":"mcp-サーバー-🦀","tool":"検索/工具/🛠️"}"#.utf8)
+        )
+        XCTAssertEqual(decoded.server, "mcp-サーバー-🦀")
+        XCTAssertEqual(decoded.tool, "検索/工具/🛠️")
+
+        let encoded = try JSONEncoder().encode(decoded)
+        let encodedObject = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        XCTAssertEqual(encodedObject?["server"] as? String, "mcp-サーバー-🦀")
+        XCTAssertEqual(encodedObject?["tool"] as? String, "検索/工具/🛠️")
+        XCTAssertEqual(try decoder.decode(AgentHistoryMCPToolCall.self, from: encoded), decoded)
+
+        let exactTool = String(repeating: "🦀", count: 16_384)
+        let exact = try decoder.decode(
+            AgentHistoryMCPToolCall.self,
+            from: Data("{\"server\":\" \",\"tool\":\"\(exactTool)\"}".utf8)
+        )
+        XCTAssertEqual(exact.tool.utf8.count, AgentHistoryMCPToolCall.maximumComponentBytes)
+        XCTAssertThrowsError(
+            try decoder.decode(
+                AgentHistoryMCPToolCall.self,
+                from: Data("{\"server\":\"server\",\"tool\":\"\(String(repeating: "a", count: 64 * 1024 + 1))\"}".utf8)
+            )
+        )
+
+        XCTAssertNoThrow(
+            try decoder.decode(
+                AgentHistoryEventRecord.self,
+                from: Data(#"{"mcpToolCall":{"server":"server","tool":"tool"},"futureEventField":true}"#.utf8)
+            )
+        )
+        XCTAssertThrowsError(
+            try decoder.decode(AgentHistoryEventRecord.self, from: Data(#"{"mcpToolCall":null}"#.utf8))
+        )
+
+        let nullRunner = CapturingRunner { _ in
+            CommandResult(stdout: #"{"event":{"mcp_tool_call":null},"events":[]}"#)
+        }
+        let nullClient = AgentHistoryClient(adapter: LocalCLIAdapter(runner: nullRunner))
+        XCTAssertThrowsError(try nullClient.showEvent("event-1"))
+
+        let omittedRunner = CapturingRunner { _ in
+            CommandResult(stdout: #"{"event":{"text":"no MCP metadata"},"events":[{"text":"window omission"}]}"#)
+        }
+        let omittedClient = AgentHistoryClient(adapter: LocalCLIAdapter(runner: omittedRunner))
+        let omitted = try omittedClient.showEvent("event-1")
+        XCTAssertNil(omitted.event.event?.mcpToolCall)
+        XCTAssertNil(omitted.event.events.first?.mcpToolCall)
+
+        let windowNullRunner = CapturingRunner { _ in
+            CommandResult(stdout: #"{"event":{"text":"selected"},"events":[{"mcp_tool_call":null}]}"#)
+        }
+        XCTAssertThrowsError(
+            try AgentHistoryClient(adapter: LocalCLIAdapter(runner: windowNullRunner))
+                .showEvent("event-1")
+        )
+
+        let sessionNullRunner = CapturingRunner { _ in
+            CommandResult(stdout: #"{"session":{},"events":[{"mcpToolCall":null}],"mode":"lite","format":"json"}"#)
+        }
+        XCTAssertThrowsError(
+            try AgentHistoryClient(adapter: LocalCLIAdapter(runner: sessionNullRunner))
+                .showSession("session-1")
+        )
+
+        let sessionOmittedRunner = CapturingRunner { _ in
+            CommandResult(stdout: #"{"session":{},"events":[{"text":"no MCP metadata"}],"mode":"lite","format":"json"}"#)
+        }
+        let session = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: sessionOmittedRunner))
+            .showSession("session-1")
+        XCTAssertNil(session.session.events.first?.mcpToolCall)
+    }
+
+    func testRawMCPToolCallDuplicateMembersAreRejectedStructurally() throws {
+        let fixtureDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "contracts/agent-history-v1/fixtures/adversarial",
+                isDirectory: true
+            )
+        for name in [
+            "duplicate-event-mcp-tool-call-snake.json",
+            "duplicate-event-mcp-tool-call-camel.json",
+            "duplicate-mcp-tool-call-server.json",
+            "duplicate-mcp-tool-call-tool.json",
+            "invalid-mcp-tool-call-transformed-server.json",
+            "invalid-mcp-tool-call-transformed-tool.json",
+            "invalid-mcp-tool-call-transformed-collision.json",
+            "invalid-mcp-tool-call-outer-alias-collision.json",
+            "invalid-mcp-tool-call-outer-mixed-case.json",
+            "invalid-mcp-tool-call-outer-repeated-separator.json",
+            "invalid-mcp-tool-call-outer-trailing-separator.json",
+            "invalid-mcp-tool-call-outer-camel-snake.json"
+        ] {
+            let data = try Data(contentsOf: fixtureDirectory.appendingPathComponent(name))
+            let runner = CapturingRunner { _ in CommandResult(stdout: data) }
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            XCTAssertThrowsError(try client.showEvent("event-1"), name)
+        }
+
+        let repeated = try Data(
+            contentsOf: fixtureDirectory.appendingPathComponent("valid-repeated-string-contents.json")
+        )
+        let runner = CapturingRunner { _ in CommandResult(stdout: repeated) }
+        let response = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            .showEvent("event-1")
+        XCTAssertEqual(response.event.event?.mcpToolCall?.server, "server server")
+        XCTAssertEqual(response.event.event?.mcpToolCall?.tool, "tool tool")
+
+        let aliases = try Data(
+            contentsOf: fixtureDirectory.appendingPathComponent("valid-mcp-tool-call-outer-aliases.json")
+        )
+        let aliasRunner = CapturingRunner { _ in CommandResult(stdout: aliases) }
+        let aliasResponse = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: aliasRunner))
+            .showEvent("event-1")
+        XCTAssertEqual(aliasResponse.event.event?.mcpToolCall?.server, "snake-server")
+        XCTAssertEqual(aliasResponse.event.event?.text, "snake outer alias")
+        XCTAssertEqual(aliasResponse.event.events.first?.mcpToolCall?.server, "camel-server")
+        XCTAssertEqual(aliasResponse.event.events.first?.text, "camel outer alias")
     }
 
     func testCamelizedPublicJSONOmitsRawMetadataKeys() throws {
@@ -419,6 +561,15 @@ final class CtxAgentHistoryTests: XCTestCase {
                     "toolResult",
                     url.lastPathComponent
                 )
+                if url.lastPathComponent == "show-event.mcp-tool-call.json" {
+                    XCTAssertEqual(envelope.event?.event?.mcpToolCall?.server, "mcp-サーバー-🦀")
+                    XCTAssertEqual(envelope.event?.event?.mcpToolCall?.tool, "検索/工具/🛠️")
+                } else if url.lastPathComponent == "show-event.window.json" {
+                    XCTAssertNil(envelope.event?.event?.mcpToolCall)
+                    let encoded = try JSONEncoder().encode(envelope.event?.event)
+                    let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+                    XCTAssertNil(object?["mcpToolCall"])
+                }
             case .showSession:
                 XCTAssertEqual(envelope.session?.session?.title, "Fixture session", url.lastPathComponent)
                 XCTAssertEqual(envelope.session?.session?.providerSessionId, "codex-fixture-session", url.lastPathComponent)
@@ -436,7 +587,7 @@ final class CtxAgentHistoryTests: XCTestCase {
 
     private static let statusJSON = #"{"initialized":true,"local_only":true,"data_root":"/tmp/ctx-sdk-test","indexed_items":3,"indexed_sessions":1,"indexed_events":2,"indexed_sources":1,"lexical":{"status":"ready","generation_id":"gen-3"},"refresh":{"status":"ready","generation_id":"gen-3"}}"#
     private static let searchJSON = #"{"query":"local agent history","filters":{"provider":"codex"},"freshness":{"mode":"off","status":"skipped","source_count":0,"totals":{"imported_events":0}},"generated_at":"2026-07-01T12:00:00Z","retrieval":{"requested_mode":"hybrid","effective_mode":"lexical","semantic_weight":0.0,"semantic_fallback_code":"semantic_retrieval_failed","semantic_fallback":"semantic_retrieval_failed","coverage":{"embedded_items":4,"indexed_now":1},"diagnostics":{"query_embed_ms":2}},"results":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","event_seq":1,"title":"Fixture session","snippet":"local agent history search result","rank":1,"retrieval_score":0.98,"result_type":"event","result_scope":"event","provider":"codex","timestamp":"2026-07-01T12:00:00Z","cwd":"/workspace/ctx","why_matched":["text"],"citations":[{"target_type":"event","ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","label":"codex event","provider":"codex"}],"suggested_next_commands":["ctx show event 11111111-1111-4111-8111-111111111111 --window 10","ctx search 'local agent history' --session 22222222-2222-4222-8222-222222222222","ctx show session 22222222-2222-4222-8222-222222222222"],"visibility":"local_only"}],"result_window":{"limit":1,"returned":1,"more_available":true},"truncation":{"truncated":false}}"#
-    private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":{"kind":"toolResult","payload":{"items":["alpha",null,{"nested":[1,false]}]}},"content":{"complete":true,"policy_status":"selected"}},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":null,"content":{"complete":true,"policy_status":"selected"}}]}"#
+    private static let eventJSON = #"{"event":{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","mcp_tool_call":{"server":"mcp-サーバー-🦀","tool":"検索/工具/🛠️"},"future_event_field":true,"structured_content":{"kind":"toolResult","payload":{"items":["alpha",null,{"nested":[1,false]}]}},"content":{"complete":true,"policy_status":"selected"}},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","occurred_at":"2026-07-01T12:00:00Z","text":"local agent history search result","structured_content":null,"content":{"complete":true,"policy_status":"selected"}}]}"#
     private static let sessionJSON = #"{"session":{"ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","title":"Fixture session"},"events":[{"ctx_event_id":"11111111-1111-4111-8111-111111111111","ctx_session_id":"22222222-2222-4222-8222-222222222222","provider":"codex","provider_session_id":"codex-fixture-session","source_format":"codex_session_jsonl","sequence":1,"event_type":"message","role":"assistant","text":"local agent history search result","content":{"complete":true,"policy_status":"selected"}}],"mode":"lite","format":"json"}"#
 }
 

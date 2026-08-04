@@ -47,6 +47,8 @@ fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String)
         ctx_history_index::WriterOptions::default(),
     )
     .unwrap()
+    .into_writer()
+    .unwrap()
     .commit(|_| true)
     .unwrap()
     .generation_id;
@@ -157,6 +159,8 @@ fn publish_changed_core_generation(data_root: &Path) -> String {
             memory_bytes: 32 * 1024 * 1024,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(record).unwrap();
@@ -367,6 +371,8 @@ fn catalog_status_reports_automatic_roots_and_request_scoped_explicit_overlays()
         &index_root,
         ctx_history_index::WriterOptions::default(),
     )
+    .unwrap()
+    .into_writer()
     .unwrap()
     .commit(|_| true)
     .unwrap()

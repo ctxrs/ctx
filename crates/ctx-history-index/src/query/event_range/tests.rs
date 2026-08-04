@@ -121,7 +121,10 @@ fn appendable_certificate(source: &SourceKey, revision: u8, documents: usize) ->
 }
 
 fn publish(root: &Path, revision: u8, sources: &[(SourceKey, Vec<CoreRecord>)]) -> String {
-    let mut writer = GenerationWriter::open(root, WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     for (source, records) in sources {
         writer.begin_source(source.clone()).unwrap();
         for record in records {
@@ -324,7 +327,10 @@ fn thirty_two_segment_oracle_covers_heap_directions_boundaries_and_indexed_filte
     let mut records = Vec::with_capacity(SEGMENTS * EVENTS_PER_SEGMENT);
     for segment in 0..SEGMENTS {
         let revision = u8::try_from(segment + 1).unwrap();
-        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         writer
             .writer_mut()
             .unwrap()
@@ -756,7 +762,10 @@ fn active_range_tracks_noop_rewrite_and_certified_deletion() {
     assert_eq!(rewritten_index.document_count(), rewritten.len() as u64);
 
     let (deletion, inventory) = deletion_evidence(&source, 3);
-    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     deleting.delete_source(deletion, inventory).unwrap();
     let deleted_generation = deleting.commit(|_| true).unwrap().generation_id;
     assert_ne!(deleted_generation, rewritten_generation);

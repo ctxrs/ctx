@@ -24,9 +24,9 @@ from ctx_agent_history import (
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
-from ctx_agent_history.agent_history_v1 import normalize_import, normalize_sources, normalize_status
+from ctx_agent_history.agent_history_v1 import normalize_event, normalize_import, normalize_sources, normalize_status
 from ctx_agent_history.transport import LocalCliAdapter
-from ctx_agent_history.types import AgentHistoryErrorCode, SearchHit
+from ctx_agent_history.types import AgentHistoryErrorCode, Event, McpToolCall, SearchHit
 import dogfood_local
 
 
@@ -70,12 +70,143 @@ class LocalCliAdapterTests(unittest.TestCase):
         show_event_hints = typing.get_type_hints(AgentHistoryClient.showEvent)
         show_session_hints = typing.get_type_hints(AgentHistoryClient.showSession)
         search_hit_hints = typing.get_type_hints(SearchHit)
+        event_hints = typing.get_type_hints(Event)
+        mcp_tool_call_hints = typing.get_type_hints(McpToolCall)
         self.assertEqual(show_event_hints["event_id"], str)
         self.assertEqual(show_event_hints["return"].__name__, "ShowEventResponse")
         self.assertEqual(show_session_hints["session_id"], str)
         self.assertEqual(show_session_hints["return"].__name__, "ShowSessionResponse")
         self.assertEqual(search_hit_hints["rank"], typing.Optional[float])
         self.assertEqual(search_hit_hints["retrievalScore"], typing.Optional[float])
+        self.assertEqual(event_hints["mcpToolCall"], McpToolCall)
+        self.assertEqual(mcp_tool_call_hints, {"server": str, "tool": str})
+        self.assertEqual(McpToolCall.__required_keys__, frozenset({"server", "tool"}))
+
+    def test_mcp_tool_call_metadata_is_exact_bounded_and_omits_absence(self) -> None:
+        result = normalize_event(
+            {
+                "event": {
+                    "mcp_tool_call": {
+                        "server": "mcp-サーバー-🦀",
+                        "tool": "検索/工具/🛠️",
+                    },
+                    "future_event_field": {"preserved": True},
+                },
+                "events": [{}],
+            }
+        )
+
+        call = result["event"]["mcpToolCall"]
+        self.assertEqual(call["server"], "mcp-サーバー-🦀")
+        self.assertEqual(call["tool"], "検索/工具/🛠️")
+        self.assertEqual(result["event"]["futureEventField"], {"preserved": True})
+        self.assertNotIn("mcpToolCall", result["events"][0])
+        self.assertEqual(json.loads(json.dumps(call, ensure_ascii=False)), call)
+
+        exact = normalize_event(
+            {"event": {"mcpToolCall": {"server": " ", "tool": "🦀" * 16_384}}, "events": []}
+        )
+        self.assertEqual(len(exact["event"]["mcpToolCall"]["tool"].encode()), 64 * 1024)
+
+        for invalid in (
+            {"server": "server"},
+            {"server": "server", "tool": "tool", "futureLabel": True},
+            {"server": "", "tool": "tool"},
+            {"server": "server", "tool": "a" * (64 * 1024 + 1)},
+            {"server": "server", "tool": 7},
+            {"server": "server", "tool": "\ud800"},
+            None,
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(CtxAgentHistoryProtocolError):
+                    normalize_event({"event": {"mcpToolCall": invalid}, "events": []})
+
+    def test_raw_mcp_tool_call_duplicates_are_rejected_structurally(self) -> None:
+        fixture_dir = (
+            Path(__file__).resolve().parents[3]
+            / "contracts"
+            / "agent-history-v1"
+            / "fixtures"
+            / "adversarial"
+        )
+        client = AgentHistoryClient.local(ctx_binary="ctx-test")
+        invalid_paths = sorted(fixture_dir.glob("duplicate-*.json")) + sorted(
+            fixture_dir.glob("invalid-mcp-tool-call-transformed-*.json")
+        )
+        invalid_paths.extend(
+            fixture_dir / name
+            for name in (
+                "invalid-mcp-tool-call-outer-alias-collision.json",
+                "invalid-mcp-tool-call-outer-mixed-case.json",
+                "invalid-mcp-tool-call-outer-repeated-separator.json",
+                "invalid-mcp-tool-call-outer-trailing-separator.json",
+                "invalid-mcp-tool-call-outer-camel-snake.json",
+            )
+        )
+        for path in invalid_paths:
+            completed = subprocess.CompletedProcess(
+                ["ctx-test", "show", "event"],
+                0,
+                stdout=path.read_text(encoding="utf-8"),
+                stderr="",
+            )
+            with self.subTest(fixture=path.name):
+                with mock.patch(
+                    "ctx_agent_history.transport.run_local_cli",
+                    return_value=completed,
+                ):
+                    with self.assertRaises(CtxAgentHistoryProtocolError):
+                        client.show_event("event-1")
+
+        repeated = fixture_dir / "valid-repeated-string-contents.json"
+        completed = subprocess.CompletedProcess(
+            ["ctx-test", "show", "event"],
+            0,
+            stdout=repeated.read_text(encoding="utf-8"),
+            stderr="",
+        )
+        with mock.patch("ctx_agent_history.transport.run_local_cli", return_value=completed):
+            event = client.show_event("event-1")["event"]["event"]
+        self.assertEqual(event["mcpToolCall"], {"server": "server server", "tool": "tool tool"})
+        self.assertEqual(
+            event["text"],
+            "server tool mcpToolCall mcp_tool_call server tool mcpToolCall mcp_tool_call",
+        )
+
+        aliases = fixture_dir / "valid-mcp-tool-call-outer-aliases.json"
+        completed = subprocess.CompletedProcess(
+            ["ctx-test", "show", "event"],
+            0,
+            stdout=aliases.read_text(encoding="utf-8"),
+            stderr="",
+        )
+        with mock.patch("ctx_agent_history.transport.run_local_cli", return_value=completed):
+            result = client.show_event("event-1")["event"]
+        self.assertEqual(result["event"]["mcpToolCall"]["server"], "snake-server")
+        self.assertEqual(result["event"]["mcpToolCalls"], {"note": "ordinary unknown"})
+        self.assertEqual(result["event"]["futureEventField"], "snake-extra")
+        self.assertEqual(result["events"][0]["mcpToolCall"]["server"], "camel-server")
+        self.assertEqual(result["events"][0]["mcpToolCalls"], {"note": "ordinary unknown"})
+        self.assertEqual(result["events"][0]["futureEventField"], "camel-extra")
+
+    def test_non_finite_json_constants_are_rejected(self) -> None:
+        client = AgentHistoryClient.local(ctx_binary="ctx-test")
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            completed = subprocess.CompletedProcess(
+                ["ctx-test", "status"],
+                0,
+                stdout=f'{{"initialized":true,"future":{constant}}}',
+                stderr="",
+            )
+            with self.subTest(constant=constant):
+                with mock.patch(
+                    "ctx_agent_history.transport.run_local_cli",
+                    return_value=completed,
+                ):
+                    with self.assertRaises(CtxAgentHistoryProtocolError) as raised:
+                        client.status()
+                self.assertEqual(raised.exception.code, "decode_error")
+                self.assertEqual(raised.exception.message, "ctx returned invalid JSON")
 
     def test_status_uses_local_cli_json(self) -> None:
         with fake_ctx() as cli:
@@ -119,12 +250,12 @@ class LocalCliAdapterTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             ["ctx", "status", "--format=json"],
             0,
-            stdout=b'{"initialized":true,"local_only":true}',
-            stderr=b"",
+            stdout='{"initialized":true,"local_only":true}',
+            stderr="",
         )
         with mock.patch.dict(os.environ, {"CTX_ANALYTICS_ENABLED": "true"}):
             with mock.patch(
-                "ctx_agent_history.transport.subprocess.run",
+                "ctx_agent_history.transport.run_local_cli",
                 return_value=completed,
             ) as run:
                 client = AgentHistoryClient.local(
@@ -402,6 +533,16 @@ class ContractFixtureSmokeTests(unittest.TestCase):
                 with fixture.open("r", encoding="utf-8") as handle:
                     payload = json.load(handle)
                 assert_agent_history_v1_envelope(self, payload)
+
+    def test_old_and_new_event_fixtures_expose_optional_mcp_tool_call(self) -> None:
+        root = Path(__file__).resolve().parents[3]
+        fixture_dir = root / "contracts" / "agent-history-v1" / "fixtures"
+        old = json.loads((fixture_dir / "show-event.window.json").read_text(encoding="utf-8"))
+        new = json.loads((fixture_dir / "show-event.mcp-tool-call.json").read_text(encoding="utf-8"))
+
+        self.assertNotIn("mcpToolCall", old["event"]["event"])
+        self.assertEqual(new["event"]["event"]["mcpToolCall"]["server"], "mcp-サーバー-🦀")
+        self.assertEqual(new["event"]["event"]["mcpToolCall"]["tool"], "検索/工具/🛠️")
 
 
 class DogfoodExampleTests(unittest.TestCase):

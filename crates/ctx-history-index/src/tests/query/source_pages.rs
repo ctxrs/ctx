@@ -12,7 +12,10 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     let other_first = document(&other, 1, "other first");
     let other_second = document(&other, 2, "other second");
 
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first
         .writer_mut()
         .unwrap()
@@ -29,7 +32,10 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
     first.certify_source(certificate(&other, 1, 2)).unwrap();
     first.commit(|_| true).unwrap();
 
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     append
         .writer_mut()
         .unwrap()
@@ -179,7 +185,10 @@ fn stored_core_source_page_retains_canonical_round_trip_bytes() {
         document(&source, 1, "plain body"),
         document(&source, 2, "escaped \0 \"body\" ☃"),
     ];
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for record in &records {
         writer.add_core_record(record.clone()).unwrap();
@@ -227,7 +236,10 @@ fn source_event_second_page_reopens_without_materializing_the_remaining_source()
     let temp = tempdir().unwrap();
     let source = source("large-paged-source.jsonl");
     let mut expected = Vec::with_capacity(EVENT_COUNT as usize);
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for sequence in 1..=EVENT_COUNT {
         let event = document(&source, sequence, "large source body");
@@ -312,7 +324,10 @@ fn sparse_source_pages_visit_only_exact_source_terms_across_segments_and_reopen(
     let temp = tempdir().unwrap();
     let target = source("sparse-target.jsonl");
     let mut expected = Vec::new();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer
         .writer_mut()
         .unwrap()
@@ -340,7 +355,10 @@ fn sparse_source_pages_visit_only_exact_source_terms_across_segments_and_reopen(
     }
     writer.commit(|_| true).unwrap();
 
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     append
         .writer_mut()
         .unwrap()
@@ -436,7 +454,10 @@ fn source_event_byte_budget_returns_large_singletons_without_skips_or_extra_deco
     ];
     let mut expected_content_bytes = HashMap::new();
     let mut expected_ids = Vec::new();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for (index, body) in bodies.into_iter().enumerate() {
         let event = document(&source, index as u64 + 1, body);
@@ -496,7 +517,10 @@ fn source_event_size_suffix_counts_structured_core_content() {
     });
     let expected_content_bytes = event.content.normalized_body.as_ref().unwrap().len()
         + serde_json::to_vec(&structured_content).unwrap().len();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(with_annotation(
@@ -524,7 +548,10 @@ fn source_event_size_suffix_counts_structured_core_content() {
 fn source_event_page_rejects_a_forged_order_size_suffix_before_returning_record() {
     let temp = tempdir().unwrap();
     let source = source("forged-source-order.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "forged order body"))
@@ -587,7 +614,10 @@ fn source_event_pages_bind_generation_descriptor_and_bounds() {
     let source = source("rewrite-delete-pages.jsonl");
     let old_first = document(&source, 1, "old first");
     let old_second = document(&source, 2, "old second");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first.add_core_record(old_second.clone()).unwrap();
     first.add_core_record(old_first.clone()).unwrap();
@@ -639,7 +669,10 @@ fn source_event_pages_bind_generation_descriptor_and_bounds() {
     let mut rewritten_first = document(&source, 1, "rewritten first");
     rewritten_first.workspace = Some("rewritten".to_owned());
     let replacement = document(&source, 3, "replacement");
-    let mut rewriting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut rewriting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     rewriting.begin_source(source.clone()).unwrap();
     rewriting.add_core_record(replacement.clone()).unwrap();
     rewriting.add_core_record(rewritten_first.clone()).unwrap();
@@ -682,7 +715,10 @@ fn source_event_pages_bind_generation_descriptor_and_bounds() {
     ));
 
     let (deletion, inventory) = deletion_evidence(&source, 3);
-    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     deleting.delete_source(deletion, inventory).unwrap();
     deleting.commit(|_| true).unwrap();
     let deleted_pin = VerifiedIndex::open(temp.path()).unwrap();

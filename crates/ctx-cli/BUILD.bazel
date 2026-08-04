@@ -425,6 +425,20 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "mcp_attribution_privacy_tests",
+    src = "tests/mcp_attribution_privacy.rs",
+    extra_deps = ["//crates/ctx-history-core:lib"],
+    tags = [
+        "privacy",
+        "provider-conformance",
+    ],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
+)
+
+ctx_cli_integration_test(
     name = "native_provider_real_shapes_tests",
     src = "tests/native_provider_real_shapes.rs",
     test_support = [

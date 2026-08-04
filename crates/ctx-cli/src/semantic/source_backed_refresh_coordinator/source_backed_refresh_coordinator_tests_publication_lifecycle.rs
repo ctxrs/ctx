@@ -177,6 +177,8 @@ fn verified_publication_atomically_installs_pinned_core_receipt() {
                 execution.index_root,
                 WriterOptions::default(),
             )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit(|_| true)?;
             Ok(empty_test_publication(receipt.generation_id))
         },
@@ -705,7 +707,9 @@ fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
             let _writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
-            )?;
+            )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
             Err(anyhow!("injected cancellation before commit"))
         },
     ));
@@ -721,6 +725,8 @@ fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
                 execution.index_root,
                 WriterOptions::default(),
             )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit(|_| true)?;
             Ok(empty_test_publication(receipt.generation_id))
         },
@@ -751,6 +757,8 @@ fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() 
                 execution.index_root,
                 WriterOptions::default(),
             )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?
             .commit_with_publication_metadata(
                 |_| true,
                 |context| {
@@ -845,7 +853,9 @@ fn activated_generation_missing_commit_payload_remains_typed_corruption() {
             let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
-            )?;
+            )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
             let receipt = writer.commit(|_| true)?;
             Ok(empty_test_publication(receipt.generation_id))
         },

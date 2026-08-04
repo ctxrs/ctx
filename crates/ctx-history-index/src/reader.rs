@@ -5,11 +5,12 @@ use std::{
 };
 
 use crate::{
-    analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory, is_generation_id,
-    load_active_generation_pointer, load_publication_for_metas, meta_generation, open_slot_index,
-    payload_generation_id, scrub_and_certify_physical_integrity, searcher_generation,
-    validate_schema, verify_or_certify_physical_integrity, verify_searcher,
-    verify_searcher_structure, ActiveGenerationPointer, GenerationManifest, GenerationSlot,
+    analyzer::register_body_analyzer, audit_searcher_core_contract,
+    durable_directory::DurableMmapDirectory, is_generation_id, load_active_generation_pointer,
+    load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
+    scrub_and_certify_physical_integrity, searcher_generation, validate_schema,
+    verify_or_certify_physical_integrity, verify_searcher, verify_searcher_structure,
+    ActiveGenerationPointer, CoreContractGeneration, GenerationManifest, GenerationSlot,
     IndexError, Result,
 };
 use tantivy::{ReloadPolicy, Searcher};
@@ -26,12 +27,17 @@ pub struct VerifiedIndex {
     pub(crate) manifest: Arc<GenerationManifest>,
     pub(crate) generation_id: String,
     pub(crate) publication_metadata: Option<Arc<[u8]>>,
+    pub(crate) core_contract: CoreContractGeneration,
     pub(crate) semantic_eligibility_postings: OnceLock<crate::query::SemanticEligibilityPostings>,
 }
 
 impl VerifiedIndex {
-    /// Returns the generation named by the validated active pointer and commit
-    /// payload without constructing a query reader or auditing documents.
+    /// Returns the generation named by the validated active pointer, commit
+    /// payload, and current or explicitly allowlisted Core manifest contract.
+    ///
+    /// Current generations require only metadata validation. An allowlisted
+    /// predecessor is admitted only after an exhaustive frozen-shape decode
+    /// audit of every stored Core record.
     pub fn active_generation_id(root: impl AsRef<Path>) -> Result<Option<String>> {
         if !root.as_ref().is_dir() {
             return Ok(None);
@@ -43,12 +49,24 @@ impl VerifiedIndex {
             return Ok(None);
         };
         let index = open_slot_index(&root, pointer.active())?;
+        let metas = index.load_metas()?;
         let generation_id =
-            payload_generation_id(&index.load_metas()?)?.ok_or(IndexError::MissingCommitPayload)?;
+            payload_generation_id(&metas)?.ok_or(IndexError::MissingCommitPayload)?;
         if generation_id != pointer.active().generation_id() {
             return Err(IndexError::InvalidActiveGenerationPointer);
         }
-        Ok(Some(generation_id))
+        let publication = load_publication_for_metas(&root, &metas)?;
+        if publication.generation_id != generation_id {
+            return Err(IndexError::InvalidActiveGenerationPointer);
+        }
+        if publication.core_contract == CoreContractGeneration::AllowlistedPredecessor {
+            let reader = index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::Manual)
+                .try_into()?;
+            audit_searcher_core_contract(&reader.searcher(), publication.core_contract)?;
+        }
+        Ok(Some(publication.generation_id))
     }
 
     /// Opens a generation, validates its durable physical identity
@@ -71,7 +89,8 @@ impl VerifiedIndex {
     /// document count are verified on every open. Artifact bodies are rehashed
     /// only when the durable certification is unavailable or stale. The
     /// publication-time O(document-count) identity audit is not repeated for
-    /// every query.
+    /// current generations. An allowlisted predecessor repeats the exhaustive
+    /// frozen-shape decode audit before it can be queried.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
         Self::open_inner(root.as_ref(), false, false)
     }
@@ -87,7 +106,8 @@ impl VerifiedIndex {
     /// identity and structural verification of the selected manifest, payload,
     /// schema/policy contract, Tantivy generation pin, and total document
     /// count. It does not repeat the O(document-count) stored-Core identity and
-    /// source audit.
+    /// source audit for current generations. An allowlisted predecessor still
+    /// receives the exhaustive frozen-shape decode audit.
     pub fn open_pinned_generation(
         root: impl AsRef<Path>,
         expected_generation_id: &str,
@@ -223,6 +243,7 @@ impl VerifiedIndex {
         validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
         let publication = load_publication_for_metas(root, &metas)?;
+        let core_contract = publication.core_contract;
         let generation_id = publication.generation_id;
         let manifest = publication.manifest;
         if slot.generation_id() != generation_id {
@@ -241,6 +262,7 @@ impl VerifiedIndex {
         } else {
             verify_or_certify_physical_integrity(root, pointer, slot, &index)?;
         }
+        audit_searcher_core_contract(&searcher, core_contract)?;
         if audit_stored_core {
             verify_searcher(&searcher, &manifest)?;
         } else {
@@ -251,6 +273,7 @@ impl VerifiedIndex {
             manifest: Arc::new(manifest),
             generation_id,
             publication_metadata: publication.metadata,
+            core_contract,
             semantic_eligibility_postings: OnceLock::new(),
         })
     }
@@ -269,12 +292,19 @@ impl VerifiedIndex {
             manifest,
             generation_id,
             publication_metadata,
+            core_contract: CoreContractGeneration::Current,
             semantic_eligibility_postings: OnceLock::new(),
         }
     }
 
     pub fn generation_id(&self) -> &str {
         &self.generation_id
+    }
+
+    /// Returns whether this immutable reader was admitted through the exact
+    /// same-epoch predecessor contract and frozen predecessor record audit.
+    pub fn uses_allowlisted_predecessor_contract(&self) -> bool {
+        self.core_contract == CoreContractGeneration::AllowlistedPredecessor
     }
 
     pub fn manifest(&self) -> &GenerationManifest {

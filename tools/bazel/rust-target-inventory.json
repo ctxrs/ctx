@@ -21,6 +21,7 @@
         "test:integrations_mcp": "//crates/ctx-cli:integrations_mcp_tests",
         "test:local_usage": "//crates/ctx-cli:local_usage_tests",
         "test:mcp": "//crates/ctx-cli:mcp_tests",
+        "test:mcp_attribution_privacy": "//crates/ctx-cli:mcp_attribution_privacy_tests",
         "test:mcp_integration_e2e": "//crates/ctx-cli:mcp_integration_e2e_tests",
         "test:mcp_local_usage_v2": "//crates/ctx-cli:mcp_local_usage_v2_tests",
         "test:mcp_telemetry": "//crates/ctx-cli:mcp_telemetry_tests",
@@ -70,6 +71,7 @@
       "manifest": "crates/ctx-history-index/Cargo.toml",
       "targets": {
         "lib:ctx_history_index": "//crates/ctx-history-index:lib",
+        "test:mcp_attribution_search": "//crates/ctx-history-index:mcp_attribution_search_tests",
         "test:source_backed_recovery": "//crates/ctx-history-index:source_backed_recovery_tests"
       },
       "native_unit": "//crates/ctx-history-index:unit_tests"

@@ -158,13 +158,13 @@ internal static class AgentHistoryContract
     public static JsonObject NormalizeEvent(JsonObject raw)
     {
         var result = new JsonObject();
-        var eventObject = CamelizePublic(raw["event"]);
+        var eventObject = NormalizeEventRecord(raw["event"]);
         var events = new JsonArray();
         if (raw["events"] is JsonArray rawEvents)
         {
             foreach (var item in rawEvents)
             {
-                events.Add(CamelizePublic(item));
+                events.Add(NormalizeEventRecord(item));
             }
         }
 
@@ -188,7 +188,7 @@ internal static class AgentHistoryContract
         {
             foreach (var item in rawEvents)
             {
-                events.Add(CamelizePublic(item));
+                events.Add(NormalizeEventRecord(item));
             }
         }
 
@@ -198,6 +198,47 @@ internal static class AgentHistoryContract
         SetIfAbsent(result, "format", raw["format"]);
         return result;
     }
+
+    private static JsonNode? NormalizeEventRecord(JsonNode? value)
+    {
+        if (value is not JsonObject eventObject)
+        {
+            return CamelizePublic(value);
+        }
+
+        var hasSnake = eventObject.TryGetPropertyValue("mcp_tool_call", out var snake);
+        var hasCamel = eventObject.TryGetPropertyValue("mcpToolCall", out var camel);
+        if (hasSnake && hasCamel)
+        {
+            throw InvalidMcpWire("duplicate outer wire aliases");
+        }
+
+        var outer = new JsonObject();
+        foreach (var pair in eventObject)
+        {
+            if (pair.Key is "mcp_tool_call" or "mcpToolCall")
+            {
+                continue;
+            }
+            if (SnakeToCamel(pair.Key) == "mcpToolCall")
+            {
+                throw InvalidMcpWire($"outer member {pair.Key} collides with canonical mcpToolCall");
+            }
+            outer[pair.Key] = JsonHelpers.Clone(pair.Value);
+        }
+
+        var normalized = (JsonObject)CamelizePublic(outer)!;
+        if (hasSnake || hasCamel)
+        {
+            normalized["mcpToolCall"] = McpToolCall.FromJson(hasSnake ? snake : camel).ToJsonObject();
+        }
+        return normalized;
+    }
+
+    private static CtxAgentHistoryProtocolException InvalidMcpWire(string message) =>
+        new(
+            $"agent-history-v1 MCP tool call {message}",
+            new JsonObject { ["field"] = "mcpToolCall" });
 
     public static JsonNode? CamelizePublic(JsonNode? value)
     {

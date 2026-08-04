@@ -68,6 +68,8 @@ impl SinkHarness {
                     memory_bytes: 15_000_000,
                 },
             )
+            .unwrap()
+            .into_writer()
             .unwrap(),
             owners: HashMap::new(),
             complete_inventories: Vec::new(),
@@ -765,7 +767,10 @@ fn five_prior_repository_certificates_are_counted_before_output_admission() {
         .collect();
     prior.validate_contract().unwrap();
 
-    let mut initial = GenerationWriter::open(&index, WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(&index, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial.add_core_record(prior).unwrap();
     initial
@@ -773,7 +778,10 @@ fn five_prior_repository_certificates_are_counted_before_output_admission() {
         .unwrap();
     initial.commit(|_| true).unwrap();
 
-    let mut replacement = GenerationWriter::open(&index, WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(&index, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     let mut uncertified = test_core_record(&source, 1, 191);
     uncertified.repository_abstentions = vec![RepositoryAbstention {
@@ -877,6 +885,8 @@ fn publish_append_base(
             memory_bytes: 15_000_000,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer

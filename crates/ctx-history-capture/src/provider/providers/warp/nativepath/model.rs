@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{record_evidence::RecordDigest, CaptureError, OutputOutcome, Result};
 
+use super::decode::WarpMcpToolInvocation;
+
 pub(in super::super) const WARP_NATIVE_PAGE_MAX_ROWS: usize = 64;
 pub(in super::super) const WARP_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const WARP_NATIVE_REJECTION_KEY_MAX_CHARS: usize = 512;
@@ -74,6 +76,8 @@ pub(in super::super) struct WarpNativeEvent {
     pub(in super::super) request_id: Option<String>,
     pub(in super::super) result_outcome: Option<OutputOutcome>,
     pub(in super::super) call_id: Option<String>,
+    pub(in super::super) mcp_invocation: Option<WarpMcpToolInvocation>,
+    pub(in super::super) mcp_attribution: bool,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) lexical_body: String,
     pub(in super::super) source_record_digest: RecordDigest,
@@ -93,6 +97,8 @@ pub(in super::super) struct WarpNativeEventDraft {
     pub(in super::super) request_id: Option<String>,
     pub(in super::super) result_outcome: Option<OutputOutcome>,
     pub(in super::super) call_id: Option<String>,
+    pub(in super::super) mcp_invocation: Option<WarpMcpToolInvocation>,
+    pub(in super::super) mcp_attribution: bool,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) body: String,
     pub(in super::super) source_record_digest: RecordDigest,
@@ -124,6 +130,8 @@ impl WarpNativeEvent {
             request_id: draft.request_id,
             result_outcome: draft.result_outcome,
             call_id: draft.call_id,
+            mcp_invocation: draft.mcp_invocation,
+            mcp_attribution: draft.mcp_attribution,
             occurred_at: draft.occurred_at,
             lexical_body: draft.body,
             source_record_digest: draft.source_record_digest,
@@ -437,6 +445,8 @@ mod tests {
             request_id: None,
             result_outcome: Some(OutputOutcome::Success),
             call_id: Some("call".to_owned()),
+            mcp_invocation: None,
+            mcp_attribution: false,
             occurred_at: None,
             lexical_body: body.clone(),
             source_record_digest: RecordDigest::from_text("warp large result"),

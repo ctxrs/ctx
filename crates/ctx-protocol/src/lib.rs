@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 pub const CONTRACT_VERSION: &str = "agent-history-v1";
 pub const SCHEMA_VERSION: u16 = 1;
 pub const MAX_SAFE_STATUS_COUNTER: u64 = (1_u64 << 53) - 1;
+pub const MAX_MCP_TOOL_CALL_COMPONENT_BYTES: usize = 64 * 1024;
 
 fn deserialize_optional_status_counter<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
@@ -38,6 +39,44 @@ where
         )));
     }
     value.serialize(serializer)
+}
+
+fn deserialize_mcp_tool_call_component<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_mcp_tool_call_component(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn serialize_mcp_tool_call_component<S>(value: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    validate_mcp_tool_call_component(value).map_err(serde::ser::Error::custom)?;
+    value.serialize(serializer)
+}
+
+fn validate_mcp_tool_call_component(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("MCP tool-call component must be nonempty".to_owned());
+    }
+    if value.len() > MAX_MCP_TOOL_CALL_COMPONENT_BYTES {
+        return Err(format!(
+            "MCP tool-call component exceeds {MAX_MCP_TOOL_CALL_COMPONENT_BYTES} decoded UTF-8 bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn deserialize_present_mcp_tool_call<'de, D>(
+    deserializer: D,
+) -> Result<Option<McpToolCall>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    McpToolCall::deserialize(deserializer).map(Some)
 }
 
 /// Extensible JSON object used where `agent-history-v1` intentionally leaves room for
@@ -432,6 +471,21 @@ pub struct CoreContentMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpToolCall {
+    #[serde(
+        deserialize_with = "deserialize_mcp_tool_call_component",
+        serialize_with = "serialize_mcp_tool_call_component"
+    )]
+    pub server: String,
+    #[serde(
+        deserialize_with = "deserialize_mcp_tool_call_component",
+        serialize_with = "serialize_mcp_tool_call_component"
+    )]
+    pub tool: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHistoryEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -454,6 +508,12 @@ pub struct AgentHistoryEvent {
     pub occurred_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_mcp_tool_call",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mcp_tool_call: Option<McpToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -741,6 +801,60 @@ mod tests {
         let status = envelope.status.unwrap();
         assert_eq!(status.extra["futureField"]["enabled"], true);
         assert_eq!(envelope.extra["futureEnvelopeField"], "kept");
+    }
+
+    #[test]
+    fn mcp_tool_call_is_exact_bounded_and_omitted_when_absent() {
+        let fixture =
+            fs::read_to_string(fixture_root().join("show-event.mcp-tool-call.json")).unwrap();
+        let envelope: AgentHistoryEnvelope = serde_json::from_str(&fixture).unwrap();
+        let result = envelope.event.unwrap();
+        let selected = result.event.unwrap();
+        let mcp_tool_call = selected.mcp_tool_call.as_ref().unwrap();
+
+        assert_eq!(mcp_tool_call.server, "mcp-サーバー-🦀");
+        assert_eq!(mcp_tool_call.tool, "検索/工具/🛠️");
+        assert_eq!(selected.extra["futureEventField"]["preserved"], true);
+
+        let encoded = serde_json::to_value(&selected).unwrap();
+        assert_eq!(encoded["mcpToolCall"]["server"], "mcp-サーバー-🦀");
+        assert_eq!(encoded["mcpToolCall"]["tool"], "検索/工具/🛠️");
+        assert!(encoded["mcpToolCall"].get("futureLabel").is_none());
+        assert_eq!(encoded["futureEventField"]["preserved"], true);
+
+        let without_metadata = serde_json::to_value(&result.events[0]).unwrap();
+        assert!(without_metadata.get("mcpToolCall").is_none());
+
+        for invalid in [
+            serde_json::json!({"server": "only-server"}),
+            serde_json::json!({"tool": "only-tool"}),
+            serde_json::json!({"server": "", "tool": "tool"}),
+            serde_json::json!({"server": "server", "tool": ""}),
+            serde_json::json!({"server": "server", "tool": "tool", "futureLabel": true}),
+            serde_json::json!({
+                "server": "server",
+                "tool": "a".repeat(MAX_MCP_TOOL_CALL_COMPONENT_BYTES + 1)
+            }),
+        ] {
+            assert!(serde_json::from_value::<McpToolCall>(invalid).is_err());
+        }
+        assert!(serde_json::from_value::<AgentHistoryEvent>(
+            serde_json::json!({"mcpToolCall": null})
+        )
+        .is_err());
+
+        let exact = serde_json::json!({
+            "server": " ",
+            "tool": "🦀".repeat(MAX_MCP_TOOL_CALL_COMPONENT_BYTES / 4)
+        });
+        let exact: McpToolCall = serde_json::from_value(exact).unwrap();
+        assert_eq!(exact.tool.len(), MAX_MCP_TOOL_CALL_COMPONENT_BYTES);
+
+        let invalid_for_encoding = McpToolCall {
+            server: "server".to_owned(),
+            tool: String::new(),
+        };
+        assert!(serde_json::to_value(invalid_for_encoding).is_err());
     }
 
     #[test]

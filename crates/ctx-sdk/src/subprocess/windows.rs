@@ -12,7 +12,11 @@ use windows_sys::Win32::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
         },
-        JobObjects::{AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject},
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        },
         Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
     },
 };
@@ -30,6 +34,21 @@ impl ProcessTree {
         }
         // SAFETY: CreateJobObjectW returned a new owned handle after the null check.
         let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: limits has the layout and exact byte size required by this information class,
+        // and the job handle remains valid for the duration of the call.
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                ptr::addr_of!(limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         // SAFETY: both handles remain valid for the duration of this call.
         if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0 {
             return Err(io::Error::last_os_error());
@@ -47,6 +66,50 @@ impl ProcessTree {
         // SAFETY: this is the live private job handle owned by this ProcessTree.
         unsafe {
             TerminateJobObject(self.job.as_raw_handle(), 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        os::windows::process::CommandExt as _,
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+    use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    #[test]
+    fn closing_job_handle_terminates_assigned_process() {
+        let mut child = Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_SUSPENDED)
+            .spawn()
+            .unwrap();
+        let process_tree = ProcessTree::start(&child).unwrap_or_else(|err| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("failed to establish Windows test job: {err}");
+        });
+        assert!(child.try_wait().unwrap().is_none());
+
+        drop(process_tree);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait().unwrap() {
+                Some(_) => break,
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("assigned process survived closing its KILL_ON_JOB_CLOSE job");
+                }
+            }
         }
     }
 }

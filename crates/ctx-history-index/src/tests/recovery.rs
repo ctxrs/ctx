@@ -4,7 +4,10 @@ use super::*;
 fn failed_final_revalidation_keeps_the_previous_generation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first
         .add_core_record(document(&source, 1, "previous generation"))
@@ -12,7 +15,10 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     let first_receipt = first.commit(|_| true).unwrap();
 
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
         .add_core_record(document(&source, 1, "uncommitted replacement"))
@@ -33,7 +39,10 @@ fn failed_final_revalidation_keeps_the_previous_generation() {
 fn crash_after_candidate_commit_before_verification_keeps_old_pointer_and_restarts() {
     let temp = tempdir().unwrap();
     let source = source("candidate-crash.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "audited baseline"))
@@ -42,7 +51,10 @@ fn crash_after_candidate_commit_before_verification_keeps_old_pointer_and_restar
     let baseline = initial.commit(|_| true).unwrap();
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
 
-    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     candidate.begin_source(source.clone()).unwrap();
     candidate
         .add_core_record(document(&source, 1, "unverified candidate"))
@@ -66,7 +78,10 @@ fn crash_after_candidate_commit_before_verification_keeps_old_pointer_and_restar
     assert_eq!(still_active.count_term("baseline").unwrap(), 1);
     assert_eq!(still_active.count_term("unverified").unwrap(), 0);
 
-    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert_eq!(
         restarted.base_manifest().unwrap().generation_id().unwrap(),
         baseline.generation_id
@@ -77,7 +92,10 @@ fn crash_after_candidate_commit_before_verification_keeps_old_pointer_and_restar
 fn structural_verification_fault_never_switches_the_active_pointer() {
     let temp = tempdir().unwrap();
     let source = source("candidate-verification-fault.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "verified baseline"))
@@ -86,7 +104,10 @@ fn structural_verification_fault_never_switches_the_active_pointer() {
     let baseline = initial.commit(|_| true).unwrap();
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
 
-    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     candidate.begin_source(source.clone()).unwrap();
     candidate
         .add_core_record(document(&source, 1, "corrupt candidate"))
@@ -124,14 +145,22 @@ fn structural_verification_fault_never_switches_the_active_pointer() {
         VerifiedIndex::open(temp.path()).unwrap().generation_id(),
         baseline.generation_id
     );
-    drop(GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap());
+    drop(
+        GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap(),
+    );
 }
 
 #[test]
 fn omitted_managed_body_projection_fault_before_pointer_switch_keeps_previous_generation() {
     let temp = tempdir().unwrap();
     let source = source("candidate-checksum-fault.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "checksum baseline"))
@@ -140,7 +169,10 @@ fn omitted_managed_body_projection_fault_before_pointer_switch_keeps_previous_ge
     let baseline = initial.commit(|_| true).unwrap();
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
 
-    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     candidate.begin_source(source.clone()).unwrap();
     candidate
         .add_core_record(document(&source, 1, "checksum candidate"))
@@ -173,7 +205,10 @@ fn assert_incremental_segment_corruption_is_rejected(corrupt_retained_segment: b
     } else {
         "changed-segment-corruption.jsonl"
     });
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "uncorrupted retained body"))
@@ -192,7 +227,10 @@ fn assert_incremental_segment_corruption_is_rejected(corrupt_retained_segment: b
             .collect::<std::collections::HashSet<_>>()
     };
 
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
     append
         .add_core_record(document(&source, 2, "uncorrupted changed body"))
@@ -246,7 +284,10 @@ fn stored_core_aggregate_fault_before_pointer_switch_keeps_the_previous_generati
 
     let temp = tempdir().unwrap();
     let source = source("candidate-core-aggregate-fault.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     for sequence in 1..=DOCUMENTS {
         initial
@@ -259,7 +300,10 @@ fn stored_core_aggregate_fault_before_pointer_switch_keeps_the_previous_generati
     let baseline = initial.commit(|_| true).unwrap();
     let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
 
-    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     candidate.begin_source(source.clone()).unwrap();
     for sequence in 1..=DOCUMENTS {
         candidate
@@ -329,7 +373,10 @@ fn stored_core_aggregate_fault_before_pointer_switch_keeps_the_previous_generati
 fn assert_valid_recommit_without_projection_is_rejected(field_name: &'static str) {
     let temp = tempdir().unwrap();
     let source = source(&format!("missing-{field_name}.jsonl"));
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "projection authority body"))
@@ -561,7 +608,10 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
     for (name, mutation) in cases {
         let temp = tempdir().unwrap();
         let source = source(&format!("projection-{name}.jsonl"));
-        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         initial.begin_source(source.clone()).unwrap();
         initial
             .add_core_record(query_projection_fixture_record(&source, "prior body"))
@@ -570,7 +620,10 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
         let baseline = initial.commit(|_| true).unwrap();
         let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
 
-        let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         candidate.begin_source(source.clone()).unwrap();
         candidate
             .add_core_record(query_projection_fixture_record(&source, "candidate body"))
@@ -602,7 +655,10 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
 fn crash_immediately_after_pointer_switch_reopens_new_and_retains_previous() {
     let temp = tempdir().unwrap();
     let source = source("pointer-switch-crash.jsonl");
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "previous generation"))
@@ -610,7 +666,10 @@ fn crash_immediately_after_pointer_switch_reopens_new_and_retains_previous() {
     initial.certify_source(certificate(&source, 1, 1)).unwrap();
     let baseline = initial.commit(|_| true).unwrap();
 
-    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     candidate.begin_source(source.clone()).unwrap();
     candidate
         .add_core_record(document(&source, 1, "switched generation"))
@@ -637,7 +696,10 @@ fn crash_immediately_after_pointer_switch_reopens_new_and_retains_previous() {
         pointer.previous().unwrap().generation_id(),
         baseline.generation_id
     );
-    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let restarted = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert_eq!(
         restarted.base_manifest().unwrap().generation_id().unwrap(),
         switched.generation_id()
@@ -649,7 +711,10 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
     let temp = tempdir().unwrap();
     let source = source("post-pointer-cleanup.jsonl");
 
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first
         .add_core_record(document(&source, 1, "first generation"))
@@ -659,7 +724,10 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
     let first_generation_path = active_generation_path(temp.path());
     let first_manifest_path = manifest_path(temp.path(), &first_receipt.generation_id);
 
-    let mut second = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut second = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     second.begin_source(source.clone()).unwrap();
     second
         .add_core_record(document(&source, 1, "second generation"))
@@ -669,7 +737,10 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
     assert!(first_generation_path.exists());
     assert!(first_manifest_path.exists());
 
-    let mut third = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut third = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     third.begin_source(source.clone()).unwrap();
     third
         .add_core_record(document(&source, 1, "third generation"))
@@ -702,7 +773,10 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
     fs::remove_file(rebuild_marker.join("obstruction")).unwrap();
     fs::remove_dir(&rebuild_marker).unwrap();
     fs::write(&rebuild_marker, stale_marker_bytes).unwrap();
-    let reopened = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let reopened = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert_eq!(
         reopened.base_manifest().unwrap().generation_id().unwrap(),
         third_receipt.generation_id
@@ -714,7 +788,10 @@ fn post_pointer_cleanup_failure_preserves_success_and_runs_later_cleanup() {
 fn deletion_requires_final_inventory_revalidation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first
         .add_core_record(document(&source, 1, "retained"))
@@ -722,7 +799,10 @@ fn deletion_requires_final_inventory_revalidation() {
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
 
-    let mut rejected = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut rejected = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let (deletion, inventory) = deletion_evidence(&source, 2);
     rejected.delete_source(deletion, inventory).unwrap();
     let error = rejected
@@ -737,7 +817,10 @@ fn deletion_requires_final_inventory_revalidation() {
         1
     );
 
-    let mut accepted = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut accepted = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let (deletion, inventory) = deletion_evidence(&source, 3);
     accepted.delete_source(deletion, inventory).unwrap();
     let accepted_receipt = accepted.commit(|_| true).unwrap();
@@ -754,7 +837,10 @@ fn generation_manifests_retain_only_current_sources() {
     let temp = tempdir().unwrap();
     let removed = source("removed.jsonl");
     let retained = source("retained.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(removed.clone()).unwrap();
     first
         .add_core_record(document(&removed, 1, "removed body"))
@@ -768,7 +854,10 @@ fn generation_manifests_retain_only_current_sources() {
     first.commit(|_| true).unwrap();
 
     let (deletion, inventory) = deletion_evidence(&removed, 2);
-    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     deleting.delete_source(deletion, inventory).unwrap();
     let deleted_receipt = deleting.commit(|_| true).unwrap();
     let deleted = VerifiedIndex::open(temp.path()).unwrap();
@@ -779,7 +868,10 @@ fn generation_manifests_retain_only_current_sources() {
     );
     assert_eq!(deleted.manifest().source_routes().len(), 1);
 
-    let mut unrelated = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut unrelated = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     unrelated.begin_source(retained.clone()).unwrap();
     unrelated
         .add_core_record(document(&retained, 2, "rewritten retained body"))
@@ -799,7 +891,10 @@ fn generation_manifests_retain_only_current_sources() {
     let returning = source_for_provider("codex", "codex_prompt_history_jsonl", "removed.jsonl");
     assert_eq!(returning, removed);
     assert!(!returning.exact_descriptor_eq(&removed));
-    let mut republishing = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut republishing = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     republishing.begin_source(returning.clone()).unwrap();
     republishing
         .add_core_record(document(&returning, 4, "returned body"))
@@ -846,7 +941,10 @@ fn generation_route_validation_binds_exact_current_membership() {
 fn replacement_atomically_removes_old_source_documents() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first
         .add_core_record(document(&source, 1, "retired content"))
@@ -854,7 +952,10 @@ fn replacement_atomically_removes_old_source_documents() {
     first.certify_source(certificate(&source, 1, 1)).unwrap();
     first.commit(|_| true).unwrap();
 
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
         .add_core_record(document(&source, 1, "current content"))
@@ -874,7 +975,10 @@ fn replacement_atomically_removes_old_source_documents() {
 fn certified_append_indexes_only_the_delta() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first.add_core_record(document(&source, 1, "base")).unwrap();
     first
@@ -882,7 +986,10 @@ fn certified_append_indexes_only_the_delta() {
         .unwrap();
     first.commit(|_| true).unwrap();
 
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
     append
         .add_core_record(document(&source, 2, "delta"))
@@ -908,7 +1015,10 @@ fn certified_append_indexes_only_the_delta() {
 fn append_event_term_audit_rejects_an_identity_already_in_the_base() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first.add_core_record(document(&source, 1, "base")).unwrap();
     first
@@ -916,7 +1026,10 @@ fn append_event_term_audit_rejects_an_identity_already_in_the_base() {
         .unwrap();
     let baseline = first.commit(|_| true).unwrap();
 
-    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let base = append.begin_source_append(source.clone()).unwrap().clone();
     append
         .add_core_record(document(&source, 1, "duplicate"))
@@ -944,7 +1057,10 @@ fn append_event_term_audit_rejects_an_identity_already_in_the_base() {
 fn verified_reader_remains_pinned_to_its_generation() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut first = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     first.begin_source(source.clone()).unwrap();
     first
         .add_core_record(document(&source, 1, "old pinned generation"))
@@ -953,7 +1069,10 @@ fn verified_reader_remains_pinned_to_its_generation() {
     first.commit(|_| true).unwrap();
     let old_reader = VerifiedIndex::open(temp.path()).unwrap();
 
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     replacement
         .add_core_record(document(&source, 1, "new committed generation"))
@@ -982,7 +1101,10 @@ fn a_partial_unreferenced_manifest_does_not_poison_retry() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, b"partial").unwrap();
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -1002,7 +1124,10 @@ fn a_partial_unreferenced_manifest_does_not_poison_retry() {
 fn manifest_corruption_fails_closed() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -1026,7 +1151,10 @@ fn manifest_corruption_fails_closed() {
 fn stale_schema_manifest_fails_closed_at_generation_boundary() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -1069,7 +1197,10 @@ fn assert_active_meta_incompatibility_is_rebuilt(
 ) {
     let temp = tempdir().unwrap();
     let source = source(source_name);
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source.clone()).unwrap();
     initial
         .add_core_record(document(&source, 1, "source authoritative body"))
@@ -1091,7 +1222,10 @@ fn assert_active_meta_incompatibility_is_rebuilt(
     };
     assert_incompatibility(&error);
 
-    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(
         rebuild.base_manifest().is_none(),
         "incompatible generation was exposed as reusable base state"
@@ -1246,7 +1380,10 @@ fn verified_open_rejects_mismatched_core_contract_fingerprint() {
         "e4a46c8bac8fce97b984f4cf11b92ab926f69993e20176873cbfc03739f5b6cc";
     let temp = tempdir().unwrap();
     let source = source("core-fingerprint-mismatch.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -1295,7 +1432,10 @@ fn policy_field_change_changes_hash_and_generation_id() {
 fn verified_open_rejects_mismatched_active_policy() {
     let temp = tempdir().unwrap();
     let source = source("policy-mismatch.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer
         .add_core_record(document(&source, 1, "body"))
@@ -1329,7 +1469,10 @@ fn verified_open_rejects_mismatched_active_policy() {
     let pointer_before = fs::read(&pointer_path).unwrap();
     let incompatible_path = active_generation_path(temp.path());
     drop(pinned);
-    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut rebuild = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     assert!(rebuild.base_manifest().is_none());
     assert_eq!(fs::read(&pointer_path).unwrap(), pointer_before);
     rebuild.begin_source(source.clone()).unwrap();

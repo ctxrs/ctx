@@ -200,7 +200,9 @@ impl Fixture {
 
     fn publish(&self, name: &str, specs: &[(usize, Vec<String>)]) -> Result<VerifiedIndex> {
         let root = self.data_root.join(format!("index-{name}"));
-        let mut writer = GenerationWriter::open(&root, WriterOptions::default())?;
+        let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
         for (source_index, records) in specs {
             let fixture_source = &self.sources[*source_index];
             writer.begin_source(fixture_source.source.clone())?;
@@ -241,7 +243,9 @@ impl Fixture {
         specs: &[(usize, Vec<(u64, String)>)],
     ) -> Result<VerifiedIndex> {
         let root = self.data_root.join(format!("index-{name}"));
-        let mut writer = GenerationWriter::open(&root, WriterOptions::default())?;
+        let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
         for (source_index, records) in specs {
             let fixture_source = &self.sources[*source_index];
             writer.begin_source(fixture_source.source.clone())?;
@@ -484,7 +488,9 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
         fixture.record_with_role(0, 2, "ineligible assistant answer", EventRole::Assistant)?;
     let root = fixture.data_root.join("index-mixed-core-roles");
     let fixture_source = &fixture.sources[0];
-    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?;
+    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+        .into_writer()
+        .map_err(crate::semantic::committed_generation_recovery_error)?;
     writer.begin_source(fixture_source.source.clone())?;
     writer.add_core_record(user.clone())?;
     writer.add_core_record(assistant)?;
@@ -557,7 +563,9 @@ fn role_policy_transition_rebuilds_semantic_state_without_reingesting_core() -> 
     )?;
     let root = fixture.data_root.join("index-role-policy-transition");
     let fixture_source = &fixture.sources[0];
-    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?;
+    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+        .into_writer()
+        .map_err(crate::semantic::committed_generation_recovery_error)?;
     writer.begin_source(fixture_source.source.clone())?;
     writer.add_core_record(user.clone())?;
     writer.add_core_record(assistant.clone())?;

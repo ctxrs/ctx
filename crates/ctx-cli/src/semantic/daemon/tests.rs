@@ -288,7 +288,9 @@ fn write_observation_fixture_generation(
     route_staged: bool,
 ) -> Result<String> {
     let bytes = fs::read(provider_file)?;
-    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?;
+    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?
+        .into_writer()
+        .map_err(crate::semantic::committed_generation_recovery_error)?;
     if route_staged {
         writer.set_source_route_plan(BTreeSet::from([route.clone()]), BTreeSet::new())?;
         writer.begin_source_route_stage(route.clone())?;
@@ -857,6 +859,8 @@ fn due_consumer_retry_wait_loop_blocks_and_wakes_when_query_becomes_idle() -> Re
         super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
         ctx_history_index::WriterOptions::default(),
     )?
+    .into_writer()
+    .map_err(crate::semantic::committed_generation_recovery_error)?
     .commit(|_| true)?
     .generation_id;
     let wakeup = Arc::new(super::super::daemon_wakeup::DaemonWakeup::default());
@@ -970,6 +974,8 @@ fn continuous_query_wait_loop_reaches_consumer_retry_fairness_deadline() -> Resu
         super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
         ctx_history_index::WriterOptions::default(),
     )?
+    .into_writer()
+    .map_err(crate::semantic::committed_generation_recovery_error)?
     .commit(|_| true)?
     .generation_id;
     let wakeup = Arc::new(super::super::daemon_wakeup::DaemonWakeup::default());
@@ -1119,7 +1125,9 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 let writer = ctx_history_index::GenerationWriter::open(
                     execution.index_root,
                     ctx_history_index::WriterOptions::default(),
-                )?;
+                )?
+                .into_writer()
+                .map_err(crate::semantic::committed_generation_recovery_error)?;
                 let receipt = writer.commit(|_| true)?;
                 Ok(SourceBackedRefreshPublication {
                     route_results: Vec::new(),
@@ -1223,7 +1231,9 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
             let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 ctx_history_index::WriterOptions::default(),
-            )?;
+            )?
+            .into_writer()
+            .map_err(crate::semantic::committed_generation_recovery_error)?;
             let receipt = writer.commit(|_| true)?;
             Ok(SourceBackedRefreshPublication {
                 route_results: vec![SourceBackedRefreshRouteResult::succeeded(

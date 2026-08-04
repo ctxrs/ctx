@@ -20,6 +20,7 @@ from .version import API_VERSION
 
 SCHEMA_VERSION = 1
 MAX_SAFE_STATUS_COUNTER = (1 << 53) - 1
+MAX_MCP_TOOL_CALL_COMPONENT_BYTES = 64 * 1024
 _STATUS_COUNTER_KEYS = (
     "indexedItems",
     "indexedSessions",
@@ -162,8 +163,8 @@ def _result_window_pagination(result_window: Mapping[str, Any]) -> JsonObject:
 
 
 def normalize_event(raw: Mapping[str, Any]) -> EventResult:
-    event = _camelize_public(raw.get("event"))
-    events = [_camelize_public(item) for item in raw.get("events", [])]
+    event = _normalize_event_record(raw.get("event"))
+    events = [_normalize_event_record(item) for item in raw.get("events", [])]
     return cast(
         EventResult,
         _drop_none(
@@ -185,11 +186,80 @@ def normalize_session(raw: Mapping[str, Any]) -> SessionResult:
         _drop_none(
             {
                 "session": session,
-                "events": [_camelize_public(item) for item in raw.get("events", [])],
+                "events": [_normalize_event_record(item) for item in raw.get("events", [])],
                 "mode": raw.get("mode"),
                 "format": raw.get("format"),
             }
         ),
+    )
+
+
+def _normalize_event_record(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _camelize_public(value)
+
+    wire_keys = [key for key in ("mcp_tool_call", "mcpToolCall") if key in value]
+    if len(wire_keys) > 1:
+        raise _mcp_tool_call_error("duplicate wire aliases")
+    for key in value:
+        if key not in wire_keys and _snake_to_camel(key) == "mcpToolCall":
+            raise _mcp_tool_call_error(
+                "outer member collides with the canonical mcpToolCall key",
+                details={"member": key},
+            )
+
+    normalized = _camelize_public(
+        {key: nested for key, nested in value.items() if key not in wire_keys}
+    )
+    if wire_keys:
+        normalized["mcpToolCall"] = _validate_mcp_tool_call(value[wire_keys[0]])
+    return normalized
+
+
+def _validate_mcp_tool_call(value: Any) -> JsonObject:
+    if not isinstance(value, Mapping):
+        raise _mcp_tool_call_error("expected an object")
+    keys = set(value)
+    if keys != {"server", "tool"}:
+        raise _mcp_tool_call_error(
+            "expected exactly server and tool",
+            details={"members": sorted(str(key) for key in keys)},
+        )
+
+    result: JsonObject = {}
+    for field in ("server", "tool"):
+        component = value[field]
+        if not isinstance(component, str):
+            raise _mcp_tool_call_error("expected a string", field=field)
+        try:
+            decoded_bytes = component.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise _mcp_tool_call_error("invalid Unicode string", field=field, cause=exc) from exc
+        if not decoded_bytes:
+            raise _mcp_tool_call_error("must be nonempty", field=field)
+        if len(decoded_bytes) > MAX_MCP_TOOL_CALL_COMPONENT_BYTES:
+            raise _mcp_tool_call_error(
+                f"exceeds {MAX_MCP_TOOL_CALL_COMPONENT_BYTES} decoded UTF-8 bytes",
+                field=field,
+            )
+        result[field] = component
+    return result
+
+
+def _mcp_tool_call_error(
+    message: str,
+    *,
+    field: Optional[str] = None,
+    details: Optional[JsonObject] = None,
+    cause: Optional[BaseException] = None,
+) -> CtxAgentHistoryProtocolError:
+    error_details: JsonObject = {"field": f"mcpToolCall.{field}" if field else "mcpToolCall"}
+    if details:
+        error_details.update(details)
+    return CtxAgentHistoryProtocolError(
+        f"agent-history-v1 MCP tool call {message}",
+        details=error_details,
+        cause=cause,
     )
 
 

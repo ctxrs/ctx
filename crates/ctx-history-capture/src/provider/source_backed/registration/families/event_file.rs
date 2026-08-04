@@ -392,8 +392,10 @@ mod tests {
         )
         .unwrap();
         let migration_index = temp.path().join("migration-index");
-        let mut writer =
-            GenerationWriter::open(&migration_index, WriterOptions::default()).unwrap();
+        let mut writer = GenerationWriter::open(&migration_index, WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         writer
             .begin_source(source.observation().source().clone())
             .unwrap();

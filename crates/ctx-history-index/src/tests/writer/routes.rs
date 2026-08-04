@@ -10,7 +10,10 @@ fn route_checkpoint_rolls_back_partial_route_and_keeps_prior_route_work() {
     let route_b = SourceRouteIdentity::from_sha256("b2".repeat(32)).unwrap();
     let route_c = SourceRouteIdentity::from_sha256("c3".repeat(32)).unwrap();
 
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source_a.clone()).unwrap();
     initial
         .add_core_record(document(&source_a, 1, "retained route a"))
@@ -27,7 +30,10 @@ fn route_checkpoint_rolls_back_partial_route_and_keeps_prior_route_work() {
         .unwrap();
     initial.commit(|_| true).unwrap();
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer
         .set_source_route_plan(
             BTreeSet::from([route_b.clone(), route_c.clone()]),
@@ -76,7 +82,10 @@ fn selected_route_exact_noop_carries_unselected_base_without_revalidation() {
     let source_b = source("selected-noop-b.jsonl");
     let route_a = SourceRouteIdentity::from_sha256("d4".repeat(32)).unwrap();
     let route_b = SourceRouteIdentity::from_sha256("e5".repeat(32)).unwrap();
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     for (source, sequence) in [(&source_a, 1), (&source_b, 2)] {
         initial.begin_source(source.clone()).unwrap();
         initial
@@ -95,7 +104,10 @@ fn selected_route_exact_noop_carries_unselected_base_without_revalidation() {
     let initial = initial.commit(|_| true).unwrap();
     let base_route_a = initial.manifest().source_route(&route_a).unwrap().clone();
 
-    let mut selected = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut selected = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     selected
         .set_source_route_plan(
             BTreeSet::from([route_b.clone()]),
@@ -138,7 +150,10 @@ fn selected_route_exact_noop_carries_unselected_base_without_revalidation() {
     assert_eq!(revalidated, 1, "only the selected route is revalidated");
     assert_eq!(noop.manifest().source_route(&route_a), Some(&base_route_a));
 
-    let mut mutation = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut mutation = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     mutation
         .set_source_route_plan(BTreeSet::new(), BTreeSet::from([route_a, route_b]))
         .unwrap();
@@ -156,7 +171,10 @@ fn successful_route_atomically_retires_one_exact_carried_route() {
     let old_route = SourceRouteIdentity::from_sha256("18".repeat(32)).unwrap();
     let replacement_route = SourceRouteIdentity::from_sha256("29".repeat(32)).unwrap();
 
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(old_source.clone()).unwrap();
     initial
         .add_core_record(document(&old_source, 1, "retired route old body"))
@@ -173,7 +191,10 @@ fn successful_route_atomically_retires_one_exact_carried_route() {
         .unwrap();
     initial.commit(|_| true).unwrap();
 
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement
         .set_source_route_plan(
             BTreeSet::from([replacement_route.clone()]),
@@ -231,7 +252,10 @@ fn failed_route_rollback_restores_its_carried_retirement() {
     let old_route = SourceRouteIdentity::from_sha256("3a".repeat(32)).unwrap();
     let failed_route = SourceRouteIdentity::from_sha256("4b".repeat(32)).unwrap();
 
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(old_source.clone()).unwrap();
     initial
         .add_core_record(document(&old_source, 1, "rollback retained body"))
@@ -248,7 +272,10 @@ fn failed_route_rollback_restores_its_carried_retirement() {
         .unwrap();
     let initial = initial.commit(|_| true).unwrap();
 
-    let mut failed = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut failed = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     failed
         .set_source_route_plan(
             BTreeSet::from([failed_route.clone()]),
@@ -292,7 +319,10 @@ fn unpublished_route_checkpoint_is_reclaimed_after_reopen() {
     let source_b = source("checkpoint-crash-b.jsonl");
     let route_a = SourceRouteIdentity::from_sha256("f6".repeat(32)).unwrap();
     let route_b = SourceRouteIdentity::from_sha256("07".repeat(32)).unwrap();
-    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     initial.begin_source(source_a.clone()).unwrap();
     initial
         .add_core_record(document(&source_a, 1, "active before checkpoint"))
@@ -310,7 +340,10 @@ fn unpublished_route_checkpoint_is_reclaimed_after_reopen() {
     let initial = initial.commit(|_| true).unwrap();
 
     {
-        let mut abandoned = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+        let mut abandoned = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
         abandoned
             .set_source_route_plan(BTreeSet::from([route_b.clone()]), BTreeSet::from([route_a]))
             .unwrap();
@@ -328,7 +361,12 @@ fn unpublished_route_checkpoint_is_reclaimed_after_reopen() {
     let still_active = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(still_active.generation_id(), initial.generation_id);
     assert_eq!(still_active.count_term("unpublished").unwrap(), 0);
-    drop(GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap());
+    drop(
+        GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap(),
+    );
     assert_eq!(
         VerifiedIndex::open(temp.path()).unwrap().generation_id(),
         initial.generation_id

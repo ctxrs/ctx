@@ -100,7 +100,7 @@ public enum JSONValue: Codable, Equatable, Sendable, CustomStringConvertible {
         case let .bool(value):
             return String(value)
         case let .number(value):
-            return String(value)
+            return String(describing: value)
         case let .string(value):
             return value
         case let .array(value):
@@ -124,7 +124,7 @@ extension JSONValue {
         case let .object(object):
             var result: [String: JSONValue] = [:]
             for (key, value) in object where !Self.omittedPublicKeys.contains(key) {
-                let publicKey = Self.snakeToCamel(key)
+                let publicKey = Self.camelizedPublicKey(key)
                 result[publicKey] = value.camelizedPublicJSON()
             }
             return .object(result)
@@ -162,7 +162,7 @@ extension JSONValue {
         "recordType"
     ])
 
-    private static func snakeToCamel(_ value: String) -> String {
+    static func camelizedPublicKey(_ value: String) -> String {
         let parts = value.split(separator: "_", omittingEmptySubsequences: false)
         guard let first = parts.first else {
             return value

@@ -27,7 +27,10 @@ fn maximum_encoded_body(source: &SourceKey) -> String {
 
 fn prefetch_fixture(case: PrefetchFixture) -> (tempfile::TempDir, VerifiedIndex, usize, usize) {
     let temp = tempdir().unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let (source_count, record_count) = match case {
         PrefetchFixture::ManyTiny => {
             for source_index in 0..48 {
@@ -110,7 +113,10 @@ fn oversized_nonterminal_before_maximum_singleton_fixture() -> (tempfile::TempDi
     let later = candidates.last().unwrap().clone();
     assert!(earlier.identity().digest() < later.identity().digest());
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(
         &mut writer,
         &earlier,

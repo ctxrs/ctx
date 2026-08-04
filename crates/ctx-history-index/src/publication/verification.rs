@@ -138,6 +138,21 @@ pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest
     verify_searcher_with_options(searcher, manifest, worker_budget, false, false).map(|_| ())
 }
 
+/// Verifies the complete publication authority carried by one immutable searcher.
+pub(crate) fn verify_complete_searcher(
+    searcher: &Searcher,
+    manifest: &GenerationManifest,
+    generation_path: &Path,
+    expected_physical_integrity_digest: &str,
+) -> Result<()> {
+    verify_physical_integrity(
+        searcher.index(),
+        generation_path,
+        expected_physical_integrity_digest,
+    )?;
+    verify_searcher(searcher, manifest)
+}
+
 const PHYSICAL_INTEGRITY_DOMAIN: &[u8] = b"ctx-tantivy-physical-integrity-v1\0";
 const PHYSICAL_HASH_BUFFER_BYTES: usize = 64 * 1024;
 const TANTIVY_META_FILE: &str = "meta.json";
@@ -188,7 +203,6 @@ impl PhysicalIntegrityAudit {
 /// and temporary files are deliberately excluded because queries do not read them.
 /// Segment bytes are streamed once and checked against their Tantivy CRC footer
 /// while their stronger SHA-256 is computed.
-#[cfg(test)]
 pub(crate) fn physical_integrity_digest(
     index: &tantivy::Index,
     generation_path: &Path,
@@ -375,7 +389,7 @@ fn sha256_physical_authority_distinguishes_stubbed_crc_collision() {
     );
 }
 
-pub(super) fn active_index_files(index: &tantivy::Index) -> Result<BTreeSet<PathBuf>> {
+pub(crate) fn active_index_files(index: &tantivy::Index) -> Result<BTreeSet<PathBuf>> {
     let directory = index.directory();
     let metas = index.load_metas()?;
     let mut expected_files = BTreeSet::new();

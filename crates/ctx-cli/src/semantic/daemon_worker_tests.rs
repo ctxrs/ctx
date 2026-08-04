@@ -101,6 +101,8 @@ impl CoreFixture {
         let count = records.len() as u64;
         let mut writer =
             GenerationWriter::open(self.temp.path().join("index"), WriterOptions::default())
+                .unwrap()
+                .into_writer()
                 .unwrap();
         writer.begin_source(self.source.clone()).unwrap();
         for record in records {

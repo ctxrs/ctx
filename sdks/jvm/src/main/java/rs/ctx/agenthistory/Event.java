@@ -8,11 +8,15 @@ public final class Event {
     private final Map<String, Object> fields;
     private final List<Citation> citations;
     private final CoreContentMetadata content;
+    private final McpToolCall mcpToolCall;
 
     Event(Map<String, Object> fields) {
         this.fields = AgentHistoryValue.copyObject(fields);
         this.citations = AgentHistoryValue.objectList(fields.get("citations"), Citation::new);
         this.content = CoreContentMetadata.from(fields.get("content"));
+        this.mcpToolCall = fields.containsKey("mcpToolCall")
+                ? McpToolCall.from(fields.get("mcpToolCall"))
+                : null;
     }
 
     public String getCtxEventId() {
@@ -93,6 +97,14 @@ public final class Event {
 
     public String text() {
         return getText();
+    }
+
+    public McpToolCall getMcpToolCall() {
+        return mcpToolCall;
+    }
+
+    public McpToolCall mcpToolCall() {
+        return mcpToolCall;
     }
 
     public CoreContentMetadata getContent() {

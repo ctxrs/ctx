@@ -8,7 +8,10 @@ fn core_session_pages_traverse_more_than_4096_in_order_without_duplicates() {
 
     let temp = tempdir().unwrap();
     let source = source("huge-session-pages.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for sequence in (1..=EVENT_COUNT).rev() {
         writer
@@ -73,7 +76,10 @@ fn core_session_cursor_binds_generation_full_session_and_exact_coordinate() {
     let alpha_second = document_for_session(&source, "alpha", 2, "same sized body");
     let beta_first = document_for_session(&source, "beta", 1, "same sized body");
     let beta_second = document_for_session(&source, "beta", 2, "same sized body");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     for record in [
         alpha_second.clone(),
@@ -175,7 +181,10 @@ fn core_session_cursor_binds_generation_full_session_and_exact_coordinate() {
         Err(IndexError::InvalidSessionEventPageSize { .. })
     ));
 
-    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     replacement.begin_source(source.clone()).unwrap();
     for record in [alpha_first, alpha_second, beta_first, beta_second] {
         replacement.add_core_record(record).unwrap();
@@ -202,7 +211,10 @@ fn core_session_page_reports_duplicate_identity_as_typed_error() {
     let source = source("duplicate-session-page.jsonl");
     let first = document(&source, 1, "first");
     let second = document(&source, 2, "second");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(first.clone()).unwrap();
     writer.add_core_record(second).unwrap();

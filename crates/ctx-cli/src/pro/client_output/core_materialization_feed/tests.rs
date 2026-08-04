@@ -136,7 +136,10 @@ fn add_source(
 fn single_source_index(name: &str, bodies: Vec<String>) -> (tempfile::TempDir, VerifiedIndex) {
     let temp = tempdir().unwrap();
     let source = source(name);
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &source, 1, bodies);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();

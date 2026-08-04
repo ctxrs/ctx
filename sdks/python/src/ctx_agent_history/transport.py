@@ -7,12 +7,11 @@ import os
 import subprocess
 from typing import Any, Mapping, Optional, Protocol, Sequence, cast
 
+from ._subprocess import run_local_cli
 from .config import HostedConfig, LocalConfig
 from .errors import (
-    CtxAgentHistoryCliError,
     CtxAgentHistoryError,
     CtxAgentHistoryProtocolError,
-    CtxAgentHistoryTimeoutError,
     HostedTransportNotImplementedError,
 )
 from .agent_history_v1 import (
@@ -39,6 +38,27 @@ from .types import (
     SyncResponse,
 )
 from .validation import validate_search_intent
+
+
+class _DuplicateJSONMemberError(ValueError):
+    pass
+
+
+class _NonFiniteJSONConstantError(ValueError):
+    pass
+
+
+def _reject_duplicate_object_pairs(pairs: Sequence[tuple[str, Any]]) -> JsonObject:
+    result: JsonObject = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJSONMemberError(f"duplicate JSON object member {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_json_constant(value: str) -> Any:
+    raise _NonFiniteJSONConstantError(f"non-finite JSON constant {value!r}")
 
 
 class AgentHistoryTransport(Protocol):
@@ -321,8 +341,16 @@ class LocalCliAdapter:
                 details={"command": self._command(args), "stderr": completed.stderr},
             )
         try:
-            parsed = json.loads(stdout)
-        except json.JSONDecodeError as exc:
+            parsed = json.loads(
+                stdout,
+                object_pairs_hook=_reject_duplicate_object_pairs,
+                parse_constant=_reject_non_finite_json_constant,
+            )
+        except (
+            json.JSONDecodeError,
+            _DuplicateJSONMemberError,
+            _NonFiniteJSONConstantError,
+        ) as exc:
             raise CtxAgentHistoryProtocolError(
                 "ctx returned invalid JSON",
                 details={
@@ -345,58 +373,11 @@ class LocalCliAdapter:
         if self.config.env:
             env.update(self.config.env)
         env["CTX_ANALYTICS_ENABLED"] = "false"
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=str(self.config.cwd) if self.config.cwd is not None else None,
-                env=env,
-                capture_output=True,
-                timeout=self.config.timeout,
-                check=False,
-            )
-        except OSError as exc:
-            raise CtxAgentHistoryCliError(
-                "failed to execute ctx CLI",
-                command=command,
-                exit_code=-1,
-                stderr=str(exc),
-                cause=exc,
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise CtxAgentHistoryTimeoutError(
-                "ctx CLI timed out",
-                details={
-                    "command": command,
-                    "stderr": _decode_process_output(exc.stderr),
-                    "stdout": _decode_process_output(exc.stdout),
-                    "timeout": self.config.timeout,
-                },
-                cause=exc,
-            ) from exc
-        if completed.returncode != 0:
-            raise CtxAgentHistoryCliError(
-                "ctx CLI command failed",
-                command=command,
-                exit_code=completed.returncode,
-                stderr=_decode_process_output(completed.stderr),
-                stdout=_decode_process_output(completed.stdout),
-            )
-        try:
-            stdout = _decode_process_output_strict(completed.stdout)
-            stderr = _decode_process_output_strict(completed.stderr)
-        except UnicodeDecodeError as exc:
-            raise CtxAgentHistoryProtocolError(
-                "ctx returned invalid UTF-8",
-                details={
-                    "command": command,
-                },
-                cause=exc,
-            ) from exc
-        return subprocess.CompletedProcess(
+        return run_local_cli(
             command,
-            completed.returncode,
-            stdout=stdout,
-            stderr=stderr,
+            cwd=str(self.config.cwd) if self.config.cwd is not None else None,
+            env=env,
+            timeout=self.config.timeout,
         )
 
     def _command(self, args: Sequence[str]) -> list[str]:
@@ -463,23 +444,3 @@ class HostedAdapter:
 def _extend_option(args: list[str], flag: str, value: Optional[str]) -> None:
     if value is not None:
         args.extend([flag, value])
-
-
-def _decode_process_output(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
-
-
-def _decode_process_output_strict(value: object) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="strict")
-    return str(value)

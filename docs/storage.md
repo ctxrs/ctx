@@ -173,6 +173,14 @@ never checkpoint or write provider data.
 - `usage.sqlite` contains only the bounded content-free aggregates documented
   above. It is product state, not history or search authority.
 
+A qualifying normalized event may carry
+`mcp_tool_call: {server, tool}` as event-local Core metadata. The pair is stored
+only with that Core event. It is not copied into lexical terms, semantic text,
+`usage.sqlite`, or the Local Pro graph, and query paths do not reconstruct it
+from provider-specific content or current MCP configuration. Presentation
+`--content none` retains already-stored metadata; Core `Redacted` or `Omitted`
+policy omits the sensitive pair by default.
+
 Search, show, list, locate, and MCP retrieval read verified Core/Tantivy
 generations. List continuations remain bound to the named active or retained
 generation, and JSONL holds one generation pin for its whole traversal. Show
@@ -559,6 +567,22 @@ meaningful-body lexical selection, event projector/class revision, tokenizer
 and lexical schema revision, and semantic settings. A mismatch makes derived
 storage stale and requires a Core rebuild rather than an in-place migration.
 
+Exact MCP attribution introduces one deliberately narrow exception for the
+immediately preceding self-contained Core contract. When that allowlisted
+predecessor is present, ctx verifies its pointer, manifest, checksums, records,
+identities, and counts, then republishes an out-of-place current candidate with
+`mcp_tool_call` absent. It does not discover or reopen provider history during
+this preservation step. The prior generation remains authoritative until the
+new candidate is completely verified and atomically published; unknown,
+incomplete, or corrupt predecessors fail closed.
+
+A later ordinary provider refresh can enrich qualifying source records with
+exact attribution. If their original provider source is unavailable,
+historical records remain readable and unattributed with stable existing event
+and session identities. This bridge applies only within the self-contained
+Core epoch; it does not read or migrate the legacy Store/SQL epoch described
+above.
+
 Remove a source from future imports:
 
 ```bash
@@ -620,6 +644,15 @@ deletion; it is security metadata outside the user-deletable Pro inventory.
 Provider transcripts, indexed terms, Core snippets, commands, and file
 paths may contain credentials, customer data, private repository names, or
 proprietary design notes.
+
+Exact MCP server and tool names are opaque local data with the same handling
+requirements. They may themselves contain credentials, paths, customer or
+repository identifiers, Unicode controls, or terminal escape content. Exact
+JSON/JSONL and MCP structured output is therefore not share-safe without
+review. Human terminal and Markdown views escape controls and structure; a
+display-bounded value is visibly marked rather than silently changing the
+machine value. See
+[`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md).
 
 Recommended handling:
 

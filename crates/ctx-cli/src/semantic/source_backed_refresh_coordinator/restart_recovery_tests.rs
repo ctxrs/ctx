@@ -147,6 +147,8 @@ fn typed_unknown_recovery_reenqueues_stable_uuid_and_returns_its_terminal_genera
                         source_backed_index_root(&data_root),
                         WriterOptions::default(),
                     )?
+                    .into_writer()
+                    .map_err(crate::semantic::committed_generation_recovery_error)?
                     .commit(|_| true)?;
                     *execute_generation.lock().unwrap() = Some(commit.generation_id.clone());
                     Ok(SourceBackedRefreshPublication {
@@ -237,6 +239,8 @@ fn legacy_publication_without_source_refresh_metadata_does_not_block_restart() {
         source_backed_index_root(&data_root),
         WriterOptions::default(),
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let commit = writer.commit(|_| true).unwrap();
 
@@ -275,6 +279,8 @@ fn legacy_terminal_publication_recovers_successor_without_pointer_change() {
         source_backed_index_root(&data_root),
         WriterOptions::default(),
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let commit = writer.commit(|_| true).unwrap();
     let successor = CoreRefreshEngine::new().enqueue(Some(commit.generation_id.clone()));
@@ -321,6 +327,8 @@ fn metadata_free_publication_does_not_discard_a_running_refresh() {
         source_backed_index_root(&data_root),
         WriterOptions::default(),
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let commit = writer.commit(|_| true).unwrap();
 
@@ -361,6 +369,8 @@ fn metadata_free_publication_requires_the_exact_legacy_generation() {
         source_backed_index_root(&data_root),
         WriterOptions::default(),
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let commit = writer.commit(|_| true).unwrap();
 
@@ -508,7 +518,9 @@ fn old_wait_request_keeps_exact_identity_across_restart_and_returns_exact_genera
                     let writer = ctx_history_index::GenerationWriter::open(
                         source_backed_index_root(&data_root),
                         WriterOptions::default(),
-                    )?;
+                    )?
+                    .into_writer()
+                    .map_err(crate::semantic::committed_generation_recovery_error)?;
                     let commit = writer.commit(|_| true)?;
                     *execute_generation.lock().unwrap() = Some(commit.generation_id.clone());
                     let mut publication = SourceBackedRefreshPublication {

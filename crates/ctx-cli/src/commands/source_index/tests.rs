@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    mod mcp_tool_call;
     mod semantic_fallback;
     mod show_lineage;
 
@@ -466,6 +467,9 @@ mod tests {
         assert_eq!(omitted["content"]["complete"], false);
         assert_eq!(omitted["content"]["policy_status"], "omitted");
         assert_eq!(omitted["content"]["policy_reason"], "unsupported");
+        assert!(selected.get("mcp_tool_call").is_none());
+        assert!(redacted.get("mcp_tool_call").is_none());
+        assert!(omitted.get("mcp_tool_call").is_none());
     }
 
     #[test]

@@ -233,15 +233,21 @@ fn copilot_and_windsurf_replay_preserve_current_revision_ids_and_records() {
             "c1ebd99c-7338-859b-891d-1c7e04d9ae9d",
             "5ff93a01-4aa3-82f8-8d9e-784490016567",
             "8d4627ce-c12c-8d64-af2d-d85ac722121f",
-            "6c2b33c68b4dc8d5b8b220be78e17be476d4971ddb00494b4de95705909394c9",
+            "9be420c82c33b56f1f5e89f61024535d698514f2e4b974b8ebc0e7df77c0d515",
         ),
     ];
 
     for (provider, value, event_id, session_id, source_id, record_leaf) in cases {
         let adapter = adapter(provider);
+        let expected_parser_revision = match provider {
+            CaptureProvider::CopilotCli => {
+                super::copilot::COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION
+            }
+            _ => "direct-native-jsonl-parser-v4",
+        };
         assert_eq!(
             JsonlFamilyAdapter::parser_revision(&adapter),
-            "direct-native-jsonl-parser-v4"
+            expected_parser_revision
         );
         let (initial, rejected) = project_all(provider, std::slice::from_ref(&value));
         assert_eq!(rejected, 0);
@@ -250,7 +256,7 @@ fn copilot_and_windsurf_replay_preserve_current_revision_ids_and_records() {
         assert_eq!(replay_rejected, 0);
         assert_eq!(replay, initial);
         let record = &initial[0];
-        assert_eq!(record.parser_revision, "direct-native-jsonl-parser-v4");
+        assert_eq!(record.parser_revision, expected_parser_revision);
         assert_eq!(record.event_id.to_string(), event_id, "{provider:?}");
         assert_eq!(record.session_id.to_string(), session_id, "{provider:?}");
         assert_eq!(

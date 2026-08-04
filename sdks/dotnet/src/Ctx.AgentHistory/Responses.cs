@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json.Nodes;
 
 namespace Ctx.AgentHistory;
@@ -566,6 +567,73 @@ public sealed record CoreContentMetadata
         json is null ? null : new CoreContentMetadata(json);
 }
 
+public sealed record McpToolCall
+{
+    private const int MaxComponentBytes = 64 * 1024;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private readonly JsonObject _json;
+
+    private McpToolCall(JsonObject json)
+    {
+        var unknown = json.Select(entry => entry.Key)
+            .Where(key => key is not "server" and not "tool")
+            .ToArray();
+        if (unknown.Length > 0)
+        {
+            throw InvalidObject($"contains unknown members: {string.Join(", ", unknown)}");
+        }
+        _json = JsonHelpers.CloneObject(json);
+        Server = RequiredString(json, "server");
+        Tool = RequiredString(json, "tool");
+    }
+
+    public string Server { get; }
+    public string Tool { get; }
+
+    public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
+
+    internal static McpToolCall FromJson(JsonNode? json) =>
+        json is JsonObject value
+            ? new McpToolCall(value)
+            : throw InvalidObject("must be an object when present");
+
+    private static string RequiredString(JsonObject json, string field)
+    {
+        var value = JsonHelpers.GetString(json, field)
+            ?? throw InvalidObject($"is missing required string field {field}", field: field);
+        if (value.Length == 0)
+        {
+            throw InvalidObject($"field {field} must be nonempty", field: field);
+        }
+        try
+        {
+            if (StrictUtf8.GetByteCount(value) > MaxComponentBytes)
+            {
+                throw InvalidObject(
+                    $"field {field} exceeds {MaxComponentBytes} decoded UTF-8 bytes",
+                    field: field);
+            }
+        }
+        catch (EncoderFallbackException exception)
+        {
+            throw InvalidObject($"field {field} contains an invalid Unicode string", field: field, exception: exception);
+        }
+        return value;
+    }
+
+    private static CtxAgentHistoryProtocolException InvalidObject(
+        string message,
+        string? field = null,
+        Exception? exception = null) =>
+        new(
+            $"agent-history-v1 MCP tool call {message}",
+            new JsonObject
+            {
+                ["field"] = field is null ? "mcpToolCall" : $"mcpToolCall.{field}",
+            },
+            exception);
+}
+
 public sealed record AgentHistoryEvent
 {
     private readonly JsonObject _json;
@@ -583,6 +651,9 @@ public sealed record AgentHistoryEvent
         Role = JsonHelpers.GetString(json, "role");
         OccurredAt = JsonHelpers.GetString(json, "occurredAt");
         Text = JsonHelpers.GetString(json, "text");
+        McpToolCall = json.TryGetPropertyValue("mcpToolCall", out var mcpToolCall)
+            ? Ctx.AgentHistory.McpToolCall.FromJson(mcpToolCall)
+            : null;
         Content = CoreContentMetadata.FromJson(json["content"] as JsonObject);
         Citations = JsonHelpers.GetObjectArray(json, "citations", Citation.FromJson);
     }
@@ -597,6 +668,7 @@ public sealed record AgentHistoryEvent
     public string? Role { get; }
     public string? OccurredAt { get; }
     public string? Text { get; }
+    public McpToolCall? McpToolCall { get; }
     public CoreContentMetadata? Content { get; }
     public IReadOnlyList<Citation> Citations { get; }
 

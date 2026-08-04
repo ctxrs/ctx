@@ -157,6 +157,7 @@ fn record(source: &SourceKey, sequence: u64, body: String, two_repositories: boo
             normalized_body: Some(body),
             structured_content: None,
         },
+        mcp_tool_call: None,
         metadata: BTreeMap::new(),
         repository_candidate_evidence: RepositoryCandidateEvidence::default(),
         repository_bindings,

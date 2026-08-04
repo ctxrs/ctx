@@ -30,6 +30,12 @@ All data responses extend `AgentHistoryEnvelope`, with `contractVersion`,
 access. Local mode shells out to the `ctx` CLI and performs no network calls or
 provider API calls.
 
+The local adapter currently supports POSIX systems with either `setsid` or
+`bash` available for race-free process-group ownership (including standard
+Linux and macOS installations). It fails closed on Windows and on POSIX systems
+without either containment launcher. Fake transports and typed response parsing
+remain platform independent.
+
 Hosted configuration is present as `AgentHistoryClient.hosted(HostedConfig)` and
 returns a structured `not_supported` error until a hosted ctx service exists.
 

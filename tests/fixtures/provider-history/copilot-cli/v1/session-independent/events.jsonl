@@ -1,0 +1,3 @@
+{"type":"session.start","id":"independent-session-start","timestamp":"2026-08-03T13:00:00Z","data":{"sessionId":"copilot-mcp-independent","startTime":"2026-08-03T13:00:00Z","context":{"cwd":"/workspace/sanitized-independent"}}}
+{"type":"tool.execution_start","id":"independent-start","timestamp":"2026-08-03T13:00:01Z","data":{"toolCallId":"call-alpha","mcpServerName":"independent","mcpToolName":"lookup"}}
+{"type":"tool.execution_complete","id":"independent-complete","timestamp":"2026-08-03T13:00:02Z","data":{"toolCallId":"call-alpha","success":true}}

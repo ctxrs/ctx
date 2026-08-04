@@ -2,6 +2,7 @@ package ctxagenthistory
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -331,6 +332,57 @@ func TestLocalCLIAdapterClassifiesContextTimeout(t *testing.T) {
 	}
 }
 
+func TestLocalCLIAdapterStrictlyDecodesSpawnedStdoutUTF8(t *testing.T) {
+	prefix := []byte(`{"event":{"mcp_tool_call":{"server":"`)
+	suffix := []byte(`","tool":"tool"}},"events":[]}`)
+	invalid := append(append(append([]byte(nil), prefix...), 0xff), suffix...)
+	valid := []byte(`{"event":{"mcp_tool_call":{"server":"�","tool":"tool"}},"events":[]}`)
+
+	for _, test := range []struct {
+		name    string
+		payload []byte
+		valid   bool
+	}{
+		{name: "invalid byte", payload: invalid},
+		{name: "encoded replacement character", payload: valid, valid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := NewLocalCLIAdapter(
+				WithCLIPath(os.Args[0]),
+				WithEnv([]string{spawnedStdoutHexEnvironment + "=" + hex.EncodeToString(test.payload)}),
+			)
+			stdout, err := adapter.Do(context.Background(), Operation{
+				Name: "showEvent",
+				Args: []string{"-test.run=^TestSpawnedStdoutHelper$"},
+			})
+			if test.valid {
+				if err != nil || !strings.Contains(string(stdout), "�") {
+					t.Fatalf("valid encoded U+FFFD was not preserved: stdout=%q err=%v", stdout, err)
+				}
+				return
+			}
+			if !IsErrorKind(err, ErrorKindDecode) {
+				t.Fatalf("invalid UTF-8 should be a decode error, got %v", err)
+			}
+		})
+	}
+}
+
+const spawnedStdoutHexEnvironment = "CTX_AGENT_HISTORY_GO_TEST_STDOUT_HEX"
+
+func TestSpawnedStdoutHelper(t *testing.T) {
+	rawHex := os.Getenv(spawnedStdoutHexEnvironment)
+	if rawHex == "" {
+		return
+	}
+	payload, err := hex.DecodeString(rawHex)
+	if err != nil {
+		os.Exit(2)
+	}
+	_, _ = os.Stdout.Write(payload)
+	os.Exit(0)
+}
+
 func TestLocalCLIAdapterAddsDataRootEnvironment(t *testing.T) {
 	runner := &recordingRunner{result: commandResult{Stdout: []byte(`{"schema_version":1}`)}}
 	adapter := NewLocalCLIAdapter(WithCLIPath("ctx"), WithDataRoot("/tmp/ctx-data"))
@@ -473,10 +525,131 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 	if got := string(event.Event.Events[0].StructuredContent); got != "null" {
 		t.Fatalf("nullable structured content was not preserved: %q", got)
 	}
+	if event.Event.Event.MCPToolCall != nil {
+		t.Fatalf("legacy event unexpectedly gained MCP metadata: %+v", event.Event.Event.MCPToolCall)
+	}
+	legacyJSON, err := json.Marshal(event.Event.Event)
+	if err != nil {
+		t.Fatalf("encode legacy event: %v", err)
+	}
+	var legacyObject Object
+	if err := json.Unmarshal(legacyJSON, &legacyObject); err != nil {
+		t.Fatalf("decode encoded legacy event: %v", err)
+	}
+	if _, exists := legacyObject["mcpToolCall"]; exists {
+		t.Fatalf("absent MCP metadata was serialized: %#v", legacyObject)
+	}
+
+	mcpEvent := readFixture[ShowEventResponse](t, "show-event.mcp-tool-call.json")
+	call := mcpEvent.Event.Event.MCPToolCall
+	if call == nil || call.Server != "mcp-サーバー-🦀" || call.Tool != "検索/工具/🛠️" {
+		t.Fatalf("unexpected typed MCP tool call: %+v", call)
+	}
+	encodedCall, err := json.Marshal(call)
+	if err != nil {
+		t.Fatalf("encode MCP tool call: %v", err)
+	}
+	var roundTrip Object
+	if err := json.Unmarshal(encodedCall, &roundTrip); err != nil {
+		t.Fatalf("decode encoded MCP tool call: %v", err)
+	}
+	if roundTrip["server"] != "mcp-サーバー-🦀" || roundTrip["tool"] != "検索/工具/🛠️" {
+		t.Fatalf("MCP Unicode did not round trip: %#v", roundTrip)
+	}
+	if _, exists := roundTrip["futureLabel"]; exists {
+		t.Fatalf("Go typed DTO unexpectedly retained an unknown MCP field: %#v", roundTrip)
+	}
+	var outerWithAddition Event
+	if err := json.Unmarshal([]byte(`{"mcpToolCall":{"server":"server","tool":"tool"},"futureEventField":true}`), &outerWithAddition); err != nil {
+		t.Fatalf("outer Event addition was not accepted: %v", err)
+	}
+	exact := `{"mcpToolCall":{"server":" ","tool":"` + strings.Repeat("🦀", 16_384) + `"}}`
+	if err := json.Unmarshal([]byte(exact), &outerWithAddition); err != nil {
+		t.Fatalf("exact 64 KiB MCP component was rejected: %v", err)
+	}
+
+	for name, invalid := range map[string]string{
+		"missing server":  `{"mcpToolCall":{"tool":"only-tool"}}`,
+		"missing tool":    `{"mcpToolCall":{"server":"only-server"}}`,
+		"unknown member":  `{"mcpToolCall":{"server":"server","tool":"tool","future":true}}`,
+		"empty component": `{"mcpToolCall":{"server":"","tool":"tool"}}`,
+		"oversized":       `{"mcpToolCall":{"server":"server","tool":"` + strings.Repeat("a", 64*1024+1) + `"}}`,
+		"non-string":      `{"mcpToolCall":{"server":"server","tool":7}}`,
+		"bad surrogate":   `{"mcpToolCall":{"server":"server","tool":"\ud800"}}`,
+		"explicit null":   `{"mcpToolCall":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var value Event
+			if err := json.Unmarshal([]byte(invalid), &value); err == nil {
+				t.Fatalf("invalid MCP tool call decoded: %+v", value.MCPToolCall)
+			}
+		})
+	}
 
 	errorEnvelope := readFixture[ErrorResponse](t, "error.not-supported.json")
 	if errorEnvelope.Error.Code != ErrorKindHostedNotImplemented || errorEnvelope.Backend.Kind != BackendKindHosted {
 		t.Fatalf("unexpected error envelope: %+v", errorEnvelope)
+	}
+}
+
+func TestRawMCPToolCallDuplicateMembersAreRejected(t *testing.T) {
+	fixtureRoot := filepath.Clean("../../contracts/agent-history-v1/fixtures/adversarial")
+	for _, name := range []string{
+		"duplicate-event-mcp-tool-call-snake.json",
+		"duplicate-event-mcp-tool-call-camel.json",
+		"duplicate-mcp-tool-call-server.json",
+		"duplicate-mcp-tool-call-tool.json",
+		"invalid-mcp-tool-call-transformed-server.json",
+		"invalid-mcp-tool-call-transformed-tool.json",
+		"invalid-mcp-tool-call-transformed-collision.json",
+		"invalid-mcp-tool-call-outer-alias-collision.json",
+		"invalid-mcp-tool-call-outer-mixed-case.json",
+		"invalid-mcp-tool-call-outer-repeated-separator.json",
+		"invalid-mcp-tool-call-outer-trailing-separator.json",
+		"invalid-mcp-tool-call-outer-camel-snake.json",
+	} {
+		data, err := os.ReadFile(filepath.Join(fixtureRoot, name))
+		if err != nil {
+			t.Fatalf("read adversarial fixture %s: %v", name, err)
+		}
+		t.Run(name, func(t *testing.T) {
+			client := NewClient(WithTransport(fakeTransport{response: string(data)}))
+			if _, err := client.ShowEvent(context.Background(), ShowEventOptions{ID: "event-1"}); err == nil {
+				t.Fatal("duplicate JSON object member was accepted")
+			}
+		})
+	}
+
+	data, err := os.ReadFile(filepath.Join(fixtureRoot, "valid-repeated-string-contents.json"))
+	if err != nil {
+		t.Fatalf("read repeated-string fixture: %v", err)
+	}
+	client := NewClient(WithTransport(fakeTransport{response: string(data)}))
+	response, err := client.ShowEvent(context.Background(), ShowEventOptions{ID: "event-1"})
+	if err != nil {
+		t.Fatalf("repeated string contents were rejected: %v", err)
+	}
+	call := response.Event.Event.MCPToolCall
+	if call == nil || call.Server != "server server" || call.Tool != "tool tool" {
+		t.Fatalf("unexpected repeated-string MCP call: %+v", call)
+	}
+
+	data, err = os.ReadFile(filepath.Join(fixtureRoot, "valid-mcp-tool-call-outer-aliases.json"))
+	if err != nil {
+		t.Fatalf("read outer-alias fixture: %v", err)
+	}
+	client = NewClient(WithTransport(fakeTransport{response: string(data)}))
+	response, err = client.ShowEvent(context.Background(), ShowEventOptions{ID: "event-1"})
+	if err != nil {
+		t.Fatalf("valid outer aliases were rejected: %v", err)
+	}
+	if response.Event.Event == nil || len(response.Event.Events) != 1 ||
+		response.Event.Event.MCPToolCall == nil || response.Event.Events[0].MCPToolCall == nil {
+		t.Fatal("valid outer aliases did not normalize to typed MCP calls")
+	}
+	if response.Event.Event.MCPToolCall.Server != "snake-server" ||
+		response.Event.Events[0].MCPToolCall.Server != "camel-server" {
+		t.Fatalf("unexpected outer-alias calls: %+v %+v", response.Event.Event.MCPToolCall, response.Event.Events[0].MCPToolCall)
 	}
 }
 

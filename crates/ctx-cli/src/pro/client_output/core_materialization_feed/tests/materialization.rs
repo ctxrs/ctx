@@ -408,7 +408,10 @@ fn source_deletion_is_resumable_tombstone_pages() {
     let retained = source("retained.jsonl");
     let removed = source("removed.jsonl");
     let removed_count = MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1;
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &retained, 1, vec!["retained".to_owned()]);
     add_source(
         &mut writer,
@@ -442,7 +445,10 @@ fn source_deletion_is_resumable_tombstone_pages() {
     )
     .unwrap();
     let deletion = CertifiedSourceDeletion::from_inventory(removed.clone(), &inventory).unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.delete_source(deletion, inventory).unwrap();
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
@@ -480,7 +486,10 @@ fn changed_current_then_lower_removed_source_flushes_before_source_order_reversa
     let removed = candidates.first().unwrap().clone();
     let current = candidates.last().unwrap().clone();
 
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &removed, 1, vec!["removed prior".to_owned()]);
     add_source(&mut writer, &current, 1, vec!["current prior".to_owned()]);
     writer.commit(|_| true).unwrap();
@@ -508,7 +517,10 @@ fn changed_current_then_lower_removed_source_flushes_before_source_order_reversa
     )
     .unwrap();
     let deletion = CertifiedSourceDeletion::from_inventory(removed.clone(), &inventory).unwrap();
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(
         &mut writer,
         &current,
@@ -538,7 +550,10 @@ fn changed_current_then_lower_removed_source_flushes_before_source_order_reversa
 fn large_native_key_removals_without_receipt_drive_all_acknowledgements_idempotently() {
     const REMOVAL_COUNT: usize = 2_048;
     let temp = tempdir().unwrap();
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let mut consumer = Consumer::new();
@@ -672,7 +687,10 @@ fn large_native_key_removals_without_receipt_drive_all_acknowledgements_idempote
 fn event_page_cas_mismatch_fails_closed_after_one_exchange() {
     let temp = tempdir().unwrap();
     let source = source("event-cas-mismatch.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
@@ -716,7 +734,10 @@ fn event_page_is_authoritatively_validated_before_exchange() {
 fn generation_mismatched_delta_ack_fails_closed() {
     let temp = tempdir().unwrap();
     let source = source("mismatch.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
@@ -732,7 +753,10 @@ fn generation_mismatched_delta_ack_fails_closed() {
 fn source_acknowledgement_sequence_and_global_identity_fail_closed() {
     let temp = tempdir().unwrap();
     let source = source("invalid-source-ack.jsonl");
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default()).unwrap();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();

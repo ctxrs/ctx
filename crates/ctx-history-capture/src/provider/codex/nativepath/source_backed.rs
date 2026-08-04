@@ -227,6 +227,9 @@ pub struct CodexSourceBackedCountersV0 {
     pub ignored_records_scanned: u64,
     pub scanner_bytes_read: u64,
     pub checkpoint_validation_bytes: u64,
+    pub mcp_terminal_authority_bytes_read: u64,
+    pub peak_mcp_terminal_authority_entries: usize,
+    pub peak_mcp_terminal_authority_bytes: usize,
     pub prefiltered_records: u64,
     pub structural_json_parses: u64,
     pub typed_json_parses: u64,
@@ -277,6 +280,15 @@ impl CodexSourceBackedCountersV0 {
         self.checkpoint_validation_bytes = self
             .checkpoint_validation_bytes
             .saturating_add(scan.checkpoint_validation_bytes);
+        self.mcp_terminal_authority_bytes_read = self
+            .mcp_terminal_authority_bytes_read
+            .saturating_add(scan.mcp_terminal_authority_bytes_read);
+        self.peak_mcp_terminal_authority_entries = self
+            .peak_mcp_terminal_authority_entries
+            .max(scan.peak_mcp_terminal_authority_entries);
+        self.peak_mcp_terminal_authority_bytes = self
+            .peak_mcp_terminal_authority_bytes
+            .max(scan.peak_mcp_terminal_authority_bytes);
         self.prefiltered_records = self
             .prefiltered_records
             .saturating_add(scan.prefiltered_records);

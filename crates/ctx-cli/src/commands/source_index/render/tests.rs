@@ -12,6 +12,7 @@ use super::{
 };
 use crate::{
     cli::Cli,
+    commands::mcp_tool_call::{MCP_TOOL_CALL_DISPLAY_MAX_CHARS, MCP_TOOL_CALL_JSON_GUIDANCE},
     ui::{
         canonical_human_output_bytes, is_copyable_atom, ColorMode, Document, RenderContext,
         StreamKind, TestContext, Token,
@@ -739,4 +740,63 @@ fn compatibility_string_and_raw_format_renderers_keep_their_existing_bytes() {
     assert!(!markdown.contains('\u{1b}'));
     assert!(jsonl.contains("Fix the Unicode cache key regression."));
     assert!(markdown.contains("Keep source bytes exact."));
+}
+
+#[test]
+fn mcp_attribution_is_machine_exact_and_human_safe_with_visible_truncation() {
+    let exact_server = format!(
+        "literal\\n\n# heading\u{202e}\u{1b}[2J|`[]{}",
+        "x".repeat(MCP_TOOL_CALL_DISPLAY_MAX_CHARS)
+    );
+    let exact_tool = "tool\\literal\t*#_{}<>";
+    let attribution = json!({
+        "server": exact_server,
+        "tool": exact_tool,
+    });
+    let mut session = show_value();
+    session["events"][0]["mcp_tool_call"] = attribution.clone();
+    let mut event = event_show_value(None, SESSION_ID);
+    event["events"][0]["mcp_tool_call"] = attribution.clone();
+
+    for value in [&session, &event] {
+        let jsonl = render_show_jsonl(value).unwrap();
+        let first: Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let machine_event = first.get("event").unwrap_or(&first);
+        assert_eq!(machine_event["mcp_tool_call"], attribution);
+        assert!(machine_event["mcp_tool_call"]["server"]
+            .as_str()
+            .unwrap()
+            .contains('\u{202e}'));
+        assert!(!jsonl.contains("display truncated"));
+        let lines = jsonl.lines().collect::<Vec<_>>();
+        let absent: Value = serde_json::from_str(lines[1]).unwrap();
+        let absent_event = absent.get("event").unwrap_or(&absent);
+        assert!(absent_event.get("mcp_tool_call").is_none());
+    }
+
+    let terminal = render_show_document(&session, &context(200, ColorMode::Never)).render_plain();
+    let text = render_show_text(&session);
+    for rendered in [&terminal, &text] {
+        assert_control_safe(rendered);
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains("literal\\\\n\\n#"), "{rendered:?}");
+        assert!(
+            rendered.contains("heading\\u{202e}\\x1b[2J"),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains("… [display truncated]"));
+        assert!(rendered.contains(MCP_TOOL_CALL_JSON_GUIDANCE));
+    }
+
+    let markdown = render_show_markdown(&session);
+    assert_control_safe(&markdown);
+    assert!(!markdown.contains('\u{202e}'));
+    assert!(!markdown.contains('\u{1b}'));
+    assert!(!markdown.contains("\n# heading"));
+    assert!(markdown.contains("- MCP server:"));
+    assert!(markdown.contains("\\# heading"));
+    assert!(markdown.contains("\\|\\`\\[\\]"));
+    assert!(markdown.contains("… \\[display truncated\\]"));
+    assert!(markdown.contains(MCP_TOOL_CALL_JSON_GUIDANCE));
 }

@@ -14,15 +14,20 @@ use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
 pub use ctx_protocol::{
     AgentHistoryEnvelope, AgentHistoryErrorBody, AgentHistoryErrorCode, AgentHistoryEvent,
     AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, CoreContentMetadata,
-    CoreContentPolicyStatus, EventResult, Freshness, ImportResult, ProviderSource, SearchHit,
-    SearchResult, SearchResultWindow, SearchRetrieval, SearchRetrievalCoverage, SessionResult,
-    SessionSummary, Totals, CONTRACT_VERSION, SCHEMA_VERSION,
+    CoreContentPolicyStatus, EventResult, Freshness, ImportResult, McpToolCall, ProviderSource,
+    SearchHit, SearchResult, SearchResultWindow, SearchRetrieval, SearchRetrievalCoverage,
+    SessionResult, SessionSummary, Totals, CONTRACT_VERSION, MAX_MCP_TOOL_CALL_COMPONENT_BYTES,
+    SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use thiserror::Error;
 
+mod exact_json;
 mod subprocess;
+
+#[cfg(test)]
+use exact_json::decode_json_value_exact;
 
 use subprocess::{collect_ctx_json, collect_ctx_mcp_output, spawn_configured};
 #[cfg(all(test, unix))]
@@ -530,7 +535,6 @@ fn run_ctx_mcp_show_session(
             false,
         ));
     }
-
     let response = output.tool_response.ok_or_else(|| {
         AgentHistoryError::new(
             AgentHistoryErrorCode::DecodeError,
@@ -699,22 +703,74 @@ fn bridge_search_pagination(value: &mut Value) {
 }
 
 fn normalize_event(raw: &Value) -> Result<EventResult, AgentHistoryError> {
-    let value = json!({
-        "event": raw.get("event").cloned(),
-        "events": raw.get("events").cloned().unwrap_or_else(|| json!([]))
-    });
-    decode_payload(camelize_object_keys(&value), "event")
+    let event = normalize_event_record(raw.get("event").unwrap_or(&Value::Null))?;
+    let events = normalize_event_records(raw.get("events").unwrap_or(&Value::Null))?;
+    decode_payload(json!({"event": event, "events": events}), "event")
 }
 
 fn normalize_session(raw: &Value) -> Result<SessionResult, AgentHistoryError> {
+    let events = normalize_event_records(raw.get("events").unwrap_or(&Value::Null))?;
     let value = json!({
         "session": raw.get("session").cloned(),
-        "events": raw.get("events").cloned().unwrap_or_else(|| json!([])),
+        "events": events,
         "mode": raw.get("mode").cloned(),
         "format": raw.get("format").cloned(),
         "pagination": raw.get("pagination").cloned()
     });
     decode_payload(camelize_object_keys(&value), "session")
+}
+
+fn normalize_event_records(raw: &Value) -> Result<Value, AgentHistoryError> {
+    let Value::Array(events) = raw else {
+        return Ok(if raw.is_null() {
+            Value::Array(Vec::new())
+        } else {
+            camelize_object_keys(raw)
+        });
+    };
+    events
+        .iter()
+        .map(normalize_event_record)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+}
+
+fn normalize_event_record(raw: &Value) -> Result<Value, AgentHistoryError> {
+    let Value::Object(event) = raw else {
+        return Ok(camelize_object_keys(raw));
+    };
+    let snake = event.get("mcp_tool_call");
+    let camel = event.get("mcpToolCall");
+    if snake.is_some() && camel.is_some() {
+        return Err(invalid_mcp_wire("duplicate outer wire aliases"));
+    }
+
+    let mut outer = event.clone();
+    outer.remove("mcp_tool_call");
+    outer.remove("mcpToolCall");
+    let Value::Object(mut normalized) = camelize_object_keys(&Value::Object(outer)) else {
+        return Err(invalid_mcp_wire(
+            "event normalization did not produce an object",
+        ));
+    };
+    if normalized.contains_key("mcpToolCall") {
+        return Err(invalid_mcp_wire(
+            "outer member collides with the canonical mcpToolCall key",
+        ));
+    }
+    if let Some(call) = snake.or(camel) {
+        let _: McpToolCall = decode_payload(call.clone(), "mcpToolCall")?;
+        normalized.insert("mcpToolCall".to_owned(), call.clone());
+    }
+    Ok(Value::Object(normalized))
+}
+
+fn invalid_mcp_wire(message: &str) -> AgentHistoryError {
+    AgentHistoryError::new(
+        AgentHistoryErrorCode::DecodeError,
+        format!("agent-history-v1 MCP tool call {message}"),
+        false,
+    )
 }
 
 pub fn fixture_path(name: impl AsRef<Path>) -> PathBuf {

@@ -29,7 +29,8 @@ let package = Package(
         ),
         .testTarget(
             name: "CtxAgentHistoryTests",
-            dependencies: ["CtxAgentHistory"]
+            dependencies: ["CtxAgentHistory"],
+            exclude: ["Fixtures"]
         )
     ]
 )

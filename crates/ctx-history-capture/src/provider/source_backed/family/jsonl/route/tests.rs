@@ -487,6 +487,8 @@ fn capture_parallel_test_generation(
             memory_bytes: 15_000_000,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
@@ -531,6 +533,8 @@ fn capture_checkpoint_test_generation(
             memory_bytes: 15_000_000,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
@@ -757,6 +761,8 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
             memory_bytes: 15_000_000,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let mut owners = HashMap::new();
     let mut complete_inventories = Vec::new();
@@ -816,6 +822,8 @@ fn serial_and_parallel_jsonl_emission_preserve_resource_unavailable() {
                 memory_bytes: 15_000_000,
             },
         )
+        .unwrap()
+        .into_writer()
         .unwrap();
         let mut owners = HashMap::new();
         let mut complete_inventories = Vec::new();

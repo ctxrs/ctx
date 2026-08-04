@@ -1,11 +1,13 @@
 use super::*;
 use ctx_history_core::{
     core_record_contract_fingerprint, CORE_BOUNDED_SHELL_SUBSET_REVISION,
-    CORE_RECORD_ACCUMULATOR_IDENTITY, CORE_RECORD_LEAF_DOMAIN,
-    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_CONTRACT_REVISION,
+    CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION, CORE_RECORD_ACCUMULATOR_IDENTITY,
+    CORE_RECORD_LEAF_DOMAIN, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    CORE_REPOSITORY_CONTRACT_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
     CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
+    MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
 };
 
 fn wire_names<T: Copy>(values: &[T], name: impl Fn(T) -> &'static str) -> Vec<&'static str> {
@@ -78,7 +80,9 @@ pub(super) fn inventory() -> Value {
             "blame_evidence": MAX_BLAME_EVIDENCE,
             "blame_attributions_per_match": MAX_BLAME_ATTRIBUTIONS_PER_MATCH,
             "citations_per_fact": MAX_CITATIONS_PER_FACT,
-            "blame_target_bytes": MAX_BLAME_TARGET_BYTES
+            "blame_target_bytes": MAX_BLAME_TARGET_BYTES,
+            "mcp_tool_call_attribution_component_bytes":
+                MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
         },
         "host_message_kinds": [
             "hello", "authorize", "prepare_graph_key_deletion",
@@ -234,7 +238,8 @@ pub(super) fn inventory() -> Value {
                 "repository_bindings", "repository_abstentions",
                 "repository_file_invocation_evidence", "repository_file_observations",
                 "repository_vcs_observations"
-            ], &[]),
+            ], &["mcp_tool_call"]),
+            "McpToolCallAttribution": fields(&["server", "tool"], &[]),
             "RepositoryCandidateEvidence": fields(&[
                 "repository_observation_revision", "bounded_shell_subset_revision",
                 "association_policy_revision", "outcome_capture_revision", "candidates"
@@ -289,6 +294,14 @@ pub(super) fn inventory() -> Value {
             "repository_outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
             "repository_local_root_authorization_fingerprint_revision":
                 CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+            "mcp_tool_call_attribution_revision": CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION,
+            "mcp_tool_call_attribution": {
+                "wire_path": "CoreRecord.mcp_tool_call",
+                "presence": "optional_omitted_when_absent_explicit_null_rejected",
+                "shape": "exact_server_and_tool_string_pair",
+                "component_bound": "decoded_utf8_bytes",
+                "maximum_component_bytes": MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
+            },
             "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
             "repository_file_invocation_evidence_set":
                 "strictly_sorted_unique_typed_request_intent_bound_to_repository_and_normalized_body"

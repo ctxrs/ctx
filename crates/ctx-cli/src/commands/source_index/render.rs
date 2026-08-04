@@ -13,6 +13,9 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use uuid::Uuid;
 
 use crate::{
+    commands::mcp_tool_call::{
+        append_mcp_tool_call_markdown, append_mcp_tool_call_text, MCP_TOOL_CALL_JSON_GUIDANCE,
+    },
     output::{compact_json, OutputFormat},
     presentation_limit::{
         enforce_presentation_cli_output_limit, enforce_presentation_output_limit,
@@ -698,13 +701,15 @@ fn render_show_text(value: &Value) -> String {
             .as_str()
             .unwrap_or_else(|| event["event_type"].as_str().unwrap_or("event"));
         output.push_str(&format!(
-            "[{}] {} {} {}\n{}\n\n",
+            "[{}] {} {} {}\n",
             event["occurred_at"].as_str().unwrap_or("-"),
             role,
             event["event_type"].as_str().unwrap_or("event"),
             event["ctx_event_id"].as_str().unwrap_or("unknown"),
-            event["text"].as_str().unwrap_or_default()
         ));
+        append_mcp_tool_call_text(&mut output, event, "", MCP_TOOL_CALL_JSON_GUIDANCE);
+        output.push_str(event["text"].as_str().unwrap_or_default());
+        output.push_str("\n\n");
     }
     output
 }
@@ -731,13 +736,17 @@ fn render_show_markdown(value: &Value) -> String {
             .as_str()
             .unwrap_or_else(|| event["event_type"].as_str().unwrap_or("event"));
         output.push_str(&format!(
-            "\n## {} - {} - {}\n\nctx_event_id: `{}`\n\n{}\n",
+            "\n## {} - {} - {}\n\nctx_event_id: `{}`\n\n",
             role,
             event["event_type"].as_str().unwrap_or("event"),
             event["occurred_at"].as_str().unwrap_or("-"),
             event["ctx_event_id"].as_str().unwrap_or("unknown"),
-            event["text"].as_str().unwrap_or_default()
         ));
+        if append_mcp_tool_call_markdown(&mut output, event) {
+            output.push('\n');
+        }
+        output.push_str(event["text"].as_str().unwrap_or_default());
+        output.push('\n');
     }
     output
 }
