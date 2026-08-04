@@ -146,6 +146,7 @@ fn render_search_json(input: SearchJsonInput<'_, '_>) -> Result<Value> {
             "source_format": filters.source_format,
             "workspace": request.workspace,
             "since": request.since,
+            "content_scope": filters.content_scope.as_str(),
             "event_type": request.event_type,
             "file": request.file.as_ref().map(|path| path.display().to_string()),
             "session": request.session,

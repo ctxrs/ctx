@@ -435,12 +435,17 @@ fn push_filter_summary(out: &mut String, filters: Option<&Value>) {
         "source_format",
         "workspace",
         "since",
+        "content_scope",
         "event_type",
         "file",
         "session",
     ]
     .into_iter()
-    .filter_map(|key| value_field(filters.get(key)?, "").map(|value| format!("{key}={value}")))
+    .filter_map(|key| {
+        value_field(filters.get(key)?, "").and_then(|value| {
+            (key != "content_scope" || value != "all").then(|| format!("{key}={value}"))
+        })
+    })
     .collect::<Vec<_>>();
     if !filter_parts.is_empty() {
         out.push_str(&format!("filters: {}\n", filter_parts.join(", ")));
@@ -729,6 +734,25 @@ mod tests {
             }
         });
         assert!(!render_tool_text(&complete).contains("More results available."));
+    }
+
+    #[test]
+    fn search_text_reports_only_nondefault_content_scope_filters() {
+        let scoped = json!({
+            "payload_type": "search_results",
+            "query": "journal replay",
+            "filters": {"content_scope": "outputs"},
+            "results": []
+        });
+        assert!(render_tool_text(&scoped).contains("filters: content_scope=outputs\n"));
+
+        let default = json!({
+            "payload_type": "search_results",
+            "query": "journal replay",
+            "filters": {"content_scope": "all"},
+            "results": []
+        });
+        assert!(!render_tool_text(&default).contains("content_scope="));
     }
 
     #[test]

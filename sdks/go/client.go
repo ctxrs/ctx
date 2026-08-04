@@ -59,6 +59,16 @@ type ImportOptions struct {
 	Resume   bool
 }
 
+// SearchContentScope selects which event content classes a search can match.
+type SearchContentScope string
+
+const (
+	SearchContentScopeAll        SearchContentScope = "all"
+	SearchContentScopeTranscript SearchContentScope = "transcript"
+	SearchContentScopeCalls      SearchContentScope = "calls"
+	SearchContentScopeOutputs    SearchContentScope = "outputs"
+)
+
 // SearchOptions configures Client.Search.
 type SearchOptions struct {
 	Query                 string
@@ -72,6 +82,7 @@ type SearchOptions struct {
 	PrimaryOnly           bool
 	IncludeSubagents      bool
 	EventType             string
+	ContentScope          SearchContentScope
 	File                  string
 	Session               string
 	Events                bool
@@ -142,6 +153,9 @@ func (c *Client) Sync(ctx context.Context, opts ImportOptions) (*ImportResponse,
 }
 
 func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchResponse, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
 	if !opts.hasIntent() {
 		return nil, sdkError(ErrorKindInvalidArgument, "search requires a query, term, or file option", nil)
 	}
@@ -168,6 +182,7 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 	appendStringFlag("--provider", opts.Provider)
 	appendStringFlag("--workspace", opts.Workspace)
 	appendStringFlag("--since", opts.Since)
+	appendStringFlag("--content-scope", string(opts.ContentScope))
 	appendStringFlag("--event-type", opts.EventType)
 	appendStringFlag("--file", opts.File)
 	appendStringFlag("--session", opts.Session)
@@ -189,6 +204,33 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (opts SearchOptions) validate() error {
+	if !opts.ContentScope.valid() {
+		return sdkError(
+			ErrorKindInvalidArgument,
+			"search content scope must be one of all, transcript, calls, or outputs",
+			nil,
+		)
+	}
+	if opts.ContentScope != "" && opts.EventType != "" {
+		return sdkError(
+			ErrorKindInvalidArgument,
+			"search content scope and event type are mutually exclusive",
+			nil,
+		)
+	}
+	return nil
+}
+
+func (scope SearchContentScope) valid() bool {
+	switch scope {
+	case "", SearchContentScopeAll, SearchContentScopeTranscript, SearchContentScopeCalls, SearchContentScopeOutputs:
+		return true
+	default:
+		return false
+	}
 }
 
 func (opts SearchOptions) hasIntent() bool {

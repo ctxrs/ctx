@@ -166,7 +166,7 @@ export class LocalAgentHistoryClient {
       typeof queryOrOptions === "string"
         ? { ...maybeOptions, query: queryOrOptions }
         : { ...queryOrOptions };
-    validateSearchIntent(options);
+    validateSearchOptions(options);
     const args = ["search"];
     if (options.query) {
       args.push(options.query);
@@ -767,6 +767,7 @@ function appendSearchArgs(args, options) {
   appendOptional(args, "--since", options.since);
   appendFlag(args, "--primary-only", options.primaryOnly);
   appendFlag(args, "--include-subagents", options.includeSubagents);
+  appendOptional(args, "--content-scope", options.contentScope);
   appendOptional(args, "--event-type", options.eventType);
   appendOptional(args, "--file", options.file);
   appendOptional(args, "--session", options.session);
@@ -777,7 +778,30 @@ function appendSearchArgs(args, options) {
   appendFlag(args, "--include-current-session", options.includeCurrentSession);
 }
 
-function validateSearchIntent(options) {
+function validateSearchOptions(options) {
+  if (
+    options.contentScope !== undefined &&
+    options.contentScope !== null &&
+    !["all", "transcript", "calls", "outputs"].includes(options.contentScope)
+  ) {
+    throw new CtxValidationError(
+      "search contentScope must be one of all, transcript, calls, outputs",
+      { details: { contentScope: options.contentScope } },
+    );
+  }
+  if (
+    options.contentScope !== undefined &&
+    options.contentScope !== null &&
+    options.eventType !== undefined &&
+    options.eventType !== null
+  ) {
+    throw new CtxValidationError("search contentScope and eventType are mutually exclusive", {
+      details: {
+        contentScope: options.contentScope,
+        eventType: options.eventType,
+      },
+    });
+  }
   if (hasSearchText(options.query) || hasSearchText(options.file) || hasSearchTerm(options)) {
     return;
   }

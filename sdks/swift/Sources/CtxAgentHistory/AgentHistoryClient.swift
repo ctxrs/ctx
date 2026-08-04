@@ -68,6 +68,7 @@ public struct AgentHistoryClient: Sendable {
 
     public func search(_ query: String? = nil, options: SearchOptions = SearchOptions()) throws -> SearchResponse {
         try requireSearchIntent(query: query, options: options)
+        try requireCompatibleSearchFilters(options)
         var arguments = ["search"]
         if let query {
             arguments.append(query)
@@ -91,6 +92,7 @@ public struct AgentHistoryClient: Sendable {
         if options.includeSubagents {
             arguments.append("--include-subagents")
         }
+        appendOption(&arguments, "--content-scope", options.contentScope?.rawValue)
         appendOption(&arguments, "--event-type", options.eventType)
         appendOption(&arguments, "--file", options.file)
         appendOption(&arguments, "--session", options.session)
@@ -283,6 +285,15 @@ private func requireSearchIntent(query: String?, options: SearchOptions) throws 
         code: .invalidRequest,
         message: "search requires a query, term, or file option"
     )
+}
+
+private func requireCompatibleSearchFilters(_ options: SearchOptions) throws {
+    if options.contentScope != nil, let eventType = options.eventType, !eventType.isEmpty {
+        throw CtxAgentHistorySDKError(
+            code: .invalidRequest,
+            message: "search content scope and event type are mutually exclusive"
+        )
+    }
 }
 
 private func hasSearchText(_ value: String?) -> Bool {

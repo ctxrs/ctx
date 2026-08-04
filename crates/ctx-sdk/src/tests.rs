@@ -1172,10 +1172,16 @@ fn builds_search_cli_arguments_without_running_for_public_options() {
     assert_eq!(options.semantic_weight, Some(0.35));
     assert!(SearchOptions::default().backend.is_none());
     assert!(SearchOptions::default().semantic_weight.is_none());
+    assert!(SearchOptions::default().content_scope.is_none());
+    assert!(SearchOptions::default().event_type.is_none());
+    assert_eq!(SearchContentScope::All.as_arg(), "all");
+    assert_eq!(SearchContentScope::Transcript.as_arg(), "transcript");
+    assert_eq!(SearchContentScope::Calls.as_arg(), "calls");
+    assert_eq!(SearchContentScope::Outputs.as_arg(), "outputs");
 }
 
 #[test]
-fn search_options_map_retrieval_controls_to_cli_flags() {
+fn search_options_map_retrieval_and_class_filters_to_cli_flags() {
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("ctx-fake");
     fs::write(
@@ -1208,6 +1214,7 @@ exit 2
             limit: 7,
             backend: Some("hybrid".to_owned()),
             semantic_weight: Some(0.625),
+            content_scope: Some(SearchContentScope::Calls),
             refresh: SearchRefresh::Off,
             ..SearchOptions::default()
         })
@@ -1226,8 +1233,36 @@ exit 2
             "hybrid",
             "--semantic-weight",
             "0.625",
+            "--content-scope",
+            "calls",
             "--refresh",
             "off",
+            "--format=json",
+        ]
+    );
+
+    client
+        .search(SearchOptions {
+            query: Some("agent history".to_owned()),
+            limit: 4,
+            event_type: Some("tool_call".to_owned()),
+            refresh: SearchRefresh::Wait,
+            ..SearchOptions::default()
+        })
+        .unwrap();
+
+    let argv = fs::read_to_string(temp.path().join("argv.txt")).unwrap();
+    assert_eq!(
+        argv.lines().collect::<Vec<_>>(),
+        vec![
+            "search",
+            "agent history",
+            "--limit",
+            "4",
+            "--event-type",
+            "tool_call",
+            "--refresh",
+            "wait",
             "--format=json",
         ]
     );
@@ -1313,6 +1348,29 @@ fn search_requires_query_term_or_file_before_cli() {
         let err = client.search(options).unwrap_err();
         assert_eq!(err.body.code, AgentHistoryErrorCode::InvalidRequest);
     }
+}
+
+#[test]
+fn search_rejects_content_scope_and_event_type_before_cli() {
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: PathBuf::from("/definitely/missing/ctx"),
+        data_root: None,
+        env: BTreeMap::new(),
+        timeout: Duration::from_secs(1),
+    });
+
+    let err = client
+        .search(SearchOptions {
+            query: Some("agent history".to_owned()),
+            content_scope: Some(SearchContentScope::All),
+            event_type: Some("message".to_owned()),
+            ..SearchOptions::default()
+        })
+        .unwrap_err();
+
+    assert_eq!(err.body.code, AgentHistoryErrorCode::InvalidRequest);
+    assert!(err.body.message.contains("content_scope"));
+    assert!(err.body.message.contains("event_type"));
 }
 
 #[test]

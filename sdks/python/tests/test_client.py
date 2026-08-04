@@ -21,12 +21,19 @@ from ctx_agent_history import (
     HostedConfig,
     HostedTransportNotImplementedError,
     AgentHistoryClient,
+    SearchContentScope as PublicSearchContentScope,
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
 from ctx_agent_history.agent_history_v1 import normalize_event, normalize_import, normalize_sources, normalize_status
 from ctx_agent_history.transport import LocalCliAdapter
-from ctx_agent_history.types import AgentHistoryErrorCode, Event, McpToolCall, SearchHit
+from ctx_agent_history.types import (
+    AgentHistoryErrorCode,
+    Event,
+    McpToolCall,
+    SearchContentScope,
+    SearchHit,
+)
 import dogfood_local
 
 
@@ -69,6 +76,8 @@ class LocalCliAdapterTests(unittest.TestCase):
 
         show_event_hints = typing.get_type_hints(AgentHistoryClient.showEvent)
         show_session_hints = typing.get_type_hints(AgentHistoryClient.showSession)
+        search_hints = typing.get_type_hints(AgentHistoryClient.search)
+        transport_search_hints = typing.get_type_hints(LocalCliAdapter.search)
         search_hit_hints = typing.get_type_hints(SearchHit)
         event_hints = typing.get_type_hints(Event)
         mcp_tool_call_hints = typing.get_type_hints(McpToolCall)
@@ -76,6 +85,16 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(show_event_hints["return"].__name__, "ShowEventResponse")
         self.assertEqual(show_session_hints["session_id"], str)
         self.assertEqual(show_session_hints["return"].__name__, "ShowSessionResponse")
+        self.assertEqual(search_hints["content_scope"], typing.Optional[SearchContentScope])
+        self.assertEqual(
+            transport_search_hints["content_scope"],
+            typing.Optional[SearchContentScope],
+        )
+        self.assertEqual(
+            SearchContentScope.__args__,
+            ("all", "transcript", "calls", "outputs"),
+        )
+        self.assertIs(PublicSearchContentScope, SearchContentScope)
         self.assertEqual(search_hit_hints["rank"], typing.Optional[float])
         self.assertEqual(search_hit_hints["retrievalScore"], typing.Optional[float])
         self.assertEqual(event_hints["mcpToolCall"], McpToolCall)
@@ -328,6 +347,7 @@ class LocalCliAdapterTests(unittest.TestCase):
 
         self.assertNotIn("--backend", adapter.calls[0])
         self.assertNotIn("--semantic-weight", adapter.calls[0])
+        self.assertNotIn("--content-scope", adapter.calls[0])
         self.assertEqual(
             adapter.calls[1],
             [
@@ -342,6 +362,63 @@ class LocalCliAdapterTests(unittest.TestCase):
                 "off",
             ],
         )
+
+    def test_search_forwards_exactly_one_class_aware_content_scope(self) -> None:
+        adapter = RecordingSearchAdapter()
+        client = AgentHistoryClient(adapter)
+
+        client.search("tool calls", content_scope="calls")
+
+        args = adapter.calls[0]
+        self.assertEqual(args.count("--content-scope"), 1)
+        self.assertEqual(args[args.index("--content-scope") + 1], "calls")
+
+    def test_search_rejects_content_scope_with_event_type_before_transport_or_spawn(self) -> None:
+        adapter = RecordingSearchAdapter()
+        client = AgentHistoryClient(adapter)
+
+        for call in (
+            lambda: client.search("messages", content_scope="all", event_type="message"),
+            lambda: adapter.search("messages", content_scope="all", event_type="message"),
+        ):
+            with self.subTest(call=call):
+                with self.assertRaises(CtxAgentHistoryValidationError) as raised:
+                    call()
+                self.assertEqual(raised.exception.code, "invalid_request")
+                self.assertEqual(
+                    str(raised.exception),
+                    "search content_scope and event_type are mutually exclusive",
+                )
+                self.assertEqual(
+                    raised.exception.details,
+                    {"content_scope": "all", "event_type": "message"},
+                )
+
+        self.assertEqual(adapter.calls, [])
+
+    def test_search_rejects_invalid_content_scope_before_transport_or_spawn(self) -> None:
+        adapter = RecordingSearchAdapter()
+        client = AgentHistoryClient(adapter)
+
+        for content_scope in ("messages", "All", "outputs ", 1, {}):
+            for call in (
+                lambda value=content_scope: client.search("messages", content_scope=value),
+                lambda value=content_scope: adapter.search("messages", content_scope=value),
+            ):
+                with self.subTest(content_scope=content_scope, call=call):
+                    with self.assertRaises(CtxAgentHistoryValidationError) as raised:
+                        call()
+                    self.assertEqual(raised.exception.code, "invalid_request")
+                    self.assertEqual(
+                        str(raised.exception),
+                        "search content_scope must be one of all, transcript, calls, outputs",
+                    )
+                    self.assertEqual(
+                        raised.exception.details,
+                        {"content_scope": content_scope},
+                    )
+
+        self.assertEqual(adapter.calls, [])
 
     def test_search_normalization_camelizes_retrieval_json(self) -> None:
         adapter = RecordingSearchAdapter(

@@ -151,6 +151,73 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 	}
 }
 
+func TestSearchContentScopeValuesAreClosed(t *testing.T) {
+	got := []SearchContentScope{
+		SearchContentScopeAll,
+		SearchContentScopeTranscript,
+		SearchContentScopeCalls,
+		SearchContentScopeOutputs,
+	}
+	want := []SearchContentScope{"all", "transcript", "calls", "outputs"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("content scope values mismatch\nwant: %#v\n got: %#v", want, got)
+	}
+
+	transport := &recordingTransport{response: `{"schema_version":1,"results":[]}`}
+	client := NewClient(WithTransport(transport))
+	if _, err := client.Search(context.Background(), SearchOptions{
+		Query:        "agent history",
+		ContentScope: SearchContentScope("messages"),
+	}); !IsErrorKind(err, ErrorKindInvalidArgument) {
+		t.Fatalf("Search error = %v, want invalid_request", err)
+	}
+	if transport.op.Args != nil {
+		t.Fatalf("Search invoked transport for an invalid content scope: %#v", transport.op.Args)
+	}
+}
+
+func TestSearchForwardsContentScopeOnce(t *testing.T) {
+	transport := &recordingTransport{response: `{"schema_version":1,"results":[]}`}
+	client := NewClient(WithTransport(transport))
+
+	if _, err := client.Search(context.Background(), SearchOptions{
+		Query:        "agent history",
+		ContentScope: SearchContentScopeCalls,
+	}); err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+
+	want := []string{"search", "agent history", "--format=json", "--content-scope", "calls"}
+	if !reflect.DeepEqual(transport.op.Args, want) {
+		t.Fatalf("args mismatch\nwant: %#v\n got: %#v", want, transport.op.Args)
+	}
+	count := 0
+	for _, arg := range transport.op.Args {
+		if arg == "--content-scope" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("--content-scope count = %d, want 1 in %#v", count, transport.op.Args)
+	}
+}
+
+func TestSearchRejectsContentScopeEventTypeConflictBeforeTransport(t *testing.T) {
+	transport := &recordingTransport{response: `{"schema_version":1,"results":[]}`}
+	client := NewClient(WithTransport(transport))
+
+	if _, err := client.Search(context.Background(), SearchOptions{
+		Query:        "agent history",
+		EventType:    "message",
+		ContentScope: SearchContentScopeAll,
+	}); !IsErrorKind(err, ErrorKindInvalidArgument) {
+		t.Fatalf("Search error = %v, want invalid_request", err)
+	}
+	if transport.op.Args != nil {
+		t.Fatalf("Search invoked transport for conflicting filters: %#v", transport.op.Args)
+	}
+}
+
 func TestSearchCamelizesRetrievalJSON(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{response: `{
 		"schema_version": 1,

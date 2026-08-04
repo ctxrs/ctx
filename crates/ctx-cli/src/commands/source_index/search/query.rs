@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use ctx_history_core::{CaptureProvider, EventType};
 use ctx_history_index::{
-    AgentScope, EventSearchFilters, ExcludedSessionTree, VerifiedIndex, LEXICAL_QUERY_LIMITS,
+    AgentScope, EventSearchFilters, ExcludedSessionTree, SearchContentScope, VerifiedIndex,
+    LEXICAL_QUERY_LIMITS,
 };
 
 use crate::{
+    cli::ContentScopeArg,
     config,
     search_filters::{
         normalize_source_identity_filters, parse_since_filter, SourceIdentityFilterArgs,
@@ -36,6 +38,7 @@ pub(crate) struct SourceSearchRequest {
     pub(crate) since: Option<String>,
     pub(crate) primary_only: bool,
     pub(crate) include_subagents: bool,
+    pub(crate) content_scope: SearchContentScope,
     pub(crate) event_type: Option<String>,
     pub(crate) file: Option<PathBuf>,
     pub(crate) session: Option<String>,
@@ -63,6 +66,12 @@ impl From<&SearchArgs> for SourceSearchRequest {
             since: args.since.clone(),
             primary_only: args.primary_only,
             include_subagents: args.include_subagents,
+            content_scope: match args.content_scope.unwrap_or(ContentScopeArg::All) {
+                ContentScopeArg::All => SearchContentScope::All,
+                ContentScopeArg::Transcript => SearchContentScope::Transcript,
+                ContentScopeArg::Calls => SearchContentScope::Calls,
+                ContentScopeArg::Outputs => SearchContentScope::Outputs,
+            },
             event_type: args.event_type.clone(),
             file: args.file.clone(),
             session: args.session.clone(),
@@ -226,6 +235,7 @@ pub(in crate::commands::source_index) fn resolve_source_search_backend(
     {
         return Ok(SearchBackendArg::Lexical);
     }
+    super::validate_explicit_semantic_scope(request)?;
     let semantic_enabled = config.semantic_search_enabled();
     match request.backend {
         Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(anyhow::Error::new(
@@ -250,6 +260,37 @@ pub(in crate::commands::source_index) fn resolve_source_search_backend(
         None if semantic_enabled => Ok(SearchBackendArg::Hybrid),
         None => Ok(SearchBackendArg::Lexical),
     }
+}
+
+pub(super) fn unsupported_semantic_scope(
+    request: &SourceSearchRequest,
+) -> Option<SourceBackedSemanticNotReady> {
+    let content_scope = match request.content_scope {
+        SearchContentScope::Calls => Some("calls"),
+        SearchContentScope::Outputs => Some("outputs"),
+        SearchContentScope::All | SearchContentScope::Transcript => None,
+    };
+    if let Some(content_scope) = content_scope {
+        return Some(SourceBackedSemanticNotReady::new(
+            "semantic_content_scope_unsupported",
+            format!(
+                "semantic retrieval does not support content scope '{content_scope}'; use --backend lexical or choose --content-scope all|transcript"
+            ),
+        ));
+    }
+
+    let event_type = request
+        .event_type
+        .as_deref()
+        .and_then(|value| value.parse::<EventType>().ok())
+        .filter(|event_type| *event_type != EventType::Message)?;
+    Some(SourceBackedSemanticNotReady::new(
+        "semantic_event_type_unsupported",
+        format!(
+            "semantic retrieval does not support event type '{}'; use --backend lexical or remove --event-type",
+            event_type.as_str()
+        ),
+    ))
 }
 
 pub(in crate::commands::source_index) fn index_search_filters(
@@ -297,6 +338,7 @@ pub(in crate::commands::source_index) fn index_search_filters(
         source_format: source_identity.source_format,
         workspace: normalized_optional_text(request.workspace.as_deref()),
         since_unix_ms,
+        content_scope: request.content_scope,
         event_type,
         agent_scope: if request.primary_only || !request.include_subagents {
             AgentScope::Primary

@@ -58,6 +58,9 @@ internal static class Program
             ("normalizes setup init status", NormalizesSetupInitStatus),
             ("enforces the exact status counter domain", EnforcesExactStatusCounterDomain),
             ("builds search flags", BuildsSearchFlags),
+            ("keeps search content scope values closed", SearchContentScopeValuesAreClosed),
+            ("forwards search content scope once", SearchForwardsContentScopeOnce),
+            ("rejects conflicting search content filters before transport", RejectsContentScopeEventTypeConflictBeforeTransport),
             ("camelizes search retrieval json", CamelizesSearchRetrievalJson),
             ("rejects search without intent", RejectsSearchWithoutIntent),
             ("wraps show commands", WrapsShow),
@@ -633,6 +636,60 @@ internal static class Program
         Equal("search", response.Operation);
         Equal("retry", response.Search.Query ?? "");
         Equal("off", response.Search.Freshness!.Mode ?? "");
+    }
+
+    private static async Task SearchContentScopeValuesAreClosed()
+    {
+        Equal(4, Enum.GetValues<SearchContentScope>().Length);
+
+        var transport = new RecordingTransport("""{"schema_version":1,"results":[]}""");
+        var client = new AgentHistoryClient(transport);
+        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync(new SearchOptions
+        {
+            Query = "agent history",
+            ContentScope = (SearchContentScope)int.MaxValue
+        }));
+        Equal(0, transport.Calls.Count);
+    }
+
+    private static async Task SearchForwardsContentScopeOnce()
+    {
+        var transport = new RecordingTransport("""{"schema_version":1,"results":[]}""");
+        var client = new AgentHistoryClient(transport);
+        var cases = new[]
+        {
+            (SearchContentScope.All, "all"),
+            (SearchContentScope.Transcript, "transcript"),
+            (SearchContentScope.Calls, "calls"),
+            (SearchContentScope.Outputs, "outputs"),
+        };
+
+        foreach (var (scope, wireName) in cases)
+        {
+            await client.SearchAsync(new SearchOptions
+            {
+                Query = "agent history",
+                ContentScope = scope
+            });
+            var call = transport.Calls[^1];
+            Equal(1, call.Count(arg => arg == "--content-scope"));
+            var flagIndex = call.ToList().IndexOf("--content-scope");
+            Equal(wireName, call[flagIndex + 1]);
+        }
+    }
+
+    private static async Task RejectsContentScopeEventTypeConflictBeforeTransport()
+    {
+        var transport = new RecordingTransport("""{"schema_version":1,"results":[]}""");
+        var client = new AgentHistoryClient(transport);
+
+        await ThrowsAsync<CtxAgentHistoryValidationException>(() => client.SearchAsync(new SearchOptions
+        {
+            Query = "agent history",
+            EventType = "message",
+            ContentScope = SearchContentScope.All
+        }));
+        Equal(0, transport.Calls.Count);
     }
 
     private static async Task CamelizesSearchRetrievalJson()

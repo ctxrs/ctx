@@ -16,6 +16,7 @@ export type RefreshMode = "background" | "off" | "wait";
 export type ProgressMode = "auto" | "plain" | "json" | "none";
 export type TranscriptMode = "lite" | "full" | "log";
 export type SearchBackendMode = "hybrid" | "semantic" | "lexical";
+export type SearchContentScope = "all" | "transcript" | "calls" | "outputs";
 export type CoreContentPolicyStatus = "selected" | "redacted" | "omitted";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -84,6 +85,7 @@ export interface SearchOptions {
   since?: string;
   primaryOnly?: boolean;
   includeSubagents?: boolean;
+  contentScope?: SearchContentScope;
   eventType?: string;
   file?: string;
   session?: string;

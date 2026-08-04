@@ -21,6 +21,7 @@ ctx search "build failure"
 ctx search "storage layout" --provider codex
 ctx search "retry handling" --workspace checkout --since 60d
 ctx search "tool output" --event-type tool_output
+ctx search "permission denied" --content-scope outputs
 ctx search --file crates/foo/src/lib.rs
 ctx search "token budget" --refresh off
 ctx search "signed metadata" --term checksum --term release
@@ -62,6 +63,7 @@ Search filters narrow text and JSON output:
 - `--workspace <name-or-path>`;
 - `--since <rfc3339-or-days>d`;
 - `--event-type <event-type>`;
+- `--content-scope all|transcript|calls|outputs`;
 - `--file <path>`;
 - `--session <ctx-session-id-or-prefix>`;
 - repeatable `--term <query-or-keyword>`;
@@ -87,6 +89,10 @@ prefix.
 Search requires a nonempty query, at least one nonempty `--term`, or
 `--file <path>`. Other filters only narrow an actual search.
 
+`--content-scope` cannot be combined with `--event-type`, even when the exact
+event type belongs to the selected content scope. Use the exact event-type
+filter or the class-aware content scope, not both.
+
 Default search excludes subagent sessions so primary human-agent intent stays
 prominent. Use `--include-subagents` for implementation details, reviews, test
 output, and failure analysis. When `CODEX_THREAD_ID` is available, ctx also
@@ -96,6 +102,39 @@ excludes the active Codex session tree by default; use
 `--limit` defaults to `20` and is capped at `200`. Default search returns one
 diverse result per session. Use `--session` for dense hits inside one session
 or `--events` for dense event hits across sessions.
+
+## Content scopes
+
+Content scope is a query-time selection over existing searchable events. The
+default resolves to `all`, so omitting `--content-scope` and passing
+`--content-scope all` have identical retrieval behavior.
+
+| Scope | Searchable event types | Lexical weight within the scope |
+| --- | --- | --- |
+| `all` | `message` | `1.0` |
+| `all` | `summary` | `0.9` |
+| `all` | `tool_call`, `command_started` | `0.8` |
+| `all` | `tool_output`, `command_output`, `command_finished` | `0.6` |
+| `all` | any other or future searchable event type | `0.8` |
+| `transcript` | `message`, `summary` | `1.0`, `0.9` respectively |
+| `calls` | `tool_call`, `command_started` | ordinary lexical strength (`1.0`) |
+| `outputs` | `tool_output`, `command_output`, `command_finished` | ordinary lexical strength (`1.0`) |
+
+The relative message/summary weighting is therefore preserved in
+`transcript`, while a class-specific calls or outputs search does not carry
+over the downweighting used to mix that class into `all`. Class-aware search
+does not infer diagnostic importance and does not automatically collapse
+events with duplicate text.
+
+Changing content scope does not alter retained or indexed bodies, Core schema,
+or index generations, and it does not require an index rebuild. Search still
+uses semantic evidence only for transcript messages: `all` and `transcript`
+retain normal semantic/hybrid behavior, while `calls` and `outputs` make a
+hybrid request explicitly fall back to lexical retrieval with structured
+diagnostics. Semantic-only calls/outputs requests fail with a typed unsupported
+scope error instead of returning a misleading empty result. Search still
+matches and returns the same complete policy-selected records; only query-time
+event eligibility and lexical weighting change.
 
 ## Retrieval backends
 

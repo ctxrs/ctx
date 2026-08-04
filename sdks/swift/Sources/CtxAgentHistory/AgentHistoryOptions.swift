@@ -30,6 +30,13 @@ public struct ImportOptions: Sendable {
     }
 }
 
+public enum SearchContentScope: String, CaseIterable, Sendable {
+    case all
+    case transcript
+    case calls
+    case outputs
+}
+
 public struct SearchOptions: Sendable {
     public var terms: [String]
     public var limit: Int?
@@ -41,6 +48,7 @@ public struct SearchOptions: Sendable {
     public var primaryOnly: Bool
     public var includeSubagents: Bool
     public var eventType: String?
+    public var contentScope: SearchContentScope?
     public var file: String?
     public var session: String?
     public var events: Bool
@@ -58,6 +66,7 @@ public struct SearchOptions: Sendable {
         primaryOnly: Bool = false,
         includeSubagents: Bool = false,
         eventType: String? = nil,
+        contentScope: SearchContentScope? = nil,
         file: String? = nil,
         session: String? = nil,
         events: Bool = false,
@@ -74,6 +83,7 @@ public struct SearchOptions: Sendable {
         self.primaryOnly = primaryOnly
         self.includeSubagents = includeSubagents
         self.eventType = eventType
+        self.contentScope = contentScope
         self.file = file
         self.session = session
         self.events = events

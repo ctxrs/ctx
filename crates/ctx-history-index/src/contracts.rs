@@ -276,6 +276,8 @@ pub enum IndexError {
     LexicalQueryTokensTooMany { observed: usize, maximum: usize },
     #[error("lexical result limit must not exceed {maximum} items, requested {requested}")]
     InvalidLexicalResultLimit { requested: usize, maximum: usize },
+    #[error("content scope {scope} cannot be combined with an exact event_type filter")]
+    ContentScopeEventTypeConflict { scope: &'static str },
     #[error(
         "semantic event page size must be between 1 and {maximum} items, requested {requested}"
     )]

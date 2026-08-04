@@ -96,6 +96,25 @@ pub struct ImportOptions {
     pub resume: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchContentScope {
+    All,
+    Transcript,
+    Calls,
+    Outputs,
+}
+
+impl SearchContentScope {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Transcript => "transcript",
+            Self::Calls => "calls",
+            Self::Outputs => "outputs",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
     pub query: Option<String>,
@@ -106,6 +125,8 @@ pub struct SearchOptions {
     pub provider: Option<String>,
     pub workspace: Option<String>,
     pub since: Option<String>,
+    pub content_scope: Option<SearchContentScope>,
+    pub event_type: Option<String>,
     pub file: Option<PathBuf>,
     pub session: Option<String>,
     pub events: bool,
@@ -124,6 +145,8 @@ impl Default for SearchOptions {
             provider: None,
             workspace: None,
             since: None,
+            content_scope: None,
+            event_type: None,
             file: None,
             session: None,
             events: false,
@@ -266,6 +289,13 @@ impl AgentHistoryClient {
         &self,
         options: SearchOptions,
     ) -> Result<AgentHistoryEnvelope, AgentHistoryError> {
+        if options.content_scope.is_some() && options.event_type.is_some() {
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::InvalidRequest,
+                "search content_scope and event_type are mutually exclusive",
+                false,
+            ));
+        }
         if !options.has_intent() {
             return Err(AgentHistoryError::new(
                 AgentHistoryErrorCode::InvalidRequest,
@@ -290,6 +320,13 @@ impl AgentHistoryClient {
         push_opt(&mut owned, "--provider", options.provider);
         push_opt(&mut owned, "--workspace", options.workspace);
         push_opt(&mut owned, "--since", options.since);
+        if let Some(content_scope) = options.content_scope {
+            owned.extend([
+                "--content-scope".to_owned(),
+                content_scope.as_arg().to_owned(),
+            ]);
+        }
+        push_opt(&mut owned, "--event-type", options.event_type);
         if let Some(file) = options.file {
             push_opt(
                 &mut owned,

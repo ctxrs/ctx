@@ -150,6 +150,118 @@ fn query_events_rejects_removed_aliases_and_page_budget_arguments() {
     }
 }
 
+#[test]
+fn search_content_scope_schema_and_runtime_are_in_parity() {
+    let tool = tool_definitions()
+        .into_iter()
+        .find(|tool| tool["name"] == "search")
+        .expect("search tool definition");
+    let content_scope = &tool["inputSchema"]["properties"]["content_scope"];
+    assert_eq!(
+        content_scope["enum"],
+        json!(["all", "transcript", "calls", "outputs"])
+    );
+    assert_eq!(content_scope["default"], "all");
+    assert_eq!(
+        tool["inputSchema"]["not"]["required"],
+        json!(["content_scope", "event_type"])
+    );
+
+    for value in ["all", "transcript", "calls", "outputs"] {
+        let request = search_request(&json!({
+            "query": "onboarding",
+            "content_scope": value,
+        }))
+        .unwrap();
+        assert!(
+            matches!(
+                (value, &request.content_scope),
+                ("all", SearchContentScope::All)
+                    | ("transcript", SearchContentScope::Transcript)
+                    | ("calls", SearchContentScope::Calls)
+                    | ("outputs", SearchContentScope::Outputs)
+            ),
+            "runtime mapping for {value} did not match the advertised schema"
+        );
+    }
+
+    for invalid in ["All", "TRANSCRIPT", "call", "outputs "] {
+        let error = search_request(&json!({
+            "query": "onboarding",
+            "content_scope": invalid,
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("content_scope must be one of all, transcript, calls, outputs"),
+            "{invalid}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn search_content_scope_defaults_to_all_in_the_forwarded_request() {
+    let request = search_request(&json!({"query": "onboarding"})).unwrap();
+    assert!(matches!(request.content_scope, SearchContentScope::All));
+}
+
+#[test]
+fn search_content_scope_and_event_type_conflict_before_filesystem_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let (handled, _) = handle_tools_call(
+        json!({
+            "name": "search",
+            "arguments": {
+                "query": "onboarding",
+                "content_scope": "all",
+                "event_type": "message"
+            }
+        }),
+        temp.path(),
+    );
+    let handled = handled.unwrap().value;
+    assert_eq!(handled["isError"], true);
+    assert_eq!(
+        handled["structuredContent"]["error_code"],
+        "invalid_request"
+    );
+    assert!(handled["structuredContent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("content_scope and event_type are mutually exclusive"));
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "the conflicting MCP request must fail before search or storage work"
+    );
+}
+
+#[test]
+fn semantic_only_content_scope_rejects_before_daemon_or_filesystem_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let (handled, _) = handle_tools_call(
+        json!({
+            "name": "search",
+            "arguments": {
+                "query": "onboarding",
+                "backend": "semantic",
+                "content_scope": "outputs"
+            }
+        }),
+        temp.path(),
+    );
+    let handled = handled.unwrap().value;
+    assert_eq!(handled["isError"], true);
+    assert!(handled["structuredContent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("semantic retrieval does not support content scope 'outputs'"));
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "unsupported semantic-only MCP input must fail before daemon or storage work"
+    );
+}
+
 fn run_one_status_response(
     failure: OutputFailure,
 ) -> (

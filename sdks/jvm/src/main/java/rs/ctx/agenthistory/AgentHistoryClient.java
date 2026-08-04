@@ -82,6 +82,7 @@ public class AgentHistoryClient {
     public SearchResponse search(AgentHistoryOptions.Search options) {
         AgentHistoryOptions.Search safe = options == null ? AgentHistoryOptions.search() : options;
         requireSearchIntent(safe);
+        requireCompatibleSearchFilters(safe);
         List<String> args = new ArrayList<>();
         args.add("search");
         if (safe.query() != null && !safe.query().isEmpty()) {
@@ -104,6 +105,9 @@ public class AgentHistoryClient {
         add(args, "--provider", safe.provider());
         add(args, "--workspace", safe.workspace());
         add(args, "--since", safe.since());
+        if (safe.contentScope() != null) {
+            add(args, "--content-scope", safe.contentScope().wireName());
+        }
         add(args, "--event-type", safe.eventType());
         add(args, "--file", safe.file());
         add(args, "--session", safe.session());
@@ -113,6 +117,15 @@ public class AgentHistoryClient {
         if (safe.events()) args.add("--events");
         if (safe.includeCurrentSession()) args.add("--include-current-session");
         return new SearchResponse(executeEnvelope("search", args));
+    }
+
+    private static void requireCompatibleSearchFilters(AgentHistoryOptions.Search options) {
+        if (options.contentScope() != null
+                && options.eventType() != null
+                && !options.eventType().isEmpty()) {
+            throw new CtxAgentHistoryException.Validation(
+                    "search content scope and event type are mutually exclusive");
+        }
     }
 
     private static void requireSearchIntent(AgentHistoryOptions.Search options) {

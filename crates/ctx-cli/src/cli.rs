@@ -372,6 +372,14 @@ pub(crate) struct SearchArgs {
     pub(crate) include_subagents: bool,
     #[arg(
         long,
+        value_enum,
+        conflicts_with = "event_type",
+        help = "Search content scope: all, transcript, calls, or outputs"
+    )]
+    pub(crate) content_scope: Option<ContentScopeArg>,
+    #[arg(
+        long,
+        conflicts_with = "content_scope",
         help = "Filter by event type: message, tool_call, tool_output, command_started, command_output, command_finished, file_touched, vcs_change, artifact, summary, or notice"
     )]
     pub(crate) event_type: Option<String>,
@@ -431,6 +439,14 @@ pub(crate) enum SearchBackendArg {
     Hybrid,
     Lexical,
     Semantic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ContentScopeArg {
+    All,
+    Transcript,
+    Calls,
+    Outputs,
 }
 
 impl SearchBackendArg {
@@ -715,5 +731,41 @@ mod tests {
             assert!(help.contains(expected), "{help}");
         }
         assert!(!help.contains("--once"), "{help}");
+    }
+
+    #[test]
+    fn search_content_scope_is_typed_and_conflicts_with_event_type() {
+        for (value, expected) in [
+            ("all", ContentScopeArg::All),
+            ("transcript", ContentScopeArg::Transcript),
+            ("calls", ContentScopeArg::Calls),
+            ("outputs", ContentScopeArg::Outputs),
+        ] {
+            let cli = Cli::try_parse_from(["ctx", "search", "needle", "--content-scope", value])
+                .expect("documented content scopes must parse");
+            let CommandRoot::Search(args) = cli.command else {
+                panic!("expected search command");
+            };
+            assert_eq!(args.content_scope, Some(expected));
+        }
+
+        let invalid =
+            Cli::try_parse_from(["ctx", "search", "needle", "--content-scope", "messages"])
+                .expect_err("unknown content scopes must be rejected by clap");
+        assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
+
+        for scope in ["all", "transcript", "calls", "outputs"] {
+            let conflict = Cli::try_parse_from([
+                "ctx",
+                "search",
+                "needle",
+                "--content-scope",
+                scope,
+                "--event-type",
+                "message",
+            ])
+            .expect_err("content scope and event type must conflict unconditionally");
+            assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 }

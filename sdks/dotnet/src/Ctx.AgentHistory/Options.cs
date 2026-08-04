@@ -14,6 +14,14 @@ public sealed record ImportOptions
     public string? Progress { get; init; } = "none";
 }
 
+public enum SearchContentScope
+{
+    All,
+    Transcript,
+    Calls,
+    Outputs,
+}
+
 public sealed record SearchOptions
 {
     public string? Query { get; init; }
@@ -27,6 +35,7 @@ public sealed record SearchOptions
     public bool PrimaryOnly { get; init; }
     public bool IncludeSubagents { get; init; }
     public string? EventType { get; init; }
+    public SearchContentScope? ContentScope { get; init; }
     public string? File { get; init; }
     public string? Session { get; init; }
     public bool Events { get; init; }

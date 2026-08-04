@@ -6,12 +6,18 @@ from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
 from .config import HostedConfig, LocalConfig
-from .transport import HostedAdapter, LocalCliAdapter, AgentHistoryTransport
+from .transport import (
+    AgentHistoryTransport,
+    HostedAdapter,
+    LocalCliAdapter,
+    _validate_search_class_filters,
+)
 from .types import (
     ImportResponse,
     InitResponse,
     JsonObject,
     SearchBackendMode,
+    SearchContentScope,
     SearchResponse,
     ShowEventResponse,
     ShowSessionResponse,
@@ -123,6 +129,7 @@ class AgentHistoryClient:
         provider: Optional[str] = None,
         workspace: Optional[str] = None,
         since: Optional[str] = None,
+        content_scope: Optional[SearchContentScope] = None,
         event_type: Optional[str] = None,
         file: Optional[Pathish] = None,
         session: Optional[str] = None,
@@ -137,12 +144,14 @@ class AgentHistoryClient:
         include_current_session: bool = False,
     ) -> SearchResponse:
         file_value = str(file) if file is not None else None
+        _validate_search_class_filters(content_scope=content_scope, event_type=event_type)
         validate_search_intent(query=query, terms=terms, file=file_value)
         return self._transport.search(
             query=query,
             provider=provider,
             workspace=workspace,
             since=since,
+            content_scope=content_scope,
             event_type=event_type,
             file=file_value,
             session=session,

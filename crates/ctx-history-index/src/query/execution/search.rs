@@ -48,6 +48,7 @@ impl VerifiedIndex {
     ) -> Result<Vec<EventSearchCandidate>> {
         validate_lexical_result_limit(limit)?;
         LEXICAL_QUERY_LIMITS.validate_texts(natural_texts.iter().copied())?;
+        filters.validate_content_scope()?;
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -77,10 +78,8 @@ impl VerifiedIndex {
         if ranking_terms.len() == 1 {
             #[cfg(test)]
             record_lexical_query_construction();
-            let body_query = Box::new(TermQuery::new(
-                ranking_terms[0].clone(),
-                IndexRecordOption::WithFreqs,
-            ));
+            let body_query =
+                class_weighted_body_query(&ranking_terms, 1, filters.content_scope, fields);
             let lexical_limit = limit
                 .checked_add(seen.len())
                 .ok_or(IndexError::CountOverflow)?;
@@ -106,17 +105,12 @@ impl VerifiedIndex {
         for minimum_required in (1..=ranking_terms.len()).rev() {
             #[cfg(test)]
             record_lexical_query_construction();
-            let alternatives = ranking_terms
-                .iter()
-                .cloned()
-                .map(|term| {
-                    Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>
-                })
-                .collect();
-            let body_query = Box::new(BooleanQuery::union_with_minimum_required_clauses(
-                alternatives,
+            let body_query = class_weighted_body_query(
+                &ranking_terms,
                 minimum_required,
-            ));
+                filters.content_scope,
+                fields,
+            );
             // Lower-coverage tiers also contain every prior higher-coverage
             // hit. Bounded over-collection by exactly the number already seen
             // guarantees enough unique lookahead without a total-count scan.
@@ -144,6 +138,7 @@ impl VerifiedIndex {
         limit: usize,
     ) -> Result<Vec<EventSearchCandidate>> {
         validate_lexical_result_limit(limit)?;
+        filters.validate_content_scope()?;
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -162,6 +157,7 @@ impl VerifiedIndex {
         &self,
         filters: &EventSearchFilters,
     ) -> Result<SemanticFilterProjection> {
+        filters.validate_content_scope()?;
         validate_event_sort_fast_fields(&self.searcher)?;
         let fields = fields_from_schema(self.searcher.schema())?;
         let semantic_eligibility = Box::new(BooleanQuery::intersection(vec![
@@ -177,7 +173,10 @@ impl VerifiedIndex {
         let source_identity_query = self.source_identity_query(filters, fields)?;
         let query =
             filtered_event_query(semantic_eligibility, source_identity_query, filters, fields)?;
-        let addresses = self.searcher.search(query.as_ref(), &DocSetCollector)?;
+        let addresses = self
+            .searcher
+            .search(query.as_ref(), &DocSetCollector)
+            .map_err(IndexError::from)?;
         let mut event_ids = HashSet::with_capacity(addresses.len());
         for address in addresses {
             let (event_id, _, _) = core_event_fast_preflight(&self.searcher, address)?;
@@ -314,6 +313,260 @@ impl VerifiedIndex {
         }
         Ok(Some(Box::new(BooleanQuery::new(clauses))))
     }
+}
+
+fn class_weighted_body_query(
+    ranking_terms: &[Term],
+    minimum_required: usize,
+    scope: SearchContentScope,
+    fields: Fields,
+) -> Box<dyn Query> {
+    match scope {
+        SearchContentScope::All | SearchContentScope::Transcript => {
+            Box::new(ClassWeightedQuery::new(
+                ordinary_body_query(ranking_terms, minimum_required),
+                fields.event_type,
+                scope,
+            ))
+        }
+        SearchContentScope::Calls | SearchContentScope::Outputs => {
+            ordinary_body_query(ranking_terms, minimum_required)
+        }
+    }
+}
+
+fn ordinary_body_query(ranking_terms: &[Term], minimum_required: usize) -> Box<dyn Query> {
+    if ranking_terms.len() == 1 {
+        return Box::new(TermQuery::new(
+            ranking_terms[0].clone(),
+            IndexRecordOption::WithFreqs,
+        ));
+    }
+    let alternatives = ranking_terms
+        .iter()
+        .cloned()
+        .map(|term| Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>)
+        .collect();
+    Box::new(BooleanQuery::union_with_minimum_required_clauses(
+        alternatives,
+        minimum_required,
+    ))
+}
+
+#[derive(Debug)]
+struct ClassWeightedQuery {
+    inner: Box<dyn Query>,
+    event_type_field: Field,
+    scope: SearchContentScope,
+}
+
+impl ClassWeightedQuery {
+    fn new(inner: Box<dyn Query>, event_type_field: Field, scope: SearchContentScope) -> Self {
+        debug_assert!(matches!(
+            scope,
+            SearchContentScope::All | SearchContentScope::Transcript
+        ));
+        Self {
+            inner,
+            event_type_field,
+            scope,
+        }
+    }
+}
+
+impl Clone for ClassWeightedQuery {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.box_clone(),
+            event_type_field: self.event_type_field,
+            scope: self.scope,
+        }
+    }
+}
+
+impl Query for ClassWeightedQuery {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        Ok(Box::new(ClassWeightedWeight {
+            inner: self.inner.weight(enable_scoring)?,
+            event_type_field: self.event_type_field,
+            scope: self.scope,
+        }))
+    }
+
+    fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
+        self.inner.query_terms(visitor);
+    }
+}
+
+struct ClassWeightedWeight {
+    inner: Box<dyn Weight>,
+    event_type_field: Field,
+    scope: SearchContentScope,
+}
+
+impl ClassWeightedWeight {
+    fn class_postings(&self, reader: &SegmentReader) -> tantivy::Result<ClassPostings> {
+        ClassPostings::open(reader, self.event_type_field, self.scope)
+    }
+}
+
+impl Weight for ClassWeightedWeight {
+    fn scorer(&self, reader: &SegmentReader, boost: Score) -> tantivy::Result<Box<dyn Scorer>> {
+        Ok(Box::new(ClassWeightedScorer {
+            inner: self.inner.scorer(reader, boost)?,
+            classes: self.class_postings(reader)?,
+        }))
+    }
+
+    fn explain(&self, reader: &SegmentReader, doc: DocId) -> tantivy::Result<Explanation> {
+        let inner_explanation = self.inner.explain(reader, doc)?;
+        let mut scorer = self.scorer(reader, 1.0)?;
+        scorer.seek(doc);
+        let mut explanation = Explanation::new("event-content class weight", scorer.score());
+        explanation.add_detail(inner_explanation);
+        Ok(explanation)
+    }
+
+    fn count(&self, reader: &SegmentReader) -> tantivy::Result<u32> {
+        self.inner.count(reader)
+    }
+
+    fn for_each(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut dyn FnMut(DocId, Score),
+    ) -> tantivy::Result<()> {
+        let mut classes = self.class_postings(reader)?;
+        self.inner.for_each(reader, &mut |doc, score| {
+            callback(doc, score * classes.weight(doc))
+        })
+    }
+
+    fn for_each_no_score(
+        &self,
+        reader: &SegmentReader,
+        callback: &mut dyn FnMut(&[DocId]),
+    ) -> tantivy::Result<()> {
+        self.inner.for_each_no_score(reader, callback)
+    }
+
+    fn for_each_pruning(
+        &self,
+        threshold: Score,
+        reader: &SegmentReader,
+        callback: &mut dyn FnMut(DocId, Score) -> Score,
+    ) -> tantivy::Result<()> {
+        let mut classes = self.class_postings(reader)?;
+        let mut weighted_threshold = threshold;
+        // Every class weight is at most 1.0, so an unweighted score at or
+        // below the collector threshold can never become competitive. The
+        // inner query may therefore retain its native Block-WAND pruning.
+        self.inner
+            .for_each_pruning(threshold, reader, &mut |doc, score| {
+                let weighted_score = score * classes.weight(doc);
+                if weighted_score > weighted_threshold {
+                    weighted_threshold = callback(doc, weighted_score);
+                }
+                weighted_threshold
+            })
+    }
+}
+
+struct ClassWeightedScorer {
+    inner: Box<dyn Scorer>,
+    classes: ClassPostings,
+}
+
+impl DocSet for ClassWeightedScorer {
+    fn advance(&mut self) -> DocId {
+        self.inner.advance()
+    }
+
+    fn seek(&mut self, target: DocId) -> DocId {
+        self.inner.seek(target)
+    }
+
+    fn doc(&self) -> DocId {
+        self.inner.doc()
+    }
+
+    fn size_hint(&self) -> u32 {
+        self.inner.size_hint()
+    }
+
+    fn cost(&self) -> u64 {
+        self.inner.cost()
+    }
+}
+
+impl Scorer for ClassWeightedScorer {
+    fn score(&mut self) -> Score {
+        self.inner.score() * self.classes.weight(self.inner.doc())
+    }
+}
+
+struct ClassPostings {
+    message: SegmentPostings,
+    summary: SegmentPostings,
+    outputs: Vec<SegmentPostings>,
+    scope: SearchContentScope,
+}
+
+impl ClassPostings {
+    fn open(
+        reader: &SegmentReader,
+        event_type_field: Field,
+        scope: SearchContentScope,
+    ) -> tantivy::Result<Self> {
+        let inverted_index = reader.inverted_index(event_type_field)?;
+        let postings = |event_type: &str| {
+            inverted_index
+                .read_postings(
+                    &Term::from_field_text(event_type_field, event_type),
+                    IndexRecordOption::Basic,
+                )
+                .map(|postings| postings.unwrap_or_else(SegmentPostings::empty))
+        };
+        Ok(Self {
+            message: postings("message")?,
+            summary: postings("summary")?,
+            outputs: if scope == SearchContentScope::All {
+                OUTPUT_EVENT_TYPES
+                    .iter()
+                    .map(|event_type| postings(event_type))
+                    .collect::<std::io::Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            },
+            scope,
+        })
+    }
+
+    fn weight(&mut self, doc: DocId) -> Score {
+        if posting_matches(&mut self.message, doc) {
+            return 1.0;
+        }
+        if posting_matches(&mut self.summary, doc) {
+            return 0.9;
+        }
+        if self
+            .outputs
+            .iter_mut()
+            .any(|postings| posting_matches(postings, doc))
+        {
+            return 0.6;
+        }
+        match self.scope {
+            SearchContentScope::All => 0.8,
+            SearchContentScope::Transcript => 0.9,
+            SearchContentScope::Calls | SearchContentScope::Outputs => unreachable!(),
+        }
+    }
+}
+
+fn posting_matches(postings: &mut SegmentPostings, doc: DocId) -> bool {
+    let posting_doc = postings.doc();
+    (posting_doc == doc) || (posting_doc < doc && postings.seek(doc) == doc)
 }
 
 #[derive(Debug, Clone, Copy)]

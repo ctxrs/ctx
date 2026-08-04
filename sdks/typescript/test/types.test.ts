@@ -4,6 +4,7 @@ import {
   type AgentHistoryEnvelope,
   type McpToolCall,
   type SearchBackendMode,
+  type SearchContentScope,
   type SearchEnvelope,
   type ShowEventEnvelope,
   type SourcesEnvelope,
@@ -64,6 +65,13 @@ const semanticSearch = await client.search("semantic memory", {
   semanticWeight: 0.8,
 });
 expectType<SearchEnvelope>(semanticSearch);
+
+const contentScopes: SearchContentScope[] = ["all", "transcript", "calls", "outputs"];
+for (const contentScope of contentScopes) {
+  expectType<SearchEnvelope>(await client.search("class-aware memory", { contentScope }));
+}
+// @ts-expect-error contentScope is closed to all, transcript, calls, and outputs.
+await client.search("class-aware memory", { contentScope: "messages" });
 
 const termSearch = await client.search({ terms: ["local agent history"], refresh: "off" });
 expectType<SearchEnvelope>(termSearch);
