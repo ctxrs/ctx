@@ -558,15 +558,19 @@
           "source_format": "trae_state_vscdb",
           "fidelity": "partial",
           "notes": [
-            "No official automatic Trae history root is established; workspaceStorage compatibility paths require an exact explicit path.",
-            "Explicit Trae or Trae CN User/workspaceStorage roots, workspace directories, or state.vscdb files remain supported.",
+            "Automatic discovery selects the current platform-standard Trae application-data database at Trae/ModularData/ai-agent/database.db on Linux, macOS, and Windows.",
+            "Released compatibility remains available for exact explicit Trae or Trae CN User/workspaceStorage roots, workspace directories, or state.vscdb files.",
             "Reads SQLite ItemTable values for exporter-backed keys including memento/icube-ai-agent-storage, icube-ai-agent-storage-input-history, chat.ChatSessionStore.index, and ChatStore.",
             "Trae CN input-history rows are imported as user prompts when assistant replies are not present in local state.",
-            "globalStorage, ModularData, arbitrary caches, unknown ItemTable keys, and full assistant transcript recovery from input-history-only databases are not claimed."
+            "globalStorage, arbitrary caches, unknown ItemTable keys, and full assistant transcript recovery from input-history-only databases are not claimed."
           ]
         }
       ],
-      "history_locations": [],
+      "history_locations": [
+        "~/.config/Trae/ModularData/ai-agent/database.db",
+        "~/Library/Application Support/Trae/ModularData/ai-agent/database.db",
+        "%APPDATA%\\Trae\\ModularData\\ai-agent\\database.db"
+      ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
@@ -584,13 +588,11 @@
         "parent_child_session_edges": false
       },
       "limitations": [
-        "No automatic official history leaf: `ModularData` does not identify current-importer input. Former `workspaceStorage` probes are removed; compatible `state.vscdb` remains available by exact `--path`."
+        "Automatic discovery is limited to the current platform-standard Trae application-data database. Released compatibility for User/workspaceStorage/state.vscdb remains exact `--path` only."
       ],
       "public_docs": "docs/provider-support.md",
       "metadata": {
-        "default_auto_discovery": false,
-        "default_auto_discovery_scope": "none; no official automatic Trae history leaf is established",
-        "import_support": "exact explicit paths only",
+        "import_support": "automatic current database plus exact explicit legacy paths",
         "aliases": [
           "trae-cn",
           "trae_cn"

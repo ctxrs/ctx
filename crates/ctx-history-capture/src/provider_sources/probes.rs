@@ -383,7 +383,10 @@ pub(super) fn has_trae_state_vscdb_chat_history(
             return BoundedProbe::NotFound;
         }
         Ok(metadata) if metadata.is_file() => {
-            if root.file_name().and_then(|name| name.to_str()) != Some("state.vscdb") {
+            if !matches!(
+                root.file_name().and_then(|name| name.to_str()),
+                Some("state.vscdb" | "database.db")
+            ) {
                 return BoundedProbe::NotFound;
             }
             return has_trae_state_vscdb_chat_keys(data_root, root);

@@ -87,6 +87,11 @@ Factory AI Droid history is discovered automatically at `~/.factory/sessions`.
 An exact path remains available, for example
 `ctx import --provider factory-ai-droid --path /path/to/factory/sessions`.
 
+Trae history is discovered automatically from the current platform application
+data database (`Trae/ModularData/ai-agent/database.db`) on Linux, macOS, and
+Windows. Exact `--path` imports of released `User/workspaceStorage/state.vscdb`
+compatibility data remain supported.
+
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific
 transcript files exist and match the documented format. NanoClaw remains

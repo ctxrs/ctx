@@ -32,6 +32,7 @@ pub(in crate::provider_sources) use lingma::resolve_lingma_with_authority;
 const KIRO_FORMAT: &str = "kiro_cli_sqlite";
 const WARP_FORMAT: &str = "warp_sqlite";
 const CODEBUDDY_FORMAT: &str = "codebuddy_history_json";
+const TRAE_FORMAT: &str = "trae_state_vscdb";
 const ZED_FORMAT: &str = "zed_threads_sqlite";
 const COPILOT_FORMAT: &str = "copilot_cli_session_events_jsonl";
 const ANTIGRAVITY_FORMAT: &str = "antigravity_cli_transcript_jsonl_tree";
@@ -51,7 +52,7 @@ pub(super) fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> 
         CaptureProvider::Lingma => lingma::resolve_lingma(context, spec),
         CaptureProvider::Zed => resolve_zed(context, spec),
         CaptureProvider::CopilotCli => resolve_copilot(context, spec),
-        CaptureProvider::Trae => DiscoveryReport::default(),
+        CaptureProvider::Trae => resolve_trae(context, spec),
         CaptureProvider::Antigravity => resolve_antigravity(context, spec),
         CaptureProvider::Windsurf => resolve_windsurf(context, spec),
         _ => DiscoveryReport::default(),
@@ -427,6 +428,55 @@ fn resolve_copilot(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> Dis
         )],
         issues: Vec::new(),
     }
+}
+
+fn resolve_trae(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
+    let root = match context.platform() {
+        DiscoveryPlatform::Linux => {
+            let base = absolute_xdg_or_default(
+                context.env("XDG_CONFIG_HOME"),
+                context
+                    .platform_dirs()
+                    .config
+                    .clone()
+                    .unwrap_or_else(|| context.home().join(".config")),
+            );
+            Some(base.join("Trae"))
+        }
+        DiscoveryPlatform::MacOS => context
+            .platform_dirs()
+            .data
+            .clone()
+            .map(|path| path.join("Trae"))
+            .or_else(|| Some(context.home().join("Library/Application Support/Trae"))),
+        DiscoveryPlatform::Windows => context
+            .platform_dirs()
+            .data
+            .clone()
+            .or_else(|| {
+                context.env("APPDATA").and_then(|value| {
+                    let path = PathBuf::from(value);
+                    path_is_absolute_for_platform(&path, DiscoveryPlatform::Windows).then_some(path)
+                })
+            })
+            .map(|path| path.join("Trae")),
+        DiscoveryPlatform::OtherUnix => None,
+    };
+    let mut report = DiscoveryReport::default();
+    if let Some(root) = root {
+        push_source_candidate(
+            &mut report.sources,
+            safe_native_source(
+                context.data_root(),
+                spec,
+                root.join("ModularData")
+                    .join("ai-agent")
+                    .join("database.db"),
+                TRAE_FORMAT,
+            ),
+        );
+    }
+    report
 }
 
 fn resolve_antigravity(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {

@@ -103,7 +103,7 @@ pub(super) fn register_trae_route(
         registry,
         source,
         selection,
-        SourceBackedSelectorAuthority::ExplicitPath,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
         adapter,
     )
 }

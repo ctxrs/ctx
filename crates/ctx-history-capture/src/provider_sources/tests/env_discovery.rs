@@ -441,11 +441,13 @@ fn lingma_discovery_uses_current_vscode_root_only() {
 }
 
 #[test]
-fn trae_workspace_storage_compatibility_paths_are_not_automatic() {
+fn trae_current_database_is_automatic_without_workspace_storage_union() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = tempdir();
     let appdata = temp.path().join("appdata");
     let _appdata = EnvGuard::set("APPDATA", appdata.as_os_str());
+    let xdg_config = temp.path().join("xdg-config");
+    let _xdg_config = EnvGuard::set("XDG_CONFIG_HOME", xdg_config.as_os_str());
 
     let standard_mac_root = temp
         .path()
@@ -468,8 +470,15 @@ fn trae_workspace_storage_compatibility_paths_are_not_automatic() {
         BoundedProbe::NotFound
     );
 
+    let current = xdg_config.join("Trae/ModularData/ai-agent/database.db");
+    write_trae_discovery_db(&current);
     let sources = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Trae);
-    assert!(sources.is_empty());
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, current);
+    assert_eq!(sources[0].status, ProviderSourceStatus::Available);
+    assert!(sources
+        .iter()
+        .all(|source| !source.path.to_string_lossy().contains("workspaceStorage")));
 }
 
 #[test]

@@ -514,7 +514,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         true,
         DiscoveredWinner
     ),
-    sqlite_route!(Trae, "trae_state_vscdb", true, true, ExplicitPath),
+    sqlite_route!(Trae, "trae_state_vscdb", true, true, DiscoveredWinner),
     sqlite_route!(MiMoCode, "mimocode_sqlite", true, true, DiscoveredWinner),
 ];
 
@@ -602,7 +602,7 @@ Qoder|qoder_transcript_jsonl_tree|qoder_transcript_jsonl|true|true|DiscoveredWin
 Qoder|qoder_transcript_jsonl|qoder_transcript_jsonl|false|true|ExplicitPath|none|ProviderSource
 Warp|warp_sqlite|warp_sqlite|true|true|NamedSurface|none|NamedSurface
 CodeBuddy|codebuddy_history_json|codebuddy_history_json|true|true|DiscoveredWinner|none|ProviderSource
-Trae|trae_state_vscdb|trae_state_vscdb|true|true|ExplicitPath|none|ProviderSource
+Trae|trae_state_vscdb|trae_state_vscdb|true|true|DiscoveredWinner|none|ProviderSource
 MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 ";
 
