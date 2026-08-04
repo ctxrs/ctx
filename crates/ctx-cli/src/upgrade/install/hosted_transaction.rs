@@ -217,16 +217,7 @@ fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
     complete_install(&source, &journal_path, &mut journal)?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&json!({
-            "schema_version": 1,
-            "command": "hosted_install_transaction",
-            "ok": true,
-            "status": "committed",
-            "attempt_id": journal.attempt_id,
-            "install_path": journal.install_path,
-            "binary_sha256": journal.binary_sha256,
-            "marker_sha256": journal.marker_sha256,
-        }))?
+        serde_json::to_string_pretty(&install_receipt(&journal))?
     );
     Ok(())
 }
@@ -553,19 +544,36 @@ fn required_uninstall_journal(path: &Path, install_path: &Path) -> Result<Journa
 fn print_uninstall_receipt(journal: &Journal, helper: &Path, status: &str) -> Result<()> {
     println!(
         "{}",
-        serde_json::to_string_pretty(&json!({
-            "schema_version": 1,
-            "command": "hosted_uninstall_transaction",
-            "ok": true,
-            "status": status,
-            "attempt_id": journal.attempt_id,
-            "install_path": journal.install_path,
-            "helper_path": helper,
-            "binary_sha256": journal.binary_sha256,
-            "marker_sha256": journal.marker_sha256,
-        }))?
+        serde_json::to_string_pretty(&uninstall_receipt(journal, helper, status))?
     );
     Ok(())
+}
+
+fn install_receipt(journal: &Journal) -> Value {
+    json!({
+        "schema_version": 1,
+        "command": "hosted_install_transaction",
+        "ok": true,
+        "status": "committed",
+        "attempt_id": journal.attempt_id,
+        "install_path": journal.install_path,
+        "binary_sha256": journal.binary_sha256,
+        "marker_sha256": journal.marker_sha256,
+    })
+}
+
+fn uninstall_receipt(journal: &Journal, helper: &Path, status: &str) -> Value {
+    json!({
+        "schema_version": 1,
+        "command": "hosted_uninstall_transaction",
+        "ok": true,
+        "status": status,
+        "attempt_id": journal.attempt_id,
+        "install_path": journal.install_path,
+        "helper_path": helper,
+        "binary_sha256": journal.binary_sha256,
+        "marker_sha256": journal.marker_sha256,
+    })
 }
 
 fn validate_uninstall_caller(current: &Path, journal: &Journal) -> Result<()> {

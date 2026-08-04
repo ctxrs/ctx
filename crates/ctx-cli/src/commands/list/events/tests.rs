@@ -738,3 +738,43 @@ fn broken_pipe_is_quiet_and_successful() {
     .is_ok());
     assert!(stderr_copy.bytes().is_empty());
 }
+
+#[test]
+fn run_writes_typed_resource_errors_only_to_the_selected_machine_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let stdout = SharedBytes::default();
+    let stdout_copy = stdout.clone();
+    let stderr = SharedBytes::default();
+    let stderr_copy = stderr.clone();
+    let mut ui = crate::ui::Ui::with_writers(
+        stdout,
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+        stderr,
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+    );
+    let mut telemetry = ShowTelemetry {
+        target_kind: TargetKind::Events,
+        transcript_mode: None,
+        output_format: RenderFormat::Json,
+        writes_out_file: false,
+        provider_lookup: false,
+        window: None,
+        events_returned: None,
+    };
+    let mut usage = crate::local_usage::CliUsage::excluded();
+    let args = parse_events(&["ctx", "list", "events", "--limit", "0"]);
+
+    assert!(run(
+        args,
+        temp.path().to_path_buf(),
+        &mut telemetry,
+        &mut usage,
+        &mut ui
+    )
+    .is_err());
+    assert!(stdout_copy.bytes().is_empty());
+    let stderr = stderr_copy.bytes();
+    let value: Value = serde_json::from_slice(&stderr).unwrap();
+    assert_eq!(value["error_code"], "resource_limit");
+    assert_eq!(value["retryable"], false);
+}

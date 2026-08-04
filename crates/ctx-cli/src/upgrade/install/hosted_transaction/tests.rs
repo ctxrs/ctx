@@ -108,6 +108,29 @@ fn assert_installed(install: &Path, ownership_body: &[u8], point: &str) {
 }
 
 #[test]
+fn hosted_transaction_receipts_keep_the_stable_machine_schema() {
+    let (_temp, install, digest, _source) = fixture();
+    let journal = owned_install_journal(&install, &digest, NEW_OWNERSHIP, "receipt-attempt");
+
+    let install_value = install_receipt(&journal);
+    assert_eq!(install_value["schema_version"], 1);
+    assert_eq!(install_value["command"], "hosted_install_transaction");
+    assert_eq!(install_value["status"], "committed");
+    assert_eq!(install_value["attempt_id"], "receipt-attempt");
+    assert_eq!(install_value["binary_sha256"], digest);
+
+    let helper = uninstall_helper_path(&install);
+    let uninstall_value = uninstall_receipt(&journal, &helper, "armed");
+    assert_eq!(uninstall_value["schema_version"], 1);
+    assert_eq!(uninstall_value["command"], "hosted_uninstall_transaction");
+    assert_eq!(uninstall_value["status"], "armed");
+    assert_eq!(
+        uninstall_value["helper_path"],
+        helper.to_string_lossy().as_ref()
+    );
+}
+
+#[test]
 fn journal_binding_rejects_path_and_digest_changes() {
     let (_temp, install, digest, _source) = fixture();
     let body = marker(&install, &digest);
