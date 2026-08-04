@@ -61,7 +61,7 @@ pub(crate) use sqlite_source::{
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,
     ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceSpec, ProviderSourceStatus,
+    ProviderSourceSpec, ProviderSourceStatus, ProviderSourceStatusReason,
 };
 pub use warp::{
     discover_warp_sources_with_authority, resolve_warp_discovery_authority, DiscoveredWarpSource,

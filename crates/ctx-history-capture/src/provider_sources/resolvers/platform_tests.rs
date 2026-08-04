@@ -2,7 +2,10 @@ use super::super::super::context::DiscoveryPlatformDirs;
 use std::fs;
 
 use super::*;
-use crate::{provider_source_for_path, provider_source_spec};
+use crate::{
+    provider_source_for_path, provider_source_spec, ProviderImportSupport,
+    ProviderSourceStatusReason,
+};
 use rusqlite::Connection;
 
 fn tempdir() -> tempfile::TempDir {
@@ -805,6 +808,27 @@ fn trae_current_database_reports_missing_valid_empty_and_malformed_states() {
     drop(connection);
     let report = provider_report(&context, CaptureProvider::Trae);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Available);
+    assert_eq!(
+        report.sources[0].source_kind,
+        ProviderSourceKind::NativeHistory
+    );
+    assert_eq!(
+        report.sources[0].import_support,
+        ProviderImportSupport::Native
+    );
+    assert_eq!(report.sources[0].status_reason(), None);
+
+    let explicit_plaintext = provider_source_for_path(CaptureProvider::Trae, current.clone());
+    assert_eq!(explicit_plaintext.status, ProviderSourceStatus::Available);
+    assert_eq!(
+        explicit_plaintext.source_kind,
+        ProviderSourceKind::NativeHistory
+    );
+    assert_eq!(
+        explicit_plaintext.import_support,
+        ProviderImportSupport::Explicit
+    );
+    assert_eq!(explicit_plaintext.status_reason(), None);
 
     let encrypted_shape = (0..4096)
         .map(|index| u8::try_from((index * 131 + 17) % 251).unwrap())
@@ -822,6 +846,18 @@ fn trae_current_database_reports_missing_valid_empty_and_malformed_states() {
         .collect::<Vec<_>>();
     let report = provider_report(&context, CaptureProvider::Trae);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+    assert_eq!(
+        report.sources[0].source_kind,
+        ProviderSourceKind::DetectionOnly
+    );
+    assert_eq!(
+        report.sources[0].import_support,
+        ProviderImportSupport::Unsupported
+    );
+    assert_eq!(
+        report.sources[0].status_reason(),
+        Some(ProviderSourceStatusReason::BlockedAuthOrEncryption)
+    );
     assert_eq!(
         report.sources[0].unsupported_reason,
         Some(
@@ -843,6 +879,12 @@ fn trae_current_database_reports_missing_valid_empty_and_malformed_states() {
 
     let explicit = provider_source_for_path(CaptureProvider::Trae, current);
     assert_eq!(explicit.status, ProviderSourceStatus::Unknown);
+    assert_eq!(explicit.source_kind, ProviderSourceKind::DetectionOnly);
+    assert_eq!(explicit.import_support, ProviderImportSupport::Unsupported);
+    assert_eq!(
+        explicit.status_reason(),
+        Some(ProviderSourceStatusReason::BlockedAuthOrEncryption)
+    );
     assert_eq!(
         explicit.unsupported_reason,
         report.sources[0].unsupported_reason

@@ -30,6 +30,16 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
         .filter(|route| route.unsupported_reason.is_some())
         .collect::<Vec<_>>();
     assert!(unsupported.is_empty());
+    let providers_with_automatic_routes = LANDED_SOURCE_BACKED_ROUTES
+        .iter()
+        .filter(|route| route.automatic && route.unsupported_reason.is_none())
+        .map(|route| route.provider)
+        .collect::<HashSet<_>>();
+    let registered_providers = crate::provider_source_specs()
+        .iter()
+        .map(|spec| spec.provider)
+        .collect::<HashSet<_>>();
+    assert_eq!(providers_with_automatic_routes, registered_providers);
     let mut formats = HashSet::new();
     for route in LANDED_SOURCE_BACKED_ROUTES {
         assert!(
@@ -44,12 +54,6 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
     }
 
     for spec in crate::provider_source_specs() {
-        assert_eq!(
-            spec.import_support,
-            ProviderImportSupport::Native,
-            "{} must participate in ordinary automatic discovery",
-            spec.provider.as_str()
-        );
         let routes = LANDED_SOURCE_BACKED_ROUTES
             .iter()
             .filter(|route| route.provider == spec.provider)
@@ -65,9 +69,7 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
             spec.provider.as_str()
         );
         assert!(
-            routes
-                .iter()
-                .any(|route| route.automatic && route.unsupported_reason.is_none()),
+            providers_with_automatic_routes.contains(&spec.provider),
             "{} must have at least one supported automatic source route",
             spec.provider.as_str()
         );
@@ -83,14 +85,12 @@ fn importable_provider_inventory_covers_default_and_explicit_formats() {
                 spec.provider.as_str(),
                 location.source_format
             );
-            if spec.import_support == ProviderImportSupport::Native {
-                assert!(
-                    matching[0].automatic,
-                    "{} default format {} is not automatic",
-                    spec.provider.as_str(),
-                    location.source_format
-                );
-            }
+            assert!(
+                matching[0].automatic,
+                "{} default format {} is not automatic",
+                spec.provider.as_str(),
+                location.source_format
+            );
         }
     }
 

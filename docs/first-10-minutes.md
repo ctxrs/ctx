@@ -59,8 +59,12 @@ row with
 `exists: false`
 means ctx knows the default path but did not find local history there. A JSON
 row with `status: "empty"` means the path exists but no provider-specific
-transcript files were found. A row with `status: "unknown"` means the bounded
-transcript probe hit its scan budget.
+transcript files were found. A row with `status: "unknown"` means bounded
+discovery could not decide safely, for example because of a scan budget, I/O
+failure, or an authentication/encryption boundary. Inspect `status_reason` and
+`unsupported_reason` for the typed and human-readable diagnostics; an encrypted
+or non-plaintext Trae database reports
+`status_reason: "blocked_auth_or_encryption"`.
 
 ## 4. Re-Run Or Target Imports
 

@@ -240,7 +240,12 @@ fn trae_encrypted_current_database_is_unknown_and_never_imported() {
     let before_entries = fs::read_dir(database.parent().unwrap()).unwrap().count();
 
     let sources = json_output(ctx(&temp).args(["sources", "--format=json", "--all"]));
-    let source = assert_current_trae_default_source(&sources, "unknown", false);
+    let source = current_trae_default_source(&sources);
+    assert_eq!(source["status"], "unknown");
+    assert_eq!(source["status_reason"], "blocked_auth_or_encryption");
+    assert_eq!(source["import_support"], "unsupported");
+    assert_eq!(source["native_import"], false);
+    assert_eq!(source["importable"], false);
     let reason = source["unsupported_reason"].as_str().unwrap();
     assert!(reason.contains("SQLCipher-encrypted relational history"));
     assert!(reason.contains("cannot be imported without Trae key access"));
@@ -367,6 +372,17 @@ fn assert_current_trae_default_source<'a>(
     expected_status: &str,
     expected_importable: bool,
 ) -> &'a Value {
+    let source = current_trae_default_source(sources);
+    assert_eq!(source["source_format"], "trae_state_vscdb");
+    assert_eq!(source["status"], expected_status);
+    assert_eq!(source["status_reason"], Value::Null);
+    assert_eq!(source["import_support"], "native");
+    assert_eq!(source["native_import"], true);
+    assert_eq!(source["importable"], expected_importable);
+    source
+}
+
+fn current_trae_default_source(sources: &Value) -> &Value {
     let source = sources["sources"]
         .as_array()
         .unwrap()
@@ -374,10 +390,6 @@ fn assert_current_trae_default_source<'a>(
         .find(|source| source["provider"] == "trae")
         .unwrap_or_else(|| panic!("missing current Trae source in {sources:#}"));
     assert_eq!(source["source_format"], "trae_state_vscdb");
-    assert_eq!(source["status"], expected_status);
-    assert_eq!(source["import_support"], "native");
-    assert_eq!(source["native_import"], true);
-    assert_eq!(source["importable"], expected_importable);
     let path = source["path"].as_str().unwrap();
     assert!(
         path.ends_with(".config/Trae/ModularData/ai-agent/database.db"),

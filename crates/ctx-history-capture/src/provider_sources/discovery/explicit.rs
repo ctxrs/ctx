@@ -128,7 +128,13 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
         _ => "unsupported",
     };
-    let explicit_import_support = spec.import_support;
+    let explicit_import_support = if trae_blocked_auth_or_encryption {
+        ProviderImportSupport::Unsupported
+    } else if provider == CaptureProvider::Trae && spec.import_support.is_importable() {
+        ProviderImportSupport::Explicit
+    } else {
+        spec.import_support
+    };
     let source_kind = if explicit_import_support.is_importable() {
         ProviderSourceKind::NativeHistory
     } else {
@@ -142,13 +148,17 @@ pub fn provider_source_for_path(provider: CaptureProvider, path: PathBuf) -> Pro
         source_format,
         source_kind,
         import_support: explicit_import_support,
-        catalog_support: spec.catalog_support,
-        status: if matches!(explicit_import_support, ProviderImportSupport::Unsupported)
+        catalog_support: if trae_blocked_auth_or_encryption {
+            ProviderCatalogSupport::None
+        } else {
+            spec.catalog_support
+        },
+        status: if trae_blocked_auth_or_encryption {
+            ProviderSourceStatus::Unknown
+        } else if matches!(explicit_import_support, ProviderImportSupport::Unsupported)
             || matches!(observed, Err(SourcePathError::Unsupported))
         {
             ProviderSourceStatus::Unsupported
-        } else if trae_blocked_auth_or_encryption {
-            ProviderSourceStatus::Unknown
         } else if observed.is_ok() {
             ProviderSourceStatus::Available
         } else if matches!(observed, Err(SourcePathError::Missing)) {

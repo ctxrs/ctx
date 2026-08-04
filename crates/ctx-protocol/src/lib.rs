@@ -409,6 +409,8 @@ pub struct ProviderSource {
     pub source_format: Option<String>,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_support: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_import: Option<bool>,

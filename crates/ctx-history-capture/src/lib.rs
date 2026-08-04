@@ -21,8 +21,8 @@ pub use provider_sources::{
     LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation, ProviderCatalogSupport,
     ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
     ProviderSourceRootBoundaryError, ProviderSourceSpec, ProviderSourceStatus,
-    WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel,
-    WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
+    ProviderSourceStatusReason, WarpDiscoveryUnavailable, WarpInstalledPlatform,
+    WarpInstalledSurfaceKey, WarpReleaseChannel, WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
 };
 
 pub(crate) const MAX_PROVIDER_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;

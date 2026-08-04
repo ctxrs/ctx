@@ -693,12 +693,12 @@
           "fidelity": "partial",
           "notes": [
             "Native importer for a NanoClaw project root containing data/v2.db and data/v2-sessions/*/*/{inbound.db,outbound.db}.",
-            "Automatic project discovery checks exact CWD first, then finite official service registrations: macOS ~/Library/LaunchAgents/com.nanoclaw-v2-<sha1>.plist, Linux user ~/.config/systemd/user/nanoclaw-v2-<sha1>.service, and root Linux /etc/systemd/system/nanoclaw-v2-<sha1>.service."
+            "Automatic project discovery retains the exact CWD and every valid finite official service registration together, deduplicated by canonical source identity: macOS ~/Library/LaunchAgents/com.nanoclaw-v2-<sha1>.plist, Linux user ~/.config/systemd/user/nanoclaw-v2-<sha1>.service, and root Linux /etc/systemd/system/nanoclaw-v2-<sha1>.service. The system service directory is examined only when the effective UID is 0."
           ]
         }
       ],
       "history_locations": [
-        "Exact-CWD checkout containing `data/v2.db` and required `data/v2-sessions`; otherwise official launchd/systemd service registrations pinning a checkout WorkingDirectory. Alternate unregistered roots require exact `--path`."
+        "Exact-CWD checkout containing `data/v2.db` and required `data/v2-sessions` coexists with all valid official launchd/systemd registrations pinning checkout WorkingDirectories; canonical source identity deduplicates overlap. `/etc/systemd/system` is examined only for effective UID 0. Alternate unregistered roots require exact `--path`."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
