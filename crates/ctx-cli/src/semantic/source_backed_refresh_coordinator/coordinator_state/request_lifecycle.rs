@@ -2,7 +2,9 @@ use super::*;
 
 impl CoreRefreshEngine {
     pub(in crate::semantic) fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
-        if let Some(run) = self.resolve_fully_covered_continuation(data_root) {
+        if let Some(run) = self.resolve_fully_covered_continuation_with(data_root, |catalog| {
+            source_backed_route_admission_fence(data_root, catalog)
+        }) {
             return Some(run);
         }
         self.run_next_with_verified_index_opener(data_root, |index_root| {
@@ -10,12 +12,64 @@ impl CoreRefreshEngine {
         })
     }
 
-    fn resolve_fully_covered_continuation(
+    #[cfg(test)]
+    pub(in super::super) fn run_next_with_post_publication_sampler_for_test<Sample>(
         &self,
         data_root: &Path,
-    ) -> Option<SourceBackedRefreshRun> {
+        sample: Sample,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Sample: FnOnce(
+            Option<&ExplicitSourceCatalogAuthority>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
+        if let Some(run) = self.resolve_fully_covered_continuation_with(data_root, sample) {
+            return Some(run);
+        }
+        self.run_next_with_verified_index_opener(data_root, |index_root| {
+            Ok(Arc::new(open_verified_index(index_root)?))
+        })
+    }
+
+    fn resolve_fully_covered_continuation_with<Sample>(
+        &self,
+        data_root: &Path,
+        sample: Sample,
+    ) -> Option<SourceBackedRefreshRun>
+    where
+        Sample: FnOnce(
+            Option<&ExplicitSourceCatalogAuthority>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
+        let (sample_request_id, sample_routes) = {
+            let state = self.lock_state();
+            let request_id = state.active_request_id.clone()?;
+            let continuation = state.manual_all_continuations.get(&request_id)?;
+            if !continuation.predecessor_finished || !continuation.is_fully_covered() {
+                return None;
+            }
+            let predecessor = find_attempt(&state, &continuation.predecessor_request_id)?;
+            let publication_receipt = predecessor
+                .publication_receipt
+                .as_ref()
+                .or(predecessor.receipt.as_ref())?;
+            if publication_receipt.published_generation.is_empty() {
+                return None;
+            }
+            let routes = continuation.covered_route_results.keys().cloned().collect();
+            (request_id, routes)
+        };
+        let post_publication_fence = self.post_publication_route_coverage_fence_with(
+            &sample_request_id,
+            sample_routes,
+            sample,
+        );
+
         let mut state = self.lock_state();
         let request_id = state.active_request_id.clone()?;
+        if request_id != sample_request_id {
+            return None;
+        }
         let continuation = state.manual_all_continuations.get(&request_id)?.clone();
         if !continuation.predecessor_finished || !continuation.is_fully_covered() {
             return None;
@@ -50,6 +104,11 @@ impl CoreRefreshEngine {
                             .admission_event_watermarks
                             .get(route)
                             .copied()?;
+                        let admitted_watermark = post_publication_fence.certified_boundary(
+                            route,
+                            admitted_watermark,
+                            observation,
+                        );
                         Some((
                             route.clone(),
                             SourceBackedRefreshRouteCoverageCertificate {
@@ -276,16 +335,35 @@ impl CoreRefreshEngine {
         data_root: &Path,
         request_id: &str,
     ) -> PostPublicationRouteCoverageFence {
+        let routes = {
+            let state = self.lock_state();
+            find_attempt(&state, request_id)
+                .into_iter()
+                .flat_map(|attempt| attempt.route_observations.keys().cloned())
+                .collect()
+        };
+        self.post_publication_route_coverage_fence_with(request_id, routes, |catalog| {
+            source_backed_route_admission_fence(data_root, catalog)
+        })
+    }
+
+    fn post_publication_route_coverage_fence_with<Sample>(
+        &self,
+        request_id: &str,
+        routes: BTreeSet<SourceRouteIdentity>,
+        sample: Sample,
+    ) -> PostPublicationRouteCoverageFence
+    where
+        Sample: FnOnce(
+            Option<&ExplicitSourceCatalogAuthority>,
+        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
+    {
         // Snapshot the exact seen-event boundary before touching provider
         // targets. Events delivered after this lock is released are outside
         // the certificate even if their content-free observation is equal.
-        let (routes, seen_watermarks, requested_catalog) = {
+        let (seen_watermarks, requested_catalog) = {
             let state = self.lock_state();
             let attempt = find_attempt(&state, request_id);
-            let routes = attempt
-                .into_iter()
-                .flat_map(|attempt| attempt.route_observations.keys().cloned())
-                .collect::<BTreeSet<_>>();
             let seen_watermarks = routes
                 .iter()
                 .filter_map(|route| {
@@ -298,11 +376,9 @@ impl CoreRefreshEngine {
                 .collect();
             let requested_catalog =
                 attempt.and_then(|attempt| attempt.requested_explicit_source_catalog.clone());
-            (routes, seen_watermarks, requested_catalog)
+            (seen_watermarks, requested_catalog)
         };
-        let mut sampled =
-            source_backed_route_admission_fence(data_root, requested_catalog.as_ref())
-                .unwrap_or_default();
+        let mut sampled = sample(requested_catalog.as_ref()).unwrap_or_default();
         let sampled_observations = routes
             .into_iter()
             .map(|route| {
@@ -376,7 +452,7 @@ impl CoreRefreshEngine {
                                     Arc::clone(verified),
                                 )?;
                                 let has_successors = !queued_successors.is_empty();
-                                let durable_request_id = {
+                                {
                                     let mut state = self.lock_state();
                                     terminal.install(&mut state);
                                     state.attempts.push_back(attempt);
@@ -389,15 +465,10 @@ impl CoreRefreshEngine {
                                         .extend(recovered_continuations.clone());
                                     state.current_published_generation = active_generation.clone();
                                     trim_terminal_attempt_history(&mut state);
-                                    state
-                                        .active_request_id
-                                        .as_deref()
-                                        .unwrap_or(metadata.request_id.as_str())
-                                        .to_owned()
-                                };
+                                }
                                 let _ =
                                     self.finish_route_admissions(&metadata.request_id, true, None);
-                                self.persist_job_status(data_root, &durable_request_id)?;
+                                self.persist_job_status(data_root, &metadata.request_id)?;
                                 return Ok(has_successors);
                             }
                         }
@@ -484,7 +555,7 @@ impl CoreRefreshEngine {
                 SourceBackedRefreshAttempt::recovered_published(&job, &metadata, receipt.clone());
             let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
             let has_successors = !queued_successors.is_empty();
-            let durable_request_id = {
+            {
                 let mut state = self.lock_state();
                 terminal.install(&mut state);
                 state.attempts.push_back(attempt);
@@ -494,14 +565,9 @@ impl CoreRefreshEngine {
                     .extend(recovered_continuations.clone());
                 state.current_published_generation = Some(active_generation);
                 trim_terminal_attempt_history(&mut state);
-                state
-                    .active_request_id
-                    .as_deref()
-                    .unwrap_or(metadata.request_id.as_str())
-                    .to_owned()
-            };
+            }
             let _ = self.finish_route_admissions(&metadata.request_id, true, None);
-            self.persist_job_status(data_root, &durable_request_id)?;
+            self.persist_job_status(data_root, &metadata.request_id)?;
             return Ok(has_successors);
         }
         if request_state == "failed" && !queued_successors.is_empty() {

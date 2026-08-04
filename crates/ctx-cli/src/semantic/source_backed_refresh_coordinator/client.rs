@@ -54,7 +54,7 @@ const TYPED_UNKNOWN_RECOVERY_ATTEMPT_LIMIT: usize = 3;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum SourceRefreshRequestRecoveryFailureReason {
     AttemptsExhausted,
-    NoRequestIdProgress,
+    RequestIdChanged,
 }
 
 #[derive(Debug)]
@@ -70,8 +70,8 @@ impl fmt::Display for SourceRefreshRequestRecoveryFailed {
             SourceRefreshRequestRecoveryFailureReason::AttemptsExhausted => {
                 "typed unknown-request recovery attempts were exhausted"
             }
-            SourceRefreshRequestRecoveryFailureReason::NoRequestIdProgress => {
-                "typed unknown-request recovery repeated a prior request ID"
+            SourceRefreshRequestRecoveryFailureReason::RequestIdChanged => {
+                "typed unknown-request recovery returned a different logical request ID"
             }
         };
         write!(
@@ -87,15 +87,11 @@ impl std::error::Error for SourceRefreshRequestRecoveryFailed {}
 #[derive(Debug)]
 pub(super) struct TypedUnknownRequestRecovery {
     attempts: usize,
-    seen_request_ids: BTreeSet<String>,
 }
 
 impl TypedUnknownRequestRecovery {
-    pub(super) fn new(initial_request_id: &str) -> Self {
-        Self {
-            attempts: 0,
-            seen_request_ids: BTreeSet::from([initial_request_id.to_owned()]),
-        }
+    pub(super) fn new(_initial_request_id: &str) -> Self {
+        Self { attempts: 0 }
     }
 
     fn begin_attempt(&mut self, request_id: &str) -> Result<StdDuration> {
@@ -121,13 +117,11 @@ impl TypedUnknownRequestRecovery {
         previous_request_id: &str,
         recovered_request_id: String,
     ) -> Result<String> {
-        if recovered_request_id == previous_request_id
-            || !self.seen_request_ids.insert(recovered_request_id.clone())
-        {
+        if recovered_request_id != previous_request_id {
             return Err(SourceRefreshRequestRecoveryFailed {
                 request_id: recovered_request_id,
                 recovery_attempts: self.attempts,
-                reason: SourceRefreshRequestRecoveryFailureReason::NoRequestIdProgress,
+                reason: SourceRefreshRequestRecoveryFailureReason::RequestIdChanged,
             }
             .into());
         }

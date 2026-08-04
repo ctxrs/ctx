@@ -248,9 +248,13 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
     );
     assert!(restarted.has_pending_request());
     let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("successor-rooted recovered job");
-    assert_eq!(recovered["request_id"], successor_request_id);
-    assert_eq!(recovered["request_state"], "queued");
+        .expect("predecessor-rooted recovered job");
+    assert_eq!(recovered["request_id"], active_request_id);
+    assert_eq!(recovered["request_state"], "published");
+    assert_eq!(
+        recovered["queued_successors"][0]["request_id"],
+        successor_request_id
+    );
 }
 
 #[test]

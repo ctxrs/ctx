@@ -60,12 +60,12 @@ fn persistent_typed_unknown_loss_is_bounded_with_backoff_and_typed_failure() {
     let mut recovery = TypedUnknownRequestRecovery::new("lost-0");
     let mut request_id = "lost-0".to_owned();
     let mut backoffs = Vec::new();
-    for next in ["lost-1", "lost-2", "lost-3"] {
+    for _ in 0..3 {
         request_id = recover_typed_unknown_request_with(
             &mut recovery,
             &request_id,
             |backoff| backoffs.push(backoff),
-            || Ok(next.to_owned()),
+            || Ok("lost-0".to_owned()),
         )
         .unwrap();
     }
@@ -80,7 +80,7 @@ fn persistent_typed_unknown_loss_is_bounded_with_backoff_and_typed_failure() {
     let typed = error
         .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
         .expect("persistent loss returns a typed recovery failure");
-    assert_eq!(typed.request_id, "lost-3");
+    assert_eq!(typed.request_id, "lost-0");
     assert_eq!(typed.recovery_attempts, 3);
     assert_eq!(
         typed.reason,
@@ -96,19 +96,94 @@ fn persistent_typed_unknown_loss_is_bounded_with_backoff_and_typed_failure() {
     );
 }
 
+#[cfg(any(unix, windows))]
 #[test]
-fn typed_unknown_recovery_requires_request_id_progress() {
-    let mut recovery = TypedUnknownRequestRecovery::new("lost");
-    let error =
-        recover_typed_unknown_request_with(&mut recovery, "lost", |_| {}, || Ok("lost".to_owned()))
-            .unwrap_err();
-    let typed = error
-        .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
-        .expect("stalled recovery returns a typed failure");
-    assert_eq!(typed.recovery_attempts, 1);
+fn typed_unknown_recovery_reenqueues_stable_uuid_and_returns_its_terminal_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let service = start_daemon_source_refresh_service_with_request_timeout(
+        &data_root,
+        SharedSemanticRuntime::default(),
+        StdDuration::from_millis(100),
+    )
+    .unwrap();
+    let stable_request_id = Uuid::from_u128(0x28108).to_string();
+    let terminal_generation = Arc::new(Mutex::new(None::<String>));
+
+    let observation = std::thread::scope(|scope| {
+        let waiter_root = data_root.clone();
+        let waiter_request_id = stable_request_id.clone();
+        let waiter = scope.spawn(move || {
+            wait_for_published_generation(
+                &waiter_root,
+                waiter_request_id,
+                SourceBackedRefreshMode::Wait,
+                SourceBackedRefreshOperation::Refresh,
+                None,
+                false,
+            )
+            .unwrap()
+        });
+
+        let started = StdInstant::now();
+        loop {
+            if service.source_refresh.status(&stable_request_id).is_some() {
+                break;
+            }
+            assert!(
+                started.elapsed() < StdDuration::from_secs(2),
+                "stable UUID was not restored after the typed unknown response"
+            );
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+        let execute_generation = Arc::clone(&terminal_generation);
+        let probe_generation = Arc::clone(&terminal_generation);
+        let run = service
+            .source_refresh
+            .run_next_with(
+                move |_, _| {
+                    let commit = ctx_history_index::GenerationWriter::open(
+                        source_backed_index_root(&data_root),
+                        WriterOptions::default(),
+                    )?
+                    .commit(|_| true)?;
+                    *execute_generation.lock().unwrap() = Some(commit.generation_id.clone());
+                    Ok(SourceBackedRefreshPublication {
+                        generation_id: commit.generation_id,
+                        published_explicit_source_catalog: None,
+                        unsupported_routes: 0,
+                        certified_source_count: 0,
+                        certified_source_bytes: 0,
+                        current: SourceBackedRefreshCurrent::default(),
+                        timings: SourceBackedRefreshTimings::default(),
+                        route_results: Vec::new(),
+                        catalog_route_bindings: Vec::new(),
+                        verified_index: None,
+                    })
+                },
+                move || Ok(probe_generation.lock().unwrap().clone()),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .expect("stable recovered request publication");
+        assert!(!run.failed, "{:#}", run.job);
+        waiter.join().unwrap()
+    });
+
+    let generation = terminal_generation
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("stable recovered request generation");
     assert_eq!(
-        typed.reason,
-        SourceRefreshRequestRecoveryFailureReason::NoRequestIdProgress
+        observation.request_id.as_deref(),
+        Some(stable_request_id.as_str())
+    );
+    assert_eq!(observation.pin.generation_id(), generation);
+    assert_eq!(
+        service.source_refresh.status(&stable_request_id).unwrap()["request_id"],
+        stable_request_id
     );
 }
 

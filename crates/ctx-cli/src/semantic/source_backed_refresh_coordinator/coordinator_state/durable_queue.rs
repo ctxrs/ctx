@@ -12,9 +12,24 @@ const DAEMON_RETRY_FIELDS: [&str; 4] = [
 impl CoreRefreshEngine {
     pub(super) fn persist_job_status(&self, data_root: &Path, request_id: &str) -> Result<()> {
         let state = self.lock_state();
-        find_attempt(&state, request_id)
+        let requested_attempt = find_attempt(&state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-        let durable_request_id = state.active_request_id.as_deref().unwrap_or(request_id);
+        let requested_terminal = !requested_attempt.state.is_active();
+        let durable_request_id = if requested_terminal {
+            request_id
+        } else {
+            state
+                .pending_scheduler_retry_root_id
+                .as_deref()
+                .or_else(|| {
+                    state
+                        .pending_terminal_persistence
+                        .as_ref()
+                        .map(|pending| pending.request_id.as_str())
+                })
+                .or(state.active_request_id.as_deref())
+                .unwrap_or(request_id)
+        };
         let job = durable_job_json(&state, durable_request_id)
             .ok_or_else(|| anyhow!("source refresh request `{durable_request_id}` is unknown"))?;
         // Keep the state lock through publication so an admission snapshot

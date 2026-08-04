@@ -16,6 +16,105 @@ fn publication_for_routes(
     publication
 }
 
+fn verified_publication_for_observations(
+    execution: &SourceBackedRefreshExecution<'_>,
+    observations: &BTreeMap<SourceRouteIdentity, String>,
+) -> Result<SourceBackedRefreshPublication> {
+    let previous_generation = open_verified_index(execution.index_root)
+        .ok()
+        .map(|index| index.generation_id().to_owned());
+    let request_id = execution.request_id.to_owned();
+    let operation = execution.operation;
+    let scope = execution.scope.clone();
+    let metadata_observations = observations.clone();
+    let route_results = observations
+        .keys()
+        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+        .collect::<Vec<_>>();
+    let covered_publication = execution.covered_publication.clone();
+    let published =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .commit_with_publication_metadata(
+                |_| true,
+                move |context| {
+                    let mut publication =
+                        empty_test_publication(context.generation_id().to_owned());
+                    publication.route_results = route_results.clone();
+                    covered_publication.apply_receipt(&mut publication);
+                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                        previous_generation.clone(),
+                        context.generation_id().to_owned(),
+                        &publication,
+                    )
+                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                    SourceBackedPublicationMetadata {
+                        request_id: request_id.clone(),
+                        operation,
+                        refresh_scope: scope.clone(),
+                        receipt: receipt.to_json(),
+                        route_observations: metadata_observations.clone(),
+                    }
+                    .encode()
+                },
+            )?;
+    let mut publication = empty_test_publication(published.receipt().generation_id.clone());
+    publication.route_results = observations
+        .keys()
+        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+        .collect();
+    execution
+        .covered_publication
+        .apply_receipt(&mut publication);
+    Ok(publication)
+}
+
+fn complete_verified_fully_covered_demand(
+    data_root: &Path,
+    route: &SourceRouteIdentity,
+    route_observation: &str,
+    demand_id: &str,
+) -> Arc<CoreRefreshEngine> {
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let observations = BTreeMap::from([(route.clone(), route_observation.to_owned())]);
+    let executor_observations = observations.clone();
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_entered.wait();
+            executor_release.wait();
+            verified_publication_for_observations(&execution, &executor_observations)
+        },
+    )));
+    coordinator.initialize_watch_route_authority([route.clone()]);
+    coordinator.enqueue_periodic(data_root).unwrap();
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_root = data_root.to_path_buf();
+        let predecessor = scope.spawn(move || {
+            runner
+                .run_next(&runner_root)
+                .expect("verified predecessor publication")
+        });
+        entered.wait();
+        coordinator
+            .enqueue_fresh_demand_for_test(
+                None,
+                demand_id.to_owned(),
+                observations
+                    .iter()
+                    .map(|(route, observation)| (route.clone(), Some(observation.clone())))
+                    .collect(),
+            )
+            .unwrap();
+        release.wait();
+        let predecessor = predecessor.join().unwrap();
+        assert!(!predecessor.failed, "{:#}", predecessor.job);
+    });
+    coordinator
+}
+
 fn complete_running_all_with_demand(
     coordinator: &CoreRefreshEngine,
     data_root: &Path,
@@ -103,6 +202,88 @@ fn running_cold_all_satisfies_fresh_demand_with_one_full_pass() {
     assert_eq!(resolution.job["scanned_routes"], 0);
     assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
     assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn fully_covered_resolver_samples_after_seen_fence_and_extends_matching_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x69);
+    let route_observation = observation(0xa9);
+    let demand_id = Uuid::from_u128(0x28109).to_string();
+    let coordinator =
+        complete_verified_fully_covered_demand(&data_root, &route, &route_observation, &demand_id);
+    let seen_during_capture = EventWatermark::new(0, 4);
+    coordinator.set_route_event_watermark_for_test(route.clone(), seen_during_capture);
+    let sampled = Arc::new(AtomicBool::new(false));
+    let sampled_by_resolver = Arc::clone(&sampled);
+    let sampled_route = route.clone();
+    let sampled_observation = route_observation.clone();
+
+    let resolution = coordinator
+        .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+            sampled_by_resolver.store(true, Ordering::SeqCst);
+            Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
+        })
+        .expect("fully covered logical resolution");
+    let certificate = resolution
+        .coverage_certificate()
+        .expect("matching post-publication observation certificate");
+
+    assert!(sampled.load(Ordering::SeqCst));
+    assert_eq!(certificate.request_id(), demand_id);
+    assert_eq!(
+        certificate.exact_route_boundaries().collect::<Vec<_>>(),
+        vec![(&route, seen_during_capture, route_observation.as_str())]
+    );
+}
+
+#[test]
+fn fully_covered_resolver_mismatch_and_unavailable_samples_do_not_extend_coverage() {
+    for (case, sampled_observation) in
+        [("mismatch", Some(observation(0xbb))), ("unavailable", None)]
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+        let route = route_identity(0x6a);
+        let route_observation = observation(0xaa);
+        let demand_id = Uuid::now_v7().to_string();
+        let coordinator = complete_verified_fully_covered_demand(
+            &data_root,
+            &route,
+            &route_observation,
+            &demand_id,
+        );
+        coordinator.set_route_event_watermark_for_test(route.clone(), EventWatermark::new(0, 5));
+        let sampled = Arc::new(AtomicBool::new(false));
+        let sampled_by_resolver = Arc::clone(&sampled);
+        let sampled_route = route.clone();
+
+        let resolution = coordinator
+            .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+                sampled_by_resolver.store(true, Ordering::SeqCst);
+                Ok(BTreeMap::from([(sampled_route, sampled_observation)]))
+            })
+            .unwrap_or_else(|| panic!("{case} logical resolution"));
+        let boundaries = resolution
+            .coverage_certificate()
+            .unwrap_or_else(|| panic!("{case} fail-closed certificate"))
+            .exact_route_boundaries()
+            .collect::<Vec<_>>();
+
+        assert!(sampled.load(Ordering::SeqCst), "{case}");
+        assert_eq!(
+            boundaries,
+            vec![(
+                &route,
+                EventWatermark::new(0, 0),
+                route_observation.as_str()
+            )],
+            "{case} must retain only the older admitted boundary"
+        );
+    }
 }
 
 #[test]
@@ -384,4 +565,115 @@ fn restart_before_publication_preserves_logical_demand_fence() {
         restarted.status(&demand_id).unwrap()["request_state"],
         "published"
     );
+}
+
+#[test]
+fn restart_after_predecessor_publication_recovers_predecessor_root_and_logical_continuation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x6b);
+    let route_observation = observation(0xab);
+    let observations = BTreeMap::from([(route.clone(), route_observation.clone())]);
+    let demand_id = Uuid::from_u128(0x2810a).to_string();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let executor_observations = observations.clone();
+    let status_writer = Arc::new(|path: &Path, job: &Value| {
+        let continuation_finished = job
+            .get("queued_successors")
+            .and_then(Value::as_array)
+            .and_then(|successors| successors.first())
+            .and_then(|successor| successor.get("logical_demand"))
+            .and_then(|demand| demand.get("predecessor_finished"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        if continuation_finished {
+            panic!("injected crash while persisting predecessor-bound continuation");
+        }
+        write_daemon_job_status(path, job)
+    });
+    let first = Arc::new(CoreRefreshEngine::with_status_writer_for_test(
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            executor_entered.wait();
+            executor_release.wait();
+            verified_publication_for_observations(&execution, &executor_observations)
+        }),
+        status_writer,
+    ));
+    first.initialize_watch_route_authority([route.clone()]);
+    let predecessor = first.enqueue_periodic(&data_root).unwrap();
+    let predecessor_id = request_id(&predecessor);
+
+    let crashed = std::thread::scope(|scope| {
+        let runner = Arc::clone(&first);
+        let runner_root = data_root.clone();
+        let run = scope.spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runner.run_next(&runner_root)
+            }))
+        });
+        entered.wait();
+        let demand = first
+            .enqueue_fresh_demand_for_test(
+                None,
+                demand_id.clone(),
+                observations
+                    .iter()
+                    .map(|(route, observation)| (route.clone(), Some(observation.clone())))
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(request_id(&demand), demand_id);
+        release.wait();
+        run.join().unwrap()
+    });
+    assert!(crashed.is_err());
+    let interrupted = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("published predecessor root before continuation persistence");
+    assert_eq!(interrupted["request_id"], predecessor_id);
+    assert_eq!(interrupted["request_state"], "published");
+    assert_eq!(interrupted["queued_successors"][0]["request_id"], demand_id);
+    assert_eq!(
+        interrupted["queued_successors"][0]["logical_demand"]["predecessor_finished"],
+        false
+    );
+    drop(first);
+
+    let recaptures = Arc::new(AtomicUsize::new(0));
+    let observed_recaptures = Arc::clone(&recaptures);
+    let restarted = CoreRefreshEngine::with_executor(Arc::new(
+        move |_execution: SourceBackedRefreshExecution<'_>| {
+            observed_recaptures.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("covered logical continuation must not recapture"))
+        },
+    ));
+    assert!(restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    let recovered_root = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("recovered predecessor-rooted continuation");
+    assert_eq!(recovered_root["request_id"], predecessor_id);
+    assert_eq!(recovered_root["request_state"], "published");
+    assert_eq!(
+        recovered_root["queued_successors"][0]["request_id"],
+        demand_id
+    );
+    assert_eq!(
+        recovered_root["queued_successors"][0]["logical_demand"]["predecessor_finished"],
+        true
+    );
+
+    let sampled_route = route.clone();
+    let sampled_observation = route_observation.clone();
+    let resolution = restarted
+        .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+            Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
+        })
+        .expect("recovered logical continuation resolution");
+    assert_eq!(request_id(&resolution.job), demand_id);
+    assert!(!resolution.did_work);
+    assert_eq!(recaptures.load(Ordering::SeqCst), 0);
 }
