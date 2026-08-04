@@ -5,6 +5,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::process::Child;
+#[cfg(unix)]
+use std::{thread, time::Instant};
 
 #[cfg(unix)]
 fn spawn_json_shell(body: &str) -> Child {
@@ -14,8 +16,7 @@ fn spawn_json_shell(body: &str) -> Child {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    configure_command(&mut command);
-    command.spawn().unwrap()
+    spawn_configured(&mut command).unwrap()
 }
 
 #[cfg(unix)]
@@ -266,16 +267,62 @@ printf '%s\n' '{"initialized":true,"local_only":true}'
         env: BTreeMap::new(),
         timeout: Duration::from_millis(200),
     });
+    assert_inherited_stream_timeout(temp.path(), move || client.status());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn mcp_wrapper_with_inherited_stream_descendant_is_bounded_and_cleaned() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("ctx-mcp-inherited-streams");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$$" > "$CTX_DATA_ROOT/wrapper.pid"
+sleep 30 &
+printf '%s\n' "$!" > "$CTX_DATA_ROOT/descendant.pid"
+cat >/dev/null
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"ctx"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[],"structuredContent":{"schema_version":1,"target":"session","payload_type":"session_transcript","ctx_session_id":"session-1","mode":"log","format":"json","session":{"ctx_session_id":"session-1"},"events":[]}}}'
+"#,
+    )
+    .unwrap();
+    make_test_executable(&script);
+
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: script,
+        data_root: Some(temp.path().to_path_buf()),
+        env: BTreeMap::new(),
+        timeout: Duration::from_millis(200),
+    });
+    assert_inherited_stream_timeout(temp.path(), move || {
+        client.show_session(
+            "session-1",
+            ShowSessionOptions {
+                mode: "log".to_owned(),
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn assert_inherited_stream_timeout(
+    data_root: &Path,
+    operation: impl FnOnce() -> Result<AgentHistoryEnvelope, AgentHistoryError> + Send + 'static,
+) {
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker = thread::spawn(move || {
         let started = Instant::now();
-        let result = client.status();
+        let result = operation();
         sender.send((started.elapsed(), result)).unwrap();
     });
 
-    let wrapper_pid = wait_for_test_pid(&temp.path().join("wrapper.pid"));
+    let wrapper_pid = wait_for_test_pid(&data_root.join("wrapper.pid"));
     let mut cleanup = ProcessGroupCleanup(Some(wrapper_pid));
-    let descendant_pid = wait_for_test_pid(&temp.path().join("descendant.pid"));
+    let descendant_pid = wait_for_test_pid(&data_root.join("descendant.pid"));
     let (elapsed, result) = match receiver.recv_timeout(Duration::from_secs(2)) {
         Ok(result) => result,
         Err(err) => {

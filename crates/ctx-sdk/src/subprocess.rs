@@ -1,6 +1,6 @@
 use std::{
-    io::{self, Read},
-    process::{Child, Command},
+    io::{self, Read, Write},
+    process::{Child, Command, ExitStatus},
     thread,
     time::{Duration, Instant},
 };
@@ -22,13 +22,24 @@ use self::windows::ProcessTree;
 
 pub(super) const MAX_RETAINED_SUBPROCESS_STDERR_BYTES: usize = 64 * 1024;
 
-pub(super) fn configure_command(command: &mut Command) {
+pub(super) fn spawn_configured(command: &mut Command) -> io::Result<Child> {
+    configure_command(command);
+    command.spawn()
+}
+
+fn configure_command(command: &mut Command) {
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
     command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
     #[cfg(not(any(unix, windows)))]
     let _ = command;
+}
+
+pub(super) struct McpOutput {
+    pub(super) status: ExitStatus,
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
 }
 
 pub(super) fn collect_ctx_json(
@@ -186,6 +197,151 @@ pub(super) fn collect_ctx_json(
     }
 }
 
+pub(super) fn collect_ctx_mcp_output(
+    mut child: Child,
+    stdin_bytes: Vec<u8>,
+    timeout: Duration,
+) -> Result<McpOutput, AgentHistoryError> {
+    let started = Instant::now();
+    let process_tree = ProcessTree::start(&child).map_err(|err| {
+        stop_direct_child_and_reap(&mut child);
+        AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "failed to establish ctx MCP process-tree ownership",
+            true,
+        )
+        .with_cause(err.to_string())
+    })?;
+    if started.elapsed() >= timeout {
+        stop_and_reap(&mut child, &process_tree);
+        return Err(mcp_timeout_error());
+    }
+    let stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            stop_and_reap(&mut child, &process_tree);
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "ctx MCP stdin was unavailable",
+                true,
+            ));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            stop_and_reap(&mut child, &process_tree);
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "ctx MCP stdout was unavailable",
+                true,
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            stop_and_reap(&mut child, &process_tree);
+            return Err(AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "ctx MCP stderr was unavailable",
+                true,
+            ));
+        }
+    };
+    let stdout_reader = match thread::Builder::new()
+        .name("ctx-sdk-mcp-stdout".to_owned())
+        .spawn(move || read_pipe(stdout))
+    {
+        Ok(reader) => reader,
+        Err(err) => {
+            stop_and_reap(&mut child, &process_tree);
+            return Err(thread_start_error("ctx MCP stdout reader", err));
+        }
+    };
+    let stderr_reader = match thread::Builder::new()
+        .name("ctx-sdk-mcp-stderr".to_owned())
+        .spawn(move || read_pipe(stderr))
+    {
+        Ok(reader) => reader,
+        Err(err) => {
+            stop_and_reap(&mut child, &process_tree);
+            return Err(thread_start_error("ctx MCP stderr reader", err));
+        }
+    };
+    let stdin_writer = match thread::Builder::new()
+        .name("ctx-sdk-mcp-stdin".to_owned())
+        .spawn(move || {
+            let mut stdin = stdin;
+            stdin.write_all(&stdin_bytes)
+        }) {
+        Ok(writer) => writer,
+        Err(err) => {
+            stop_and_reap(&mut child, &process_tree);
+            return Err(thread_start_error("ctx MCP stdin writer", err));
+        }
+    };
+
+    let mut status = None;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(observed) => status = observed,
+                Err(err) => {
+                    stop_and_reap(&mut child, &process_tree);
+                    return Err(AgentHistoryError::new(
+                        AgentHistoryErrorCode::AdapterError,
+                        "failed to wait for ctx MCP server",
+                        true,
+                    )
+                    .with_cause(err.to_string()));
+                }
+            }
+        }
+        if status.is_some()
+            && stdin_writer.is_finished()
+            && stdout_reader.is_finished()
+            && stderr_reader.is_finished()
+        {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            stop_and_reap(&mut child, &process_tree);
+            return Err(mcp_timeout_error());
+        }
+        thread::sleep(Duration::from_millis(20).min(timeout.saturating_sub(started.elapsed())));
+    }
+
+    join_mcp_io(
+        stdin_writer,
+        "ctx MCP stdin writer panicked",
+        "failed to write ctx MCP request",
+    )?;
+    let stdout = join_mcp_io(
+        stdout_reader,
+        "ctx MCP stdout reader panicked",
+        "failed to read ctx MCP stdout",
+    )?;
+    let stderr = join_mcp_io(
+        stderr_reader,
+        "ctx MCP stderr reader panicked",
+        "failed to read ctx MCP stderr",
+    )?;
+    let Some(status) = status else {
+        stop_and_reap(&mut child, &process_tree);
+        return Err(AgentHistoryError::new(
+            AgentHistoryErrorCode::AdapterError,
+            "ctx MCP completed without a process status",
+            true,
+        ));
+    };
+    Ok(McpOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 enum JsonPipeError {
     Decode(serde_json::Error),
     Read(io::Error),
@@ -218,6 +374,36 @@ pub(super) fn read_bounded_pipe(mut pipe: impl Read, maximum: usize) -> io::Resu
     }
 }
 
+fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn join_mcp_io<T>(
+    task: thread::JoinHandle<io::Result<T>>,
+    panic_message: &'static str,
+    io_message: &'static str,
+) -> Result<T, AgentHistoryError> {
+    task.join()
+        .map_err(|_| {
+            AgentHistoryError::new(AgentHistoryErrorCode::AdapterError, panic_message, true)
+        })?
+        .map_err(|err| {
+            AgentHistoryError::new(AgentHistoryErrorCode::AdapterError, io_message, true)
+                .with_cause(err.to_string())
+        })
+}
+
+fn thread_start_error(task: &str, err: io::Error) -> AgentHistoryError {
+    AgentHistoryError::new(
+        AgentHistoryErrorCode::AdapterError,
+        format!("failed to start {task}"),
+        true,
+    )
+    .with_cause(err.to_string())
+}
+
 fn stop_and_reap(child: &mut Child, process_tree: &ProcessTree) {
     process_tree.terminate();
     stop_direct_child_and_reap(child);
@@ -227,6 +413,14 @@ fn timeout_error() -> AgentHistoryError {
     AgentHistoryError::new(
         AgentHistoryErrorCode::Timeout,
         "ctx CLI command timed out",
+        true,
+    )
+}
+
+fn mcp_timeout_error() -> AgentHistoryError {
+    AgentHistoryError::new(
+        AgentHistoryErrorCode::Timeout,
+        "ctx MCP request timed out",
         true,
     )
 }
@@ -258,7 +452,7 @@ impl ProcessTree {
         else {
             return;
         };
-        // SAFETY: configure_command placed this child in a fresh process group,
+        // SAFETY: spawn_configured placed this child in a fresh process group,
         // so the negative PID targets only the subprocess tree owned by this call.
         unsafe {
             kill(process_group, SIGKILL);

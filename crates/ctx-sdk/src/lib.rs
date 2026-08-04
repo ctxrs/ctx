@@ -5,11 +5,9 @@
 
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
@@ -26,7 +24,7 @@ use thiserror::Error;
 
 mod subprocess;
 
-use subprocess::{collect_ctx_json, configure_command};
+use subprocess::{collect_ctx_json, collect_ctx_mcp_output, spawn_configured};
 #[cfg(all(test, unix))]
 use subprocess::{read_bounded_pipe, MAX_RETAINED_SUBPROCESS_STDERR_BYTES};
 
@@ -442,8 +440,7 @@ fn run_ctx_json(config: &LocalBackendConfig, args: &[String]) -> Result<Value, A
         command.env("CTX_DATA_ROOT", data_root);
     }
     command.env("CTX_ANALYTICS_ENABLED", "false");
-    configure_command(&mut command);
-    let child = command.spawn().map_err(|err| {
+    let child = spawn_configured(&mut command).map_err(|err| {
         AgentHistoryError::new(
             AgentHistoryErrorCode::BackendUnavailable,
             "failed to start ctx CLI",
@@ -490,6 +487,18 @@ fn run_ctx_mcp_show_session(
             }
         }),
     ];
+    let mut stdin_bytes = Vec::new();
+    for request in requests {
+        serde_json::to_writer(&mut stdin_bytes, &request).map_err(|err| {
+            AgentHistoryError::new(
+                AgentHistoryErrorCode::AdapterError,
+                "failed to encode ctx MCP request",
+                false,
+            )
+            .with_cause(err.to_string())
+        })?;
+        stdin_bytes.push(b'\n');
+    }
 
     let mut command = Command::new(&config.ctx_binary);
     command
@@ -502,7 +511,7 @@ fn run_ctx_mcp_show_session(
         command.env("CTX_DATA_ROOT", data_root);
     }
     command.env("CTX_ANALYTICS_ENABLED", "false");
-    let mut child = command.spawn().map_err(|err| {
+    let child = spawn_configured(&mut command).map_err(|err| {
         AgentHistoryError::new(
             AgentHistoryErrorCode::BackendUnavailable,
             "failed to start ctx MCP server",
@@ -510,80 +519,9 @@ fn run_ctx_mcp_show_session(
         )
         .with_cause(err.to_string())
     })?;
-
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        AgentHistoryError::new(
-            AgentHistoryErrorCode::AdapterError,
-            "ctx MCP stdin was unavailable",
-            true,
-        )
-    })?;
-    for request in requests {
-        serde_json::to_writer(&mut stdin, &request).map_err(|err| {
-            AgentHistoryError::new(
-                AgentHistoryErrorCode::AdapterError,
-                "failed to encode ctx MCP request",
-                false,
-            )
-            .with_cause(err.to_string())
-        })?;
-        stdin.write_all(b"\n").map_err(|err| {
-            AgentHistoryError::new(
-                AgentHistoryErrorCode::AdapterError,
-                "failed to write ctx MCP request",
-                true,
-            )
-            .with_cause(err.to_string())
-        })?;
-    }
-    drop(stdin);
-
-    let stdout = child.stdout.take().ok_or_else(|| {
-        AgentHistoryError::new(
-            AgentHistoryErrorCode::AdapterError,
-            "ctx MCP stdout was unavailable",
-            true,
-        )
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        AgentHistoryError::new(
-            AgentHistoryErrorCode::AdapterError,
-            "ctx MCP stderr was unavailable",
-            true,
-        )
-    })?;
-    let stdout_reader = thread::spawn(move || read_pipe(stdout));
-    let stderr_reader = thread::spawn(move || read_pipe(stderr));
-
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|err| {
-            AgentHistoryError::new(
-                AgentHistoryErrorCode::AdapterError,
-                "failed to wait for ctx MCP server",
-                true,
-            )
-            .with_cause(err.to_string())
-        })? {
-            break status;
-        }
-        if started.elapsed() > config.timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(AgentHistoryError::new(
-                AgentHistoryErrorCode::Timeout,
-                "ctx MCP request timed out",
-                true,
-            ));
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    let stdout = join_pipe(stdout_reader, "stdout")?;
-    let stderr = join_pipe(stderr_reader, "stderr")?;
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr);
+    let output = collect_ctx_mcp_output(child, stdin_bytes, config.timeout)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AgentHistoryError::new(
             classify_stderr(&stderr),
             stderr.trim().to_owned(),
@@ -592,7 +530,8 @@ fn run_ctx_mcp_show_session(
     }
 
     let mut tool_response = None;
-    for line in stdout
+    for line in output
+        .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
     {
@@ -655,35 +594,6 @@ fn run_ctx_mcp_show_session(
             false,
         )
     })
-}
-
-fn read_pipe(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn join_pipe(
-    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
-    name: &str,
-) -> Result<Vec<u8>, AgentHistoryError> {
-    reader
-        .join()
-        .map_err(|_| {
-            AgentHistoryError::new(
-                AgentHistoryErrorCode::AdapterError,
-                format!("ctx MCP {name} reader panicked"),
-                true,
-            )
-        })?
-        .map_err(|err| {
-            AgentHistoryError::new(
-                AgentHistoryErrorCode::AdapterError,
-                format!("failed to read ctx MCP {name}"),
-                true,
-            )
-            .with_cause(err.to_string())
-        })
 }
 
 fn classify_stderr(stderr: &str) -> AgentHistoryErrorCode {
