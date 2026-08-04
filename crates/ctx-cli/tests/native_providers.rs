@@ -86,7 +86,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "--progress",
             "none",
         ]));
-        assert_authoritative_provider_publication(&first);
+        assert_authoritative_provider_publication_with_rejections(&first, 1);
         wait_for_imported_core(&temp, &first);
         assert_eq!(first["totals"]["current_rejected_records"], 1, "{first:#}");
         let (session_count, event_count) = provider_core_counts(&data_root(&temp), stored_provider);
@@ -121,7 +121,7 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "--progress",
             "none",
         ]));
-        assert_authoritative_provider_publication(&second);
+        assert_authoritative_provider_publication_with_rejections(&second, 1);
         assert_eq!(
             second["totals"]["current_rejected_records"], 1,
             "{second:#}"
@@ -542,7 +542,16 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             "--no-daemon",
             "--format=json",
         ]));
-        assert_explicit_source_publication(&first, stored_provider, expected_format);
+        if stored_provider == "qwen_code" {
+            assert_explicit_source_publication_with_rejections(
+                &first,
+                stored_provider,
+                expected_format,
+                1,
+            );
+        } else {
+            assert_explicit_source_publication(&first, stored_provider, expected_format);
+        }
         wait_for_imported_core(&temp, &first);
         let expected_rejected_records = u64::from(stored_provider == "qwen_code");
         assert_eq!(
@@ -987,7 +996,12 @@ fn personal_agent_sqlite_imports_report_corrupt_databases() {
         .stderr
         .clone();
     let stderr = String::from_utf8(output).unwrap();
-    assert!(stderr.contains("not a database"), "{stderr}");
+    assert!(
+        stderr.contains("certified provider SQLite content is corrupt")
+            && stderr.contains("sqlite_primary_code=26")
+            && stderr.contains("do_not_retry_corrupt"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1346,7 +1360,7 @@ fn import_all_isolates_rejected_records_and_imports_other_sources() {
 
     let imported =
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert_authoritative_provider_publication(&imported);
+    assert_authoritative_provider_publication_with_rejections(&imported, 1);
     assert_eq!(imported["totals"]["current_rejected_records"], 1);
     assert_eq!(imported["totals"]["current_sources_with_rejections"], 1);
     assert_eq!(imported["totals"]["current_source_count"], 2);
