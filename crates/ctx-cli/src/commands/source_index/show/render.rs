@@ -20,7 +20,7 @@ pub(in crate::commands::source_index) fn session_transcript_value(
     truncated: bool,
     max_events: Option<usize>,
 ) -> Value {
-    compact_json(json!({
+    let mut value = compact_json(json!({
         "schema_version": 1,
         "target": "session",
         "payload_type": "session_transcript",
@@ -45,12 +45,13 @@ pub(in crate::commands::source_index) fn session_transcript_value(
             "workspace": session.workspace,
             "cwd": session.cwd,
         },
-        "events": rendered,
         "truncated": truncated.then(|| json!({
             "events": true,
             "max_events": max_events,
         })),
-    }))
+    }));
+    value["events"] = Value::Array(rendered);
+    value
 }
 
 pub(super) fn event_window_json(
@@ -76,16 +77,17 @@ pub(in crate::commands::source_index) fn event_window_value(
         })
         .cloned()
         .ok_or_else(|| anyhow!("selected event is absent from its pinned Core event window"))?;
-    Ok(compact_json(json!({
+    let mut value = compact_json(json!({
         "schema_version": 1,
         "target": "event",
         "payload_type": "event_window",
         "ctx_event_id": selected.event_id.as_uuid(),
         "ctx_session_id": selected.session_id.as_uuid(),
         "format": format.as_str(),
-        "event": selected_value,
-        "events": rendered,
-    })))
+    }));
+    value["event"] = selected_value;
+    value["events"] = Value::Array(rendered);
+    Ok(value)
 }
 
 pub(in crate::commands::source_index) fn render_event_values(
@@ -97,7 +99,8 @@ pub(in crate::commands::source_index) fn render_event_values(
     for event in events {
         let content = &event.core_record.content;
         let content_bytes = serialized_json_bytes(&content.normalized_body)?
-            .saturating_add(serialized_json_bytes(&content.structured_content)?);
+            .saturating_add(serialized_json_bytes(&content.structured_content)?)
+            .saturating_add(serialized_json_bytes(&content.mcp_exchange)?);
         enforce_presentation_output_limit(
             serialized_event_bytes.saturating_add(content_bytes),
             output_limit_bytes,
@@ -153,6 +156,9 @@ pub(in crate::commands::source_index) fn render_event_value(event: &CoreEventRec
             "policy_reason": policy_reason,
         },
     }));
+    if let Some(mcp_exchange) = &content.mcp_exchange {
+        rendered["mcp_exchange"] = json!(mcp_exchange);
+    }
     crate::commands::mcp_tool_call::insert_mcp_tool_call(&mut rendered, &event.core_record);
     rendered
 }

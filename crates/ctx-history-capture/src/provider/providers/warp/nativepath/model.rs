@@ -6,7 +6,7 @@ use digest::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{EventRole, EventType, McpTerminalResponseContent};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -19,7 +19,7 @@ pub(in super::super) const WARP_NATIVE_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const WARP_NATIVE_REJECTION_KEY_MAX_CHARS: usize = 512;
 const WARP_NATIVE_REJECTION_REASON_MAX_CHARS: usize = 1_024;
 const WARP_NATIVE_REJECTION_RESERVE_BYTES: usize = 40 * 1024;
-pub(super) const WARP_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-warp-source-integrity-v4\0";
+pub(super) const WARP_SOURCE_DIGEST_DOMAIN: &[u8] = b"ctx-warp-source-integrity-v5\0";
 const WARP_DIGEST_CHAIN_DOMAIN: &[u8] = b"ctx-warp-native-digest-chain-v1\0";
 const WARP_PAGE_IDENTITY_DOMAIN: &[u8] = b"ctx-warp-native-safe-page-v2\0";
 
@@ -77,6 +77,7 @@ pub(in super::super) struct WarpNativeEvent {
     pub(in super::super) result_outcome: Option<OutputOutcome>,
     pub(in super::super) call_id: Option<String>,
     pub(in super::super) mcp_invocation: Option<WarpMcpToolInvocation>,
+    pub(in super::super) mcp_response: Option<McpTerminalResponseContent>,
     pub(in super::super) mcp_attribution: bool,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) lexical_body: String,
@@ -98,6 +99,7 @@ pub(in super::super) struct WarpNativeEventDraft {
     pub(in super::super) result_outcome: Option<OutputOutcome>,
     pub(in super::super) call_id: Option<String>,
     pub(in super::super) mcp_invocation: Option<WarpMcpToolInvocation>,
+    pub(in super::super) mcp_response: Option<McpTerminalResponseContent>,
     pub(in super::super) mcp_attribution: bool,
     pub(in super::super) occurred_at: Option<DateTime<Utc>>,
     pub(in super::super) body: String,
@@ -131,6 +133,7 @@ impl WarpNativeEvent {
             result_outcome: draft.result_outcome,
             call_id: draft.call_id,
             mcp_invocation: draft.mcp_invocation,
+            mcp_response: draft.mcp_response,
             mcp_attribution: draft.mcp_attribution,
             occurred_at: draft.occurred_at,
             lexical_body: draft.body,
@@ -446,6 +449,7 @@ mod tests {
             result_outcome: Some(OutputOutcome::Success),
             call_id: Some("call".to_owned()),
             mcp_invocation: None,
+            mcp_response: None,
             mcp_attribution: false,
             occurred_at: None,
             lexical_body: body.clone(),

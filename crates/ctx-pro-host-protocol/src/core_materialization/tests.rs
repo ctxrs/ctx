@@ -7,11 +7,12 @@ use crate::{
 };
 use ctx_history_core::{
     derive_event_id, derive_session_id, CoreContent, CoreContentPolicyStatus, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
-    RepositoryCandidateEvidence, RepositoryEvidence, RepositoryEvidenceConfidence,
-    RepositoryEvidenceKind, RepositoryFileObservation, RepositoryFileObservationKind,
-    RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor,
-    TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    McpExchangeContent, McpInvocationContent, McpJsonCapture, NativeItemKey, NativeSessionKey,
+    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidateEvidence,
+    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryVcsObservation,
+    RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor, TypedKey,
+    CORE_CONTENT_POLICY_REVISION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 use uuid::Uuid;
 
@@ -156,6 +157,7 @@ fn record(source: &SourceKey, sequence: u64, body: String, two_repositories: boo
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: Some(body),
             structured_content: None,
+            mcp_exchange: None,
         },
         mcp_tool_call: None,
         metadata: BTreeMap::new(),
@@ -885,6 +887,29 @@ fn event_delta_page_batch_retains_every_constituent_page_bound() {
         .unwrap_err()
         .message
         .contains("page exceeds its wire bound"));
+}
+
+#[test]
+fn pro_page_content_accounting_includes_typed_mcp_exchange_bytes() {
+    let source = source(11);
+    let mut record = record(&source, 1, "existing normalized body".to_owned(), false);
+    record.content.mcp_exchange = Some(McpExchangeContent {
+        provider_call_id: "call-1".to_owned(),
+        invocation: Some(McpInvocationContent {
+            server: "filesystem".to_owned(),
+            tool: "read_file".to_owned(),
+            arguments: McpJsonCapture::Present {
+                value: serde_json::json!({"exchange_only": "transport-bound-canary"}),
+            },
+        }),
+        response: None,
+    });
+    record.validate_contract().unwrap();
+
+    assert_eq!(
+        validation::core_record_content_bytes(&record).unwrap(),
+        record.content.encoded_content_bytes().unwrap()
+    );
 }
 
 #[test]

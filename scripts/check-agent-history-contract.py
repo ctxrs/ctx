@@ -66,7 +66,25 @@ MCP_TOOL_CALL_OUTER_REJECTION_FIXTURES = {
     "invalid-mcp-tool-call-outer-trailing-separator.json": {"mcp_tool_call_"},
     "invalid-mcp-tool-call-outer-camel-snake.json": {"mcpTool_call"},
 }
-SDK_MCP_TOOL_CALL_REJECTION_TESTS = {
+MCP_EXCHANGE_REJECTION_FIXTURES = {
+    "duplicate-event-mcp-exchange-snake.json",
+    "duplicate-mcp-exchange-captured-value.json",
+    "invalid-mcp-exchange-explicit-null.json",
+    "invalid-mcp-exchange-outer-alias-collision.json",
+    "invalid-mcp-exchange-unknown-field.json",
+    "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+    "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+    "invalid-mcp-exchange-unsafe-duration-ns.json",
+    "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
+}
+MCP_EXCHANGE_SCHEMA_REJECTION_FIXTURES = {
+    "invalid-mcp-exchange-explicit-null.json",
+    "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+    "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+    "invalid-mcp-exchange-unsafe-duration-ns.json",
+    "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
+}
+SDK_MCP_REJECTION_TESTS = {
     "Rust": ROOT / "crates" / "ctx-sdk" / "src" / "tests.rs",
     "Go": ROOT / "sdks" / "go" / "client_test.go",
     "Python": ROOT / "sdks" / "python" / "tests" / "test_client.py",
@@ -123,10 +141,42 @@ def load_json_exact(path: Path):
 
 
 def validate_schema(value, schema, root, path: str) -> None:
+    if isinstance(schema, bool):
+        require(schema, f"{path}: rejected by false schema")
+        return
+
     if "$ref" in schema:
         ref = schema["$ref"]
         require(ref.startswith("#/$defs/"), f"{path}: unsupported ref {ref}")
-        schema = root["$defs"][ref.removeprefix("#/$defs/")]
+        validate_schema(value, root["$defs"][ref.removeprefix("#/$defs/")], root, path)
+
+    for index, subschema in enumerate(schema.get("allOf", [])):
+        validate_schema(value, subschema, root, f"{path}.allOf[{index}]")
+
+    if "anyOf" in schema:
+        matches = sum(
+            schema_accepts(value, subschema, root, f"{path}.anyOf[{index}]")
+            for index, subschema in enumerate(schema["anyOf"])
+        )
+        require(matches >= 1, f"{path}: did not match any anyOf branch")
+
+    if "oneOf" in schema:
+        matches = sum(
+            schema_accepts(value, subschema, root, f"{path}.oneOf[{index}]")
+            for index, subschema in enumerate(schema["oneOf"])
+        )
+        require(matches == 1, f"{path}: matched {matches} oneOf branches")
+
+    if "not" in schema:
+        require(
+            not schema_accepts(value, schema["not"], root, f"{path}.not"),
+            f"{path}: matched forbidden not schema",
+        )
+
+    if "if" in schema:
+        branch = "then" if schema_accepts(value, schema["if"], root, f"{path}.if") else "else"
+        if branch in schema:
+            validate_schema(value, schema[branch], root, f"{path}.{branch}")
 
     if "const" in schema:
         require(value == schema["const"], f"{path}: expected const {schema['const']!r}")
@@ -152,12 +202,9 @@ def validate_schema(value, schema, root, path: str) -> None:
             require(len(value) <= schema["maxLength"], f"{path}: above maximum length")
 
     if isinstance(value, dict):
-        forbidden_property_names = schema.get("propertyNames", {}).get("not", {}).get("enum", [])
-        for key in value:
-            require(
-                key not in forbidden_property_names,
-                f"{path}: forbidden property name {key!r}",
-            )
+        if "propertyNames" in schema:
+            for key in value:
+                validate_schema(key, schema["propertyNames"], root, f"{path}.propertyName")
         for key in schema.get("required", []):
             require(key in value, f"{path}: missing required key {key!r}")
         properties = schema.get("properties", {})
@@ -170,6 +217,14 @@ def validate_schema(value, schema, root, path: str) -> None:
     if isinstance(value, list) and "items" in schema:
         for index, item in enumerate(value):
             validate_schema(item, schema["items"], root, f"{path}[{index}]")
+
+
+def schema_accepts(value, schema, root, path: str) -> bool:
+    try:
+        validate_schema(value, schema, root, path)
+    except AssertionError:
+        return False
+    return True
 
 
 def json_type_matches(value, expected: str) -> bool:
@@ -332,6 +387,17 @@ def validate_show_events(result: dict, path: Path) -> None:
         )
         if "mcpToolCall" in event:
             validate_mcp_tool_call(event["mcpToolCall"], f"{path}: event.mcpToolCall")
+        if (
+            event.get("mcpExchange", {})
+            .get("response", {})
+            .get("text", {})
+            .get("captureStatus")
+            == "normalized_body"
+        ):
+            require(
+                isinstance(event.get("text"), str) and bool(event["text"]),
+                f"{path}: normalized MCP response body requires nonempty event.text",
+            )
         for forbidden in FORBIDDEN_EVENT_LOCATOR_FIELDS:
             require(forbidden not in event, f"{path}: forbidden event field {forbidden}")
         for citation in event.get("citations", []):
@@ -380,6 +446,54 @@ def validate_mcp_tool_call_schema(schema: dict) -> None:
         raise AssertionError(f"mcpToolCall accepted invalid value: {invalid.keys()}")
 
 
+def validate_mcp_exchange_schema(schema: dict) -> None:
+    maximum = 9_007_199_254_740_991
+    exchange = schema["$defs"]["mcpExchange"]
+    require(exchange.get("additionalProperties") is False, "mcpExchange must be closed")
+    response = schema["$defs"]["mcpResponse"]
+    omitted = schema["$defs"]["mcpJsonCaptureOmitted"]
+    for path, numeric in (
+        ("mcpResponse.durationNs", response["properties"]["durationNs"]),
+        (
+            "mcpJsonCaptureOmitted.observedEncodedBytes",
+            omitted["properties"]["observedEncodedBytes"],
+        ),
+    ):
+        require(numeric.get("minimum") == 0, f"{path}: bad minimum")
+        require(numeric.get("maximum") == maximum, f"{path}: bad maximum")
+        validate_schema(maximum, numeric, schema, path)
+        require(
+            not schema_accepts(maximum + 1, numeric, schema, path),
+            f"{path}: accepted an unsafe integer",
+        )
+
+    valid_event = {
+        "text": "normalized response",
+        "mcpExchange": {
+            "providerCallId": "call",
+            "response": {
+                "status": "succeeded",
+                "durationNs": maximum,
+                "text": {"captureStatus": "normalized_body"},
+                "payload": {
+                    "captureStatus": "omitted",
+                    "reason": "size_limit",
+                    "observedEncodedBytes": maximum,
+                },
+            },
+        },
+    }
+    validate_schema(valid_event, schema["$defs"]["event"], schema, "event")
+    for invalid in (
+        {**valid_event, "text": ""},
+        {key: value for key, value in valid_event.items() if key != "text"},
+    ):
+        require(
+            not schema_accepts(invalid, schema["$defs"]["event"], schema, "event"),
+            "event schema accepted normalized_body without nonempty text",
+        )
+
+
 def snake_to_camel(value: str) -> str:
     parts = value.split("_")
     if len(parts) == 1:
@@ -420,20 +534,20 @@ def validate_mcp_outer_rejection_fixtures() -> int:
 
 def validate_seven_sdk_rejection_wiring() -> int:
     require(
-        len(SDK_MCP_TOOL_CALL_REJECTION_TESTS) == 7,
-        "outer MCP rejection matrix must cover exactly seven SDKs",
+        len(SDK_MCP_REJECTION_TESTS) == 7,
+        "MCP rejection matrix must cover exactly seven SDKs",
     )
-    for sdk, path in SDK_MCP_TOOL_CALL_REJECTION_TESTS.items():
+    for sdk, path in SDK_MCP_REJECTION_TESTS.items():
         source = path.read_text(encoding="utf-8")
-        for fixture in MCP_TOOL_CALL_OUTER_REJECTION_FIXTURES:
+        for fixture in set(MCP_TOOL_CALL_OUTER_REJECTION_FIXTURES) | MCP_EXCHANGE_REJECTION_FIXTURES:
             require(
                 fixture in source,
                 f"{sdk} SDK rejection test is not wired to {fixture}",
             )
-    return len(SDK_MCP_TOOL_CALL_REJECTION_TESTS)
+    return len(SDK_MCP_REJECTION_TESTS)
 
 
-def validate_adversarial_mcp_fixtures() -> int:
+def validate_adversarial_mcp_fixtures(schema: dict) -> int:
     duplicate_paths = sorted(ADVERSARIAL_FIXTURES.glob("duplicate-*.json"))
     require(duplicate_paths, "no duplicate MCP tool-call fixtures found")
     for path in duplicate_paths:
@@ -485,7 +599,20 @@ def validate_adversarial_mcp_fixtures() -> int:
         "nearby unknown outer members did not remain ordinary extensions",
     )
     outer_rejection_count = validate_mcp_outer_rejection_fixtures()
-    return len(duplicate_paths) + len(transformed_paths) + outer_rejection_count + 2
+    for name in MCP_EXCHANGE_SCHEMA_REJECTION_FIXTURES:
+        path = ADVERSARIAL_FIXTURES / name
+        event = load_json_exact(path)["event"]
+        require(
+            not schema_accepts(event, schema["$defs"]["event"], schema, str(path)),
+            f"{path}: event schema accepted invalid MCP exchange",
+        )
+    return (
+        len(duplicate_paths)
+        + len(transformed_paths)
+        + outer_rejection_count
+        + len(MCP_EXCHANGE_SCHEMA_REJECTION_FIXTURES)
+        + 2
+    )
 
 
 def main() -> int:
@@ -493,6 +620,7 @@ def main() -> int:
     require(schema.get("$id"), "schema missing $id")
     validate_status_counter_domain(schema)
     validate_mcp_tool_call_schema(schema)
+    validate_mcp_exchange_schema(schema)
     for definition in ("searchHit", "eventResult", "sessionResult", "event", "citation"):
         forbidden = set(schema["$defs"][definition]["propertyNames"]["not"]["enum"])
         require(
@@ -503,7 +631,7 @@ def main() -> int:
     require(fixture_paths, "no fixtures found")
     for path in fixture_paths:
         validate_fixture(path, schema)
-    adversarial_count = validate_adversarial_mcp_fixtures()
+    adversarial_count = validate_adversarial_mcp_fixtures(schema)
     sdk_count = validate_seven_sdk_rejection_wiring()
     print(
         f"validated {len(fixture_paths)} agent-history-v1 fixtures "

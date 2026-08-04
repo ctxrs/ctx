@@ -16,6 +16,7 @@ required_paths=(
   docs/contracts/json.md
   docs/storage.md
   docs/privacy-storage.md
+  docs/mcp-exchange-capture.md
   docs/mcp-tool-call-attribution.md
   docs/mcp-tool-call-attribution-evidence.md
   docs/mcp-tool-call-attribution-capabilities.json

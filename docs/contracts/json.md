@@ -502,6 +502,16 @@ or `structured_content` when policy permits. Each rendered event also includes
 `content.complete`, `content.policy_status`, and an optional
 `content.policy_reason`.
 
+A selected full-content event can additionally include optional
+`mcp_exchange`, containing `provider_call_id` and invocation and/or response.
+Invocation arguments and response payloads use explicit
+`present`/`absent`/`unavailable`/`omitted` capture states and remain decoded JSON
+when present. CLI/Core fields use snake_case. `ctx list events --content text`
+and `--content none` omit the entire exchange; full show-event and log-mode
+show-session event rows can include it. See
+[`mcp-exchange-capture.md`](../mcp-exchange-capture.md) for the closed wire
+shape, response status, limits, and state semantics.
+
 A qualifying terminal/result event can also include the optional top-level
 event field `mcp_tool_call: {"server": <string>, "tool": <string>}`. Both
 members are required nonempty decoded UTF-8 strings, each bounded to 64 KiB.
@@ -513,6 +523,10 @@ metadata. Ordinary tool results appear in session output only with
 Core contract transition may remain unattributed until an ordinary provider
 refresh can recompute the field from source. See
 [`mcp-tool-call-attribution.md`](../mcp-tool-call-attribution.md).
+
+The same migrated historical rows have `mcp_exchange` absent until an ordinary
+provider refresh or reimport can recapture it. Contract migration does not
+reopen provider history.
 
 The 256-Unicode-scalar display bound and `… [display truncated]` marker apply
 only to human rendering. JSON, JSONL, and MCP `structuredContent` retain the
@@ -528,6 +542,10 @@ The in-repo Rust SDK preserves this split. `ShowSessionOptions::default()` has
 no `limit` or `cursor` and uses the complete CLI stream. Supplying either option
 uses the existing local MCP `show_session` page contract; its returned
 `pagination` object is preserved in the SDK session result's additive fields.
+Typed SDK event output maps `mcp_tool_call` and `mcp_exchange` to camelCase
+`mcpToolCall` and `mcpExchange`, including `providerCallId`, `failureKind`,
+`durationNs`, `captureStatus`, and `observedEncodedBytes`. Keys inside captured
+JSON values are not camelized.
 
 If the active generation changes while `show` or `search` is opening its
 verified reader, JSON mode exits nonzero and writes one error object to stderr
@@ -764,9 +782,10 @@ recover the default-enabled persistent daemon. Search and blame can send
 bounded, content-free maintenance wakes; the MCP process never becomes an
 importer or derived-state writer and never writes provider history or
 repositories. Tool results include
-`structuredContent` JSON using the same private local fields as CLI JSON. MCP
-output may include absolute paths, source metadata, snippets, and transcript
-text, and the MCP host may log or forward it.
+`structuredContent` JSON carrying the same typed data as CLI JSON, with
+contract-owned event keys in camelCase. MCP output may include absolute paths,
+source metadata, snippets, transcript text, MCP arguments, and response
+payloads, and the MCP host may log or forward it.
 
 MCP search follows the same committed-generation and lexical/semantic/hybrid
 retrieval contract as CLI search. Hybrid may report lexical fallback when
@@ -777,11 +796,13 @@ by default when `CODEX_THREAD_ID` is set; pass
 `include_current_session: true` to opt back in.
 
 MCP `show_event`, `show_session`, and `query_events` structured event rows reuse
-the exact CLI `mcp_tool_call` object. Text fallback is display-safe rather than
-the exact machine authority. The field is not added to MCP or CLI search
-results, inputs, matching, ranking, snippets, selectors, or SQL. Paginated MCP
-callers filter each returned page client-side and continue with the existing
-opaque cursor; `show_session` requires `mode: "log"` for ordinary tool results.
+the same attribution identity as camelCase `mcpToolCall`. Text fallback is
+display-safe rather than the exact machine authority. Full-content rows can
+also include camelCase `mcpExchange`; `query_events` with `content: "text"` or
+`content: "none"` omits it. Neither field is added to MCP or CLI search inputs,
+matching, ranking, snippets, selectors, or SQL. Paginated MCP callers filter
+each returned page client-side and continue with the existing opaque cursor;
+`show_session` requires `mode: "log"` for ordinary tool results.
 
 The MCP `sources` tool includes the same bounded `issues` and
 `issues_truncated` fields as `ctx sources --format json`.

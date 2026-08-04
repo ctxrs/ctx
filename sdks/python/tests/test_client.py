@@ -30,6 +30,7 @@ from ctx_agent_history.transport import LocalCliAdapter
 from ctx_agent_history.types import (
     AgentHistoryErrorCode,
     Event,
+    McpExchange,
     McpToolCall,
     SearchContentScope,
     SearchHit,
@@ -81,6 +82,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         search_hit_hints = typing.get_type_hints(SearchHit)
         event_hints = typing.get_type_hints(Event)
         mcp_tool_call_hints = typing.get_type_hints(McpToolCall)
+        mcp_exchange_hints = typing.get_type_hints(McpExchange)
         self.assertEqual(show_event_hints["event_id"], str)
         self.assertEqual(show_event_hints["return"].__name__, "ShowEventResponse")
         self.assertEqual(show_session_hints["session_id"], str)
@@ -98,8 +100,11 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(search_hit_hints["rank"], typing.Optional[float])
         self.assertEqual(search_hit_hints["retrievalScore"], typing.Optional[float])
         self.assertEqual(event_hints["mcpToolCall"], McpToolCall)
+        self.assertEqual(event_hints["mcpExchange"], McpExchange)
         self.assertEqual(mcp_tool_call_hints, {"server": str, "tool": str})
         self.assertEqual(McpToolCall.__required_keys__, frozenset({"server", "tool"}))
+        self.assertEqual(mcp_exchange_hints["providerCallId"], str)
+        self.assertEqual(McpExchange.__required_keys__, frozenset({"providerCallId"}))
 
     def test_mcp_tool_call_metadata_is_exact_bounded_and_omits_absence(self) -> None:
         result = normalize_event(
@@ -160,6 +165,15 @@ class LocalCliAdapterTests(unittest.TestCase):
                 "invalid-mcp-tool-call-outer-repeated-separator.json",
                 "invalid-mcp-tool-call-outer-trailing-separator.json",
                 "invalid-mcp-tool-call-outer-camel-snake.json",
+                "duplicate-event-mcp-exchange-snake.json",
+                "duplicate-mcp-exchange-captured-value.json",
+                "invalid-mcp-exchange-explicit-null.json",
+                "invalid-mcp-exchange-outer-alias-collision.json",
+                "invalid-mcp-exchange-unknown-field.json",
+                "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+                "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+                "invalid-mcp-exchange-unsafe-duration-ns.json",
+                "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
             )
         )
         for path in invalid_paths:
@@ -207,6 +221,62 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(result["events"][0]["mcpToolCall"]["server"], "camel-server")
         self.assertEqual(result["events"][0]["mcpToolCalls"], {"note": "ordinary unknown"})
         self.assertEqual(result["events"][0]["futureEventField"], "camel-extra")
+
+    def test_mcp_exchange_is_typed_lossless_and_preserves_captured_json_keys(self) -> None:
+        fixture_root = (
+            Path(__file__).resolve().parents[3]
+            / "contracts"
+            / "agent-history-v1"
+            / "fixtures"
+        )
+        fixture = json.loads(
+            (fixture_root / "show-event.mcp-tool-call.json").read_text(encoding="utf-8")
+        )
+        result = normalize_event(fixture["event"])
+        exchange = result["event"]["mcpExchange"]
+        self.assertEqual(exchange["providerCallId"], "native-call-呼び出し-🦀")
+        self.assertEqual(exchange["response"]["durationNs"], (1 << 53) - 1)
+        arguments = exchange["invocation"]["arguments"]["value"]
+        self.assertIn("snake_key", arguments)
+        self.assertNotIn("snakeKey", arguments)
+        self.assertIsNone(arguments["nested"]["items"][1]["deep_null"])
+        self.assertEqual(
+            result["events"][2]["mcpExchange"]["response"]["text"]["observedEncodedBytes"],
+            (1 << 53) - 1,
+        )
+        self.assertNotIn("mcpExchange", result["events"][3])
+
+        normalized = normalize_event(
+            {
+                "event": {
+                    "text": "body",
+                    "mcp_exchange": {
+                        "provider_call_id": "call",
+                        "invocation": {
+                            "server": "server",
+                            "tool": "tool",
+                            "arguments": {
+                                "capture_status": "present",
+                                "value": {"snake_key": {"deep_null": None}},
+                            },
+                        },
+                        "response": {
+                            "status": "succeeded",
+                            "text": {"capture_status": "normalized_body"},
+                            "payload": {
+                                "capture_status": "present",
+                                "value": {"result_key": ["雪", None]},
+                            },
+                        },
+                    },
+                },
+                "events": [],
+            }
+        )
+        self.assertEqual(
+            normalized["event"]["mcpExchange"]["response"]["payload"]["value"],
+            {"result_key": ["雪", None]},
+        )
 
     def test_non_finite_json_constants_are_rejected(self) -> None:
         client = AgentHistoryClient.local(ctx_binary="ctx-test")
@@ -868,6 +938,8 @@ def _assert_public_keys_are_camel_case(test: unittest.TestCase, payload: object)
     if isinstance(payload, dict):
         for key, value in payload.items():
             test.assertNotIn("_", str(key), f"non-canonical snake_case key: {key}")
+            if key == "value" and payload.get("captureStatus") == "present":
+                continue
             _assert_public_keys_are_camel_case(test, value)
     elif isinstance(payload, list):
         for value in payload:

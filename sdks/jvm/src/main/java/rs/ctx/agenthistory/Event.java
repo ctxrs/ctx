@@ -9,6 +9,7 @@ public final class Event {
     private final List<Citation> citations;
     private final CoreContentMetadata content;
     private final McpToolCall mcpToolCall;
+    private final McpExchange mcpExchange;
 
     Event(Map<String, Object> fields) {
         this.fields = AgentHistoryValue.copyObject(fields);
@@ -17,6 +18,17 @@ public final class Event {
         this.mcpToolCall = fields.containsKey("mcpToolCall")
                 ? McpToolCall.from(fields.get("mcpToolCall"))
                 : null;
+        this.mcpExchange = fields.containsKey("mcpExchange")
+                ? McpExchange.from(fields.get("mcpExchange"))
+                : null;
+        if (mcpExchange != null
+                && mcpExchange.getResponse() != null
+                && mcpExchange.getResponse().getText().getCaptureStatus()
+                        == McpExchange.TextCaptureStatus.NORMALIZED_BODY
+                && (getText() == null || getText().isEmpty())) {
+            throw McpExchange.protocolError(
+                    "normalized response body requires nonempty event text", null);
+        }
     }
 
     public String getCtxEventId() {
@@ -105,6 +117,14 @@ public final class Event {
 
     public McpToolCall mcpToolCall() {
         return mcpToolCall;
+    }
+
+    public McpExchange getMcpExchange() {
+        return mcpExchange;
+    }
+
+    public McpExchange mcpExchange() {
+        return mcpExchange;
     }
 
     public CoreContentMetadata getContent() {

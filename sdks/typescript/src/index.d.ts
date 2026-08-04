@@ -278,6 +278,54 @@ export interface McpToolCall {
   tool: string;
 }
 
+export type McpPayloadOmissionReason = "size_limit";
+export type McpResponseStatus = "succeeded" | "failed" | "cancelled" | "timed_out" | "unknown";
+export type McpFailureKind = "tool_reported" | "invocation" | "unknown";
+
+export type McpJsonCapture =
+  | { captureStatus: "present"; value: JsonValue }
+  | { captureStatus: "absent" }
+  | { captureStatus: "unavailable" }
+  | {
+      captureStatus: "omitted";
+      reason: McpPayloadOmissionReason;
+      observedEncodedBytes?: number;
+    };
+
+export type McpArgumentsCapture =
+  | { captureStatus: "present"; value: JsonObject }
+  | Exclude<McpJsonCapture, { captureStatus: "present" }>;
+
+export type McpTextCapture =
+  | { captureStatus: "normalized_body" }
+  | { captureStatus: "absent" }
+  | { captureStatus: "unavailable" }
+  | {
+      captureStatus: "omitted";
+      reason: McpPayloadOmissionReason;
+      observedEncodedBytes?: number;
+    };
+
+export interface McpInvocation {
+  server: string;
+  tool: string;
+  arguments: McpArgumentsCapture;
+}
+
+export interface McpResponse {
+  status: McpResponseStatus;
+  failureKind?: McpFailureKind;
+  durationNs?: number;
+  text: McpTextCapture;
+  payload: McpJsonCapture;
+}
+
+export interface McpExchange {
+  providerCallId: string;
+  invocation?: McpInvocation;
+  response?: McpResponse;
+}
+
 export interface AgentHistoryEvent {
   ctxEventId?: string | null;
   ctxSessionId?: string | null;
@@ -290,6 +338,8 @@ export interface AgentHistoryEvent {
   occurredAt?: string | null;
   text?: string | null;
   mcpToolCall?: McpToolCall;
+  mcpExchange?: McpExchange;
+  structuredContent?: JsonValue;
   content?: CoreContentMetadata;
   citations?: Citation[];
 }

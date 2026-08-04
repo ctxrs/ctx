@@ -14,13 +14,15 @@ use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
 pub use ctx_protocol::{
     AgentHistoryEnvelope, AgentHistoryErrorBody, AgentHistoryErrorCode, AgentHistoryEvent,
     AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, CoreContentMetadata,
-    CoreContentPolicyStatus, EventResult, Freshness, ImportResult, McpToolCall, ProviderSource,
-    SearchHit, SearchResult, SearchResultWindow, SearchRetrieval, SearchRetrievalCoverage,
-    SessionResult, SessionSummary, Totals, CONTRACT_VERSION, MAX_MCP_TOOL_CALL_COMPONENT_BYTES,
+    CoreContentPolicyStatus, EventResult, Freshness, ImportResult, McpExchange, McpFailureKind,
+    McpInvocation, McpJsonCapture, McpPayloadOmissionReason, McpResponse, McpResponseStatus,
+    McpTextCapture, McpToolCall, ProviderSource, SearchHit, SearchResult, SearchResultWindow,
+    SearchRetrieval, SearchRetrievalCoverage, SessionResult, SessionSummary, Totals,
+    CONTRACT_VERSION, MAX_MCP_EXCHANGE_IDENTITY_BYTES, MAX_MCP_TOOL_CALL_COMPONENT_BYTES,
     SCHEMA_VERSION,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 mod exact_json;
@@ -781,10 +783,17 @@ fn normalize_event_record(raw: &Value) -> Result<Value, AgentHistoryError> {
     if snake.is_some() && camel.is_some() {
         return Err(invalid_mcp_wire("duplicate outer wire aliases"));
     }
+    let snake_exchange = event.get("mcp_exchange");
+    let camel_exchange = event.get("mcpExchange");
+    if snake_exchange.is_some() && camel_exchange.is_some() {
+        return Err(invalid_mcp_exchange_wire("duplicate outer wire aliases"));
+    }
 
     let mut outer = event.clone();
     outer.remove("mcp_tool_call");
     outer.remove("mcpToolCall");
+    outer.remove("mcp_exchange");
+    outer.remove("mcpExchange");
     let Value::Object(mut normalized) = camelize_object_keys(&Value::Object(outer)) else {
         return Err(invalid_mcp_wire(
             "event normalization did not produce an object",
@@ -795,17 +804,139 @@ fn normalize_event_record(raw: &Value) -> Result<Value, AgentHistoryError> {
             "outer member collides with the canonical mcpToolCall key",
         ));
     }
+    if normalized.contains_key("mcpExchange") {
+        return Err(invalid_mcp_exchange_wire(
+            "outer member collides with the canonical mcpExchange key",
+        ));
+    }
     if let Some(call) = snake.or(camel) {
         let _: McpToolCall = decode_payload(call.clone(), "mcpToolCall")?;
         normalized.insert("mcpToolCall".to_owned(), call.clone());
     }
+    if let Some(exchange) = snake_exchange.or(camel_exchange) {
+        let exchange = normalize_mcp_exchange_wire(exchange)?;
+        let _: McpExchange = decode_payload(exchange.clone(), "mcpExchange")?;
+        normalized.insert("mcpExchange".to_owned(), exchange);
+    }
     Ok(Value::Object(normalized))
+}
+
+fn normalize_mcp_exchange_wire(raw: &Value) -> Result<Value, AgentHistoryError> {
+    let mut exchange = normalize_closed_mcp_exchange_object(
+        raw,
+        "exchange",
+        &[
+            ("provider_call_id", "providerCallId"),
+            ("providerCallId", "providerCallId"),
+            ("invocation", "invocation"),
+            ("response", "response"),
+        ],
+    )?;
+    if let Some(invocation) = exchange.get_mut("invocation") {
+        *invocation = normalize_mcp_invocation_wire(invocation)?;
+    }
+    if let Some(response) = exchange.get_mut("response") {
+        *response = normalize_mcp_response_wire(response)?;
+    }
+    Ok(Value::Object(exchange))
+}
+
+fn normalize_mcp_invocation_wire(raw: &Value) -> Result<Value, AgentHistoryError> {
+    let mut invocation = normalize_closed_mcp_exchange_object(
+        raw,
+        "invocation",
+        &[
+            ("server", "server"),
+            ("tool", "tool"),
+            ("arguments", "arguments"),
+        ],
+    )?;
+    if let Some(arguments) = invocation.get_mut("arguments") {
+        *arguments = normalize_mcp_capture_wire(arguments, "invocation arguments")?;
+    }
+    Ok(Value::Object(invocation))
+}
+
+fn normalize_mcp_response_wire(raw: &Value) -> Result<Value, AgentHistoryError> {
+    let mut response = normalize_closed_mcp_exchange_object(
+        raw,
+        "response",
+        &[
+            ("status", "status"),
+            ("failure_kind", "failureKind"),
+            ("failureKind", "failureKind"),
+            ("duration_ns", "durationNs"),
+            ("durationNs", "durationNs"),
+            ("text", "text"),
+            ("payload", "payload"),
+        ],
+    )?;
+    if let Some(text) = response.get_mut("text") {
+        *text = normalize_mcp_capture_wire(text, "response text")?;
+    }
+    if let Some(payload) = response.get_mut("payload") {
+        *payload = normalize_mcp_capture_wire(payload, "response payload")?;
+    }
+    Ok(Value::Object(response))
+}
+
+fn normalize_mcp_capture_wire(raw: &Value, context: &str) -> Result<Value, AgentHistoryError> {
+    normalize_closed_mcp_exchange_object(
+        raw,
+        context,
+        &[
+            ("capture_status", "captureStatus"),
+            ("captureStatus", "captureStatus"),
+            ("value", "value"),
+            ("reason", "reason"),
+            ("observed_encoded_bytes", "observedEncodedBytes"),
+            ("observedEncodedBytes", "observedEncodedBytes"),
+        ],
+    )
+    .map(Value::Object)
+}
+
+fn normalize_closed_mcp_exchange_object(
+    raw: &Value,
+    context: &str,
+    aliases: &[(&str, &str)],
+) -> Result<Map<String, Value>, AgentHistoryError> {
+    let Value::Object(raw) = raw else {
+        return Err(invalid_mcp_exchange_wire(&format!(
+            "{context} must be an object"
+        )));
+    };
+    let mut normalized = Map::new();
+    for (key, value) in raw {
+        let Some((_, canonical)) = aliases.iter().find(|(alias, _)| key == alias) else {
+            return Err(invalid_mcp_exchange_wire(&format!(
+                "{context} contains unknown member {key:?}"
+            )));
+        };
+        if normalized
+            .insert((*canonical).to_owned(), value.clone())
+            .is_some()
+        {
+            return Err(invalid_mcp_exchange_wire(&format!(
+                "{context} contains colliding aliases for {canonical}"
+            )));
+        }
+    }
+    Ok(normalized)
 }
 
 fn invalid_mcp_wire(message: &str) -> AgentHistoryError {
     AgentHistoryError::new(
         AgentHistoryErrorCode::DecodeError,
         format!("agent-history-v1 MCP tool call {message}"),
+        false,
+    )
+}
+
+fn invalid_mcp_exchange_wire(message: &str) -> AgentHistoryError {
+    AgentHistoryError::new(
+        AgentHistoryErrorCode::DecodeError,
+        format!("agent-history-v1 MCP exchange {message}"),
         false,
     )
 }

@@ -22,6 +22,31 @@
         "server": "mcp-サーバー-🦀",
         "tool": "検索/工具/🛠️"
       },
+      "mcpExchange": {
+        "providerCallId": "native-call-呼び出し-🦀",
+        "invocation": {
+          "server": "mcp-サーバー-🦀",
+          "tool": "検索/工具/🛠️",
+          "arguments": {
+            "captureStatus": "present",
+            "value": {
+              "snake_key": ["雪", null, {"camelKey": true}],
+              "nested": {"items": [1, {"deep_null": null}]}
+            }
+          }
+        },
+        "response": {
+          "status": "succeeded",
+        "durationNs": 9007199254740991,
+          "text": {"captureStatus": "normalized_body"},
+          "payload": {
+            "captureStatus": "present",
+            "value": {
+              "result_key": ["完了", null, {"mixedCase": [false, 3]}]
+            }
+          }
+        }
+      },
       "futureEventField": {
         "preserved": true
       },
@@ -55,6 +80,66 @@
           "complete": true,
           "policyStatus": "selected"
         }
+      },
+      {
+        "ctxEventId": "33333333-3333-4333-8333-333333333333",
+        "ctxSessionId": "22222222-2222-4222-8222-222222222222",
+        "provider": "codex",
+        "providerSessionId": "codex-fixture-session",
+        "sourceFormat": "codex_session_jsonl",
+        "sequence": 2,
+        "eventType": "tool_call",
+        "content": {"complete": true, "policyStatus": "selected"},
+        "mcpExchange": {
+          "providerCallId": "capture-states",
+          "invocation": {
+            "server": "server",
+            "tool": "tool",
+            "arguments": {"captureStatus": "absent"}
+          },
+          "response": {
+            "status": "cancelled",
+            "text": {"captureStatus": "absent"},
+            "payload": {"captureStatus": "unavailable"}
+          }
+        }
+      },
+      {
+        "ctxEventId": "44444444-4444-4444-8444-444444444444",
+        "ctxSessionId": "22222222-2222-4222-8222-222222222222",
+        "provider": "codex",
+        "providerSessionId": "codex-fixture-session",
+        "sourceFormat": "codex_session_jsonl",
+        "sequence": 3,
+        "eventType": "tool_result",
+        "content": {"complete": true, "policyStatus": "selected"},
+        "mcpExchange": {
+          "providerCallId": "omitted-response",
+          "response": {
+            "status": "failed",
+            "failureKind": "tool_reported",
+            "text": {
+              "captureStatus": "omitted",
+              "reason": "size_limit",
+            "observedEncodedBytes": 9007199254740991
+            },
+            "payload": {
+              "captureStatus": "omitted",
+              "reason": "size_limit"
+            }
+          }
+        }
+      },
+      {
+        "ctxEventId": "55555555-5555-4555-8555-555555555555",
+        "ctxSessionId": "22222222-2222-4222-8222-222222222222",
+        "provider": "codex",
+        "providerSessionId": "codex-fixture-session",
+        "sourceFormat": "codex_session_jsonl",
+        "sequence": 4,
+        "eventType": "message",
+        "text": "no MCP exchange",
+        "content": {"complete": true, "policyStatus": "selected"}
       }
     ]
   }

@@ -240,6 +240,7 @@ pub(super) fn codex_core_record(
         lexical_body,
         structured_content,
         mcp_tool_call,
+        mcp_exchange,
         touched_paths,
         repository_tools,
         repository_result,
@@ -441,6 +442,10 @@ pub(super) fn codex_core_record(
         .as_ref()
         .and_then(|git| bounded_core_metadata(git.branch.as_deref()));
     record.content.structured_content = annotation.structured_content;
+    record.content.mcp_exchange = mcp_exchange;
+    record
+        .content
+        .omit_structured_content_if_aggregate_exceeds_limit()?;
     record.mcp_tool_call = annotation.mcp_tool_call;
     record.metadata = annotation.metadata;
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;

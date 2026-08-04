@@ -29,8 +29,8 @@ internal sealed class ProcessTree : IAsyncDisposable
     private const uint WindowsFileAttributeNormal = 0x00000080;
     private const uint WindowsHandleFlagInherit = 0x00000001;
     private const uint WindowsJobObjectLimitKillOnJobClose = 0x00002000;
-    private const int WindowsJobObjectBasicAccountingInformation = 1;
-    private const int WindowsJobObjectExtendedLimitInformation = 9;
+    private const int WindowsJobObjectBasicAccountingInformationClass = 1;
+    private const int WindowsJobObjectExtendedLimitInformationClass = 9;
     private const int WindowsStartfUseStdHandles = 0x00000100;
     private const int WindowsStdInputHandle = -10;
     private const int WindowsErrorInsufficientBuffer = 122;
@@ -549,7 +549,7 @@ internal sealed class ProcessTree : IAsyncDisposable
         };
         if (!WindowsSetInformationJobObject(
                 job,
-                WindowsJobObjectExtendedLimitInformation,
+                WindowsJobObjectExtendedLimitInformationClass,
                 ref limits,
                 Marshal.SizeOf<WindowsJobObjectExtendedLimitInformation>()))
         {
@@ -564,7 +564,7 @@ internal sealed class ProcessTree : IAsyncDisposable
     {
         return !WindowsQueryInformationJobObject(
                 job,
-                WindowsJobObjectBasicAccountingInformation,
+                WindowsJobObjectBasicAccountingInformationClass,
                 out var accounting,
                 Marshal.SizeOf<WindowsJobObjectBasicAccountingInformation>(),
                 IntPtr.Zero)

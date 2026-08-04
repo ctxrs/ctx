@@ -105,6 +105,34 @@ fn incremental_accounts_exact_protocol_bytes_across_page_index_digits() {
 }
 
 #[test]
+fn prepared_delta_content_bytes_include_mcp_exchange() {
+    let source = source("mcp-exchange-content-bytes.jsonl");
+    let mut record = record(&source, 1, "body".to_owned());
+    record.content.mcp_exchange = Some(McpExchangeContent {
+        provider_call_id: "materialization-call".to_owned(),
+        invocation: None,
+        response: Some(McpTerminalResponseContent {
+            status: McpTerminalStatus::Succeeded,
+            failure_kind: None,
+            duration_ns: Some(42),
+            text: McpTextCapture::Absent,
+            payload: McpJsonCapture::Present {
+                value: serde_json::json!({
+                    "result": ["complete", null, {"unicode": "雪"}],
+                }),
+            },
+        }),
+    });
+    record.validate_contract().unwrap();
+    let expected = record.content.encoded_content_bytes().unwrap();
+
+    let prepared = PreparedEventDelta::from_typed(CoreEventDelta::Added(record)).unwrap();
+
+    assert_eq!(prepared.content_bytes(), expected);
+    assert!(prepared.content_bytes() > "body".len());
+}
+
+#[test]
 fn batch_builder_carried_lengths_match_exact_request_encoding_after_every_page() {
     let source = source("batch-carried-lengths.jsonl");
     let pages = single_delta_event_pages(&source, MAX_CORE_EVENT_DELTA_PAGES, 17);

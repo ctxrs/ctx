@@ -1,0 +1,1 @@
+{"event":{"mcp_exchange":{"provider_call_id":"first","response":{"status":"succeeded","text":{"capture_status":"absent"},"payload":{"capture_status":"absent"}}},"mcp_exchange":{"provider_call_id":"second","response":{"status":"succeeded","text":{"capture_status":"absent"},"payload":{"capture_status":"absent"}}}},"events":[]}

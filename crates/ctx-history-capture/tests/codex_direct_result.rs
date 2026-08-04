@@ -5,7 +5,10 @@ use ctx_history_capture::{
     register_landed_source_backed_route, SourceBackedProviderRegistry, SourceBackedRefreshReceipt,
     SourceBackedRouteSelection,
 };
-use ctx_history_core::{CaptureProvider, CoreRecord, McpToolCallAttribution};
+use ctx_history_core::{
+    CaptureProvider, CoreRecord, McpFailureKind, McpJsonCapture, McpPayloadOmissionReason,
+    McpTerminalStatus, McpTextCapture, McpToolCallAttribution,
+};
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 
@@ -153,6 +156,29 @@ fn over_8_mib_mcp_result_is_admitted_once_and_indexable() {
             tool: "read".to_owned(),
         })
     );
+    let exchange = core.content.mcp_exchange.as_ref().unwrap();
+    assert_eq!(exchange.provider_call_id, "exec-mcp-large");
+    let invocation = exchange.invocation.as_ref().unwrap();
+    assert_eq!(invocation.server, "example");
+    assert_eq!(invocation.tool, "read");
+    assert_eq!(
+        invocation.arguments,
+        McpJsonCapture::Present {
+            value: json!({"path": "/workspace/result.txt"})
+        }
+    );
+    let response = exchange.response.as_ref().unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.failure_kind, None);
+    assert_eq!(response.duration_ns, Some(1_000_000_007));
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert!(matches!(
+        &response.payload,
+        McpJsonCapture::Omitted {
+            reason: McpPayloadOmissionReason::SizeLimit,
+            observed_encoded_bytes: Some(bytes),
+        } if *bytes > 8 * 1024 * 1024
+    ));
 }
 
 #[test]
@@ -164,6 +190,7 @@ fn malformed_mcp_results_are_rejected_without_hiding_later_valid_content() {
     let rejected_marker = "rejectonlyzzqv7421";
     let tool_error_marker = "toolerrorokqjx8137";
     let protocol_error_marker = "protocolerrorokmzn9264";
+    let implicit_success_marker = "missingiserrorsucceedszzqv7421";
     let valid_marker = "later_valid_content_is_indexed";
     let malformed = [
         json!({
@@ -195,6 +222,14 @@ fn malformed_mcp_results_are_rejected_without_hiding_later_valid_content() {
         "exec-mcp-protocol-error",
         json!({"Err": protocol_error_marker}),
     ));
+    events.push(mcp_result(
+        "exec-mcp-implicit-success",
+        json!({
+            "Ok": {
+                "content": [{"type": "text", "text": implicit_success_marker}]
+            }
+        }),
+    ));
     events.push(json!({
         "timestamp": "2026-08-01T12:00:02Z",
         "type": "response_item",
@@ -207,7 +242,7 @@ fn malformed_mcp_results_are_rejected_without_hiding_later_valid_content() {
     write_session(&sessions, native_session_id, &events);
 
     let receipt = publish_codex_sessions(&sessions, &index);
-    assert_eq!(receipt.commit.indexed_documents, 3);
+    assert_eq!(receipt.commit.indexed_documents, 4);
     let verified = VerifiedIndex::open(&index).unwrap();
     assert!(verified
         .search_event_candidates(rejected_marker, 10)
@@ -229,6 +264,57 @@ fn malformed_mcp_results_are_rejected_without_hiding_later_valid_content() {
             })
         );
     }
+    let tool_error = core_for_marker(&verified, tool_error_marker);
+    let response = tool_error
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Failed);
+    assert_eq!(response.failure_kind, Some(McpFailureKind::ToolReported));
+    assert_eq!(response.duration_ns, Some(1_000_000_007));
+    assert!(matches!(&response.payload, McpJsonCapture::Present { .. }));
+
+    let protocol_error = core_for_marker(&verified, protocol_error_marker);
+    let response = protocol_error
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Failed);
+    assert_eq!(response.failure_kind, Some(McpFailureKind::Invocation));
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: Value::String(protocol_error_marker.to_owned())
+        }
+    );
+
+    let implicit_success = core_for_marker(&verified, implicit_success_marker);
+    let response = implicit_success
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.failure_kind, None);
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: json!({
+                "content": [{"type": "text", "text": implicit_success_marker}]
+            })
+        }
+    );
     assert_eq!(
         verified
             .search_event_candidates(protocol_error_marker, 10)
@@ -293,6 +379,54 @@ fn redacted_real_shape_fixture_is_admitted_with_linkage_and_metadata() {
             tool: "js".to_owned(),
         })
     );
+    let exchange = core.content.mcp_exchange.as_ref().unwrap();
+    assert_eq!(exchange.provider_call_id, "exec-redacted-real-shape");
+    let invocation = exchange.invocation.as_ref().unwrap();
+    assert_eq!(invocation.server, "node_repl");
+    assert_eq!(invocation.tool, "js");
+    assert_eq!(
+        invocation.arguments,
+        McpJsonCapture::Present {
+            value: json!({
+                "code": "/* redacted */",
+                "title": "Redacted fixture",
+                "timeout_ms": 30000
+            })
+        }
+    );
+    let response = exchange.response.as_ref().unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.failure_kind, None);
+    assert_eq!(response.duration_ns, Some(916_426_054));
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: json!({
+                "content": [{"type": "text", "text": "REAL_SHAPE_DIRECT_RESULT"}],
+                "isError": false,
+                "_meta": {
+                    "browser_use": {},
+                    "codex/toolSurface": {"backend": "iab", "kind": "browserUse"}
+                }
+            })
+        }
+    );
+
+    let initial_event_id = core.event_id;
+    let initial_exchange = core.content.mcp_exchange.clone();
+    let initial_generation = receipt.commit.generation_id;
+    drop(verified);
+    let replay = publish_codex_sessions(&sessions, &index);
+    assert_eq!(replay.commit.generation_id, initial_generation);
+    let replayed = VerifiedIndex::open(&index).unwrap();
+    let current = core_for_marker(&replayed, "REAL_SHAPE_DIRECT_RESULT");
+    assert_eq!(current.event_id, initial_event_id);
+    assert_eq!(current.content.mcp_exchange, initial_exchange);
+    assert_eq!(
+        current.content.normalized_body.as_deref(),
+        Some("REAL_SHAPE_DIRECT_RESULT")
+    );
 }
 
 #[test]
@@ -333,6 +467,12 @@ fn exact_error_attribution_and_ambiguous_pair_abstention_survive_publication() {
         let core = core_for_marker(&verified, marker);
         assert!(core.mcp_tool_call.is_none());
         assert_eq!(core.content.normalized_body.as_deref(), Some(marker));
+        let exchange = core.content.mcp_exchange.as_ref().unwrap();
+        assert!(exchange.invocation.is_none());
+        assert_eq!(
+            exchange.response.as_ref().unwrap().status,
+            McpTerminalStatus::Succeeded
+        );
     }
     for marker in [
         "AMBIGUOUS_MCP_RESULT",
@@ -350,7 +490,24 @@ fn exact_error_attribution_and_ambiguous_pair_abstention_survive_publication() {
             "unexpected attribution for {marker}"
         );
         assert_eq!(core.content.normalized_body.as_deref(), Some(marker));
+        if marker == "AMBIGUOUS_MCP_TERMINAL_SELECTORS" {
+            assert!(core.content.mcp_exchange.is_none());
+        } else {
+            assert!(core.content.mcp_exchange.is_some());
+        }
     }
+    let ambiguous_result = core_for_marker(&verified, "AMBIGUOUS_MCP_RESULT");
+    let response = ambiguous_result
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Unknown);
+    assert_eq!(response.failure_kind, None);
+    assert_eq!(response.payload, McpJsonCapture::Unavailable);
     assert_eq!(
         core_for_marker(&verified, "SEQUENTIAL_REUSE_SEPARATOR")
             .content
@@ -358,6 +515,86 @@ fn exact_error_attribution_and_ambiguous_pair_abstention_survive_publication() {
             .as_deref(),
         Some("SEQUENTIAL_REUSE_SEPARATOR")
     );
+}
+
+#[test]
+fn nested_duplicate_json_is_unavailable_without_losing_terminal_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let native_session_id = "019fa000-0000-7000-8000-000000000031";
+    let arguments_marker = "duplicate_nested_arguments_body_survives";
+    let payload_marker = "duplicate_nested_payload_body_survives";
+    let status_marker = "duplicate_is_error_body_survives";
+    fs::create_dir_all(&sessions).unwrap();
+    let contents = format!(
+        concat!(
+            "{{\"timestamp\":\"2026-08-01T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{native_session_id}\",\"timestamp\":\"2026-08-01T12:00:00Z\",\"cwd\":\"/workspace\",\"source\":\"cli\"}}}}\n",
+            "{{\"timestamp\":\"2026-08-01T12:00:01Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"mcp_tool_call_end\",\"call_id\":\"exec-duplicate-arguments\",\"invocation\":{{\"server\":\"example\",\"tool\":\"read\",\"arguments\":{{\"path\":\"first\",\"path\":\"second\"}}}},\"duration\":{{\"secs\":1,\"nanos\":7}},\"result\":{{\"Ok\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{arguments_marker}\"}}],\"isError\":false}}}}}}}}\n",
+            "{{\"timestamp\":\"2026-08-01T12:00:02Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"mcp_tool_call_end\",\"call_id\":\"exec-duplicate-payload\",\"invocation\":{{\"server\":\"example\",\"tool\":\"read\",\"arguments\":{{}}}},\"duration\":{{\"secs\":1,\"nanos\":7}},\"result\":{{\"Ok\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{payload_marker}\"}}],\"isError\":false,\"_meta\":{{\"surface\":1,\"surface\":2}}}}}}}}}}\n",
+            "{{\"timestamp\":\"2026-08-01T12:00:03Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"mcp_tool_call_end\",\"call_id\":\"exec-duplicate-status\",\"invocation\":{{\"server\":\"example\",\"tool\":\"read\",\"arguments\":{{}}}},\"duration\":{{\"secs\":1,\"nanos\":7}},\"result\":{{\"Ok\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{status_marker}\"}}],\"isError\":false,\"isError\":true}}}}}}}}\n"
+        ),
+        native_session_id = native_session_id,
+        arguments_marker = arguments_marker,
+        payload_marker = payload_marker,
+        status_marker = status_marker,
+    );
+    fs::write(
+        sessions.join(format!("rollout-{native_session_id}.jsonl")),
+        contents,
+    )
+    .unwrap();
+
+    let receipt = publish_codex_sessions(&sessions, &index);
+    assert_eq!(receipt.commit.indexed_documents, 3);
+    let verified = VerifiedIndex::open(&index).unwrap();
+
+    let arguments = core_for_marker(&verified, arguments_marker);
+    assert_eq!(
+        arguments.content.normalized_body.as_deref(),
+        Some(arguments_marker)
+    );
+    let exchange = arguments.content.mcp_exchange.as_ref().unwrap();
+    assert_eq!(
+        exchange.invocation.as_ref().unwrap().arguments,
+        McpJsonCapture::Unavailable
+    );
+    let response = exchange.response.as_ref().unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert!(matches!(&response.payload, McpJsonCapture::Present { .. }));
+
+    let payload = core_for_marker(&verified, payload_marker);
+    assert_eq!(
+        payload.content.normalized_body.as_deref(),
+        Some(payload_marker)
+    );
+    let response = payload
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.payload, McpJsonCapture::Unavailable);
+
+    let status = core_for_marker(&verified, status_marker);
+    assert_eq!(
+        status.content.normalized_body.as_deref(),
+        Some(status_marker)
+    );
+    let response = status
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Unknown);
+    assert_eq!(response.failure_kind, None);
+    assert_eq!(response.payload, McpJsonCapture::Unavailable);
 }
 
 #[test]
@@ -502,7 +739,10 @@ fn invalid_attribution_preserves_terminal_content_and_all_stable_identities() {
         exact.content.normalized_body,
         invalid.content.normalized_body
     );
-    assert_eq!(exact.parser_revision, "codex-nativepath-core-record-v13");
+    assert_eq!(
+        exact.parser_revision,
+        "codex-nativepath-core-record-v16-aggregate-content-admission"
+    );
     assert_eq!(exact.parser_revision, invalid.parser_revision);
     assert_eq!(
         exact.mcp_tool_call,
@@ -515,7 +755,7 @@ fn invalid_attribution_preserves_terminal_content_and_all_stable_identities() {
 }
 
 #[test]
-fn exact_raw_limit_omits_oversized_invocation_but_publishes_result() {
+fn exact_raw_limit_omits_oversized_arguments_but_publishes_result() {
     const MAX_CODEX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 
     let temp = tempfile::tempdir().unwrap();
@@ -523,18 +763,15 @@ fn exact_raw_limit_omits_oversized_invocation_but_publishes_result() {
     let index = temp.path().join("global-index");
     let native_session_id = "019fa000-0000-7000-8000-000000000027";
     let marker = "near_limit_terminal_result_survives";
-    let oversized_server =
-        "s".repeat(ctx_history_core::MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES + 1);
     let mut event = json!({
         "type": "event_msg",
         "payload": {
             "type": "mcp_tool_call_end",
             "call_id": "exec-mcp-near-limit",
             "invocation": {
-                "server": oversized_server,
+                "server": "example",
                 "tool": "read",
-                "arguments": {},
-                "padding": ""
+                "arguments": {"padding": ""}
             },
             "duration": {"secs": 1, "nanos": 7},
             "result": {"Err": marker}
@@ -542,7 +779,7 @@ fn exact_raw_limit_omits_oversized_invocation_but_publishes_result() {
     });
     let base_len = serde_json::to_vec(&event).unwrap().len();
     let padding_len = MAX_CODEX_RECORD_BYTES.checked_sub(base_len).unwrap();
-    event["payload"]["invocation"]["padding"] = Value::String("p".repeat(padding_len));
+    event["payload"]["invocation"]["arguments"]["padding"] = Value::String("p".repeat(padding_len));
     assert_eq!(
         serde_json::to_vec(&event).unwrap().len(),
         MAX_CODEX_RECORD_BYTES
@@ -554,13 +791,42 @@ fn exact_raw_limit_omits_oversized_invocation_but_publishes_result() {
     let verified = VerifiedIndex::open(&index).unwrap();
     let core = core_for_marker(&verified, marker);
     assert_eq!(core.content.normalized_body.as_deref(), Some(marker));
-    assert!(core.mcp_tool_call.is_none());
+    assert_eq!(
+        core.mcp_tool_call,
+        Some(McpToolCallAttribution {
+            server: "example".to_owned(),
+            tool: "read".to_owned(),
+        })
+    );
     let structured = core.content.structured_content.as_ref().unwrap();
     let native = &structured["provider_native_tool_result"];
     assert_eq!(native["result_variant"], "Err");
     assert!(native.get("invocation").is_none());
     assert!(
         serde_json::to_vec(structured).unwrap().len() <= ctx_history_core::MAX_CORE_CONTENT_BYTES
+    );
+    let exchange = core.content.mcp_exchange.as_ref().unwrap();
+    let invocation = exchange.invocation.as_ref().unwrap();
+    assert_eq!(invocation.server, "example");
+    assert_eq!(invocation.tool, "read");
+    assert!(matches!(
+        &invocation.arguments,
+        McpJsonCapture::Omitted {
+            reason: McpPayloadOmissionReason::SizeLimit,
+            observed_encoded_bytes: Some(bytes),
+        } if *bytes > 15 * 1024 * 1024
+    ));
+    let response = exchange.response.as_ref().unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Failed);
+    assert_eq!(response.failure_kind, Some(McpFailureKind::Invocation));
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: Value::String(marker.to_owned())
+        }
+    );
+    assert!(
+        core.content.encoded_content_bytes().unwrap() <= ctx_history_core::MAX_CORE_CONTENT_BYTES
     );
 }
 
@@ -731,9 +997,9 @@ fn mcp_attribution_canaries_are_not_indexed_or_ranked() {
                 "timestamp": "2026-08-01T12:00:02Z",
                 "type": "response_item",
                 "payload": {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": body}]
+                    "type": "function_call_output",
+                    "call_id": "exec-non-mcp-ranking-control",
+                    "output": body
                 }
             }),
         ],
@@ -753,7 +1019,7 @@ fn mcp_attribution_canaries_are_not_indexed_or_ranked() {
                 .core_record_by_id(candidate.event.event_id.as_uuid())
                 .unwrap()
         })
-        .find(|core| core.content.structured_content.is_some())
+        .find(|core| core.mcp_tool_call.is_some())
         .expect("MCP result remains available through its body match");
     let invocation = &attributed.content.structured_content.as_ref().unwrap()
         ["provider_native_tool_result"]["invocation"];

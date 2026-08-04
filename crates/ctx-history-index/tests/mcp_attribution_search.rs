@@ -1,12 +1,17 @@
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
-    McpToolCallAttribution, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
+    McpExchangeContent, McpInvocationContent, McpJsonCapture, McpTerminalResponseContent,
+    McpTerminalStatus, McpTextCapture, McpToolCallAttribution, NativeItemKey, NativeSessionKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
+    TypedKey,
 };
 use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
 
 const SERVER_CANARY: &str = "zzsrvcoresearchcanary4c18vjqx";
 const TOOL_CANARY: &str = "zztoolcoresearchcanary6d29wknp";
+const CALL_ID_CANARY: &str = "zzcallidcoresearchcanary7g52skmp";
+const ARGUMENT_CANARY: &str = "zzargumentcoresearchcanary8h63tlmq";
+const RESPONSE_CANARY: &str = "zzresponsecoresearchcanary9j74vmnr";
 const BODY_ORACLE: &str = "provider neutral attribution ranking oracle";
 
 fn source() -> SourceKey {
@@ -79,7 +84,7 @@ fn certificate(source: &SourceKey) -> CertifiedSource {
 }
 
 #[test]
-fn mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked() {
+fn mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked() {
     let temp = tempfile::tempdir().unwrap();
     let source = source();
     let mut attributed = record(&source, 1);
@@ -87,8 +92,31 @@ fn mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked() {
         server: SERVER_CANARY.to_owned(),
         tool: TOOL_CANARY.to_owned(),
     });
+    let exchange = McpExchangeContent {
+        provider_call_id: CALL_ID_CANARY.to_owned(),
+        invocation: Some(McpInvocationContent {
+            server: SERVER_CANARY.to_owned(),
+            tool: TOOL_CANARY.to_owned(),
+            arguments: McpJsonCapture::Present {
+                value: serde_json::json!({"only_in_mcp_exchange": ARGUMENT_CANARY}),
+            },
+        }),
+        response: Some(McpTerminalResponseContent {
+            status: McpTerminalStatus::Succeeded,
+            failure_kind: None,
+            duration_ns: Some(42),
+            text: McpTextCapture::NormalizedBody,
+            payload: McpJsonCapture::Present {
+                value: serde_json::json!({"only_in_mcp_exchange": RESPONSE_CANARY}),
+            },
+        }),
+    };
+    attributed.content.mcp_exchange = Some(exchange.clone());
     attributed.validate_contract().unwrap();
     let attributed_id = attributed.event_id;
+    let attributed_content_bytes = attributed.content.encoded_content_bytes().unwrap();
+    let plain = record(&source, 2);
+    let plain_content_bytes = plain.content.encoded_content_bytes().unwrap();
 
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()
@@ -96,7 +124,7 @@ fn mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked() {
         .unwrap();
     writer.begin_source(source.clone()).unwrap();
     writer.add_core_record(attributed).unwrap();
-    writer.add_core_record(record(&source, 2)).unwrap();
+    writer.add_core_record(plain).unwrap();
     writer.certify_source(certificate(&source)).unwrap();
     writer.commit(|_| true).unwrap();
 
@@ -116,14 +144,38 @@ fn mcp_tool_call_attribution_is_stored_but_never_indexed_or_ranked() {
             tool: TOOL_CANARY.to_owned(),
         })
     );
+    assert_eq!(stored.content.mcp_exchange, Some(exchange.clone()));
 
-    for canary in [SERVER_CANARY, TOOL_CANARY] {
+    let page = index.core_source_event_page(&source, None, 10).unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(
+        page.content_bytes,
+        attributed_content_bytes + plain_content_bytes
+    );
+    assert_eq!(
+        page.items
+            .iter()
+            .find(|item| item.core_record.event_id == attributed_id)
+            .unwrap()
+            .core_record
+            .content
+            .mcp_exchange,
+        Some(exchange)
+    );
+
+    for canary in [
+        SERVER_CANARY,
+        TOOL_CANARY,
+        CALL_ID_CANARY,
+        ARGUMENT_CANARY,
+        RESPONSE_CANARY,
+    ] {
         assert!(
             index
                 .search_event_candidates(canary, 10)
                 .unwrap()
                 .is_empty(),
-            "provider-neutral MCP attribution became searchable: {canary}"
+            "provider-neutral MCP data became searchable: {canary}"
         );
     }
 }

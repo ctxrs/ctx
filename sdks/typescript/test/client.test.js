@@ -499,6 +499,57 @@ test("normalizes an exact bounded MCP tool-call object while retaining outer add
   }
 });
 
+test("exposes a typed lossless MCP exchange without normalizing captured JSON keys", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      join(repoRoot, "contracts", "agent-history-v1", "fixtures", "show-event.mcp-tool-call.json"),
+      "utf8",
+    ),
+  );
+  const envelope = toAgentHistoryEnvelope("showEvent", fixture.event);
+  const exchange = envelope.event.event.mcpExchange;
+  assert.equal(exchange.providerCallId, "native-call-呼び出し-🦀");
+  assert.equal(exchange.response.durationNs, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(exchange.invocation.arguments.value, {
+    snake_key: ["雪", null, { camelKey: true }],
+    nested: { items: [1, { deep_null: null }] },
+  });
+  assert.equal(Object.hasOwn(exchange.invocation.arguments.value, "snake_key"), true);
+  assert.equal(Object.hasOwn(exchange.invocation.arguments.value, "snakeKey"), false);
+  assert.equal(envelope.event.events[2].mcpExchange.response.text.observedEncodedBytes, Number.MAX_SAFE_INTEGER);
+  assert.equal("mcpExchange" in envelope.event.events[3], false);
+
+  const raw = toAgentHistoryEnvelope("showEvent", {
+    event: {
+      text: "body",
+      mcp_exchange: {
+        provider_call_id: "call",
+        invocation: {
+          server: "server",
+          tool: "tool",
+          arguments: {
+            capture_status: "present",
+            value: { snake_key: { deep_null: null }, camelKey: [1, false] },
+          },
+        },
+        response: {
+          status: "succeeded",
+          duration_ns: Number.MAX_SAFE_INTEGER,
+          text: { capture_status: "normalized_body" },
+          payload: {
+            capture_status: "present",
+            value: { result_key: ["雪", null] },
+          },
+        },
+      },
+    },
+    events: [],
+  });
+  assert.deepEqual(raw.event.event.mcpExchange.response.payload.value, {
+    result_key: ["雪", null],
+  });
+});
+
 test("rejects raw MCP duplicates without matching repeated string contents", async () => {
   const fixtureDir = join(repoRoot, "contracts", "agent-history-v1", "fixtures", "adversarial");
   for (const name of [
@@ -506,6 +557,15 @@ test("rejects raw MCP duplicates without matching repeated string contents", asy
     "duplicate-event-mcp-tool-call-camel.json",
     "duplicate-mcp-tool-call-server.json",
     "duplicate-mcp-tool-call-tool.json",
+    "duplicate-event-mcp-exchange-snake.json",
+    "duplicate-mcp-exchange-captured-value.json",
+    "invalid-mcp-exchange-explicit-null.json",
+    "invalid-mcp-exchange-outer-alias-collision.json",
+    "invalid-mcp-exchange-unknown-field.json",
+    "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+    "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+    "invalid-mcp-exchange-unsafe-duration-ns.json",
+    "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
     "invalid-mcp-tool-call-transformed-server.json",
     "invalid-mcp-tool-call-transformed-tool.json",
     "invalid-mcp-tool-call-transformed-collision.json",

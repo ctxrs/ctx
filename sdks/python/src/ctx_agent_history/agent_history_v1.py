@@ -21,6 +21,7 @@ from .version import API_VERSION
 SCHEMA_VERSION = 1
 MAX_SAFE_STATUS_COUNTER = (1 << 53) - 1
 MAX_MCP_TOOL_CALL_COMPONENT_BYTES = 64 * 1024
+MAX_MCP_EXCHANGE_IDENTITY_BYTES = 64 * 1024
 _STATUS_COUNTER_KEYS = (
     "indexedItems",
     "indexedSessions",
@@ -208,12 +209,217 @@ def _normalize_event_record(value: Any) -> Any:
                 details={"member": key},
             )
 
+    exchange_wire_keys = [key for key in ("mcp_exchange", "mcpExchange") if key in value]
+    if len(exchange_wire_keys) > 1:
+        raise _mcp_exchange_error("duplicate wire aliases")
+    for key in value:
+        if key not in exchange_wire_keys and _snake_to_camel(key) == "mcpExchange":
+            raise _mcp_exchange_error(
+                "outer member collides with the canonical mcpExchange key",
+                details={"member": key},
+            )
+
     normalized = _camelize_public(
-        {key: nested for key, nested in value.items() if key not in wire_keys}
+        {
+            key: nested
+            for key, nested in value.items()
+            if key not in wire_keys and key not in exchange_wire_keys
+        }
     )
     if wire_keys:
         normalized["mcpToolCall"] = _validate_mcp_tool_call(value[wire_keys[0]])
+    if exchange_wire_keys:
+        normalized["mcpExchange"] = _normalize_mcp_exchange(value[exchange_wire_keys[0]])
+    response = normalized.get("mcpExchange", {}).get("response", {})
+    if response.get("text", {}).get("captureStatus") == "normalized_body":
+        if not isinstance(normalized.get("text"), str) or not normalized["text"]:
+            raise _mcp_exchange_error("normalized response body requires nonempty event text")
     return normalized
+
+
+def _normalize_mcp_exchange(value: Any) -> JsonObject:
+    exchange = _normalize_closed_mcp_object(
+        value,
+        "exchange",
+        {
+            "provider_call_id": "providerCallId",
+            "providerCallId": "providerCallId",
+            "invocation": "invocation",
+            "response": "response",
+        },
+    )
+    exchange["providerCallId"] = _validate_mcp_identity(
+        exchange.get("providerCallId"), "providerCallId"
+    )
+    if "invocation" not in exchange and "response" not in exchange:
+        raise _mcp_exchange_error("requires invocation, response, or both")
+    if "invocation" in exchange:
+        exchange["invocation"] = _normalize_mcp_invocation(exchange["invocation"])
+    if "response" in exchange:
+        exchange["response"] = _normalize_mcp_response(exchange["response"])
+    return exchange
+
+
+def _normalize_mcp_invocation(value: Any) -> JsonObject:
+    invocation = _normalize_closed_mcp_object(
+        value,
+        "invocation",
+        {"server": "server", "tool": "tool", "arguments": "arguments"},
+    )
+    _require_exact_mcp_members(invocation, {"server", "tool", "arguments"}, "invocation")
+    invocation["server"] = _validate_mcp_identity(invocation["server"], "invocation.server")
+    invocation["tool"] = _validate_mcp_identity(invocation["tool"], "invocation.tool")
+    invocation["arguments"] = _normalize_mcp_capture(
+        invocation["arguments"], "invocation.arguments", arguments_capture=True
+    )
+    return invocation
+
+
+def _normalize_mcp_response(value: Any) -> JsonObject:
+    response = _normalize_closed_mcp_object(
+        value,
+        "response",
+        {
+            "status": "status",
+            "failure_kind": "failureKind",
+            "failureKind": "failureKind",
+            "duration_ns": "durationNs",
+            "durationNs": "durationNs",
+            "text": "text",
+            "payload": "payload",
+        },
+    )
+    for required in ("status", "text", "payload"):
+        if required not in response:
+            raise _mcp_exchange_error(f"response requires {required}")
+    if response["status"] not in {"succeeded", "failed", "cancelled", "timed_out", "unknown"}:
+        raise _mcp_exchange_error("response.status is invalid")
+    if response["status"] == "failed":
+        if response.get("failureKind") not in {"tool_reported", "invocation", "unknown"}:
+            raise _mcp_exchange_error("failed response requires failureKind")
+    elif "failureKind" in response:
+        raise _mcp_exchange_error("failureKind is only valid for failed responses")
+    if "durationNs" in response:
+        response["durationNs"] = _validate_mcp_safe_integer(
+            response["durationNs"], "response.durationNs"
+        )
+    response["text"] = _normalize_mcp_capture(
+        response["text"], "response.text", text_capture=True
+    )
+    response["payload"] = _normalize_mcp_capture(response["payload"], "response.payload")
+    return response
+
+
+def _normalize_mcp_capture(
+    value: Any,
+    context: str,
+    *,
+    arguments_capture: bool = False,
+    text_capture: bool = False,
+) -> JsonObject:
+    capture = _normalize_closed_mcp_object(
+        value,
+        context,
+        {
+            "capture_status": "captureStatus",
+            "captureStatus": "captureStatus",
+            "value": "value",
+            "reason": "reason",
+            "observed_encoded_bytes": "observedEncodedBytes",
+            "observedEncodedBytes": "observedEncodedBytes",
+        },
+    )
+    status = capture.get("captureStatus")
+    if status == "present":
+        if text_capture:
+            raise _mcp_exchange_error(f"{context} cannot use present")
+        _require_exact_mcp_members(capture, {"captureStatus", "value"}, context)
+        if arguments_capture and not isinstance(capture["value"], Mapping):
+            raise _mcp_exchange_error("present invocation arguments must be a JSON object")
+    elif status == "normalized_body":
+        if not text_capture:
+            raise _mcp_exchange_error(f"{context} cannot use normalized_body")
+        _require_exact_mcp_members(capture, {"captureStatus"}, context)
+    elif status in {"absent", "unavailable"}:
+        _require_exact_mcp_members(capture, {"captureStatus"}, context)
+    elif status == "omitted":
+        if capture.get("reason") != "size_limit":
+            raise _mcp_exchange_error(f"{context}.reason must be size_limit")
+        expected = {"captureStatus", "reason"}
+        if "observedEncodedBytes" in capture:
+            capture["observedEncodedBytes"] = _validate_mcp_safe_integer(
+                capture["observedEncodedBytes"], f"{context}.observedEncodedBytes"
+            )
+            expected.add("observedEncodedBytes")
+        _require_exact_mcp_members(capture, expected, context)
+    else:
+        raise _mcp_exchange_error(f"{context}.captureStatus is invalid")
+    return capture
+
+
+def _normalize_closed_mcp_object(
+    value: Any, context: str, aliases: Mapping[str, str]
+) -> JsonObject:
+    if not isinstance(value, Mapping):
+        raise _mcp_exchange_error(f"{context} must be an object")
+    normalized: JsonObject = {}
+    for key, nested in value.items():
+        canonical = aliases.get(key)
+        if canonical is None:
+            raise _mcp_exchange_error(f"{context} contains unknown member {key!r}")
+        if canonical in normalized:
+            raise _mcp_exchange_error(f"{context} contains colliding aliases for {canonical}")
+        normalized[canonical] = nested
+    return normalized
+
+
+def _require_exact_mcp_members(value: Mapping[str, Any], expected: set[str], context: str) -> None:
+    if set(value) != expected:
+        raise _mcp_exchange_error(
+            f"{context} has invalid members", details={"members": sorted(value)}
+        )
+
+
+def _validate_mcp_identity(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise _mcp_exchange_error(f"{field} must be a nonempty string")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise _mcp_exchange_error(f"{field} contains invalid Unicode", cause=exc) from exc
+    if len(encoded) > MAX_MCP_EXCHANGE_IDENTITY_BYTES:
+        raise _mcp_exchange_error(
+            f"{field} exceeds {MAX_MCP_EXCHANGE_IDENTITY_BYTES} decoded UTF-8 bytes"
+        )
+    return value
+
+
+def _validate_mcp_safe_integer(value: Any, field: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > MAX_SAFE_STATUS_COUNTER
+    ):
+        raise _mcp_exchange_error(
+            f"{field} is outside the exact JSON integer domain",
+            details={"field": field, "maximum": MAX_SAFE_STATUS_COUNTER},
+        )
+    return value
+
+
+def _mcp_exchange_error(
+    message: str,
+    *,
+    details: Optional[JsonObject] = None,
+    cause: Optional[BaseException] = None,
+) -> CtxAgentHistoryProtocolError:
+    error_details: JsonObject = {"field": "mcpExchange"}
+    if details:
+        error_details.update(details)
+    return CtxAgentHistoryProtocolError(
+        f"agent-history-v1 MCP exchange {message}", details=error_details, cause=cause
+    )
 
 
 def _validate_mcp_tool_call(value: Any) -> JsonObject:

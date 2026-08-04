@@ -689,6 +689,13 @@ default `lite` and `full` selection rules do not change. The object is omitted
 rather than `null` when exact attribution is unavailable. See
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md).
 
+Full JSON/JSONL event output can also include content-governed
+`mcp_exchange`, with a provider call ID and invocation and/or response. Present
+arguments and response payloads remain decoded JSON values. This capture is
+separate from top-level attribution; see
+[`mcp-exchange-capture.md`](mcp-exchange-capture.md) for its wire shape and
+capture states.
+
 ## List
 
 ```bash
@@ -707,9 +714,12 @@ JSONL streams bounded pages and ends with exactly one completion record. Opaque
 cursors are bound to the exact selection and immutable Core generation. See
 [`event-queries.md`](event-queries.md) for the wire contract and jq examples.
 
-`--content none` retains event metadata, including an available
-`mcp_tool_call`, while omitting payload content. MCP attribution has no list
-selector; filter JSON/JSONL rows client-side.
+Only `--content full` can return `mcp_exchange`. `--content text` keeps the
+existing normalized event text but omits structured content and the exchange;
+`--content none` omits all payload content. Both reduced projections retain
+event metadata, including an available `mcp_tool_call`. MCP attribution and
+exchange capture have no list selectors; filter full JSON/JSONL rows
+client-side.
 
 Show and list commands read complete policy-selected normalized records from the active
 verified Core/Tantivy generation. They do not reopen provider history at query
@@ -721,8 +731,8 @@ event arguments are ctx-owned IDs. To look up a provider-owned session, use an
 explicit provider lookup such as `--provider codex --provider-session
 <provider-session-id>` on commands that support provider lookup.
 
-JSON output may expose transcript content and local workspace metadata, so
-treat it as private local data.
+JSON output may expose transcript content, MCP arguments/responses, and local
+workspace metadata, so treat it as private local data.
 
 ## Locate
 
@@ -957,9 +967,13 @@ MCP search follows the same active Codex session-tree exclusion as the CLI when
 tool when the active session tree itself is the target.
 
 MCP `show_event`, log-mode `show_session`, and `query_events` event rows expose
-the same optional exact `mcp_tool_call` object in `structuredContent`. Filter
-bounded pages on the client and continue with their existing opaque cursors;
-there are no MCP attribution selectors or search arguments.
+the same optional exact attribution as camelCase `mcpToolCall` in
+`structuredContent`. Full-content rows can also expose camelCase `mcpExchange`;
+`query_events` with `content: "text"` or `content: "none"` omits that capture
+while `mcpToolCall` remains metadata. Filter bounded pages on the client and
+continue with their existing opaque cursors; there are no MCP attribution or
+exchange selectors or search arguments. Captured JSON keys are not camelized.
+See [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
 
 Human CLI and Markdown views retain exactly the first 256 Unicode scalar values
 of each MCP server/tool component before escaping and append

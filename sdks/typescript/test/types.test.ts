@@ -3,6 +3,7 @@ import {
   type JsonValue,
   type AgentHistoryEnvelope,
   type McpToolCall,
+  type McpExchange,
   type SearchBackendMode,
   type SearchContentScope,
   type SearchEnvelope,
@@ -106,6 +107,31 @@ expectType<McpToolCall>(extendedMcpToolCall);
 // @ts-expect-error MCP tool calls require both server and tool.
 const incompleteMcpToolCall: McpToolCall = { server: "only-server" };
 expectType<McpToolCall>(incompleteMcpToolCall);
+
+const exactMcpExchange: McpExchange = {
+  providerCallId: "call",
+  invocation: {
+    server: "server",
+    tool: "tool",
+    arguments: {
+      captureStatus: "present",
+      value: { snake_key: ["雪", null, { deep_null: null }] },
+    },
+  },
+  response: {
+    status: "succeeded",
+    durationNs: Number.MAX_SAFE_INTEGER,
+    text: { captureStatus: "normalized_body" },
+    payload: { captureStatus: "present", value: { result_key: [null] } },
+  },
+};
+expectType<McpExchange>(exactMcpExchange);
+expectType<JsonValue>(shown.event.events[0]!.mcpExchange!.response!.payload.captureStatus === "present"
+  ? shown.event.events[0]!.mcpExchange!.response!.payload.value
+  : null);
+// @ts-expect-error MCP exchange objects are closed.
+const extendedMcpExchange: McpExchange = { providerCallId: "call", future: true };
+expectType<McpExchange>(extendedMcpExchange);
 
 const shownSession = await client.showSession("22222222-2222-4222-8222-222222222222");
 expectType<string | null | undefined>(shownSession.session.session?.providerSessionId);

@@ -509,6 +509,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
     public var occurredAt: String?
     public var text: String?
     public var mcpToolCall: AgentHistoryMCPToolCall?
+    public var mcpExchange: AgentHistoryMCPExchange?
     public var structuredContent: JSONValue?
     public var content: CoreContentMetadata?
     public var citations: [AgentHistoryCitation]?
@@ -525,6 +526,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         occurredAt: String? = nil,
         text: String? = nil,
         mcpToolCall: AgentHistoryMCPToolCall? = nil,
+        mcpExchange: AgentHistoryMCPExchange? = nil,
         structuredContent: JSONValue? = nil,
         content: CoreContentMetadata? = nil,
         citations: [AgentHistoryCitation]? = nil
@@ -540,6 +542,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         self.occurredAt = occurredAt
         self.text = text
         self.mcpToolCall = mcpToolCall
+        self.mcpExchange = mcpExchange
         self.structuredContent = structuredContent
         self.content = content
         self.citations = citations
@@ -557,6 +560,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         case occurredAt
         case text
         case mcpToolCall
+        case mcpExchange
         case structuredContent
         case content
         case citations
@@ -577,9 +581,48 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         mcpToolCall = container.contains(.mcpToolCall)
             ? try container.decode(AgentHistoryMCPToolCall.self, forKey: .mcpToolCall)
             : nil
+        mcpExchange = container.contains(.mcpExchange)
+            ? try container.decode(AgentHistoryMCPExchange.self, forKey: .mcpExchange)
+            : nil
         structuredContent = try container.decodeIfPresent(JSONValue.self, forKey: .structuredContent)
         content = try container.decodeIfPresent(CoreContentMetadata.self, forKey: .content)
         citations = try container.decodeIfPresent([AgentHistoryCitation].self, forKey: .citations)
+        try Self.validateNormalizedResponseBody(text: text, exchange: mcpExchange, codingPath: decoder.codingPath)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try Self.validateNormalizedResponseBody(text: text, exchange: mcpExchange, codingPath: encoder.codingPath)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(ctxEventId, forKey: .ctxEventId)
+        try container.encodeIfPresent(ctxSessionId, forKey: .ctxSessionId)
+        try container.encodeIfPresent(provider, forKey: .provider)
+        try container.encodeIfPresent(providerSessionId, forKey: .providerSessionId)
+        try container.encodeIfPresent(sourceFormat, forKey: .sourceFormat)
+        try container.encodeIfPresent(sequence, forKey: .sequence)
+        try container.encodeIfPresent(eventType, forKey: .eventType)
+        try container.encodeIfPresent(role, forKey: .role)
+        try container.encodeIfPresent(occurredAt, forKey: .occurredAt)
+        try container.encodeIfPresent(text, forKey: .text)
+        try container.encodeIfPresent(mcpToolCall, forKey: .mcpToolCall)
+        try container.encodeIfPresent(mcpExchange, forKey: .mcpExchange)
+        try container.encodeIfPresent(structuredContent, forKey: .structuredContent)
+        try container.encodeIfPresent(content, forKey: .content)
+        try container.encodeIfPresent(citations, forKey: .citations)
+    }
+
+    private static func validateNormalizedResponseBody(
+        text: String?,
+        exchange: AgentHistoryMCPExchange?,
+        codingPath: [CodingKey]
+    ) throws {
+        guard exchange?.response?.text.captureStatus == .normalizedBody else {
+            return
+        }
+        guard let text, !text.isEmpty else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: codingPath, debugDescription: "normalized MCP response body requires nonempty event text")
+            )
+        }
     }
 }
 

@@ -38,6 +38,21 @@ existing indexed lowercase projections. An exact public source ID is resolved
 against the pinned generation manifest to its full source identity before the
 query runs.
 
+## Content projection
+
+`--content full` returns the selected normalized `text`, provider-native
+`structured_content`, and optional content-governed `mcp_exchange` stored on an
+event. `--content text` returns only the existing normalized text body;
+`--content none` omits payload content entirely. Both reduced projections omit
+`mcp_exchange`, including its provider call ID, arguments, response status and
+timing, and response payload.
+
+The separate top-level `mcp_tool_call: {server, tool}` is event metadata and
+survives every presentation projection when available. Neither identity nor
+exchange capture adds a list selector. Use full JSON/JSONL and filter emitted
+rows client-side when exchange content is required. See
+[`mcp-exchange-capture.md`](mcp-exchange-capture.md).
+
 ## Bounded pages and cursors
 
 JSON returns one bounded page. JSONL reads a sequence of bounded internal pages
@@ -134,9 +149,9 @@ ignored never acquired a Core identity and therefore cannot be enumerated;
 leaving those authoritative source bytes untouched is not the same as claiming
 round-trip visibility.
 
-All JSON and JSONL can contain transcript content, command arguments,
-repository evidence, and local workspace paths. Treat it as private local data
-and review it before sharing.
+All JSON and JSONL can contain transcript content, command arguments, MCP
+arguments and responses, repository evidence, and local workspace paths. Treat
+it as private local data and review it before sharing.
 
 Exact MCP server/tool names are also opaque private local data and can contain
 sensitive identifiers, paths, or controls. See

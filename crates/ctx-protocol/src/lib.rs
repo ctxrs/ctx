@@ -3,15 +3,18 @@
 //! These types describe the SDK product contract. They are not SQLite schema
 //! types and are not a promise to preserve current CLI JSON internals.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 pub const CONTRACT_VERSION: &str = "agent-history-v1";
 pub const SCHEMA_VERSION: u16 = 1;
-pub const MAX_SAFE_STATUS_COUNTER: u64 = (1_u64 << 53) - 1;
+pub const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+pub const MAX_SAFE_STATUS_COUNTER: u64 = MAX_SAFE_INTEGER;
 pub const MAX_MCP_TOOL_CALL_COMPONENT_BYTES: usize = 64 * 1024;
+pub const MAX_MCP_EXCHANGE_IDENTITY_BYTES: usize = 64 * 1024;
 
 fn deserialize_optional_status_counter<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
@@ -77,6 +80,130 @@ where
     D: Deserializer<'de>,
 {
     McpToolCall::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_mcp_exchange<'de, D>(
+    deserializer: D,
+) -> Result<Option<McpExchange>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    McpExchange::deserialize(deserializer).map(Some)
+}
+
+fn validate_mcp_exchange_identity(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{field} must be nonempty"));
+    }
+    if value.len() > MAX_MCP_EXCHANGE_IDENTITY_BYTES {
+        return Err(format!(
+            "{field} exceeds {MAX_MCP_EXCHANGE_IDENTITY_BYTES} decoded UTF-8 bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_safe_integer(field: &str, value: Option<u64>) -> Result<(), String> {
+    if value.is_some_and(|value| value > MAX_SAFE_INTEGER) {
+        return Err(format!("{field} exceeds maximum {MAX_SAFE_INTEGER}"));
+    }
+    Ok(())
+}
+
+struct ExactJsonValue(Value);
+
+impl<'de> Deserialize<'de> for ExactJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(ExactJsonValueVisitor)
+    }
+}
+
+struct ExactJsonValueVisitor;
+
+impl<'de> Visitor<'de> for ExactJsonValueVisitor {
+    type Value = ExactJsonValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value without duplicate object members")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(ExactJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(ExactJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(ExactJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .map(ExactJsonValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(ExactJsonValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(ExactJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(ExactJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(ExactJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(ExactJsonValue(value)) = sequence.next_element()? {
+            values.push(value);
+        }
+        Ok(ExactJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut members = BTreeSet::new();
+        let mut values = Map::new();
+        while let Some(member) = object.next_key::<String>()? {
+            if !members.insert(member.clone()) {
+                return Err(de::Error::custom(format!(
+                    "duplicate JSON object member {member:?}"
+                )));
+            }
+            let ExactJsonValue(value) = object.next_value()?;
+            values.insert(member, value);
+        }
+        Ok(ExactJsonValue(Value::Object(values)))
+    }
 }
 
 /// Extensible JSON object used where `agent-history-v1` intentionally leaves room for
@@ -485,43 +612,648 @@ pub struct McpToolCall {
     pub tool: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpExchange {
+    pub provider_call_id: String,
+    pub invocation: Option<McpInvocation>,
+    pub response: Option<McpResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpInvocation {
+    pub server: String,
+    pub tool: String,
+    pub arguments: McpJsonCapture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpResponse {
+    pub status: McpResponseStatus,
+    pub failure_kind: Option<McpFailureKind>,
+    pub duration_ns: Option<u64>,
+    pub text: McpTextCapture,
+    pub payload: McpJsonCapture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpJsonCapture {
+    Present {
+        value: Value,
+    },
+    Absent,
+    Unavailable,
+    Omitted {
+        reason: McpPayloadOmissionReason,
+        observed_encoded_bytes: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTextCapture {
+    NormalizedBody,
+    Absent,
+    Unavailable,
+    Omitted {
+        reason: McpPayloadOmissionReason,
+        observed_encoded_bytes: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpPayloadOmissionReason {
+    SizeLimit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpResponseStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpFailureKind {
+    ToolReported,
+    Invocation,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for McpJsonCapture {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        parse_mcp_json_capture(ExactJsonValue::deserialize(deserializer)?.0)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for McpJsonCapture {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        validate_mcp_json_capture(self).map_err(serde::ser::Error::custom)?;
+        mcp_json_capture_value(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpTextCapture {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        parse_mcp_text_capture(ExactJsonValue::deserialize(deserializer)?.0)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for McpTextCapture {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        validate_mcp_text_capture(self).map_err(serde::ser::Error::custom)?;
+        mcp_text_capture_value(self).serialize(serializer)
+    }
+}
+
+fn parse_mcp_json_capture(value: Value) -> Result<McpJsonCapture, String> {
+    let mut object = mcp_capture_object(value)?;
+    let status = take_capture_status(&mut object)?;
+    let capture = match status.as_str() {
+        "present" => McpJsonCapture::Present {
+            value: object
+                .remove("value")
+                .ok_or_else(|| "present MCP JSON capture requires value".to_owned())?,
+        },
+        "absent" => McpJsonCapture::Absent,
+        "unavailable" => McpJsonCapture::Unavailable,
+        "omitted" => {
+            let (reason, observed_encoded_bytes) = take_omission_fields(&mut object)?;
+            McpJsonCapture::Omitted {
+                reason,
+                observed_encoded_bytes,
+            }
+        }
+        _ => return Err(format!("unknown MCP JSON captureStatus {status:?}")),
+    };
+    reject_remaining_capture_fields(&object)?;
+    Ok(capture)
+}
+
+fn parse_mcp_text_capture(value: Value) -> Result<McpTextCapture, String> {
+    let mut object = mcp_capture_object(value)?;
+    let status = take_capture_status(&mut object)?;
+    let capture = match status.as_str() {
+        "normalized_body" => McpTextCapture::NormalizedBody,
+        "absent" => McpTextCapture::Absent,
+        "unavailable" => McpTextCapture::Unavailable,
+        "omitted" => {
+            let (reason, observed_encoded_bytes) = take_omission_fields(&mut object)?;
+            McpTextCapture::Omitted {
+                reason,
+                observed_encoded_bytes,
+            }
+        }
+        _ => return Err(format!("unknown MCP text captureStatus {status:?}")),
+    };
+    reject_remaining_capture_fields(&object)?;
+    Ok(capture)
+}
+
+fn mcp_capture_object(value: Value) -> Result<Map<String, Value>, String> {
+    match value {
+        Value::Object(object) => Ok(object),
+        _ => Err("MCP capture must be an object".to_owned()),
+    }
+}
+
+fn take_capture_status(object: &mut Map<String, Value>) -> Result<String, String> {
+    object
+        .remove("captureStatus")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| "MCP captureStatus must be a string".to_owned())
+}
+
+fn take_omission_fields(
+    object: &mut Map<String, Value>,
+) -> Result<(McpPayloadOmissionReason, Option<u64>), String> {
+    let reason = match object
+        .remove("reason")
+        .and_then(|value| value.as_str().map(str::to_owned))
+    {
+        Some(reason) if reason == "size_limit" => McpPayloadOmissionReason::SizeLimit,
+        Some(reason) => return Err(format!("unknown MCP capture omission reason {reason:?}")),
+        None => return Err("omitted MCP capture requires string reason".to_owned()),
+    };
+    let observed_encoded_bytes = object
+        .remove("observedEncodedBytes")
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| "observedEncodedBytes must be an unsigned integer".to_owned())
+        })
+        .transpose()?;
+    validate_optional_safe_integer("observedEncodedBytes", observed_encoded_bytes)?;
+    Ok((reason, observed_encoded_bytes))
+}
+
+fn validate_mcp_json_capture(capture: &McpJsonCapture) -> Result<(), String> {
+    if let McpJsonCapture::Omitted {
+        observed_encoded_bytes,
+        ..
+    } = capture
+    {
+        validate_optional_safe_integer("observedEncodedBytes", *observed_encoded_bytes)?;
+    }
+    Ok(())
+}
+
+fn validate_mcp_text_capture(capture: &McpTextCapture) -> Result<(), String> {
+    if let McpTextCapture::Omitted {
+        observed_encoded_bytes,
+        ..
+    } = capture
+    {
+        validate_optional_safe_integer("observedEncodedBytes", *observed_encoded_bytes)?;
+    }
+    Ok(())
+}
+
+fn reject_remaining_capture_fields(object: &Map<String, Value>) -> Result<(), String> {
+    match object.keys().next() {
+        Some(key) => Err(format!("MCP capture contains unknown member {key:?}")),
+        None => Ok(()),
+    }
+}
+
+fn mcp_json_capture_value(capture: &McpJsonCapture) -> Value {
+    let mut object = Map::new();
+    match capture {
+        McpJsonCapture::Present { value } => {
+            object.insert(
+                "captureStatus".to_owned(),
+                Value::String("present".to_owned()),
+            );
+            object.insert("value".to_owned(), value.clone());
+        }
+        McpJsonCapture::Absent => {
+            object.insert(
+                "captureStatus".to_owned(),
+                Value::String("absent".to_owned()),
+            );
+        }
+        McpJsonCapture::Unavailable => {
+            object.insert(
+                "captureStatus".to_owned(),
+                Value::String("unavailable".to_owned()),
+            );
+        }
+        McpJsonCapture::Omitted {
+            reason,
+            observed_encoded_bytes,
+        } => insert_omitted_capture_fields(&mut object, *reason, *observed_encoded_bytes),
+    }
+    Value::Object(object)
+}
+
+fn mcp_text_capture_value(capture: &McpTextCapture) -> Value {
+    let mut object = Map::new();
+    match capture {
+        McpTextCapture::NormalizedBody => {
+            object.insert(
+                "captureStatus".to_owned(),
+                Value::String("normalized_body".to_owned()),
+            );
+        }
+        McpTextCapture::Absent => {
+            object.insert(
+                "captureStatus".to_owned(),
+                Value::String("absent".to_owned()),
+            );
+        }
+        McpTextCapture::Unavailable => {
+            object.insert(
+                "captureStatus".to_owned(),
+                Value::String("unavailable".to_owned()),
+            );
+        }
+        McpTextCapture::Omitted {
+            reason,
+            observed_encoded_bytes,
+        } => insert_omitted_capture_fields(&mut object, *reason, *observed_encoded_bytes),
+    }
+    Value::Object(object)
+}
+
+fn insert_omitted_capture_fields(
+    object: &mut Map<String, Value>,
+    reason: McpPayloadOmissionReason,
+    observed_encoded_bytes: Option<u64>,
+) {
+    object.insert(
+        "captureStatus".to_owned(),
+        Value::String("omitted".to_owned()),
+    );
+    let reason = match reason {
+        McpPayloadOmissionReason::SizeLimit => "size_limit",
+    };
+    object.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    if let Some(observed_encoded_bytes) = observed_encoded_bytes {
+        object.insert(
+            "observedEncodedBytes".to_owned(),
+            Value::Number(observed_encoded_bytes.into()),
+        );
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpExchangeWire {
+    provider_call_id: String,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    invocation: Option<McpInvocation>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    response: Option<McpResponse>,
+}
+
+impl McpExchange {
+    fn validate(&self) -> Result<(), String> {
+        validate_mcp_exchange_identity("MCP exchange providerCallId", &self.provider_call_id)?;
+        if self.invocation.is_none() && self.response.is_none() {
+            return Err("MCP exchange requires invocation, response, or both".to_owned());
+        }
+        if let Some(invocation) = &self.invocation {
+            invocation.validate()?;
+        }
+        if let Some(response) = &self.response {
+            response.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for McpExchange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = McpExchangeWire::deserialize(deserializer)?;
+        let value = Self {
+            provider_call_id: wire.provider_call_id,
+            invocation: wire.invocation,
+            response: wire.response,
+        };
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl Serialize for McpExchange {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire<'a> {
+            provider_call_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            invocation: &'a Option<McpInvocation>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            response: &'a Option<McpResponse>,
+        }
+        Wire {
+            provider_call_id: &self.provider_call_id,
+            invocation: &self.invocation,
+            response: &self.response,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpInvocationWire {
+    server: String,
+    tool: String,
+    arguments: McpJsonCapture,
+}
+
+impl McpInvocation {
+    fn validate(&self) -> Result<(), String> {
+        validate_mcp_exchange_identity("MCP invocation server", &self.server)?;
+        validate_mcp_exchange_identity("MCP invocation tool", &self.tool)?;
+        if matches!(
+            &self.arguments,
+            McpJsonCapture::Present { value } if !value.is_object()
+        ) {
+            return Err("present MCP invocation arguments must be a JSON object".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for McpInvocation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = McpInvocationWire::deserialize(deserializer)?;
+        let value = Self {
+            server: wire.server,
+            tool: wire.tool,
+            arguments: wire.arguments,
+        };
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl Serialize for McpInvocation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            server: &'a str,
+            tool: &'a str,
+            arguments: &'a McpJsonCapture,
+        }
+        Wire {
+            server: &self.server,
+            tool: &self.tool,
+            arguments: &self.arguments,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpResponseWire {
+    status: McpResponseStatus,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    failure_kind: Option<McpFailureKind>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    duration_ns: Option<u64>,
+    text: McpTextCapture,
+    payload: McpJsonCapture,
+}
+
+impl McpResponse {
+    fn validate(&self) -> Result<(), String> {
+        if (self.status == McpResponseStatus::Failed) != self.failure_kind.is_some() {
+            return Err(
+                "MCP response failureKind must be present exactly when status is failed".to_owned(),
+            );
+        }
+        validate_optional_safe_integer("MCP response durationNs", self.duration_ns)?;
+        validate_mcp_text_capture(&self.text)?;
+        validate_mcp_json_capture(&self.payload)?;
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for McpResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = McpResponseWire::deserialize(deserializer)?;
+        let value = Self {
+            status: wire.status,
+            failure_kind: wire.failure_kind,
+            duration_ns: wire.duration_ns,
+            text: wire.text,
+            payload: wire.payload,
+        };
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+}
+
+impl Serialize for McpResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire<'a> {
+            status: McpResponseStatus,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            failure_kind: &'a Option<McpFailureKind>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            duration_ns: &'a Option<u64>,
+            text: &'a McpTextCapture,
+            payload: &'a McpJsonCapture,
+        }
+        Wire {
+            status: self.status,
+            failure_kind: &self.failure_kind,
+            duration_ns: &self.duration_ns,
+            text: &self.text,
+            payload: &self.payload,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentHistoryEvent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_event_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_format: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    pub mcp_tool_call: Option<McpToolCall>,
+    pub mcp_exchange: Option<McpExchange>,
+    pub structured_content: Option<Value>,
+    pub content: Option<CoreContentMetadata>,
+    pub citations: Vec<Citation>,
+    pub extra: JsonObject,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentHistoryEventWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ctx_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ctx_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    occurred_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
     #[serde(
         default,
         deserialize_with = "deserialize_present_mcp_tool_call",
         skip_serializing_if = "Option::is_none"
     )]
-    pub mcp_tool_call: Option<McpToolCall>,
+    mcp_tool_call: Option<McpToolCall>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_mcp_exchange",
+        skip_serializing_if = "Option::is_none"
+    )]
+    mcp_exchange: Option<McpExchange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structured_content: Option<Value>,
+    structured_content: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<CoreContentMetadata>,
+    content: Option<CoreContentMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub citations: Vec<Citation>,
+    citations: Vec<Citation>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: JsonObject,
+    extra: JsonObject,
+}
+
+impl AgentHistoryEvent {
+    fn validate(&self) -> Result<(), String> {
+        let has_normalized_body = self
+            .mcp_exchange
+            .as_ref()
+            .and_then(|exchange| exchange.response.as_ref())
+            .is_some_and(|response| response.text == McpTextCapture::NormalizedBody);
+        if has_normalized_body && !self.text.as_deref().is_some_and(|text| !text.is_empty()) {
+            return Err("normalized MCP response body requires nonempty event text".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl From<AgentHistoryEventWire> for AgentHistoryEvent {
+    fn from(wire: AgentHistoryEventWire) -> Self {
+        Self {
+            ctx_event_id: wire.ctx_event_id,
+            ctx_session_id: wire.ctx_session_id,
+            provider: wire.provider,
+            provider_session_id: wire.provider_session_id,
+            source_format: wire.source_format,
+            sequence: wire.sequence,
+            event_type: wire.event_type,
+            role: wire.role,
+            occurred_at: wire.occurred_at,
+            text: wire.text,
+            mcp_tool_call: wire.mcp_tool_call,
+            mcp_exchange: wire.mcp_exchange,
+            structured_content: wire.structured_content,
+            content: wire.content,
+            citations: wire.citations,
+            extra: wire.extra,
+        }
+    }
+}
+
+impl From<&AgentHistoryEvent> for AgentHistoryEventWire {
+    fn from(event: &AgentHistoryEvent) -> Self {
+        Self {
+            ctx_event_id: event.ctx_event_id.clone(),
+            ctx_session_id: event.ctx_session_id.clone(),
+            provider: event.provider.clone(),
+            provider_session_id: event.provider_session_id.clone(),
+            source_format: event.source_format.clone(),
+            sequence: event.sequence,
+            event_type: event.event_type.clone(),
+            role: event.role.clone(),
+            occurred_at: event.occurred_at.clone(),
+            text: event.text.clone(),
+            mcp_tool_call: event.mcp_tool_call.clone(),
+            mcp_exchange: event.mcp_exchange.clone(),
+            structured_content: event.structured_content.clone(),
+            content: event.content.clone(),
+            citations: event.citations.clone(),
+            extra: event.extra.clone(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentHistoryEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let event = Self::from(AgentHistoryEventWire::deserialize(deserializer)?);
+        event.validate().map_err(serde::de::Error::custom)?;
+        Ok(event)
+    }
+}
+
+impl Serialize for AgentHistoryEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        AgentHistoryEventWire::from(self).serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -855,6 +1587,257 @@ mod tests {
             tool: String::new(),
         };
         assert!(serde_json::to_value(invalid_for_encoding).is_err());
+    }
+
+    #[test]
+    fn mcp_exchange_is_typed_lossless_bounded_and_shape_validated() {
+        let fixture =
+            fs::read_to_string(fixture_root().join("show-event.mcp-tool-call.json")).unwrap();
+        let envelope: AgentHistoryEnvelope = serde_json::from_str(&fixture).unwrap();
+        let result = envelope.event.unwrap();
+        let selected = result.event.unwrap();
+        let exchange = selected.mcp_exchange.as_ref().unwrap();
+        assert_eq!(exchange.provider_call_id, "native-call-呼び出し-🦀");
+
+        let invocation = exchange.invocation.as_ref().unwrap();
+        let McpJsonCapture::Present { value: arguments } = &invocation.arguments else {
+            panic!("fixture arguments must be present");
+        };
+        assert_eq!(arguments["snake_key"][0], "雪");
+        assert!(arguments["snake_key"][1].is_null());
+        assert!(arguments["nested"]["items"][1]["deep_null"].is_null());
+
+        let response = exchange.response.as_ref().unwrap();
+        assert_eq!(response.status, McpResponseStatus::Succeeded);
+        assert_eq!(response.duration_ns, Some(MAX_SAFE_INTEGER));
+        assert_eq!(response.text, McpTextCapture::NormalizedBody);
+        let McpJsonCapture::Present { value: payload } = &response.payload else {
+            panic!("fixture payload must be present");
+        };
+        assert_eq!(payload["result_key"][0], "完了");
+        assert!(payload["result_key"][1].is_null());
+
+        let encoded = serde_json::to_value(&selected).unwrap();
+        assert_eq!(
+            encoded["mcpExchange"]["invocation"]["arguments"]["value"],
+            *arguments
+        );
+        assert_eq!(
+            encoded["mcpExchange"]["response"]["payload"]["value"],
+            *payload
+        );
+        assert!(encoded.get("mcp_exchange").is_none());
+
+        assert!(result.events[0].mcp_exchange.is_none());
+        let capture_states = result.events[1].mcp_exchange.as_ref().unwrap();
+        assert_eq!(
+            capture_states.invocation.as_ref().unwrap().arguments,
+            McpJsonCapture::Absent
+        );
+        let capture_response = capture_states.response.as_ref().unwrap();
+        assert_eq!(capture_response.text, McpTextCapture::Absent);
+        assert_eq!(capture_response.payload, McpJsonCapture::Unavailable);
+
+        let omitted = result.events[2].mcp_exchange.as_ref().unwrap();
+        let omitted_response = omitted.response.as_ref().unwrap();
+        assert_eq!(omitted_response.status, McpResponseStatus::Failed);
+        assert_eq!(
+            omitted_response.failure_kind,
+            Some(McpFailureKind::ToolReported)
+        );
+        assert_eq!(
+            omitted_response.text,
+            McpTextCapture::Omitted {
+                reason: McpPayloadOmissionReason::SizeLimit,
+                observed_encoded_bytes: Some(MAX_SAFE_INTEGER),
+            }
+        );
+        assert_eq!(
+            omitted_response.payload,
+            McpJsonCapture::Omitted {
+                reason: McpPayloadOmissionReason::SizeLimit,
+                observed_encoded_bytes: None,
+            }
+        );
+        let encoded_omitted = serde_json::to_value(&result.events[2]).unwrap();
+        assert_eq!(
+            encoded_omitted["mcpExchange"]["response"]["text"]["observedEncodedBytes"],
+            MAX_SAFE_INTEGER
+        );
+        assert!(encoded_omitted["mcpExchange"]["response"]["text"]
+            .get("observed_encoded_bytes")
+            .is_none());
+        assert!(result.events[3].mcp_exchange.is_none());
+
+        for (index, invalid) in [
+            serde_json::json!({"mcpExchange": null}),
+            serde_json::json!({"mcpExchange": {"providerCallId": "call"}}),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"captureStatus": "absent"},
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "response": {
+                        "status": "succeeded",
+                        "durationNs": MAX_SAFE_INTEGER + 1,
+                        "text": {"captureStatus": "absent"},
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {
+                            "captureStatus": "omitted",
+                            "reason": "size_limit",
+                            "observedEncodedBytes": MAX_SAFE_INTEGER + 1
+                        },
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "invocation": null,
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"captureStatus": "absent"},
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "invocation": {
+                        "server": "server",
+                        "tool": "tool",
+                        "arguments": {"captureStatus": "present", "value": null}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "response": {
+                        "status": "failed",
+                        "text": {"captureStatus": "absent"},
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "response": {
+                        "status": "succeeded",
+                        "failureKind": "unknown",
+                        "text": {"captureStatus": "absent"},
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"captureStatus": "absent", "future": true},
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"captureStatus": "absent"},
+                        "payload": {"captureStatus": "absent"}
+                    },
+                    "future": true
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "x".repeat(MAX_MCP_EXCHANGE_IDENTITY_BYTES + 1),
+                    "response": {
+                        "status": "succeeded",
+                        "text": {"captureStatus": "absent"},
+                        "payload": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "mcpExchange": {
+                    "providerCallId": "call",
+                    "invocation": {
+                        "server": "x".repeat(MAX_MCP_EXCHANGE_IDENTITY_BYTES + 1),
+                        "tool": "tool",
+                        "arguments": {"captureStatus": "absent"}
+                    }
+                }
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                serde_json::from_value::<AgentHistoryEvent>(invalid.clone()).is_err(),
+                "invalid MCP exchange fixture {index} decoded: {invalid}"
+            );
+        }
+
+        let exact: McpExchange = serde_json::from_value(serde_json::json!({
+            "providerCallId": "🦀".repeat(MAX_MCP_EXCHANGE_IDENTITY_BYTES / 4),
+            "invocation": {
+                "server": " ",
+                "tool": "tool",
+                "arguments": {"captureStatus": "absent"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            exact.provider_call_id.len(),
+            MAX_MCP_EXCHANGE_IDENTITY_BYTES
+        );
+
+        let invalid_for_encoding = McpExchange {
+            provider_call_id: "call".to_owned(),
+            invocation: None,
+            response: None,
+        };
+        assert!(serde_json::to_value(invalid_for_encoding).is_err());
+    }
+
+    #[test]
+    fn mcp_exchange_direct_decode_rejects_duplicate_captured_json_and_bad_event_text() {
+        for name in [
+            "duplicate-mcp-exchange-captured-value.json",
+            "invalid-mcp-exchange-normalized-body-missing-event-text.json",
+            "invalid-mcp-exchange-normalized-body-empty-event-text.json",
+            "invalid-mcp-exchange-unsafe-duration-ns.json",
+            "invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
+        ] {
+            let fixture =
+                fs::read_to_string(fixture_root().join("adversarial").join(name)).unwrap();
+            assert!(
+                serde_json::from_str::<EventResult>(&fixture).is_err(),
+                "direct protocol decode accepted {name}"
+            );
+        }
     }
 
     #[test]

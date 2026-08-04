@@ -216,21 +216,39 @@ public class AgentHistoryEnvelope {
         if (hasSnake && hasCamel) {
             throw invalidMcpWire("duplicate outer wire aliases");
         }
+        boolean hasSnakeExchange = event.containsKey("mcp_exchange");
+        boolean hasCamelExchange = event.containsKey("mcpExchange");
+        if (hasSnakeExchange && hasCamelExchange) {
+            throw invalidMcpExchangeWire("duplicate outer wire aliases");
+        }
 
         Map<String, Object> out = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : event.entrySet()) {
             String key = entry.getKey();
-            if ("mcp_tool_call".equals(key) || "mcpToolCall".equals(key)) {
+            if ("mcp_tool_call".equals(key) || "mcpToolCall".equals(key)
+                    || "mcp_exchange".equals(key) || "mcpExchange".equals(key)) {
                 continue;
             }
             if ("mcpToolCall".equals(AgentHistoryValue.snakeToCamel(key))) {
                 throw invalidMcpWire("outer member " + key + " collides with canonical mcpToolCall");
+            }
+            if ("mcpExchange".equals(AgentHistoryValue.snakeToCamel(key))) {
+                throw invalidMcpExchangeWire(
+                        "outer member " + key + " collides with canonical mcpExchange");
             }
             out.put(key, entry.getValue());
         }
         if (hasSnake || hasCamel) {
             Object call = hasSnake ? event.get("mcp_tool_call") : event.get("mcpToolCall");
             out.put("mcpToolCall", McpToolCall.from(call).asMap());
+        }
+        if (hasSnakeExchange || hasCamelExchange) {
+            Object exchange = hasSnakeExchange
+                    ? event.get("mcp_exchange")
+                    : event.get("mcpExchange");
+            out.put(
+                    "mcpExchange",
+                    AgentHistoryValue.opaqueJson(McpExchange.normalizeWire(exchange)));
         }
         return out;
     }
@@ -240,6 +258,15 @@ public class AgentHistoryEnvelope {
         details.put("field", "mcpToolCall");
         return new CtxAgentHistoryException.Protocol(
                 "agent-history-v1 MCP tool call " + message,
+                details,
+                null);
+    }
+
+    private static CtxAgentHistoryException.Protocol invalidMcpExchangeWire(String message) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("field", "mcpExchange");
+        return new CtxAgentHistoryException.Protocol(
+                "agent-history-v1 MCP exchange " + message,
                 details,
                 null);
     }

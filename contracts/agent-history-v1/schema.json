@@ -271,6 +271,7 @@
         "occurredAt": { "type": ["string", "null"] },
         "text": { "type": ["string", "null"] },
         "mcpToolCall": { "$ref": "#/$defs/mcpToolCall" },
+        "mcpExchange": { "$ref": "#/$defs/mcpExchange" },
         "structuredContent": {
           "description": "Optional Core structured content. Any JSON value, including null, is preserved without a narrowed SDK-specific schema."
         },
@@ -280,6 +281,37 @@
           "items": { "$ref": "#/$defs/citation" }
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "required": ["mcpExchange"],
+            "properties": {
+              "mcpExchange": {
+                "required": ["response"],
+                "properties": {
+                  "response": {
+                    "required": ["text"],
+                    "properties": {
+                      "text": {
+                        "required": ["captureStatus"],
+                        "properties": {
+                          "captureStatus": { "const": "normalized_body" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": ["text"],
+            "properties": {
+              "text": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "mcpToolCall": {
@@ -291,6 +323,153 @@
         "tool": { "type": "string", "minLength": 1, "maxLength": 65536 }
       },
       "additionalProperties": false
+    },
+    "mcpExchange": {
+      "description": "Closed, content-governed MCP invocation and/or response. providerCallId and invocation identities are nonempty and limited to 65,536 decoded UTF-8 bytes; SDK decoders enforce the byte ceiling.",
+      "type": "object",
+      "required": ["providerCallId"],
+      "anyOf": [
+        { "required": ["invocation"] },
+        { "required": ["response"] }
+      ],
+      "properties": {
+        "providerCallId": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "invocation": { "$ref": "#/$defs/mcpInvocation" },
+        "response": { "$ref": "#/$defs/mcpResponse" }
+      },
+      "additionalProperties": false
+    },
+    "mcpInvocation": {
+      "type": "object",
+      "required": ["server", "tool", "arguments"],
+      "properties": {
+        "server": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "tool": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "arguments": { "$ref": "#/$defs/mcpArgumentsCapture" }
+      },
+      "additionalProperties": false
+    },
+    "mcpResponse": {
+      "type": "object",
+      "required": ["status", "text", "payload"],
+      "properties": {
+        "status": {
+          "enum": ["succeeded", "failed", "cancelled", "timed_out", "unknown"]
+        },
+        "failureKind": { "enum": ["tool_reported", "invocation", "unknown"] },
+        "durationNs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "text": { "$ref": "#/$defs/mcpTextCapture" },
+        "payload": { "$ref": "#/$defs/mcpJsonCapture" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "failed" } },
+            "required": ["status"]
+          },
+          "then": { "required": ["failureKind"] },
+          "else": { "not": { "required": ["failureKind"] } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "mcpArgumentsCapture": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["captureStatus", "value"],
+          "properties": {
+            "captureStatus": { "const": "present" },
+            "value": { "type": "object" }
+          },
+          "additionalProperties": false
+        },
+        { "$ref": "#/$defs/mcpJsonCaptureAbsent" },
+        { "$ref": "#/$defs/mcpJsonCaptureUnavailable" },
+        { "$ref": "#/$defs/mcpJsonCaptureOmitted" }
+      ]
+    },
+    "mcpJsonCapture": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["captureStatus", "value"],
+          "properties": {
+            "captureStatus": { "const": "present" },
+            "value": {}
+          },
+          "additionalProperties": false
+        },
+        { "$ref": "#/$defs/mcpJsonCaptureAbsent" },
+        { "$ref": "#/$defs/mcpJsonCaptureUnavailable" },
+        { "$ref": "#/$defs/mcpJsonCaptureOmitted" }
+      ]
+    },
+    "mcpJsonCaptureAbsent": {
+      "type": "object",
+      "required": ["captureStatus"],
+      "properties": { "captureStatus": { "const": "absent" } },
+      "additionalProperties": false
+    },
+    "mcpJsonCaptureUnavailable": {
+      "type": "object",
+      "required": ["captureStatus"],
+      "properties": { "captureStatus": { "const": "unavailable" } },
+      "additionalProperties": false
+    },
+    "mcpJsonCaptureOmitted": {
+      "type": "object",
+      "required": ["captureStatus", "reason"],
+      "properties": {
+        "captureStatus": { "const": "omitted" },
+        "reason": { "const": "size_limit" },
+        "observedEncodedBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false
+    },
+    "mcpTextCapture": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["captureStatus"],
+          "properties": { "captureStatus": { "const": "normalized_body" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["captureStatus"],
+          "properties": { "captureStatus": { "const": "absent" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["captureStatus"],
+          "properties": { "captureStatus": { "const": "unavailable" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["captureStatus", "reason"],
+          "properties": {
+            "captureStatus": { "const": "omitted" },
+            "reason": { "const": "size_limit" },
+            "observedEncodedBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "coreContentMetadata": {
       "type": "object",

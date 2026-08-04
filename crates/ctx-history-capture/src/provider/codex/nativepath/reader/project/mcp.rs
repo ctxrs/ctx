@@ -452,8 +452,8 @@ impl<'de> serde::de::Visitor<'de> for McpInvocationProbeVisitor {
 }
 
 #[derive(Default)]
-struct BoundedStringProbe<const MAX_BYTES: usize> {
-    value: Option<String>,
+pub(super) struct BoundedStringProbe<const MAX_BYTES: usize> {
+    pub(super) value: Option<String>,
 }
 
 impl<'de, const MAX_BYTES: usize> serde::Deserialize<'de> for BoundedStringProbe<MAX_BYTES> {

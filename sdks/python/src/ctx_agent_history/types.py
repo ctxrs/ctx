@@ -191,6 +191,83 @@ class McpToolCall(TypedDict):
     tool: str
 
 
+McpPayloadOmissionReason = Literal["size_limit"]
+McpResponseStatus = Literal["succeeded", "failed", "cancelled", "timed_out", "unknown"]
+McpFailureKind = Literal["tool_reported", "invocation", "unknown"]
+
+
+class McpJsonCapturePresent(TypedDict):
+    captureStatus: Literal["present"]
+    value: Any
+
+
+class McpCaptureAbsent(TypedDict):
+    captureStatus: Literal["absent"]
+
+
+class McpCaptureUnavailable(TypedDict):
+    captureStatus: Literal["unavailable"]
+
+
+class _McpCaptureOmittedRequired(TypedDict):
+    captureStatus: Literal["omitted"]
+    reason: McpPayloadOmissionReason
+
+
+class McpCaptureOmitted(_McpCaptureOmittedRequired, total=False):
+    observedEncodedBytes: int
+
+
+McpJsonCapture = Union[
+    McpJsonCapturePresent, McpCaptureAbsent, McpCaptureUnavailable, McpCaptureOmitted
+]
+
+
+class McpArgumentsCapturePresent(TypedDict):
+    captureStatus: Literal["present"]
+    value: JsonObject
+
+
+McpArgumentsCapture = Union[
+    McpArgumentsCapturePresent, McpCaptureAbsent, McpCaptureUnavailable, McpCaptureOmitted
+]
+
+
+class McpTextCaptureNormalizedBody(TypedDict):
+    captureStatus: Literal["normalized_body"]
+
+
+McpTextCapture = Union[
+    McpTextCaptureNormalizedBody, McpCaptureAbsent, McpCaptureUnavailable, McpCaptureOmitted
+]
+
+
+class McpInvocation(TypedDict):
+    server: str
+    tool: str
+    arguments: McpArgumentsCapture
+
+
+class _McpResponseRequired(TypedDict):
+    status: McpResponseStatus
+    text: McpTextCapture
+    payload: McpJsonCapture
+
+
+class McpResponse(_McpResponseRequired, total=False):
+    failureKind: McpFailureKind
+    durationNs: int
+
+
+class _McpExchangeRequired(TypedDict):
+    providerCallId: str
+
+
+class McpExchange(_McpExchangeRequired, total=False):
+    invocation: McpInvocation
+    response: McpResponse
+
+
 class Event(TypedDict, total=False):
     ctxEventId: Optional[str]
     ctxSessionId: Optional[str]
@@ -203,6 +280,8 @@ class Event(TypedDict, total=False):
     occurredAt: Optional[str]
     text: Optional[str]
     mcpToolCall: McpToolCall
+    mcpExchange: McpExchange
+    structuredContent: Any
     content: CoreContentMetadata
     citations: list[Citation]
 

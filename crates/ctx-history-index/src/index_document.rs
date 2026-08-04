@@ -491,16 +491,9 @@ impl SourceEventOrderKey {
 }
 
 pub(crate) fn core_content_bytes(content: &CoreContent) -> Result<usize> {
-    let normalized_body_bytes = content.normalized_body.as_ref().map_or(0, String::len);
-    let structured_content_bytes = content
-        .structured_content
-        .as_ref()
-        .map(serde_json::to_vec)
-        .transpose()?
-        .map_or(0, |encoded| encoded.len());
-    let content_bytes = normalized_body_bytes
-        .checked_add(structured_content_bytes)
-        .ok_or(IndexError::CountOverflow)?;
+    let content_bytes = content
+        .encoded_content_bytes()
+        .map_err(IndexError::CoreRecord)?;
     if content_bytes > MAX_CORE_CONTENT_BYTES {
         return Err(IndexError::DocumentFieldTooLarge {
             field: "core_content",
@@ -880,6 +873,22 @@ mod tests {
         let digest = [0xa5; 32];
         let token = SourceToken::new(&digest);
         assert_eq!(token.as_str().unwrap(), crate::hex(&digest));
+    }
+
+    #[test]
+    fn core_content_accounting_preserves_the_index_maximum_for_direct_callers() {
+        let source = source("codex_session_jsonl");
+        let mut record = core_record(&source);
+        record.content.normalized_body = Some("x".repeat(MAX_CORE_CONTENT_BYTES + 1));
+
+        assert!(matches!(
+            core_content_bytes(&record.content),
+            Err(IndexError::DocumentFieldTooLarge {
+                field: "core_content",
+                actual,
+                maximum: MAX_CORE_CONTENT_BYTES,
+            }) if actual == MAX_CORE_CONTENT_BYTES + 1
+        ));
     }
 
     #[test]

@@ -626,6 +626,30 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 	if _, exists := roundTrip["futureLabel"]; exists {
 		t.Fatalf("Go typed DTO unexpectedly retained an unknown MCP field: %#v", roundTrip)
 	}
+	exchange := mcpEvent.Event.Event.MCPExchange
+	if exchange == nil || exchange.ProviderCallID != "native-call-呼び出し-🦀" ||
+		exchange.Invocation == nil || exchange.Response == nil {
+		t.Fatalf("unexpected typed MCP exchange: %+v", exchange)
+	}
+	if exchange.Response.DurationNS == nil || *exchange.Response.DurationNS != MaxSafeInteger {
+		t.Fatalf("MCP duration did not preserve safe maximum: %+v", exchange.Response.DurationNS)
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal(exchange.Invocation.Arguments.Value, &arguments); err != nil {
+		t.Fatalf("decode captured arguments: %v", err)
+	}
+	if _, exists := arguments["snake_key"]; !exists {
+		t.Fatalf("captured JSON key was rewritten: %#v", arguments)
+	}
+	if _, exists := arguments["snakeKey"]; exists {
+		t.Fatalf("captured JSON gained camelized key: %#v", arguments)
+	}
+	if observed := mcpEvent.Event.Events[2].MCPExchange.Response.Text.ObservedEncodedBytes; observed == nil || *observed != MaxSafeInteger {
+		t.Fatalf("observed encoded bytes did not preserve safe maximum: %v", observed)
+	}
+	if mcpEvent.Event.Events[3].MCPExchange != nil {
+		t.Fatal("absent MCP exchange was materialized")
+	}
 	var outerWithAddition Event
 	if err := json.Unmarshal([]byte(`{"mcpToolCall":{"server":"server","tool":"tool"},"futureEventField":true}`), &outerWithAddition); err != nil {
 		t.Fatalf("outer Event addition was not accepted: %v", err)
@@ -666,6 +690,15 @@ func TestRawMCPToolCallDuplicateMembersAreRejected(t *testing.T) {
 		"duplicate-event-mcp-tool-call-camel.json",
 		"duplicate-mcp-tool-call-server.json",
 		"duplicate-mcp-tool-call-tool.json",
+		"duplicate-event-mcp-exchange-snake.json",
+		"duplicate-mcp-exchange-captured-value.json",
+		"invalid-mcp-exchange-explicit-null.json",
+		"invalid-mcp-exchange-outer-alias-collision.json",
+		"invalid-mcp-exchange-unknown-field.json",
+		"invalid-mcp-exchange-normalized-body-missing-event-text.json",
+		"invalid-mcp-exchange-normalized-body-empty-event-text.json",
+		"invalid-mcp-exchange-unsafe-duration-ns.json",
+		"invalid-mcp-exchange-unsafe-observed-encoded-bytes.json",
 		"invalid-mcp-tool-call-transformed-server.json",
 		"invalid-mcp-tool-call-transformed-tool.json",
 		"invalid-mcp-tool-call-transformed-collision.json",
@@ -718,6 +751,195 @@ func TestRawMCPToolCallDuplicateMembersAreRejected(t *testing.T) {
 		response.Event.Events[0].MCPToolCall.Server != "camel-server" {
 		t.Fatalf("unexpected outer-alias calls: %+v %+v", response.Event.Event.MCPToolCall, response.Event.Events[0].MCPToolCall)
 	}
+}
+
+func TestMCPUnmarshalJSONReceiverReuseClearsAbsentFields(t *testing.T) {
+	unmarshal := func(t *testing.T, input string, target any) {
+		t.Helper()
+		if err := json.Unmarshal([]byte(input), target); err != nil {
+			t.Fatalf("unmarshal %s: %v", input, err)
+		}
+	}
+	assertValue := func(t *testing.T, got, want any) {
+		t.Helper()
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("decoded value = %#v, want %#v", got, want)
+		}
+	}
+	assertJSON := func(t *testing.T, value any, want string) {
+		t.Helper()
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal reused receiver: %v", err)
+		}
+		if got := string(encoded); got != want {
+			t.Fatalf("reused receiver JSON = %s, want %s", got, want)
+		}
+	}
+
+	t.Run("event", func(t *testing.T) {
+		var value Event
+		unmarshal(t, `{
+			"text":"body",
+			"mcpToolCall":{"server":"server","tool":"tool"},
+			"mcpExchange":{
+				"providerCallId":"call-populated",
+				"response":{
+					"status":"succeeded",
+					"text":{"captureStatus":"normalized_body"},
+					"payload":{"captureStatus":"absent"}
+				}
+			}
+		}`, &value)
+		unmarshal(t, `{"text":"plain"}`, &value)
+
+		assertValue(t, value, Event{Text: "plain"})
+		assertJSON(t, value, `{"text":"plain"}`)
+	})
+
+	t.Run("exchange", func(t *testing.T) {
+		var value MCPExchange
+		unmarshal(t, `{
+			"providerCallId":"call-populated",
+			"invocation":{
+				"server":"server",
+				"tool":"tool",
+				"arguments":{"captureStatus":"present","value":{"snake_key":true}}
+			},
+			"response":{
+				"status":"failed",
+				"failureKind":"tool_reported",
+				"durationNs":17,
+				"text":{"captureStatus":"omitted","reason":"size_limit","observedEncodedBytes":19},
+				"payload":{"captureStatus":"present","value":{"result":true}}
+			}
+		}`, &value)
+		unmarshal(t, `{
+			"providerCallId":"call-response-only",
+			"response":{
+				"status":"succeeded",
+				"text":{"captureStatus":"absent"},
+				"payload":{"captureStatus":"unavailable"}
+			}
+		}`, &value)
+
+		wantResponseOnly := MCPExchange{
+			ProviderCallID: "call-response-only",
+			Response: &MCPResponse{
+				Status:  MCPResponseStatusSucceeded,
+				Text:    MCPTextCapture{CaptureStatus: MCPJSONCaptureStatusAbsent},
+				Payload: MCPJSONCapture{CaptureStatus: MCPJSONCaptureStatusUnavailable},
+			},
+		}
+		assertValue(t, value, wantResponseOnly)
+		assertJSON(t, value, `{"providerCallId":"call-response-only","response":{"status":"succeeded","text":{"captureStatus":"absent"},"payload":{"captureStatus":"unavailable"}}}`)
+
+		unmarshal(t, `{
+			"providerCallId":"call-invocation-only",
+			"invocation":{
+				"server":"next-server",
+				"tool":"next-tool",
+				"arguments":{"captureStatus":"absent"}
+			}
+		}`, &value)
+		wantInvocationOnly := MCPExchange{
+			ProviderCallID: "call-invocation-only",
+			Invocation: &MCPInvocation{
+				Server:    "next-server",
+				Tool:      "next-tool",
+				Arguments: MCPJSONCapture{CaptureStatus: MCPJSONCaptureStatusAbsent},
+			},
+		}
+		assertValue(t, value, wantInvocationOnly)
+		assertJSON(t, value, `{"providerCallId":"call-invocation-only","invocation":{"server":"next-server","tool":"next-tool","arguments":{"captureStatus":"absent"}}}`)
+	})
+
+	t.Run("invocation", func(t *testing.T) {
+		var value MCPInvocation
+		unmarshal(t, `{
+			"server":"server",
+			"tool":"tool",
+			"arguments":{"captureStatus":"present","value":{"camelKey":2,"snake_key":[1,2]}}
+		}`, &value)
+		if got, want := string(value.Arguments.Value), `{"camelKey":2,"snake_key":[1,2]}`; got != want {
+			t.Fatalf("opaque argument JSON = %s, want %s", got, want)
+		}
+		unmarshal(t, `{
+			"server":"sparse-server",
+			"tool":"sparse-tool",
+			"arguments":{"captureStatus":"absent"}
+		}`, &value)
+
+		want := MCPInvocation{
+			Server:    "sparse-server",
+			Tool:      "sparse-tool",
+			Arguments: MCPJSONCapture{CaptureStatus: MCPJSONCaptureStatusAbsent},
+		}
+		assertValue(t, value, want)
+		assertJSON(t, value, `{"server":"sparse-server","tool":"sparse-tool","arguments":{"captureStatus":"absent"}}`)
+	})
+
+	t.Run("response", func(t *testing.T) {
+		var value MCPResponse
+		unmarshal(t, `{
+			"status":"failed",
+			"failureKind":"invocation",
+			"durationNs":23,
+			"text":{"captureStatus":"omitted","reason":"size_limit","observedEncodedBytes":29},
+			"payload":{"captureStatus":"omitted","reason":"size_limit","observedEncodedBytes":31}
+		}`, &value)
+		unmarshal(t, `{
+			"status":"succeeded",
+			"text":{"captureStatus":"absent"},
+			"payload":{"captureStatus":"unavailable"}
+		}`, &value)
+
+		want := MCPResponse{
+			Status:  MCPResponseStatusSucceeded,
+			Text:    MCPTextCapture{CaptureStatus: MCPJSONCaptureStatusAbsent},
+			Payload: MCPJSONCapture{CaptureStatus: MCPJSONCaptureStatusUnavailable},
+		}
+		assertValue(t, value, want)
+		assertJSON(t, value, `{"status":"succeeded","text":{"captureStatus":"absent"},"payload":{"captureStatus":"unavailable"}}`)
+	})
+
+	t.Run("JSON capture", func(t *testing.T) {
+		var value MCPJSONCapture
+		unmarshal(t, `{"captureStatus":"present","value":{"camelKey":2,"snake_key":[1,2]}}`, &value)
+		if got, want := string(value.Value), `{"camelKey":2,"snake_key":[1,2]}`; got != want {
+			t.Fatalf("opaque captured JSON = %s, want %s", got, want)
+		}
+		unmarshal(t, `{"captureStatus":"absent"}`, &value)
+		want := MCPJSONCapture{CaptureStatus: MCPJSONCaptureStatusAbsent}
+		assertValue(t, value, want)
+		assertJSON(t, value, `{"captureStatus":"absent"}`)
+
+		unmarshal(t, `{"captureStatus":"omitted","reason":"size_limit","observedEncodedBytes":37}`, &value)
+		unmarshal(t, `{"captureStatus":"unavailable"}`, &value)
+		want = MCPJSONCapture{CaptureStatus: MCPJSONCaptureStatusUnavailable}
+		assertValue(t, value, want)
+		assertJSON(t, value, `{"captureStatus":"unavailable"}`)
+	})
+
+	t.Run("text capture", func(t *testing.T) {
+		var value MCPTextCapture
+		unmarshal(t, `{"captureStatus":"omitted","reason":"size_limit","observedEncodedBytes":41}`, &value)
+		unmarshal(t, `{"captureStatus":"normalized_body"}`, &value)
+
+		want := MCPTextCapture{CaptureStatus: MCPTextCaptureStatusNormalizedBody}
+		assertValue(t, value, want)
+		assertJSON(t, value, `{"captureStatus":"normalized_body"}`)
+	})
+
+	t.Run("tool call", func(t *testing.T) {
+		var value MCPToolCall
+		unmarshal(t, `{"server":"first-server","tool":"first-tool"}`, &value)
+		unmarshal(t, `{"server":"next-server","tool":"next-tool"}`, &value)
+
+		want := MCPToolCall{Server: "next-server", Tool: "next-tool"}
+		assertValue(t, value, want)
+		assertJSON(t, value, `{"server":"next-server","tool":"next-tool"}`)
+	})
 }
 
 func TestContractFixturesIfPresent(t *testing.T) {

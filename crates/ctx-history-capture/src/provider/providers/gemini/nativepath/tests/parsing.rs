@@ -111,7 +111,7 @@ fn gemini_nativepath_retains_core_rows_with_exact_result_material() {
 }
 
 #[test]
-fn gemini_large_tool_arguments_keep_both_complete_core_representations() {
+fn gemini_large_tool_arguments_preserve_body_and_identity_within_aggregate_limit() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let tail = "gemini_large_tool_argument_tail_complete";
@@ -136,17 +136,35 @@ fn gemini_large_tool_arguments_keep_both_complete_core_representations() {
         panic!("expected exactly one Gemini tool-call record");
     };
     let normalized = record.content.normalized_body.as_deref().unwrap();
-    let structured = record.content.structured_content.as_ref().unwrap();
+    let expected_native_event_id =
+        ctx_history_core::TypedKey::utf8("large-tool-call-record").unwrap();
+    let expected_event_id =
+        ctx_history_core::derive_event_id(ctx_history_core::EventIdentityInput {
+            source: &record.source,
+            session_id: record.session_id,
+            logical_item_kind: "gemini-event",
+            native_item_key: &ctx_history_core::NativeItemKey::native_id(
+                "gemini.event",
+                expected_native_event_id.clone(),
+            )
+            .unwrap(),
+            subrecord_selector: None,
+        })
+        .unwrap();
+    let duplicate_structured = serde_json::json!({"args": {"prompt": &full_argument}});
     assert!(normalized.contains(tail));
+    assert_eq!(record.event_id, expected_event_id);
     assert_eq!(
-        structured
-            .pointer("/details/calls/0/args/prompt")
-            .and_then(Value::as_str),
-        Some(full_argument.as_str())
+        record.native_event_id.as_ref(),
+        Some(&expected_native_event_id)
+    );
+    assert!(record.content.structured_content.is_none());
+    assert!(
+        normalized.len() + serde_json::to_vec(&duplicate_structured).unwrap().len()
+            > ctx_history_core::MAX_CORE_CONTENT_BYTES
     );
     assert!(
-        normalized.len() + serde_json::to_vec(structured).unwrap().len()
-            > ctx_history_core::MAX_CORE_CONTENT_BYTES
+        record.content.encoded_content_bytes().unwrap() <= ctx_history_core::MAX_CORE_CONTENT_BYTES
     );
     record.validate_contract().unwrap();
     record.encode_stored().unwrap();

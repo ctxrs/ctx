@@ -160,6 +160,10 @@ impl OpenClawProjector {
             append_invocation_abstention(&mut annotation, abstention);
         }
         apply_annotation(&mut record, annotation);
+        record
+            .content
+            .omit_structured_content_if_aggregate_exceeds_limit()
+            .map_err(contract)?;
         record.validate_contract().map_err(contract)?;
         emit(record)?;
         if let Some((process_session_id, context)) = running {

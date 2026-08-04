@@ -9,6 +9,8 @@ use std::{
 use clap::{CommandFactory, Parser};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
+    McpExchangeContent, McpFailureKind, McpInvocationContent, McpJsonCapture,
+    McpPayloadOmissionReason, McpTerminalResponseContent, McpTerminalStatus, McpTextCapture,
     McpToolCallAttribution, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
@@ -296,6 +298,32 @@ fn test_record(source: &SourceKey, nonce: u64, body: &str) -> CoreRecord {
     record
 }
 
+fn test_mcp_exchange(payload: Value) -> McpExchangeContent {
+    McpExchangeContent {
+        provider_call_id: "native-call-呼び出し-🦀".to_owned(),
+        invocation: Some(McpInvocationContent {
+            server: "mcp-サーバー".to_owned(),
+            tool: "検索-tool".to_owned(),
+            arguments: McpJsonCapture::Present {
+                value: json!({
+                    "snake_key": ["雪", null, {"camelKey": true}],
+                    "nested": {"deep_null": null},
+                }),
+            },
+        }),
+        response: Some(McpTerminalResponseContent {
+            status: McpTerminalStatus::Failed,
+            failure_kind: Some(McpFailureKind::ToolReported),
+            duration_ns: Some(42),
+            text: McpTextCapture::Omitted {
+                reason: McpPayloadOmissionReason::SizeLimit,
+                observed_encoded_bytes: Some(70_000),
+            },
+            payload: McpJsonCapture::Present { value: payload },
+        }),
+    }
+}
+
 fn publish_fixture(data_root: &Path, bodies: &[String]) {
     let source = test_source();
     let records = bodies
@@ -551,6 +579,81 @@ fn mcp_tool_call_is_exact_omitted_when_absent_and_projection_independent() {
         .unwrap();
         assert_eq!(mcp_page["events"][0]["mcp_tool_call"], exact_value);
         assert!(mcp_page["events"][1].get("mcp_tool_call").is_none());
+    }
+}
+
+#[test]
+fn mcp_exchange_is_lossless_and_full_projection_only_across_cli_and_mcp() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = test_source();
+    let payload = json!({
+        "result_key": ["完了", null, {"mixedCase": [false, 3]}],
+        "nested_object": {"snake_key": null},
+    });
+    let exchange = test_mcp_exchange(payload.clone());
+    let exact_exchange = serde_json::to_value(&exchange).unwrap();
+    let attribution = McpToolCallAttribution {
+        server: "mcp-サーバー".to_owned(),
+        tool: "検索-tool".to_owned(),
+    };
+    let mut captured = test_record(&source, 0, "response body remains unchanged");
+    captured.mcp_tool_call = Some(attribution.clone());
+    captured.content.mcp_exchange = Some(exchange);
+    captured.validate_contract().unwrap();
+    let absent = test_record(&source, 1, "no exchange");
+    publish_records(temp.path(), source, vec![captured, absent]);
+
+    let selection = all_selection(CoreEventRangeDirection::Ascending);
+    for projection in [
+        EventContentProjection::Full,
+        EventContentProjection::Text,
+        EventContentProjection::None,
+    ] {
+        let request = request(CoreEventRangeDirection::Ascending, 10, projection);
+        let json_page = page(temp.path(), &selection, None, &request);
+        assert_eq!(
+            json_page["events"][0]["mcp_tool_call"],
+            serde_json::to_value(&attribution).unwrap()
+        );
+        assert!(json_page["events"][1].get("mcp_exchange").is_none());
+        if projection == EventContentProjection::Full {
+            assert_eq!(json_page["events"][0]["mcp_exchange"], exact_exchange);
+            assert_eq!(
+                json_page["events"][0]["mcp_exchange"]["response"]["payload"]["value"],
+                payload
+            );
+            assert!(
+                json_page["events"][0]["mcp_exchange"]["response"]["payload"]["value"]
+                    ["result_key"][1]
+                    .is_null()
+            );
+        } else {
+            assert!(json_page["events"][0].get("mcp_exchange").is_none());
+        }
+
+        let index = open_event_range_index(temp.path(), None).unwrap();
+        let mut jsonl = Vec::new();
+        write_jsonl_pages(&index, &selection, None, &request, &mut jsonl, || {}).unwrap();
+        let first_line: Value =
+            serde_json::from_slice(jsonl.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
+        assert_eq!(
+            first_line["event"].get("mcp_exchange"),
+            (projection == EventContentProjection::Full).then_some(&exact_exchange)
+        );
+
+        let mcp_page = crate::mcp::query_events_for_test(
+            &json!({"content": projection.as_str()}),
+            temp.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            mcp_page["events"][0].get("mcp_exchange"),
+            (projection == EventContentProjection::Full).then_some(&exact_exchange)
+        );
+        assert_eq!(
+            mcp_page["events"][0]["mcp_tool_call"],
+            serde_json::to_value(&attribution).unwrap()
+        );
     }
 }
 

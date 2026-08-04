@@ -221,6 +221,15 @@ search inputs, filters, results, matching, ranking, snippets, or
 `ctx list events` and filter JSON/JSONL rows client-side when that metadata is
 needed.
 
+Typed `mcp_exchange` content does not change that policy. The field itself,
+provider call IDs, arguments, response status/timing, and response payloads are
+not new Tantivy fields or tokens, semantic text, selectors, search result
+fields, ranking signals, snippets, SQL columns, or Local Pro facts. The event's
+existing normalized body keeps its pre-existing lexical and semantic
+eligibility; a response text disposition of `normalized_body` adds no second
+text copy. Retrieve the exchange with full-content show/list/MCP event output,
+not search. See [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
+
 ## History reports
 
 Use the agent history-search skill when a topic needs a cited synthesis rather

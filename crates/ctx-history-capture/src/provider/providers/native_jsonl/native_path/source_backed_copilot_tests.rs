@@ -8,7 +8,11 @@ use std::{
     },
 };
 
-use ctx_history_core::{McpToolCallAttribution, MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES};
+use ctx_history_core::{
+    McpFailureKind, McpJsonCapture, McpPayloadOmissionReason, McpTerminalResponseContent,
+    McpTerminalStatus, McpTextCapture, McpToolCallAttribution, MAX_CORE_CONTENT_BYTES,
+    MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+};
 use serde_json::{json, Value};
 
 use super::*;
@@ -435,6 +439,619 @@ fn copilot_attributes_only_unique_exact_terminal_completions() {
 }
 
 #[test]
+fn copilot_captures_exact_invocations_and_linked_terminal_responses() {
+    let fixture = fixture_root();
+    let records = project_copilot_root(&fixture.root);
+
+    let start_alpha = record_by_native_id(&records, "start-alpha");
+    assert_eq!(start_alpha.mcp_tool_call, None);
+    let exchange = start_alpha.content.mcp_exchange.as_ref().unwrap();
+    assert_eq!(exchange.provider_call_id, "call-alpha");
+    assert_eq!(exchange.response, None);
+    let invocation = exchange.invocation.as_ref().unwrap();
+    assert_eq!(invocation.server, "alpha");
+    assert_eq!(invocation.tool, "lookup");
+    assert_eq!(
+        invocation.arguments,
+        McpJsonCapture::Present {
+            value: json!({"query": "synthetic alpha"})
+        }
+    );
+
+    assert_eq!(
+        record_by_native_id(&records, "start-absent-shape")
+            .content
+            .mcp_exchange
+            .as_ref()
+            .unwrap()
+            .invocation
+            .as_ref()
+            .unwrap()
+            .arguments,
+        McpJsonCapture::Absent
+    );
+    assert_eq!(
+        record_by_native_id(&records, "start-malformed-envelope")
+            .content
+            .mcp_exchange
+            .as_ref()
+            .unwrap()
+            .invocation
+            .as_ref()
+            .unwrap()
+            .arguments,
+        McpJsonCapture::Unavailable
+    );
+
+    let alpha = record_by_native_id(&records, "complete-alpha");
+    let exchange = alpha.content.mcp_exchange.as_ref().unwrap();
+    assert_eq!(exchange.provider_call_id, "call-alpha");
+    assert_eq!(exchange.invocation, None);
+    let response = exchange.response.as_ref().unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.failure_kind, None);
+    assert_eq!(response.duration_ns, None);
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: json!({"content": "synthetic alpha success"})
+        }
+    );
+
+    let beta = record_by_native_id(&records, "complete-beta");
+    let response = beta
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Failed);
+    assert_eq!(response.failure_kind, Some(McpFailureKind::Unknown));
+    assert_eq!(response.duration_ns, None);
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: json!({"message": "synthetic beta failure"})
+        }
+    );
+
+    let bodyless = record_by_native_id(&records, "complete-contentless");
+    assert_eq!(bodyless.mcp_tool_call, attribution("gamma", "ping"));
+    assert_eq!(
+        bodyless.content.normalized_body.as_deref(),
+        Some("tool_output")
+    );
+    let response = bodyless
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.text, McpTextCapture::Absent);
+    assert_eq!(response.payload, McpJsonCapture::Absent);
+
+    let duplicate_nested = record_by_native_id(&records, "complete-duplicate-nested-key");
+    assert_eq!(
+        duplicate_nested.mcp_tool_call,
+        attribution("duplicate", "nested")
+    );
+    let response = duplicate_nested
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.text, McpTextCapture::Unavailable);
+    assert_eq!(response.payload, McpJsonCapture::Unavailable);
+}
+
+#[test]
+fn copilot_argument_capture_distinguishes_exact_absent_and_unavailable() {
+    let events = vec![
+        json!({
+            "type": "tool.execution_start",
+            "id": "exact-arguments",
+            "timestamp": "2026-08-03T12:00:01Z",
+            "data": {
+                "toolCallId": "exact-arguments-call",
+                "mcpServerName": "exact",
+                "mcpToolName": "arguments",
+                "arguments": {"nested": {"values": [1, true, null, "four"]}}
+            }
+        })
+        .to_string(),
+        start("absent-arguments", "absent-call", "exact", "absent"),
+        r#"{"type":"tool.execution_start","id":"non-object-arguments","timestamp":"2026-08-03T12:00:02Z","data":{"toolCallId":"non-object-call","mcpServerName":"exact","mcpToolName":"arguments","arguments":["not","an","object"]}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"duplicate-arguments","timestamp":"2026-08-03T12:00:03Z","data":{"toolCallId":"duplicate-arguments-call","mcpServerName":"exact","mcpToolName":"arguments","arguments":{"first":1},"argum\u0065nts":{"second":2}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"nested-duplicate-arguments","timestamp":"2026-08-03T12:00:04Z","data":{"toolCallId":"nested-duplicate-call","mcpServerName":"exact","mcpToolName":"arguments","arguments":{"nested":{"key":1,"k\u0065y":2}}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"duplicate-call-id","timestamp":"2026-08-03T12:00:05Z","data":{"toolCallId":"first","toolCall\u0049d":"second","mcpServerName":"exact","mcpToolName":"arguments","arguments":{}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"duplicate-server","timestamp":"2026-08-03T12:00:06Z","data":{"toolCallId":"duplicate-server-call","mcpServerName":"first","mcpSer\u0076erName":"second","mcpToolName":"arguments","arguments":{}}}"#.to_owned(),
+    ];
+    let records = project_events(&events);
+
+    let exact = record_by_native_id(&records, "exact-arguments")
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .invocation
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        exact.arguments,
+        McpJsonCapture::Present {
+            value: json!({"nested": {"values": [1, true, null, "four"]}})
+        }
+    );
+    assert_eq!(
+        record_by_native_id(&records, "absent-arguments")
+            .content
+            .mcp_exchange
+            .as_ref()
+            .unwrap()
+            .invocation
+            .as_ref()
+            .unwrap()
+            .arguments,
+        McpJsonCapture::Absent
+    );
+    for native_id in [
+        "non-object-arguments",
+        "duplicate-arguments",
+        "nested-duplicate-arguments",
+    ] {
+        assert_eq!(
+            record_by_native_id(&records, native_id)
+                .content
+                .mcp_exchange
+                .as_ref()
+                .unwrap()
+                .invocation
+                .as_ref()
+                .unwrap()
+                .arguments,
+            McpJsonCapture::Unavailable,
+            "{native_id} must preserve an honest unavailable capture"
+        );
+    }
+    for native_id in ["duplicate-call-id", "duplicate-server"] {
+        assert_eq!(
+            record_by_native_id(&records, native_id)
+                .content
+                .mcp_exchange,
+            None,
+            "{native_id} has no exact invocation identity"
+        );
+    }
+}
+
+#[test]
+fn copilot_duplicate_response_fields_do_not_replace_exact_linkage() {
+    let events = vec![
+        start("duplicate-result-start", "duplicate-result", "server", "tool"),
+        r#"{"type":"tool.execution_complete","id":"duplicate-result-complete","timestamp":"2026-08-03T12:00:02Z","data":{"toolCallId":"duplicate-result","success":true,"result":{"content":"first"},"r\u0065sult":{"content":"second"}}}"#.to_owned(),
+    ];
+    let records = project_events(&events);
+    let completion = record_by_native_id(&records, "duplicate-result-complete");
+    assert_eq!(completion.mcp_tool_call, attribution("server", "tool"));
+    let response = completion
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.text, McpTextCapture::Unavailable);
+    assert_eq!(response.payload, McpJsonCapture::Unavailable);
+}
+
+#[test]
+fn copilot_ignores_non_authoritative_duration_fields() {
+    let events = vec![
+        start("duration-start", "duration-call", "server", "tool"),
+        json!({
+            "type": "tool.execution_complete",
+            "id": "duration-complete",
+            "timestamp": "2026-08-03T12:00:02Z",
+            "data": {
+                "toolCallId": "duration-call",
+                "success": true,
+                "durationMs": 17,
+                "result": {"content": "done"}
+            }
+        })
+        .to_string(),
+    ];
+    let records = project_events(&events);
+    assert_eq!(
+        record_by_native_id(&records, "duration-complete")
+            .content
+            .mcp_exchange
+            .as_ref()
+            .unwrap()
+            .response
+            .as_ref()
+            .unwrap()
+            .duration_ns,
+        None
+    );
+}
+
+#[test]
+fn copilot_tool_owned_redaction_like_keys_preserve_body_and_exchange() {
+    let redacted_like_result = json!({
+        "content": "tool-owned result body",
+        "redacted": true,
+        "status": "redacted",
+        "state": "output-redacted"
+    });
+    let redacted_like_error = json!({
+        "message": "tool-owned error body",
+        "redacted": true,
+        "status": "redacted",
+        "state": "output-redacted"
+    });
+    let redacted_like_arguments = json!({
+        "redacted": true,
+        "status": "redacted",
+        "state": "output-redacted",
+        "value": "tool-owned"
+    });
+    let events = vec![
+        start(
+            "redacted-response-start",
+            "redacted-response-call",
+            "server",
+            "tool",
+        ),
+        json!({
+            "type": "tool.execution_complete",
+            "id": "redacted-response-complete",
+            "timestamp": "2026-08-03T12:00:02Z",
+            "data": {
+                "toolCallId": "redacted-response-call",
+                "success": true,
+                "result": redacted_like_result.clone()
+            }
+        })
+        .to_string(),
+        start(
+            "redacted-error-start",
+            "redacted-error-call",
+            "server",
+            "error-tool",
+        ),
+        json!({
+            "type": "tool.execution_complete",
+            "id": "redacted-error-complete",
+            "timestamp": "2026-08-03T12:00:03Z",
+            "data": {
+                "toolCallId": "redacted-error-call",
+                "success": false,
+                "error": redacted_like_error.clone()
+            }
+        })
+        .to_string(),
+        json!({
+            "type": "tool.execution_start",
+            "id": "redacted-arguments",
+            "timestamp": "2026-08-03T12:00:04Z",
+            "data": {
+                "toolCallId": "redacted-arguments-call",
+                "mcpServerName": "server",
+                "mcpToolName": "tool",
+                "arguments": redacted_like_arguments.clone()
+            }
+        })
+        .to_string(),
+    ];
+    let records = project_events(&events);
+
+    let completion = record_by_native_id(&records, "redacted-response-complete");
+    assert_eq!(completion.mcp_tool_call, attribution("server", "tool"));
+    assert_eq!(
+        completion.content.normalized_body.as_deref(),
+        Some("tool-owned result body")
+    );
+    let response = completion
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: redacted_like_result
+        }
+    );
+
+    let error = record_by_native_id(&records, "redacted-error-complete");
+    assert_eq!(error.mcp_tool_call, attribution("server", "error-tool"));
+    assert_eq!(
+        error.content.normalized_body.as_deref(),
+        Some("tool-owned error body")
+    );
+    let response = error
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .response
+        .as_ref()
+        .unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Failed);
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Present {
+            value: redacted_like_error
+        }
+    );
+
+    let invocation = record_by_native_id(&records, "redacted-arguments")
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .invocation
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        invocation.arguments,
+        McpJsonCapture::Present {
+            value: redacted_like_arguments
+        }
+    );
+}
+
+#[test]
+fn copilot_provider_redacted_starts_do_not_leak_linkage_or_exchange() {
+    let events = vec![
+        r#"{"type":"tool.execution_start","id":"redacted-envelope","timestamp":"2026-08-03T12:00:01Z","redacted":true,"data":{"toolCallId":"redacted-envelope-call","mcpServerName":"secret-server","mcpToolName":"secret-tool","arguments":{}}}"#.to_owned(),
+        r#"{"type":"tool.execution_complete","id":"redacted-envelope-complete","timestamp":"2026-08-03T12:00:02Z","data":{"toolCallId":"redacted-envelope-call","success":true,"result":{"content":"ordinary envelope completion"}}}"#.to_owned(),
+        r#"{"type":"tool.execution_start","id":"redacted-data","timestamp":"2026-08-03T12:00:03Z","data":{"redacted":true,"toolCallId":"redacted-data-call","mcpServerName":"secret-server","mcpToolName":"secret-tool","arguments":{}}}"#.to_owned(),
+        r#"{"type":"tool.execution_complete","id":"redacted-data-complete","timestamp":"2026-08-03T12:00:04Z","data":{"toolCallId":"redacted-data-call","success":false,"error":{"message":"ordinary data completion"}}}"#.to_owned(),
+    ];
+    assert!(linkage_plan(&events, super::copilot::CopilotLinkageLimits::DEFAULT).is_empty());
+    let records = project_events(&events);
+
+    for native_id in ["redacted-envelope", "redacted-data"] {
+        let record = record_by_native_id(&records, native_id);
+        assert_eq!(record.mcp_tool_call, None);
+        assert_eq!(record.content.mcp_exchange, None);
+        assert!(record.content.normalized_body.is_some());
+    }
+    for (native_id, expected_body) in [
+        ("redacted-envelope-complete", "ordinary envelope completion"),
+        ("redacted-data-complete", "ordinary data completion"),
+    ] {
+        let record = record_by_native_id(&records, native_id);
+        assert_eq!(record.mcp_tool_call, None);
+        assert_eq!(record.content.mcp_exchange, None);
+        assert_eq!(
+            record.content.normalized_body.as_deref(),
+            Some(expected_body)
+        );
+    }
+}
+
+#[test]
+fn copilot_budget_fitting_omits_one_capture_at_a_time() {
+    let mut record = project_events(&[start(
+        "budget-start",
+        "budget-call",
+        "budget-server",
+        "budget-tool",
+    )])
+    .pop()
+    .unwrap();
+    record.content.normalized_body = Some("actual response body".to_owned());
+    record.content.structured_content = None;
+    let exchange = record.content.mcp_exchange.as_mut().unwrap();
+    exchange.invocation.as_mut().unwrap().arguments = McpJsonCapture::Present {
+        value: json!({"large_arguments": "a".repeat(4_096)}),
+    };
+    exchange.response = Some(McpTerminalResponseContent {
+        status: McpTerminalStatus::Succeeded,
+        failure_kind: None,
+        duration_ns: None,
+        text: McpTextCapture::NormalizedBody,
+        payload: McpJsonCapture::Present {
+            value: json!({"smaller_payload": "p".repeat(2_048)}),
+        },
+    });
+
+    let full_bytes = record.content.encoded_content_bytes().unwrap();
+    let mut arguments_omitted = record.clone();
+    assert!(omit_present_json(
+        &mut arguments_omitted
+            .content
+            .mcp_exchange
+            .as_mut()
+            .unwrap()
+            .invocation
+            .as_mut()
+            .unwrap()
+            .arguments
+    )
+    .unwrap());
+    let arguments_omitted_bytes = arguments_omitted.content.encoded_content_bytes().unwrap();
+    let mut payload_omitted = record.clone();
+    assert!(omit_present_json(
+        &mut payload_omitted
+            .content
+            .mcp_exchange
+            .as_mut()
+            .unwrap()
+            .response
+            .as_mut()
+            .unwrap()
+            .payload
+    )
+    .unwrap());
+    let payload_omitted_bytes = payload_omitted.content.encoded_content_bytes().unwrap();
+    assert!(arguments_omitted_bytes < payload_omitted_bytes);
+    assert!(payload_omitted_bytes < full_bytes);
+
+    let mut one_omission = record.clone();
+    fit_mcp_exchange_within_content_budget(&mut one_omission, payload_omitted_bytes).unwrap();
+    let exchange = one_omission.content.mcp_exchange.as_ref().unwrap();
+    assert!(matches!(
+        exchange.invocation.as_ref().unwrap().arguments,
+        McpJsonCapture::Omitted {
+            reason: McpPayloadOmissionReason::SizeLimit,
+            observed_encoded_bytes: Some(_)
+        }
+    ));
+    assert!(matches!(
+        exchange.response.as_ref().unwrap().payload,
+        McpJsonCapture::Present { .. }
+    ));
+    assert_eq!(
+        one_omission.content.normalized_body.as_deref(),
+        Some("actual response body")
+    );
+
+    let mut both_omitted = record.clone();
+    let both_limit = arguments_omitted_bytes.saturating_sub(1);
+    fit_mcp_exchange_within_content_budget(&mut both_omitted, both_limit).unwrap();
+    let exchange = both_omitted.content.mcp_exchange.as_ref().unwrap();
+    assert!(matches!(
+        exchange.invocation.as_ref().unwrap().arguments,
+        McpJsonCapture::Omitted { .. }
+    ));
+    assert!(matches!(
+        exchange.response.as_ref().unwrap().payload,
+        McpJsonCapture::Omitted { .. }
+    ));
+    assert!(both_omitted.content.encoded_content_bytes().unwrap() <= both_limit);
+
+    let compact_bytes = both_omitted.content.encoded_content_bytes().unwrap();
+    let mut exchange_dropped = record;
+    fit_mcp_exchange_within_content_budget(&mut exchange_dropped, compact_bytes.saturating_sub(1))
+        .unwrap();
+    assert_eq!(exchange_dropped.content.mcp_exchange, None);
+    assert_eq!(
+        exchange_dropped.content.normalized_body.as_deref(),
+        Some("actual response body")
+    );
+}
+
+#[test]
+fn copilot_oversized_native_arguments_become_explicit_omission_without_losing_the_event() {
+    let arguments = json!({
+        "blob": "x".repeat(MAX_CORE_CONTENT_BYTES / 2 + 64 * 1024)
+    });
+    let observed_encoded_bytes = u64::try_from(serde_json::to_vec(&arguments).unwrap().len()).ok();
+    let data = json!({
+        "toolCallId": "oversized-arguments-call",
+        "mcpServerName": "oversized-server",
+        "mcpToolName": "oversized-tool",
+        "arguments": arguments
+    });
+    let expected_normalized_body = data.to_string();
+    let event = json!({
+        "type": "tool.execution_start",
+        "id": "oversized-arguments-start",
+        "timestamp": "2026-08-03T12:00:01Z",
+        "data": data
+    })
+    .to_string();
+    assert!(event.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let records = project_events(&[event]);
+    let record = record_by_native_id(&records, "oversized-arguments-start");
+    assert_eq!(record.mcp_tool_call, None);
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(expected_normalized_body.as_str())
+    );
+    assert_eq!(
+        record
+            .content
+            .mcp_exchange
+            .as_ref()
+            .unwrap()
+            .invocation
+            .as_ref()
+            .unwrap()
+            .arguments,
+        McpJsonCapture::Omitted {
+            reason: McpPayloadOmissionReason::SizeLimit,
+            observed_encoded_bytes,
+        }
+    );
+    assert!(record.content.encoded_content_bytes().unwrap() <= MAX_CORE_CONTENT_BYTES);
+}
+
+#[test]
+fn copilot_completion_above_one_mib_keeps_linkage_and_omits_oversized_payload() {
+    let output = "x".repeat(MAX_CORE_CONTENT_BYTES / 2 + 64 * 1024);
+    let result = json!({"content": output.clone()});
+    let observed_encoded_bytes = u64::try_from(serde_json::to_vec(&result).unwrap().len()).ok();
+    let completion = json!({
+        "type": "tool.execution_complete",
+        "id": "large-completion",
+        "timestamp": "2026-08-03T12:00:02Z",
+        "data": {
+            "toolCallId": "large-completion-call",
+            "success": true,
+            "result": result
+        }
+    })
+    .to_string();
+    assert!(completion.len() > 1024 * 1024);
+    assert!(completion.len() <= crate::MAX_PROVIDER_JSONL_LINE_BYTES);
+
+    let records = project_events(&[
+        start(
+            "large-completion-start",
+            "large-completion-call",
+            "large-server",
+            "large-tool",
+        ),
+        completion,
+    ]);
+    let record = record_by_native_id(&records, "large-completion");
+    assert_eq!(
+        record.mcp_tool_call,
+        attribution("large-server", "large-tool")
+    );
+    assert_eq!(
+        record.content.normalized_body.as_deref(),
+        Some(output.as_str())
+    );
+    let exchange = record.content.mcp_exchange.as_ref().unwrap();
+    assert_eq!(exchange.provider_call_id, "large-completion-call");
+    let response = exchange.response.as_ref().unwrap();
+    assert_eq!(response.status, McpTerminalStatus::Succeeded);
+    assert_eq!(response.text, McpTextCapture::NormalizedBody);
+    assert_eq!(
+        response.payload,
+        McpJsonCapture::Omitted {
+            reason: McpPayloadOmissionReason::SizeLimit,
+            observed_encoded_bytes,
+        }
+    );
+    assert!(record.content.encoded_content_bytes().unwrap() <= MAX_CORE_CONTENT_BYTES);
+}
+
+#[test]
 fn copilot_malformed_ambiguous_or_orphan_linkage_abstains() {
     let fixture = fixture_root();
     let records = project_copilot_root(&fixture.root);
@@ -459,10 +1076,11 @@ fn copilot_malformed_ambiguous_or_orphan_linkage_abstains() {
         "complete-escaped-duplicate-tool-key",
         "complete-duplicate-success-key",
     ] {
+        let record = record_by_native_id(&records, native_id);
+        assert_eq!(record.mcp_tool_call, None, "{native_id} must abstain");
         assert_eq!(
-            record_by_native_id(&records, native_id).mcp_tool_call,
-            None,
-            "{native_id} must abstain"
+            record.content.mcp_exchange, None,
+            "{native_id} has no exact linked terminal exchange"
         );
     }
 }
@@ -665,15 +1283,20 @@ fn copilot_generated_id_count_multiplicity_and_byte_exhaustion_disable_the_plan(
 }
 
 #[test]
-fn copilot_oversized_or_malformed_linkage_never_aborts_neighbor_projection() {
-    let oversized = format!(
-        r#"{{"type":"tool.execution_start","id":"oversized-start","data":{{"toolCallId":"oversized","mcpServerName":"oversized","mcpToolName":"lookup"}},"padding":"{}"}}"#,
-        "x".repeat(super::copilot::COPILOT_LINKAGE_MAX_LINE_BYTES + 1)
-    );
+fn copilot_large_unrelated_line_preserves_linkage_while_malformed_line_abstains() {
+    let large_unrelated = json!({
+        "type": "session.info",
+        "id": "large-unrelated",
+        "timestamp": "2026-08-03T12:00:02Z",
+        "data": {"padding": "x".repeat(1024 * 1024 + 1)}
+    })
+    .to_string();
+    assert!(large_unrelated.len() > 1024 * 1024);
+    assert!(large_unrelated.len() <= super::copilot::COPILOT_LINKAGE_MAX_LINE_BYTES);
     let events = vec![
         start("before-start", "before", "clean", "before"),
         completion("before-complete", "before", true),
-        oversized,
+        large_unrelated,
         start("after-start", "after", "clean", "after"),
         completion("after-complete", "after", false),
     ];
@@ -681,13 +1304,24 @@ fn copilot_oversized_or_malformed_linkage_never_aborts_neighbor_projection() {
     for expected in [
         "before-start",
         "before-complete",
-        "oversized-start",
+        "large-unrelated",
         "after-start",
         "after-complete",
     ] {
         assert!(records.iter().any(|record| native_id(record) == expected));
     }
-    assert!(records.iter().all(|record| record.mcp_tool_call.is_none()));
+    for (native_id, server, tool) in [
+        ("before-complete", "clean", "before"),
+        ("after-complete", "clean", "after"),
+    ] {
+        let record = record_by_native_id(&records, native_id);
+        assert_eq!(record.mcp_tool_call, attribution(server, tool));
+        assert!(record
+            .content
+            .mcp_exchange
+            .as_ref()
+            .is_some_and(|exchange| exchange.response.is_some()));
+    }
 
     let malformed_events = vec![
         start("malformed-before-start", "before", "clean", "before"),

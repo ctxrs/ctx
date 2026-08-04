@@ -10,6 +10,10 @@ import (
 )
 
 const maxMCPToolCallComponentBytes = 64 * 1024
+const maxMCPExchangeIdentityBytes = 64 * 1024
+
+// MaxSafeInteger is the largest exact JSON integer in every supported SDK.
+const MaxSafeInteger uint64 = (1 << 53) - 1
 
 // Object stores JSON sub-documents whose shape can grow across ctx releases.
 type Object map[string]any
@@ -148,8 +152,8 @@ type StatusRecord struct {
 	Daemon          Object `json:"daemon,omitempty"`
 }
 
-// MaxSafeStatusCounter is the largest exact status counter in every supported SDK.
-const MaxSafeStatusCounter uint64 = (1 << 53) - 1
+// MaxSafeStatusCounter is retained as the status-specific name for MaxSafeInteger.
+const MaxSafeStatusCounter uint64 = MaxSafeInteger
 
 // UnmarshalJSON rejects counters that other SDKs cannot represent exactly.
 func (s *StatusRecord) UnmarshalJSON(data []byte) error {
@@ -379,6 +383,7 @@ type Event struct {
 	OccurredAt        string               `json:"occurredAt,omitempty"`
 	Text              string               `json:"text,omitempty"`
 	MCPToolCall       *MCPToolCall         `json:"mcpToolCall,omitempty"`
+	MCPExchange       *MCPExchange         `json:"mcpExchange,omitempty"`
 	StructuredContent json.RawMessage      `json:"structuredContent,omitempty"`
 	Content           *CoreContentMetadata `json:"content,omitempty"`
 	Citations         []Citation           `json:"citations,omitempty"`
@@ -402,8 +407,261 @@ func (value *Event) UnmarshalJSON(data []byte) error {
 	if raw, exists := fields["mcpToolCall"]; exists && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return fmt.Errorf("mcpToolCall must be an object when present")
 	}
-	*value = Event(wire)
+	if raw, exists := fields["mcpExchange"]; exists && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("mcpExchange must be an object when present")
+	}
+	decoded := Event(wire)
+	if decoded.MCPExchange != nil && decoded.MCPExchange.Response != nil &&
+		decoded.MCPExchange.Response.Text.CaptureStatus == MCPTextCaptureStatusNormalizedBody && decoded.Text == "" {
+		return fmt.Errorf("normalized MCP response body requires nonempty event text")
+	}
+	*value = decoded
 	return nil
+}
+
+// MCP response and capture enums retain the contract's snake_case wire values.
+type MCPResponseStatus string
+type MCPFailureKind string
+type MCPPayloadOmissionReason string
+
+const (
+	MCPResponseStatusSucceeded MCPResponseStatus = "succeeded"
+	MCPResponseStatusFailed    MCPResponseStatus = "failed"
+	MCPResponseStatusCancelled MCPResponseStatus = "cancelled"
+	MCPResponseStatusTimedOut  MCPResponseStatus = "timed_out"
+	MCPResponseStatusUnknown   MCPResponseStatus = "unknown"
+
+	MCPFailureKindToolReported MCPFailureKind = "tool_reported"
+	MCPFailureKindInvocation   MCPFailureKind = "invocation"
+	MCPFailureKindUnknown      MCPFailureKind = "unknown"
+
+	MCPPayloadOmissionReasonSizeLimit MCPPayloadOmissionReason = "size_limit"
+
+	MCPJSONCaptureStatusPresent        = "present"
+	MCPJSONCaptureStatusAbsent         = "absent"
+	MCPJSONCaptureStatusUnavailable    = "unavailable"
+	MCPJSONCaptureStatusOmitted        = "omitted"
+	MCPTextCaptureStatusNormalizedBody = "normalized_body"
+)
+
+// MCPExchange is the closed, content-governed MCP invocation/response record.
+type MCPExchange struct {
+	ProviderCallID string         `json:"providerCallId"`
+	Invocation     *MCPInvocation `json:"invocation,omitempty"`
+	Response       *MCPResponse   `json:"response,omitempty"`
+}
+
+type MCPInvocation struct {
+	Server    string         `json:"server"`
+	Tool      string         `json:"tool"`
+	Arguments MCPJSONCapture `json:"arguments"`
+}
+
+type MCPResponse struct {
+	Status      MCPResponseStatus `json:"status"`
+	FailureKind *MCPFailureKind   `json:"failureKind,omitempty"`
+	DurationNS  *uint64           `json:"durationNs,omitempty"`
+	Text        MCPTextCapture    `json:"text"`
+	Payload     MCPJSONCapture    `json:"payload"`
+}
+
+// MCPJSONCapture preserves a present value as raw JSON without rewriting nested keys.
+type MCPJSONCapture struct {
+	CaptureStatus        string                    `json:"captureStatus"`
+	Value                json.RawMessage           `json:"value,omitempty"`
+	Reason               *MCPPayloadOmissionReason `json:"reason,omitempty"`
+	ObservedEncodedBytes *uint64                   `json:"observedEncodedBytes,omitempty"`
+}
+
+type MCPTextCapture struct {
+	CaptureStatus        string                    `json:"captureStatus"`
+	Reason               *MCPPayloadOmissionReason `json:"reason,omitempty"`
+	ObservedEncodedBytes *uint64                   `json:"observedEncodedBytes,omitempty"`
+}
+
+func (value *MCPExchange) UnmarshalJSON(data []byte) error {
+	raw, err := decodeMCPExactObject(data)
+	if err != nil {
+		return err
+	}
+	normalized, err := normalizeMCPExchange(raw)
+	if err != nil {
+		return err
+	}
+	decoded := MCPExchange{ProviderCallID: normalized["providerCallId"].(string)}
+	if invocation, exists := normalized["invocation"]; exists {
+		decoded.Invocation = &MCPInvocation{}
+		if err := decodeMCPNormalized(invocation, decoded.Invocation); err != nil {
+			return err
+		}
+	}
+	if response, exists := normalized["response"]; exists {
+		decoded.Response = &MCPResponse{}
+		if err := decodeMCPNormalized(response, decoded.Response); err != nil {
+			return err
+		}
+	}
+	*value = decoded
+	return nil
+}
+
+func (value *MCPInvocation) UnmarshalJSON(data []byte) error {
+	raw, err := decodeMCPExactObject(data)
+	if err != nil {
+		return err
+	}
+	normalized, err := normalizeMCPInvocation(raw)
+	if err != nil {
+		return err
+	}
+	decoded := MCPInvocation{
+		Server: normalized["server"].(string),
+		Tool:   normalized["tool"].(string),
+	}
+	if err := decodeMCPNormalized(normalized["arguments"], &decoded.Arguments); err != nil {
+		return err
+	}
+	if decoded.Arguments.CaptureStatus == MCPJSONCaptureStatusPresent {
+		var arguments map[string]json.RawMessage
+		if err := json.Unmarshal(decoded.Arguments.Value, &arguments); err != nil {
+			return fmt.Errorf("present MCP invocation arguments must be a JSON object: %w", err)
+		}
+		if arguments == nil {
+			return fmt.Errorf("present MCP invocation arguments must be a JSON object")
+		}
+	}
+	*value = decoded
+	return nil
+}
+
+func (value *MCPResponse) UnmarshalJSON(data []byte) error {
+	raw, err := decodeMCPExactObject(data)
+	if err != nil {
+		return err
+	}
+	normalized, err := normalizeMCPResponse(raw)
+	if err != nil {
+		return err
+	}
+	decoded := MCPResponse{Status: MCPResponseStatus(normalized["status"].(string))}
+	if failure, exists := normalized["failureKind"].(string); exists {
+		typed := MCPFailureKind(failure)
+		decoded.FailureKind = &typed
+	}
+	if duration, exists := normalized["durationNs"]; exists {
+		parsed, err := mcpSafeIntegerValue(duration)
+		if err != nil {
+			return err
+		}
+		decoded.DurationNS = &parsed
+	}
+	if err := decodeMCPNormalized(normalized["text"], &decoded.Text); err != nil {
+		return err
+	}
+	if err := decodeMCPNormalized(normalized["payload"], &decoded.Payload); err != nil {
+		return err
+	}
+	*value = decoded
+	return nil
+}
+
+func (value *MCPJSONCapture) UnmarshalJSON(data []byte) error {
+	raw, err := decodeMCPExactObject(data)
+	if err != nil {
+		return err
+	}
+	normalized, err := normalizeMCPCapture(raw, "JSON capture", false, false)
+	if err != nil {
+		return err
+	}
+	decoded := MCPJSONCapture{CaptureStatus: normalized["captureStatus"].(string)}
+	if captured, exists := normalized["value"]; exists {
+		decoded.Value, err = json.Marshal(captured)
+		if err != nil {
+			return err
+		}
+	}
+	if err := decodeMCPCommonCapture(normalized, &decoded.Reason, &decoded.ObservedEncodedBytes); err != nil {
+		return err
+	}
+	*value = decoded
+	return nil
+}
+
+func (value *MCPTextCapture) UnmarshalJSON(data []byte) error {
+	raw, err := decodeMCPExactObject(data)
+	if err != nil {
+		return err
+	}
+	normalized, err := normalizeMCPCapture(raw, "text capture", false, true)
+	if err != nil {
+		return err
+	}
+	decoded := MCPTextCapture{CaptureStatus: normalized["captureStatus"].(string)}
+	if err := decodeMCPCommonCapture(normalized, &decoded.Reason, &decoded.ObservedEncodedBytes); err != nil {
+		return err
+	}
+	*value = decoded
+	return nil
+}
+
+func decodeMCPCommonCapture(
+	value map[string]any,
+	reason **MCPPayloadOmissionReason,
+	observed **uint64,
+) error {
+	if raw, exists := value["reason"].(string); exists {
+		typed := MCPPayloadOmissionReason(raw)
+		*reason = &typed
+	}
+	if raw, exists := value["observedEncodedBytes"]; exists {
+		parsed, err := mcpSafeIntegerValue(raw)
+		if err != nil {
+			return err
+		}
+		*observed = &parsed
+	}
+	return nil
+}
+
+func decodeMCPExactObject(data []byte) (map[string]any, error) {
+	if err := rejectDuplicateJSONMembers(data); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, fmt.Errorf("MCP value must be an object")
+	}
+	return value, ensureJSONEnd(decoder)
+}
+
+func decodeMCPNormalized(value any, target any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func mcpSafeIntegerValue(value any) (uint64, error) {
+	if err := validateMCPSafeInteger(value, "numeric value"); err != nil {
+		return 0, err
+	}
+	switch typed := value.(type) {
+	case json.Number:
+		return strconv.ParseUint(string(typed), 10, 64)
+	case uint64:
+		return typed, nil
+	case int:
+		return uint64(typed), nil
+	default:
+		return 0, fmt.Errorf("invalid MCP integer")
+	}
 }
 
 // MCPToolCall identifies the MCP server and tool represented by an event.
@@ -464,8 +722,7 @@ func (value *MCPToolCall) UnmarshalJSON(data []byte) error {
 	if !hasTool {
 		return fmt.Errorf("mcpToolCall.tool is required")
 	}
-	value.Server = server
-	value.Tool = tool
+	*value = MCPToolCall{Server: server, Tool: tool}
 	return nil
 }
 

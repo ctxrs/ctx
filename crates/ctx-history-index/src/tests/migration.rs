@@ -18,7 +18,7 @@ use crate::{
 };
 
 const SUCCESSOR_CORE_FINGERPRINT: &str =
-    "a0279f09839842b272a3a7b619ebeacac37cce85fb7c8144e9bc5cbf88622684";
+    "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e";
 const PUBLICATION_METADATA: &[u8] = b"source-catalog-frontier-receipt-v1";
 const GOLDEN_GENERATION_ID: &str =
     "102ee16e93877e1a3f2eec8e229df8b507f7cfff6de03e87f3ab932d8d81387d";
@@ -489,6 +489,20 @@ fn publish_predecessor_with_successor_member(root: &Path, value: serde_json::Val
     })
 }
 
+fn publish_predecessor_with_nested_successor_member(
+    root: &Path,
+    value: serde_json::Value,
+) -> String {
+    publish_predecessor_with_encoded_mutation(root, |encoded| {
+        let mut json = serde_json::from_slice::<serde_json::Value>(encoded).unwrap();
+        json["content"]
+            .as_object_mut()
+            .unwrap()
+            .insert("mcp_exchange".to_owned(), value);
+        serde_json::to_vec(&json).unwrap()
+    })
+}
+
 fn publish_predecessor_with_raw_member_prefix(root: &Path, prefix: &[u8]) -> String {
     publish_predecessor_with_encoded_mutation(root, |encoded| {
         assert_eq!(encoded.first(), Some(&b'{'));
@@ -500,15 +514,72 @@ fn publish_predecessor_with_raw_member_prefix(root: &Path, prefix: &[u8]) -> Str
     })
 }
 
-fn assert_predecessor_shape_error(error: IndexError) {
+fn publish_predecessor_with_raw_content_member_prefix(root: &Path, prefix: &[u8]) -> String {
+    publish_predecessor_with_encoded_mutation(root, |encoded| {
+        const CONTENT_OBJECT_PREFIX: &[u8] = br#""content":{"#;
+
+        let content_offset = encoded
+            .windows(CONTENT_OBJECT_PREFIX.len())
+            .position(|window| window == CONTENT_OBJECT_PREFIX)
+            .unwrap()
+            + CONTENT_OBJECT_PREFIX.len();
+        let mut malformed = Vec::with_capacity(encoded.len() + prefix.len());
+        malformed.extend_from_slice(&encoded[..content_offset]);
+        malformed.extend_from_slice(prefix);
+        malformed.extend_from_slice(&encoded[content_offset..]);
+        malformed
+    })
+}
+
+fn assert_predecessor_shape_error(error: IndexError, expected_member: &'static str) {
     assert!(matches!(
         error,
-        IndexError::PredecessorCoreRecordShapeMismatch
+        IndexError::PredecessorCoreRecordShapeMismatch { member }
+            if member == expected_member
     ));
 }
 
+fn assert_predecessor_shape_rejected_on_every_path(
+    predecessor: &GoldenPredecessor,
+    generation_id: &str,
+    expected_member: &'static str,
+) {
+    let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
+
+    assert_predecessor_shape_error(
+        VerifiedIndex::active_generation_id(predecessor.root()).unwrap_err(),
+        expected_member,
+    );
+    assert_predecessor_shape_error(
+        match VerifiedIndex::open(predecessor.root()) {
+            Ok(_) => panic!("malformed predecessor unexpectedly opened"),
+            Err(error) => error,
+        },
+        expected_member,
+    );
+    assert_predecessor_shape_error(
+        match VerifiedIndex::open_pinned(predecessor.root()) {
+            Ok(_) => panic!("malformed predecessor unexpectedly opened pinned"),
+            Err(error) => error,
+        },
+        expected_member,
+    );
+    assert_predecessor_shape_error(
+        match VerifiedIndex::open_pinned_generation(predecessor.root(), generation_id) {
+            Ok(_) => panic!("malformed predecessor unexpectedly opened by generation"),
+            Err(error) => error,
+        },
+        expected_member,
+    );
+    assert_predecessor_shape_error(open_writer_error(predecessor.root()), expected_member);
+    assert_eq!(
+        fs::read(predecessor.root().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+}
+
 #[test]
-fn predecessor_label_rejects_null_or_present_successor_member_on_every_read_and_migration_path() {
+fn predecessor_label_rejects_null_or_present_top_level_successor_member_on_every_path() {
     for successor_member in [
         serde_json::Value::Null,
         serde_json::json!({"server": "fixture-server", "tool": "fixture-tool"}),
@@ -516,35 +587,33 @@ fn predecessor_label_rejects_null_or_present_successor_member_on_every_read_and_
         let predecessor = GoldenPredecessor::copy();
         let generation_id =
             publish_predecessor_with_successor_member(predecessor.root(), successor_member);
-        let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
-
-        assert_predecessor_shape_error(
-            VerifiedIndex::active_generation_id(predecessor.root()).unwrap_err(),
-        );
-        assert_predecessor_shape_error(match VerifiedIndex::open(predecessor.root()) {
-            Ok(_) => panic!("malformed predecessor unexpectedly opened"),
-            Err(error) => error,
-        });
-        assert_predecessor_shape_error(match VerifiedIndex::open_pinned(predecessor.root()) {
-            Ok(_) => panic!("malformed predecessor unexpectedly opened for cursor reads"),
-            Err(error) => error,
-        });
-        assert_predecessor_shape_error(
-            match VerifiedIndex::open_pinned_generation(predecessor.root(), &generation_id) {
-                Ok(_) => panic!("malformed predecessor unexpectedly opened by generation"),
-                Err(error) => error,
-            },
-        );
-        assert_predecessor_shape_error(open_writer_error(predecessor.root()));
-        assert_eq!(
-            fs::read(predecessor.root().join("active-generation.json")).unwrap(),
-            pointer_before
+        assert_predecessor_shape_rejected_on_every_path(
+            &predecessor,
+            &generation_id,
+            "mcp_tool_call",
         );
     }
 }
 
 #[test]
-fn predecessor_label_rejects_escaped_and_duplicate_successor_keys_on_every_path() {
+fn predecessor_label_rejects_null_or_present_nested_successor_member_on_every_path() {
+    for successor_member in [
+        serde_json::Value::Null,
+        serde_json::json!({"provider_call_id": "fixture-call"}),
+    ] {
+        let predecessor = GoldenPredecessor::copy();
+        let generation_id =
+            publish_predecessor_with_nested_successor_member(predecessor.root(), successor_member);
+        assert_predecessor_shape_rejected_on_every_path(
+            &predecessor,
+            &generation_id,
+            "content.mcp_exchange",
+        );
+    }
+}
+
+#[test]
+fn predecessor_label_rejects_escaped_and_duplicate_top_level_successor_keys_on_every_path() {
     for raw_prefix in [
         br#""mcp\u005ftool_call":null,"#.as_slice(),
         br#""mcp_tool_call":null,"mcp_tool_call":null,"#.as_slice(),
@@ -552,29 +621,27 @@ fn predecessor_label_rejects_escaped_and_duplicate_successor_keys_on_every_path(
         let predecessor = GoldenPredecessor::copy();
         let generation_id =
             publish_predecessor_with_raw_member_prefix(predecessor.root(), raw_prefix);
-        let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
+        assert_predecessor_shape_rejected_on_every_path(
+            &predecessor,
+            &generation_id,
+            "mcp_tool_call",
+        );
+    }
+}
 
-        assert_predecessor_shape_error(
-            VerifiedIndex::active_generation_id(predecessor.root()).unwrap_err(),
-        );
-        assert_predecessor_shape_error(match VerifiedIndex::open(predecessor.root()) {
-            Ok(_) => panic!("malformed predecessor unexpectedly opened"),
-            Err(error) => error,
-        });
-        assert_predecessor_shape_error(match VerifiedIndex::open_pinned(predecessor.root()) {
-            Ok(_) => panic!("malformed predecessor unexpectedly opened pinned"),
-            Err(error) => error,
-        });
-        assert_predecessor_shape_error(
-            match VerifiedIndex::open_pinned_generation(predecessor.root(), &generation_id) {
-                Ok(_) => panic!("malformed predecessor unexpectedly opened by generation"),
-                Err(error) => error,
-            },
-        );
-        assert_predecessor_shape_error(open_writer_error(predecessor.root()));
-        assert_eq!(
-            fs::read(predecessor.root().join("active-generation.json")).unwrap(),
-            pointer_before
+#[test]
+fn predecessor_label_rejects_escaped_and_duplicate_nested_successor_keys_on_every_path() {
+    for raw_prefix in [
+        br#""mcp\u005fexchange":null,"#.as_slice(),
+        br#""mcp_exchange":null,"mcp_exchange":null,"#.as_slice(),
+    ] {
+        let predecessor = GoldenPredecessor::copy();
+        let generation_id =
+            publish_predecessor_with_raw_content_member_prefix(predecessor.root(), raw_prefix);
+        assert_predecessor_shape_rejected_on_every_path(
+            &predecessor,
+            &generation_id,
+            "content.mcp_exchange",
         );
     }
 }

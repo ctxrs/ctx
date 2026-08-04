@@ -1,5 +1,7 @@
+mod mcp_response;
 mod protobuf;
 
+use mcp_response::decode_mcp_tool_result_response;
 #[cfg(test)]
 use protobuf::decode_protobuf_struct;
 use protobuf::{
@@ -7,14 +9,16 @@ use protobuf::{
     decode_protobuf_struct_map, decode_received_messages_occurrences,
     decode_summarization_occurrences, decode_system_query_occurrences,
     decode_timestamp_occurrences, last_length_delimited_field_occurrences,
-    last_length_delimited_value, last_length_delimited_value_occurrences,
-    validate_string_fields_occurrences, warp_text_owned,
+    last_length_delimited_value, last_length_delimited_value_occurrences, warp_text_owned,
 };
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use ctx_history_core::{EventRole, EventType, MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES};
+use ctx_history_core::{
+    EventRole, EventType, McpJsonCapture, McpTerminalResponseContent, McpTerminalStatus,
+    McpTextCapture, MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
+};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -66,6 +70,7 @@ pub(super) struct WarpDecodedOutput {
     pub(super) outcome: OutputOutcome,
     pub(super) body: String,
     pub(super) mcp_invocation: Option<WarpMcpToolInvocation>,
+    pub(super) mcp_response: Option<McpTerminalResponseContent>,
     result_kind: WarpToolResultKind,
 }
 
@@ -111,6 +116,7 @@ struct WarpToolResultClassification {
     outcome: OutputOutcome,
     body: WarpClassifiedBody,
     result_kind: WarpToolResultKind,
+    mcp_response: Option<McpTerminalResponseContent>,
 }
 
 #[derive(Debug)]
@@ -470,8 +476,14 @@ fn link_mcp_tool_results(messages: &mut [WarpDecodedMessage]) {
         invocation: Option<WarpMcpToolInvocation>,
     }
 
+    #[derive(Default)]
+    struct ResultLink {
+        count: usize,
+        exact_terminal: bool,
+    }
+
     let mut calls = HashMap::<String, CallLink>::new();
-    let mut results = HashMap::<String, usize>::new();
+    let mut results = HashMap::<String, ResultLink>::new();
     for message in messages.iter() {
         match &message.payload {
             WarpDecodedMessagePayload::Retained(retained) if retained.tool_call => {
@@ -489,35 +501,61 @@ fn link_mcp_tool_results(messages: &mut [WarpDecodedMessage]) {
             _ => {}
         }
         if let Some(call_id) = message.result_call_id.as_ref() {
-            let count = results.entry(call_id.clone()).or_default();
-            *count = count.saturating_add(1);
+            let exact_terminal = matches!(
+                &message.payload,
+                WarpDecodedMessagePayload::Output(output)
+                    if matches!(
+                        output.result_kind,
+                        WarpToolResultKind::Mcp | WarpToolResultKind::Cancellation
+                    ) && output.mcp_response.is_some()
+            );
+            let link = results.entry(call_id.clone()).or_default();
+            link.count = link.count.saturating_add(1);
+            if link.count == 1 {
+                link.exact_terminal = exact_terminal;
+            } else {
+                link.exact_terminal = false;
+            }
         }
     }
 
     for message in messages {
-        let WarpDecodedMessagePayload::Output(output) = &mut message.payload else {
-            continue;
-        };
-        if !matches!(
-            output.result_kind,
-            WarpToolResultKind::Mcp | WarpToolResultKind::Cancellation
-        ) {
-            continue;
-        }
-        let Some(call_id) = output.call_id.as_ref() else {
-            continue;
-        };
-        let Some(call) = calls.get(call_id) else {
-            continue;
-        };
-        if call.count != 1 || results.get(call_id) != Some(&1) {
-            continue;
-        }
-        let Some(invocation) = call.invocation.as_ref() else {
-            continue;
-        };
-        if qualifies_mcp_invocation(invocation) {
-            output.mcp_invocation = Some(invocation.clone());
+        match &mut message.payload {
+            WarpDecodedMessagePayload::Retained(retained) if retained.tool_call => {
+                let qualified = retained.call_id.as_ref().and_then(|call_id| {
+                    let call = calls.get(call_id)?;
+                    let result = results.get(call_id)?;
+                    let invocation = call.invocation.as_ref()?;
+                    (call.count == 1
+                        && result.count == 1
+                        && result.exact_terminal
+                        && qualifies_mcp_invocation(invocation))
+                    .then(|| invocation.clone())
+                });
+                retained.mcp_invocation = qualified;
+            }
+            WarpDecodedMessagePayload::Output(output)
+                if matches!(
+                    output.result_kind,
+                    WarpToolResultKind::Mcp | WarpToolResultKind::Cancellation
+                ) =>
+            {
+                let qualified = output.call_id.as_ref().and_then(|call_id| {
+                    let call = calls.get(call_id)?;
+                    let result = results.get(call_id)?;
+                    let invocation = call.invocation.as_ref()?;
+                    (call.count == 1
+                        && result.count == 1
+                        && result.exact_terminal
+                        && qualifies_mcp_invocation(invocation))
+                    .then(|| invocation.clone())
+                });
+                output.mcp_invocation = qualified;
+                if output.mcp_invocation.is_none() {
+                    output.mcp_response = None;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -649,6 +687,7 @@ fn decode_output(
         outcome: classification.outcome,
         body,
         mcp_invocation: None,
+        mcp_response: classification.mcp_response,
         result_kind: classification.result_kind,
     }))
 }
@@ -684,6 +723,7 @@ fn classify_tool_result(payloads: &[Vec<u8>]) -> Result<WarpToolResultClassifica
             outcome: OutputOutcome::Unknown,
             body: WarpClassifiedBody::Bytes(None),
             result_kind: WarpToolResultKind::Other,
+            mcp_response: None,
         });
     };
     let variant = selected.field;
@@ -694,24 +734,33 @@ fn classify_tool_result(payloads: &[Vec<u8>]) -> Result<WarpToolResultClassifica
             outcome: OutputOutcome::Unknown,
             body: WarpClassifiedBody::Bytes(None),
             result_kind: WarpToolResultKind::Cancellation,
+            mcp_response: Some(McpTerminalResponseContent {
+                status: McpTerminalStatus::Cancelled,
+                failure_kind: None,
+                duration_ns: None,
+                text: McpTextCapture::Absent,
+                payload: McpJsonCapture::Absent,
+            }),
         });
     }
     if variant == 16 {
-        let Some((outcome, body)) = classify_mcp_tool_result(&selected.payloads)? else {
+        let Some(decoded) = decode_mcp_tool_result_response(&selected.payloads)? else {
             return Ok(WarpToolResultClassification {
                 call_id,
                 tool_name: warp_tool_result_name(variant),
                 outcome: OutputOutcome::Unknown,
                 body: WarpClassifiedBody::Bytes(None),
                 result_kind: WarpToolResultKind::Other,
+                mcp_response: None,
             });
         };
         return Ok(WarpToolResultClassification {
             call_id,
             tool_name: warp_tool_result_name(variant),
-            outcome,
-            body: WarpClassifiedBody::Owned(body),
+            outcome: decoded.outcome,
+            body: WarpClassifiedBody::Owned(decoded.body),
             result_kind: WarpToolResultKind::Mcp,
+            mcp_response: Some(decoded.response),
         });
     }
     if variant == 2 {
@@ -722,6 +771,7 @@ fn classify_tool_result(payloads: &[Vec<u8>]) -> Result<WarpToolResultClassifica
             outcome,
             body,
             result_kind: WarpToolResultKind::Other,
+            mcp_response: None,
         });
     }
     let selected_field = last_length_delimited_field_occurrences(&selected.payloads)?;
@@ -752,6 +802,7 @@ fn classify_tool_result(payloads: &[Vec<u8>]) -> Result<WarpToolResultClassifica
         outcome,
         body,
         result_kind: WarpToolResultKind::Other,
+        mcp_response: None,
     })
 }
 
@@ -826,116 +877,6 @@ fn classified_nested_text_occurrences(payloads: &[Vec<u8>], field: u32) -> WarpC
     match last_length_delimited_value_occurrences(payloads, field) {
         Ok(value) => WarpClassifiedBody::Bytes(value.map(<[u8]>::to_vec)),
         Err(_) => WarpClassifiedBody::Malformed,
-    }
-}
-
-fn classify_mcp_tool_result(
-    payloads: &[Vec<u8>],
-) -> Result<Option<(OutputOutcome, Option<String>)>> {
-    let mut selected = None;
-    for payload in payloads {
-        let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
-            if let (number @ (1 | 2), WarpWireValue::LengthDelimited(value)) =
-                (field.number, field.value)
-            {
-                validate_message_payload(value)?;
-                select_message_oneof(&mut selected, number, value);
-            }
-        }
-    }
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
-    match selected.field {
-        1 => Ok(Some((
-            OutputOutcome::Success,
-            decode_mcp_success_text_occurrences(&selected.payloads)?,
-        ))),
-        2 => Ok(Some((
-            OutputOutcome::Failure,
-            decode_last_nested_text_occurrences(&selected.payloads, 1)?,
-        ))),
-        _ => Err(CaptureError::SystemInvariant(
-            "Warp MCP result selected an unclassified oneof arm",
-        )),
-    }
-}
-
-fn decode_mcp_success_text_occurrences(payloads: &[Vec<u8>]) -> Result<Option<String>> {
-    let mut parts = Vec::new();
-    for payload in payloads {
-        let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
-            let (1, WarpWireValue::LengthDelimited(result)) = (field.number, field.value) else {
-                continue;
-            };
-            if let Some(text) = decode_mcp_result_content_text(result)? {
-                if !text.trim().is_empty() {
-                    parts.push(text);
-                }
-            }
-        }
-    }
-    Ok((!parts.is_empty()).then(|| parts.join("\n")))
-}
-
-fn decode_mcp_result_content_text(data: &[u8]) -> Result<Option<String>> {
-    let mut cursor = WarpWireCursor::new(data);
-    let mut selected = None;
-    while let Some(field) = cursor.next()? {
-        if let (number @ (1..=3), WarpWireValue::LengthDelimited(value)) =
-            (field.number, field.value)
-        {
-            validate_message_payload(value)?;
-            select_message_oneof(&mut selected, number, value);
-        }
-    }
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
-    match selected.field {
-        1 => decode_last_nested_text_occurrences(&selected.payloads, 1),
-        2 => {
-            validate_string_fields_occurrences(&selected.payloads, &[1, 2], "MCP image")?;
-            Ok(None)
-        }
-        3 => decode_mcp_resource_text_occurrences(&selected.payloads),
-        _ => Err(CaptureError::SystemInvariant(
-            "Warp MCP content selected an unclassified oneof arm",
-        )),
-    }
-}
-
-fn decode_mcp_resource_text_occurrences(payloads: &[Vec<u8>]) -> Result<Option<String>> {
-    let mut selected = None;
-    let mut uri = WarpValidatedString::default();
-    for payload in payloads {
-        let mut cursor = WarpWireCursor::new(payload);
-        while let Some(field) = cursor.next()? {
-            match (field.number, field.value) {
-                (1, WarpWireValue::LengthDelimited(value)) => uri.observe(value),
-                (number @ (2 | 3), WarpWireValue::LengthDelimited(value)) => {
-                    validate_message_payload(value)?;
-                    select_message_oneof(&mut selected, number, value);
-                }
-                _ => {}
-            }
-        }
-    }
-    let _ = uri.into_optional("MCP resource URI")?;
-    match selected {
-        Some(WarpSelectedMessage { field: 2, payloads }) => {
-            decode_last_nested_text_occurrences(&payloads, 1)
-        }
-        Some(WarpSelectedMessage { field: 3, payloads }) => {
-            validate_string_fields_occurrences(&payloads, &[1, 2], "MCP blob resource")?;
-            Ok(None)
-        }
-        None => Ok(None),
-        Some(_) => Err(CaptureError::SystemInvariant(
-            "Warp MCP resource selected an unclassified oneof arm",
-        )),
     }
 }
 

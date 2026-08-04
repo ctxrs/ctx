@@ -210,26 +210,32 @@ fn enumerate_copilot_results(
     {
         return Err(NativeJsonlResultExtractionError::InvalidShape);
     }
-    if result.is_some() {
-        reject_redacted(
-            data.get("result")
-                .ok_or(NativeJsonlResultExtractionError::InvalidShape)?,
-        )?;
-    }
-    if error.is_some() {
-        reject_redacted(
-            data.get("error")
-                .ok_or(NativeJsonlResultExtractionError::InvalidShape)?,
-        )?;
-    }
     let selected = direct.or(result).or(error);
     Ok(vec![NativeJsonlResultSubrecord {
         subrecord_index: 0,
-        content: extract_direct_result_content(selected, &[], true)?,
+        content: extract_copilot_tool_owned_content(selected)?,
         call_id: native_result_identity(data).or_else(|| native_result_identity(value)),
         tool_name: native_result_tool_name(data).or_else(|| native_result_tool_name(value)),
         outcome: native_result_outcome(data),
     }])
+}
+
+fn extract_copilot_tool_owned_content(
+    value: Option<&Value>,
+) -> Result<Option<Cow<'_, str>>, NativeJsonlResultExtractionError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        Value::String(text) => Ok(Some(Cow::Borrowed(text))),
+        Value::Null => Ok(None),
+        Value::Object(_) | Value::Array(_) | Value::Bool(_) | Value::Number(_) => {
+            serde_json::to_string(value)
+                .map(Cow::Owned)
+                .map(Some)
+                .map_err(|_| NativeJsonlResultExtractionError::InvalidShape)
+        }
+    }
 }
 
 pub(super) fn extract_direct_result_content<'a>(
@@ -595,5 +601,87 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| result.content.is_none()));
         assert_eq!(results[1].subrecord_index, 1);
+    }
+
+    #[test]
+    fn copilot_tool_owned_result_and_error_markers_preserve_content() {
+        for (value, expected_body, expected_outcome) in [
+            (
+                json!({
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "result-call",
+                        "success": true,
+                        "result": {
+                            "content": "ordinary result body",
+                            "redacted": true,
+                            "status": "redacted",
+                            "state": "output-redacted"
+                        }
+                    }
+                }),
+                "ordinary result body",
+                OutputOutcome::Success,
+            ),
+            (
+                json!({
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "error-call",
+                        "success": false,
+                        "error": {
+                            "message": "ordinary error body",
+                            "redacted": true,
+                            "status": "redacted",
+                            "state": "output-redacted"
+                        }
+                    }
+                }),
+                "ordinary error body",
+                OutputOutcome::Failure,
+            ),
+        ] {
+            let results =
+                enumerate_native_jsonl_result_subrecords(COPILOT_CLI_RESULT_PROFILE, &value)
+                    .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].content.as_deref(), Some(expected_body));
+            assert_eq!(results[0].outcome.outcome, expected_outcome);
+        }
+    }
+
+    #[test]
+    fn copilot_provider_envelope_redaction_remains_fail_closed() {
+        let data_redacted = json!({
+            "type": "tool.execution_complete",
+            "data": {
+                "redacted": true,
+                "toolCallId": "data-redacted-call",
+                "success": true,
+                "result": {"content": "secret"}
+            }
+        });
+        assert_eq!(
+            enumerate_native_jsonl_result_subrecords(COPILOT_CLI_RESULT_PROFILE, &data_redacted),
+            Err(NativeJsonlResultExtractionError::Redacted)
+        );
+
+        let envelope_redacted = json!({
+            "redacted": true,
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "envelope-redacted-call",
+                "success": true,
+                "result": {"content": "secret"}
+            }
+        });
+        let results = enumerate_native_jsonl_result_subrecords(
+            COPILOT_CLI_RESULT_PROFILE,
+            &envelope_redacted,
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, None);
+        assert_eq!(results[0].call_id, None);
     }
 }

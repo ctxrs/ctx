@@ -1,0 +1,1 @@
+{"event":{"mcpExchange":{"providerCallId":"call","response":{"status":"succeeded","text":{"captureStatus":"omitted","reason":"size_limit","observedEncodedBytes":9007199254740992},"payload":{"captureStatus":"absent"}}}},"events":[]}
