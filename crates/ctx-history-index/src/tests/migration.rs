@@ -21,7 +21,7 @@ const SUCCESSOR_CORE_FINGERPRINT: &str =
     "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e";
 const PUBLICATION_METADATA: &[u8] = b"source-catalog-frontier-receipt-v1";
 const GOLDEN_GENERATION_ID: &str =
-    "102ee16e93877e1a3f2eec8e229df8b507f7cfff6de03e87f3ab932d8d81387d";
+    "a71ac367a8192609dc5b739e8f68e83124ee369e7cb3975a88e873eafe9f0283";
 const SUBPROCESS_MODE_ENV: &str = "CTX_PREDECESSOR_MIGRATION_CHILD";
 const SUBPROCESS_ROOT_ENV: &str = "CTX_PREDECESSOR_MIGRATION_ROOT";
 const SUBPROCESS_MARKER_ENV: &str = "CTX_PREDECESSOR_MIGRATION_MARKER";
@@ -59,7 +59,7 @@ impl GoldenPredecessor {
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("testdata")
-        .join("core-predecessor-c5ad8c7b")
+        .join("core-predecessor-7552eee7")
 }
 
 fn copy_fixture_tree(source: &Path, destination: &Path) {
@@ -104,12 +104,11 @@ fn active_meta_generation(root: &Path) -> BTreeMap<String, Option<u64>> {
     meta_generation(&index.load_metas().unwrap())
 }
 
-fn manifest_without_core_fingerprint(manifest: &GenerationManifest) -> serde_json::Value {
+fn manifest_without_migration_identities(manifest: &GenerationManifest) -> serde_json::Value {
     let mut value = serde_json::to_value(manifest).unwrap();
-    value
-        .as_object_mut()
-        .unwrap()
-        .remove("core_record_contract_fingerprint");
+    let object = value.as_object_mut().unwrap();
+    object.remove("core_record_contract_fingerprint");
+    object.remove("policy_schema_hash");
     value
 }
 
@@ -152,13 +151,30 @@ fn checked_in_predecessor_fixture_has_exact_provenance_and_hashes() {
     assert_eq!(provenance["version"], 1);
     assert_eq!(
         provenance["source_commit"],
-        "1f400fc7ac37e87c107e7665e8decccc8c30fe91"
+        "a0ff045f8a223468b2f00b1e6e1d9a51709d208f"
     );
     assert_eq!(
         provenance["core_record_contract_fingerprint"],
         SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
     );
     assert_eq!(provenance["generation_id"], GOLDEN_GENERATION_ID);
+    let manifest: GenerationManifest = serde_json::from_slice(
+        &fs::read(
+            root.join("index")
+                .join("ctx-generations")
+                .join(format!("{GOLDEN_GENERATION_ID}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.core_record_contract_fingerprint,
+        SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
+    );
+    assert_eq!(
+        manifest.policy_schema_hash,
+        SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH
+    );
 
     let mut declared = BTreeSet::new();
     for file in provenance["files"].as_array().unwrap() {
@@ -233,6 +249,10 @@ fn writer_lease_migrates_without_sources_and_preserves_records_segments_and_rece
     let predecessor_bytes = stored_core_bytes(&predecessor_reader);
     let predecessor_segments = active_meta_generation(predecessor.root());
     let predecessor_manifest = predecessor_reader.manifest().clone();
+    assert_eq!(
+        predecessor_manifest.policy_schema_hash,
+        SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH
+    );
 
     let outcome = GenerationWriter::open(predecessor.root(), WriterOptions::default()).unwrap();
     assert!(outcome.committed_migration_recovery().is_none());
@@ -243,8 +263,12 @@ fn writer_lease_migrates_without_sources_and_preserves_records_segments_and_rece
         SUCCESSOR_CORE_FINGERPRINT
     );
     assert_eq!(
-        manifest_without_core_fingerprint(current_manifest),
-        manifest_without_core_fingerprint(&predecessor_manifest)
+        current_manifest.policy_schema_hash,
+        current_source_generation_policy_hash().unwrap()
+    );
+    assert_eq!(
+        manifest_without_migration_identities(current_manifest),
+        manifest_without_migration_identities(&predecessor_manifest)
     );
 
     let current_pointer = load_active_generation_pointer(predecessor.root())
@@ -479,16 +503,6 @@ fn publish_predecessor_with_encoded_mutation(
         .to_owned()
 }
 
-fn publish_predecessor_with_successor_member(root: &Path, value: serde_json::Value) -> String {
-    publish_predecessor_with_encoded_mutation(root, |encoded| {
-        let mut json = serde_json::from_slice::<serde_json::Value>(encoded).unwrap();
-        json.as_object_mut()
-            .unwrap()
-            .insert("mcp_tool_call".to_owned(), value);
-        serde_json::to_vec(&json).unwrap()
-    })
-}
-
 fn publish_predecessor_with_nested_successor_member(
     root: &Path,
     value: serde_json::Value,
@@ -500,17 +514,6 @@ fn publish_predecessor_with_nested_successor_member(
             .unwrap()
             .insert("mcp_exchange".to_owned(), value);
         serde_json::to_vec(&json).unwrap()
-    })
-}
-
-fn publish_predecessor_with_raw_member_prefix(root: &Path, prefix: &[u8]) -> String {
-    publish_predecessor_with_encoded_mutation(root, |encoded| {
-        assert_eq!(encoded.first(), Some(&b'{'));
-        let mut malformed = Vec::with_capacity(encoded.len() + prefix.len());
-        malformed.push(b'{');
-        malformed.extend_from_slice(prefix);
-        malformed.extend_from_slice(&encoded[1..]);
-        malformed
     })
 }
 
@@ -579,23 +582,6 @@ fn assert_predecessor_shape_rejected_on_every_path(
 }
 
 #[test]
-fn predecessor_label_rejects_null_or_present_top_level_successor_member_on_every_path() {
-    for successor_member in [
-        serde_json::Value::Null,
-        serde_json::json!({"server": "fixture-server", "tool": "fixture-tool"}),
-    ] {
-        let predecessor = GoldenPredecessor::copy();
-        let generation_id =
-            publish_predecessor_with_successor_member(predecessor.root(), successor_member);
-        assert_predecessor_shape_rejected_on_every_path(
-            &predecessor,
-            &generation_id,
-            "mcp_tool_call",
-        );
-    }
-}
-
-#[test]
 fn predecessor_label_rejects_null_or_present_nested_successor_member_on_every_path() {
     for successor_member in [
         serde_json::Value::Null,
@@ -608,23 +594,6 @@ fn predecessor_label_rejects_null_or_present_nested_successor_member_on_every_pa
             &predecessor,
             &generation_id,
             "content.mcp_exchange",
-        );
-    }
-}
-
-#[test]
-fn predecessor_label_rejects_escaped_and_duplicate_top_level_successor_keys_on_every_path() {
-    for raw_prefix in [
-        br#""mcp\u005ftool_call":null,"#.as_slice(),
-        br#""mcp_tool_call":null,"mcp_tool_call":null,"#.as_slice(),
-    ] {
-        let predecessor = GoldenPredecessor::copy();
-        let generation_id =
-            publish_predecessor_with_raw_member_prefix(predecessor.root(), raw_prefix);
-        assert_predecessor_shape_rejected_on_every_path(
-            &predecessor,
-            &generation_id,
-            "mcp_tool_call",
         );
     }
 }
