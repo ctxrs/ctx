@@ -1,8 +1,11 @@
 use std::ops::Range;
 
+use serde::de::IgnoredAny;
+use serde_json::Value;
+
 use crate::{CaptureError, Result};
 
-use super::TRAE_CN_INPUT_HISTORY_KEY;
+use super::{event::trae_message_text, TRAE_CN_INPUT_HISTORY_KEY};
 
 pub(super) enum TraeSessionSelection {
     CnMessages(Range<usize>),
@@ -51,6 +54,69 @@ pub(super) fn trae_session_selection(
     } else {
         Ok(Some(TraeSessionSelection::Sessions(whole)))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TraePayloadAdmission {
+    SupportedChat,
+    Empty,
+    Unrecognized,
+}
+
+pub(crate) fn trae_payload_admission(bytes: &[u8], chat_key: &str) -> Result<TraePayloadAdmission> {
+    serde_json::from_slice::<IgnoredAny>(bytes)?;
+    let Some(selection) = trae_session_selection(bytes, chat_key)? else {
+        return Ok(TraePayloadAdmission::Unrecognized);
+    };
+    match selection {
+        TraeSessionSelection::CnMessages(messages) => trae_messages_admission(bytes, messages),
+        TraeSessionSelection::Sessions(container) => {
+            let mut values = TraeJsonContainerValues::new(bytes, container)?;
+            let mut saw_supported_chat = false;
+            let mut saw_unrecognized = false;
+            let mut session_index = 0_usize;
+            while let Some(range) = values.next_range()? {
+                if let Some(session) = trae_stream_session(bytes, range, session_index)? {
+                    match trae_messages_admission(bytes, session.messages)? {
+                        TraePayloadAdmission::SupportedChat => saw_supported_chat = true,
+                        TraePayloadAdmission::Empty => {}
+                        TraePayloadAdmission::Unrecognized => saw_unrecognized = true,
+                    }
+                } else {
+                    saw_unrecognized = true;
+                }
+                session_index = session_index.saturating_add(1);
+            }
+            Ok(if saw_supported_chat {
+                TraePayloadAdmission::SupportedChat
+            } else if saw_unrecognized {
+                TraePayloadAdmission::Unrecognized
+            } else {
+                TraePayloadAdmission::Empty
+            })
+        }
+    }
+}
+
+fn trae_messages_admission(bytes: &[u8], messages: Range<usize>) -> Result<TraePayloadAdmission> {
+    let mut values = TraeJsonArrayValues::new(bytes, messages)?;
+    let mut saw_supported_chat = false;
+    let mut saw_unrecognized = false;
+    while let Some(range) = values.next_range()? {
+        let message: Value = serde_json::from_slice(&bytes[range])?;
+        if trae_message_text(&message).is_some_and(|text| !text.trim().is_empty()) {
+            saw_supported_chat = true;
+        } else {
+            saw_unrecognized = true;
+        }
+    }
+    Ok(if saw_supported_chat {
+        TraePayloadAdmission::SupportedChat
+    } else if saw_unrecognized {
+        TraePayloadAdmission::Unrecognized
+    } else {
+        TraePayloadAdmission::Empty
+    })
 }
 
 pub(super) fn trae_stream_session(

@@ -774,9 +774,31 @@ fn trae_current_database_reports_missing_valid_empty_and_malformed_states() {
     connection
         .execute(
             "INSERT INTO ItemTable ([key], value) VALUES (?1, ?2)",
+            rusqlite::params!["memento/icube-ai-agent-storage", "invalid JSON"],
+        )
+        .unwrap();
+    drop(connection);
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute(
+            "UPDATE ItemTable SET value = ?1 WHERE [key] = ?2",
+            rusqlite::params![r#"{"list":[]}"#, "memento/icube-ai-agent-storage"],
+        )
+        .unwrap();
+    drop(connection);
+    let report = provider_report(&context, CaptureProvider::Trae);
+    assert_eq!(report.sources[0].status, ProviderSourceStatus::Empty);
+
+    let connection = Connection::open(&current).unwrap();
+    connection
+        .execute(
+            "UPDATE ItemTable SET value = ?1 WHERE [key] = ?2",
             rusqlite::params![
-                "memento/icube-ai-agent-storage",
-                r#"{"list":[{"id":"input-1","messages":[{"role":"user","content":"trae discovery"}]}]}"#
+                r#"{"list":[{"id":"input-1","messages":[{"role":"user","content":"trae discovery"}]}]}"#,
+                "memento/icube-ai-agent-storage"
             ],
         )
         .unwrap();

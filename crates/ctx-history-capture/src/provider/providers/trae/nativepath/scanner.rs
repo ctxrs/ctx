@@ -37,6 +37,7 @@ use super::super::{
         trae_session_selection, trae_stream_session, TraeJsonArrayValues, TraeJsonContainerValues,
         TraeSessionSelection, TraeStreamSession,
     },
+    trae_sqlite_value_fits_parser_bound,
     workspace::{trae_workspace_folder, trae_workspace_id},
     TRAE_CHAT_KEYS,
 };
@@ -45,7 +46,6 @@ const TRAE_SOURCE_PARSER_REVISION: &str = "trae-nativepath-parser-v2";
 const TRAE_SOURCE_POLICY_REVISION: &str = "trae-nativepath-core-policy-v2";
 const TRAE_PAGE_UNIT_LIMIT: usize = NATIVE_INGESTION_PAGE_MAX_UNITS - 8;
 const TRAE_PAGE_BYTE_LIMIT: usize = NATIVE_INGESTION_PAGE_MAX_BYTES - 512 * 1024;
-const TRAE_SQLITE_VALUE_OVERHEAD_BYTES: u64 = 16 * 64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TraeFrontier {
@@ -603,10 +603,7 @@ impl<'a> TraeScanner<'a> {
         let retained_bytes = u64::try_from(observed.retained_bytes).map_err(|_| {
             CaptureError::InvalidPayload("Trae ItemTable value length is negative".into())
         })?;
-        let observed_bytes = retained_bytes
-            .saturating_add(TRAE_SQLITE_VALUE_OVERHEAD_BYTES)
-            .saturating_add(u64::try_from(chat_key.len()).unwrap_or(u64::MAX));
-        if observed_bytes > u64::try_from(MAX_PROVIDER_JSONL_LINE_BYTES).unwrap_or(u64::MAX) {
+        if !trae_sqlite_value_fits_parser_bound(chat_key, retained_bytes) {
             return Ok(TraeLoadedKey::Rejected(format!(
                 "Trae ItemTable key `{chat_key}` exceeds the provider JSON bound"
             )));

@@ -139,6 +139,99 @@ fn sqlite_probe_fails_closed_for_corruption_and_oversized_sources() {
     );
 }
 
+fn trae_probe_database(path: &Path) -> Connection {
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute("create table ItemTable ([key] text primary key, value)", [])
+        .unwrap();
+    connection
+}
+
+fn replace_trae_probe_value(connection: &Connection, value: rusqlite::types::Value) {
+    connection.execute("delete from ItemTable", []).unwrap();
+    connection
+        .execute(
+            "insert into ItemTable ([key], value) values (?1, ?2)",
+            rusqlite::params![TRAE_CHAT_KEYS[0], value],
+        )
+        .unwrap();
+}
+
+#[test]
+fn trae_probe_rejects_invalid_non_text_and_unrecognized_payloads() {
+    let temp = tempdir();
+    let path = temp.path().join("database.db");
+    let connection = trae_probe_database(&path);
+
+    for value in [
+        rusqlite::types::Value::Text("arbitrary nonempty garbage".to_owned()),
+        rusqlite::types::Value::Blob(br#"{"list":[]}"#.to_vec()),
+        rusqlite::types::Value::Text(r#"{"futureSessions":[]}"#.to_owned()),
+    ] {
+        replace_trae_probe_value(&connection, value);
+        assert_eq!(
+            has_trae_state_vscdb_chat_history(None, &path, 10_000),
+            BoundedProbe::IoError
+        );
+    }
+}
+
+#[test]
+fn trae_probe_rejects_values_over_the_importer_bound() {
+    let temp = tempdir();
+    let path = temp.path().join("database.db");
+    let connection = trae_probe_database(&path);
+    let oversized = u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+        .unwrap()
+        .saturating_sub(TRAE_SQLITE_VALUE_OVERHEAD_BYTES)
+        .saturating_sub(u64::try_from(TRAE_CHAT_KEYS[0].len()).unwrap())
+        .saturating_add(1);
+    connection
+        .execute(
+            "insert into ItemTable ([key], value) values (?1, cast(zeroblob(?2) as text))",
+            rusqlite::params![TRAE_CHAT_KEYS[0], i64::try_from(oversized).unwrap()],
+        )
+        .unwrap();
+
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(None, &path, 10_000),
+        BoundedProbe::IoError
+    );
+}
+
+#[test]
+fn trae_probe_distinguishes_supported_content_from_valid_empty_containers() {
+    let temp = tempdir();
+    let path = temp.path().join("database.db");
+    let connection = trae_probe_database(&path);
+
+    for payload in [
+        r#"{"list":[]}"#,
+        r#"{"list":[{"id":"session-1","messages":[]}]}"#,
+    ] {
+        replace_trae_probe_value(
+            &connection,
+            rusqlite::types::Value::Text(payload.to_owned()),
+        );
+        assert_eq!(
+            has_trae_state_vscdb_chat_history(None, &path, 10_000),
+            BoundedProbe::NotFound
+        );
+    }
+
+    replace_trae_probe_value(
+        &connection,
+        rusqlite::types::Value::Text(
+            r#"{"list":[{"id":"session-1","messages":[{"role":"user","content":"hello"}]}]}"#
+                .to_owned(),
+        ),
+    );
+    assert_eq!(
+        has_trae_state_vscdb_chat_history(None, &path, 10_000),
+        BoundedProbe::Found
+    );
+}
+
 #[test]
 fn sqlite_probe_deadline_interrupts_expensive_queries() {
     let temp = tempdir();

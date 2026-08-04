@@ -22,7 +22,13 @@ use crate::common::io::{
 };
 use crate::provider::{
     provider_safe_path_segment,
-    providers::cursor::{discover_cursor_transcripts, CursorDiscoveryIssueKind},
+    providers::{
+        cursor::{discover_cursor_transcripts, CursorDiscoveryIssueKind},
+        trae::{
+            trae_payload_admission, trae_sqlite_value_fits_parser_bound, TraePayloadAdmission,
+            TRAE_CHAT_KEYS, TRAE_SQLITE_VALUE_OVERHEAD_BYTES,
+        },
+    },
     sqlite::sqlite_component_change_token,
 };
 use crate::MAX_PROVIDER_SQLITE_VALUE_BYTES;
@@ -455,20 +461,66 @@ fn has_trae_state_vscdb_chat_keys(data_root: Option<&Path>, path: &Path) -> Boun
             return Ok(false);
         }
 
-        let key_count = conn.query_row(
-            "select count(*) from ItemTable \
-             where [key] in (
-                'memento/icube-ai-agent-storage',
-                'icube-ai-agent-storage-input-history',
-                'chat.ChatSessionStore.index',
-                'ChatStore',
-                'memento/icube-ai-chat-storage-7467774676505887760',
-                'memento/icube-ai-ng-chat-storage-7467774676505887760'
-             ) and length(trim(cast(coalesce(value, '') as text))) > 0",
-            [],
-            |row| row.get::<_, i64>(0),
+        let parser_bound = i64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(i64::MAX);
+        let parser_overhead = i64::try_from(TRAE_SQLITE_VALUE_OVERHEAD_BYTES).unwrap_or(i64::MAX);
+        let mut statement = conn.prepare(
+            "select [key], typeof(value), coalesce(octet_length(value), 0), \
+                    case when typeof(value) = 'text' \
+                              and octet_length(value) + octet_length([key]) + ?7 <= ?8 \
+                         then cast(value as text) end \
+             from ItemTable \
+             where [key] in (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        Ok(key_count > 0)
+        let mut rows = statement.query(rusqlite::params![
+            TRAE_CHAT_KEYS[0],
+            TRAE_CHAT_KEYS[1],
+            TRAE_CHAT_KEYS[2],
+            TRAE_CHAT_KEYS[3],
+            TRAE_CHAT_KEYS[4],
+            TRAE_CHAT_KEYS[5],
+            parser_overhead,
+            parser_bound,
+        ])?;
+        let mut saw_supported_chat = false;
+        let mut saw_incompatible_payload = false;
+        while let Some(row) = rows.next()? {
+            let chat_key = row.get::<_, String>(0)?;
+            let value_type = row.get::<_, String>(1)?;
+            let retained_bytes = row.get::<_, i64>(2)?;
+            let value = row.get::<_, Option<String>>(3)?;
+            let Ok(retained_bytes) = u64::try_from(retained_bytes) else {
+                saw_incompatible_payload = true;
+                continue;
+            };
+            if value_type != "text"
+                || !trae_sqlite_value_fits_parser_bound(&chat_key, retained_bytes)
+            {
+                saw_incompatible_payload = true;
+                continue;
+            }
+            let Some(value) = value else {
+                saw_incompatible_payload = true;
+                continue;
+            };
+            if u64::try_from(value.len()).ok() != Some(retained_bytes) {
+                saw_incompatible_payload = true;
+                continue;
+            }
+            match trae_payload_admission(value.as_bytes(), &chat_key) {
+                Ok(TraePayloadAdmission::SupportedChat) => saw_supported_chat = true,
+                Ok(TraePayloadAdmission::Empty) => {}
+                Ok(TraePayloadAdmission::Unrecognized) | Err(_) => {
+                    saw_incompatible_payload = true;
+                }
+            }
+        }
+        if saw_incompatible_payload {
+            // The structural-probe error path becomes Unknown at the resolver boundary. A known
+            // Trae chat key with incompatible content must not collapse into NotFound/Empty.
+            Err(rusqlite::Error::InvalidQuery)
+        } else {
+            Ok(saw_supported_chat)
+        }
     })
 }
 
