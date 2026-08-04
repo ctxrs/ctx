@@ -784,6 +784,43 @@ fn read_mutable_evidence_file(
     Err(ProbeFailure::PlatformUnsupported)
 }
 
+#[cfg(test)]
+mod mutable_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_descriptor_read_rejects_post_snapshot_growth() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("grown-packed-refs");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_MUTABLE_GIT_EVIDENCE_BYTES + 1).unwrap();
+        drop(file);
+        let mut file = fs::File::open(path).unwrap();
+
+        let result = read_mutable_evidence_bounded(&mut file, MAX_MUTABLE_GIT_EVIDENCE_BYTES);
+
+        assert!(matches!(
+            result,
+            Err(ProbeFailure::Failed("mutable_git_evidence_limit_exceeded"))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_read_rejects_post_read_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mutated-packed-refs");
+        fs::write(&path, b"opening\n").unwrap();
+        let opening = fs::symlink_metadata(&path).unwrap();
+
+        let result = read_mutable_evidence_file_with_after_read(&path, &opening, || {
+            fs::write(&path, b"changed-and-grown\n").unwrap();
+        });
+
+        assert!(matches!(result, Err(ProbeFailure::ConcurrentDrift)));
+    }
+}
+
 /// Revision 1 local-root authorization fingerprint.
 ///
 /// SHA-256 input is `CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN`, big-endian
@@ -899,41 +936,4 @@ pub(super) fn path_identity_fingerprint(path: &Path) -> Result<[u8; 32], ProbeFa
         return Err(ProbeFailure::PlatformUnsupported);
     }
     Ok(digest.finalize().into())
-}
-
-#[cfg(test)]
-mod mutable_evidence_tests {
-    use super::*;
-
-    #[test]
-    fn bounded_descriptor_read_rejects_post_snapshot_growth() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("grown-packed-refs");
-        let file = fs::File::create(&path).unwrap();
-        file.set_len(MAX_MUTABLE_GIT_EVIDENCE_BYTES + 1).unwrap();
-        drop(file);
-        let mut file = fs::File::open(path).unwrap();
-
-        let result = read_mutable_evidence_bounded(&mut file, MAX_MUTABLE_GIT_EVIDENCE_BYTES);
-
-        assert!(matches!(
-            result,
-            Err(ProbeFailure::Failed("mutable_git_evidence_limit_exceeded"))
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn descriptor_read_rejects_post_read_mutation() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("mutated-packed-refs");
-        fs::write(&path, b"opening\n").unwrap();
-        let opening = fs::symlink_metadata(&path).unwrap();
-
-        let result = read_mutable_evidence_file_with_after_read(&path, &opening, || {
-            fs::write(&path, b"changed-and-grown\n").unwrap();
-        });
-
-        assert!(matches!(result, Err(ProbeFailure::ConcurrentDrift)));
-    }
 }
