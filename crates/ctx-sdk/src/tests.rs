@@ -8,13 +8,14 @@ use std::process::Child;
 
 #[cfg(unix)]
 fn spawn_json_shell(body: &str) -> Child {
-    Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .args(["-c", body])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    configure_command(&mut command);
+    command.spawn().unwrap()
 }
 
 #[cfg(unix)]
@@ -239,6 +240,116 @@ fn local_json_timeout_kills_and_reaps_the_child() {
         !Path::new("/proc").join(&pid).exists(),
         "timed-out ctx child {pid} was not reaped"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn local_json_wrapper_with_inherited_stream_descendant_is_bounded_and_cleaned() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("ctx-inherited-streams");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$$" > "$CTX_DATA_ROOT/wrapper.pid"
+sleep 30 &
+printf '%s\n' "$!" > "$CTX_DATA_ROOT/descendant.pid"
+printf '%s\n' '{"initialized":true,"local_only":true}'
+"#,
+    )
+    .unwrap();
+    make_test_executable(&script);
+
+    let client = AgentHistoryClient::local(LocalBackendConfig {
+        ctx_binary: script,
+        data_root: Some(temp.path().to_path_buf()),
+        env: BTreeMap::new(),
+        timeout: Duration::from_millis(200),
+    });
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let started = Instant::now();
+        let result = client.status();
+        sender.send((started.elapsed(), result)).unwrap();
+    });
+
+    let wrapper_pid = wait_for_test_pid(&temp.path().join("wrapper.pid"));
+    let mut cleanup = ProcessGroupCleanup(Some(wrapper_pid));
+    let descendant_pid = wait_for_test_pid(&temp.path().join("descendant.pid"));
+    let (elapsed, result) = match receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(err) => {
+            drop(cleanup);
+            let _ = receiver.recv_timeout(Duration::from_secs(2));
+            drop(worker);
+            panic!("SDK collection exceeded its bounded deadline: {err}");
+        }
+    };
+    worker.join().unwrap();
+
+    let error = result.unwrap_err();
+    assert_eq!(error.body.code, AgentHistoryErrorCode::Timeout);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "inherited stream handles delayed return for {elapsed:?}"
+    );
+    wait_for_process_termination(wrapper_pid);
+    wait_for_process_termination(descendant_pid);
+    cleanup.0 = None;
+}
+
+#[cfg(target_os = "linux")]
+struct ProcessGroupCleanup(Option<u32>);
+
+#[cfg(target_os = "linux")]
+impl Drop for ProcessGroupCleanup {
+    fn drop(&mut self) {
+        let Some(process_group) = self.0 else {
+            return;
+        };
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{process_group}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_test_pid(path: &Path) -> u32 {
+    let started = Instant::now();
+    loop {
+        if let Ok(raw) = fs::read_to_string(path) {
+            return raw.trim().parse().unwrap();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_process_termination(pid: u32) {
+    let process_status = Path::new("/proc").join(pid.to_string()).join("stat");
+    let started = Instant::now();
+    while fs::read_to_string(&process_status)
+        .ok()
+        .and_then(|status| {
+            status
+                .rsplit_once(") ")
+                .and_then(|(_, fields)| fields.chars().next())
+        })
+        .is_some_and(|state| !matches!(state, 'Z' | 'X'))
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "task-owned process {pid} remained live after collection cleanup"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(unix)]

@@ -26,8 +26,8 @@ use thiserror::Error;
 
 mod subprocess;
 
-use subprocess::collect_ctx_json;
-#[cfg(test)]
+use subprocess::{collect_ctx_json, configure_command};
+#[cfg(all(test, unix))]
 use subprocess::{read_bounded_pipe, MAX_RETAINED_SUBPROCESS_STDERR_BYTES};
 
 #[derive(Debug, Error)]
@@ -442,6 +442,7 @@ fn run_ctx_json(config: &LocalBackendConfig, args: &[String]) -> Result<Value, A
         command.env("CTX_DATA_ROOT", data_root);
     }
     command.env("CTX_ANALYTICS_ENABLED", "false");
+    configure_command(&mut command);
     let child = command.spawn().map_err(|err| {
         AgentHistoryError::new(
             AgentHistoryErrorCode::BackendUnavailable,

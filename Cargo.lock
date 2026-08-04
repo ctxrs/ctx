@@ -884,6 +884,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
