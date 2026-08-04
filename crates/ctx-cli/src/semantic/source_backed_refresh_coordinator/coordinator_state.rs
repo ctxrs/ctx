@@ -13,6 +13,8 @@ mod read_model;
 mod request_lifecycle;
 mod runtime_metadata;
 mod startup_observation;
+#[cfg(test)]
+mod test_support;
 use attempt_helpers::*;
 use coverage_contract::{
     ManualAllContinuation, PostPublicationRouteCoverageFence,
@@ -631,18 +633,6 @@ impl CoreRefreshEngine {
             request,
             source_backed_route_admission_fence,
         )
-    }
-
-    #[cfg(test)]
-    pub(in crate::semantic) fn handle_ipc_request_with_admission_fence_for_test(
-        &self,
-        data_root: &Path,
-        request: &Value,
-        observations: BTreeMap<SourceRouteIdentity, Option<String>>,
-    ) -> Result<Option<Value>> {
-        self.handle_ipc_request_with_admission_fence(data_root, request, move |_, _| {
-            Ok(observations.clone())
-        })
     }
 
     fn handle_ipc_request_with_admission_fence<F>(
