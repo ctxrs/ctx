@@ -126,6 +126,10 @@ fn registered_codex_parent_and_exact_subdirectory_keep_parent_source_ownership()
                 .unwrap(),
         )
         .unwrap();
+    // Registration declares route authority but does not read or freeze the
+    // provider tree. The shared JSONL lifecycle freezes its opening inventory
+    // only when this refresh is admitted, so this pre-refresh append belongs
+    // to the generation while the parent route still owns the nested source.
     let refreshed =
         refresh_source_backed_generation(&index, &combined_registry, WriterOptions::default())
             .unwrap();
@@ -156,12 +160,12 @@ fn registered_codex_parent_and_exact_subdirectory_keep_parent_source_ownership()
         .into_iter()
         .filter_map(|record| record.content.normalized_body)
         .collect::<Vec<_>>();
-    assert_eq!(bodies, vec!["parent root", "nested old"]);
+    assert_eq!(bodies, vec!["parent root", "nested old", "nested append"]);
 
     let caught_up =
         refresh_source_backed_generation(&index, &combined_registry, WriterOptions::default())
             .unwrap();
-    assert_ne!(
+    assert_eq!(
         caught_up.commit.generation_id,
         refreshed.commit.generation_id
     );

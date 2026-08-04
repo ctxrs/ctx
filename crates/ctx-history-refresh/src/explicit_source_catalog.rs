@@ -20,9 +20,8 @@ use ctx_history_capture::{
     source_backed_route_constructor, source_backed_route_inventory,
     validate_provider_source_roots_outside_data_root, DiscoveryReport, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
-    SourceBackedAutomaticRegistryBuild, SourceBackedProviderRegistry, SourceBackedRoute,
-    SourceBackedRouteConstructor, SourceBackedRouteDriver, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    SourceBackedAutomaticRegistryBuild, SourceBackedProviderRegistry, SourceBackedRouteConstructor,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
 };
 use ctx_history_core::{CaptureProvider, CertifiedSource, SourceAnchor, TypedKey};
 use ctx_history_index::VerifiedIndex;
@@ -474,22 +473,6 @@ fn register_explicit_source_catalog_snapshot_routes(
         } else {
             Vec::new()
         };
-    let automatic_codex_tree_has_current_or_retained_sources =
-        build.registry.routes().any(|route| {
-            route.selection == Some(SourceBackedRouteSelection::Automatic)
-                && route.source.provider == CaptureProvider::Codex
-                && route.source.source_format == "codex_session_jsonl_tree"
-                && (route.source.exists
-                    || base_generation.is_some_and(|index| {
-                        route.route_identity.as_ref().is_some_and(|route_identity| {
-                            index
-                                .manifest()
-                                .source_route(route_identity)
-                                .is_some_and(|snapshot| !snapshot.sources().is_empty())
-                        })
-                    }))
-        });
-
     let mut bindings = Vec::new();
     for entry in &snapshot.entries {
         let before = build
@@ -513,7 +496,6 @@ fn register_explicit_source_catalog_snapshot_routes(
             source,
             entry.lineage()?,
             &base_certificates,
-            automatic_codex_tree_has_current_or_retained_sources,
         )
         .with_context(|| {
             format!(
@@ -576,35 +558,7 @@ fn register_enabled_catalog_route(
     source: ProviderSource,
     lineage: [u8; 32],
     base_certificates: &[CertifiedSource],
-    automatic_codex_tree_has_current_or_retained_sources: bool,
 ) -> Result<()> {
-    if source.provider == CaptureProvider::Codex
-        && source.source_format == "codex_session_jsonl_tree"
-        && automatic_codex_tree_has_current_or_retained_sources
-    {
-        // Codex's current tree adapter reads every retained Codex tree source
-        // from the writer, so two independently owned tree routes can claim
-        // each other's sources. Keep the exact request terminal and typed
-        // until the provider exposes route-scoped retained-source authority.
-        let detail = "Codex session-tree exact import requires provider route-scoped retained-source ownership when an automatic Codex tree route is active";
-        let failure_detail = detail.to_owned();
-        let route = SourceBackedRoute::explicit_manual(
-            source,
-            SourceBackedSelectorAuthority::ExplicitPath,
-            SourceBackedRouteDriver::new(
-                move |_| {
-                    Err(SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::Unsupported,
-                        failure_detail.clone(),
-                    ))
-                },
-                |_| false,
-                |_| false,
-            ),
-        )?;
-        registry.register(route);
-        return Ok(());
-    }
     let constructor = source_backed_route_constructor(source.provider).ok_or_else(|| {
         anyhow!(
             "{} has no source-backed registration constructor",

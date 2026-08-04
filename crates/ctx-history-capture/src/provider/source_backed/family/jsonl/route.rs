@@ -39,9 +39,9 @@ const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
 mod leaf;
 #[cfg(test)]
 use leaf::family_scanner_worker_count_policy;
-#[cfg(test)]
-use leaf::prepare_leaf;
 use leaf::{physical_identity, scan_leaves, source_observation};
+#[cfg(test)]
+use leaf::{prepare_leaf, JsonlLeafOutput, JsonlLeafOutputEvent};
 mod ownership;
 use ownership::base_sources_for_root;
 mod revalidation;
@@ -163,6 +163,13 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         SourceBackedRouteErrorKind::InvalidSource
     }
 
+    /// Applies a deterministic provider-declared dependency order before the
+    /// shared family scheduler starts any leaf workers. Adapters may reorder
+    /// the supplied leaves but must not add or remove them.
+    fn order_leaf_scans(&self, _leaves: &mut [JsonlFamilyLeaf]) -> Result<()> {
+        Ok(())
+    }
+
     /// Performs adapter-owned preparation that must complete before any leaf
     /// worker starts and may conservatively cap this capture's worker count.
     /// The default has no preparation and keeps the shared scheduler budget.
@@ -172,6 +179,29 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         _bases: &HashMap<[u8; 32], &CertifiedSource>,
     ) -> Result<Option<usize>> {
         Ok(None)
+    }
+
+    /// Returns the dependency phase for one leaf after `prepare_leaf_scans`.
+    /// The shared scheduler runs every leaf in a phase concurrently, joins all
+    /// of those workers, and only then starts the next phase. Adapters that use
+    /// this hook must order leaves by nondecreasing phase. The default keeps
+    /// every leaf in one fully parallel phase.
+    fn leaf_scan_phase(&self, _leaf: &JsonlFamilyLeaf) -> Result<usize> {
+        Ok(0)
+    }
+
+    /// Pins related leaves to one persistent worker-state slot across
+    /// dependency phases. Equal affinities must denote leaves that may safely
+    /// serialize on one worker; the default leaves assignment round-robin.
+    fn leaf_worker_affinity(&self, _leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Releases adapter-owned scan-only state after all leaf workers have
+    /// joined. Terminal source and inventory revalidation must keep only the
+    /// evidence they need beyond this boundary.
+    fn finish_leaf_scans(&self) -> Result<()> {
+        Ok(())
     }
 
     fn projector(
@@ -862,7 +892,7 @@ fn capture(
         ));
     }
     let bases = base_sources_for_root(adapter, &opening, root, sink)?;
-    let selected_leaves = opening
+    let mut selected_leaves = opening
         .leaves()
         .iter()
         .filter(|leaf| {
@@ -871,6 +901,9 @@ fn capture(
         })
         .cloned()
         .collect::<Vec<_>>();
+    adapter
+        .order_leaf_scans(&mut selected_leaves)
+        .map_err(|error| route_scan(adapter, error))?;
     let mut owned_sources = HashMap::with_capacity(bases.len() + selected_leaves.len());
     for source in bases
         .iter()
@@ -895,7 +928,12 @@ fn capture(
         &bases_by_descriptor,
         base_event_lookup,
         sink,
-    )?;
+    );
+    let finish_leaf_scans = adapter
+        .finish_leaf_scans()
+        .map_err(|error| route_scan(adapter, error));
+    let terminal_sources = terminal_sources?;
+    finish_leaf_scans?;
 
     let selected_sources = selected_leaves
         .iter()

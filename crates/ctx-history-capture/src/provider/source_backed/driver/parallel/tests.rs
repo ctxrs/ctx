@@ -116,6 +116,40 @@ impl SinkHarness {
         sink.run_parallel_leaf_scans(jobs, worker_count, scan)
     }
 
+    fn run_with_existing_worker_states<L, R, W, F>(
+        &mut self,
+        jobs: Vec<ParallelLeafScanJob<L>>,
+        worker_states: &mut [W],
+        scan: F,
+    ) -> TestRunResult<R>
+    where
+        L: Send,
+        R: Send,
+        W: Send,
+        F: Fn(
+                &mut W,
+                &ParallelLeafScanJob<L>,
+                &mut ParallelLeafScanEmitter<'_, R, TestWorkerFailure>,
+            ) -> TestWorkerResult
+            + Sync,
+    {
+        let mut sink = SourceBackedGenerationSink {
+            core_record_preparer: self.writer.core_record_preparer(),
+            writer: &mut self.writer,
+            owners: &mut self.owners,
+            complete_inventories: &mut self.complete_inventories,
+            route_index: 0,
+            route_identity: test_route_identity(),
+            resources: SourceBackedRouteResources::production(self.leaf_worker_budget),
+            logical_source_failures: &mut self.logical_source_failures,
+            record_rejections: &mut self.record_rejections,
+            applied_removals: &mut Vec::new(),
+            record_progress: None,
+            current_source_progress: None,
+        };
+        sink.run_parallel_leaf_scans_with_worker_states(jobs, worker_states, scan)
+    }
+
     fn run_with_source_outcomes<L, R, F>(
         &mut self,
         jobs: Vec<ParallelLeafScanJob<L>>,
@@ -167,21 +201,8 @@ impl SinkHarness {
             ) -> TestWorkerResult
             + Sync,
     {
-        let mut sink = SourceBackedGenerationSink {
-            core_record_preparer: self.writer.core_record_preparer(),
-            writer: &mut self.writer,
-            owners: &mut self.owners,
-            complete_inventories: &mut self.complete_inventories,
-            route_index: 0,
-            route_identity: test_route_identity(),
-            resources: SourceBackedRouteResources::production(self.leaf_worker_budget),
-            logical_source_failures: &mut self.logical_source_failures,
-            record_rejections: &mut self.record_rejections,
-            applied_removals: &mut Vec::new(),
-            record_progress: None,
-            current_source_progress: None,
-        };
-        sink.run_parallel_leaf_scans_with_worker_state(jobs, worker_count, initialize_worker, scan)
+        let mut worker_states = (0..worker_count).map(initialize_worker).collect::<Vec<_>>();
+        self.run_with_existing_worker_states(jobs, &mut worker_states, scan)
     }
 
     fn run_with_resources_and_record_progress<L, R, F>(
@@ -318,6 +339,75 @@ fn worker_state_is_initialized_once_per_stripe_and_reused_in_order() {
             (1, 3)
         ]
     );
+}
+
+#[test]
+fn borrowed_worker_state_slots_survive_wide_narrow_wide_phases() {
+    fn jobs(ids: std::ops::Range<u8>) -> Vec<ParallelLeafScanJob<u8>> {
+        ids.map(|id| ParallelLeafScanJob::new(test_source(id), id))
+            .collect()
+    }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let mut harness = SinkHarness::open(&temp.path().join("index"));
+    let mut worker_states = vec![0_usize; 4];
+    let scan =
+        |worker: &mut usize,
+         job: &ParallelLeafScanJob<u8>,
+         emitter: &mut ParallelLeafScanEmitter<'_, usize, TestWorkerFailure>| {
+            *worker = worker.saturating_add(1);
+            emitter.complete(ParallelLeafScanComplete::Skipped { result: *worker })?;
+            let _ = job;
+            Ok(())
+        };
+
+    let first = harness
+        .run_with_existing_worker_states(jobs(0..4), &mut worker_states, scan)
+        .unwrap();
+    let second = harness
+        .run_with_existing_worker_states(jobs(4..5), &mut worker_states, scan)
+        .unwrap();
+    let third = harness
+        .run_with_existing_worker_states(jobs(5..9), &mut worker_states, scan)
+        .unwrap();
+
+    assert_eq!(first, [1, 1, 1, 1]);
+    assert_eq!(second, [2]);
+    assert_eq!(third, [3, 2, 2, 2]);
+    assert_eq!(worker_states, [3, 2, 2, 2]);
+}
+
+#[test]
+fn worker_affinity_pins_a_dependency_component_across_phase_widths() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let mut harness = SinkHarness::open(&temp.path().join("index"));
+    let mut worker_states = vec![0_usize; 4];
+    let scan =
+        |worker: &mut usize,
+         _job: &ParallelLeafScanJob<u8>,
+         emitter: &mut ParallelLeafScanEmitter<'_, usize, TestWorkerFailure>| {
+            *worker = worker.saturating_add(1);
+            emitter.complete(ParallelLeafScanComplete::Skipped { result: *worker })?;
+            Ok(())
+        };
+    let root = vec![ParallelLeafScanJob::new(test_source(10), 10).with_worker_affinity(3)];
+    let children = (11_u8..15)
+        .map(|id| ParallelLeafScanJob::new(test_source(id), id).with_worker_affinity(3))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        harness
+            .run_with_existing_worker_states(root, &mut worker_states, scan)
+            .unwrap(),
+        [1]
+    );
+    assert_eq!(
+        harness
+            .run_with_existing_worker_states(children, &mut worker_states, scan)
+            .unwrap(),
+        [2, 3, 4, 5]
+    );
+    assert_eq!(worker_states, [0, 0, 0, 5]);
 }
 
 #[test]
@@ -1153,7 +1243,7 @@ fn worker_budget_reserves_indexers_runtime_and_caps_scanners() {
 }
 
 #[test]
-fn core_record_transport_is_a_zero_capacity_one_record_rendezvous() {
+fn single_core_record_transport_uses_one_bounded_zero_capacity_batch_rendezvous() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let harness = SinkHarness::open(&temp.path().join("index"));
     let core_record_preparer = harness.writer.core_record_preparer();
@@ -1196,10 +1286,10 @@ fn core_record_transport_is_a_zero_capacity_one_record_rendezvous() {
         };
         assert_eq!(worker_index, 0);
         assert_eq!(job_index, 0);
-        assert!(matches!(
-            *message,
-            ParallelLeafProtocolMessage::CoreRecord(_)
-        ));
+        let ParallelLeafProtocolMessage::CoreRecordBatch(batch) = *message else {
+            panic!("expected one Core-record batch");
+        };
+        assert_eq!(batch.len(), 1);
         finished_receiver.recv().unwrap();
     });
 }
@@ -1274,6 +1364,48 @@ fn core_record_batch_transport_is_one_bounded_zero_capacity_rendezvous() {
     assert!(matches!(error, ParallelLeafScanEmitError::Cancelled(_)));
     assert_eq!(
         resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+}
+
+#[test]
+fn batch_emitter_rejects_a_zero_output_budget_without_transporting_a_record() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let harness = SinkHarness::open(&temp.path().join("index"));
+    let source = test_source(39);
+    let resources = SourceBackedRouteResources::for_test(1, 0, u64::MAX);
+    let (sender, receiver) =
+        mpsc::sync_channel::<ParallelLeafWorkerEvent<(), TestWorkerFailure>>(0);
+    let cancellation = AtomicBool::new(false);
+    let mut emitter = ParallelLeafScanEmitter {
+        worker_index: 0,
+        job_index: 0,
+        sender: &sender,
+        cancellation: &cancellation,
+        resources: resources.clone(),
+        core_record_preparer: harness.writer.core_record_preparer(),
+    };
+
+    let error = emitter
+        .emit_core_records(vec![test_core_record(&source, 1, 39)])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ParallelLeafScanEmitError::Route(SourceBackedRouteError {
+            kind: SourceBackedRouteErrorKind::ResourceUnavailable,
+            ..
+        })
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
+        0
+    );
+    assert_eq!(
+        resources.successful_reservations(SourceBackedRouteResourceKind::CoreOutput),
         0
     );
 }
@@ -1504,22 +1636,24 @@ fn batch_application_preserves_order_accounts_progress_and_releases_reservations
     assert_eq!(results, [()]);
     assert_eq!(
         progress,
-        vec![
-            SourceBackedRecordProgressDelta {
-                accepted_records: 1,
-                completed_bytes: 0,
-            };
-            3
-        ]
+        vec![SourceBackedRecordProgressDelta {
+            accepted_records: 3,
+            completed_bytes: 0,
+        }]
     );
     assert_eq!(
         live_bytes_after_acceptance,
-        [prepared_sizes[1] + prepared_sizes[2], prepared_sizes[2], 0,],
-        "each record reservation must be released immediately after writer acceptance"
+        [0],
+        "batch progress is reported after every accepted record releases its reservation"
     );
     assert_eq!(
         resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
         0
+    );
+    assert_eq!(
+        resources.successful_reservations(SourceBackedRouteResourceKind::CoreOutput),
+        1,
+        "one bounded transport batch must acquire the global byte budget once"
     );
 
     let batch_commit = harness.commit();
@@ -1608,7 +1742,7 @@ fn batch_validates_every_source_before_writing_and_propagates_progress_errors() 
     let mut accepted = 0_u64;
     let mut fail_progress = |delta: SourceBackedRecordProgressDelta| {
         accepted = accepted.saturating_add(delta.accepted_records);
-        if accepted == 2 {
+        if accepted == 3 {
             return Err(SourceBackedCoordinatorError::Progress(
                 SourceBackedRouteError::new(
                     SourceBackedRouteErrorKind::Internal,
@@ -1643,7 +1777,7 @@ fn batch_validates_every_source_before_writing_and_propagates_progress_errors() 
             ..
         } if detail == "injected batch progress failure"
     ));
-    assert_eq!(accepted, 2);
+    assert_eq!(accepted, 3);
     assert_eq!(
         resources.live_bytes(SourceBackedRouteResourceKind::CoreOutput),
         0,

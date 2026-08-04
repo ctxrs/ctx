@@ -9,9 +9,12 @@ use std::{
 use super::*;
 use crate::provider::codex::nativepath::record::codex_lineage_call_id_digest;
 
-pub(crate) const CODEX_LINEAGE_EXHAUSTED_SENTINEL: &str = "Codex lineage working set exhausted";
-const MAX_LINEAGE_FACTS_PER_TASK: usize = 262_144;
 const MAX_LINEAGE_FACT_BYTES_PER_TASK: usize = 64 * 1024 * 1024;
+pub(crate) const CODEX_LINEAGE_EXHAUSTED_SENTINEL: &str = "Codex lineage working set exhausted";
+// Keep a defensive logical-count ceiling, but derive it from the same fixed-
+// width memory budget instead of imposing an unrelated lower corpus-size cap.
+const MAX_LINEAGE_FACTS_PER_TASK: usize =
+    MAX_LINEAGE_FACT_BYTES_PER_TASK / size_of::<CodexLineageFactV0>();
 const LINEAGE_FACT_GROWTH: usize = 64;
 const LINEAGE_CONTAINER_CHARGE: usize = 128;
 
@@ -146,6 +149,7 @@ impl CodexLineageFactsV0 {
         if self.sealed {
             return;
         }
+        let previous_len = self.facts.len();
         self.facts.sort_unstable();
         let mut read = 0_usize;
         let mut write = 0_usize;
@@ -181,6 +185,12 @@ impl CodexLineageFactsV0 {
             }
         }
         self.facts.truncate(write);
+        let released_facts = previous_len.saturating_sub(write);
+        self.charged_facts = self
+            .charged_facts
+            .checked_sub(released_facts)
+            .expect("Codex lineage logical-fact accounting is balanced");
+        self.budget.release_facts(released_facts);
         self.sealed = true;
     }
 
@@ -192,7 +202,13 @@ impl CodexLineageFactsV0 {
     }
 
     pub(super) fn restore(&mut self, mark: CodexLineageFactMarkV0) {
+        let released_facts = self.facts.len().saturating_sub(mark.len);
         self.facts.truncate(mark.len);
+        self.charged_facts = self
+            .charged_facts
+            .checked_sub(released_facts)
+            .expect("Codex lineage logical-fact accounting is balanced");
+        self.budget.release_facts(released_facts);
         self.has_unattributed_ambiguity = mark.has_unattributed_ambiguity;
     }
 
@@ -238,41 +254,30 @@ impl CodexLineageFactsV0 {
             let bytes = requested
                 .checked_mul(size_of::<CodexLineageFactV0>())
                 .ok_or_else(lineage_exhausted)?;
-            self.budget.charge_facts(requested)?;
-            if let Err(error) = self.budget.charge(bytes) {
-                self.budget.release_facts(requested);
-                return Err(error);
-            }
+            self.budget.charge(bytes)?;
             if self.facts.try_reserve_exact(requested).is_err() {
                 self.budget.release(bytes);
-                self.budget.release_facts(requested);
                 return Err(lineage_exhausted());
             }
             let actual_facts = self.facts.capacity().saturating_sub(self.facts.len());
             let actual = actual_facts.saturating_mul(size_of::<CodexLineageFactV0>());
-            if actual_facts > requested {
-                if let Err(error) = self.budget.charge_facts(actual_facts - requested) {
-                    self.facts.shrink_to(self.facts.len());
-                    self.budget.release(bytes);
-                    self.budget.release_facts(requested);
-                    return Err(error);
-                }
-            } else {
-                self.budget.release_facts(requested - actual_facts);
-            }
             if actual > bytes {
                 if let Err(error) = self.budget.charge(actual - bytes) {
                     self.facts.shrink_to(self.facts.len());
                     self.budget.release(bytes);
-                    self.budget.release_facts(actual_facts);
                     return Err(error);
                 }
             } else {
                 self.budget.release(bytes - actual);
             }
             self.charged = self.charged.saturating_add(actual);
-            self.charged_facts = self.charged_facts.saturating_add(actual_facts);
         }
+        self.budget.charge_facts(1)?;
+        let Some(charged_facts) = self.charged_facts.checked_add(1) else {
+            self.budget.release_facts(1);
+            return Err(lineage_exhausted());
+        };
+        self.charged_facts = charged_facts;
         self.facts.push(CodexLineageFactV0 {
             call_id_sha256: digest,
             kind,
@@ -342,6 +347,83 @@ mod tests {
             facts.presence("duplicate", "duplicate"),
             CodexLineageFactPresenceV0::Unproven
         );
+    }
+
+    #[test]
+    fn logical_fact_budget_counts_entries_not_allocator_growth() {
+        let budget = Arc::new(CodexLineageFactBudgetV0::with_limits(1024 * 1024, 2));
+        let mut first = CodexLineageFactsV0::new(Arc::clone(&budget)).unwrap();
+        first
+            .record(CodexLineageRecordEvidence::Call("first"))
+            .unwrap();
+        first.seal();
+        assert_eq!(budget.facts.load(Ordering::Acquire), 1);
+
+        let mut second = CodexLineageFactsV0::new(Arc::clone(&budget)).unwrap();
+        second
+            .record(CodexLineageRecordEvidence::Call("second"))
+            .unwrap();
+        assert_eq!(budget.facts.load(Ordering::Acquire), 2);
+        assert!(matches!(
+            second.record(CodexLineageRecordEvidence::Call("exhausted")),
+            Err(CaptureError::InvalidPayload(detail))
+                if detail == CODEX_LINEAGE_EXHAUSTED_SENTINEL
+        ));
+        second.seal();
+        assert_eq!(budget.facts.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn thousands_of_small_fact_sets_are_charged_by_live_facts() {
+        const SETS: usize = 6_073;
+        let budget = Arc::new(CodexLineageFactBudgetV0::with_limits(
+            MAX_LINEAGE_FACT_BYTES_PER_TASK,
+            SETS,
+        ));
+        let mut retained = Vec::with_capacity(SETS);
+        for index in 0..SETS {
+            let mut facts = CodexLineageFactsV0::new(Arc::clone(&budget)).unwrap();
+            facts
+                .record(CodexLineageRecordEvidence::Call(&format!(
+                    "small-set-{index}"
+                )))
+                .unwrap();
+            facts.seal();
+            retained.push(facts);
+        }
+        assert_eq!(budget.facts.load(Ordering::Acquire), SETS);
+        assert!(budget.charged.load(Ordering::Acquire) < MAX_LINEAGE_FACT_BYTES_PER_TASK);
+        drop(retained);
+        assert_eq!(budget.facts.load(Ordering::Acquire), 0);
+        assert_eq!(budget.charged.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn rollback_and_seal_release_logical_fact_charges() {
+        let budget = Arc::new(CodexLineageFactBudgetV0::with_limits(1024 * 1024, 8));
+        {
+            let mut facts = CodexLineageFactsV0::new(Arc::clone(&budget)).unwrap();
+            facts
+                .record(CodexLineageRecordEvidence::Call("retained"))
+                .unwrap();
+            let mark = facts.mark();
+            facts
+                .record(CodexLineageRecordEvidence::Call("rolled-back"))
+                .unwrap();
+            facts.restore(mark);
+            assert_eq!(budget.facts.load(Ordering::Acquire), 1);
+            facts
+                .record(CodexLineageRecordEvidence::Ambiguous("duplicate"))
+                .unwrap();
+            facts
+                .record(CodexLineageRecordEvidence::Ambiguous("duplicate"))
+                .unwrap();
+            assert_eq!(budget.facts.load(Ordering::Acquire), 3);
+            facts.seal();
+            assert_eq!(budget.facts.load(Ordering::Acquire), 2);
+        }
+        assert_eq!(budget.facts.load(Ordering::Acquire), 0);
+        assert_eq!(budget.charged.load(Ordering::Acquire), 0);
     }
 
     #[test]

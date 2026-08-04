@@ -189,10 +189,13 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
             .success());
     }
 
-    let parent_id = "019facf0-4444-7777-8888-000000000001";
+    // Keep the child lexically ahead of its parent so the shared inventory's
+    // canonical path order is the opposite of the required lineage order.
+    let parent_id = "f19facf0-4444-7777-8888-000000000001";
     let child_id = "019facf0-4444-7777-8888-000000000002";
     let parent_path = sessions.join(format!("rollout-{parent_id}.jsonl"));
     let child_path = sessions.join(format!("rollout-{child_id}.jsonl"));
+    assert!(child_path < parent_path);
     let copied_oid = "518dedb053f04ab0b529c7d2e8dafb322974fbf6";
     let cold_child_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let warm_child_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

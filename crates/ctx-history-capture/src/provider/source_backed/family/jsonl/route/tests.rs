@@ -2,7 +2,7 @@ use std::{
     fs,
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -368,6 +368,92 @@ impl JsonlFamilyAdapter for ParallelTestAdapter {
     }
 }
 
+struct PhasedTestAdapter {
+    completed_first_phase: Arc<AtomicUsize>,
+    second_phase_started_early: Arc<AtomicBool>,
+}
+
+struct PhasedTestProjector {
+    phase: usize,
+    completed_first_phase: Arc<AtomicUsize>,
+    second_phase_started_early: Arc<AtomicBool>,
+}
+
+impl JsonlFamilyProjector for PhasedTestProjector {
+    fn project(
+        &mut self,
+        _record: JsonlRecordRef<'_>,
+        _worker: &mut JsonlFamilyWorkerContext,
+        _emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
+        if self.phase == 1 && self.completed_first_phase.load(Ordering::SeqCst) != 4 {
+            self.second_phase_started_early
+                .store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if self.phase == 0 {
+            self.completed_first_phase.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+impl JsonlFamilyAdapter for PhasedTestAdapter {
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "phased-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        TestAdapter.discover(root)
+    }
+
+    fn order_leaf_scans(&self, leaves: &mut [JsonlFamilyLeaf]) -> Result<()> {
+        leaves.sort_by_key(|leaf| self.leaf_scan_phase(leaf).unwrap_or(usize::MAX));
+        Ok(())
+    }
+
+    fn leaf_scan_phase(&self, leaf: &JsonlFamilyLeaf) -> Result<usize> {
+        Ok(usize::from(
+            leaf.source_path()
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.starts_with("second-")),
+        ))
+    }
+
+    fn projector(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<dyn JsonlFamilyProjector>> {
+        Ok(Box::new(PhasedTestProjector {
+            phase: self.leaf_scan_phase(leaf)?,
+            completed_first_phase: Arc::clone(&self.completed_first_phase),
+            second_phase_started_early: Arc::clone(&self.second_phase_started_early),
+        }))
+    }
+}
+
 struct IdentityRevisionTestAdapter {
     revision: &'static str,
     expected_mode: JsonlFamilyProjectionMode,
@@ -432,10 +518,30 @@ impl JsonlFamilyAdapter for IdentityRevisionTestAdapter {
     }
 }
 
-struct EmissionTestAdapter;
+struct EmissionTestAdapter {
+    project_fanout: usize,
+    finish_fanout: usize,
+    admitted: Option<Arc<AtomicUsize>>,
+    observed_before_65: Option<Arc<AtomicUsize>>,
+}
 
 struct EmissionTestProjector {
     source: SourceKey,
+    project_fanout: usize,
+    finish_fanout: usize,
+    admitted: Option<Arc<AtomicUsize>>,
+    observed_before_65: Option<Arc<AtomicUsize>>,
+}
+
+impl EmissionTestAdapter {
+    fn ordinary() -> Self {
+        Self {
+            project_fanout: 1,
+            finish_fanout: 0,
+            admitted: None,
+            observed_before_65: None,
+        }
+    }
 }
 
 fn emission_test_record(source: &SourceKey, ordinal: u64) -> Result<CoreRecord> {
@@ -487,8 +593,48 @@ impl JsonlFamilyProjector for EmissionTestProjector {
         _worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
-        let ordinal = record.evidence().physical_ordinal();
-        emit(emission_test_record(&self.source, ordinal)?)
+        let base = record
+            .evidence()
+            .physical_ordinal()
+            .checked_mul(1_000)
+            .ok_or(CaptureError::SystemInvariant(
+                "emission-test ordinal overflowed",
+            ))?;
+        self.emit_fanout(base, self.project_fanout, emit)
+    }
+
+    fn finish_projecting(
+        &mut self,
+        _worker: &mut JsonlFamilyWorkerContext,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
+        self.emit_fanout(1_000_000, self.finish_fanout, emit)
+    }
+}
+
+impl EmissionTestProjector {
+    fn emit_fanout(
+        &self,
+        base: u64,
+        count: usize,
+        emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
+    ) -> Result<()> {
+        for index in 0..count {
+            if index == 64 {
+                if let (Some(admitted), Some(observed)) =
+                    (self.admitted.as_ref(), self.observed_before_65.as_ref())
+                {
+                    observed.store(admitted.load(Ordering::SeqCst), Ordering::SeqCst);
+                }
+            }
+            let ordinal = base
+                .checked_add(index as u64)
+                .ok_or(CaptureError::SystemInvariant(
+                    "emission-test fanout overflowed",
+                ))?;
+            emit(emission_test_record(&self.source, ordinal)?)?;
+        }
+        Ok(())
     }
 }
 
@@ -525,6 +671,10 @@ impl JsonlFamilyAdapter for EmissionTestAdapter {
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         Ok(Box::new(EmissionTestProjector {
             source: leaf.source().clone(),
+            project_fanout: self.project_fanout,
+            finish_fanout: self.finish_fanout,
+            admitted: self.admitted.clone(),
+            observed_before_65: self.observed_before_65.clone(),
         }))
     }
 }
@@ -856,19 +1006,25 @@ fn optimized_leaf_execution_keeps_publication_inside_the_shared_family() {
             memory_bytes: 15_000_000,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let mut publications = Vec::new();
     let mut worker = JsonlFamilyWorkerContext::default();
+    let mut emit = |event| {
+        if let JsonlLeafOutputEvent::Page { append, records } = event {
+            publications.push((append, records.len()));
+        }
+        Ok(())
+    };
+    let mut output = JsonlLeafOutput::new(&mut emit);
     let prepared = prepare_leaf(
         &adapter,
         leaf,
         None,
         &writer.base_event_identity_lookup(),
         &mut worker,
-        &mut |append, records| {
-            publications.push((append, records.len()));
-            Ok(())
-        },
+        &mut output,
     )
     .unwrap();
 
@@ -901,21 +1057,76 @@ fn optimized_leaf_execution_rejects_records_owned_by_another_source() {
             memory_bytes: 15_000_000,
         },
     )
+    .unwrap()
+    .into_writer()
     .unwrap();
     let mut worker = JsonlFamilyWorkerContext::default();
+    let mut emit = |_event| Ok(());
+    let mut output = JsonlLeafOutput::new(&mut emit);
     let error = prepare_leaf(
         &adapter,
         leaf,
         None,
         &writer.base_event_identity_lookup(),
         &mut worker,
-        &mut |_append, _records| Ok(()),
+        &mut output,
     )
     .err()
     .expect("wrong-source optimized emission must fail");
     assert!(error
         .to_string()
         .contains("optimized JSONL leaf emitted a record for another source"));
+}
+
+#[test]
+fn generic_projection_streams_record_and_finish_fanout_before_record_65() {
+    for finish_only in [false, true] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("fanout.jsonl"), TEST_RECORD).unwrap();
+        let admitted = Arc::new(AtomicUsize::new(0));
+        let observed_before_65 = Arc::new(AtomicUsize::new(usize::MAX));
+        let adapter = EmissionTestAdapter {
+            project_fanout: if finish_only { 0 } else { 129 },
+            finish_fanout: if finish_only { 129 } else { 0 },
+            admitted: Some(Arc::clone(&admitted)),
+            observed_before_65: Some(Arc::clone(&observed_before_65)),
+        };
+        let inventory = adapter.discover(&root).unwrap();
+        let leaf = inventory.leaves().first().unwrap();
+        let writer = GenerationWriter::open(
+            temp.path().join("index"),
+            WriterOptions {
+                indexer_threads: 1,
+                memory_bytes: 15_000_000,
+            },
+        )
+        .unwrap()
+        .into_writer()
+        .unwrap();
+        let mut emit = |event| {
+            if matches!(event, JsonlLeafOutputEvent::Record { .. }) {
+                admitted.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        };
+        let mut output = JsonlLeafOutput::new(&mut emit);
+        let mut worker = JsonlFamilyWorkerContext::default();
+        let prepared = prepare_leaf(
+            &adapter,
+            leaf,
+            None,
+            &writer.base_event_identity_lookup(),
+            &mut worker,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(admitted.load(Ordering::SeqCst), 129);
+        assert_eq!(observed_before_65.load(Ordering::SeqCst), 64);
+        assert_eq!(prepared.certificate.counts().indexed_documents, 129);
+    }
 }
 
 #[test]
@@ -1138,19 +1349,49 @@ fn production_jsonl_scheduler_projects_multiple_sources_concurrently() {
 }
 
 #[test]
-fn serial_and_parallel_jsonl_emission_preserve_resource_unavailable() {
+fn dependency_phases_bar_later_jsonl_scans_without_serializing_each_phase() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
-    for index in 0..4 {
-        fs::write(
-            root.join(format!("{index}.jsonl")),
-            b"{\"message\":\"bounded\"}\n",
-        )
-        .unwrap();
+    for phase in ["first", "second"] {
+        for index in 0..4 {
+            fs::write(
+                root.join(format!("{phase}-{index}.jsonl")),
+                b"{\"message\":\"phased\"}\n",
+            )
+            .unwrap();
+        }
     }
+    let completed_first_phase = Arc::new(AtomicUsize::new(0));
+    let second_phase_started_early = Arc::new(AtomicBool::new(false));
+    let adapter = PhasedTestAdapter {
+        completed_first_phase: Arc::clone(&completed_first_phase),
+        second_phase_started_early: Arc::clone(&second_phase_started_early),
+    };
 
+    let (_, activity) =
+        capture_parallel_test_generation(&adapter, &root, &temp.path().join("index"), 4);
+
+    assert_eq!(completed_first_phase.load(Ordering::SeqCst), 4);
+    assert!(!second_phase_started_early.load(Ordering::SeqCst));
+    assert_eq!(activity.sources_started, 8);
+    assert_eq!(activity.sources_completed, 8);
+    assert_eq!(activity.peak_active_scanners, 4);
+}
+
+#[test]
+fn serial_and_parallel_jsonl_emission_preserve_resource_unavailable() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
     for workers in [1, 4] {
+        let root = temp.path().join(format!("sessions-{workers}"));
+        fs::create_dir_all(&root).unwrap();
+        for index in 0..workers {
+            fs::write(
+                root.join(format!("{index}.jsonl")),
+                b"{\"message\":\"bounded\"}\n",
+            )
+            .unwrap();
+        }
         let resident = Mutex::new(FamilyResident::default());
         let mut writer = GenerationWriter::open(
             temp.path().join(format!("index-{workers}")),
@@ -1182,7 +1423,13 @@ fn serial_and_parallel_jsonl_emission_preserve_resource_unavailable() {
         };
 
         let error = with_family_scanner_workers(workers, || {
-            capture(&EmissionTestAdapter, &root, &resident, &mut sink).unwrap_err()
+            capture(
+                &EmissionTestAdapter::ordinary(),
+                &root,
+                &resident,
+                &mut sink,
+            )
+            .unwrap_err()
         });
         assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
     }

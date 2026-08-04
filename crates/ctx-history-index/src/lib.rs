@@ -67,7 +67,10 @@ pub use policy::{
     SEMANTIC_EMBEDDING_DIMENSIONS, SEMANTIC_EMBEDDING_MODEL, SEMANTIC_EMBEDDING_MODEL_REVISION,
     SEMANTIC_EMBEDDING_NORMALIZATION, SEMANTIC_SOURCE_MAX_CHARS,
 };
-pub use preparation::{CoreRecordPreparer, PreparedCoreRecord};
+pub use preparation::{
+    CoreRecordPreparer, PreparedCoreRecord, PreparedCoreRecordDraft,
+    PreparedCoreRecordMaterialization,
+};
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
 #[cfg(test)]

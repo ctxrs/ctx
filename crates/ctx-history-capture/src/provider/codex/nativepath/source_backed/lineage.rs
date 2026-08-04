@@ -37,16 +37,25 @@ struct LineageNodeV0 {
     native_session_id: String,
     observation: CodexFileObservation,
     parent: ParentLinkV0,
+    has_children: bool,
     dependency_digest: [u8; 32],
     relationship_state: RelationshipStateV0,
     depth: usize,
 }
 
 #[derive(Debug)]
+enum LineageFactsStateV0 {
+    Pending,
+    OutsideRoute,
+    CompleteLeaf,
+    Ready(CodexLineageFactsV0),
+}
+
+#[derive(Debug)]
 pub(super) struct CodexOutcomeLineageAuthorityV0 {
     nodes: Vec<LineageNodeV0>,
     indices: HashMap<String, usize>,
-    facts: Mutex<Vec<Option<CodexLineageFactsV0>>>,
+    facts: Mutex<Vec<LineageFactsStateV0>>,
     budget: Arc<CodexLineageFactBudgetV0>,
     #[cfg(test)]
     dependency_work_units: usize,
@@ -92,10 +101,23 @@ impl CodexOutcomeLineageAuthorityV0 {
                 native_session_id: native_session_id.clone(),
                 observation: source.catalog_observation.clone(),
                 parent,
+                has_children: false,
                 dependency_digest: [0; 32],
                 relationship_state: RelationshipStateV0::Root,
                 depth: 0,
             });
+        }
+        for index in 0..nodes.len() {
+            let parent = match nodes[index].parent {
+                ParentLinkV0::Source(parent) => Some(parent),
+                ParentLinkV0::Root | ParentLinkV0::Missing(_) => None,
+            };
+            if let Some(parent) = parent {
+                nodes
+                    .get_mut(parent)
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+                    .has_children = true;
+            }
         }
         let dependency_work_units = compute_dependency_digests(&mut nodes)?;
         #[cfg(not(test))]
@@ -105,7 +127,7 @@ impl CodexOutcomeLineageAuthorityV0 {
         facts
             .try_reserve_exact(nodes.len())
             .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
-        facts.resize_with(nodes.len(), || None);
+        facts.resize_with(nodes.len(), || LineageFactsStateV0::Pending);
         Ok(Self {
             nodes,
             indices,
@@ -131,6 +153,25 @@ impl CodexOutcomeLineageAuthorityV0 {
         CodexLineageFactsV0::new(Arc::clone(&self.budget)).map_err(map_lineage_capture_error)
     }
 
+    pub(super) fn bind_route_sources(
+        &self,
+        selected_native_session_ids: &HashSet<String>,
+    ) -> CodexSourceBackedResultV0<()> {
+        let mut facts = self
+            .facts
+            .lock()
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        for (node, state) in self.nodes.iter().zip(facts.iter_mut()) {
+            if !selected_native_session_ids.contains(&node.native_session_id) {
+                if !matches!(state, LineageFactsStateV0::Pending) {
+                    return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
+                }
+                *state = LineageFactsStateV0::OutsideRoute;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn register(
         &self,
         native_session_id: &str,
@@ -142,6 +183,11 @@ impl CodexOutcomeLineageAuthorityV0 {
             .get(native_session_id)
             .copied()
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let retain_facts = self
+            .nodes
+            .get(index)
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+            .has_children;
         let mut registered = self
             .facts
             .lock()
@@ -149,11 +195,25 @@ impl CodexOutcomeLineageAuthorityV0 {
         let slot = registered
             .get_mut(index)
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-        if slot.is_some() {
-            return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
+        match slot {
+            LineageFactsStateV0::Pending => {
+                *slot = if retain_facts {
+                    LineageFactsStateV0::Ready(facts)
+                } else {
+                    // A session's facts are consulted only while classifying
+                    // descendants. Terminal leaves still need a completed
+                    // state, but retaining their facts can never affect an
+                    // outcome and would turn corpus size into live state.
+                    LineageFactsStateV0::CompleteLeaf
+                };
+                Ok(())
+            }
+            LineageFactsStateV0::OutsideRoute
+            | LineageFactsStateV0::CompleteLeaf
+            | LineageFactsStateV0::Ready(_) => {
+                Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+            }
         }
-        *slot = Some(facts);
-        Ok(())
     }
 
     pub(super) fn dependency_digest(&self, native_session_id: &str) -> [u8; 32] {
@@ -169,6 +229,34 @@ impl CodexOutcomeLineageAuthorityV0 {
             .get(native_session_id)
             .and_then(|index| self.nodes.get(*index))
             .map_or(usize::MAX, |node| node.depth)
+    }
+
+    pub(super) fn component_affinity(&self, native_session_id: &str) -> u64 {
+        let Some(mut current) = self.indices.get(native_session_id).copied() else {
+            return u64::MAX;
+        };
+        let mut remaining = self.nodes.len().saturating_add(1);
+        while remaining != 0 {
+            remaining = remaining.saturating_sub(1);
+            let Some(node) = self.nodes.get(current) else {
+                return u64::MAX;
+            };
+            if node.depth == 0 {
+                let digest: [u8; 32] = if node.relationship_state == RelationshipStateV0::Cycle {
+                    node.dependency_digest
+                } else {
+                    let mut hasher = dependency_hasher(b"component\0");
+                    hash_text(&mut hasher, &node.native_session_id);
+                    hasher.finalize().into()
+                };
+                return u64::from_le_bytes(digest[..8].try_into().unwrap_or([0; 8]));
+            }
+            match node.parent {
+                ParentLinkV0::Source(parent) => current = parent,
+                ParentLinkV0::Root | ParentLinkV0::Missing(_) => return u64::MAX,
+            }
+        }
+        u64::MAX
     }
 
     pub(super) fn classify(
@@ -221,10 +309,18 @@ impl CodexOutcomeLineageAuthorityV0 {
                 .nodes
                 .get(parent_index)
                 .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-            let parent_facts = facts
-                .get(parent_index)
-                .and_then(Option::as_ref)
-                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            let parent_facts = match facts.get(parent_index) {
+                Some(LineageFactsStateV0::Ready(facts)) => facts,
+                Some(LineageFactsStateV0::OutsideRoute) => {
+                    return Ok(CodexOutcomeOriginV0::Unproven)
+                }
+                Some(LineageFactsStateV0::CompleteLeaf) => {
+                    return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+                }
+                Some(LineageFactsStateV0::Pending) | None => {
+                    return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+                }
+            };
             match parent_facts.presence(origin_call_id, result_call_id) {
                 CodexLineageFactPresenceV0::Present => {
                     return Ok(CodexOutcomeOriginV0::CopiedFromAncestor)
@@ -556,5 +652,54 @@ mod tests {
                 candidate.4,
             ));
         }
+    }
+
+    #[test]
+    fn parent_owned_by_another_route_is_conservatively_unproven() {
+        let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        authority
+            .bind_route_sources(&HashSet::from(["child".to_owned()]))
+            .unwrap();
+        assert_eq!(
+            authority
+                .classify("child", "call", "call", None, 0, 0)
+                .unwrap(),
+            CodexOutcomeOriginV0::Unproven
+        );
+    }
+
+    #[test]
+    fn selected_parent_without_facts_remains_a_typed_ordering_failure() {
+        let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        authority
+            .bind_route_sources(&HashSet::from(["root".to_owned(), "child".to_owned()]))
+            .unwrap();
+        assert!(matches!(
+            authority.classify("child", "call", "call", None, 0, 0),
+            Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+        ));
+    }
+
+    #[test]
+    fn registered_terminal_leaf_drops_facts_but_remains_complete() {
+        let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        authority
+            .bind_route_sources(&HashSet::from(["root".to_owned(), "child".to_owned()]))
+            .unwrap();
+
+        authority
+            .register("child", authority.new_fact_set().unwrap())
+            .unwrap();
+        let facts = authority.facts.lock().unwrap();
+        let child = authority.indices["child"];
+        assert!(matches!(facts[child], LineageFactsStateV0::CompleteLeaf));
+        drop(facts);
+        assert!(matches!(
+            authority.register("child", authority.new_fact_set().unwrap()),
+            Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+        ));
     }
 }

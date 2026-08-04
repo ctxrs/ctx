@@ -4,7 +4,10 @@ use std::sync::{
 };
 
 use ctx_history_core::CoreRecord;
-use ctx_history_index::{CoreRecordPreparer, IndexError, PreparedCoreRecord};
+use ctx_history_index::{
+    CoreRecordPreparer, IndexError, PreparedCoreRecord, PreparedCoreRecordDraft,
+    PreparedCoreRecordMaterialization,
+};
 
 use super::{SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult};
 
@@ -46,6 +49,8 @@ impl std::fmt::Display for SourceBackedRouteResourceKind {
 struct SourceBackedRouteByteBudget {
     maximum: u64,
     live: AtomicU64,
+    #[cfg(test)]
+    successful_reservations: AtomicU64,
 }
 
 /// Cloneable route resources shared by every scanner worker. Cloning this
@@ -76,10 +81,14 @@ impl SourceBackedRouteResources {
             output: Arc::new(SourceBackedRouteByteBudget {
                 maximum: maximum_live_output_bytes,
                 live: AtomicU64::new(0),
+                #[cfg(test)]
+                successful_reservations: AtomicU64::new(0),
             }),
             scratch: Arc::new(SourceBackedRouteByteBudget {
                 maximum: maximum_physical_scratch_bytes,
                 live: AtomicU64::new(0),
+                #[cfg(test)]
+                successful_reservations: AtomicU64::new(0),
             }),
         }
     }
@@ -106,6 +115,18 @@ impl SourceBackedRouteResources {
             SourceBackedRouteResourceKind::CoreOutput => self.output.maximum,
             SourceBackedRouteResourceKind::LogicalSourceScratch => self.scratch.maximum,
         }
+    }
+
+    /// One worker may reserve this conservative share before preparing a
+    /// transport batch. Shares across the configured worker budget sum to no
+    /// more than the route maximum, so batching amortizes global accounting
+    /// without weakening the aggregate live-byte ceiling.
+    pub(crate) fn core_output_batch_reservation_bytes(&self) -> u64 {
+        if self.output.maximum == 0 {
+            return 0;
+        }
+        let workers = u64::try_from(self.leaf_worker_budget).unwrap_or(u64::MAX);
+        self.output.maximum.checked_div(workers).unwrap_or(0).max(1)
     }
 
     pub(crate) fn reserve(
@@ -137,6 +158,10 @@ impl SourceBackedRouteResources {
                 .compare_exchange_weak(live, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => {
+                    #[cfg(test)]
+                    budget
+                        .successful_reservations
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(SourceBackedRouteByteReservation {
                         budget: Arc::clone(budget),
                         bytes,
@@ -155,6 +180,16 @@ impl SourceBackedRouteResources {
         }
         .live
         .load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn successful_reservations(&self, kind: SourceBackedRouteResourceKind) -> u64 {
+        match kind {
+            SourceBackedRouteResourceKind::CoreOutput => &self.output,
+            SourceBackedRouteResourceKind::LogicalSourceScratch => &self.scratch,
+        }
+        .successful_reservations
+        .load(Ordering::Relaxed)
     }
 }
 
@@ -222,6 +257,24 @@ impl CoreRecordEmission {
         })
     }
 
+    pub(crate) fn prepare_draft(
+        record: CoreRecord,
+        preparer: &CoreRecordPreparer,
+    ) -> SourceBackedRouteResult<PreparedCoreRecordDraft> {
+        preparer.prepare_draft(record).map_err(|error| {
+            SourceBackedRouteError::new(core_preparation_error_kind(&error), error.to_string())
+        })
+    }
+
+    pub(crate) fn materialize_draft(
+        draft: PreparedCoreRecordDraft,
+        maximum_encoded_bytes: usize,
+    ) -> SourceBackedRouteResult<PreparedCoreRecordMaterialization> {
+        draft.materialize(maximum_encoded_bytes).map_err(|error| {
+            SourceBackedRouteError::new(core_preparation_error_kind(&error), error.to_string())
+        })
+    }
+
     pub(crate) fn from_prepared(
         prepared: PreparedCoreRecord,
         resources: &SourceBackedRouteResources,
@@ -243,10 +296,6 @@ impl CoreRecordEmission {
         }
     }
 
-    pub(crate) fn source(&self) -> &ctx_history_core::SourceKey {
-        self.prepared.source()
-    }
-
     pub(crate) fn into_prepared(self) -> (PreparedCoreRecord, SourceBackedRouteByteReservation) {
         let Self {
             prepared,
@@ -256,19 +305,107 @@ impl CoreRecordEmission {
     }
 }
 
-/// One worker-prepared Core-record batch. Every record owns an independent
-/// reservation from the shared live output budget, so dropping a partially
-/// prepared batch or a rejected protocol message releases all of its bytes.
-#[derive(Debug)]
-pub(crate) struct CoreRecordEmissionBatch {
-    emissions: Vec<CoreRecordEmission>,
+/// A mutable worker-local Core-record batch. The batch acquires one
+/// conservative share of the global output budget before retaining prepared
+/// records. A record larger than that share instead receives one exact
+/// reservation and travels alone.
+#[derive(Debug, Default)]
+pub(crate) struct CoreRecordEmissionBatchBuilder {
+    prepared: Vec<PreparedCoreRecord>,
+    reservation: Option<SourceBackedRouteByteReservation>,
+    prepared_bytes: u64,
 }
 
-impl CoreRecordEmissionBatch {
-    pub(crate) fn from_emissions(
-        emissions: Vec<CoreRecordEmission>,
-    ) -> SourceBackedRouteResult<Self> {
-        if emissions.len() > SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS {
+impl CoreRecordEmissionBatchBuilder {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.prepared.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.prepared.len()
+    }
+
+    pub(crate) fn has_reservation(&self) -> bool {
+        self.reservation.is_some()
+    }
+
+    pub(crate) fn reservation_bytes(&self) -> u64 {
+        self.reservation
+            .as_ref()
+            .map_or(0, SourceBackedRouteByteReservation::bytes)
+    }
+
+    pub(crate) fn remaining_bytes(&self) -> u64 {
+        self.reservation_bytes().saturating_sub(self.prepared_bytes)
+    }
+
+    pub(crate) fn can_admit(&self, prepared_bytes: u64) -> bool {
+        self.reservation.as_ref().is_some_and(|reservation| {
+            self.prepared_bytes
+                .checked_add(prepared_bytes)
+                .is_some_and(|total| total <= reservation.bytes())
+        })
+    }
+
+    pub(crate) fn reserve_bytes(
+        &mut self,
+        reservation_bytes: u64,
+        resources: &SourceBackedRouteResources,
+    ) -> SourceBackedRouteResult<()> {
+        debug_assert!(self.is_empty());
+        debug_assert!(self.reservation.is_none());
+        let reservation_bytes = usize::try_from(reservation_bytes).map_err(|_| {
+            resource_error(
+                SourceBackedRouteResourceKind::CoreOutput,
+                resources.maximum_bytes(SourceBackedRouteResourceKind::CoreOutput),
+            )
+        })?;
+        self.reservation =
+            Some(resources.reserve(SourceBackedRouteResourceKind::CoreOutput, reservation_bytes)?);
+        Ok(())
+    }
+
+    pub(crate) fn release_empty_reservation(&mut self) {
+        debug_assert!(self.is_empty());
+        self.reservation = None;
+        self.prepared_bytes = 0;
+    }
+
+    pub(crate) fn push(&mut self, prepared: PreparedCoreRecord) -> SourceBackedRouteResult<()> {
+        let prepared_bytes = u64::try_from(prepared.encoded_core_bytes()).map_err(|_| {
+            SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Internal,
+                "prepared Core-record byte count overflowed",
+            )
+        })?;
+        if !self.can_admit(prepared_bytes) {
+            return Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Internal,
+                "prepared Core record exceeded its batch reservation",
+            ));
+        }
+        self.prepared_bytes = self
+            .prepared_bytes
+            .checked_add(prepared_bytes)
+            .ok_or_else(|| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "prepared Core-record batch byte count overflowed",
+                )
+            })?;
+        self.prepared.push(prepared);
+        Ok(())
+    }
+
+    pub(crate) fn take_batch(
+        &mut self,
+    ) -> SourceBackedRouteResult<Option<CoreRecordEmissionBatch>> {
+        if self.is_empty() {
+            self.reservation = None;
+            self.prepared_bytes = 0;
+            return Ok(None);
+        }
+        if self.prepared.len() > SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS {
             return Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Internal,
                 format!(
@@ -277,20 +414,42 @@ impl CoreRecordEmissionBatch {
                 ),
             ));
         }
-        Ok(Self { emissions })
+        let reservation = self.reservation.take().ok_or_else(|| {
+            SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::Internal,
+                "prepared Core-record batch has no live byte reservation",
+            )
+        })?;
+        self.prepared_bytes = 0;
+        Ok(Some(CoreRecordEmissionBatch {
+            prepared: std::mem::take(&mut self.prepared),
+            reservation,
+        }))
     }
+}
 
-    #[cfg(test)]
+/// One worker-prepared Core-record batch. All retained records share one
+/// aggregate reservation, released if the message is rejected or after the
+/// writer accepts the complete batch.
+#[derive(Debug)]
+pub(crate) struct CoreRecordEmissionBatch {
+    prepared: Vec<PreparedCoreRecord>,
+    reservation: SourceBackedRouteByteReservation,
+}
+
+impl CoreRecordEmissionBatch {
     pub(crate) fn len(&self) -> usize {
-        self.emissions.len()
+        self.prepared.len()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &CoreRecordEmission> {
-        self.emissions.iter()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &PreparedCoreRecord> {
+        self.prepared.iter()
     }
 
-    pub(crate) fn into_emissions(self) -> impl Iterator<Item = CoreRecordEmission> {
-        self.emissions.into_iter()
+    pub(crate) fn into_prepared(
+        self,
+    ) -> (Vec<PreparedCoreRecord>, SourceBackedRouteByteReservation) {
+        (self.prepared, self.reservation)
     }
 }
 

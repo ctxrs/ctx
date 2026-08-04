@@ -8,13 +8,15 @@ use std::{
     time::Duration,
 };
 
-use ctx_history_core::{CertifiedSource, CertifiedSourceAppend, CoreRecord, SourceKey};
-use ctx_history_index::CoreRecordPreparer;
+use ctx_history_core::{
+    CertifiedSource, CertifiedSourceAppend, CoreRecord, SourceKey, MAX_ENCODED_CORE_RECORD_BYTES,
+};
+use ctx_history_index::{CoreRecordPreparer, PreparedCoreRecordMaterialization};
 use thiserror::Error;
 
 use super::super::{
-    CoreRecordEmission, CoreRecordEmissionBatch, SourceBackedCoordinatorError,
-    SourceBackedGenerationSink, SourceBackedLogicalSourceFailureFact,
+    CoreRecordEmission, CoreRecordEmissionBatch, CoreRecordEmissionBatchBuilder,
+    SourceBackedCoordinatorError, SourceBackedGenerationSink, SourceBackedLogicalSourceFailureFact,
     SourceBackedRecordRejectionDrafts, SourceBackedRouteError, SourceBackedRouteErrorKind,
     SourceBackedRouteResourceKind, SourceBackedRouteResources, SourceBackedSourceOutcome,
     SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS,
@@ -26,11 +28,21 @@ const CORE_OUTPUT_RESERVATION_RETRY_DELAY: Duration = Duration::from_millis(1);
 pub struct ParallelLeafScanJob<L> {
     source: SourceKey,
     leaf: L,
+    worker_affinity: Option<u64>,
 }
 
 impl<L> ParallelLeafScanJob<L> {
     pub fn new(source: SourceKey, leaf: L) -> Self {
-        Self { source, leaf }
+        Self {
+            source,
+            leaf,
+            worker_affinity: None,
+        }
+    }
+
+    pub(crate) fn with_worker_affinity(mut self, worker_affinity: u64) -> Self {
+        self.worker_affinity = Some(worker_affinity);
+        self
     }
 
     pub fn source(&self) -> &SourceKey {
@@ -39,6 +51,10 @@ impl<L> ParallelLeafScanJob<L> {
 
     pub fn leaf(&self) -> &L {
         &self.leaf
+    }
+
+    pub(crate) fn worker_affinity(&self) -> Option<u64> {
+        self.worker_affinity
     }
 }
 
@@ -265,7 +281,10 @@ pub(super) struct ParallelLeafBeginAcknowledgement(SyncSender<()>);
 
 impl ParallelLeafBeginAcknowledgement {
     fn rendezvous() -> (Self, Receiver<()>) {
-        let (sender, receiver) = mpsc::sync_channel(0);
+        // The worker still cannot proceed before receiving this token, while
+        // one slot lets the coordinator resume servicing other ready workers
+        // immediately after applying Begin.
+        let (sender, receiver) = mpsc::sync_channel(1);
         (Self(sender), receiver)
     }
 
@@ -390,7 +409,6 @@ pub(super) enum ParallelLeafProtocolMessage<R> {
         begin: Box<ParallelLeafScanBegin>,
         acknowledgement: ParallelLeafBeginAcknowledgement,
     },
-    CoreRecord(Box<CoreRecordEmission>),
     CoreRecordBatch(Box<CoreRecordEmissionBatch>),
     Complete(Box<ParallelLeafScanComplete<R>>),
 }
@@ -453,17 +471,9 @@ impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
         &mut self,
         record: CoreRecord,
     ) -> Result<(), ParallelLeafScanEmitError> {
-        let emission =
-            CoreRecordEmission::new(record, &self.resources, &self.core_record_preparer)?;
-        self.emit_core_record_emission(emission)
-    }
-
-    pub(crate) fn emit_core_record_emission(
-        &mut self,
-        emission: CoreRecordEmission,
-    ) -> Result<(), ParallelLeafScanEmitError> {
-        self.send(ParallelLeafProtocolMessage::CoreRecord(Box::new(emission)))?;
-        Ok(())
+        let mut emissions = CoreRecordEmissionBatchBuilder::default();
+        self.emit_core_record_batched(&mut emissions, record)?;
+        self.emit_core_record_batch(&mut emissions)
     }
 
     /// Prepares and reserves one bounded provider page on this worker, then
@@ -477,65 +487,128 @@ impl<R, E> ParallelLeafScanEmitter<'_, R, E> {
         &mut self,
         records: Vec<CoreRecord>,
     ) -> Result<(), ParallelLeafScanEmitError> {
-        let mut emissions = Vec::with_capacity(
-            records
-                .len()
-                .min(SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS),
-        );
+        let mut emissions = CoreRecordEmissionBatchBuilder::default();
         for record in records {
-            self.require_not_cancelled()?;
-            let prepared = CoreRecordEmission::prepare(record, &self.core_record_preparer)?;
-            let prepared_bytes = prepared.encoded_core_bytes();
-            let maximum_bytes = self
-                .resources
-                .maximum_bytes(SourceBackedRouteResourceKind::CoreOutput);
-
-            let reservation = loop {
-                self.require_not_cancelled()?;
-                match self
-                    .resources
-                    .reserve(SourceBackedRouteResourceKind::CoreOutput, prepared_bytes)
-                {
-                    Ok(reservation) => break reservation,
-                    Err(error)
-                        if error.kind == SourceBackedRouteErrorKind::ResourceUnavailable
-                            && u64::try_from(prepared_bytes)
-                                .ok()
-                                .is_some_and(|bytes| bytes <= maximum_bytes) =>
-                    {
-                        if !emissions.is_empty() {
-                            self.emit_core_record_batch(&mut emissions)?;
-                        } else {
-                            thread::sleep(CORE_OUTPUT_RESERVATION_RETRY_DELAY);
-                        }
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            };
-            emissions.push(CoreRecordEmission::from_prepared_and_reservation(
-                prepared,
-                reservation,
-            ));
-            if emissions.len() == SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS {
-                self.emit_core_record_batch(&mut emissions)?;
-            }
+            self.emit_core_record_batched(&mut emissions, record)?;
         }
         self.emit_core_record_batch(&mut emissions)?;
         Ok(())
     }
 
-    fn emit_core_record_batch(
+    pub(crate) fn emit_core_record_batched(
         &mut self,
-        emissions: &mut Vec<CoreRecordEmission>,
+        emissions: &mut CoreRecordEmissionBatchBuilder,
+        record: CoreRecord,
     ) -> Result<(), ParallelLeafScanEmitError> {
-        if emissions.is_empty() {
-            return Ok(());
+        self.require_not_cancelled()?;
+        let mut draft = CoreRecordEmission::prepare_draft(record, &self.core_record_preparer)?;
+        self.require_not_cancelled()?;
+        let route_maximum_bytes = self
+            .resources
+            .maximum_bytes(SourceBackedRouteResourceKind::CoreOutput);
+        let maximum_materialization_bytes = route_maximum_bytes
+            .min(u64::try_from(MAX_ENCODED_CORE_RECORD_BYTES).unwrap_or(u64::MAX));
+
+        loop {
+            self.require_not_cancelled()?;
+            if !emissions.has_reservation() {
+                self.reserve_core_output_cancelably(
+                    emissions,
+                    self.resources.core_output_batch_reservation_bytes().max(1),
+                )?;
+            }
+            self.require_not_cancelled()?;
+            let materialization_limit = usize::try_from(
+                emissions
+                    .remaining_bytes()
+                    .min(maximum_materialization_bytes),
+            )
+            .map_err(|_| {
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::Internal,
+                    "Core-record materialization permit does not fit this platform",
+                )
+            })?;
+            match CoreRecordEmission::materialize_draft(draft, materialization_limit)? {
+                PreparedCoreRecordMaterialization::Prepared(prepared) => {
+                    emissions.push(prepared)?;
+                    if emissions.len() == SOURCE_BACKED_CORE_RECORD_BATCH_MAX_RECORDS {
+                        self.emit_core_record_batch(emissions)?;
+                    }
+                    return Ok(());
+                }
+                PreparedCoreRecordMaterialization::CapacityExceeded(returned_draft) => {
+                    draft = *returned_draft;
+                }
+            }
+
+            if !emissions.is_empty() {
+                self.emit_core_record_batch(emissions)?;
+                continue;
+            }
+
+            if emissions.reservation_bytes() >= maximum_materialization_bytes {
+                emissions.release_empty_reservation();
+                let maximum_core_bytes =
+                    u64::try_from(MAX_ENCODED_CORE_RECORD_BYTES).unwrap_or(u64::MAX);
+                let (kind, detail) = if route_maximum_bytes < maximum_core_bytes {
+                    (
+                        SourceBackedRouteErrorKind::ResourceUnavailable,
+                        format!(
+                            "shared route live prepared Core-record output byte limit cannot admit \
+                             one valid record: maximum {route_maximum_bytes}"
+                        ),
+                    )
+                } else {
+                    (
+                        SourceBackedRouteErrorKind::InvalidSource,
+                        format!(
+                            "encoded Core record exceeds the {MAX_ENCODED_CORE_RECORD_BYTES}-byte \
+                             contract maximum"
+                        ),
+                    )
+                };
+                return Err(SourceBackedRouteError::new(kind, detail).into());
+            }
+
+            emissions.release_empty_reservation();
+            self.reserve_core_output_cancelably(emissions, maximum_materialization_bytes)?;
         }
-        let batch = CoreRecordEmissionBatch::from_emissions(std::mem::take(emissions))?;
-        self.send(ParallelLeafProtocolMessage::CoreRecordBatch(Box::new(
-            batch,
-        )))?;
+    }
+
+    pub(crate) fn emit_core_record_batch(
+        &mut self,
+        emissions: &mut CoreRecordEmissionBatchBuilder,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        if let Some(batch) = emissions.take_batch()? {
+            self.send(ParallelLeafProtocolMessage::CoreRecordBatch(Box::new(
+                batch,
+            )))?;
+        }
         Ok(())
+    }
+
+    fn reserve_core_output_cancelably(
+        &self,
+        emissions: &mut CoreRecordEmissionBatchBuilder,
+        reservation_bytes: u64,
+    ) -> Result<(), ParallelLeafScanEmitError> {
+        let route_maximum_bytes = self
+            .resources
+            .maximum_bytes(SourceBackedRouteResourceKind::CoreOutput);
+        loop {
+            self.require_not_cancelled()?;
+            match emissions.reserve_bytes(reservation_bytes, &self.resources) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.kind == SourceBackedRouteErrorKind::ResourceUnavailable
+                        && reservation_bytes <= route_maximum_bytes =>
+                {
+                    thread::sleep(CORE_OUTPUT_RESERVATION_RETRY_DELAY);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     fn require_not_cancelled(&self) -> Result<(), ParallelLeafScanCancelled> {

@@ -1,4 +1,5 @@
 use super::*;
+use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use std::{path::Path, sync::Arc};
 
 mod merge_policy;
@@ -33,6 +34,48 @@ fn commit_binds_manifest_and_searchable_documents() {
     );
     assert_eq!(index.manifest().indexed_documents, 1);
     assert_eq!(index.count_term("atomic").unwrap(), 1);
+}
+
+#[test]
+fn prepared_core_draft_retries_final_encoding_under_a_caller_permit() {
+    let temp = tempdir().unwrap();
+    let source = source("bounded-materialization.jsonl");
+    let record = document(&source, 1, "bounded materialization");
+    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let preparer = writer.core_record_preparer();
+
+    crate::preparation::reset_final_encoding_count();
+    let draft = preparer.prepare_draft(record.clone()).unwrap();
+    let draft = match draft.materialize(1).unwrap() {
+        PreparedCoreRecordMaterialization::CapacityExceeded(draft) => *draft,
+        PreparedCoreRecordMaterialization::Prepared(_) => {
+            panic!("one byte unexpectedly admitted a complete Core record")
+        }
+    };
+    assert_eq!(
+        crate::preparation::final_encoding_count(),
+        0,
+        "a failed bounded attempt is not a completed canonical encoding"
+    );
+
+    let prepared = match draft.materialize(MAX_ENCODED_CORE_RECORD_BYTES).unwrap() {
+        PreparedCoreRecordMaterialization::Prepared(prepared) => prepared,
+        PreparedCoreRecordMaterialization::CapacityExceeded(_) => {
+            panic!("a valid Core record exceeded the contract maximum")
+        }
+    };
+    assert_eq!(crate::preparation::final_encoding_count(), 1);
+
+    let reference = preparer.prepare(record).unwrap();
+    assert_eq!(
+        prepared.encoded_core_bytes(),
+        reference.encoded_core_bytes(),
+        "retrying under a sufficient permit must preserve canonical encoding"
+    );
+    assert_eq!(crate::preparation::final_encoding_count(), 2);
 }
 
 #[test]

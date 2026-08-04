@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    io::{self, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -9,6 +10,7 @@ use std::cell::Cell;
 
 use ctx_history_core::{
     CoreRecord, SourceKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION,
+    MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use tantivy::Searcher;
 
@@ -67,7 +69,27 @@ impl CoreRecordPreparer {
     /// projection and aggregate leaf from those same bytes. Corrupt base
     /// authority is returned as a rebuild-required error; preparation never
     /// persists publication state.
-    pub fn prepare(&self, mut record: CoreRecord) -> Result<PreparedCoreRecord> {
+    pub fn prepare(&self, record: CoreRecord) -> Result<PreparedCoreRecord> {
+        match self
+            .prepare_draft(record)?
+            .materialize(MAX_ENCODED_CORE_RECORD_BYTES)?
+        {
+            PreparedCoreRecordMaterialization::Prepared(prepared) => Ok(prepared),
+            PreparedCoreRecordMaterialization::CapacityExceeded(_) => {
+                Err(IndexError::DocumentFieldTooLarge {
+                    field: "core_record",
+                    actual: MAX_ENCODED_CORE_RECORD_BYTES.saturating_add(1),
+                    maximum: MAX_ENCODED_CORE_RECORD_BYTES,
+                })
+            }
+        }
+    }
+
+    /// Resolves immutable base authority and validates one record without
+    /// allocating its canonical stored encoding or lexical document. Callers
+    /// that govern cross-thread memory can therefore acquire a permit before
+    /// materialization begins.
+    pub fn prepare_draft(&self, mut record: CoreRecord) -> Result<PreparedCoreRecordDraft> {
         if record.normalization_revision != CORE_NORMALIZATION_REVISION
             || record.content.policy_revision != CORE_CONTENT_POLICY_REVISION
         {
@@ -90,34 +112,151 @@ impl CoreRecordPreparer {
             }
         }
 
+        record.validate_contract()?;
         let source = record.source.clone();
         let source_token = crate::source_token(&source);
-        let event_id = record.event_id;
         let core_content_bytes = core_content_bytes(&record.content)?;
+        Ok(PreparedCoreRecordDraft {
+            fields: self.fields,
+            base_generation_id: self.context_generation_id.clone(),
+            record,
+            source,
+            source_token,
+            core_content_bytes,
+        })
+    }
+}
+
+/// Opaque validated Core preparation state that has not allocated the final
+/// stored encoding or index document.
+pub struct PreparedCoreRecordDraft {
+    fields: Fields,
+    base_generation_id: Option<String>,
+    record: CoreRecord,
+    source: SourceKey,
+    source_token: String,
+    core_content_bytes: usize,
+}
+
+/// Result of attempting final materialization under a caller-owned exact-byte
+/// permit. Capacity exhaustion returns the untouched draft so a bounded
+/// scheduler can flush, acquire a larger permit, and retry.
+// Boxing the ordinary prepared result would add one allocation to every
+// indexed record. Keep the hot success path inline and box only the uncommon
+// capacity retry.
+#[allow(clippy::large_enum_variant)]
+pub enum PreparedCoreRecordMaterialization {
+    Prepared(PreparedCoreRecord),
+    CapacityExceeded(Box<PreparedCoreRecordDraft>),
+}
+
+impl PreparedCoreRecordDraft {
+    pub fn materialize(
+        self,
+        maximum_encoded_bytes: usize,
+    ) -> Result<PreparedCoreRecordMaterialization> {
+        let maximum_encoded_bytes = maximum_encoded_bytes.min(MAX_ENCODED_CORE_RECORD_BYTES);
+        let mut encoded = BoundedJsonBuffer::new(maximum_encoded_bytes);
+        if let Err(error) = serde_json::to_writer(&mut encoded, &self.record) {
+            if encoded.capacity_exceeded() {
+                return Ok(PreparedCoreRecordMaterialization::CapacityExceeded(
+                    Box::new(self),
+                ));
+            }
+            return Err(error.into());
+        }
+        let encoded_core_record = encoded.into_bytes();
+        let encoded_core_bytes = encoded_core_record.len();
+        if encoded_core_bytes == 0 {
+            return Err(IndexError::EmptyDocumentField {
+                field: "core_record",
+            });
+        }
         #[cfg(test)]
         FINAL_ENCODINGS.with(|count| count.set(count.get() + 1));
-        let encoded_core_record: Arc<[u8]> = record.encode_stored()?.into();
-        let encoded_core_bytes = encoded_core_record.len();
+        let event_id = self.record.event_id;
         let record_leaf = staging::core_record_leaf(event_id, &encoded_core_record)?;
         let record_accumulator_leaf =
             staging::core_record_accumulator_leaf(event_id, &record_leaf)?;
         let document = IndexDocument::from_core(
             self.fields,
-            record,
-            Arc::clone(&encoded_core_record),
-            core_content_bytes,
-            IndexSourceFields::new(&source, &source_token),
+            self.record,
+            encoded_core_record,
+            self.core_content_bytes,
+            IndexSourceFields::new(&self.source, &self.source_token),
         )?;
 
-        Ok(PreparedCoreRecord {
-            base_generation_id: self.context_generation_id.clone(),
-            source,
-            source_token,
-            encoded_core_bytes,
-            encoded_core_record,
-            record_accumulator_leaf,
-            document,
-        })
+        Ok(PreparedCoreRecordMaterialization::Prepared(
+            PreparedCoreRecord {
+                base_generation_id: self.base_generation_id,
+                source: self.source,
+                source_token: self.source_token,
+                encoded_core_bytes,
+                record_accumulator_leaf,
+                document,
+            },
+        ))
+    }
+}
+
+struct BoundedJsonBuffer {
+    bytes: Vec<u8>,
+    maximum: usize,
+    capacity_exceeded: bool,
+}
+
+impl BoundedJsonBuffer {
+    fn new(maximum: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            maximum,
+            capacity_exceeded: false,
+        }
+    }
+
+    fn capacity_exceeded(&self) -> bool {
+        self.capacity_exceeded
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedJsonBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Some(next_len) = self.bytes.len().checked_add(bytes.len()) else {
+            self.capacity_exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "encoded Core record byte count overflowed",
+            ));
+        };
+        if next_len > self.maximum {
+            self.capacity_exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "encoded Core record exceeded its materialization permit",
+            ));
+        }
+        if next_len > self.bytes.capacity() {
+            let next_capacity = self
+                .bytes
+                .capacity()
+                .max(1024)
+                .saturating_mul(2)
+                .min(self.maximum)
+                .max(next_len);
+            self.bytes
+                .try_reserve_exact(next_capacity.saturating_sub(self.bytes.len()))
+                .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -161,7 +300,6 @@ pub struct PreparedCoreRecord {
     source: SourceKey,
     source_token: String,
     encoded_core_bytes: usize,
-    encoded_core_record: Arc<[u8]>,
     record_accumulator_leaf: [u8; 32],
     document: IndexDocument,
 }
@@ -185,7 +323,6 @@ impl PreparedCoreRecord {
     }
 
     pub(crate) fn into_parts(self) -> PreparedCoreRecordParts {
-        debug_assert_eq!(self.encoded_core_bytes, self.encoded_core_record.len());
         PreparedCoreRecordParts {
             record_accumulator_leaf: self.record_accumulator_leaf,
             document: self.document,

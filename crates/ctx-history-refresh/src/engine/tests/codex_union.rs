@@ -62,7 +62,7 @@ fn successful_codex_route_derives_rejected_records_from_committed_core_sources()
 }
 
 #[test]
-fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscoped_exact_route() {
+fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let index_root = source_backed_index_root(&data_root);
@@ -136,31 +136,14 @@ fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscope
             .iter()
             .map(|result| result.source_failure_total)
             .sum::<usize>(),
-        1
+        0
     );
-    assert_eq!(
-        first
-            .route_results
-            .iter()
-            .flat_map(|result| result.source_failures.iter())
-            .next()
-            .unwrap()
-            .class,
-        "incompatible"
-    );
-    assert!(first.published_explicit_source_catalog.is_none());
-    let [failed_binding] = first.catalog_route_bindings.as_slice() else {
-        panic!("failed explicit request should retain one diagnostic route binding");
+    assert!(first.published_explicit_source_catalog.is_some());
+    let [binding] = first.catalog_route_bindings.as_slice() else {
+        panic!("successful explicit request should retain one route binding");
     };
     assert!(first.route_results.iter().any(|result| {
-        result.route_identity == failed_binding.route_identity
-            && matches!(
-                result.outcome,
-                SourceBackedRefreshRouteOutcome::Failed {
-                    ref class,
-                    carried_forward: false,
-                } if class == "incompatible"
-            )
+        result.route_identity == binding.route_identity && result.outcome.is_success()
     }));
     let verified = VerifiedIndex::open(&index_root).unwrap();
     assert!(!verified.manifest().sources.is_empty());
@@ -171,9 +154,8 @@ fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscope
             .len(),
         1
     );
-    // The parent automatic route remains authoritative and can legitimately
-    // include the nested transcript. The exact overlay itself stays a typed
-    // failure until the provider can scope retained Codex sources per route.
+    // The parent automatic route retains its existing exact source ownership;
+    // the successful exact overlay owns no duplicate sources.
     assert_eq!(
         verified
             .search_event_candidates("explicitrootmarker", 10)
@@ -181,7 +163,7 @@ fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscope
             .len(),
         1
     );
-    assert_eq!(first.generation_id, parent_generation);
+    assert_ne!(first.generation_id, parent_generation);
     drop(verified);
 
     let replay = refresh_all_provider_sources(
@@ -198,7 +180,7 @@ fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscope
     .unwrap();
     assert_eq!(replay.generation_id, first.generation_id);
     assert_eq!(replay.route_results.len(), 2);
-    assert!(replay.published_explicit_source_catalog.is_none());
+    assert!(replay.published_explicit_source_catalog.is_some());
     assert_eq!(replay.catalog_route_bindings.len(), 1);
     assert!(replay.certified_source_count >= 1);
     assert_eq!(
@@ -207,7 +189,7 @@ fn registered_codex_parent_and_exact_subdir_keep_the_parent_and_fail_the_unscope
             .iter()
             .map(|result| result.source_failure_total)
             .sum::<usize>(),
-        1
+        0
     );
 }
 

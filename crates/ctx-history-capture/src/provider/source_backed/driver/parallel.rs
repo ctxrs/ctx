@@ -119,11 +119,17 @@ impl SourceBackedGenerationSink<'_> {
             ) -> Result<(), ParallelLeafScanWorkerError<E>>
             + Sync,
     {
+        let worker_count = bounded_leaf_worker_count(
+            jobs.len(),
+            worker_count.min(self.resources.leaf_worker_budget()),
+        );
+        let mut worker_states = (0..worker_count).map(|_| ()).collect::<Vec<_>>();
         self.run_parallel_leaf_scans_inner(
             jobs,
             worker_count,
             |job| Some(job.source().clone()),
-            |_| (),
+            ParallelLeafScanJob::worker_affinity,
+            &mut worker_states,
             |_, job, emitter| scan(job, emitter),
         )?
         .into_iter()
@@ -136,14 +142,13 @@ impl SourceBackedGenerationSink<'_> {
         .collect()
     }
 
-    /// Runs source-bound leaf scans with one mutable state value owned by each
-    /// worker stripe for its full lifetime. The state never crosses workers
-    /// and is dropped after that worker has returned all of its jobs.
-    pub(crate) fn run_parallel_leaf_scans_with_worker_state<L, R, E, W, I, F>(
+    /// Runs source-bound scans by borrowing one persistent state slot per
+    /// active worker. Callers may reuse the same bounded slots across joined
+    /// dependency phases without sharing mutable state between threads.
+    pub(crate) fn run_parallel_leaf_scans_with_worker_states<L, R, E, W, F>(
         &mut self,
         jobs: Vec<ParallelLeafScanJob<L>>,
-        worker_count: usize,
-        initialize_worker: I,
+        worker_states: &mut [W],
         scan: F,
     ) -> Result<Vec<R>, ParallelLeafScanError<E>>
     where
@@ -151,7 +156,6 @@ impl SourceBackedGenerationSink<'_> {
         R: Send,
         E: StdError + Send + 'static,
         W: Send,
-        I: Fn(usize) -> W,
         F: Fn(
                 &mut W,
                 &ParallelLeafScanJob<L>,
@@ -161,9 +165,10 @@ impl SourceBackedGenerationSink<'_> {
     {
         self.run_parallel_leaf_scans_inner(
             jobs,
-            worker_count,
+            worker_states.len(),
             |job| Some(job.source().clone()),
-            initialize_worker,
+            ParallelLeafScanJob::worker_affinity,
+            worker_states,
             scan,
         )?
         .into_iter()
@@ -192,11 +197,17 @@ impl SourceBackedGenerationSink<'_> {
             ) -> Result<(), ParallelLeafScanWorkerError<E>>
             + Sync,
     {
+        let worker_count = bounded_leaf_worker_count(
+            jobs.len(),
+            worker_count.min(self.resources.leaf_worker_budget()),
+        );
+        let mut worker_states = (0..worker_count).map(|_| ()).collect::<Vec<_>>();
         self.run_parallel_leaf_scans_inner(
             jobs,
             worker_count,
             |job| Some(job.source().clone()),
-            |_| (),
+            ParallelLeafScanJob::worker_affinity,
+            &mut worker_states,
             |_, job, emitter| scan(job, emitter),
         )
     }
@@ -220,11 +231,17 @@ impl SourceBackedGenerationSink<'_> {
             ) -> Result<(), ParallelLeafScanWorkerError<E>>
             + Sync,
     {
+        let worker_count = bounded_leaf_worker_count(
+            leaves.len(),
+            worker_count.min(self.resources.leaf_worker_budget()),
+        );
+        let mut worker_states = (0..worker_count).map(|_| ()).collect::<Vec<_>>();
         self.run_parallel_leaf_scans_inner(
             leaves,
             worker_count,
             |_| None,
-            |_| (),
+            |_| None,
+            &mut worker_states,
             |_, leaf, emitter| scan(leaf, emitter),
         )?
         .into_iter()
@@ -237,12 +254,13 @@ impl SourceBackedGenerationSink<'_> {
         .collect()
     }
 
-    fn run_parallel_leaf_scans_inner<J, R, E, W, I, F, S>(
+    fn run_parallel_leaf_scans_inner<J, R, E, W, F, S, A>(
         &mut self,
         jobs: Vec<J>,
         worker_count: usize,
         expected_source: S,
-        initialize_worker: I,
+        worker_affinity: A,
+        worker_states: &mut [W],
         scan: F,
     ) -> Result<Vec<SourceBackedSourceOutcome<R>>, ParallelLeafScanError<E>>
     where
@@ -250,7 +268,6 @@ impl SourceBackedGenerationSink<'_> {
         R: Send,
         E: StdError + Send + 'static,
         W: Send,
-        I: Fn(usize) -> W,
         F: Fn(
                 &mut W,
                 &J,
@@ -258,6 +275,7 @@ impl SourceBackedGenerationSink<'_> {
             ) -> Result<(), ParallelLeafScanWorkerError<E>>
             + Sync,
         S: Fn(&J) -> Option<SourceKey>,
+        A: Fn(&J) -> Option<u64>,
     {
         if jobs.is_empty() {
             return Ok(Vec::new());
@@ -268,24 +286,39 @@ impl SourceBackedGenerationSink<'_> {
             });
         }
 
-        let worker_count = bounded_leaf_worker_count(
-            jobs.len(),
-            worker_count.min(self.resources.leaf_worker_budget()),
-        );
+        let worker_slots = worker_count
+            .min(worker_states.len())
+            .min(self.resources.leaf_worker_budget())
+            .min(MAX_PARALLEL_LEAF_WORKERS);
+        let has_worker_affinity = jobs.iter().any(|job| worker_affinity(job).is_some());
+        let worker_count = if has_worker_affinity {
+            worker_slots
+        } else {
+            bounded_leaf_worker_count(jobs.len(), worker_slots)
+        };
         if worker_count == 0 {
             return Err(ParallelLeafScanError::InvalidWorkerCount {
                 job_count: jobs.len(),
             });
         }
+        let worker_assignments = jobs
+            .iter()
+            .enumerate()
+            .map(|(job_index, job)| {
+                worker_affinity(job)
+                    .map(|affinity| (affinity as usize) % worker_count)
+                    .unwrap_or(job_index % worker_count)
+            })
+            .collect::<Vec<_>>();
         let mut states = jobs
             .iter()
             .enumerate()
             .map(|(job_index, job)| {
-                ParallelLeafJobState::new(expected_source(job), job_index % worker_count)
+                ParallelLeafJobState::new(expected_source(job), worker_assignments[job_index])
             })
             .collect::<Vec<_>>();
         let mut results = (0..jobs.len()).map(|_| None).collect::<Vec<_>>();
-        let stripes = stripe_leaf_jobs(jobs, worker_count);
+        let stripes = stripe_leaf_jobs(jobs, worker_count, &worker_assignments);
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_context = ParallelLeafWorkerContext {
             resources: self.resources.clone(),
@@ -299,8 +332,11 @@ impl SourceBackedGenerationSink<'_> {
             // keep scheduling order out of generation identity.
             let (sender, receiver) = mpsc::sync_channel::<ParallelLeafWorkerEvent<R, E>>(0);
             let mut handles = Vec::with_capacity(worker_count);
-            for (worker_index, jobs) in stripes.into_iter().enumerate() {
-                let mut worker_state = initialize_worker(worker_index);
+            for ((worker_index, jobs), worker_state) in stripes
+                .into_iter()
+                .enumerate()
+                .zip(worker_states.iter_mut())
+            {
                 let worker_sender = sender.clone();
                 let worker_cancellation = Arc::clone(&cancellation);
                 let worker_context = worker_context.clone();
@@ -320,7 +356,7 @@ impl SourceBackedGenerationSink<'_> {
                                 &worker_sender,
                                 &worker_cancellation,
                                 worker_context,
-                                &mut worker_state,
+                                worker_state,
                                 scan,
                             );
                         })
@@ -471,10 +507,14 @@ impl SourceBackedGenerationSink<'_> {
     }
 }
 
-fn stripe_leaf_jobs<J>(jobs: Vec<J>, worker_count: usize) -> Vec<Vec<(usize, J)>> {
+fn stripe_leaf_jobs<J>(
+    jobs: Vec<J>,
+    worker_count: usize,
+    worker_assignments: &[usize],
+) -> Vec<Vec<(usize, J)>> {
     let mut stripes = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
     for (job_index, job) in jobs.into_iter().enumerate() {
-        stripes[job_index % worker_count].push((job_index, job));
+        stripes[worker_assignments[job_index]].push((job_index, job));
     }
     stripes
 }

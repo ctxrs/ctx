@@ -3,11 +3,10 @@ use std::error::Error as StdError;
 use ctx_history_core::{CertifiedSource, SourceKey};
 
 use super::{
-    CoreRecordEmission, CoreRecordEmissionBatch, ParallelLeafProtocolMessage,
-    ParallelLeafScanBegin, ParallelLeafScanComplete, ParallelLeafScanError,
-    ParallelLeafScanMessageKind, ParallelLeafScanMode, ParallelLeafScanProtocolError,
-    ParallelLeafSinkOperation, SourceBackedCoordinatorError, SourceBackedGenerationSink,
-    SourceBackedSourceOutcome,
+    CoreRecordEmissionBatch, ParallelLeafProtocolMessage, ParallelLeafScanBegin,
+    ParallelLeafScanComplete, ParallelLeafScanError, ParallelLeafScanMessageKind,
+    ParallelLeafScanMode, ParallelLeafScanProtocolError, ParallelLeafSinkOperation,
+    SourceBackedCoordinatorError, SourceBackedGenerationSink, SourceBackedSourceOutcome,
 };
 
 #[derive(Debug)]
@@ -100,9 +99,6 @@ where
             acknowledgement.acknowledge(job_index)?;
             Ok(())
         }
-        ParallelLeafProtocolMessage::CoreRecord(record) => {
-            apply_core_record(sink, job_index, state, *record)
-        }
         ParallelLeafProtocolMessage::CoreRecordBatch(batch) => {
             apply_core_record_batch(sink, job_index, state, *batch)
         }
@@ -182,38 +178,6 @@ where
         }
     }
     Ok(())
-}
-
-fn apply_core_record<E>(
-    sink: &mut SourceBackedGenerationSink<'_>,
-    job_index: usize,
-    state: &mut ParallelLeafJobState,
-    emission: CoreRecordEmission,
-) -> Result<(), ParallelLeafScanError<E>>
-where
-    E: StdError + 'static,
-{
-    if state.completion.is_some() {
-        return Err(ParallelLeafScanProtocolError::CoreRecordAfterCompletion { job_index }.into());
-    }
-    if state.begin.is_none() {
-        return Err(ParallelLeafScanProtocolError::CoreRecordBeforeBegin { job_index }.into());
-    }
-    let source = bound_source(job_index, ParallelLeafScanMessageKind::CoreRecord, state)?;
-    validate_source(
-        job_index,
-        ParallelLeafScanMessageKind::CoreRecord,
-        source,
-        emission.source(),
-    )?;
-    sink.add_core_record_emission(emission).map_err(|error| {
-        sink_error(
-            job_index,
-            source,
-            ParallelLeafSinkOperation::AddCoreRecord,
-            error,
-        )
-    })
 }
 
 fn apply_core_record_batch<E>(
