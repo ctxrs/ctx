@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use super::DaemonQueryResponseTooLarge;
+use super::{mark_request_may_have_been_submitted, DaemonQueryResponseTooLarge};
 
 const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(2);
 
@@ -277,6 +277,7 @@ fn write_daemon_query_request_unix(
     stream: &mut UnixStream,
     request: &[u8],
     deadline: &UnixIoDeadline,
+    request_may_have_been_submitted: &mut bool,
 ) -> std::io::Result<()> {
     let mut written = 0;
     while written < request.len() {
@@ -288,7 +289,10 @@ fn write_daemon_query_request_unix(
                     "daemon query request socket stopped accepting bytes",
                 ));
             }
-            Ok(count) => written = written.saturating_add(count),
+            Ok(count) => {
+                *request_may_have_been_submitted = true;
+                written = written.saturating_add(count);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 let _ = wait_for_fd(stream.as_raw_fd(), libc::POLLOUT, deadline, "request write")?;
@@ -345,11 +349,24 @@ pub(in crate::semantic) fn daemon_query_roundtrip_unix(
     let deadline = UnixIoDeadline::new(timeout);
     let mut stream = connect_daemon_query_unix(path, &deadline)
         .with_context(|| format!("connect daemon query socket {}", path.display()))?;
-    write_daemon_query_request_unix(&mut stream, request, &deadline)
-        .context("write daemon query request")?;
+    let mut request_may_have_been_submitted = false;
+    if let Err(error) = write_daemon_query_request_unix(
+        &mut stream,
+        request,
+        &deadline,
+        &mut request_may_have_been_submitted,
+    ) {
+        let error = anyhow::Error::from(error).context("write daemon query request");
+        return Err(if request_may_have_been_submitted {
+            mark_request_may_have_been_submitted(error)
+        } else {
+            error
+        });
+    }
     let _ = stream.shutdown(std::net::Shutdown::Write);
     read_daemon_query_response_unix_with_deadline(&mut stream, max_response_bytes, &deadline)
         .context("read daemon query response")
+        .map_err(mark_request_may_have_been_submitted)
 }
 
 #[cfg(test)]

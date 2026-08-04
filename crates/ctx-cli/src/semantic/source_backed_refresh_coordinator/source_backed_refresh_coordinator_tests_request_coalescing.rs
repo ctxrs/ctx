@@ -35,7 +35,9 @@ fn exact_import_overlay_upgrades_queued_route_work_without_rescan() {
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
     let coordinator = CoreRefreshEngine::new();
-    coordinator.reconcile_watch_routes([route_identity(0xa1)], EventWatermark::new(1, 0), 0);
+    let route = route_identity(0xa1);
+    let observation = format!("{:02x}", 0xa3).repeat(32);
+    coordinator.reconcile_watch_routes([route.clone()], EventWatermark::new(1, 0), 0);
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, u64::MAX)
         .unwrap());
@@ -58,28 +60,58 @@ fn exact_import_overlay_upgrades_queued_route_work_without_rescan() {
     assert_eq!(request["fresh_after_admitted_snapshot"], true);
 
     let upgraded = coordinator
-        .handle_ipc_request_with_admission_fence_for_test(&data_root, &request, BTreeMap::new())
+        .handle_ipc_request_with_admission_fence_for_test(
+            &data_root,
+            &request,
+            BTreeMap::from([(route.clone(), Some(observation.clone()))]),
+        )
         .unwrap()
         .expect("exact-overlay import response");
     let attached = coordinator
-        .handle_ipc_request_with_admission_fence_for_test(&data_root, &request, BTreeMap::new())
+        .handle_ipc_request_with_admission_fence_for_test(
+            &data_root,
+            &request,
+            BTreeMap::from([(route.clone(), Some(observation.clone()))]),
+        )
         .unwrap()
         .expect("equivalent import response");
 
-    assert_eq!(request_id(&upgraded), scheduled_request_id);
-    assert_eq!(request_id(&attached), scheduled_request_id);
-    assert_eq!(attached["coalesced_requests"], 2);
-    assert_eq!(attached["operation"], "import");
-    assert_eq!(attached["trigger"], "import");
-    assert_eq!(attached["trigger_provenance"], "explicit_source_catalog");
+    let logical_request_id = request_id(&upgraded);
+    assert_eq!(logical_request_id, request["request_id"]);
+    assert_eq!(request_id(&attached), logical_request_id);
+    assert_eq!(attached["coalesced_requests"], 0);
+    assert_eq!(attached["coalesced_into_request_id"], scheduled_request_id);
+    let upgraded_physical = coordinator
+        .status_for_test(&scheduled_request_id)
+        .expect("upgraded physical request");
+    assert_eq!(upgraded_physical["operation"], "import");
+    assert_eq!(upgraded_physical["trigger"], "import");
+    assert_eq!(
+        upgraded_physical["trigger_provenance"],
+        "explicit_source_catalog"
+    );
+    assert_eq!(upgraded_physical["coalesced_logical_demands"], 1);
 
     let writer_launches = AtomicUsize::new(0);
     let run = coordinator
         .run_next_with(
-            |_, _| {
+            |request_id, coordinator| {
                 writer_launches.fetch_add(1, Ordering::SeqCst);
+                coordinator
+                    .admit_refresh_scope_for_test(request_id, &SourceBackedRefreshScope::All)
+                    .unwrap();
                 let mut publication = test_publication("implicit-import-generation");
                 publication.published_explicit_source_catalog = Some(authority);
+                publication
+                    .route_results
+                    .push(SourceBackedRefreshRouteResult::succeeded(
+                        route.as_str().to_owned(),
+                        true,
+                    ));
+                coordinator.set_route_observations_for_test(
+                    request_id,
+                    BTreeMap::from([(route.clone(), observation.clone())]),
+                );
                 Ok(publication)
             },
             || Ok(Some("implicit-import-generation".to_owned())),
@@ -89,7 +121,9 @@ fn exact_import_overlay_upgrades_queued_route_work_without_rescan() {
         .expect("upgraded all-route refresh");
     assert_eq!(run.scope, SourceBackedRefreshScope::All);
     assert_eq!(writer_launches.load(Ordering::SeqCst), 1);
-    assert!(!coordinator.has_pending_request());
+    assert!(coordinator.logical_continuation_is_fully_covered_for_test(&logical_request_id));
+    assert_eq!(writer_launches.load(Ordering::SeqCst), 1);
+    assert!(coordinator.has_pending_request());
 }
 
 #[test]

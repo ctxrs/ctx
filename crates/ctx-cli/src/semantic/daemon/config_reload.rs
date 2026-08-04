@@ -14,7 +14,8 @@ use super::{
         paths_status::lower_semantic_worker_priority,
         query_service::{
             daemon_query_service_transport_supported, semantic_query_service_supported,
-            start_daemon_query_service, start_daemon_source_refresh_service, DaemonQueryService,
+            start_daemon_query_service, start_daemon_source_refresh_service,
+            start_daemon_source_refresh_service_with_coordinator, DaemonQueryService,
         },
     },
     DaemonRuntime,
@@ -137,11 +138,25 @@ pub(super) fn reload_daemon_runtime_config(
         semantic_query_service_supported() && daemon_query_service_transport_supported(),
     );
     if daemon_query_service_transport_supported() && refresh_service.is_none() {
-        match start_daemon_source_refresh_service(
-            data_root,
-            runtime.semantic_runtime.clone(),
-            Arc::clone(wakeup),
-        ) {
+        let source_refresh = runtime.source_refresh_coordinator.as_ref().cloned();
+        let started = source_refresh.map_or_else(
+            || {
+                start_daemon_source_refresh_service(
+                    data_root,
+                    runtime.semantic_runtime.clone(),
+                    Arc::clone(wakeup),
+                )
+            },
+            |source_refresh| {
+                start_daemon_source_refresh_service_with_coordinator(
+                    data_root,
+                    runtime.semantic_runtime.clone(),
+                    Arc::clone(wakeup),
+                    source_refresh,
+                )
+            },
+        );
+        match started {
             Ok(service) => *refresh_service = Some(service),
             Err(error) => {
                 reload.activation_failed(error);

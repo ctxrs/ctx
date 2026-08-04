@@ -799,6 +799,7 @@ mod tests {
                     source_count: 0,
                     request_previous_generation: None,
                     request_generation_changed: false,
+                    scanned_routes: None,
                     receipt: None,
                     pin: PinnedSourceBackedGeneration::from_index(open_index(data_root)?),
                 })

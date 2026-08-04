@@ -103,7 +103,8 @@ fn wait_selection(lexical: bool, semantic: bool, all: bool) -> IndexSelection {
 
 #[test]
 fn first_publication_pending_is_not_collapsed_to_missing() {
-    let status = first_publication_pending();
+    let mut status = first_publication_pending();
+    status["refresh"]["request_state"] = json!("admission_pending");
     let selection = IndexSelection::default_for(&status);
     assert!(!index_ready(&status, selection));
     assert!(
@@ -138,10 +139,16 @@ fn machine_snapshot_contains_only_authoritative_readiness_units() {
 
 #[test]
 fn explicit_lexical_wait_accepts_a_verified_generation_during_refresh() {
-    let pending = readiness("pending", 4, true);
+    let mut pending = readiness("pending", 4, true);
     let selection = wait_selection(true, false, false);
-    assert!(index_ready(&pending, selection));
-    assert!(index_terminal_error(&pending, selection).is_none());
+    for request_state in ["admission_pending", "queued", "running"] {
+        pending["refresh"]["request_state"] = json!(request_state);
+        assert!(index_ready(&pending, selection), "{request_state}");
+        assert!(
+            index_terminal_error(&pending, selection).is_none(),
+            "{request_state}"
+        );
+    }
 
     let mut failed = pending;
     failed["refresh"] = json!({
@@ -329,8 +336,8 @@ fn stopped_refresh_is_terminal_without_fabricated_failure_counts() {
 }
 
 #[test]
-fn stopped_queued_or_running_refresh_is_terminal_despite_stale_daemon_status() {
-    for request_state in ["queued", "running"] {
+fn stopped_active_refresh_is_terminal_despite_stale_daemon_status() {
+    for request_state in ["admission_pending", "queued", "running"] {
         let mut status = readiness("pending", 4, false);
         status["refresh"]["request_state"] = json!(request_state);
         status["daemon"]["status"] = json!("running");

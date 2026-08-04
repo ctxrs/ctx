@@ -9,6 +9,30 @@ const DAEMON_RETRY_FIELDS: [&str; 4] = [
     "retry_not_before_at_ms",
 ];
 
+pub(super) enum DurableAdmissionPersistence {
+    Confirmed,
+    Retained(anyhow::Error),
+    Failed(anyhow::Error),
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_ADMISSION_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_admission_parent_sync_for_test() {
+    FAIL_NEXT_ADMISSION_PARENT_SYNC.with(|fail| fail.set(true));
+}
+
+fn sync_durable_admission_parent(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_ADMISSION_PARENT_SYNC.with(std::cell::Cell::take) {
+        bail!("injected durable admission parent sync failure");
+    }
+    crate::semantic::paths_status::sync_private_file_parent(path)
+}
+
 impl CoreRefreshEngine {
     pub(super) fn persist_job_status(&self, data_root: &Path, request_id: &str) -> Result<()> {
         let state = self.lock_state();
@@ -38,7 +62,7 @@ impl CoreRefreshEngine {
     }
 
     #[cfg(test)]
-    pub(in super::super) fn persist_job_status_for_test(
+    pub(in crate::semantic) fn persist_job_status_for_test(
         &self,
         data_root: &Path,
         request_id: &str,
@@ -48,6 +72,29 @@ impl CoreRefreshEngine {
 
     pub(super) fn write_status(&self, data_root: &Path, job: &Value) -> Result<()> {
         (self.status_writer)(&daemon_source_backed_refresh_job_path(data_root), job)
+    }
+
+    pub(super) fn write_durable_admission_status(
+        &self,
+        data_root: &Path,
+        job: &Value,
+    ) -> DurableAdmissionPersistence {
+        let path = daemon_source_backed_refresh_job_path(data_root);
+        if let Err(error) = (self.status_writer)(&path, job) {
+            return if error
+                .downcast_ref::<crate::semantic::paths_status::PrivateJsonReplacementError>()
+                .is_some()
+                || read_daemon_job_status(&path).as_ref() == Some(job)
+            {
+                DurableAdmissionPersistence::Retained(error)
+            } else {
+                DurableAdmissionPersistence::Failed(error)
+            };
+        }
+        match sync_durable_admission_parent(&path) {
+            Ok(()) => DurableAdmissionPersistence::Confirmed,
+            Err(error) => DurableAdmissionPersistence::Retained(error),
+        }
     }
 
     pub(in super::super) fn persist_progress(
@@ -183,9 +230,12 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
         .as_deref()
         .filter(|request_id| Some(*request_id) != root_request_id)
     {
-        if let Some(active) = find_attempt(state, active_request_id)
-            .filter(|attempt| attempt.state == SourceBackedRefreshState::Queued)
-        {
+        if let Some(active) = find_attempt(state, active_request_id).filter(|attempt| {
+            matches!(
+                attempt.state,
+                SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued
+            )
+        }) {
             successors.push(job_with_logical_demand(state, active.job_json()));
         }
     }
@@ -194,7 +244,12 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
             .pending_request_ids
             .iter()
             .filter_map(|request_id| find_attempt(state, request_id))
-            .filter(|attempt| attempt.state == SourceBackedRefreshState::Queued)
+            .filter(|attempt| {
+                matches!(
+                    attempt.state,
+                    SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued
+                )
+            })
             .map(SourceBackedRefreshAttempt::job_json)
             .map(|job| job_with_logical_demand(state, job)),
     );
@@ -265,10 +320,7 @@ pub(super) fn recover_logical_demand_continuations(
     Ok(recovered)
 }
 
-pub(super) fn recover_queued_successors(
-    job: &Value,
-    previous_generation: Option<String>,
-) -> Result<Vec<SourceBackedRefreshAttempt>> {
+pub(super) fn recover_queued_successors(job: &Value) -> Result<Vec<SourceBackedRefreshAttempt>> {
     let Some(successors) = job.get(QUEUED_SUCCESSORS_FIELD) else {
         return Ok(Vec::new());
     };
@@ -280,7 +332,7 @@ pub(super) fn recover_queued_successors(
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("durable source refresh job has no request state"))?;
     match root_state {
-        "queued" | "running" | "failed" | "published" => {}
+        "admission_pending" | "queued" | "running" | "failed" | "published" => {}
         _ => bail!("durable source refresh job has an invalid request state"),
     }
     if successors.len().saturating_add(1) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
@@ -297,8 +349,12 @@ pub(super) fn recover_queued_successors(
         if successor.get(QUEUED_SUCCESSORS_FIELD).is_some() {
             bail!("durable source refresh successor queue must not be nested");
         }
-        let attempt =
-            recover_pending_attempt(successor, previous_generation.clone(), "successor", false)?;
+        let attempt = recover_pending_attempt(
+            successor,
+            optional_generation(successor.get("previous_generation"))?,
+            "successor",
+            false,
+        )?;
         if !request_ids.insert(attempt.request_id.clone()) {
             bail!("durable source refresh successor request ID is duplicated");
         }
@@ -321,7 +377,9 @@ fn recover_pending_attempt(
     is_root: bool,
 ) -> Result<SourceBackedRefreshAttempt> {
     let request_state = job.get("request_state").and_then(Value::as_str);
-    if request_state != Some("queued") && !(is_root && request_state == Some("running")) {
+    if !matches!(request_state, Some("admission_pending" | "queued"))
+        && !(is_root && request_state == Some("running"))
+    {
         bail!("durable source refresh {role} is not queued");
     }
     let request_id = job
@@ -385,6 +443,31 @@ fn recover_pending_attempt(
         refresh_scope,
     );
     attempt.request_id = request_id.to_owned();
+    attempt.state = if request_state == Some("admission_pending") {
+        SourceBackedRefreshState::AdmissionPending
+    } else {
+        SourceBackedRefreshState::Queued
+    };
+    attempt.fresh_after_admitted_snapshot = match job.get("fresh_after_admitted_snapshot") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(|| {
+            anyhow!("durable source refresh {role} has invalid freshness requirement")
+        })?,
+    };
+    attempt.request_fingerprint = optional_sha256(job, "request_fingerprint")?;
+    attempt.admission_durability_indeterminate =
+        recover_admission_durability(job, &format!("durable source refresh {role}"))?;
+    attempt.coalesced_into_request_id = job
+        .get("coalesced_into_request_id")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("durable source refresh {role} has invalid predecessor ID"))
+        })
+        .transpose()?;
     if let Some(requested_at_ms) = job
         .get("requested_at_ms")
         .or_else(|| job.get("last_run_at_ms"))
@@ -398,7 +481,31 @@ fn recover_pending_attempt(
             anyhow!("durable source refresh {role} has invalid coalesced request count")
         })?;
     }
+    if let Some(coalesced_logical_demands) = job.get("coalesced_logical_demands") {
+        attempt.coalesced_logical_demands =
+            coalesced_logical_demands.as_u64().ok_or_else(|| {
+                anyhow!("durable source refresh {role} has invalid logical demand count")
+            })?;
+    }
+    if attempt.state == SourceBackedRefreshState::AdmissionPending
+        && !attempt.fresh_after_admitted_snapshot
+    {
+        bail!("durable admission-pending source refresh has no freshness requirement");
+    }
     Ok(attempt)
+}
+
+fn optional_sha256(job: &Value, field: &str) -> Result<Option<String>> {
+    job.get(field)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| is_sha256_identity(value))
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("durable source refresh has invalid `{field}`"))
+        })
+        .transpose()
 }
 
 fn recover_static_job_field(

@@ -23,6 +23,10 @@ use super::{
 
 const MAX_REPORTED_SOURCE_FAILURES: usize = 3;
 
+fn published_request_scanned_routes(scanned_routes: Option<usize>) -> Result<usize> {
+    scanned_routes.context("published daemon source refresh omitted its scanned route count")
+}
+
 pub(super) struct AutomaticSourceRefreshImportContext<'a> {
     pub(super) args: &'a ImportArgs,
     pub(super) data_root: PathBuf,
@@ -71,6 +75,7 @@ pub(super) fn run_automatic_source_refresh_import(
         .context("daemon source refresh published without an authoritative terminal receipt")?;
     let request_previous_generation = refresh.request_previous_generation.clone();
     let request_generation_changed = refresh.request_generation_changed;
+    let scanned_routes = published_request_scanned_routes(refresh.scanned_routes)?;
     let request_id = refresh.request_id.clone();
     let index = refresh.pin.into_index();
     let manifest = index.manifest();
@@ -164,7 +169,7 @@ pub(super) fn run_automatic_source_refresh_import(
         "previous_generation": request_previous_generation,
         "published_generation": receipt.published_generation,
         "generation_changed": request_generation_changed,
-        "scanned_routes": receipt.selected_route_total(),
+        "scanned_routes": scanned_routes,
         "successful_routes": receipt.successful_route_total(),
         "source_failure_total": receipt.source_failure_total(),
         "source_failures_omitted": receipt.source_failures_omitted()
@@ -360,5 +365,11 @@ mod tests {
             assert!(row.get(unsupported).is_none(), "{row:#}");
         }
         assert_eq!(MAX_REPORTED_SOURCE_FAILURES, 3);
+    }
+
+    #[test]
+    fn logical_publication_reports_zero_scans_without_receipt_count_fallback() {
+        assert_eq!(published_request_scanned_routes(Some(0)).unwrap(), 0);
+        assert!(published_request_scanned_routes(None).is_err());
     }
 }

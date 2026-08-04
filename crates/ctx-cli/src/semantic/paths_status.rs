@@ -336,7 +336,26 @@ pub(super) fn lower_semantic_worker_priority() {
 #[cfg(not(unix))]
 pub(super) fn lower_semantic_worker_priority() {}
 
+#[derive(Debug, thiserror::Error)]
+#[error("private status replacement is visible or indeterminate")]
+pub(super) struct PrivateJsonReplacementError;
+
 pub(super) fn write_private_json_file(path: &Path, value: &Value) -> Result<()> {
+    write_private_json_file_with_permissions(path, value, secure_private_file_permissions)
+}
+
+#[cfg(test)]
+pub(super) fn write_private_json_with_chmod_fault(path: &Path, value: &Value) -> Result<()> {
+    write_private_json_file_with_permissions(path, value, |_| {
+        anyhow::bail!("injected chmod failure")
+    })
+}
+
+fn write_private_json_file_with_permissions(
+    path: &Path,
+    value: &Value,
+    secure: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)?;
     }
@@ -372,7 +391,27 @@ pub(super) fn write_private_json_file(path: &Path, value: &Value) -> Result<()> 
         let _ = fs::remove_file(&tmp_path);
         return Err(error);
     }
-    secure_private_file_permissions(path)?;
+    secure(path).map_err(|error| {
+        error
+            .context(format!("secure private status file {}", path.display()))
+            .context(PrivateJsonReplacementError)
+    })?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(super) fn sync_private_file_parent(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    fs::File::open(parent)
+        .with_context(|| format!("open private status directory {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("sync private status directory {}", parent.display()))
+}
+
+#[cfg(windows)]
+pub(super) fn sync_private_file_parent(_path: &Path) -> Result<()> {
     Ok(())
 }
 

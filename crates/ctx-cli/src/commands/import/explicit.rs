@@ -265,7 +265,9 @@ pub(crate) fn run_explicit_source_catalog_import(
         "previous_generation": request_previous_generation,
         "published_generation": published_generation,
         "generation_changed": request_generation_changed,
-        "scanned_routes": receipt.selected_route_total(),
+        "scanned_routes": refresh
+            .scanned_routes
+            .context("published daemon source refresh omitted its scanned route count")?,
         "successful_routes": receipt.successful_route_total(),
         "source_failure_total": receipt.source_failure_total(),
         "route_source_failure_total": requested_outcome.source_failure_total,

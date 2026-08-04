@@ -3,6 +3,9 @@ use crate::semantic::dirty_source_routes::{
     DirtySourceRouteAdmission, DirtySourceRoutes, EventWatermark,
 };
 
+mod admission;
+#[cfg(test)]
+mod admission_tests;
 mod attempt_helpers;
 mod coverage_contract;
 mod durable_queue;
@@ -173,6 +176,8 @@ pub(super) struct CoreRefreshEngineState {
     manual_all_continuations: BTreeMap<String, ManualAllContinuation>,
     pending_terminal_persistence: Option<PendingTerminalPersistence>,
     pending_scheduler_retry_root_id: Option<String>,
+    unacknowledged_admissions: BTreeMap<String, usize>,
+    admission_resolutions_in_flight: BTreeSet<String>,
     watch_routes_initialized: bool,
 }
 
@@ -215,16 +220,28 @@ impl fmt::Debug for PendingTerminalPersistence {
 }
 
 type SourceRefreshStatusWriter = dyn Fn(&Path, &Value) -> Result<()> + Send + Sync;
+type SourceRefreshAdmissionFence = dyn Fn(
+        &Path,
+        Option<&ExplicitSourceCatalogAuthority>,
+    ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>
+    + Send
+    + Sync;
 
 pub(in crate::semantic) struct CoreRefreshEngine {
     state: Mutex<CoreRefreshEngineState>,
     pub(super) executor: Arc<dyn SourceBackedRefreshExecutor>,
+    admission_fence: Arc<SourceRefreshAdmissionFence>,
     status_writer: Arc<SourceRefreshStatusWriter>,
 }
 
 #[derive(Debug)]
 struct SourceBackedRefreshQueueFull {
     active_pending_requests: usize,
+}
+
+#[derive(Debug)]
+struct SourceBackedRefreshIdempotencyConflict {
+    request_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -239,6 +256,8 @@ struct SourceRefreshLogicalDemand {
     admission: SourceRefreshAdmissionRequirement,
     route_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
     request_id: Option<String>,
+    request_fingerprint: Option<String>,
+    admission_pending: bool,
 }
 
 impl SourceRefreshAdmissionRequirement {
@@ -264,6 +283,22 @@ impl SourceBackedRefreshQueueFull {
     }
 }
 
+impl SourceBackedRefreshIdempotencyConflict {
+    fn to_json(&self) -> Value {
+        compact_json(json!({
+            "ok": false,
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": self.request_id,
+            "request_state": "request_conflict",
+            "error_code": "request_id_conflict",
+            "reason": "request_id_payload_mismatch",
+            "retryable": false,
+            "error": self.to_string(),
+        }))
+    }
+}
+
 impl fmt::Display for SourceBackedRefreshQueueFull {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -276,6 +311,18 @@ impl fmt::Display for SourceBackedRefreshQueueFull {
 }
 
 impl std::error::Error for SourceBackedRefreshQueueFull {}
+
+impl fmt::Display for SourceBackedRefreshIdempotencyConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "daemon source refresh request ID {} was already admitted for a different request payload",
+            self.request_id
+        )
+    }
+}
+
+impl std::error::Error for SourceBackedRefreshIdempotencyConflict {}
 
 impl CoreRefreshEngine {
     pub(in crate::semantic) fn new() -> Self {
@@ -290,6 +337,18 @@ impl CoreRefreshEngine {
 
     fn with_executor_and_status_writer(
         executor: Arc<dyn SourceBackedRefreshExecutor>,
+        status_writer: Arc<SourceRefreshStatusWriter>,
+    ) -> Self {
+        Self::with_runtime(
+            executor,
+            Arc::new(source_backed_route_admission_fence),
+            status_writer,
+        )
+    }
+
+    fn with_runtime(
+        executor: Arc<dyn SourceBackedRefreshExecutor>,
+        admission_fence: Arc<SourceRefreshAdmissionFence>,
         status_writer: Arc<SourceRefreshStatusWriter>,
     ) -> Self {
         Self {
@@ -307,9 +366,12 @@ impl CoreRefreshEngine {
                 manual_all_continuations: BTreeMap::new(),
                 pending_terminal_persistence: None,
                 pending_scheduler_retry_root_id: None,
+                unacknowledged_admissions: BTreeMap::new(),
+                admission_resolutions_in_flight: BTreeSet::new(),
                 watch_routes_initialized: false,
             }),
             executor,
+            admission_fence,
             status_writer,
         }
     }
@@ -320,6 +382,26 @@ impl CoreRefreshEngine {
         status_writer: Arc<SourceRefreshStatusWriter>,
     ) -> Self {
         Self::with_executor_and_status_writer(executor, status_writer)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn with_runtime_for_test(
+        executor: Arc<dyn SourceBackedRefreshExecutor>,
+        admission_fence: Arc<SourceRefreshAdmissionFence>,
+        status_writer: Arc<SourceRefreshStatusWriter>,
+    ) -> Self {
+        Self::with_runtime(executor, admission_fence, status_writer)
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn with_admission_fence_for_test(
+        admission_fence: Arc<SourceRefreshAdmissionFence>,
+    ) -> Self {
+        Self::with_runtime(
+            Arc::new(CaptureOwnedSourceBackedRefreshExecutor),
+            admission_fence,
+            Arc::new(write_daemon_job_status),
+        )
     }
 
     pub(in crate::semantic) fn has_pending_request(&self) -> bool {
@@ -623,156 +705,27 @@ impl CoreRefreshEngine {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub(in crate::semantic) fn handle_ipc_request(
         &self,
         data_root: &Path,
         request: &Value,
     ) -> Result<Option<Value>> {
-        self.handle_ipc_request_with_admission_fence(
-            data_root,
-            request,
-            source_backed_route_admission_fence,
-        )
+        admission::handle_ipc_request(self, data_root, request)
     }
 
-    fn handle_ipc_request_with_admission_fence<F>(
+    fn background_maintenance_wake_response(
         &self,
         data_root: &Path,
-        request: &Value,
-        admission_fence: F,
-    ) -> Result<Option<Value>>
-    where
-        F: Fn(
-            &Path,
-            Option<&ExplicitSourceCatalogAuthority>,
-        ) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>>,
-    {
-        match request.get("op").and_then(Value::as_str) {
-            Some(SOURCE_REFRESH_REQUEST_OP) => {
-                let mode = request.get("mode").and_then(Value::as_str).unwrap_or("");
-                if !matches!(mode, "background" | "wait") {
-                    return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
-                }
-                let operation = SourceBackedRefreshOperation::from_request_json(request)?;
-                let explicit_catalog = request.get("explicit_source_catalog");
-                match (operation, mode, explicit_catalog) {
-                    (SourceBackedRefreshOperation::Refresh, _, Some(_)) => {
-                        return Err(anyhow!(
-                            "refresh operation cannot carry explicit source catalog authority"
-                        ))
-                    }
-                    (SourceBackedRefreshOperation::Import, "background", _) => {
-                        return Err(anyhow!(
-                            "import operation requires daemon refresh mode `wait`"
-                        ))
-                    }
-                    (SourceBackedRefreshOperation::Import, _, None) => {
-                        return Err(anyhow!(
-                            "import operation requires explicit source catalog authority"
-                        ))
-                    }
-                    _ => {}
-                }
-                if operation == SourceBackedRefreshOperation::Refresh && mode == "background" {
-                    return Ok(Some(self.background_maintenance_wake_response(data_root)?));
-                }
-                let requested_catalog = explicit_catalog
-                    .map(ExplicitSourceCatalogAuthority::from_json)
-                    .transpose()?;
-                let logical_request_id = match request.get("request_id") {
-                    Some(Value::String(request_id)) if !request_id.is_empty() => {
-                        Uuid::parse_str(request_id)
-                            .context("daemon source refresh logical request ID must be a UUID")?;
-                        Some(request_id.clone())
-                    }
-                    None => None,
-                    Some(_) => {
-                        return Err(anyhow!(
-                            "daemon source refresh logical request ID is invalid"
-                        ))
-                    }
-                };
-                let admission = match request.get("fresh_after_admitted_snapshot") {
-                    None | Some(Value::Bool(false)) => {
-                        SourceRefreshAdmissionRequirement::AttachEquivalent
-                    }
-                    Some(Value::Bool(true)) => {
-                        SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot
-                    }
-                    Some(_) => {
-                        return Err(anyhow!(
-                            "daemon source refresh fresh-after-admitted-snapshot requirement must be boolean"
-                        ))
-                    }
-                };
-                let previous_generation = self.observed_published_generation(data_root)?;
-                let admission_route_observations =
-                    if admission == SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot {
-                        admission_fence(data_root, requested_catalog.as_ref())?
-                    } else {
-                        BTreeMap::new()
-                    };
-                let metadata = match operation {
-                    SourceBackedRefreshOperation::Import => {
-                        source_catalog_refresh_runtime_metadata(data_root)
-                    }
-                    SourceBackedRefreshOperation::Refresh => {
-                        source_refresh_runtime_metadata(data_root)
-                    }
-                };
-                let response = match self.enqueue_with_catalog_metadata(
-                    previous_generation,
-                    metadata,
-                    requested_catalog,
-                    SourceBackedRefreshScope::All,
-                    SourceRefreshLogicalDemand {
-                        // Wait controls how the client observes the attempt; it is
-                        // not itself a fresh-after-admission barrier.
-                        admission,
-                        route_observations: admission_route_observations,
-                        request_id: logical_request_id,
-                    },
-                ) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        if let Some(queue_full) =
-                            error.downcast_ref::<SourceBackedRefreshQueueFull>()
-                        {
-                            return Ok(Some(queue_full.to_json()));
-                        }
-                        return Err(error);
-                    }
-                };
-                let request_id = response
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("queued source refresh has no request ID"))?;
-                self.persist_job_status(data_root, request_id)?;
-                Ok(Some(response))
-            }
-            Some(SOURCE_REFRESH_STATUS_OP) => {
-                let request_id = request
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .filter(|request_id| !request_id.is_empty())
-                    .ok_or_else(|| anyhow!("daemon source refresh request ID is missing"))?;
-                let status = self
-                    .status(request_id)
-                    .unwrap_or_else(|| unknown_refresh_request_response(request_id));
-                Ok(Some(status))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn background_maintenance_wake_response(&self, data_root: &Path) -> Result<Value> {
+        request_id: String,
+    ) -> Result<Value> {
         let published_generation = self.observed_published_generation(data_root)?;
         let metadata = source_refresh_runtime_metadata(data_root);
         Ok(compact_json(json!({
             "ok": true,
             "schema_version": 1,
             "owner": "daemon",
-            "request_id": Uuid::now_v7().to_string(),
+            "request_id": request_id,
             "request_state": "queued",
             "previous_generation": published_generation.clone(),
             "published_generation": published_generation,
@@ -800,10 +753,18 @@ impl CoreRefreshEngine {
             .route_admissions
             .remove(request_id)
             .unwrap_or_default();
-        let predecessor_event_watermarks = state
-            .route_admission_watermarks
-            .remove(request_id)
-            .unwrap_or_default();
+        let retained_predecessor_event_watermarks =
+            state.route_admission_watermarks.remove(request_id);
+        if let Some(predecessor_event_watermarks) = retained_predecessor_event_watermarks.as_ref() {
+            for continuation in state.manual_all_continuations.values_mut() {
+                if continuation.predecessor_request_id == request_id {
+                    continuation.predecessor_event_watermarks =
+                        predecessor_event_watermarks.clone();
+                }
+            }
+        }
+        let predecessor_event_watermarks =
+            retained_predecessor_event_watermarks.unwrap_or_default();
         let current_event_watermarks = state.route_event_watermarks.clone();
         let attempt = find_attempt(&state, request_id).cloned();
         let route_results = attempt
@@ -933,6 +894,16 @@ impl CoreRefreshEngine {
             } else {
                 for (route, result) in &covered_route_results {
                     if continuation.invalidated_routes.contains(route) {
+                        continue;
+                    }
+                    if attempt
+                        .as_ref()
+                        .is_some_and(|attempt| attempt.route_observations.contains_key(route))
+                    {
+                        // A predecessor with a provider-certified observation
+                        // cannot be covered by a later indeterminate sample.
+                        // The ledger path is only for route kinds that were
+                        // indeterminate throughout the same successful pass.
                         continue;
                     }
                     if continuation

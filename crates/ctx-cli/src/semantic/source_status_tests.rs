@@ -298,11 +298,14 @@ fn lexical_state_depends_only_on_verified_generation_policy_identity() {
 #[test]
 fn refresh_report_uses_typed_pending_ready_stale_and_unavailable_states() {
     let daemon = json!({"running": true});
-    let pending = refresh_report(
-        Some(&json!({"request_state": "running"})),
-        Some("generation-1"),
-        &daemon,
-    );
+    for request_state in ["admission_pending", "queued", "running"] {
+        let pending = refresh_report(
+            Some(&json!({"request_state": request_state})),
+            Some("generation-1"),
+            &daemon,
+        );
+        assert_eq!(pending["status"], "pending", "{request_state}");
+    }
     let ready = refresh_report(
         Some(&json!({
             "request_state": "published",
@@ -324,7 +327,6 @@ fn refresh_report_uses_typed_pending_ready_stale_and_unavailable_states() {
     );
     let unavailable = refresh_report(None, None, &json!({"running": false}));
 
-    assert_eq!(pending["status"], "pending");
     assert_eq!(ready["status"], "ready");
     assert_eq!(stale["status"], "stale");
     assert_eq!(stale["certified_source_count"], 2);
@@ -332,6 +334,48 @@ fn refresh_report_uses_typed_pending_ready_stale_and_unavailable_states() {
     assert_eq!(stale["timings_us"]["commit"], 33);
     assert_eq!(unavailable["status"], "unavailable");
     assert_eq!(unavailable["reason"], "daemon_unavailable");
+}
+
+#[test]
+fn admission_pending_is_active_with_existing_and_empty_generations() {
+    let (_temp, data_root, generation_id) = core_publication_fixture();
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_core_refresh_job_path(&data_root),
+        &json!({
+            "status": "running",
+            "request_id": "admission-existing",
+            "request_state": "admission_pending",
+            "published_generation": generation_id,
+        }),
+    )
+    .unwrap();
+
+    let existing = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    assert_eq!(existing.report["refresh"]["status"], "pending");
+    assert_eq!(existing.report["lexical"]["status"], "ready");
+    assert_eq!(
+        existing.report["lexical"]["request_state"],
+        "admission_pending"
+    );
+
+    let empty = tempfile::tempdir().unwrap();
+    let empty_root = empty.path().join("data");
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_core_refresh_job_path(&empty_root),
+        &json!({
+            "status": "running",
+            "request_id": "admission-empty",
+            "request_state": "admission_pending",
+        }),
+    )
+    .unwrap();
+    let empty = source_epoch_status_report(&empty_root, &AppConfig::default()).unwrap();
+    assert_eq!(empty.report["refresh"]["status"], "pending");
+    assert_eq!(empty.report["lexical"]["status"], "pending");
+    assert_eq!(
+        empty.report["lexical"]["reason"],
+        "generation_not_published"
+    );
 }
 
 #[test]

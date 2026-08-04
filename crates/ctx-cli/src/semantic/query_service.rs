@@ -37,7 +37,8 @@ pub(in crate::semantic) use server::*;
 #[cfg(not(test))]
 pub(in crate::semantic) use server::{
     daemon_can_begin_idle_shutdown, observe_daemon_query_activity, start_daemon_query_service,
-    start_daemon_source_refresh_service, DaemonQueryActivity, DaemonQueryService,
+    start_daemon_source_refresh_service, start_daemon_source_refresh_service_with_coordinator,
+    DaemonQueryActivity, DaemonQueryService,
 };
 
 const MAX_SEMANTIC_CORE_BATCH_BYTES: usize = 64 * 1024 * 1024;

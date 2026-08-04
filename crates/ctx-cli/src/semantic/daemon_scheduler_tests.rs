@@ -26,7 +26,7 @@ use crate::{
     config::{AppConfig, DaemonMode},
     output::JsonOutputFormat,
     semantic::{
-        daemon::{install_daemon_test_job_hooks, DaemonTestJobHooks},
+        daemon::{daemon_wait_duration, install_daemon_test_job_hooks, DaemonTestJobHooks},
         dirty_source_routes::EventWatermark,
         source_backed_refresh_coordinator::{
             coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
@@ -571,6 +571,19 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
         (request_id, runtime)
     });
 
+    let wait_started = std::time::Instant::now();
+    assert_eq!(
+        daemon_wait_duration(
+            &runtime,
+            Some(&coordinator),
+            wait_started + std::time::Duration::from_secs(30),
+            None,
+            None,
+            wait_started,
+        ),
+        std::time::Duration::ZERO,
+        "a successor exposed after the watcher-drain yield must remain immediately runnable"
+    );
     let successor = run_daemon_scheduler_cycle_with_activity(
         &daemon_args(),
         &data_root,

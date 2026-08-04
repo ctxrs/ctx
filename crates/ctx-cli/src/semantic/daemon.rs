@@ -125,6 +125,7 @@ impl DaemonIteration {
 #[derive(Default)]
 pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
+    pub(super) source_refresh_coordinator: Option<Arc<CoreRefreshEngine>>,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) pro_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
@@ -337,6 +338,10 @@ pub(super) fn run_daemon_inner(
             restore_daemon_source_refresh_retry(&mut runtime, data_root);
             restore_daemon_consumer_retries(&mut runtime, data_root);
         }
+        // Recover the durable queue into the exact coordinator that will own
+        // IPC before publishing the source-refresh endpoint. Otherwise a
+        // restart-time admission could overwrite the unrecovered queue root.
+        recover_source_refresh_coordinator_before_ipc(&mut runtime, data_root)?;
         let stop_disabled = reload_daemon_runtime_config(
             data_root,
             &args,
@@ -372,13 +377,6 @@ pub(super) fn run_daemon_inner(
         if !runtime.config.daemon.mode.runs_only_source_refresh() {
             resume_completed_installation_daemons(data_root)?;
         }
-        recover_source_refresh_before_background_cadence(
-            &mut runtime,
-            data_root,
-            refresh_service
-                .as_ref()
-                .map(|service| service.source_refresh.as_ref()),
-        )?;
         write_daemon_lifecycle_status_with_runtime(
             data_root,
             &args,
@@ -809,7 +807,21 @@ fn recover_source_refresh_before_background_cadence(
     Ok(())
 }
 
-fn daemon_wait_duration(
+fn recover_source_refresh_coordinator_before_ipc(
+    runtime: &mut DaemonRuntime,
+    data_root: &Path,
+) -> Result<Arc<CoreRefreshEngine>> {
+    let source_refresh = Arc::new(CoreRefreshEngine::new());
+    recover_source_refresh_before_background_cadence(
+        runtime,
+        data_root,
+        Some(source_refresh.as_ref()),
+    )?;
+    runtime.source_refresh_coordinator = Some(Arc::clone(&source_refresh));
+    Ok(source_refresh)
+}
+
+pub(super) fn daemon_wait_duration(
     runtime: &DaemonRuntime,
     source_refresh: Option<&CoreRefreshEngine>,
     next_safety_reconcile: Instant,
@@ -817,6 +829,11 @@ fn daemon_wait_duration(
     idle_exit: Option<StdDuration>,
     now: Instant,
 ) -> StdDuration {
+    if runtime.history_retry.ready()
+        && source_refresh.is_some_and(CoreRefreshEngine::has_pending_request)
+    {
+        return StdDuration::ZERO;
+    }
     let mut wait_for = next_safety_reconcile.saturating_duration_since(now);
     if let Some(remaining) = runtime.consumer_retry_deferral.remaining(now) {
         wait_for = wait_for.min(remaining);

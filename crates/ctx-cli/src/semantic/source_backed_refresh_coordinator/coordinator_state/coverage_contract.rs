@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct ManualAllContinuation {
     pub(super) predecessor_request_id: String,
     pub(super) predecessor_finished: bool,
+    pub(super) admission_pending: bool,
     pub(super) admission_route_observations: BTreeMap<SourceRouteIdentity, Option<String>>,
     pub(super) ledger_eligible_routes: BTreeSet<SourceRouteIdentity>,
     pub(super) admission_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
@@ -25,6 +26,7 @@ impl ManualAllContinuation {
         Self {
             predecessor_request_id,
             predecessor_finished: false,
+            admission_pending: false,
             admission_route_observations,
             ledger_eligible_routes,
             admission_event_watermarks,
@@ -34,6 +36,18 @@ impl ManualAllContinuation {
             covered_removed_source_count: 0,
             covered_timings: SourceBackedRefreshTimings::default(),
         }
+    }
+
+    pub(super) fn pending(predecessor_request_id: String) -> Self {
+        let mut continuation = Self::new(
+            predecessor_request_id,
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        continuation.admission_pending = true;
+        continuation
     }
 
     pub(super) fn invalidate_route(&mut self, route: &SourceRouteIdentity) {
@@ -57,7 +71,8 @@ impl ManualAllContinuation {
     }
 
     pub(super) fn is_fully_covered(&self) -> bool {
-        self.invalidated_routes.is_empty()
+        !self.admission_pending
+            && self.invalidated_routes.is_empty()
             && self
                 .admission_route_observations
                 .keys()
@@ -85,6 +100,7 @@ impl ManualAllContinuation {
         compact_json(json!({
             "predecessor_request_id": self.predecessor_request_id,
             "predecessor_finished": self.predecessor_finished,
+            "admission_pending": self.admission_pending,
             "admission_route_observations": admission_route_observations,
             "ledger_eligible_routes": self.ledger_eligible_routes
                 .iter()
@@ -113,6 +129,15 @@ impl ManualAllContinuation {
             .get("predecessor_finished")
             .and_then(Value::as_bool)
             .ok_or_else(|| anyhow!("logical refresh demand has no predecessor terminal state"))?;
+        let admission_pending = value
+            .get("admission_pending")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| anyhow!("logical refresh demand admission state is invalid"))
+            })
+            .transpose()?
+            .unwrap_or(false);
         let admission = value
             .get("admission_route_observations")
             .and_then(Value::as_object)
@@ -248,6 +273,7 @@ impl ManualAllContinuation {
         Ok(Self {
             predecessor_request_id,
             predecessor_finished,
+            admission_pending,
             admission_route_observations,
             ledger_eligible_routes,
             admission_event_watermarks,

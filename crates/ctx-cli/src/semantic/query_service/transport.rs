@@ -9,8 +9,12 @@ pub(in crate::semantic) enum DaemonQueryEndpoint {
     Unsupported,
 }
 
+mod submission;
 #[cfg(unix)]
 mod unix_response;
+#[cfg(windows)]
+use submission::mark_windows_pending_submission;
+use submission::{mark_request_may_have_been_submitted, request_may_have_been_submitted};
 #[cfg(unix)]
 pub(in crate::semantic) use unix_response::daemon_query_roundtrip_unix;
 #[cfg(all(test, unix))]
@@ -67,6 +71,12 @@ impl fmt::Display for DaemonSourceRefreshServiceUnavailable {
 }
 
 impl std::error::Error for DaemonSourceRefreshServiceUnavailable {}
+
+impl DaemonSourceRefreshServiceUnavailable {
+    pub(in crate::semantic) fn request_may_have_been_submitted(error: &anyhow::Error) -> bool {
+        request_may_have_been_submitted(error)
+    }
+}
 
 #[derive(Debug)]
 pub(in crate::semantic) struct DaemonQueryResponseTooLarge {
@@ -357,7 +367,9 @@ pub(in crate::semantic) fn daemon_service_request(
             }
             Err(error) => return Err(error),
         };
-    let response: Value = serde_json::from_str(&body).context("parse daemon query response")?;
+    let response: Value = serde_json::from_str(&body)
+        .context("parse daemon query response")
+        .map_err(mark_request_may_have_been_submitted)?;
     Ok(Some(response))
 }
 
@@ -374,7 +386,9 @@ pub(in crate::semantic) fn daemon_query_roundtrip(
                 return Err(DaemonQueryResponseTooLarge::new(0).into());
             }
             let body = daemon_query_roundtrip_unix(path, request, timeout, max_response_bytes)?;
-            String::from_utf8(body).context("daemon query response is not UTF-8")
+            String::from_utf8(body)
+                .context("daemon query response is not UTF-8")
+                .map_err(mark_request_may_have_been_submitted)
         }
         #[cfg(windows)]
         DaemonQueryEndpoint::WindowsNamedPipe { pipe_name, .. } => {
@@ -391,17 +405,23 @@ pub(in crate::semantic) fn daemon_query_roundtrip_error_is_unavailable(
     endpoint: &DaemonQueryEndpoint,
     error: &anyhow::Error,
 ) -> bool {
+    if request_may_have_been_submitted(error) {
+        return false;
+    }
     let Some(io_error) = error.downcast_ref::<std::io::Error>() else {
         return false;
     };
     match endpoint {
         #[cfg(unix)]
         DaemonQueryEndpoint::Unix { .. } => {
-            daemon_query_unix_io_error_is_unavailable(io_error.kind())
+            daemon_query_unix_io_error_is_pre_submission_unavailable(io_error.kind())
         }
         #[cfg(windows)]
         DaemonQueryEndpoint::WindowsNamedPipe { .. } => {
-            daemon_query_windows_io_error_is_unavailable(io_error.kind(), io_error.raw_os_error())
+            daemon_query_windows_io_error_is_pre_submission_unavailable(
+                io_error.kind(),
+                io_error.raw_os_error(),
+            )
         }
         #[cfg(not(any(unix, windows)))]
         DaemonQueryEndpoint::Unsupported => false,
@@ -409,7 +429,7 @@ pub(in crate::semantic) fn daemon_query_roundtrip_error_is_unavailable(
 }
 
 #[cfg(any(unix, test))]
-pub(in crate::semantic) fn daemon_query_unix_io_error_is_unavailable(
+pub(in crate::semantic) fn daemon_query_unix_io_error_is_pre_submission_unavailable(
     kind: std::io::ErrorKind,
 ) -> bool {
     matches!(
@@ -424,7 +444,7 @@ pub(in crate::semantic) fn daemon_query_unix_io_error_is_unavailable(
 }
 
 #[cfg(any(windows, test))]
-pub(in crate::semantic) fn daemon_query_windows_io_error_is_unavailable(
+pub(in crate::semantic) fn daemon_query_windows_io_error_is_pre_submission_unavailable(
     kind: std::io::ErrorKind,
     raw_os_error: Option<i32>,
 ) -> bool {
@@ -565,9 +585,24 @@ pub(in crate::semantic) fn daemon_query_roundtrip_windows(
     let deadline = WindowsIoDeadline::new(timeout);
     let pipe_name = windows_wide_null(pipe_name);
     let pipe = open_windows_daemon_query_pipe(&pipe_name, &deadline)?;
-    write_all_windows_daemon_query_pipe(&pipe, request, &deadline)?;
-    let response = read_windows_daemon_query_pipe(&pipe, response_limit, &deadline)?;
-    String::from_utf8(response).context("daemon query response is not UTF-8")
+    let mut request_may_have_been_submitted = false;
+    if let Err(error) = write_all_windows_daemon_query_pipe_with_submission(
+        &pipe,
+        request,
+        &deadline,
+        &mut request_may_have_been_submitted,
+    ) {
+        return Err(if request_may_have_been_submitted {
+            mark_request_may_have_been_submitted(error)
+        } else {
+            error
+        });
+    }
+    let response = read_windows_daemon_query_pipe(&pipe, response_limit, &deadline)
+        .map_err(mark_request_may_have_been_submitted)?;
+    String::from_utf8(response)
+        .context("daemon query response is not UTF-8")
+        .map_err(mark_request_may_have_been_submitted)
 }
 
 #[cfg(windows)]
@@ -669,18 +704,39 @@ pub(in crate::semantic) fn open_windows_daemon_query_pipe(
 #[cfg(windows)]
 pub(in crate::semantic) fn write_all_windows_daemon_query_pipe(
     pipe: &WindowsQueryHandle,
+    request: &[u8],
+    deadline: &WindowsIoDeadline,
+) -> Result<()> {
+    let mut request_may_have_been_submitted = false;
+    write_all_windows_daemon_query_pipe_with_submission(
+        pipe,
+        request,
+        deadline,
+        &mut request_may_have_been_submitted,
+    )
+}
+
+#[cfg(windows)]
+fn write_all_windows_daemon_query_pipe_with_submission(
+    pipe: &WindowsQueryHandle,
     mut request: &[u8],
     deadline: &WindowsIoDeadline,
+    request_may_have_been_submitted: &mut bool,
 ) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::WriteFile;
 
     while !request.is_empty() {
         let write_len = request.len().min(u32::MAX as usize) as u32;
-        let written =
-            windows_overlapped_io(pipe, deadline, "write", |transferred, overlapped| unsafe {
+        let written = windows_overlapped_io(
+            pipe,
+            deadline,
+            "write",
+            Some(request_may_have_been_submitted),
+            |transferred, overlapped| unsafe {
                 WriteFile(pipe.0, request.as_ptr(), write_len, transferred, overlapped)
-            })
-            .context("write daemon query named pipe")?;
+            },
+        )
+        .context("write daemon query named pipe")?;
         if written == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WriteZero,
@@ -688,6 +744,7 @@ pub(in crate::semantic) fn write_all_windows_daemon_query_pipe(
             ))
             .context("write daemon query named pipe");
         }
+        *request_may_have_been_submitted = true;
         request = &request[written as usize..];
     }
     Ok(())
@@ -711,8 +768,12 @@ pub(in crate::semantic) fn read_windows_daemon_query_pipe(
         let read_limit = (response_limit - response.len())
             .saturating_add(1)
             .min(chunk.len());
-        let read =
-            windows_overlapped_io(pipe, deadline, "read", |transferred, overlapped| unsafe {
+        let read = windows_overlapped_io(
+            pipe,
+            deadline,
+            "read",
+            None,
+            |transferred, overlapped| unsafe {
                 ReadFile(
                     pipe.0,
                     chunk.as_mut_ptr(),
@@ -720,7 +781,8 @@ pub(in crate::semantic) fn read_windows_daemon_query_pipe(
                     transferred,
                     overlapped,
                 )
-            });
+            },
+        );
         let read = match read {
             Ok(read) => read as usize,
             Err(error)
@@ -749,6 +811,7 @@ pub(in crate::semantic) fn windows_overlapped_io<F>(
     pipe: &WindowsQueryHandle,
     deadline: &WindowsIoDeadline,
     operation: &str,
+    pending_submission: Option<&mut bool>,
     start: F,
 ) -> std::io::Result<u32>
 where
@@ -778,6 +841,7 @@ where
     if error != ERROR_IO_PENDING {
         return Err(std::io::Error::from_raw_os_error(error as i32));
     }
+    mark_windows_pending_submission(pending_submission);
 
     let wait_ms = match deadline.remaining_ms(operation) {
         Ok(wait_ms) => wait_ms,
@@ -893,6 +957,7 @@ mod windows_query_transport_tests {
             1024,
         )
         .expect_err("stalled response must time out");
+        assert!(request_may_have_been_submitted(&error));
         assert!(format!("{error:#}").contains("timed out"));
         assert!(started.elapsed() < StdDuration::from_millis(450));
         server_thread.join().expect("server thread");

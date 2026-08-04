@@ -511,7 +511,10 @@ fn selected_pending_work(status: &Value, selection: IndexSelection) -> bool {
 }
 
 fn pending_state(state: &str) -> bool {
-    matches!(state, "pending" | "queued" | "running")
+    matches!(
+        state,
+        "admission_pending" | "pending" | "queued" | "running"
+    )
 }
 
 fn forward_index_terminal_error(message: String, human_output_rendered: bool) -> anyhow::Error {

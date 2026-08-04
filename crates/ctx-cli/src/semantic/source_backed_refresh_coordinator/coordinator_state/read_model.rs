@@ -654,6 +654,11 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) refresh_scope: SourceBackedRefreshScope,
     pub(super) operation: SourceBackedRefreshOperation,
     pub(super) requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
+    pub(super) fresh_after_admitted_snapshot: bool,
+    pub(super) request_fingerprint: Option<String>,
+    pub(super) admission_durability_indeterminate: bool,
+    pub(super) coalesced_into_request_id: Option<String>,
+    pub(super) coalesced_logical_demands: u64,
     pub(super) coalesced_requests: u64,
     pub(super) progress: SourceBackedRefreshProgress,
     pub(super) scanned_routes: Option<usize>,
@@ -722,6 +727,15 @@ impl SourceBackedRefreshAttempt {
                     .as_ref()
                     .map(ExplicitSourceCatalogAuthority::to_json)
             }).flatten(),
+            "fresh_after_admitted_snapshot": self.fresh_after_admitted_snapshot,
+            "request_fingerprint": self.request_fingerprint,
+            "admission_acknowledgement": self.admission_durability_indeterminate
+                .then_some("retained_after_durability_error"),
+            "admission_durability": self.admission_durability_indeterminate
+                .then_some("replacement_visible_or_indeterminate"),
+            "disconnect_policy": "retain_after_durable_admission",
+            "coalesced_into_request_id": self.coalesced_into_request_id,
+            "coalesced_logical_demands": self.coalesced_logical_demands,
             "generation_changed": self.request_generation_changed(),
             "receipt": publication_receipt.map(SourceBackedRefreshReceipt::to_json),
             "request_outcome": self.request_outcome_receipt()
@@ -748,7 +762,9 @@ impl SourceBackedRefreshAttempt {
         let status = match self.state {
             SourceBackedRefreshState::Published => "completed",
             SourceBackedRefreshState::Failed => "failed",
-            SourceBackedRefreshState::Queued | SourceBackedRefreshState::Running => "running",
+            SourceBackedRefreshState::AdmissionPending
+            | SourceBackedRefreshState::Queued
+            | SourceBackedRefreshState::Running => "running",
         };
         let publication_receipt = self.publication_receipt.as_ref().or(self.receipt.as_ref());
         compact_json(json!({
@@ -772,6 +788,15 @@ impl SourceBackedRefreshAttempt {
                     .as_ref()
                     .map(ExplicitSourceCatalogAuthority::to_json)
             }).flatten(),
+            "fresh_after_admitted_snapshot": self.fresh_after_admitted_snapshot,
+            "request_fingerprint": self.request_fingerprint,
+            "admission_acknowledgement": self.admission_durability_indeterminate
+                .then_some("retained_after_durability_error"),
+            "admission_durability": self.admission_durability_indeterminate
+                .then_some("replacement_visible_or_indeterminate"),
+            "disconnect_policy": "retain_after_durable_admission",
+            "coalesced_into_request_id": self.coalesced_into_request_id,
+            "coalesced_logical_demands": self.coalesced_logical_demands,
             "generation_changed": self.request_generation_changed(),
             "receipt": publication_receipt.map(SourceBackedRefreshReceipt::to_json),
             "request_outcome": self.request_outcome_receipt()

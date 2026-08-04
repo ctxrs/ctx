@@ -30,6 +30,12 @@ mod observation_fence;
 #[path = "source_backed_refresh_coordinator_tests/logical_demand.rs"]
 mod logical_demand;
 
+#[path = "source_backed_refresh_coordinator_tests/logical_completion_race.rs"]
+mod logical_completion_race;
+
+#[path = "source_backed_refresh_coordinator_tests/delayed_admission.rs"]
+mod delayed_admission;
+
 struct TestExecutor {
     calls: Arc<AtomicUsize>,
     generation_id: String,
@@ -489,9 +495,14 @@ fn queued_startup_exact_is_upgraded_to_one_manual_all_scan() {
             .expect("queued startup exact request ID");
     let authority = load_explicit_source_catalog_authority(&data_root).unwrap();
     let manual = manual_all_request(&coordinator, &data_root, &authority);
+    let manual_request_id = request_id(&manual);
 
-    assert_eq!(request_id(&manual), automatic_request_id);
-    assert_eq!(manual["trigger"], "import");
+    assert_ne!(manual_request_id, automatic_request_id);
+    assert_eq!(manual["coalesced_into_request_id"], automatic_request_id);
+    assert_eq!(manual["request_state"], "queued");
+    let upgraded = coordinator.status(&automatic_request_id).unwrap();
+    assert_eq!(upgraded["trigger"], "import");
+    assert_eq!(upgraded["coalesced_logical_demands"], 1);
     let run = coordinator.run_next(&data_root).expect("upgraded all run");
     assert!(!run.failed);
     assert_eq!(run.scope, SourceBackedRefreshScope::All);
@@ -502,6 +513,10 @@ fn queued_startup_exact_is_upgraded_to_one_manual_all_scan() {
             .cloned()
             .map(|route| (route, 1))
             .collect::<BTreeMap<_, _>>()
+    );
+    assert_eq!(
+        coordinator.status(&manual_request_id).unwrap()["request_state"],
+        "queued"
     );
     assert!(!coordinator.has_scheduled_route_work());
 }

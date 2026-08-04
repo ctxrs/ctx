@@ -15,7 +15,7 @@ impl CoreRefreshEngine {
         let active_generation = verified
             .as_ref()
             .map(|verified| verified.generation_id().to_owned());
-        let queued_successors = recover_queued_successors(&job, active_generation.clone())?;
+        let queued_successors = recover_queued_successors(&job)?;
         let recovered_continuations = recover_logical_demand_continuations(&job)?;
         let request_state = job
             .get("request_state")
@@ -146,7 +146,7 @@ impl CoreRefreshEngine {
             return Ok(has_successors);
         }
 
-        if !matches!(request_state, "queued" | "running") {
+        if !matches!(request_state, "admission_pending" | "queued" | "running") {
             if let Some(verified) = verified {
                 self.lock_state().current_published_generation =
                     Some(verified.generation_id().to_owned());
@@ -369,6 +369,23 @@ fn recover_terminal_attempt(
     attempt.started_at_ms = optional_i64(job, "started_at_ms")?;
     attempt.finished_at_ms = optional_i64(job, "finished_at_ms")?;
     attempt.published_generation = optional_generation(job.get("published_generation"))?;
+    attempt.fresh_after_admitted_snapshot = job
+        .get("fresh_after_admitted_snapshot")
+        .and_then(Value::as_bool)
+        .unwrap_or_default();
+    attempt.request_fingerprint = optional_string(job, "request_fingerprint")?;
+    if attempt
+        .request_fingerprint
+        .as_deref()
+        .is_some_and(|fingerprint| !is_sha256_identity(fingerprint))
+    {
+        bail!("durable terminal source refresh request fingerprint is invalid");
+    }
+    attempt.admission_durability_indeterminate =
+        recover_admission_durability(job, "durable terminal source refresh")?;
+    attempt.coalesced_into_request_id = optional_string(job, "coalesced_into_request_id")?;
+    attempt.coalesced_logical_demands =
+        optional_u64(job, "coalesced_logical_demands")?.unwrap_or_default();
     attempt.coalesced_requests = optional_u64(job, "coalesced_requests")?.unwrap_or_default();
     attempt.progress = SourceBackedRefreshProgress::from_status_json(job)?;
     attempt.scanned_routes = optional_usize(job, "scanned_routes")?;

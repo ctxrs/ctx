@@ -272,7 +272,10 @@ pub(crate) struct ImportArgs {
     pub(crate) resume: bool,
     #[arg(long, hide = true)]
     pub(crate) partial: bool,
-    #[arg(long, help = "Do not start daemon maintenance after import")]
+    #[arg(
+        long,
+        help = "Do not start or restart the daemon; require an already-running daemon"
+    )]
     pub(crate) no_daemon: bool,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,

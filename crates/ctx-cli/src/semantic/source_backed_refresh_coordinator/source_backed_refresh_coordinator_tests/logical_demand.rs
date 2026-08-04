@@ -1,6 +1,6 @@
 use super::*;
 
-type SelectedRouteDeltas = Arc<Mutex<Vec<BTreeSet<SourceRouteIdentity>>>>;
+pub(super) type SelectedRouteDeltas = Arc<Mutex<Vec<BTreeSet<SourceRouteIdentity>>>>;
 
 fn observation(byte: u8) -> String {
     format!("{byte:02x}").repeat(32)
@@ -18,9 +18,21 @@ fn publication_for_routes(
     publication
 }
 
-fn verified_publication_for_observations(
+pub(super) fn verified_publication_for_observations(
     execution: &SourceBackedRefreshExecution<'_>,
     observations: &BTreeMap<SourceRouteIdentity, String>,
+) -> Result<SourceBackedRefreshPublication> {
+    verified_publication_with_successful_routes(
+        execution,
+        observations,
+        &observations.keys().cloned().collect(),
+    )
+}
+
+pub(super) fn verified_publication_with_successful_routes(
+    execution: &SourceBackedRefreshExecution<'_>,
+    observations: &BTreeMap<SourceRouteIdentity, String>,
+    successful_routes: &BTreeSet<SourceRouteIdentity>,
 ) -> Result<SourceBackedRefreshPublication> {
     let previous_generation = open_verified_index(execution.index_root)
         .ok()
@@ -29,8 +41,8 @@ fn verified_publication_for_observations(
     let operation = execution.operation;
     let scope = execution.scope.clone();
     let metadata_observations = observations.clone();
-    let route_results = observations
-        .keys()
+    let route_results = successful_routes
+        .iter()
         .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
         .collect::<Vec<_>>();
     let covered_publication = execution.covered_publication.clone();
@@ -62,8 +74,8 @@ fn verified_publication_for_observations(
                 },
             )?;
     let mut publication = empty_test_publication(published.receipt().generation_id.clone());
-    publication.route_results = observations
-        .keys()
+    publication.route_results = successful_routes
+        .iter()
         .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
         .collect();
     execution
@@ -72,7 +84,7 @@ fn verified_publication_for_observations(
     Ok(publication)
 }
 
-fn complete_verified_fully_covered_demand(
+pub(super) fn complete_verified_fully_covered_demand(
     data_root: &Path,
     route: &SourceRouteIdentity,
     route_observation: &str,
@@ -663,6 +675,71 @@ fn indeterminate_admission_observation_is_not_covered() {
         coordinator.status(&demand_id).unwrap()["request_state"],
         "published"
     );
+}
+
+#[test]
+fn watcher_event_invalidates_indeterminate_ledger_coverage() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x6b);
+    let routes = BTreeSet::from([route.clone()]);
+    let demand_id = Uuid::from_u128(0x2810d).to_string();
+    let coordinator = CoreRefreshEngine::new();
+    coordinator.initialize_watch_route_authority(routes.clone());
+    coordinator.schedule_startup_route_reconciliation(
+        routes.clone(),
+        EventWatermark::new(0, 1),
+        ledger_now_ms(),
+    );
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    let predecessor = coordinator
+        .run_next_with(
+            |running_request_id, running| {
+                running.admit_refresh_scope_for_test(
+                    running_request_id,
+                    &SourceBackedRefreshScope::All,
+                )?;
+                running.enqueue_fresh_demand_for_test(
+                    None,
+                    demand_id.clone(),
+                    BTreeMap::from([(route.clone(), None)]),
+                )?;
+                Ok(publication_for_routes("ledger-covered-generation", &routes))
+            },
+            || Ok(Some("ledger-covered-generation".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("predecessor publication with exact watcher-ledger coverage");
+    assert!(!predecessor.failed, "{:#}", predecessor.job);
+    assert!(coordinator.logical_continuation_is_fully_covered_for_test(&demand_id));
+
+    coordinator.record_watch_routes(
+        [(route.clone(), EventWatermark::new(0, 2))],
+        ledger_now_ms(),
+    );
+    assert!(!coordinator.logical_continuation_is_fully_covered_for_test(&demand_id));
+
+    let mut covered_routes = None;
+    let delta = coordinator
+        .run_next_with(
+            |request_id, running| {
+                covered_routes = Some(
+                    running
+                        .admit_refresh_scope_for_test(request_id, &SourceBackedRefreshScope::All)?,
+                );
+                Ok(publication_for_routes("event-delta-generation", &routes))
+            },
+            || Ok(Some("event-delta-generation".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("post-admission watcher event executes the exact delta");
+
+    assert!(delta.did_work);
+    assert_eq!(request_id(&delta.job), demand_id);
+    assert_eq!(covered_routes, Some(BTreeSet::new()));
 }
 
 #[test]
