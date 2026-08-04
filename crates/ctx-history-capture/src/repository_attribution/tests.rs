@@ -976,7 +976,7 @@ fn certification_does_not_synthesize_vcs_activity_but_explicit_activity_survives
 }
 
 #[test]
-fn distinct_remotes_preserve_local_attribution_and_scope_exact_pull_request() {
+fn fork_and_upstream_remain_distinct_logical_repositories() {
     let temp = TempDir::new().unwrap();
     let repo = repository(
         temp.path(),
@@ -999,10 +999,13 @@ fn distinct_remotes_preserve_local_attribution_and_scope_exact_pull_request() {
         outcome_observations: vec![exact_pull_request_outcome(forge("other", "repo")).into()],
         ..AttributionInput::default()
     });
-    assert_eq!(annotation.repository_bindings.len(), 1);
-    let binding = &annotation.repository_bindings[0];
-    assert!(binding.logical_repository_id.starts_with("local:"));
-    assert_eq!(binding.aliases.len(), 3);
+    assert_eq!(annotation.repository_bindings.len(), 2);
+    let binding = annotation
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/acme/repo")
+        .expect("origin fork binding");
+    assert_eq!(binding.aliases.len(), 2);
     assert!(
         binding
             .aliases
@@ -1013,18 +1016,23 @@ fn distinct_remotes_preserve_local_attribution_and_scope_exact_pull_request() {
     assert!(binding.aliases.iter().any(|alias| {
         alias.namespace == ["other"] && alias.remote_name.as_deref() == Some("upstream")
     }));
-    assert!(binding
+    let upstream = annotation
+        .repository_bindings
+        .iter()
+        .find(|binding| binding.logical_repository_id == "forge:github.com/other/repo")
+        .expect("provider-native upstream binding");
+    assert!(upstream
         .aliases
         .iter()
         .any(|alias| { alias.namespace == ["other"] && alias.remote_name.is_none() }));
-    assert!(binding
+    assert!(upstream
         .evidence
         .iter()
         .any(|evidence| { evidence.kind == RepositoryEvidenceKind::ProviderNativeProject }));
     assert_eq!(annotation.repository_vcs_observations.len(), 1);
     assert_eq!(
         annotation.repository_vcs_observations[0].repository_binding_id,
-        binding.binding_id
+        upstream.binding_id
     );
     assert!(!has_reason(
         &annotation,
@@ -1034,6 +1042,106 @@ fn distinct_remotes_preserve_local_attribution_and_scope_exact_pull_request() {
         &annotation,
         RepositoryAbstentionReason::OutcomeRepositoryUnbound
     ));
+    assert!(!has_reason(
+        &annotation,
+        RepositoryAbstentionReason::ConflictingIdentity
+    ));
+}
+
+#[test]
+fn origin_authority_survives_secondary_remote_addition_and_config_reordering() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(
+        temp.path(),
+        "repo",
+        Some("https://github.com/acme/repo.git"),
+    );
+    let before = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "internal",
+            "https://github.com/acme/repo-internal.git",
+        ],
+    );
+    let added = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+    run_git(&repo, &["remote", "remove", "origin"]);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/repo.git",
+        ],
+    );
+    let reordered = attribute(AttributionInput {
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        ..AttributionInput::default()
+    });
+
+    for annotation in [&before, &added, &reordered] {
+        assert_eq!(annotation.repository_bindings.len(), 1);
+        assert_eq!(
+            annotation.repository_bindings[0].logical_repository_id,
+            "forge:github.com/acme/repo"
+        );
+    }
+    assert_eq!(
+        before.repository_bindings[0].binding_id,
+        added.repository_bindings[0].binding_id
+    );
+    assert_eq!(
+        added.repository_bindings[0].binding_id,
+        reordered.repository_bindings[0].binding_id
+    );
+}
+
+#[test]
+fn github_gitlab_and_custom_ports_have_canonical_distinct_authority() {
+    let temp = TempDir::new().unwrap();
+    let cases = [
+        (
+            "github",
+            "https://GitHub.com:443/acme/repo.git",
+            "forge:github.com/acme/repo",
+        ),
+        (
+            "gitlab",
+            "git@gitlab.com:group/subgroup/repo.git",
+            "forge:gitlab.com/group/subgroup/repo",
+        ),
+        (
+            "custom-default-ssh",
+            "ssh://git@forge.example.test:22/acme/repo.git",
+            "forge:forge.example.test/acme/repo",
+        ),
+        (
+            "custom-port",
+            "ssh://git@forge.example.test:2222/acme/repo.git",
+            "forge:forge.example.test:2222/acme/repo",
+        ),
+    ];
+    for (name, remote, expected) in cases {
+        let repo = repository(temp.path(), name, Some(remote));
+        let annotation = attribute(AttributionInput {
+            declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+            ..AttributionInput::default()
+        });
+        assert_eq!(annotation.repository_bindings.len(), 1, "{name}");
+        assert_eq!(
+            annotation.repository_bindings[0].logical_repository_id, expected,
+            "{name}"
+        );
+    }
 }
 
 #[test]

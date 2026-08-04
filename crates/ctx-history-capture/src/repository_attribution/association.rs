@@ -6,11 +6,38 @@ use ctx_history_core::{
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use std::{collections::HashSet, fmt};
-use url::Url;
+use url::{Host, Url};
 
 use super::shell::bounded_pull_request_association_query;
 
 const MAX_ASSOCIATION_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Credential-free canonical authority for a forge URL.
+///
+/// Default transport ports are aliases of the ordinary host spelling while a
+/// nondefault port is part of repository authority. IPv6 literals retain
+/// brackets so a following port remains unambiguous.
+pub(super) fn canonical_url_authority(url: &Url) -> Option<String> {
+    let host = match url.host()? {
+        Host::Domain(host) => host.to_ascii_lowercase(),
+        Host::Ipv4(host) => host.to_string(),
+        Host::Ipv6(host) => format!("[{host}]"),
+    };
+    let port = url
+        .port()
+        .filter(|port| Some(*port) != default_port(url.scheme()));
+    Some(port.map_or(host.clone(), |port| format!("{host}:{port}")))
+}
+
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        "ssh" => Some(22),
+        "git" => Some(9418),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnscopedPullRequestAssociationObservation {
@@ -218,16 +245,12 @@ fn canonical_pull_request(value: &str) -> Option<RepositoryPullRequestIdentity> 
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.port().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return None;
     }
-    let host = url.host_str()?.to_ascii_lowercase();
-    if host.is_empty() || host.contains(':') {
-        return None;
-    }
+    let host = canonical_url_authority(&url)?;
     let segments = url.path_segments()?.collect::<Vec<_>>();
     if segments.len() < 4
         || segments[segments.len() - 2] != "pull"
@@ -316,6 +339,28 @@ mod tests {
         assert_eq!(
             association.merged_as.hex,
             "103c0105645cc02c730f98eba2831fba854d3569"
+        );
+    }
+
+    #[test]
+    fn custom_port_is_part_of_pull_request_repository_authority() {
+        let output = json!({
+            "mergeCommit": {"oid": "103c0105645cc02c730f98eba2831fba854d3569"},
+            "mergedAt": "2026-07-29T17:11:30Z",
+            "state": "MERGED",
+            "url": "https://forge.example.test:8443/acme/repo/pull/203"
+        })
+        .to_string();
+        let association = exact_pull_request_association(
+            "gh pr view 203 --repo forge.example.test:8443/acme/repo --json state,mergedAt,mergeCommit,url",
+            "/repo",
+            &Value::String(output),
+            linkage(),
+        )
+        .expect("custom-port association");
+        assert_eq!(
+            association.pull_request.forge_repository.host,
+            "forge.example.test:8443"
         );
     }
 

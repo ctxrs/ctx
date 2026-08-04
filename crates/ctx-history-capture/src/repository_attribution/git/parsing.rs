@@ -7,6 +7,7 @@ use ctx_history_core::{
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use super::super::association::canonical_url_authority;
 use super::{
     ProbeFailure, ResolvedCommitFile, MAX_GIT_OUTPUT_BYTES, MAX_REMOTES, MAX_RESOLVED_COMMIT_FILES,
 };
@@ -297,11 +298,8 @@ fn normalize_remote(remote: &str) -> Result<Option<RepositoryAlias>, ProbeFailur
         {
             return Err(ProbeFailure::Unsafe("credential_bearing_remote"));
         }
-        let host = url
-            .host_str()
-            .ok_or(ProbeFailure::Failed("remote_host_missing"))?;
         (
-            host.to_ascii_lowercase(),
+            canonical_url_authority(&url).ok_or(ProbeFailure::Failed("remote_host_missing"))?,
             url.path().trim_matches('/').to_owned(),
         )
     } else if let Some((authority, path)) = remote.split_once(':') {

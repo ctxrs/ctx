@@ -1,13 +1,12 @@
 use std::{collections::BTreeMap, fmt::Write};
 
+use super::{git::CertifiedCandidate, outcome::UnscopedOutcomeObservation};
 use ctx_history_core::{
     CoreRecordAnnotation, RepositoryAbstention, RepositoryAbstentionReason, RepositoryAlias,
     RepositoryAliasKind, RepositoryBinding, RepositoryEvidence, RepositoryEvidenceConfidence,
     RepositoryEvidenceKind, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 use sha2::{Digest, Sha256};
-
-use super::{git::CertifiedCandidate, outcome::UnscopedOutcomeObservation};
 
 const MAX_PROVIDER_NATIVE_IDENTITIES: usize = 16;
 
@@ -127,13 +126,10 @@ pub(super) fn reconcile_provider_identity(
         .iter()
         .enumerate()
         .filter(|(_, certificate)| {
-            certificate.binding.logical_repository_id == provider.logical_repository_id
-                || certificate.binding.aliases.iter().any(|local| {
-                    provider
-                        .aliases
-                        .iter()
-                        .any(|native| alias_identity_matches(local, native))
-                })
+            provider
+                .aliases
+                .iter()
+                .any(|native| binding_accepts_forge_repository(&certificate.binding, native))
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
@@ -162,15 +158,28 @@ pub(super) fn reconcile_provider_identity(
         return;
     }
     if !certified.is_empty() {
-        push_abstention(
-            annotation,
-            RepositoryEvidenceKind::ProviderNativeProject,
-            RepositoryAbstentionReason::ConflictingIdentity,
-            "provider_native_identity_does_not_match_local_certificate",
-        );
+        let identifies_secondary_remote = certified.iter().any(|certificate| {
+            provider.aliases.iter().any(|native| {
+                certificate
+                    .binding
+                    .aliases
+                    .iter()
+                    .any(|local| alias_identity_matches(local, native))
+            })
+        });
+        if !identifies_secondary_remote {
+            push_abstention(
+                annotation,
+                RepositoryEvidenceKind::ProviderNativeProject,
+                RepositoryAbstentionReason::ConflictingIdentity,
+                "provider_native_identity_does_not_match_local_certificate",
+            );
+        }
         // Provider-native identity has precedence for its own exact outcome
-        // segment. Other structured activity lanes remain independent and may
-        // certify additional repositories in the same event.
+        // segment. A provider identity naming a configured secondary remote is
+        // a normal fork/upstream topology, not a repository conflict. Other
+        // structured activity lanes remain independent and may certify
+        // additional repositories in the same event.
         annotation.repository_bindings.push(*provider);
         return;
     }

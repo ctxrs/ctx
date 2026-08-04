@@ -605,7 +605,7 @@ impl GitSnapshot {
                 &worktree_fingerprint,
             ])
         );
-        let logical_repository_id = single_logical_alias(&self.aliases).map_or_else(
+        let logical_repository_id = authoritative_logical_alias(&self.aliases).map_or_else(
             || {
                 format!(
                     "local:{}",
@@ -660,16 +660,30 @@ impl GitSnapshot {
     }
 }
 
-fn single_logical_alias(aliases: &[RepositoryAlias]) -> Option<&RepositoryAlias> {
+fn authoritative_logical_alias(aliases: &[RepositoryAlias]) -> Option<&RepositoryAlias> {
     let first = aliases.first()?;
+    let origin = aliases
+        .iter()
+        .filter(|alias| alias.remote_name.as_deref() == Some("origin"))
+        .collect::<Vec<_>>();
+    if let Some(authority) = origin.first().copied() {
+        if origin
+            .iter()
+            .all(|alias| same_alias_identity(alias, authority))
+        {
+            return Some(authority);
+        }
+    }
     aliases
         .iter()
-        .all(|alias| {
-            alias.host.eq_ignore_ascii_case(&first.host)
-                && alias.namespace == first.namespace
-                && alias.name == first.name
-        })
+        .all(|alias| same_alias_identity(alias, first))
         .then_some(first)
+}
+
+fn same_alias_identity(left: &RepositoryAlias, right: &RepositoryAlias) -> bool {
+    left.host.eq_ignore_ascii_case(&right.host)
+        && left.namespace == right.namespace
+        && left.name == right.name
 }
 
 impl CertifiedCandidate {
