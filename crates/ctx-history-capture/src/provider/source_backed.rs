@@ -114,7 +114,9 @@ mod watch;
 
 pub use discovery::*;
 pub use driver::*;
-pub(crate) use fallback_identity::{FallbackEventIdentityMode, FallbackEventIdentityState};
+#[cfg(test)]
+pub(crate) use fallback_identity::FallbackEventIdentityMode;
+pub(crate) use fallback_identity::FallbackEventIdentityState;
 pub use inventory::*;
 pub use publication::*;
 pub use registration::*;

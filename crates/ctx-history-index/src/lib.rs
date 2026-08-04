@@ -58,6 +58,8 @@ pub use policy::{
 pub use preparation::{CoreRecordPreparer, PreparedCoreRecord};
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
+#[cfg(test)]
+pub(crate) use publication::verify_searcher;
 pub(crate) use publication::{
     canonical_commit_payload, create_candidate_generation, load_active_generation_pointer,
     load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
@@ -65,8 +67,8 @@ pub(crate) use publication::{
     reclaim_inactive_generation_directories, reclaim_unreferenced_manifests,
     reconcile_commit_error, searcher_generation, sync_directory, sync_generation,
     verify_complete_searcher, verify_physical_integrity, verify_publication_candidate,
-    verify_searcher, verify_searcher_structure, write_manifest, ActiveGenerationPointer,
-    GenerationSlot, INDEX_GENERATIONS_DIRECTORY,
+    verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
+    INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
