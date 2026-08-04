@@ -53,9 +53,13 @@ fn write_nanoclaw_systemd_unit(home: &Path, project: &Path) -> PathBuf {
     write(
         &unit,
         format!(
-            "[Unit]\nDescription=NanoClaw Personal Assistant\n\n[Service]\nType=simple\nExecStart=/usr/bin/node {}/dist/index.js\nWorkingDirectory={}\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=NanoClaw Personal Assistant\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/node {}/dist/index.js\nWorkingDirectory={}\nRestart=always\nRestartSec=5\nKillMode=process\nEnvironment=HOME={}\nEnvironment=PATH=/usr/local/bin:/usr/bin:/bin:{}/.local/bin\nStandardOutput=append:{}/logs/nanoclaw.log\nStandardError=append:{}/logs/nanoclaw.error.log\n\n[Install]\nWantedBy=default.target",
             project.display(),
-            project.display()
+            project.display(),
+            home.display(),
+            home.display(),
+            project.display(),
+            project.display(),
         ),
     );
     unit
@@ -70,9 +74,13 @@ fn write_nanoclaw_launchd_plist(home: &Path, project: &Path) -> PathBuf {
     write(
         &plist,
         format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>ProgramArguments</key><array><string>/usr/local/bin/node</string><string>{}/dist/index.js</string></array><key>WorkingDirectory</key><string>{}</string><key>RunAtLoad</key><true/></dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>{label}</string>\n    <key>ProgramArguments</key>\n    <array>\n        <string>/usr/local/bin/node</string>\n        <string>{}/dist/index.js</string>\n    </array>\n    <key>WorkingDirectory</key>\n    <string>{}</string>\n    <key>RunAtLoad</key>\n    <true/>\n    <key>KeepAlive</key>\n    <true/>\n    <key>EnvironmentVariables</key>\n    <dict>\n        <key>PATH</key>\n        <string>/usr/local/bin:/usr/bin:/bin:{}/.local/bin</string>\n        <key>HOME</key>\n        <string>{}</string>\n    </dict>\n    <key>StandardOutPath</key>\n    <string>{}/logs/nanoclaw.log</string>\n    <key>StandardErrorPath</key>\n    <string>{}/logs/nanoclaw.error.log</string>\n</dict>\n</plist>",
             project.display(),
-            project.display()
+            project.display(),
+            home.display(),
+            home.display(),
+            project.display(),
+            project.display(),
         ),
     );
     plist
@@ -129,13 +137,14 @@ fn nanoclaw_macos_launchd_registration_discovers_checkout() {
 }
 
 #[test]
-fn nanoclaw_exact_cwd_takes_precedence_over_registered_checkout() {
+fn nanoclaw_exact_cwd_coexists_with_distinct_registration_and_dedupes_itself() {
     let temp = tempdir();
     let home = temp.path().join("home");
     let cwd = temp.path().join("cwd-nanoclaw");
     let registered = temp.path().join("registered-nanoclaw");
     write_nanoclaw_project(&cwd);
     write_nanoclaw_project(&registered);
+    write_nanoclaw_systemd_unit(&home, &cwd);
     write_nanoclaw_systemd_unit(&home, &registered);
 
     let report = report(&context(&home, &cwd), CaptureProvider::NanoClaw);
@@ -146,8 +155,151 @@ fn nanoclaw_exact_cwd_takes_precedence_over_registered_checkout() {
             .iter()
             .map(|source| source.path.clone())
             .collect::<Vec<_>>(),
-        vec![cwd]
+        vec![cwd, registered]
     );
+}
+
+#[test]
+fn nanoclaw_two_registered_checkouts_coexist_deterministically() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let first = temp.path().join("nanoclaw-first");
+    let second = temp.path().join("nanoclaw-second");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&first);
+    write_nanoclaw_project(&second);
+    write_nanoclaw_systemd_unit(&home, &first);
+    write_nanoclaw_systemd_unit(&home, &second);
+
+    let mut expected = vec![first, second];
+    expected.sort_by_key(|project| nanoclaw_slug_for(project));
+    let discovery = context(&home, &cwd);
+    for _ in 0..2 {
+        let report = report(&discovery, CaptureProvider::NanoClaw);
+        assert_eq!(report.issues, []);
+        assert_eq!(
+            report
+                .sources
+                .iter()
+                .map(|source| source.path.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn nanoclaw_systemd_paths_follow_upstream_and_systemd_literal_quoting() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("NanoClaw install with spaces");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    let unit = write_nanoclaw_systemd_unit(&home, &project);
+
+    let discovery = context(&home, &cwd);
+    let upstream = report(&discovery, CaptureProvider::NanoClaw);
+    assert_eq!(upstream.issues, []);
+    assert_eq!(upstream.sources[0].path, project);
+
+    write(
+        &unit,
+        format!(
+            "[Service]\nExecStart=\"/opt/Node Runtime/bin/node\" \"{}/dist/index.js\"\nWorkingDirectory=\"{}\"\n",
+            project.display(),
+            project.display(),
+        ),
+    );
+    let quoted = report(&discovery, CaptureProvider::NanoClaw);
+    assert_eq!(quoted.issues, []);
+    assert_eq!(quoted.sources[0].path, project);
+
+    let escaped_project = project.to_string_lossy().replace(' ', "\\s");
+    write(
+        &unit,
+        format!(
+            "[Service]\nExecStart=/opt/Node\\sRuntime/bin/node {escaped_project}/dist/index.js\nWorkingDirectory={escaped_project}\n",
+        ),
+    );
+    let escaped = report(&discovery, CaptureProvider::NanoClaw);
+    assert_eq!(escaped.issues, []);
+    assert_eq!(escaped.sources[0].path, project);
+
+    for unsafe_exec_start in [
+        format!(
+            "/usr/bin/node \"{}/dist/index.js\" --inspect",
+            project.display()
+        ),
+        "/usr/bin/node \"${NANOCLAW_ROOT}/dist/index.js\"".to_owned(),
+    ] {
+        write(
+            &unit,
+            format!(
+                "[Service]\nExecStart={unsafe_exec_start}\nWorkingDirectory=\"{}\"\n",
+                project.display()
+            ),
+        );
+        let unsafe_registration = report(&discovery, CaptureProvider::NanoClaw);
+        assert!(unsafe_registration.sources.is_empty());
+        assert_eq!(unsafe_registration.issues.len(), 1);
+    }
+}
+
+#[test]
+fn nanoclaw_launchd_rejects_nested_misordered_duplicate_and_malformed_fields() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let project = temp.path().join("nanoclaw");
+    fs::create_dir_all(&cwd).unwrap();
+    write_nanoclaw_project(&project);
+    let plist = write_nanoclaw_launchd_plist(&home, &project);
+    let label = format!("com.nanoclaw-v2-{}", nanoclaw_slug_for(&project));
+    let program_arguments = format!(
+        "<key>ProgramArguments</key><array><string>/usr/local/bin/node</string><string>{}/dist/index.js</string></array>",
+        project.display()
+    );
+    let working_directory = format!(
+        "<key>WorkingDirectory</key><string>{}</string>",
+        project.display()
+    );
+    let cases = [
+        format!(
+            "<plist version=\"1.0\"><dict><key>Label</key><string>{label}</string>{program_arguments}{working_directory}<key>EnvironmentVariables</key><dict><key>WorkingDirectory</key><string>/nested</string></dict></dict></plist>"
+        ),
+        format!(
+            "<plist version=\"1.0\"><dict><string>{label}</string><key>Label</key>{program_arguments}{working_directory}</dict></plist>"
+        ),
+        format!(
+            "<plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>Label</key><string>{label}</string>{program_arguments}{working_directory}</dict></plist>"
+        ),
+        format!(
+            "<plist version=\"1.0\"><dict><key>Label</key><string>{label}</string>{program_arguments}{working_directory}</array></plist>"
+        ),
+    ];
+
+    let discovery = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::MacOS,
+        DiscoveryPlatformDirs::default(),
+    );
+    for body in cases {
+        write(&plist, body);
+        let report = report(&discovery, CaptureProvider::NanoClaw);
+        assert!(report.sources.is_empty());
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].path.as_deref(), Some(plist.as_path()));
+    }
+}
+
+#[test]
+fn nanoclaw_sha1_slug_matches_external_known_vectors() {
+    // FIPS PUB 180-1's standard "abc" vector and the standard empty digest.
+    assert_eq!(nanoclaw_sha1_slug(b"abc"), "a9993e36");
+    assert_eq!(nanoclaw_sha1_slug(b""), "da39a3ee");
 }
 
 #[test]

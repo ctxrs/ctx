@@ -382,3 +382,153 @@ fn nanoclaw_exact_cwd_sources_are_native_and_auto_imported() {
     ]));
     assert_search_provider_oracle(&search_after_import, "nanoclaw", query, 2, "message");
 }
+
+#[test]
+fn nanoclaw_service_registration_import_all_indexes_without_exact_cwd() {
+    let temp = tempdir();
+    let query = "nanoclaw-service-registration-import-all-oracle";
+    let fixture = PathBuf::from(write_native_nanoclaw_fixture(&temp, query));
+    let project = temp.path().join("registered NanoClaw checkout");
+    fs::rename(&fixture, &project).unwrap();
+    write_nanoclaw_systemd_registration(&temp, &project);
+    let unrelated_cwd = temp.path().join("unrelated-cwd");
+    fs::create_dir_all(&unrelated_cwd).unwrap();
+
+    let mut sources_command = ctx(&temp);
+    sources_command.current_dir(&unrelated_cwd);
+    let sources =
+        json_output(sources_command.args(["sources", "--provider", "nanoclaw", "--format=json"]));
+    let nanoclaw = sources["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["provider"] == "nanoclaw")
+        .unwrap_or_else(|| panic!("missing registered NanoClaw source in {sources:#}"));
+    assert_eq!(nanoclaw["path"], project.to_str().unwrap());
+    assert_eq!(nanoclaw["status"], "available");
+    assert_eq!(nanoclaw["import_support"], "native");
+
+    let mut import_command = ctx(&temp);
+    import_command.current_dir(&unrelated_cwd);
+    let imported = json_output(import_command.args([
+        "import",
+        "--all",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(
+        imported["totals"]["current_source_count"], 1,
+        "{imported:#}"
+    );
+    assert_eq!(
+        imported["totals"]["current_indexed_documents"], 2,
+        "{imported:#}"
+    );
+
+    // Import waits for the published receipt. Stop the isolated daemon before
+    // searching so no background refresh can race the refresh-off assertion.
+    json_output(ctx(&temp).args(["daemon", "disable", "--format=json"]));
+
+    let mut search_command = ctx(&temp);
+    search_command.current_dir(&unrelated_cwd);
+    let search = json_output(search_command.args([
+        "search",
+        query,
+        "--provider",
+        "nanoclaw",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "nanoclaw", query, 1, "message");
+}
+
+fn write_nanoclaw_systemd_registration(temp: &TempDir, project: &Path) {
+    let slug = nanoclaw_test_sha1_slug(project.to_string_lossy().as_bytes());
+    let unit = temp
+        .path()
+        .join(".config/systemd/user")
+        .join(format!("nanoclaw-v2-{slug}.service"));
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(
+        unit,
+        format!(
+            "[Unit]\nDescription=NanoClaw Personal Assistant\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/node {}/dist/index.js\nWorkingDirectory={}\nRestart=always\nRestartSec=5\nKillMode=process\nEnvironment=HOME={}\nEnvironment=PATH=/usr/local/bin:/usr/bin:/bin:{}/.local/bin\nStandardOutput=append:{}/logs/nanoclaw.log\nStandardError=append:{}/logs/nanoclaw.error.log\n\n[Install]\nWantedBy=default.target",
+            project.display(),
+            project.display(),
+            temp.path().display(),
+            temp.path().display(),
+            project.display(),
+            project.display(),
+        ),
+    )
+    .unwrap();
+}
+
+fn nanoclaw_test_sha1_slug(input: &[u8]) -> String {
+    let mut message = input.to_vec();
+    let bit_len = (message.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut hash = [
+        0x6745_2301_u32,
+        0xefcd_ab89_u32,
+        0x98ba_dcfe_u32,
+        0x1032_5476_u32,
+        0xc3d2_e1f0_u32,
+    ];
+    for chunk in message.chunks_exact(64) {
+        let mut words = [0_u32; 80];
+        for (index, word) in words.iter_mut().take(16).enumerate() {
+            let start = index * 4;
+            *word = u32::from_be_bytes([
+                chunk[start],
+                chunk[start + 1],
+                chunk[start + 2],
+                chunk[start + 3],
+            ]);
+        }
+        for index in 16..80 {
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e] = hash;
+        for (index, word) in words.iter().enumerate() {
+            let (function, constant) = match index {
+                0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+                _ => (b ^ c ^ d, 0xca62_c1d6),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(function)
+                .wrapping_add(e)
+                .wrapping_add(constant)
+                .wrapping_add(*word);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = next;
+        }
+        hash[0] = hash[0].wrapping_add(a);
+        hash[1] = hash[1].wrapping_add(b);
+        hash[2] = hash[2].wrapping_add(c);
+        hash[3] = hash[3].wrapping_add(d);
+        hash[4] = hash[4].wrapping_add(e);
+    }
+
+    let bytes = hash[0].to_be_bytes();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
+}
