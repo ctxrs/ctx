@@ -416,6 +416,17 @@ impl PostPublicationRouteCoverageFence {
             .copied()
             .map_or(admitted_watermark, |seen| admitted_watermark.max(seen))
     }
+
+    pub(super) fn exactly_matches(
+        &self,
+        route: &SourceRouteIdentity,
+        verified_observation: &str,
+    ) -> bool {
+        self.sampled_observations
+            .get(route)
+            .and_then(Option::as_deref)
+            == Some(verified_observation)
+    }
 }
 
 #[allow(dead_code)] // Public integration seam consumed by #282.

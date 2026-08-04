@@ -1,4 +1,5 @@
 use super::*;
+mod recovery;
 mod resolution;
 
 impl CoreRefreshEngine {
@@ -15,207 +16,6 @@ impl CoreRefreshEngine {
                 request_id: None,
             },
         )
-    }
-
-    /// Restores an exact published authority when its durable receipt is
-    /// complete, or durably enqueues one replay before daemon readiness when
-    /// Core may have committed past the last terminal job snapshot.
-    pub(in crate::semantic) fn recover_interrupted_publication(
-        &self,
-        data_root: &Path,
-    ) -> Result<bool> {
-        let Some(job) = read_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root))
-        else {
-            return Ok(false);
-        };
-        let verified = open_published_generation(data_root)?.map(Arc::new);
-        let active_generation = verified
-            .as_ref()
-            .map(|verified| verified.generation_id().to_owned());
-        let queued_successors = recover_queued_successors(&job, active_generation.clone())?;
-        let recovered_continuations = recover_logical_demand_continuations(&job)?;
-        if job.get("request_state").and_then(Value::as_str) == Some("published") {
-            if let Some(verified) = verified.as_ref() {
-                if let Ok(status_receipt) = published_refresh_receipt_for_index(&job, verified) {
-                    if let Ok(metadata) = SourceBackedPublicationMetadata::decode(verified) {
-                        if let Ok(durable_receipt) = published_refresh_receipt_for_index(
-                            &metadata.response_value(),
-                            verified,
-                        ) {
-                            if status_receipt.published_generation == verified.generation_id()
-                                && durable_receipt == status_receipt
-                            {
-                                let attempt = SourceBackedRefreshAttempt::recovered_published(
-                                    &job,
-                                    &metadata,
-                                    durable_receipt.clone(),
-                                );
-                                let terminal = CoreRefreshTerminalSuccess::bind(
-                                    durable_receipt,
-                                    Arc::clone(verified),
-                                )?;
-                                let has_successors = !queued_successors.is_empty();
-                                {
-                                    let mut state = self.lock_state();
-                                    terminal.install(&mut state);
-                                    state.attempts.push_back(attempt);
-                                    install_recovered_successors(
-                                        &mut state,
-                                        queued_successors.clone(),
-                                    )?;
-                                    state
-                                        .manual_all_continuations
-                                        .extend(recovered_continuations.clone());
-                                    state.current_published_generation = active_generation.clone();
-                                    trim_terminal_attempt_history(&mut state);
-                                }
-                                let _ =
-                                    self.finish_route_admissions(&metadata.request_id, true, None);
-                                self.persist_job_status(data_root, &metadata.request_id)?;
-                                return Ok(has_successors);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let request_state = job
-            .get("request_state")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let previous_generation = job.get("previous_generation").and_then(Value::as_str);
-        let pointer_advanced = active_generation.as_deref() != previous_generation;
-        // A terminal job must always recover or reject its exact publication,
-        // even when the persisted previous-generation pointer already equals
-        // the active generation. Otherwise malformed terminal authority can
-        // be ignored and queued successors can be lost on restart.
-        if pointer_advanced || request_state == "published" {
-            let active_generation = active_generation.ok_or_else(|| {
-                anyhow!("interrupted source refresh advanced Core without an active generation")
-            })?;
-            let verified = verified.ok_or_else(|| {
-                anyhow!("interrupted source refresh advanced Core without a verified generation")
-            })?;
-            if verified.publication_metadata().is_none() && request_state == "published" {
-                // Publications written before the refresh control plane carry
-                // no source-refresh receipt, so there is nothing exact to
-                // recover. Accept the verified generation as terminal-complete
-                // only when the legacy job names that exact publication, then
-                // install any queued successors; the next scheduled refresh
-                // publishes with metadata again. Non-terminal jobs, mismatched
-                // generations, and present-but-malformed metadata keep failing
-                // closed below.
-                let job_generation = required_generation(
-                    job.get("published_generation"),
-                    "legacy published refresh generation",
-                )?;
-                if job_generation != active_generation {
-                    bail!("legacy Core refresh job names a different published generation");
-                }
-                if !queued_successors.is_empty() {
-                    let durable_request_id = {
-                        let mut state = self.lock_state();
-                        install_recovered_successors(&mut state, queued_successors)?;
-                        state
-                            .manual_all_continuations
-                            .extend(recovered_continuations.clone());
-                        state.current_published_generation = Some(active_generation);
-                        state
-                            .active_request_id
-                            .as_deref()
-                            .ok_or_else(|| {
-                                anyhow!("recovered source refresh successor is unavailable")
-                            })?
-                            .to_owned()
-                    };
-                    self.persist_job_status(data_root, &durable_request_id)?;
-                    return Ok(true);
-                }
-                self.lock_state().current_published_generation = Some(active_generation);
-                return Ok(false);
-            }
-            let metadata = SourceBackedPublicationMetadata::decode(&verified)
-                .context("recover exact terminal refresh receipt from Core publication metadata")?;
-            let job_request_id = job
-                .get("request_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("interrupted source refresh job has no request ID"))?;
-            if metadata.request_id != job_request_id {
-                bail!("active Core refresh metadata belongs to a different request");
-            }
-            let job_operation = SourceBackedRefreshOperation::from_request_json(&job)?;
-            let job_scope = refresh_scope_from_json(job.get("refresh_scope"))?;
-            if metadata.operation != job_operation || metadata.refresh_scope != job_scope {
-                bail!("active Core refresh metadata does not match the interrupted request");
-            }
-            let receipt =
-                published_refresh_receipt_for_index(&metadata.response_value(), verified.as_ref())?;
-            if receipt.published_generation != active_generation {
-                bail!("active Core refresh metadata names a different generation");
-            }
-            let attempt =
-                SourceBackedRefreshAttempt::recovered_published(&job, &metadata, receipt.clone());
-            let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
-            let has_successors = !queued_successors.is_empty();
-            {
-                let mut state = self.lock_state();
-                terminal.install(&mut state);
-                state.attempts.push_back(attempt);
-                install_recovered_successors(&mut state, queued_successors.clone())?;
-                state
-                    .manual_all_continuations
-                    .extend(recovered_continuations.clone());
-                state.current_published_generation = Some(active_generation);
-                trim_terminal_attempt_history(&mut state);
-            }
-            let _ = self.finish_route_admissions(&metadata.request_id, true, None);
-            self.persist_job_status(data_root, &metadata.request_id)?;
-            return Ok(has_successors);
-        }
-        if request_state == "failed" && !queued_successors.is_empty() {
-            let durable_request_id = {
-                let mut state = self.lock_state();
-                install_recovered_successors(&mut state, queued_successors)?;
-                state
-                    .manual_all_continuations
-                    .extend(recovered_continuations.clone());
-                state.current_published_generation = active_generation;
-                state
-                    .active_request_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("recovered source refresh successor is unavailable"))?
-                    .to_owned()
-            };
-            self.persist_job_status(data_root, &durable_request_id)?;
-            return Ok(true);
-        }
-        let needs_recovery = matches!(request_state, "queued" | "running");
-        if !needs_recovery {
-            if let Some(verified) = verified {
-                self.lock_state().current_published_generation =
-                    Some(verified.generation_id().to_owned());
-            }
-            return Ok(false);
-        }
-
-        let root = recover_queued_root(&job, active_generation.clone())?;
-        let request_id = root.request_id.clone();
-        {
-            let mut state = self.lock_state();
-            if state.active_request_id.is_some() || !state.pending_request_ids.is_empty() {
-                bail!("interrupted source refresh recovery conflicts with an active queue");
-            }
-            state.active_request_id = Some(request_id.clone());
-            state.attempts.push_back(root);
-            install_recovered_successors(&mut state, queued_successors)?;
-            state
-                .manual_all_continuations
-                .extend(recovered_continuations);
-            state.current_published_generation = active_generation;
-        }
-        self.persist_job_status(data_root, &request_id)?;
-        Ok(true)
     }
 
     #[cfg(test)]
@@ -249,6 +49,46 @@ impl CoreRefreshEngine {
                 request_id: Some(request_id),
             },
         )
+    }
+
+    #[cfg(test)]
+    pub(in crate::semantic) fn enqueue_fresh_catalog_demand_for_test(
+        &self,
+        data_root: &Path,
+        observed_generation: Option<String>,
+        request_id: String,
+        requested_catalog: ExplicitSourceCatalogAuthority,
+    ) -> Result<Value> {
+        let response = match self.enqueue_with_catalog_metadata(
+            observed_generation,
+            SourceRefreshRuntimeMetadata {
+                operation: SourceBackedRefreshOperation::Import,
+                daemon_mode: DaemonMode::default(),
+                trigger: "import",
+                trigger_provenance: "explicit_source_catalog",
+            },
+            Some(requested_catalog),
+            SourceBackedRefreshScope::All,
+            SourceRefreshLogicalDemand {
+                admission: SourceRefreshAdmissionRequirement::FreshAfterAdmittedSnapshot,
+                route_observations: BTreeMap::new(),
+                request_id: Some(request_id),
+            },
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(queue_full) = error.downcast_ref::<SourceBackedRefreshQueueFull>() {
+                    return Ok(queue_full.to_json());
+                }
+                return Err(error);
+            }
+        };
+        let request_id = response
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("queued test source refresh has no request ID"))?;
+        self.persist_job_status(data_root, request_id)?;
+        Ok(response)
     }
 
     #[cfg(test)]

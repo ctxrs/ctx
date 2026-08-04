@@ -85,50 +85,75 @@ impl CoreRefreshEngine {
             .clone()
             .or_else(|| predecessor.receipt.clone())?;
         let published_generation = publication_receipt.published_generation.clone();
-        let coverage_certificate = state
+        let publication_metadata = state
             .pinned_core_publication
             .as_ref()
             .filter(|authority| authority.generation_id() == published_generation)
             .and_then(|authority| {
                 SourceBackedPublicationMetadata::decode(authority.verified_index_ref()).ok()
             })
-            .filter(|metadata| metadata.request_id == continuation.predecessor_request_id)
-            .map(|metadata| {
-                let routes = continuation
-                    .covered_route_results
-                    .keys()
-                    .filter_map(|route| {
-                        let observation = continuation
-                            .admission_route_observations
-                            .get(route)
-                            .and_then(Option::as_ref)?;
-                        if metadata.route_observations.get(route) != Some(observation) {
-                            return None;
-                        }
-                        let admitted_watermark = continuation
-                            .admission_event_watermarks
-                            .get(route)
-                            .copied()?;
-                        let admitted_watermark = post_publication_fence.certified_boundary(
-                            route,
+            .filter(|metadata| metadata.request_id == continuation.predecessor_request_id);
+        let invalid_routes = continuation
+            .covered_route_results
+            .keys()
+            .filter(|route| {
+                let admitted_observation = continuation
+                    .admission_route_observations
+                    .get(*route)
+                    .and_then(Option::as_deref);
+                admitted_observation.is_none_or(|admitted| {
+                    publication_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.route_observations.get(*route))
+                        .is_none_or(|published| published != admitted)
+                        || !post_publication_fence.exactly_matches(route, admitted)
+                })
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !invalid_routes.is_empty() {
+            let continuation = state.manual_all_continuations.get_mut(&request_id)?;
+            for route in invalid_routes {
+                continuation.invalidate_route(&route);
+            }
+            return None;
+        }
+        let coverage_certificate = publication_metadata.map(|metadata| {
+            let routes = continuation
+                .covered_route_results
+                .keys()
+                .filter_map(|route| {
+                    let observation = continuation
+                        .admission_route_observations
+                        .get(route)
+                        .and_then(Option::as_ref)?;
+                    if metadata.route_observations.get(route) != Some(observation) {
+                        return None;
+                    }
+                    let admitted_watermark = continuation
+                        .admission_event_watermarks
+                        .get(route)
+                        .copied()?;
+                    let admitted_watermark = post_publication_fence.certified_boundary(
+                        route,
+                        admitted_watermark,
+                        observation,
+                    );
+                    Some((
+                        route.clone(),
+                        SourceBackedRefreshRouteCoverageCertificate {
+                            observation: observation.clone(),
                             admitted_watermark,
-                            observation,
-                        );
-                        Some((
-                            route.clone(),
-                            SourceBackedRefreshRouteCoverageCertificate {
-                                observation: observation.clone(),
-                                admitted_watermark,
-                            },
-                        ))
-                    })
-                    .collect();
-                SourceBackedRefreshCoverageCertificate {
-                    request_id: request_id.clone(),
-                    published_generation: published_generation.clone(),
-                    routes,
-                }
-            });
+                        },
+                    ))
+                })
+                .collect();
+            SourceBackedRefreshCoverageCertificate {
+                request_id: request_id.clone(),
+                published_generation: published_generation.clone(),
+                routes,
+            }
+        });
         let now = utc_now().timestamp_millis();
         let request_receipt = {
             let attempt = find_attempt_mut(&mut state, &request_id)?;

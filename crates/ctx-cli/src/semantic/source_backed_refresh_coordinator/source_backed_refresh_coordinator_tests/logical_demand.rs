@@ -1,5 +1,7 @@
 use super::*;
 
+type SelectedRouteDeltas = Arc<Mutex<Vec<BTreeSet<SourceRouteIdentity>>>>;
+
 fn observation(byte: u8) -> String {
     format!("{byte:02x}").repeat(32)
 }
@@ -73,18 +75,41 @@ fn complete_verified_fully_covered_demand(
     route: &SourceRouteIdentity,
     route_observation: &str,
     demand_id: &str,
-) -> Arc<CoreRefreshEngine> {
+    demand_previous_generation: Option<String>,
+    panic_on_delta: bool,
+) -> (Arc<CoreRefreshEngine>, SelectedRouteDeltas) {
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
     let executor_entered = Arc::clone(&entered);
     let executor_release = Arc::clone(&release);
     let observations = BTreeMap::from([(route.clone(), route_observation.to_owned())]);
     let executor_observations = observations.clone();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let executor_executions = Arc::clone(&executions);
+    let selected_deltas = Arc::new(Mutex::new(Vec::new()));
+    let executor_deltas = Arc::clone(&selected_deltas);
     let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
-            executor_entered.wait();
-            executor_release.wait();
-            verified_publication_for_observations(&execution, &executor_observations)
+            if executor_executions.fetch_add(1, Ordering::SeqCst) == 0 {
+                executor_entered.wait();
+                executor_release.wait();
+                return verified_publication_for_observations(&execution, &executor_observations);
+            }
+            let selected = executor_observations
+                .keys()
+                .filter(|route| !execution.covered_route_ids.contains(*route))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            executor_deltas.lock().unwrap().push(selected.clone());
+            if panic_on_delta {
+                panic!("injected crash after exact delta became durable");
+            }
+            let selected_observations = executor_observations
+                .iter()
+                .filter(|(route, _)| selected.contains(*route))
+                .map(|(route, observation)| (route.clone(), observation.clone()))
+                .collect();
+            verified_publication_for_observations(&execution, &selected_observations)
         },
     )));
     coordinator.initialize_watch_route_authority([route.clone()]);
@@ -100,7 +125,7 @@ fn complete_verified_fully_covered_demand(
         entered.wait();
         coordinator
             .enqueue_fresh_demand_for_test(
-                None,
+                demand_previous_generation,
                 demand_id.to_owned(),
                 observations
                     .iter()
@@ -112,7 +137,7 @@ fn complete_verified_fully_covered_demand(
         let predecessor = predecessor.join().unwrap();
         assert!(!predecessor.failed, "{:#}", predecessor.job);
     });
-    coordinator
+    (coordinator, selected_deltas)
 }
 
 struct RunningAllDemand<'a> {
@@ -171,55 +196,30 @@ fn running_cold_all_satisfies_fresh_demand_with_one_full_pass() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let routes = BTreeSet::from([route_identity(0x61), route_identity(0x62)]);
-    let observations = BTreeMap::from([
-        (route_identity(0x61), observation(0xa1)),
-        (route_identity(0x62), observation(0xa2)),
-    ]);
-    let admission = observations
-        .iter()
-        .map(|(route, value)| (route.clone(), Some(value.clone())))
-        .collect();
+    let route = route_identity(0x61);
+    let route_observation = observation(0xa1);
     let demand_id = Uuid::from_u128(0x28101).to_string();
-    let executor_calls = Arc::new(AtomicUsize::new(0));
-    let observed_calls = Arc::clone(&executor_calls);
-    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |_execution: SourceBackedRefreshExecution<'_>| {
-            observed_calls.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!(
-                "covered demand must not launch another refresh attempt"
-            ))
-        },
-    ));
-
-    let (_, resolved_id) = complete_running_all_with_demand(
-        &coordinator,
+    let (coordinator, selected_deltas) = complete_verified_fully_covered_demand(
         &data_root,
-        &routes,
-        RunningAllDemand {
-            publication_observations: observations.clone(),
-            admission_observations: admission,
-            previous_generation: None,
-            request_id: &demand_id,
-            published_generation: "full-pass-generation",
-        },
+        &route,
+        &route_observation,
+        &demand_id,
+        None,
+        false,
     );
-    let sampled_observations = observations
-        .into_iter()
-        .map(|(route, observation)| (route, Some(observation)))
-        .collect();
+    let sampled_route = route;
+    let sampled_observation = route_observation;
     let resolution = coordinator
         .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
-            Ok(sampled_observations)
+            Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
         })
         .expect("covered logical demand resolution");
 
-    assert_eq!(resolved_id, demand_id);
     assert_eq!(request_id(&resolution.job), demand_id);
     assert!(!resolution.did_work);
     assert!(!resolution.failed);
     assert_eq!(resolution.job["scanned_routes"], 0);
-    assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
+    assert!(selected_deltas.lock().unwrap().is_empty());
     assert!(!coordinator.has_pending_request());
 }
 
@@ -231,8 +231,14 @@ fn fully_covered_resolver_samples_after_seen_fence_and_extends_matching_boundary
     let route = route_identity(0x69);
     let route_observation = observation(0xa9);
     let demand_id = Uuid::from_u128(0x28109).to_string();
-    let coordinator =
-        complete_verified_fully_covered_demand(&data_root, &route, &route_observation, &demand_id);
+    let (coordinator, selected_deltas) = complete_verified_fully_covered_demand(
+        &data_root,
+        &route,
+        &route_observation,
+        &demand_id,
+        None,
+        false,
+    );
     let seen_during_capture = EventWatermark::new(0, 4);
     coordinator.set_route_event_watermark_for_test(route.clone(), seen_during_capture);
     let sampled = Arc::new(AtomicBool::new(false));
@@ -256,10 +262,11 @@ fn fully_covered_resolver_samples_after_seen_fence_and_extends_matching_boundary
         certificate.exact_route_boundaries().collect::<Vec<_>>(),
         vec![(&route, seen_during_capture, route_observation.as_str())]
     );
+    assert!(selected_deltas.lock().unwrap().is_empty());
 }
 
 #[test]
-fn fully_covered_resolver_mismatch_and_unavailable_samples_do_not_extend_coverage() {
+fn fully_covered_resolver_mismatch_and_unavailable_samples_execute_exact_delta() {
     for (case, sampled_observation) in
         [("mismatch", Some(observation(0xbb))), ("unavailable", None)]
     {
@@ -269,11 +276,13 @@ fn fully_covered_resolver_mismatch_and_unavailable_samples_do_not_extend_coverag
         let route = route_identity(0x6a);
         let route_observation = observation(0xaa);
         let demand_id = Uuid::now_v7().to_string();
-        let coordinator = complete_verified_fully_covered_demand(
+        let (coordinator, selected_deltas) = complete_verified_fully_covered_demand(
             &data_root,
             &route,
             &route_observation,
             &demand_id,
+            None,
+            false,
         );
         coordinator.set_route_event_watermark_for_test(route.clone(), EventWatermark::new(0, 5));
         let sampled = Arc::new(AtomicBool::new(false));
@@ -285,24 +294,93 @@ fn fully_covered_resolver_mismatch_and_unavailable_samples_do_not_extend_coverag
                 sampled_by_resolver.store(true, Ordering::SeqCst);
                 Ok(BTreeMap::from([(sampled_route, sampled_observation)]))
             })
-            .unwrap_or_else(|| panic!("{case} logical resolution"));
-        let boundaries = resolution
-            .coverage_certificate()
-            .unwrap_or_else(|| panic!("{case} fail-closed certificate"))
-            .exact_route_boundaries()
-            .collect::<Vec<_>>();
+            .unwrap_or_else(|| panic!("{case} exact delta resolution"));
 
         assert!(sampled.load(Ordering::SeqCst), "{case}");
+        assert!(resolution.did_work, "{case}");
+        assert_eq!(request_id(&resolution.job), demand_id, "{case}");
+        assert_eq!(resolution.job["request_state"], "published", "{case}");
         assert_eq!(
-            boundaries,
-            vec![(
-                &route,
-                EventWatermark::new(0, 0),
-                route_observation.as_str()
-            )],
-            "{case} must retain only the older admitted boundary"
+            selected_deltas.lock().unwrap().as_slice(),
+            &[BTreeSet::from([route.clone()])],
+            "{case}"
         );
     }
+}
+
+#[test]
+fn unavailable_fully_covered_sample_persists_exact_delta_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x6f);
+    let route_observation = observation(0xaf);
+    let demand_id = Uuid::from_u128(0x2810b).to_string();
+    let (coordinator, selected_deltas) = complete_verified_fully_covered_demand(
+        &data_root,
+        &route,
+        &route_observation,
+        &demand_id,
+        None,
+        true,
+    );
+    coordinator.set_route_event_watermark_for_test(route.clone(), EventWatermark::new(0, 6));
+    let sampled_route = route.clone();
+
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        coordinator.run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+            Ok(BTreeMap::from([(sampled_route, None)]))
+        })
+    }));
+    assert!(crashed.is_err());
+    assert_eq!(
+        selected_deltas.lock().unwrap().as_slice(),
+        &[BTreeSet::from([route.clone()])]
+    );
+    let interrupted = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("durable exact delta before execution");
+    assert_eq!(interrupted["request_id"], demand_id);
+    assert_eq!(interrupted["request_state"], "running");
+    assert_eq!(
+        interrupted["logical_demand"]["invalidated_routes"],
+        json!([route.as_str()])
+    );
+    drop(coordinator);
+
+    let restarted_deltas = Arc::new(Mutex::new(Vec::new()));
+    let recorded_deltas = Arc::clone(&restarted_deltas);
+    let restart_route = route.clone();
+    let restart_observation = route_observation.clone();
+    let restarted = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let selected = BTreeSet::from([restart_route.clone()])
+                .difference(&execution.covered_route_ids)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            recorded_deltas.lock().unwrap().push(selected.clone());
+            let observations = selected
+                .into_iter()
+                .map(|route| (route, restart_observation.clone()))
+                .collect();
+            verified_publication_for_observations(&execution, &observations)
+        },
+    ));
+    assert!(restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert_eq!(
+        restarted.status(&demand_id).unwrap()["request_state"],
+        "queued"
+    );
+    let recovered = restarted
+        .run_next(&data_root)
+        .expect("recovered exact delta");
+    assert_eq!(request_id(&recovered.job), demand_id);
+    assert_eq!(recovered.job["request_state"], "published");
+    assert_eq!(
+        restarted_deltas.lock().unwrap().as_slice(),
+        &[BTreeSet::from([route])]
+    );
 }
 
 #[test]
@@ -454,22 +532,21 @@ fn logical_demand_keeps_its_own_terminal_request_resolution() {
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
     let route = route_identity(0x65);
-    let routes = BTreeSet::from([route.clone()]);
     let token = observation(0xc1);
     let demand_id = Uuid::from_u128(0x28103).to_string();
-    let coordinator = CoreRefreshEngine::new();
-    let (predecessor_id, _) = complete_running_all_with_demand(
-        &coordinator,
+    let (coordinator, selected_deltas) = complete_verified_fully_covered_demand(
         &data_root,
-        &routes,
-        RunningAllDemand {
-            publication_observations: BTreeMap::from([(route.clone(), token.clone())]),
-            admission_observations: BTreeMap::from([(route.clone(), Some(token.clone()))]),
-            previous_generation: Some("caller-admission-generation".to_owned()),
-            request_id: &demand_id,
-            published_generation: "shared-generation",
-        },
+        &route,
+        &token,
+        &demand_id,
+        Some("caller-admission-generation".to_owned()),
+        false,
     );
+    let predecessor_id = SourceBackedPublicationMetadata::decode(
+        &open_verified_index(&source_backed_index_root(&data_root)).unwrap(),
+    )
+    .unwrap()
+    .request_id;
     let sampled_route = route;
     let sampled_observation = token;
     coordinator
@@ -477,19 +554,68 @@ fn logical_demand_keeps_its_own_terminal_request_resolution() {
             Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
         })
         .expect("logical demand resolution");
+    assert!(selected_deltas.lock().unwrap().is_empty());
 
     let predecessor = coordinator.status(&predecessor_id).unwrap();
     let demand = coordinator.status(&demand_id).unwrap();
     assert_ne!(predecessor["request_id"], demand["request_id"]);
     assert_eq!(demand["request_id"], demand_id);
     assert_eq!(demand["request_state"], "published");
-    assert_eq!(demand["published_generation"], "shared-generation");
+    assert_eq!(
+        demand["published_generation"],
+        predecessor["published_generation"]
+    );
     assert_eq!(demand["receipt"], predecessor["receipt"]);
     assert_eq!(demand["receipt"]["previous_generation"], Value::Null);
     assert_eq!(
         demand["request_outcome"]["previous_generation"],
         "caller-admission-generation"
     );
+}
+
+#[test]
+fn fully_covered_logical_terminal_recovers_stable_uuid_and_exact_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x70);
+    let route_observation = observation(0xb0);
+    let demand_id = Uuid::from_u128(0x2810c).to_string();
+    let (coordinator, selected_deltas) = complete_verified_fully_covered_demand(
+        &data_root,
+        &route,
+        &route_observation,
+        &demand_id,
+        None,
+        false,
+    );
+    let metadata = SourceBackedPublicationMetadata::decode(
+        &open_verified_index(&source_backed_index_root(&data_root)).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(metadata.request_id, demand_id);
+    let sampled_route = route;
+    let sampled_observation = route_observation;
+    coordinator
+        .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+            Ok(BTreeMap::from([(sampled_route, Some(sampled_observation))]))
+        })
+        .expect("fully covered logical terminal");
+    assert!(selected_deltas.lock().unwrap().is_empty());
+    let exact_response = coordinator.status(&demand_id).unwrap();
+    assert_eq!(exact_response["request_id"], demand_id);
+    assert_eq!(exact_response["request_state"], "published");
+    drop(coordinator);
+
+    let restarted = CoreRefreshEngine::new();
+    assert!(!restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert_eq!(restarted.status(&demand_id).unwrap(), exact_response);
+    assert!(restarted.status(&metadata.request_id).is_none());
+    let durable = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("stable logical terminal after restart");
+    assert_eq!(durable["request_id"], demand_id);
 }
 
 #[test]
@@ -642,10 +768,13 @@ fn restart_before_publication_preserves_logical_demand_fence() {
 
     let executor_calls = Arc::new(AtomicUsize::new(0));
     let observed_calls = Arc::clone(&executor_calls);
+    let executor_observations = BTreeMap::from([(route.clone(), token.clone())]);
     let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |_execution: SourceBackedRefreshExecution<'_>| {
-            observed_calls.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("recovered covered demand must not execute a delta"))
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            if observed_calls.fetch_add(1, Ordering::SeqCst) != 0 {
+                bail!("recovered covered demand must not execute a delta");
+            }
+            verified_publication_for_observations(&execution, &executor_observations)
         },
     ));
     restarted.initialize_watch_route_authority(routes.iter().cloned());
@@ -653,19 +782,7 @@ fn restart_before_publication_preserves_logical_demand_fence() {
         .recover_interrupted_publication(&data_root)
         .unwrap());
     let predecessor = restarted
-        .run_next_with(
-            |request_id, running| {
-                running.admit_refresh_scope_for_test(request_id, &SourceBackedRefreshScope::All)?;
-                running.set_route_observations_for_test(
-                    request_id,
-                    BTreeMap::from([(route.clone(), token.clone())]),
-                );
-                Ok(publication_for_routes("recovered-generation", &routes))
-            },
-            || Ok(Some("recovered-generation".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
+        .run_next(&data_root)
         .expect("recovered predecessor publication");
     assert!(!predecessor.failed, "{:#}", predecessor.job);
     let sampled_route = route;
@@ -678,7 +795,7 @@ fn restart_before_publication_preserves_logical_demand_fence() {
 
     assert_eq!(request_id(&resolution.job), demand_id);
     assert!(!resolution.did_work);
-    assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         restarted.status(&demand_id).unwrap()["request_state"],
         "published"

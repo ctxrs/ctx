@@ -676,59 +676,6 @@ pub(super) struct SourceBackedRefreshAttempt {
 }
 
 impl SourceBackedRefreshAttempt {
-    pub(super) fn recovered_published(
-        job: &Value,
-        metadata: &SourceBackedPublicationMetadata,
-        receipt: SourceBackedRefreshReceipt,
-    ) -> Self {
-        let now = utc_now().timestamp_millis();
-        let route_total = receipt.route_results.len();
-        let unsupported_routes = receipt
-            .route_results
-            .iter()
-            .filter(|result| result.outcome.failure_class() == Some("incompatible"))
-            .count();
-        Self {
-            request_id: metadata.request_id.clone(),
-            state: SourceBackedRefreshState::Published,
-            requested_at_ms: job
-                .get("requested_at_ms")
-                .and_then(Value::as_i64)
-                .unwrap_or(now),
-            started_at_ms: job.get("started_at_ms").and_then(Value::as_i64),
-            finished_at_ms: Some(now),
-            previous_generation: receipt.previous_generation.clone(),
-            published_generation: Some(receipt.published_generation.clone()),
-            refresh_scope: metadata.refresh_scope.clone(),
-            operation: metadata.operation,
-            requested_explicit_source_catalog: None,
-            coalesced_requests: job
-                .get("coalesced_requests")
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
-            progress: SourceBackedRefreshProgress {
-                phase: "published".to_owned(),
-                completed_sources: route_total,
-                total_sources: route_total,
-                ..SourceBackedRefreshProgress::default()
-            },
-            scanned_routes: Some(route_total),
-            unsupported_routes: Some(unsupported_routes),
-            certified_source_count: Some(receipt.current.source_count),
-            certified_source_bytes: Some(receipt.current.certified_source_bytes),
-            receipt: Some(receipt.clone()),
-            publication_receipt: Some(receipt),
-            route_observations: metadata.route_observations.clone(),
-            timings: Some(SourceBackedRefreshTimings::default()),
-            publication_probe_us: 0,
-            daemon_mode: DaemonMode::default(),
-            trigger: "recovery",
-            trigger_provenance: "commit_payload",
-            failure_type: None,
-            last_error: None,
-        }
-    }
-
     fn failure_code(&self) -> Option<&'static str> {
         self.last_error
             .as_deref()
@@ -813,6 +760,9 @@ impl SourceBackedRefreshAttempt {
             "request_state": self.state.as_str(),
             "operation": self.operation.as_str(),
             "source_count": self.progress.total_sources,
+            "requested_at_ms": self.requested_at_ms,
+            "started_at_ms": self.started_at_ms,
+            "finished_at_ms": self.finished_at_ms,
             "last_run_at_ms": self.started_at_ms.unwrap_or(self.requested_at_ms),
             "previous_generation": self.previous_generation,
             "published_generation": self.published_generation,

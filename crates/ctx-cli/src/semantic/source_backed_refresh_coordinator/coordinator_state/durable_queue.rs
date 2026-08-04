@@ -385,7 +385,10 @@ fn recover_pending_attempt(
         refresh_scope,
     );
     attempt.request_id = request_id.to_owned();
-    if let Some(requested_at_ms) = job.get("last_run_at_ms") {
+    if let Some(requested_at_ms) = job
+        .get("requested_at_ms")
+        .or_else(|| job.get("last_run_at_ms"))
+    {
         attempt.requested_at_ms = requested_at_ms.as_i64().ok_or_else(|| {
             anyhow!("durable source refresh {role} has invalid request timestamp")
         })?;
