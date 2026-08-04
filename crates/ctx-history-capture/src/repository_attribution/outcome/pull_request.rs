@@ -29,6 +29,7 @@ fn pr_output_has_truncation_marker(output: &str) -> bool {
         let line = line.trim();
         line.starts_with("Warning: truncated output (original token count: ")
             || line.starts_with("Warning: truncated output (original char count: ")
+            || (line.starts_with("[omitted ") && line.ends_with(" text items ...]"))
             || (line.starts_with('…') && line.contains(" tokens truncated") && line.ends_with('…'))
     })
 }

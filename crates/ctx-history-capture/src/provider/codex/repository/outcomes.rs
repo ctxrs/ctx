@@ -477,9 +477,14 @@ mod tests {
             "--title \"fix(pro): refresh auth while Checkout polls\" --body '",
             "## Summary\n",
             "- refresh a rejected WorkOS access token noninteractively during long Checkout polling\n",
-            "- keep account and subject identity pinned across refresh\n\n",
+            "- keep account and subject identity pinned across refresh\n",
+            "- zeroize superseded access tokens and reuse the refreshed credential for entitlement issuance\n",
+            "- bound transient and fatal refresh behavior with regression coverage\n\n",
+            "## Production finding\n",
+            "A real unreleased-CLI Checkout dogfood remained open beyond the short WorkOS token lifetime and failed at approximately six minutes with HTTP 401. This patch keeps the supported 30-minute Checkout wait viable.\n\n",
             "## Validation\n",
             "- `bazel test //crates/ctx-cli:unit_tests --config=ci`\n",
+            "- focused Checkout polling tests\n",
             "- `git diff --check`\n",
             "'"
         );
@@ -491,12 +496,12 @@ mod tests {
             "Output:\n",
             "remote: \n",
             "remote: Create a pull request for 'codex/v026-checkout-token-refresh' on GitHub by visiting:\n",
-            "remote:      https://github.com/ctxrs/ctx/pull/new/codex/v026-checkout-token-refresh\n",
+            "remote:      https://github.com/ctxrs/ctx/pull/new/codex/v026-checkout-token-refresh        \n",
             "remote: \n",
             "To https://github.com/ctxrs/ctx.git\n",
             " * [new branch]          codex/v026-checkout-token-refresh -> codex/v026-checkout-token-refresh\n",
             "branch 'codex/v026-checkout-token-refresh' set up to track 'origin/codex/v026-checkout-token-refresh'.\n",
-            "https://github.com/ctxrs/ctx/pull/203"
+            "https://github.com/ctxrs/ctx/pull/203\n"
         );
         let captured = repository_result_evidence(
             &json!({"output": pull_request_output}),
@@ -540,6 +545,24 @@ mod tests {
             "call-pr-truncated",
             [0x46; 32],
             10,
+            &success(),
+        )
+        .unwrap();
+        assert!(captured.outcomes.is_empty());
+        assert_eq!(
+            captured.abstentions[0].0,
+            RepositoryAbstentionReason::OutcomeResultInadmissible
+        );
+
+        let omitted = format!(
+            "{pull_request_output}[omitted 2 text items ...]\nhttps://github.com/ctxrs/ctx/pull/204\n"
+        );
+        let captured = repository_result_evidence(
+            &json!({"output": omitted}),
+            &real_context(pull_request_command, "/repo", "call-pr-omitted"),
+            "call-pr-omitted",
+            [0x47; 32],
+            11,
             &success(),
         )
         .unwrap();

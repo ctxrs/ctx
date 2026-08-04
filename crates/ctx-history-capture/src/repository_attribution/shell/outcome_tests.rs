@@ -40,10 +40,13 @@ fn outcome_recognition_is_bounded_and_alias_free() {
     assert!(bounded_outcome_operation("git add file; git commit -m exact").is_none());
     for command in [
         "gh pr create --help",
+        "gh pr create --help=true",
         "gh pr create -h",
         "gh pr create --web",
+        "gh pr create --web=true",
         "gh pr create -w",
         "gh pr create --dry-run",
+        "gh pr create --dry-run=true",
     ] {
         assert!(bounded_outcome_operation(command).is_none(), "{command}");
     }

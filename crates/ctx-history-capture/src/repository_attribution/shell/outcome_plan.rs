@@ -466,8 +466,11 @@ fn bounded_gh_operation(
         .take_while(|argument| argument.as_str() != "--")
         .any(|argument| {
             matches!(argument.as_str(), "--help" | "-h")
+                || argument.starts_with("--help=")
                 || (operation == BoundedOutcomeOperation::PullRequestCreate
-                    && matches!(argument.as_str(), "--dry-run" | "--web" | "-w"))
+                    && (matches!(argument.as_str(), "--dry-run" | "--web" | "-w")
+                        || argument.starts_with("--dry-run=")
+                        || argument.starts_with("--web=")))
         })
     {
         return None;
