@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn explicit_post_acquisition_abort_reports_cleanup_failure_without_an_artifact() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let _writer = create_persistent_wal(&database);
+    let parent = retain_parent(temp.path());
+    crate::provider_sources::fail_next_opened_snapshot_cleanup_for_test();
+    let snapshot =
+        open_root_handle_sqlite_source_snapshot(&parent, OsStr::new("provider.sqlite")).unwrap();
+    let snapshot_directory = snapshot.snapshot_directory().unwrap().to_path_buf();
+
+    let error = snapshot.abort().unwrap_err();
+
+    let diagnostic = error.diagnostic().unwrap();
+    assert_eq!(diagnostic.phase, SqliteFailurePhase::Cleanup);
+    assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateSourceCopy);
+    assert_eq!(diagnostic.cleanup, SqliteCleanupStatus::Failed);
+    assert_eq!(diagnostic.retry, SqliteRetryDecision::RouteFatalResource);
+    assert!(!snapshot_directory.exists());
+}
+
+#[test]
 fn malformed_provider_is_source_local_and_is_not_retried_as_a_full_copy() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");

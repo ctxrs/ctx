@@ -215,6 +215,8 @@ where
     }
 }
 
+type TerminalRevalidator = Box<dyn Fn() -> SourceBackedRouteResult<()> + Send + Sync>;
+
 pub(super) struct SqliteInventoryDocumentLeaf<L> {
     index: usize,
     source: SourceKey,
@@ -224,7 +226,7 @@ pub(super) struct SqliteInventoryDocumentLeaf<L> {
     #[cfg(test)]
     base_certificate: Option<CertifiedSource>,
     provider_leaf: L,
-    terminal_revalidate: Mutex<Option<Box<dyn Fn() -> bool + Send + Sync>>>,
+    terminal_revalidate: Mutex<Option<TerminalRevalidator>>,
     #[cfg(test)]
     snapshot_counters: Mutex<Option<Box<dyn Fn() -> SqliteSourceSnapshotCounters + Send + Sync>>>,
 }
@@ -247,14 +249,17 @@ impl RetainedSqliteInventoryLeaf {
                 format!("SQLite inventory source {path:?} has no database leaf"),
             )
         })?;
-        let source_root = ProviderSourceRoot::open(parent).map_err(route_error)?;
-        let directory = source_root.directory().map_err(route_error)?;
+        let source_root =
+            ProviderSourceRoot::open(parent).map_err(sqlite_inventory_capture_error)?;
+        let directory = source_root
+            .directory()
+            .map_err(sqlite_inventory_capture_error)?;
         let authority_handle = directory
             .try_clone_authority_handle()
-            .map_err(route_error)?;
+            .map_err(|error| sqlite_inventory_capture_error(error.into()))?;
         let authority =
             retain_sqlite_source_directory_authority(data_root, &authority_handle, parent)
-                .map_err(route_error)?;
+                .map_err(sqlite_source_route_error)?;
         // The SQLite authority certifies the parent object's identity and opens
         // only the named DB family. Directory metadata also reflects unrelated
         // sibling churn and is not part of this leaf's source authority.
@@ -267,14 +272,28 @@ impl RetainedSqliteInventoryLeaf {
     fn open(&self) -> SourceBackedRouteResult<SqliteSourceReadSnapshot> {
         let snapshot =
             open_root_handle_sqlite_source_snapshot(&self.authority, &self.database_name)
-                .map_err(route_error)?;
-        let connection = snapshot.connection().map_err(route_error)?;
-        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(route_error)?;
-        connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(route_error)?;
-        Ok(snapshot)
+                .map_err(sqlite_source_route_error)?;
+        let configure = (|| {
+            let connection = snapshot.connection().map_err(sqlite_source_route_error)?;
+            let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).map_err(|_| {
+                sqlite_inventory_internal("SQLite provider value limit does not fit i32")
+            })?;
+            connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(|source| {
+                    sqlite_source_route_error(snapshot.diagnose_provider_query_error(
+                        "setting the private SQLite provider busy timeout",
+                        source,
+                        crate::provider_sources::SqliteFailurePhase::SourceValidation,
+                    ))
+                })?;
+            Ok(())
+        })();
+        match configure {
+            Ok(()) => Ok(snapshot),
+            Err(primary) => Err(abort_sqlite_inventory_snapshot(snapshot, primary)),
+        }
     }
 
     fn replay_fingerprint(
@@ -284,7 +303,7 @@ impl RetainedSqliteInventoryLeaf {
         let revision = self
             .authority
             .observe_physical_revision(&self.database_name)
-            .map_err(route_error)?;
+            .map_err(sqlite_source_route_error)?;
         Ok(sqlite_inventory_replay_fingerprint(
             catalog_fingerprint,
             revision,
@@ -355,7 +374,9 @@ where
         let revalidate = snapshot.terminal_revalidator();
         #[cfg(test)]
         let counter_authority = retained.authority.clone();
-        sink.begin_source(leaf.source.clone())?;
+        if let Err(error) = sink.begin_source(leaf.source.clone()) {
+            return Err(abort_sqlite_inventory_snapshot(snapshot, error));
+        }
         let certificate = self
             .provider_adapter
             .scan(&leaf.provider_leaf, snapshot, sink)?;
@@ -390,7 +411,9 @@ where
                     "SQLite inventory leaf was scanned more than once",
                 ));
             }
-            *terminal = Some(Box::new(move || revalidate().is_ok()));
+            *terminal = Some(Box::new(move || {
+                revalidate().map_err(sqlite_source_route_error)
+            }));
         }
         #[cfg(test)]
         {
@@ -439,11 +462,7 @@ where
                 sqlite_inventory_internal("SQLite terminal witness lock was poisoned")
             })?;
             if let Some(revalidate) = terminal.as_ref() {
-                if !revalidate() {
-                    return Err(sqlite_inventory_changed(
-                        "SQLite terminal witness no longer matches its source family",
-                    ));
-                }
+                revalidate()?;
             } else {
                 let retained = RetainedSqliteInventoryLeaf::retain(&self.data_root, &leaf.path)?;
                 if retained.replay_fingerprint(leaf.catalog_fingerprint)? != leaf.replay_fingerprint
@@ -487,6 +506,26 @@ where
             current.authority_fingerprint,
             &fingerprints,
         ))
+    }
+}
+
+fn sqlite_inventory_capture_error(error: CaptureError) -> SourceBackedRouteError {
+    if let Some(kind) = sqlite_capture_route_error(&error) {
+        SourceBackedRouteError::new(kind, error.to_string())
+    } else {
+        route_error(error)
+    }
+}
+
+fn abort_sqlite_inventory_snapshot(
+    snapshot: SqliteSourceReadSnapshot,
+    primary: SourceBackedRouteError,
+) -> SourceBackedRouteError {
+    match snapshot.abort() {
+        Ok(()) => primary,
+        Err(cleanup) => {
+            combine_primary_and_cleanup_route_errors(primary, sqlite_source_route_error(cleanup))
+        }
     }
 }
 

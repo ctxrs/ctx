@@ -136,7 +136,9 @@ pub(super) fn acquire_online_backup_source<E>(
             0,
             copied_bytes,
         ) {
-            Ok(()) => Err(error.into()),
+            Ok(()) => Err(error
+                .with_cleanup_status(SqliteCleanupStatus::Succeeded)
+                .into()),
             Err(cleanup) => Err(cleanup.into()),
         };
     }
@@ -148,7 +150,9 @@ pub(super) fn acquire_online_backup_source<E>(
             0,
             copied_bytes,
         ) {
-            Ok(()) => Err(error.into()),
+            Ok(()) => Err(error
+                .with_cleanup_status(SqliteCleanupStatus::Succeeded)
+                .into()),
             Err(cleanup) => Err(cleanup.into()),
         };
     }
@@ -202,7 +206,7 @@ fn finish_copied_online_backup_source(
     }
 }
 
-fn certify_private_source_copy(
+pub(super) fn certify_private_source_copy(
     snapshot_path: &Path,
     integrity: &CopiedFamilyIntegrity,
     copied_bytes: u64,

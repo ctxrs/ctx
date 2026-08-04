@@ -20,7 +20,8 @@ use crate::provider::source_backed::SourceBackedCurrentSourceProgressStage;
 
 use super::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test, map_revalidation_error,
-    map_revalidation_io_error, open_root_handle_sqlite_source_online_backup_after_backup_for_test,
+    map_revalidation_io_error, online_backup_contention_deadline_error_for_test,
+    open_root_handle_sqlite_source_online_backup_after_backup_for_test,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
@@ -469,10 +470,7 @@ fn sidecar_creation_during_immutable_open_is_fail_closed() {
         || fs::write(&wal, b"appeared during acquisition").unwrap(),
     );
 
-    assert!(matches!(
-        &result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[cfg(unix)]
@@ -659,10 +657,7 @@ fn snapshot_copy_fails_closed_on_database_mutation_during_family_copy() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -685,10 +680,7 @@ fn shared_memory_rewrite_during_copied_acquisition_is_fail_closed() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -753,6 +745,22 @@ fn logical_online_backup_checks_an_expired_deadline_before_a_bounded_step() {
 }
 
 #[test]
+fn logical_online_backup_contention_deadline_preserves_codes_and_final_attempt() {
+    for code in [ffi::SQLITE_BUSY, ffi::SQLITE_LOCKED] {
+        let error = online_backup_contention_deadline_error_for_test(code, 3, 9, 4_096, 17);
+        let diagnostic = error.diagnostic().unwrap();
+        assert_eq!(diagnostic.phase, SqliteFailurePhase::OnlineBackup);
+        assert_eq!(diagnostic.artifact, SqliteArtifactKind::PrivateBackup);
+        assert_eq!(diagnostic.sqlite_primary_code, Some(code));
+        assert_eq!(diagnostic.sqlite_extended_code, Some(code));
+        assert_eq!(diagnostic.copied_pages, 3);
+        assert_eq!(diagnostic.copied_bytes, 12_288);
+        assert_eq!(diagnostic.retry, SqliteRetryDecision::RetryBusyOrLocked);
+        assert!(error.is_busy_or_locked());
+    }
+}
+
+#[test]
 fn active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_writer_generation() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("provider.sqlite");
@@ -801,10 +809,7 @@ fn committed_wal_write_during_stock_open_is_fail_closed() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -1096,6 +1101,14 @@ fn sidecar_free_logical_snapshot_has_one_near_limit_scratch_allocation() {
         )
         .unwrap();
     drop(connection);
+    fs::write(
+        provider.path().join("unrelated-provider-state"),
+        b"unchanged",
+    )
+    .unwrap();
+    let before_directory = directory_file_bytes(provider.path());
+    assert!(!before_directory.contains_key(OsStr::new("provider.sqlite-wal")));
+    assert!(!before_directory.contains_key(OsStr::new("provider.sqlite-shm")));
     let scratch_limit = fs::metadata(&database).unwrap().len();
     let parent = retain_parent_in_data_root(data_root.path(), provider.path());
 
@@ -1145,6 +1158,9 @@ fn sidecar_free_logical_snapshot_has_one_near_limit_scratch_allocation() {
     let fence = snapshot.seal().unwrap();
     drop(fence);
     assert_eq!(fs::read_dir(staging_root).unwrap().count(), 0);
+    assert_eq!(directory_file_bytes(provider.path()), before_directory);
+    assert!(!database.with_file_name("provider.sqlite-wal").exists());
+    assert!(!database.with_file_name("provider.sqlite-shm").exists());
 }
 
 #[test]
@@ -1307,10 +1323,7 @@ fn logical_online_backup_rejects_wal_leaf_replacement_during_named_open() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[test]
@@ -1433,10 +1446,7 @@ fn parent_swap_after_certification_cannot_open_replacement_members() {
         },
     );
 
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
     assert_eq!(directory_file_bytes(&approved_parent), replacement_before);
     assert_eq!(directory_file_bytes(&retained_parent), retained_before);
 }

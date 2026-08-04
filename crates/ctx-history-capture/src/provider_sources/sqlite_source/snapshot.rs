@@ -40,6 +40,7 @@ pub(crate) use test_api::open_root_handle_sqlite_source_online_backup_after_priv
 #[cfg(test)]
 pub(super) use test_api::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    online_backup_contention_deadline_error_for_test,
     open_root_handle_sqlite_source_online_backup_after_backup_for_test,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,
@@ -49,6 +50,8 @@ pub(super) use test_api::{
     open_root_handle_sqlite_source_snapshot_for_test, run_online_backup_with_deadline_for_test,
 };
 
+#[cfg(test)]
+pub(crate) use acquisition::fail_next_opened_snapshot_cleanup_for_test;
 pub(super) use acquisition::{close_private_snapshot_directory, close_private_sqlite_connection};
 use copy_progress::{copy_sqlite_member_with_progress, report_source_family_copy_progress};
 use {acquisition::*, backup_handle::*, certification::*, source_copy::*};
@@ -172,7 +175,7 @@ fn open_root_handle_sqlite_source_snapshot_inner(
         &native_evidence,
         after_database_copy,
     )?;
-    let validation = (|| {
+    let validation: SqliteSourceAccessResult<SqliteSnapshotEvidence> = (|| {
         verify_connection_read_only(&acquired.connection)?;
         configure_and_pin_snapshot(&acquired.connection)?;
         before_source_revalidation();
@@ -188,8 +191,13 @@ fn open_root_handle_sqlite_source_snapshot_inner(
     let sqlite_evidence = match validation {
         Ok(evidence) => evidence,
         Err(error) => {
+            let copied_bytes = native_evidence
+                .database
+                .length
+                .saturating_add(native_evidence.wal.as_ref().map_or(0, |wal| wal.length));
+            let error = acquired.diagnose_validation_error(error, copied_bytes);
             return match acquired.cleanup() {
-                Ok(()) => Err(error),
+                Ok(()) => Err(error.with_cleanup_status(SqliteCleanupStatus::Succeeded)),
                 Err(cleanup) => Err(cleanup),
             };
         }
@@ -204,7 +212,7 @@ fn open_root_handle_sqlite_source_snapshot_inner(
         snapshot_directory,
         snapshot_activity,
     } = acquired;
-    Ok(SqliteSourceReadSnapshot {
+    let snapshot = SqliteSourceReadSnapshot {
         connection: Some(connection),
         family: Some(family),
         native_evidence,
@@ -222,7 +230,10 @@ fn open_root_handle_sqlite_source_snapshot_inner(
         snapshot_activity: Some(snapshot_activity),
         snapshot_context: Arc::clone(&authority.snapshot_context),
         terminal_fence_slot: Arc::default(),
-    })
+        #[cfg(test)]
+        fail_next_cleanup: take_opened_snapshot_cleanup_failure_for_test(),
+    };
+    Ok(snapshot)
 }
 
 fn open_logical_online_backup_snapshot(
@@ -495,7 +506,9 @@ where
                 online_backup_bounds.page_count,
                 snapshot_bytes,
             ) {
-                Ok(()) => Err(error.into()),
+                Ok(()) => Err(error
+                    .with_cleanup_status(SqliteCleanupStatus::Succeeded)
+                    .into()),
                 Err(cleanup) => Err(cleanup.into()),
             };
         }
@@ -508,7 +521,9 @@ where
             online_backup_bounds.page_count,
             snapshot_bytes,
         ) {
-            Ok(()) => Err(error.into()),
+            Ok(()) => Err(error
+                .with_cleanup_status(SqliteCleanupStatus::Succeeded)
+                .into()),
             Err(cleanup) => Err(cleanup.into()),
         };
     }
@@ -622,14 +637,16 @@ where
             );
             return match (close, cleanup) {
                 (_, Err(cleanup)) | (Err(cleanup), Ok(())) => Err(cleanup.into()),
-                (Ok(()), Ok(())) => Err(error.into()),
+                (Ok(()), Ok(())) => Err(error
+                    .with_cleanup_status(SqliteCleanupStatus::Succeeded)
+                    .into()),
             };
         }
     };
     #[cfg(not(test))]
     let _ = backup_certification;
     let evidence = SqliteSourceEvidence::from_snapshot(&native_evidence, &sqlite_evidence);
-    Ok(SqliteSourceReadSnapshot {
+    let snapshot = SqliteSourceReadSnapshot {
         connection: Some(connection),
         family: Some(family),
         native_evidence,
@@ -650,7 +667,10 @@ where
         snapshot_activity: Some(snapshot_activity),
         snapshot_context: Arc::clone(&authority.snapshot_context),
         terminal_fence_slot: Arc::default(),
-    })
+        #[cfg(test)]
+        fail_next_cleanup: take_opened_snapshot_cleanup_failure_for_test(),
+    };
+    Ok(snapshot)
 }
 
 fn online_backup_to_ctx<E>(
@@ -692,7 +712,9 @@ fn online_backup_to_ctx<E>(
                 0,
                 0,
             ) {
-                Ok(()) => Err(error.into()),
+                Ok(()) => Err(error
+                    .with_cleanup_status(SqliteCleanupStatus::Succeeded)
+                    .into()),
                 Err(cleanup) => Err(cleanup.into()),
             };
         }
@@ -754,7 +776,9 @@ fn online_backup_to_ctx<E>(
                 bounds.page_count,
                 snapshot_bytes,
             ) {
-                Ok(()) => Err(error.into()),
+                Ok(()) => Err(error
+                    .with_cleanup_status(SqliteCleanupStatus::Succeeded)
+                    .into()),
                 Err(cleanup) => Err(cleanup.into()),
             };
         }
@@ -765,7 +789,14 @@ fn online_backup_to_ctx<E>(
                 bounds.page_count,
                 bounds.bytes,
             ) {
-                Ok(()) => Err(error),
+                Ok(()) => Err(match error {
+                    SqliteSourceProgressError::Source(error) => SqliteSourceProgressError::Source(
+                        error.with_cleanup_status(SqliteCleanupStatus::Succeeded),
+                    ),
+                    SqliteSourceProgressError::Progress(error) => {
+                        SqliteSourceProgressError::Progress(error)
+                    }
+                }),
                 Err(cleanup) => Err(cleanup.into()),
             };
         }
@@ -808,33 +839,26 @@ fn run_online_backup_with_progress<E>(
     }
     let mut backup = OnlineBackupHandle(Some(backup));
     let mut completed_pages = 0;
+    let mut last_retry_code = None;
     report_progress(online_backup_progress(0, bounds)?)
         .map_err(SqliteSourceProgressError::Progress)?;
     loop {
         if Instant::now() >= deadline {
-            return Err(online_backup_deadline_error()
-                .with_diagnostic(
-                    SqliteFailurePhase::OnlineBackup,
-                    SqliteArtifactKind::PrivateBackup,
-                    completed_pages,
-                    completed_pages.saturating_mul(bounds.page_size),
-                    SqliteCleanupStatus::NotRequired,
-                )
-                .into());
+            return Err(online_backup_deadline_diagnostic(
+                completed_pages,
+                bounds,
+                last_retry_code,
+            )
+            .into());
         }
         let code = unsafe {
             ffi::sqlite3_backup_step(backup.pointer(), SQLITE_ONLINE_BACKUP_PAGES_PER_STEP)
         };
         if Instant::now() >= deadline {
-            return Err(online_backup_deadline_error()
-                .with_diagnostic(
-                    SqliteFailurePhase::OnlineBackup,
-                    SqliteArtifactKind::PrivateBackup,
-                    completed_pages,
-                    completed_pages.saturating_mul(bounds.page_size),
-                    SqliteCleanupStatus::NotRequired,
-                )
-                .into());
+            let final_code = matches!(code, ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED).then_some(code);
+            return Err(
+                online_backup_deadline_diagnostic(completed_pages, bounds, final_code).into(),
+            );
         }
         match code {
             ffi::SQLITE_DONE => {
@@ -848,6 +872,7 @@ fn run_online_backup_with_progress<E>(
                 break;
             }
             ffi::SQLITE_OK => {
+                last_retry_code = None;
                 completed_pages = report_online_backup_step(
                     &backup,
                     bounds,
@@ -857,6 +882,7 @@ fn run_online_backup_with_progress<E>(
                 )?;
             }
             ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED if Instant::now() < deadline => {
+                last_retry_code = Some(code);
                 thread::sleep(Duration::from_millis(10));
             }
             code => {

@@ -53,6 +53,73 @@ fn schema_and_projection_sqlite_failures_have_distinct_stable_diagnostics() {
 }
 
 #[test]
+fn production_schema_and_projection_errors_explicitly_report_cleanup_failure_without_leaks() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("ctx-data");
+    let provider = temp.path().join("provider");
+    fs::create_dir_all(&provider).unwrap();
+    let database = provider.join("opencode.db");
+    Connection::open(&database)
+        .unwrap()
+        .execute_batch("CREATE TABLE unsupported(value TEXT)")
+        .unwrap();
+    fail_next_opened_snapshot_cleanup_for_test();
+
+    let schema = adapter::discover_document_tree_for_test(
+        &data_root,
+        &database,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    );
+    let schema = match schema {
+        Ok(_) => panic!("unsupported OpenCode schema unexpectedly succeeded"),
+        Err(error) => adapter::route_error(error),
+    };
+    assert_eq!(schema.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+    assert!(schema.detail.contains("cleanup_status=failed"));
+    assert_no_opencode_snapshot_leaks(&data_root);
+
+    fs::remove_file(&database).unwrap();
+    let writer = write_current_schema(&database, &provider, &json!({"type": "text"}));
+    drop(writer);
+    fail_next_opened_snapshot_cleanup_for_test();
+    let authorized = open_root_authorized_snapshot_retained(&data_root, &database).unwrap();
+    let observation = observe_logical_source(
+        authorized.sqlite_snapshot.connection().unwrap(),
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+    )
+    .unwrap();
+    let projection = scan_pinned_source(
+        &database,
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+        &observation,
+        authorized.sqlite_snapshot,
+        &mut |_| {
+            Err(OpenCodeSourceBackedError::Route(
+                SourceBackedRouteError::new(
+                    SourceBackedRouteErrorKind::InvalidSource,
+                    "injected OpenCode projection failure",
+                ),
+            ))
+        },
+    )
+    .unwrap_err();
+    let projection = adapter::route_error(projection);
+    assert_eq!(
+        projection.kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+    assert!(projection.detail.contains("cleanup_status=failed"));
+    assert_no_opencode_snapshot_leaks(&data_root);
+}
+
+fn assert_no_opencode_snapshot_leaks(data_root: &Path) {
+    let staging = data_root.join("tmp/provider-sqlite");
+    if staging.exists() {
+        assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn real_schema_and_projection_full_failures_are_route_fatal() {
     for (phase, error) in [
         (

@@ -13,10 +13,10 @@ use super::ordering::{
 };
 use super::{
     observe_logical_source_with_progress, open_root_authorized_snapshot_retained_with_progress,
-    opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeLogicalObservation,
-    OpenCodeScanOutput, OpenCodeSourceBackedError, OpenCodeSourceBackedRegistration,
-    OpenCodeSourceBackedResult, SourceBackedCurrentSourceProgress, PARSER_REVISION,
-    SQLITE_SOURCE_INVALID_REASON,
+    opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeAuthorizedSnapshot,
+    OpenCodeLogicalObservation, OpenCodeScanOutput, OpenCodeSourceBackedError,
+    OpenCodeSourceBackedRegistration, OpenCodeSourceBackedResult,
+    SourceBackedCurrentSourceProgress, PARSER_REVISION, SQLITE_SOURCE_INVALID_REASON,
 };
 use crate::{
     common::io::ProviderSourceRoot,
@@ -314,6 +314,15 @@ fn discover_document_tree(
     discover_document_tree_with_progress(data_root, path, dialect, &mut |_| Ok(()))
 }
 
+#[cfg(test)]
+pub(super) fn discover_document_tree_for_test(
+    data_root: &Path,
+    path: &Path,
+    dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
+) -> OpenCodeSourceBackedResult<()> {
+    discover_document_tree(data_root, path, dialect).map(drop)
+}
+
 fn discover_document_tree_with_progress(
     data_root: &Path,
     path: &std::path::Path,
@@ -339,11 +348,17 @@ fn observe_present_document_tree_with_progress(
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
     let authorized =
         open_root_authorized_snapshot_retained_with_progress(data_root, path, report_progress)?;
-    let observation = observe_logical_source_with_progress(
-        authorized.sqlite_snapshot.connection()?,
-        dialect,
-        report_progress,
-    )?;
+    let observation = (|| {
+        observe_logical_source_with_progress(
+            authorized.sqlite_snapshot.connection()?,
+            dialect,
+            report_progress,
+        )
+    })();
+    let observation = match observation {
+        Ok(observation) => observation,
+        Err(error) => return Err(abort_authorized_snapshot(authorized, error)),
+    };
     let terminal_revalidate = authorized.sqlite_snapshot.terminal_revalidator();
     let leaf_fingerprint = DocumentLeafFingerprint::new(admitted_leaf_fingerprint(
         &observation.source,
@@ -374,6 +389,28 @@ fn observe_present_document_tree_with_progress(
         )],
         OpenCodeTreeAuthority::Present,
     ))
+}
+
+fn abort_authorized_snapshot(
+    authorized: OpenCodeAuthorizedSnapshot,
+    primary: OpenCodeSourceBackedError,
+) -> OpenCodeSourceBackedError {
+    abort_opencode_snapshot(authorized.sqlite_snapshot, primary)
+}
+
+pub(super) fn abort_opencode_snapshot(
+    snapshot: SqliteSourceReadSnapshot,
+    primary: OpenCodeSourceBackedError,
+) -> OpenCodeSourceBackedError {
+    match snapshot.abort() {
+        Ok(()) => primary,
+        Err(cleanup) => OpenCodeSourceBackedError::Route(
+            crate::provider::source_backed::combine_primary_and_cleanup_route_errors(
+                route_error(primary),
+                route_error(cleanup.into()),
+            ),
+        ),
+    }
 }
 
 fn admitted_leaf_fingerprint(source: &SourceKey, evidence: &SqliteSourceEvidence) -> [u8; 32] {

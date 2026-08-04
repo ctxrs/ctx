@@ -38,6 +38,51 @@ impl AcquiredSqliteConnection {
             (Ok(()), Ok(())) => Ok(()),
         }
     }
+
+    pub(super) fn diagnose_validation_error(
+        &self,
+        error: SqliteSourceAccessError,
+        copied_bytes: u64,
+    ) -> SqliteSourceAccessError {
+        let artifact = if self.snapshot_directory.is_some() {
+            SqliteArtifactKind::PrivateSourceCopy
+        } else {
+            SqliteArtifactKind::ProviderDatabase
+        };
+        error
+            .with_diagnostic(
+                SqliteFailurePhase::SourceValidation,
+                artifact,
+                0,
+                copied_bytes,
+                SqliteCleanupStatus::NotRequired,
+            )
+            .with_exact_provider_content_provenance()
+    }
+}
+
+impl SqliteSourceReadSnapshot {
+    /// Explicitly closes a snapshot that cannot proceed to publication.
+    /// Drop remains a defensive second attempt for unwind safety.
+    pub(crate) fn abort(mut self) -> SqliteSourceAccessResult<()> {
+        self.cleanup_snapshot_storage()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_OPENED_SNAPSHOT_CLEANUP: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_opened_snapshot_cleanup_for_test() {
+    FAIL_NEXT_OPENED_SNAPSHOT_CLEANUP.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+pub(super) fn take_opened_snapshot_cleanup_failure_for_test() -> bool {
+    FAIL_NEXT_OPENED_SNAPSHOT_CLEANUP.with(|fail| fail.replace(false))
 }
 
 pub(super) fn acquire_sqlite_connection(
@@ -81,8 +126,19 @@ pub(super) fn acquire_sqlite_connection(
     }
 
     let copied_bytes = enforce_snapshot_copy_bounds(family, evidence)?;
-    let (snapshot_directory, snapshot_path) =
+    let (snapshot_directory, snapshot_path, integrity) =
         copy_sqlite_family_to_ctx(data_root, family, evidence, after_database_copy)?;
+    if let Err(error) = certify_private_source_copy(&snapshot_path, &integrity, copied_bytes) {
+        return match close_private_snapshot_directory(
+            snapshot_directory,
+            SqliteArtifactKind::PrivateSourceCopy,
+            0,
+            copied_bytes,
+        ) {
+            Ok(()) => Err(error.with_cleanup_status(SqliteCleanupStatus::Succeeded)),
+            Err(cleanup) => Err(cleanup),
+        };
+    }
     let connection = Connection::open_with_flags(
         &snapshot_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -90,7 +146,17 @@ pub(super) fn acquire_sqlite_connection(
             | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
-    .map_err(|source| sqlite_error("opening the ctx-owned provider snapshot", source));
+    .map_err(|source| {
+        sqlite_error("opening the ctx-owned provider snapshot", source)
+            .with_exact_provider_content_provenance()
+            .with_diagnostic(
+                SqliteFailurePhase::SourceValidation,
+                SqliteArtifactKind::PrivateSourceCopy,
+                0,
+                copied_bytes,
+                SqliteCleanupStatus::NotRequired,
+            )
+    });
     let connection = match connection {
         Ok(connection) => connection,
         Err(error) => {
@@ -100,7 +166,7 @@ pub(super) fn acquire_sqlite_connection(
                 0,
                 copied_bytes,
             ) {
-                Ok(()) => Err(error),
+                Ok(()) => Err(error.with_cleanup_status(SqliteCleanupStatus::Succeeded)),
                 Err(cleanup) => Err(cleanup),
             };
         }
@@ -231,7 +297,7 @@ fn copy_sqlite_family_to_ctx(
     family: &SqliteSourceFamily,
     evidence: &SqliteFamilyEvidence,
     after_database_copy: impl FnOnce(),
-) -> SqliteSourceAccessResult<(TempDir, PathBuf)> {
+) -> SqliteSourceAccessResult<(TempDir, PathBuf, CopiedFamilyIntegrity)> {
     match copy_sqlite_family_to_ctx_with_progress(
         data_root,
         family,
@@ -239,7 +305,7 @@ fn copy_sqlite_family_to_ctx(
         after_database_copy,
         &mut |_| Ok::<(), std::convert::Infallible>(()),
     ) {
-        Ok((directory, path, _)) => Ok((directory, path)),
+        Ok(copied) => Ok(copied),
         Err(SqliteSourceProgressError::Source(error)) => Err(error),
         Err(SqliteSourceProgressError::Progress(never)) => match never {},
     }

@@ -62,6 +62,38 @@ pub(super) fn online_backup_deadline_error() -> SqliteSourceAccessError {
     }
 }
 
+pub(super) fn online_backup_deadline_diagnostic(
+    completed_pages: u64,
+    bounds: OnlineBackupBounds,
+    last_retry_code: Option<i32>,
+) -> SqliteSourceAccessError {
+    let error = match last_retry_code {
+        Some(code @ (ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED)) => {
+            SqliteSourceAccessError::SqliteControl {
+                operation: "exhausting the logical SQLite online-backup contention deadline",
+                code,
+            }
+        }
+        _ => online_backup_deadline_error(),
+    };
+    error.with_diagnostic(
+        SqliteFailurePhase::OnlineBackup,
+        SqliteArtifactKind::PrivateBackup,
+        completed_pages,
+        completed_pages.saturating_mul(bounds.page_size),
+        SqliteCleanupStatus::NotRequired,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn online_backup_contention_deadline_error(
+    code: i32,
+    completed_pages: u64,
+    bounds: OnlineBackupBounds,
+) -> SqliteSourceAccessError {
+    online_backup_deadline_diagnostic(completed_pages, bounds, Some(code))
+}
+
 pub(super) struct OnlineBackupHandle(pub(super) Option<*mut ffi::sqlite3_backup>);
 
 impl OnlineBackupHandle {

@@ -47,15 +47,16 @@ pub(crate) use resolvers::{
 pub use specs::{provider_source_spec, provider_source_specs};
 #[cfg(test)]
 pub(crate) use sqlite_source::{
+    fail_next_opened_snapshot_cleanup_for_test,
     open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test,
     SqliteRetryDecision, SqliteSourceSnapshotCounters,
 };
 pub(crate) use sqlite_source::{
     open_root_handle_sqlite_source_snapshot, resource_exhaustion_io_error,
-    retain_sqlite_source_directory_authority, rusqlite_resource_failure, SqliteArtifactKind,
-    SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot, SqliteSourceAccessError,
-    SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceProgressError,
-    SqliteSourceReadSnapshot,
+    retain_sqlite_source_directory_authority, rusqlite_busy_or_locked, rusqlite_resource_failure,
+    SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot,
+    SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
+    SqliteSourceProgressError, SqliteSourceReadSnapshot,
 };
 pub use types::{
     DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,

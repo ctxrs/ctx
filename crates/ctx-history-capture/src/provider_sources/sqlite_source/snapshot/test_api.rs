@@ -131,6 +131,25 @@ pub(in crate::provider_sources::sqlite_source) fn run_online_backup_with_deadlin
     super::backup_handle::run_online_backup_until(source, destination, deadline)
 }
 
+pub(in crate::provider_sources::sqlite_source) fn online_backup_contention_deadline_error_for_test(
+    code: i32,
+    completed_pages: u64,
+    page_count: u64,
+    page_size: u64,
+    attempt: u32,
+) -> SqliteSourceAccessError {
+    let _ = attempt;
+    super::online_backup_contention_deadline_error(
+        code,
+        completed_pages,
+        OnlineBackupBounds {
+            page_count,
+            page_size,
+            bytes: page_count.saturating_mul(page_size),
+        },
+    )
+}
+
 pub(in crate::provider_sources::sqlite_source) fn open_root_handle_sqlite_source_online_backup_with_scratch_limit_for_test(
     authority: &SqliteSourceDirectoryAuthority,
     database_name: &OsStr,

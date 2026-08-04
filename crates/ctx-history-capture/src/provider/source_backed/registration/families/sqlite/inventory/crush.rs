@@ -3,9 +3,6 @@ use std::{path::PathBuf, sync::Arc};
 use crate::provider::providers::crush::native_path::source_backed::BoundDatabase;
 
 #[cfg(test)]
-use crate::provider_sources::SqliteSourceAccessError;
-
-#[cfg(test)]
 use super::shared::SqliteInventorySnapshotCounters;
 use super::*;
 
@@ -60,7 +57,16 @@ where
             .map_err(crush_route_error)?;
         #[cfg(test)]
         self.inventory.record_projection_pass();
-        let certificate = scan_crush_source(&source, sink).map_err(crush_route_error)?;
+        let certificate = match scan_crush_source(&source, sink) {
+            Ok(certificate) => certificate,
+            Err(primary) => {
+                return Err(crush_route_error(
+                    crate::provider::providers::crush::native_path::source_backed::abort_opened_source(
+                        source, primary,
+                    ),
+                ));
+            }
+        };
         if !finish_crush_source(source).map_err(crush_route_error)? {
             return Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::SourceChanged,
@@ -89,8 +95,33 @@ fn crush_route_error(error: CrushSourceBackedErrorV0) -> SourceBackedRouteError 
     if let CrushSourceBackedErrorV0::Route(error) = error {
         return error;
     }
+    if let CrushSourceBackedErrorV0::SnapshotCleanup { primary, cleanup } = error {
+        return combine_primary_and_cleanup_route_errors(
+            crush_route_error(*primary),
+            sqlite_source_route_error(cleanup.into_source()),
+        );
+    }
     let kind = match &error {
-        CrushSourceBackedErrorV0::SqliteSourceChanged => SourceBackedRouteErrorKind::SourceChanged,
+        CrushSourceBackedErrorV0::SqliteSource(error) => {
+            sqlite_source_route_error_kind(error.source())
+        }
+        CrushSourceBackedErrorV0::Capture(error) => {
+            sqlite_capture_route_error(error).unwrap_or(SourceBackedRouteErrorKind::InvalidSource)
+        }
+        CrushSourceBackedErrorV0::Sqlite(error)
+            if crate::provider_sources::rusqlite_resource_failure(error)
+                || crate::provider_sources::rusqlite_busy_or_locked(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        CrushSourceBackedErrorV0::Io(error)
+            if crate::provider_sources::resource_exhaustion_io_error(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        CrushSourceBackedErrorV0::Sqlite(_) | CrushSourceBackedErrorV0::Io(_) => {
+            SourceBackedRouteErrorKind::Internal
+        }
         _ => SourceBackedRouteErrorKind::InvalidSource,
     };
     SourceBackedRouteError::new(kind, error.to_string())
@@ -138,10 +169,82 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_sources::{
+        SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteSourceAccessError,
+    };
+    use rusqlite::ffi;
 
     #[test]
     fn crush_sqlite_source_change_remains_typed() {
         let error = crush_route_error(SqliteSourceAccessError::SourceChanged.into());
         assert_eq!(error.kind, SourceBackedRouteErrorKind::SourceChanged);
+    }
+
+    #[test]
+    fn crush_production_mapper_preserves_sqlite_resource_and_corruption_taxonomy() {
+        for code in [
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_LOCKED,
+            ffi::SQLITE_FULL,
+            ffi::SQLITE_NOMEM,
+        ] {
+            let error = SqliteSourceAccessError::SqliteControl {
+                operation: "using the production Crush SQLite snapshot",
+                code,
+            }
+            .with_diagnostic(
+                SqliteFailurePhase::Projection,
+                SqliteArtifactKind::PrivateSourceCopy,
+                4,
+                16_384,
+                SqliteCleanupStatus::NotRequired,
+            );
+            assert_eq!(
+                crush_route_error(error.into()).kind,
+                SourceBackedRouteErrorKind::ResourceUnavailable
+            );
+        }
+
+        let provider = SqliteSourceAccessError::SqliteControl {
+            operation: "querying the exact Crush provider copy",
+            code: ffi::SQLITE_CORRUPT,
+        }
+        .with_diagnostic(
+            SqliteFailurePhase::Projection,
+            SqliteArtifactKind::PrivateSourceCopy,
+            4,
+            16_384,
+            SqliteCleanupStatus::NotRequired,
+        )
+        .with_exact_provider_content_provenance();
+        assert_eq!(
+            crush_route_error(provider.into()).kind,
+            SourceBackedRouteErrorKind::InvalidSource
+        );
+
+        let private = SqliteSourceAccessError::SqliteControl {
+            operation: "querying a damaged ctx-owned Crush copy",
+            code: ffi::SQLITE_CORRUPT,
+        }
+        .with_diagnostic(
+            SqliteFailurePhase::Projection,
+            SqliteArtifactKind::PrivateSourceCopy,
+            4,
+            16_384,
+            SqliteCleanupStatus::NotRequired,
+        );
+        assert_eq!(
+            crush_route_error(private.into()).kind,
+            SourceBackedRouteErrorKind::Internal
+        );
+
+        #[cfg(unix)]
+        assert_eq!(
+            crush_route_error(CrushSourceBackedErrorV0::Io(
+                std::io::Error::from_raw_os_error(libc::EIO),
+            ))
+            .kind,
+            SourceBackedRouteErrorKind::Internal
+        );
     }
 }

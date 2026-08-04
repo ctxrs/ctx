@@ -56,9 +56,9 @@ mod diagnostics;
 #[cfg(test)]
 pub(crate) use diagnostics::SqliteRetryDecision;
 pub(crate) use diagnostics::{
-    resource_exhaustion_io_error, rusqlite_resource_failure, SqliteArtifactKind,
-    SqliteCleanupStatus, SqliteFailurePhase, SqliteSourceAccessError, SqliteSourceComponent,
-    SqliteSourceProgressError,
+    resource_exhaustion_io_error, rusqlite_busy_or_locked, rusqlite_resource_failure,
+    SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteSourceAccessError,
+    SqliteSourceComponent, SqliteSourceProgressError,
 };
 
 pub(crate) type SqliteSourceAccessResult<T> = Result<T, SqliteSourceAccessError>;
@@ -709,6 +709,8 @@ pub(crate) struct SqliteSourceReadSnapshot {
     snapshot_activity: Option<SqliteSourceSnapshotActivity>,
     snapshot_context: Arc<SqliteSourceSnapshotContext>,
     terminal_fence_slot: Arc<SqliteSourceTerminalFenceSlot>,
+    #[cfg(test)]
+    fail_next_cleanup: bool,
 }
 
 impl SqliteSourceReadSnapshot {
@@ -845,6 +847,25 @@ impl SqliteSourceReadSnapshot {
                 SqliteArtifactKind::ProviderDatabase
             }
         };
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_cleanup) {
+            let path = self._snapshot_directory.as_ref().map_or_else(
+                || PathBuf::from("<injected-snapshot-cleanup>"),
+                |directory| directory.path().to_path_buf(),
+            );
+            return Err(SqliteSourceAccessError::ScratchIoUnavailable {
+                operation: "removing a ctx-owned SQLite snapshot directory",
+                path,
+                source: std::io::Error::other("injected SQLite snapshot cleanup failure"),
+            }
+            .with_diagnostic(
+                SqliteFailurePhase::Cleanup,
+                artifact,
+                0,
+                0,
+                SqliteCleanupStatus::Failed,
+            ));
+        }
         let close_connection = self.connection.take().map_or(Ok(()), |connection| {
             close_snapshot_read_connection(connection, artifact)
         });
@@ -932,6 +953,8 @@ use family::{
     SqliteSchemaEvidence, SqliteSnapshotEvidence, SqliteSourceFamily,
 };
 pub(crate) use logical::SqliteLogicalSnapshot;
+#[cfg(test)]
+pub(crate) use snapshot::fail_next_opened_snapshot_cleanup_for_test;
 use snapshot::open_root_handle_sqlite_source_logical_snapshot_with_progress;
 #[cfg(test)]
 pub(crate) use snapshot::open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test;
@@ -940,6 +963,7 @@ use snapshot::open_root_handle_sqlite_source_snapshot_with_policy;
 #[cfg(test)]
 use snapshot::{
     certify_root_handle_sqlite_source_snapshot_copy_budget_for_test,
+    online_backup_contention_deadline_error_for_test,
     open_root_handle_sqlite_source_online_backup_after_backup_for_test,
     open_root_handle_sqlite_source_online_backup_after_database_copy_for_test,
     open_root_handle_sqlite_source_online_backup_before_identity_check_for_test,

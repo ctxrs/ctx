@@ -115,37 +115,53 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
         };
         let path = absolute_kiro_path(&self.path).map_err(route_error)?;
         let database = take_database(&authority.database)?;
-        sink.begin_source(leaf.clone())?;
-        let scan = database
-            .with_private_scratch_database(
-                "kiro-order-",
-                KIRO_ORDER_SCRATCH_MAX_BYTES,
-                |scratch, scratch_path| {
-                    scan_kiro_snapshot(
-                        database.connection(&path)?,
-                        scratch,
-                        scratch_path,
-                        leaf.clone(),
-                        authority.opening_evidence.clone(),
-                        &mut |page| {
-                            page.into_iter().try_for_each(|document| {
-                                sink.emit_core_record(document).map_err(Into::into)
-                            })
-                        },
+        let scan = (|| {
+            sink.begin_source(leaf.clone())?;
+            let scan = database
+                .with_private_scratch_database(
+                    "kiro-order-",
+                    KIRO_ORDER_SCRATCH_MAX_BYTES,
+                    |scratch, scratch_path| {
+                        scan_kiro_snapshot(
+                            database.connection(&path)?,
+                            scratch,
+                            scratch_path,
+                            leaf.clone(),
+                            authority.opening_evidence.clone(),
+                            &mut |page| {
+                                page.into_iter().try_for_each(|document| {
+                                    sink.emit_core_record(document).map_err(Into::into)
+                                })
+                            },
+                        )
+                    },
+                )
+                .map_err(|error| {
+                    database.diagnose_provider_query_error(
+                        error,
+                        crate::provider_sources::SqliteFailurePhase::Projection,
                     )
-                },
-            )
-            .map_err(kiro_scan_error)?;
-        validate_scan_receipt(&scan)?;
-        if !scan.source.exact_descriptor_eq(leaf)
-            || scan.terminal_fence != authority.opening_evidence
-        {
-            return Err(source_changed(
-                "Kiro SQLite physical inventory changed during logical projection",
-            ));
+                })
+                .map_err(kiro_scan_error)?;
+            validate_scan_receipt(&scan)?;
+            if !scan.source.exact_descriptor_eq(leaf)
+                || scan.terminal_fence != authority.opening_evidence
+            {
+                return Err(source_changed(
+                    "Kiro SQLite physical inventory changed during logical projection",
+                ));
+            }
+            route_kiro_sqlite_call(database.revalidate(&path))?;
+            Ok(scan)
+        })();
+        let scan = match scan {
+            Ok(scan) => scan,
+            Err(error) => return Err(database.abort(error)),
+        };
+        if let Err(failure) = restore_database(&authority.database, database) {
+            let (error, database) = *failure;
+            return Err(database.abort(error));
         }
-        database.revalidate(&path).map_err(route_error)?;
-        restore_database(&authority.database, database)?;
         Ok(document_terminal(scan))
     }
 
@@ -157,7 +173,7 @@ impl ReplacementDocumentTree for KiroDocumentTreeAdapter {
             KiroTreeAuthority::Present(authority) => {
                 let path = absolute_kiro_path(&self.path).map_err(route_error)?;
                 let database = take_database(&authority.database)?;
-                let evidence = database.finish(&path).map_err(route_error)?;
+                let evidence = route_kiro_sqlite_call(database.finish(&path))?;
                 if evidence != authority.opening_evidence {
                     return Err(source_changed(
                         "Kiro SQLite physical inventory changed before commit",
@@ -272,8 +288,24 @@ fn observe_kiro_inventory(
                         scratch_path,
                     )
                 },
-            )?;
-            database.revalidate(&path)?;
+            );
+            let logical_fingerprint = match logical_fingerprint {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    let error = database.diagnose_provider_query_error(
+                        error,
+                        crate::provider_sources::SqliteFailurePhase::Schema,
+                    );
+                    return Err(KiroSourceBackedErrorV0::Route(
+                        database.abort(kiro_scan_error(error)),
+                    ));
+                }
+            };
+            if let Err(error) = database.revalidate(&path) {
+                return Err(KiroSourceBackedErrorV0::Route(
+                    database.abort(kiro_scan_error(error)),
+                ));
+            }
             Ok(KiroPhysicalInventory::Present(Box::new(
                 KiroPresentInventory {
                     logical_fingerprint,
@@ -307,15 +339,23 @@ fn take_database(
 fn restore_database(
     slot: &Mutex<Option<KiroSqliteDatabase>>,
     database: KiroSqliteDatabase,
-) -> SourceBackedRouteResult<()> {
-    let mut slot = slot
-        .lock()
-        .map_err(|_| internal_error("Kiro SQLite snapshot lock was poisoned"))?;
-    if slot.replace(database).is_some() {
-        return Err(internal_error(
-            "Kiro SQLite snapshot slot was already occupied",
-        ));
+) -> Result<(), Box<(SourceBackedRouteError, KiroSqliteDatabase)>> {
+    let mut slot = match slot.lock() {
+        Ok(slot) => slot,
+        Err(_) => {
+            return Err(Box::new((
+                internal_error("Kiro SQLite snapshot lock was poisoned"),
+                database,
+            )));
+        }
+    };
+    if slot.is_some() {
+        return Err(Box::new((
+            internal_error("Kiro SQLite snapshot slot was already occupied"),
+            database,
+        )));
     }
+    *slot = Some(database);
     Ok(())
 }
 
@@ -372,23 +412,73 @@ fn invalid_database_leaf(path: &Path) -> CaptureError {
     }
 }
 
-pub(super) fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRouteError {
-    match error {
-        KiroSourceBackedErrorV0::Route(error) => error,
-        KiroSourceBackedErrorV0::SqliteSource(SqliteSourceAccessError::ResourceUnavailable {
-            ..
-        }) => SourceBackedRouteError::new(
-            SourceBackedRouteErrorKind::ResourceUnavailable,
-            error.to_string(),
-        ),
-        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_systemic_resource_failure() => {
-            SourceBackedRouteError::new(
-                SourceBackedRouteErrorKind::ResourceUnavailable,
-                error.to_string(),
-            )
+pub(crate) fn kiro_scan_error(error: KiroSourceBackedErrorV0) -> SourceBackedRouteError {
+    let error = match error {
+        KiroSourceBackedErrorV0::Route(error) => return error,
+        error => error,
+    };
+    let kind = match &error {
+        KiroSourceBackedErrorV0::Capture(CaptureError::SourceChangedDuringCapture) => {
+            SourceBackedRouteErrorKind::SourceChanged
         }
-        error => route_error(error),
-    }
+        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_source_changed() => {
+            SourceBackedRouteErrorKind::SourceChanged
+        }
+        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_systemic_resource_failure() => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_ctx_owned_corruption() => {
+            SourceBackedRouteErrorKind::Internal
+        }
+        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_provider_corruption() => {
+            SourceBackedRouteErrorKind::InvalidSource
+        }
+        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_busy_or_locked() => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        KiroSourceBackedErrorV0::SqliteSource(error) if error.is_operational_failure() => {
+            SourceBackedRouteErrorKind::Internal
+        }
+        KiroSourceBackedErrorV0::Sqlite(error)
+            if crate::provider_sources::rusqlite_resource_failure(error)
+                || crate::provider_sources::rusqlite_busy_or_locked(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        KiroSourceBackedErrorV0::Capture(CaptureError::Sqlite(error))
+            if crate::provider_sources::rusqlite_resource_failure(error)
+                || crate::provider_sources::rusqlite_busy_or_locked(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        KiroSourceBackedErrorV0::Capture(CaptureError::Io(error))
+        | KiroSourceBackedErrorV0::Capture(CaptureError::SystemIo { source: error, .. })
+        | KiroSourceBackedErrorV0::Io(error)
+            if crate::provider_sources::resource_exhaustion_io_error(error) =>
+        {
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        }
+        KiroSourceBackedErrorV0::Capture(
+            CaptureError::Io(_) | CaptureError::SystemIo { .. } | CaptureError::Sqlite(_),
+        )
+        | KiroSourceBackedErrorV0::Io(_)
+        | KiroSourceBackedErrorV0::Sqlite(_) => SourceBackedRouteErrorKind::Internal,
+        _ => return route_error(error),
+    };
+    SourceBackedRouteError::new(kind, error.to_string())
+}
+
+pub(super) fn route_kiro_sqlite_call<T>(
+    result: super::KiroSourceBackedResultV0<T>,
+) -> SourceBackedRouteResult<T> {
+    result.map_err(kiro_scan_error)
+}
+
+#[cfg(test)]
+pub(super) fn route_kiro_sqlite_source_call<T>(
+    result: Result<T, SqliteSourceAccessError>,
+) -> SourceBackedRouteResult<T> {
+    route_kiro_sqlite_call(result.map_err(KiroSourceBackedErrorV0::from))
 }
 
 fn source_changed(detail: impl Into<String>) -> SourceBackedRouteError {

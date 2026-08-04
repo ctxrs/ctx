@@ -59,7 +59,9 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
         )
         .map_err(hermes_route_error)?;
         let opening_evidence = snapshot.evidence().clone();
-        snapshot.revalidate().map_err(default_route_error)?;
+        if let Err(error) = snapshot.revalidate().map_err(hermes_sqlite_route_error) {
+            return Err(abort_hermes_route_snapshot(snapshot, error));
+        }
         let fingerprint = DocumentLeafFingerprint::new(*opening_evidence.revision());
         Ok(CompleteDocumentTree::new(
             hermes_tree_fingerprint(&self.source),
@@ -89,79 +91,90 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
             ));
         }
         let snapshot = take_snapshot(&authority.snapshot)?;
-        sink.begin_source(source.clone())?;
-        let mut sink_error = None;
-        let scan = project_hermes_snapshot_with_progress(
-            self,
-            snapshot.connection().map_err(default_route_error)?,
-            &mut |output| match output {
-                HermesSnapshotProjectionOutput::Page(page) => {
-                    if let Err(error) = sink.report_completed_bytes(page.completed_bytes) {
-                        let detail = error.to_string();
-                        sink_error = Some(error);
-                        return Err(HermesSourceBackedError::Capture(
-                            CaptureError::InvalidPayload(detail),
-                        ));
-                    }
-                    for record in page.records {
-                        if let HermesSourceBackedRecord::Event(document) = record {
-                            if let Err(error) = sink.emit_core_record(document) {
-                                let detail = error.to_string();
-                                sink_error = Some(error);
-                                return Err(HermesSourceBackedError::Capture(
-                                    CaptureError::InvalidPayload(detail),
-                                ));
+        let scan = (|| {
+            sink.begin_source(source.clone())?;
+            let mut sink_error = None;
+            let scan = project_hermes_snapshot_with_progress(
+                self,
+                snapshot.connection().map_err(hermes_sqlite_route_error)?,
+                &mut |output| match output {
+                    HermesSnapshotProjectionOutput::Page(page) => {
+                        if let Err(error) = sink.report_completed_bytes(page.completed_bytes) {
+                            let detail = error.to_string();
+                            sink_error = Some(error);
+                            return Err(HermesSourceBackedError::Capture(
+                                CaptureError::InvalidPayload(detail),
+                            ));
+                        }
+                        for record in page.records {
+                            if let HermesSourceBackedRecord::Event(document) = record {
+                                if let Err(error) = sink.emit_core_record(document) {
+                                    let detail = error.to_string();
+                                    sink_error = Some(error);
+                                    return Err(HermesSourceBackedError::Capture(
+                                        CaptureError::InvalidPayload(detail),
+                                    ));
+                                }
                             }
                         }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                HermesSnapshotProjectionOutput::Progress(progress) => sink
-                    .report_current_source_progress(progress)
-                    .map_err(|error| {
-                        sink_error = Some(error.clone());
-                        HermesSourceBackedError::Route(error)
-                    }),
-            },
-        );
-        if let Some(error) = sink_error {
-            return Err(error);
+                    HermesSnapshotProjectionOutput::Progress(progress) => sink
+                        .report_current_source_progress(progress)
+                        .map_err(|error| {
+                            sink_error = Some(error.clone());
+                            HermesSourceBackedError::Route(error)
+                        }),
+                },
+            );
+            if let Some(error) = sink_error {
+                return Err(error);
+            }
+            let scan = scan.map_err(hermes_route_error)?;
+            let counts = scan.certificate.counts();
+            if scan.decoded_rows != counts.complete_records
+                || scan.peak_buffered_records > 64
+                || (counts.complete_records == 0) != (scan.emitted_pages == 0)
+                || scan.native_candidate_query_batches == 0
+                || scan.native_hydration_query_batches > scan.native_candidate_query_batches
+                || scan.max_native_rows_per_set > 64
+                || scan.direct_context_query_batches > scan.native_candidate_query_batches
+                || scan.ancestry_query_batches
+                    > scan
+                        .direct_context_query_batches
+                        .saturating_mul(NATIVE_INGESTION_PAGE_MAX_UNITS as u64)
+                || scan.max_context_query_batches_per_page
+                    > (NATIVE_INGESTION_PAGE_MAX_UNITS + 1) as u64
+                || scan.max_direct_context_rows_per_query > 64
+                || scan.max_ancestry_rows_per_query
+                    > ancestry::HERMES_ANCESTRY_QUERY_MAX_ROWS as u64
+                || scan.max_direct_context_bytes_per_query
+                    > ancestry::HERMES_DIRECT_CONTEXT_RESIDENT_MAX_BYTES as u64
+                || scan.max_ancestry_bytes_per_query
+                    > ancestry::HERMES_ANCESTRY_RESIDENT_MAX_BYTES as u64
+                || scan.peak_context_cache_rows > ancestry::HERMES_CONTEXT_CACHE_MAX_ROWS as u64
+                || scan.peak_context_cache_bytes > ancestry::HERMES_CONTEXT_CACHE_MAX_BYTES as u64
+            {
+                return Err(hermes_internal(
+                    "Hermes scan violated its one-pass bounded-page receipt",
+                ));
+            }
+            if snapshot.evidence() != &authority.opening_evidence {
+                return Err(hermes_changed(
+                    "Hermes source changed between physical discovery and logical scan",
+                ));
+            }
+            snapshot.revalidate().map_err(hermes_sqlite_route_error)?;
+            Ok(scan)
+        })();
+        let scan = match scan {
+            Ok(scan) => scan,
+            Err(error) => return Err(abort_hermes_route_snapshot(snapshot, error)),
+        };
+        if let Err(failure) = restore_snapshot(&authority.snapshot, snapshot) {
+            let (error, snapshot) = *failure;
+            return Err(abort_hermes_route_snapshot(snapshot, error));
         }
-        let scan = scan.map_err(hermes_route_error)?;
-        let counts = scan.certificate.counts();
-        if scan.decoded_rows != counts.complete_records
-            || scan.peak_buffered_records > 64
-            || (counts.complete_records == 0) != (scan.emitted_pages == 0)
-            || scan.native_candidate_query_batches == 0
-            || scan.native_hydration_query_batches > scan.native_candidate_query_batches
-            || scan.max_native_rows_per_set > 64
-            || scan.direct_context_query_batches > scan.native_candidate_query_batches
-            || scan.ancestry_query_batches
-                > scan
-                    .direct_context_query_batches
-                    .saturating_mul(NATIVE_INGESTION_PAGE_MAX_UNITS as u64)
-            || scan.max_context_query_batches_per_page
-                > (NATIVE_INGESTION_PAGE_MAX_UNITS + 1) as u64
-            || scan.max_direct_context_rows_per_query > 64
-            || scan.max_ancestry_rows_per_query > ancestry::HERMES_ANCESTRY_QUERY_MAX_ROWS as u64
-            || scan.max_direct_context_bytes_per_query
-                > ancestry::HERMES_DIRECT_CONTEXT_RESIDENT_MAX_BYTES as u64
-            || scan.max_ancestry_bytes_per_query
-                > ancestry::HERMES_ANCESTRY_RESIDENT_MAX_BYTES as u64
-            || scan.peak_context_cache_rows > ancestry::HERMES_CONTEXT_CACHE_MAX_ROWS as u64
-            || scan.peak_context_cache_bytes > ancestry::HERMES_CONTEXT_CACHE_MAX_BYTES as u64
-        {
-            return Err(hermes_internal(
-                "Hermes scan violated its one-pass bounded-page receipt",
-            ));
-        }
-        if snapshot.evidence() != &authority.opening_evidence {
-            return Err(hermes_changed(
-                "Hermes source changed between physical discovery and logical scan",
-            ));
-        }
-        snapshot.revalidate().map_err(default_route_error)?;
-        restore_snapshot(&authority.snapshot, snapshot)?;
         Ok(document_terminal(scan.certificate))
     }
 
@@ -182,7 +195,7 @@ impl ReplacementDocumentTree for HermesSourceCandidate {
     }
 }
 
-fn hermes_route_error(error: HermesSourceBackedError) -> SourceBackedRouteError {
+pub(super) fn hermes_route_error(error: HermesSourceBackedError) -> SourceBackedRouteError {
     let error = match error {
         HermesSourceBackedError::Route(error) => return error,
         error => error,
@@ -217,6 +230,23 @@ fn hermes_route_error(error: HermesSourceBackedError) -> SourceBackedRouteError 
     SourceBackedRouteError::new(kind, error.to_string())
 }
 
+pub(super) fn hermes_sqlite_route_error(error: SqliteSourceAccessError) -> SourceBackedRouteError {
+    hermes_route_error(error.into())
+}
+
+fn abort_hermes_route_snapshot(
+    snapshot: SqliteSourceReadSnapshot,
+    primary: SourceBackedRouteError,
+) -> SourceBackedRouteError {
+    match snapshot.abort() {
+        Ok(()) => primary,
+        Err(cleanup) => crate::provider::source_backed::combine_primary_and_cleanup_route_errors(
+            primary,
+            hermes_sqlite_route_error(cleanup),
+        ),
+    }
+}
+
 fn take_snapshot(
     slot: &Mutex<Option<SqliteSourceReadSnapshot>>,
 ) -> SourceBackedRouteResult<SqliteSourceReadSnapshot> {
@@ -229,15 +259,23 @@ fn take_snapshot(
 fn restore_snapshot(
     slot: &Mutex<Option<SqliteSourceReadSnapshot>>,
     snapshot: SqliteSourceReadSnapshot,
-) -> SourceBackedRouteResult<()> {
-    let mut slot = slot
-        .lock()
-        .map_err(|_| hermes_internal("Hermes SQLite snapshot lock was poisoned"))?;
-    if slot.replace(snapshot).is_some() {
-        return Err(hermes_internal(
-            "Hermes SQLite snapshot slot was already occupied",
-        ));
+) -> Result<(), Box<(SourceBackedRouteError, SqliteSourceReadSnapshot)>> {
+    let mut slot = match slot.lock() {
+        Ok(slot) => slot,
+        Err(_) => {
+            return Err(Box::new((
+                hermes_internal("Hermes SQLite snapshot lock was poisoned"),
+                snapshot,
+            )));
+        }
+    };
+    if slot.is_some() {
+        return Err(Box::new((
+            hermes_internal("Hermes SQLite snapshot slot was already occupied"),
+            snapshot,
+        )));
     }
+    *slot = Some(snapshot);
     Ok(())
 }
 

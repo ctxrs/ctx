@@ -8,10 +8,11 @@ use super::*;
 use crate::{
     provider::source_backed::{
         refresh_source_backed_generation, refresh_source_backed_generation_with_detailed_progress,
-        refresh_source_backed_generation_with_progress, SourceBackedCurrentSourceProgressStage,
-        SourceBackedProviderRegistry,
+        refresh_source_backed_generation_with_progress, SourceBackedCoordinatorError,
+        SourceBackedCurrentSourceProgressStage, SourceBackedProviderRegistry,
+        SourceBackedRouteErrorKind,
     },
-    provider_sources::provider_source_for_path,
+    provider_sources::{fail_next_opened_snapshot_cleanup_for_test, provider_source_for_path},
     register_hermes_explicit_source_backed_route,
 };
 
@@ -614,6 +615,32 @@ fn fixture_writer_options() -> WriterOptions {
         indexer_threads: 1,
         memory_bytes: 15_000_000,
     }
+}
+
+#[test]
+fn production_hermes_schema_failure_explicitly_reports_cleanup_without_leftovers() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let database = temp.path().join("source/state.db");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    Connection::open(&database)
+        .unwrap()
+        .execute_batch("CREATE TABLE unsupported(value TEXT)")
+        .unwrap();
+    let registry = fixture_registry(&data_root, &database);
+    fail_next_opened_snapshot_cleanup_for_test();
+
+    let error = refresh_source_backed_generation(&index_root, &registry, fixture_writer_options())
+        .unwrap_err();
+    let SourceBackedCoordinatorError::RouteScan { source, .. } = error else {
+        panic!("unexpected Hermes refresh error: {error:?}");
+    };
+    assert_eq!(source.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+    assert!(source.detail.contains("cleanup_status=failed"));
+    let staging = data_root.join("tmp/provider-sqlite");
+    assert!(staging.is_dir());
+    assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
 }
 
 #[test]

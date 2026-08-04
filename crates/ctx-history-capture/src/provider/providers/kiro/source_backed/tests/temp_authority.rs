@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt, path::Path, process::Command};
 
+use ctx_history_core::CaptureProvider;
+use ctx_history_index::WriterOptions;
 use rusqlite::{params, Connection};
 use serde_json::json;
 
@@ -13,7 +15,14 @@ use crate::{
         },
         KiroSqliteDatabase,
     },
-    provider_sources::SqliteSourceAccessError,
+    provider::source_backed::{
+        refresh_source_backed_generation, SourceBackedCoordinatorError,
+        SourceBackedProviderRegistry, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
+    },
+    provider_sources::{
+        fail_next_opened_snapshot_cleanup_for_test, provider_source_for_path,
+        SqliteSourceAccessError,
+    },
 };
 
 const LARGE_ROWS: u64 = 8_192;
@@ -340,4 +349,99 @@ fn kiro_terminal_revalidation_resource_exhaustion_stays_systemic() {
         super::super::registration::kiro_scan_error(error).kind,
         crate::provider::source_backed::SourceBackedRouteErrorKind::ResourceUnavailable
     );
+}
+
+#[test]
+fn production_kiro_route_taxonomy_preserves_change_and_corruption_provenance() {
+    assert_eq!(
+        super::super::registration::route_kiro_sqlite_call::<()>(Err(
+            KiroSourceBackedErrorV0::Capture(crate::CaptureError::SourceChangedDuringCapture),
+        ))
+        .unwrap_err()
+        .kind,
+        SourceBackedRouteErrorKind::SourceChanged
+    );
+
+    let copied_corruption = SqliteSourceAccessError::SqliteControl {
+        operation: "querying an exact Kiro provider copy",
+        code: rusqlite::ffi::SQLITE_CORRUPT,
+    }
+    .with_diagnostic(
+        crate::provider_sources::SqliteFailurePhase::Projection,
+        crate::provider_sources::SqliteArtifactKind::PrivateSourceCopy,
+        3,
+        12_288,
+        crate::provider_sources::SqliteCleanupStatus::NotRequired,
+    );
+    assert_eq!(
+        super::super::registration::route_kiro_sqlite_source_call::<()>(Err(
+            copied_corruption.with_exact_provider_content_provenance(),
+        ))
+        .unwrap_err()
+        .kind,
+        SourceBackedRouteErrorKind::InvalidSource
+    );
+
+    let private_corruption = SqliteSourceAccessError::SqliteControl {
+        operation: "querying a damaged ctx-owned Kiro copy",
+        code: rusqlite::ffi::SQLITE_CORRUPT,
+    }
+    .with_diagnostic(
+        crate::provider_sources::SqliteFailurePhase::Projection,
+        crate::provider_sources::SqliteArtifactKind::PrivateSourceCopy,
+        3,
+        12_288,
+        crate::provider_sources::SqliteCleanupStatus::NotRequired,
+    );
+    assert_eq!(
+        super::super::registration::route_kiro_sqlite_source_call::<()>(Err(private_corruption))
+            .unwrap_err()
+            .kind,
+        SourceBackedRouteErrorKind::Internal
+    );
+}
+
+#[test]
+fn production_kiro_schema_failure_explicitly_reports_cleanup_without_leftovers() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider = temp.path().join("provider");
+    let database = provider.join("kiro.sqlite");
+    let data_root = temp.path().join("ctx-data");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&provider).unwrap();
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .execute_batch(
+            "CREATE TABLE unsupported(value TEXT); INSERT INTO unsupported VALUES ('present')",
+        )
+        .unwrap();
+    let source = provider_source_for_path(CaptureProvider::KiroCli, database);
+    let mut registry = SourceBackedProviderRegistry::new();
+    super::super::registration::register(
+        &mut registry,
+        source,
+        SourceBackedRouteSelection::Automatic,
+        &data_root,
+    )
+    .unwrap();
+    fail_next_opened_snapshot_cleanup_for_test();
+
+    let error = refresh_source_backed_generation(
+        &index_root,
+        &registry,
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap_err();
+    let SourceBackedCoordinatorError::RouteScan { source, .. } = error else {
+        panic!("unexpected Kiro refresh error: {error:?}");
+    };
+    assert_eq!(source.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+    assert!(source.detail.contains("cleanup_status=failed"));
+    let staging = data_root.join("tmp/provider-sqlite");
+    assert!(staging.is_dir());
+    assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
 }

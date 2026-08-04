@@ -336,6 +336,57 @@ fn sqlite_inventory_uses_serial_bounded_streaming() {
 }
 
 #[test]
+fn production_shared_inventory_routes_corruption_and_ctx_staging_failure_by_provenance() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("provider/history.sqlite");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    drop(active_wal_database(&database, "corrupt-me"));
+    let mut bytes = fs::read(&database).unwrap();
+    bytes[..16].copy_from_slice(b"not sqlite data!");
+    fs::write(&database, bytes).unwrap();
+    let data_root = temp.path().join("ctx-data");
+    let registry = test_registry(&data_root, &database, test_provider(database.clone()));
+
+    let error = refresh_source_backed_generation(
+        temp.path().join("corrupt-index"),
+        &registry,
+        writer_options(),
+    )
+    .unwrap_err();
+    let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } = error else {
+        panic!("unexpected shared inventory corruption error: {error:?}");
+    };
+    assert_eq!(failed_routes.len(), 1);
+    assert_eq!(
+        failed_routes[0].class,
+        SourceBackedSourceFailureClass::Unreadable
+    );
+    assert!(
+        failed_routes[0]
+            .detail
+            .contains("artifact_kind=provider_database"),
+        "unexpected corruption detail: {}",
+        failed_routes[0].detail
+    );
+
+    let healthy = temp.path().join("provider/healthy.sqlite");
+    let _writer = active_wal_database(&healthy, "healthy");
+    let blocked_data_root = temp.path().join("blocked-data-root");
+    fs::write(&blocked_data_root, b"not a directory").unwrap();
+    let registry = test_registry(&blocked_data_root, &healthy, test_provider(healthy.clone()));
+    let error = refresh_source_backed_generation(
+        temp.path().join("resource-index"),
+        &registry,
+        writer_options(),
+    )
+    .unwrap_err();
+    let SourceBackedCoordinatorError::RouteScan { source, .. } = error else {
+        panic!("unexpected shared inventory staging error: {error:?}");
+    };
+    assert_eq!(source.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+}
+
+#[test]
 fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     const DATABASES: usize = 8;
     const REQUESTED_PARALLEL_WORKERS: usize = 4;

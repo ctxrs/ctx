@@ -36,6 +36,7 @@ use crate::{
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     },
     provider_sources::{
+        fail_next_opened_snapshot_cleanup_for_test,
         open_root_handle_sqlite_source_online_backup_after_private_source_copy_for_test,
         provider_source_for_path, retain_sqlite_source_directory_authority, SqliteRetryDecision,
     },

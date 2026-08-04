@@ -19,10 +19,7 @@ fn leaf_swap_between_admission_and_stock_open_is_fail_closed() {
             fs::rename(&attacker, &database).unwrap();
         },
     );
-    assert!(matches!(
-        result,
-        Err(SqliteSourceAccessError::SourceChanged)
-    ));
+    assert!(matches!(&result, Err(error) if error.is_source_changed()));
 }
 
 #[cfg(unix)]

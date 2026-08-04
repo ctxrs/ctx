@@ -180,6 +180,11 @@ pub(crate) enum SqliteSourceAccessError {
         #[source]
         source: Box<SqliteSourceAccessError>,
     },
+    #[error("certified provider SQLite content is corrupt: {source}")]
+    ProviderContentCorruption {
+        #[source]
+        source: Box<SqliteSourceAccessError>,
+    },
     #[error("SQLite source control {operation} failed with code {code}")]
     SqliteControl { operation: &'static str, code: i32 },
     #[error("SQLite source connection is not read-only")]
@@ -222,7 +227,9 @@ impl<E> From<SqliteSourceAccessError> for SqliteSourceProgressError<E> {
 impl SqliteSourceAccessError {
     pub(crate) fn acquisition_artifact(&self) -> SqliteArtifactKind {
         match self {
-            Self::Diagnosed { source, .. } => source.acquisition_artifact(),
+            Self::Diagnosed { source, .. } | Self::ProviderContentCorruption { source } => {
+                source.acquisition_artifact()
+            }
             Self::ScratchSqliteUnavailable { .. } | Self::ScratchIoUnavailable { .. } => {
                 SqliteArtifactKind::PrivateSourceCopy
             }
@@ -253,31 +260,102 @@ impl SqliteSourceAccessError {
         ) || matches!(self, Self::Io { source, .. } if resource_exhaustion_io_error(source))
             || matches!(self, Self::Sqlite { source, .. } if rusqlite_resource_failure(source))
             || matches!(self, Self::SqliteControl { code, .. } if sqlite_resource_code(*code))
-            || matches!(self, Self::Diagnosed { source, .. } if source.is_systemic_resource_failure())
+            || matches!(self, Self::Diagnosed { source, .. } | Self::ProviderContentCorruption { source } if source.is_systemic_resource_failure())
     }
 
     pub(crate) fn is_ctx_owned_corruption(&self) -> bool {
-        self.diagnostic().is_some_and(|diagnostic| {
-            matches!(
-                diagnostic.artifact,
-                SqliteArtifactKind::PrivateSourceCopy | SqliteArtifactKind::PrivateBackup
-            ) && matches!(
-                diagnostic.sqlite_primary_code,
+        match self {
+            Self::ProviderContentCorruption { .. } => false,
+            Self::Diagnosed { diagnostic, source } => {
+                !source.is_provider_corruption()
+                    && matches!(
+                        diagnostic.artifact,
+                        SqliteArtifactKind::PrivateSourceCopy | SqliteArtifactKind::PrivateBackup
+                    )
+                    && matches!(
+                        diagnostic.sqlite_primary_code,
+                        Some(ffi::SQLITE_CORRUPT) | Some(ffi::SQLITE_NOTADB)
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_provider_corruption(&self) -> bool {
+        match self {
+            Self::ProviderContentCorruption { source } => matches!(
+                source.sqlite_codes().0,
                 Some(ffi::SQLITE_CORRUPT) | Some(ffi::SQLITE_NOTADB)
-            )
-        })
+            ),
+            Self::Diagnosed { diagnostic, source } => {
+                source.is_provider_corruption()
+                    || (matches!(
+                        diagnostic.artifact,
+                        SqliteArtifactKind::ProviderDatabase
+                            | SqliteArtifactKind::ProviderWal
+                            | SqliteArtifactKind::ProviderSharedMemory
+                    ) && matches!(
+                        diagnostic.sqlite_primary_code,
+                        Some(ffi::SQLITE_CORRUPT) | Some(ffi::SQLITE_NOTADB)
+                    ))
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_provider_path_unavailable(&self) -> bool {
+        match self {
+            Self::Io { source, .. }
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                true
+            }
+            Self::Diagnosed { source, .. } | Self::ProviderContentCorruption { source } => {
+                source.is_provider_path_unavailable()
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_busy_or_locked(&self) -> bool {
+        matches!(
+            self.sqlite_codes().0,
+            Some(ffi::SQLITE_BUSY) | Some(ffi::SQLITE_LOCKED)
+        )
+    }
+
+    pub(crate) fn is_operational_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Io { .. }
+                | Self::Sqlite { .. }
+                | Self::ResourceUnavailable { .. }
+                | Self::ScratchSqliteUnavailable { .. }
+                | Self::ScratchIoUnavailable { .. }
+                | Self::CleanupUnavailable { .. }
+                | Self::SqliteControl { .. }
+                | Self::ConnectionNotReadOnly
+                | Self::ConnectionNotQueryOnly
+                | Self::ConnectionIdentityMismatch
+                | Self::SnapshotUnavailable { .. }
+                | Self::SnapshotNotActive
+        ) || matches!(self, Self::Diagnosed { source, .. } | Self::ProviderContentCorruption { source } if source.is_operational_failure())
     }
 
     pub(crate) fn diagnostic(&self) -> Option<&SqliteFailureDiagnostic> {
         match self {
             Self::Diagnosed { diagnostic, .. } => Some(diagnostic),
+            Self::ProviderContentCorruption { source } => source.diagnostic(),
             _ => None,
         }
     }
 
     pub(crate) fn is_source_changed(&self) -> bool {
         matches!(self, Self::SourceChanged)
-            || matches!(self, Self::Diagnosed { source, .. } if source.is_source_changed())
+            || matches!(self, Self::Diagnosed { source, .. } | Self::ProviderContentCorruption { source } if source.is_source_changed())
     }
 
     pub(crate) fn with_diagnostic(
@@ -317,6 +395,38 @@ impl SqliteSourceAccessError {
         }
     }
 
+    pub(crate) fn with_cleanup_status(self, cleanup: SqliteCleanupStatus) -> Self {
+        match self {
+            Self::Diagnosed {
+                mut diagnostic,
+                source,
+            } => {
+                diagnostic.cleanup = cleanup;
+                Self::Diagnosed { diagnostic, source }
+            }
+            Self::ProviderContentCorruption { source } => Self::ProviderContentCorruption {
+                source: Box::new(source.with_cleanup_status(cleanup)),
+            },
+            error => {
+                let artifact = error.acquisition_artifact();
+                error.with_diagnostic(SqliteFailurePhase::Cleanup, artifact, 0, 0, cleanup)
+            }
+        }
+    }
+
+    pub(crate) fn with_exact_provider_content_provenance(self) -> Self {
+        if matches!(
+            self.sqlite_codes().0,
+            Some(ffi::SQLITE_CORRUPT) | Some(ffi::SQLITE_NOTADB)
+        ) {
+            Self::ProviderContentCorruption {
+                source: Box::new(self),
+            }
+        } else {
+            self
+        }
+    }
+
     fn sqlite_codes(&self) -> (Option<i32>, Option<i32>) {
         let extended = match self {
             Self::Sqlite {
@@ -328,7 +438,8 @@ impl SqliteSourceAccessError {
                 ..
             } => Some(error.extended_code),
             Self::SqliteControl { code, .. } => Some(*code),
-            Self::CleanupUnavailable { source, .. } => return source.sqlite_codes(),
+            Self::CleanupUnavailable { source, .. }
+            | Self::ProviderContentCorruption { source } => return source.sqlite_codes(),
             Self::Diagnosed { source, .. } => return source.sqlite_codes(),
             _ => None,
         };
@@ -356,10 +467,54 @@ impl SqliteSourceAccessError {
     }
 }
 
+impl SqliteSourceReadSnapshot {
+    pub(crate) fn diagnose_provider_query_error(
+        &self,
+        operation: &'static str,
+        source: rusqlite::Error,
+        phase: SqliteFailurePhase,
+    ) -> SqliteSourceAccessError {
+        let artifact = match self.policy {
+            SqliteSourceSnapshotPolicy::StrictPhysicalFamily => {
+                SqliteArtifactKind::PrivateSourceCopy
+            }
+            SqliteSourceSnapshotPolicy::LogicalOnlineBackup => SqliteArtifactKind::PrivateBackup,
+        };
+        let copied_bytes = self
+            .evidence
+            .length
+            .saturating_add(self.evidence.wal_length.unwrap_or_default());
+        let error = SqliteSourceAccessError::Sqlite { operation, source }.with_diagnostic(
+            phase,
+            artifact,
+            0,
+            copied_bytes,
+            SqliteCleanupStatus::NotRequired,
+        );
+        match self.policy {
+            SqliteSourceSnapshotPolicy::StrictPhysicalFamily => {
+                error.with_exact_provider_content_provenance()
+            }
+            SqliteSourceSnapshotPolicy::LogicalOnlineBackup => error,
+        }
+    }
+}
+
 pub(crate) fn rusqlite_resource_failure(error: &rusqlite::Error) -> bool {
     matches!(
         error,
         rusqlite::Error::SqliteFailure(error, _) if sqlite_resource_code(error.extended_code)
+    )
+}
+
+pub(crate) fn rusqlite_busy_or_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, _)
+            if matches!(
+                error.extended_code & 0xff,
+                ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED
+            )
     )
 }
 

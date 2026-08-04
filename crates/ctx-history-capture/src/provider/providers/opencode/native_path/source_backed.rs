@@ -271,7 +271,7 @@ fn scan_pinned_source_with_scratch_limit(
     scratch_limit: u64,
     emit: &mut dyn FnMut(OpenCodeScanOutput) -> OpenCodeSourceBackedResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeSourceBackedScan> {
-    let working = {
+    let working = (|| {
         let connection = sqlite_snapshot.connection()?;
         let streamed = sqlite_snapshot
             .with_private_scratch_database(
@@ -309,11 +309,15 @@ fn scan_pinned_source_with_scratch_limit(
             streamed.content_digest,
             streamed.counts,
         );
-        WorkingScan {
+        Ok(WorkingScan {
             source: observation.source.clone(),
             logical_snapshot,
             bounds: streamed.bounds,
-        }
+        })
+    })();
+    let working = match working {
+        Ok(working) => working,
+        Err(error) => return Err(adapter::abort_opencode_snapshot(sqlite_snapshot, error)),
     };
     sqlite_snapshot.finish()?;
     let certificate = working.logical_snapshot.certify(working.source.clone())?;
@@ -859,24 +863,53 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
             SqliteSourceProgressError::Progress(error) => OpenCodeSourceBackedError::from(error),
         })?;
     after_authorize();
-    sqlite_snapshot.revalidate()?;
-    source_root.revalidate_same_object()?;
-    let connection = sqlite_snapshot.connection()?;
-    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-        .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
-    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-    connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    // Every corpus-sized ordering/index is externalized below. Disable
-    // SQLite's query-time automatic indexes so an accepted no-index schema
-    // cannot silently rebuild source-cardinality state in temp_store=MEMORY.
-    connection.pragma_update(None, "automatic_index", "OFF")?;
-    let automatic_index: i64 =
-        connection.pragma_query_value(None, "automatic_index", |row| row.get(0))?;
-    if automatic_index != 0 {
-        return Err(SqliteSourceAccessError::SnapshotUnavailable {
-            reason: "OpenCode source automatic-index suppression was not enforced".to_owned(),
+    let configure = (|| {
+        sqlite_snapshot.revalidate()?;
+        source_root.revalidate_same_object()?;
+        let connection = sqlite_snapshot.connection()?;
+        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+            .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
+        connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|source| {
+                sqlite_snapshot.diagnose_provider_query_error(
+                    "setting the private OpenCode SQLite busy timeout",
+                    source,
+                    SqliteFailurePhase::SourceValidation,
+                )
+            })?;
+        // Every corpus-sized ordering/index is externalized below. Disable
+        // SQLite's query-time automatic indexes so an accepted no-index schema
+        // cannot silently rebuild source-cardinality state in temp_store=MEMORY.
+        connection
+            .pragma_update(None, "automatic_index", "OFF")
+            .map_err(|source| {
+                sqlite_snapshot.diagnose_provider_query_error(
+                    "disabling private OpenCode SQLite automatic indexes",
+                    source,
+                    SqliteFailurePhase::SourceValidation,
+                )
+            })?;
+        let automatic_index: i64 = connection
+            .pragma_query_value(None, "automatic_index", |row| row.get(0))
+            .map_err(|source| {
+                sqlite_snapshot.diagnose_provider_query_error(
+                    "verifying private OpenCode SQLite automatic-index state",
+                    source,
+                    SqliteFailurePhase::SourceValidation,
+                )
+            })?;
+        if automatic_index != 0 {
+            return Err(SqliteSourceAccessError::SnapshotUnavailable {
+                reason: "OpenCode source automatic-index suppression was not enforced".to_owned(),
+            }
+            .into());
         }
-        .into());
+        Ok(())
+    })();
+    if let Err(error) = configure {
+        return Err(adapter::abort_opencode_snapshot(sqlite_snapshot, error));
     }
     Ok(OpenCodeAuthorizedSnapshot {
         source_root,

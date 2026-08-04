@@ -423,15 +423,42 @@ fn open_root_authorized_snapshot_with_hook_and_progress(
             SqliteSourceProgressError::Progress(error) => HermesSourceBackedError::from(error),
         })?;
     after_authorize();
-    sqlite_snapshot.revalidate()?;
-    let connection = sqlite_snapshot.connection()?;
-    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-        .map_err(|_| HermesSourceBackedError::CountOverflow)?;
-    connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(CaptureError::from)?;
+    let configure = (|| {
+        sqlite_snapshot.revalidate()?;
+        let connection = sqlite_snapshot.connection()?;
+        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+            .map_err(|_| HermesSourceBackedError::CountOverflow)?;
+        connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|source| {
+                sqlite_snapshot.diagnose_provider_query_error(
+                    "setting the private Hermes SQLite busy timeout",
+                    source,
+                    SqliteFailurePhase::SourceValidation,
+                )
+            })?;
+        Ok(())
+    })();
+    if let Err(error) = configure {
+        return Err(abort_hermes_snapshot(sqlite_snapshot, error));
+    }
     Ok((sqlite_authority, sqlite_snapshot))
+}
+
+fn abort_hermes_snapshot(
+    snapshot: SqliteSourceReadSnapshot,
+    primary: HermesSourceBackedError,
+) -> HermesSourceBackedError {
+    match snapshot.abort() {
+        Ok(()) => primary,
+        Err(cleanup) => HermesSourceBackedError::Route(
+            crate::provider::source_backed::combine_primary_and_cleanup_route_errors(
+                replacement::hermes_route_error(primary),
+                replacement::hermes_sqlite_route_error(cleanup),
+            ),
+        ),
+    }
 }
 
 fn hermes_schema_evidence(sqlite_user_version: i64, schema_fingerprint: &str) -> Vec<u8> {

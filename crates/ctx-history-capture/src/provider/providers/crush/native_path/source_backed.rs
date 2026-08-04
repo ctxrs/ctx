@@ -38,8 +38,8 @@ use crate::{
     },
     provider::source_backed::{family::document::ChangedDocumentSink, SourceBackedRouteError},
     provider_sources::{
-        retain_sqlite_source_directory_authority, SqliteLogicalSnapshot, SqliteSourceAccessError,
-        SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
+        retain_sqlite_source_directory_authority, SqliteFailurePhase, SqliteLogicalSnapshot,
+        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot,
     },
     CaptureError, CRUSH_SQLITE_SOURCE_FORMAT, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -85,10 +85,13 @@ pub enum CrushSourceBackedErrorV0 {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("Crush root-bound SQLite source changed during capture")]
-    SqliteSourceChanged,
-    #[error("Crush root-bound SQLite source access failed: {0}")]
-    SqliteSourceAccess(String),
+    #[error(transparent)]
+    SqliteSource(#[from] CrushSqliteSourceErrorV0),
+    #[error("{primary}; explicit Crush SQLite snapshot cleanup also failed: {cleanup}")]
+    SnapshotCleanup {
+        primary: Box<CrushSourceBackedErrorV0>,
+        cleanup: CrushSqliteSourceErrorV0,
+    },
     #[error(
         "Crush project inventory exceeds the finite {MAX_CRUSH_PROJECT_DATABASES}-database bound"
     )]
@@ -113,16 +116,35 @@ pub enum CrushSourceBackedErrorV0 {
     SessionLineageTooDeep,
 }
 
-pub type CrushSourceBackedResultV0<T> = Result<T, CrushSourceBackedErrorV0>;
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct CrushSqliteSourceErrorV0 {
+    source: SqliteSourceAccessError,
+}
 
-impl From<SqliteSourceAccessError> for CrushSourceBackedErrorV0 {
-    fn from(error: SqliteSourceAccessError) -> Self {
-        match error {
-            SqliteSourceAccessError::SourceChanged => Self::SqliteSourceChanged,
-            other => Self::SqliteSourceAccess(other.to_string()),
-        }
+impl CrushSqliteSourceErrorV0 {
+    pub(crate) fn source(&self) -> &SqliteSourceAccessError {
+        &self.source
+    }
+
+    pub(crate) fn into_source(self) -> SqliteSourceAccessError {
+        self.source
     }
 }
+
+impl From<SqliteSourceAccessError> for CrushSqliteSourceErrorV0 {
+    fn from(source: SqliteSourceAccessError) -> Self {
+        Self { source }
+    }
+}
+
+impl From<SqliteSourceAccessError> for CrushSourceBackedErrorV0 {
+    fn from(source: SqliteSourceAccessError) -> Self {
+        Self::SqliteSource(source.into())
+    }
+}
+
+pub type CrushSourceBackedResultV0<T> = Result<T, CrushSourceBackedErrorV0>;
 
 /// One selected or registered Crush project database.
 ///
@@ -350,21 +372,76 @@ pub(crate) fn open_source_snapshot(
     database: BoundDatabase,
     read_snapshot: SqliteSourceReadSnapshot,
 ) -> CrushSourceBackedResultV0<OpenedSource> {
-    let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
-        .map_err(|_| CrushSourceBackedErrorV0::CountOverflow)?;
-    read_snapshot
-        .connection()?
-        .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
-    read_snapshot
-        .connection()?
-        .busy_timeout(std::time::Duration::from_secs(5))?;
-    let schema = read_native_schema(read_snapshot.connection()?)?;
-    database.source_root.revalidate()?;
+    let configure = (|| {
+        let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
+            .map_err(|_| CrushSourceBackedErrorV0::CountOverflow)?;
+        read_snapshot
+            .connection()?
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, value_limit);
+        read_snapshot
+            .connection()?
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|source| {
+                read_snapshot.diagnose_provider_query_error(
+                    "setting the private Crush SQLite busy timeout",
+                    source,
+                    SqliteFailurePhase::SourceValidation,
+                )
+            })?;
+        let schema = read_native_schema(read_snapshot.connection()?).map_err(|error| {
+            diagnose_crush_provider_query_error(
+                &read_snapshot,
+                error.into(),
+                SqliteFailurePhase::Schema,
+            )
+        })?;
+        database.source_root.revalidate()?;
+        Ok(schema)
+    })();
+    let schema = match configure {
+        Ok(schema) => schema,
+        Err(primary) => return Err(abort_crush_snapshot(read_snapshot, primary)),
+    };
     Ok(OpenedSource {
         database,
         read_snapshot,
         schema,
     })
+}
+
+fn abort_crush_snapshot(
+    snapshot: SqliteSourceReadSnapshot,
+    primary: CrushSourceBackedErrorV0,
+) -> CrushSourceBackedErrorV0 {
+    match snapshot.abort() {
+        Ok(()) => primary,
+        Err(cleanup) => CrushSourceBackedErrorV0::SnapshotCleanup {
+            primary: Box::new(primary),
+            cleanup: cleanup.into(),
+        },
+    }
+}
+
+fn diagnose_crush_provider_query_error(
+    snapshot: &SqliteSourceReadSnapshot,
+    error: CrushSourceBackedErrorV0,
+    phase: SqliteFailurePhase,
+) -> CrushSourceBackedErrorV0 {
+    let source = match error {
+        CrushSourceBackedErrorV0::Sqlite(source)
+        | CrushSourceBackedErrorV0::Capture(CaptureError::Sqlite(source)) => source,
+        error => return error,
+    };
+    snapshot
+        .diagnose_provider_query_error("querying the private Crush provider copy", source, phase)
+        .into()
+}
+
+pub(crate) fn abort_opened_source(
+    source: OpenedSource,
+    primary: CrushSourceBackedErrorV0,
+) -> CrushSourceBackedErrorV0 {
+    abort_crush_snapshot(source.read_snapshot, primary)
 }
 
 fn finish_source(source: OpenedSource) -> CrushSourceBackedResultV0<()> {
