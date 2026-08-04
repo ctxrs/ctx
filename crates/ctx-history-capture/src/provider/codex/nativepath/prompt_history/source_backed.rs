@@ -6,11 +6,9 @@
 //! capability rather than reopening a canonicalized pathname.
 
 use std::{
-    fs::{File, Metadata},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::UNIX_EPOCH,
 };
 
 use chrono::{DateTime, Utc};
@@ -22,7 +20,6 @@ use ctx_history_core::{
     StableEntityId, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -43,8 +40,15 @@ use crate::{
 
 mod path;
 mod projection;
+mod snapshot;
 use path::absolute_lexical_path;
 use projection::{core_record, retained_record_bytes};
+pub(crate) use snapshot::revalidate_codex_prompt_history_source_backed_v0;
+use snapshot::{
+    decode_checkpoint, exact_ordinary_file_observation_matches, observation_wire,
+    opened_file_from_start, stable_current_ordinary_file_observation, verify_frozen_prefix,
+    CheckpointV0, CodexPromptHistoryFrozenSnapshotV0,
+};
 
 const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
@@ -152,32 +156,6 @@ pub(crate) struct CodexPromptHistorySourceBackedScanV0 {
     pub(crate) emitted_documents: u64,
     #[cfg(test)]
     pub(crate) terminal: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CodexPromptHistoryFrozenSnapshotV0 {
-    metadata: Metadata,
-    ordinary_file_token: [u8; 32],
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CheckpointV0 {
-    version: u32,
-    certified_prefix_bytes: u64,
-    complete_records: u64,
-    terminal: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ObservationWireV0 {
-    length: u64,
-    modified_after_epoch: bool,
-    modified_seconds: u64,
-    modified_nanos: u32,
-    readonly: bool,
-    ordinary_file_token: [u8; 32],
-    whole_source_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -971,221 +949,6 @@ enum RecordClassification {
     Retained(PromptLine),
     Rejected,
     Ignored,
-}
-
-fn opened_file_from_start(
-    source: &OpenedProviderSourceFile,
-) -> CodexPromptHistorySourceBackedResultV0<File> {
-    let mut file = source.file().try_clone()?;
-    file.seek(SeekFrom::Start(0))?;
-    Ok(file)
-}
-
-fn hash_opened_prefix(
-    source: &OpenedProviderSourceFile,
-    target: u64,
-) -> CodexPromptHistorySourceBackedResultV0<Option<[u8; 32]>> {
-    for _ in 0..2 {
-        source.revalidate_same_object()?;
-        let before = source.current_ordinary_file_token()?;
-        let observed_len = source.file().metadata()?.len();
-        let before_hash = source.current_ordinary_file_token()?;
-        if before != before_hash {
-            continue;
-        }
-
-        let digest = read_opened_prefix(source, target, observed_len)?;
-        let confirmation = read_opened_prefix(source, target, observed_len)?;
-        if digest != confirmation {
-            return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-        }
-
-        let after_hash = source.current_ordinary_file_token()?;
-        source.revalidate_same_object()?;
-        let after = source.current_ordinary_file_token()?;
-        if before != after_hash || after_hash != after {
-            continue;
-        }
-        return Ok(digest);
-    }
-    Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged)
-}
-
-fn read_opened_prefix(
-    source: &OpenedProviderSourceFile,
-    target: u64,
-    observed_len: u64,
-) -> CodexPromptHistorySourceBackedResultV0<Option<[u8; 32]>> {
-    if target > observed_len {
-        return Ok(None);
-    }
-    let mut file = opened_file_from_start(source)?;
-    let mut remaining = target;
-    let mut digest = Sha256::new();
-    let mut bytes = [0_u8; 64 * 1024];
-    while remaining > 0 {
-        let take = bytes
-            .len()
-            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-        let count = file.read(&mut bytes[..take])?;
-        if count == 0 {
-            return Ok(None);
-        }
-        digest.update(&bytes[..count]);
-        remaining = remaining.saturating_sub(
-            u64::try_from(count)
-                .map_err(|_| CodexPromptHistorySourceBackedErrorV0::CountMismatch)?,
-        );
-    }
-    Ok(Some(digest.finalize().into()))
-}
-
-fn verify_frozen_prefix(
-    source: &OpenedProviderSourceFile,
-    frozen_len: u64,
-    expected_digest: [u8; 32],
-) -> CodexPromptHistorySourceBackedResultV0<()> {
-    let actual = hash_opened_prefix(source, frozen_len)?
-        .ok_or(CodexPromptHistorySourceBackedErrorV0::SourceChanged)?;
-    if actual != expected_digest {
-        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-    }
-    Ok(())
-}
-
-fn observation_wire(
-    metadata: &Metadata,
-    ordinary_file_token: [u8; 32],
-    whole_source_digest: [u8; 32],
-) -> CodexPromptHistorySourceBackedResultV0<ObservationWireV0> {
-    let (modified_after_epoch, duration) = match metadata.modified()?.duration_since(UNIX_EPOCH) {
-        Ok(duration) => (true, duration),
-        Err(error) => (false, error.duration()),
-    };
-    Ok(ObservationWireV0 {
-        length: metadata.len(),
-        modified_after_epoch,
-        modified_seconds: duration.as_secs(),
-        modified_nanos: duration.subsec_nanos(),
-        readonly: metadata.permissions().readonly(),
-        ordinary_file_token,
-        whole_source_digest,
-    })
-}
-
-fn stable_current_ordinary_file_observation(
-    source: &OpenedProviderSourceFile,
-) -> CodexPromptHistorySourceBackedResultV0<(Metadata, [u8; 32])> {
-    let opened_token = source.ordinary_file_token();
-    if source.current_ordinary_file_token()? == opened_token
-        && source.revalidate().is_ok()
-        && source.current_ordinary_file_token()? == opened_token
-    {
-        return Ok((source.metadata().clone(), opened_token));
-    }
-
-    for _ in 0..2 {
-        source.revalidate_same_object()?;
-        let before = source.current_ordinary_file_token()?;
-        let metadata = source.file().metadata()?;
-        let after_metadata = source.current_ordinary_file_token()?;
-        source.revalidate_same_object()?;
-        let after = source.current_ordinary_file_token()?;
-        if before == after_metadata && after_metadata == after {
-            return Ok((metadata, after));
-        }
-    }
-    Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged)
-}
-
-fn exact_ordinary_file_observation_matches(
-    metadata: &Metadata,
-    ordinary_file_token: [u8; 32],
-    expected: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<bool> {
-    if expected.parser_revision() != PARSER_REVISION
-        || expected.observation().revision_kind() != SOURCE_REVISION_KIND
-    {
-        return Ok(false);
-    }
-    let expected_observation = decode_observation(expected)?;
-    Ok(observation_wire(
-        metadata,
-        ordinary_file_token,
-        expected_observation.whole_source_digest,
-    )? == expected_observation)
-}
-
-fn decode_observation(
-    certificate: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<ObservationWireV0> {
-    serde_json::from_slice(certificate.observation().revision())
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)
-}
-
-/// Revalidates one previously staged prompt-history snapshot while allowing
-/// the provider to append bytes beyond its frozen observation boundary.
-pub(crate) fn revalidate_codex_prompt_history_source_backed_v0(
-    source: &CodexPromptHistorySourceBackedSourceV0,
-    expected: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<()> {
-    expected.validate_contract()?;
-    if expected.parser_revision() != PARSER_REVISION
-        || !source
-            .source
-            .exact_descriptor_eq(expected.observation().source())
-        || expected.observation().revision_kind() != SOURCE_REVISION_KIND
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-    }
-    let observation = decode_observation(expected)?;
-    let checkpoint = decode_checkpoint(expected)?;
-    if checkpoint.certified_prefix_bytes > observation.length {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    let (current_metadata, current_token) =
-        stable_current_ordinary_file_observation(&source.opened)?;
-    if observation_wire(
-        &current_metadata,
-        current_token,
-        observation.whole_source_digest,
-    )? == observation
-    {
-        return Ok(());
-    }
-    verify_frozen_prefix(
-        &source.opened,
-        observation.length,
-        observation.whole_source_digest,
-    )
-}
-
-fn decode_checkpoint(
-    certificate: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<CheckpointV0> {
-    if certificate.parser_revision() != PARSER_REVISION {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    let frontier = certificate
-        .frontier()
-        .ok_or(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)?;
-    if frontier.checkpoint_kind() != FRONTIER_KIND {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    let TypedKey::Bytes(bytes) = frontier.checkpoint() else {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    };
-    let checkpoint: CheckpointV0 = serde_json::from_slice(bytes)
-        .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)?;
-    if checkpoint.version != CHECKPOINT_VERSION
-        || checkpoint.certified_prefix_bytes != frontier.certified_prefix_bytes()
-        || checkpoint.certified_prefix_bytes != certificate.counts().certified_bytes
-        || checkpoint.complete_records != certificate.counts().complete_records
-        || frontier.certified_prefix_digest() != certificate.content_digest()
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    Ok(checkpoint)
 }
 
 #[cfg(test)]

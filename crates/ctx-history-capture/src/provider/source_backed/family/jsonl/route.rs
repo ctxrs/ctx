@@ -8,19 +8,12 @@ use chrono::{DateTime, Utc};
 #[cfg(test)]
 use ctx_history_core::ScannedSourceCounts;
 use ctx_history_core::{
-    CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
-    CertifiedSourceInventory, CoreRecord, SourceInventoryObservation, SourceKey, TypedKey,
+    CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
+    CoreRecord, SourceInventoryObservation, SourceKey, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::cell::Cell;
-#[cfg(test)]
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Barrier,
-};
 
 use super::{
     observe_opened_file, revalidate_frozen_prefix, JsonlCheckpoint, JsonlFileObservation,
@@ -33,7 +26,6 @@ use crate::{
         SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
         SourceBackedRouteResult,
     },
-    repository_attribution::RepositoryAttributor,
     CaptureError, Result,
 };
 
@@ -57,126 +49,17 @@ use revalidation::{
     binding_digest, inventory_observation, reset_terminal, revalidate_complete_inventory,
     revalidate_target,
 };
-
+mod scanner;
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct JsonlFamilyScannerActivity {
-    pub(crate) worker_count: usize,
-    pub(crate) sources_started: usize,
-    pub(crate) sources_completed: usize,
-    pub(crate) peak_active_scanners: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    static FAMILY_SCANNER_WORKERS_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
-    static FAMILY_SCANNER_ACTIVITY: Cell<JsonlFamilyScannerActivity> =
-        const { Cell::new(JsonlFamilyScannerActivity {
-            worker_count: 0,
-            sources_started: 0,
-            sources_completed: 0,
-            peak_active_scanners: 0,
-        }) };
-}
-
-#[cfg(test)]
-pub(crate) fn jsonl_family_scanner_activity() -> JsonlFamilyScannerActivity {
-    FAMILY_SCANNER_ACTIVITY.get()
-}
-
-#[cfg(test)]
-struct JsonlFamilyScannerProbe {
-    sources_started: AtomicUsize,
-    sources_completed: AtomicUsize,
-    active_scanners: AtomicUsize,
-    peak_active_scanners: AtomicUsize,
-    rendezvous_arrivals: AtomicUsize,
-    rendezvous_target: usize,
-    rendezvous: Barrier,
-}
-
-#[cfg(test)]
-impl JsonlFamilyScannerProbe {
-    fn enter(&self) -> JsonlFamilyActiveScanner<'_> {
-        self.sources_started.fetch_add(1, Ordering::SeqCst);
-        let active = self
-            .active_scanners
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
-        self.peak_active_scanners
-            .fetch_max(active, Ordering::SeqCst);
-        if self.rendezvous_arrivals.fetch_add(1, Ordering::SeqCst) < self.rendezvous_target {
-            self.rendezvous.wait();
-        }
-        JsonlFamilyActiveScanner { probe: self }
-    }
-
-    fn snapshot(&self, worker_count: usize) -> JsonlFamilyScannerActivity {
-        debug_assert_eq!(self.active_scanners.load(Ordering::SeqCst), 0);
-        JsonlFamilyScannerActivity {
-            worker_count,
-            sources_started: self.sources_started.load(Ordering::SeqCst),
-            sources_completed: self.sources_completed.load(Ordering::SeqCst),
-            peak_active_scanners: self.peak_active_scanners.load(Ordering::SeqCst),
-        }
-    }
-}
-
-#[cfg(test)]
-struct JsonlFamilyActiveScanner<'probe> {
-    probe: &'probe JsonlFamilyScannerProbe,
-}
-
-#[cfg(test)]
-impl Drop for JsonlFamilyActiveScanner<'_> {
-    fn drop(&mut self) {
-        self.probe.sources_completed.fetch_add(1, Ordering::SeqCst);
-        self.probe.active_scanners.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-fn jsonl_family_scanner_probe(worker_count: usize) -> Option<Arc<JsonlFamilyScannerProbe>> {
-    FAMILY_SCANNER_WORKERS_OVERRIDE.with(|workers| {
-        workers.get().map(|_| {
-            let rendezvous_target = worker_count.clamp(1, 4);
-            Arc::new(JsonlFamilyScannerProbe {
-                sources_started: AtomicUsize::new(0),
-                sources_completed: AtomicUsize::new(0),
-                active_scanners: AtomicUsize::new(0),
-                peak_active_scanners: AtomicUsize::new(0),
-                rendezvous_arrivals: AtomicUsize::new(0),
-                rendezvous_target,
-                rendezvous: Barrier::new(rendezvous_target),
-            })
-        })
-    })
-}
-
-#[cfg(test)]
-fn record_jsonl_family_scanner_activity(
-    worker_count: usize,
-    probe: Option<&JsonlFamilyScannerProbe>,
-) {
-    FAMILY_SCANNER_ACTIVITY.set(
-        probe.map_or_else(JsonlFamilyScannerActivity::default, |probe| {
-            probe.snapshot(worker_count)
-        }),
-    );
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JsonlFamilyAppendMode {
-    CertifiedSuffix,
-    Replacement,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JsonlFamilyProjectionMode {
-    Cold,
-    CertifiedAppend,
-    Replacement,
-}
+use scanner::{
+    jsonl_family_scanner_activity, jsonl_family_scanner_probe,
+    record_jsonl_family_scanner_activity, with_family_scanner_workers, JsonlFamilyScannerActivity,
+    FAMILY_SCANNER_WORKERS_OVERRIDE,
+};
+pub(crate) use scanner::{
+    JsonlFamilyAppendMode, JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjectionMode,
+    JsonlFamilyPublication, JsonlFamilyWorkerContext,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JsonlFamilyRootMissingMode {
@@ -208,57 +91,6 @@ pub(crate) enum JsonlFamilyBaseScope {
     /// Reuse only sources previously committed by this exact route. Adapters
     /// whose explicit and automatic routes can overlap must select this mode.
     Route,
-}
-
-/// Publication mode selected by an optimized JSONL leaf executor.
-///
-/// The family keeps this seam provider-neutral: adapters may retain a native
-/// parser or staged full-file projection, while the shared driver still owns
-/// inventory, scheduling, writer staging, certification, and revalidation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JsonlFamilyPublication {
-    Append,
-    Replace,
-}
-
-/// Mutable services reused by one shared JSONL scanner worker across every
-/// leaf in its stripe. Keeping these caches at worker lifetime preserves
-/// bounded parallelism while amortizing provider-neutral projection work.
-#[derive(Debug, Default)]
-pub(crate) struct JsonlFamilyWorkerContext {
-    repository_attributor: RepositoryAttributor,
-}
-
-impl JsonlFamilyWorkerContext {
-    fn begin_leaf(&mut self) {
-        self.repository_attributor.begin_source();
-    }
-
-    pub(crate) fn repository_attributor(&mut self) -> &mut RepositoryAttributor {
-        &mut self.repository_attributor
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct JsonlFamilyOptimizedLeafOutcome {
-    certificate: CertifiedSource,
-    append: Option<CertifiedSourceAppend>,
-}
-
-impl JsonlFamilyOptimizedLeafOutcome {
-    pub(crate) fn replacement(certificate: CertifiedSource) -> Self {
-        Self {
-            certificate,
-            append: None,
-        }
-    }
-
-    pub(crate) fn append(append: CertifiedSourceAppend) -> Self {
-        Self {
-            certificate: append.current().clone(),
-            append: Some(append),
-        }
-    }
 }
 
 pub(crate) trait JsonlFamilyProjector: Send {
@@ -1123,22 +955,6 @@ fn bases_by_descriptor(
         }
     }
     Ok(by_descriptor)
-}
-
-#[cfg(test)]
-fn with_family_scanner_workers<T>(workers: usize, run: impl FnOnce() -> T) -> T {
-    struct Restore(Option<usize>);
-
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            FAMILY_SCANNER_WORKERS_OVERRIDE.set(self.0);
-        }
-    }
-
-    let previous = FAMILY_SCANNER_WORKERS_OVERRIDE.replace(Some(workers));
-    let _restore = Restore(previous);
-    FAMILY_SCANNER_ACTIVITY.set(JsonlFamilyScannerActivity::default());
-    run()
 }
 
 fn route_invalid(error: impl std::fmt::Display) -> SourceBackedRouteError {
