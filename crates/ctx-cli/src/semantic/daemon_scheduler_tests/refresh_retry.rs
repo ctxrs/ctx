@@ -21,6 +21,269 @@ fn make_history_retry_due(runtime: &mut DaemonRuntime) {
         Some(ctx_history_core::utc_now().timestamp_millis());
 }
 
+fn route_identity(byte: u8) -> SourceRouteIdentity {
+    SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
+}
+
+fn source_refresh_only_runtime() -> DaemonRuntime {
+    let mut runtime = DaemonRuntime::default();
+    runtime.config.daemon.mode = DaemonMode::SourceRefreshOnly;
+    runtime
+}
+
+fn run_source_refresh_cycle(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    coordinator: &CoreRefreshEngine,
+) -> crate::semantic::daemon::DaemonIteration {
+    run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        data_root,
+        runtime,
+        None,
+        false,
+        None,
+        Some(coordinator),
+    )
+    .unwrap()
+}
+
+#[test]
+fn hot_route_failure_retries_exact_after_cooldown_while_blocked_route_stays_idle() {
+    for (byte, kind, retryable) in [
+        (0xa1, SourceBackedRouteErrorKind::SourceChanged, true),
+        (0xb1, SourceBackedRouteErrorKind::InvalidSource, false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+        publish_empty_core_generation(&data_root);
+        let route = route_identity(byte);
+        let scopes = Arc::new(Mutex::new(Vec::new()));
+        let observed_scopes = Arc::clone(&scopes);
+        let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+            move |execution: SourceBackedRefreshExecution<'_>| {
+                observed_scopes
+                    .lock()
+                    .unwrap()
+                    .push(execution.scope.clone());
+                Err(SourceBackedRouteError::new(kind, "injected route failure").into())
+            },
+        ));
+        coordinator.initialize_watch_route_authority(BTreeSet::from([route.clone()]));
+        coordinator.record_watch_routes(
+            [(route.clone(), EventWatermark::new(byte.into(), 1))],
+            super::super::source_route_ledger_now_ms().saturating_sub(1_000),
+        );
+        let mut runtime = source_refresh_only_runtime();
+        assert!(run_source_refresh_cycle(&data_root, &mut runtime, &coordinator).failed);
+        assert_eq!(runtime.history_retry.consecutive_failures, 0);
+        assert_eq!(
+            scopes.lock().unwrap().as_slice(),
+            &[SourceBackedRefreshScope::Exact(BTreeSet::from([
+                route.clone()
+            ]))]
+        );
+        let terminal = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+        assert_eq!(terminal["structured_outcome"]["retryable"], retryable);
+        let field = if retryable {
+            "retryable_routes"
+        } else {
+            "blocked_routes"
+        };
+        assert_eq!(
+            terminal["structured_outcome"][field],
+            json!([route.as_str()])
+        );
+        assert!(terminal.get("retry_after_ms").is_none());
+
+        if retryable {
+            let now = super::super::source_route_ledger_now_ms();
+            let delay = coordinator.next_dirty_route_due_in_ms(now).unwrap();
+            assert!(delay > 0);
+            assert!(!coordinator
+                .enqueue_next_scheduled_refresh(&data_root, now + delay - 1)
+                .unwrap());
+            assert!(coordinator
+                .enqueue_next_scheduled_refresh(&data_root, now + delay)
+                .unwrap());
+            let queued = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+            assert_eq!(queued["refresh_scope"]["kind"], "exact");
+            assert_eq!(queued["refresh_scope"]["routes"], json!([route.as_str()]));
+        } else {
+            assert!(coordinator.next_dirty_route_due_in_ms(u64::MAX).is_none());
+            assert!(!coordinator
+                .enqueue_next_scheduled_refresh(&data_root, u64::MAX)
+                .unwrap());
+            assert!(!coordinator.has_pending_request());
+        }
+    }
+}
+
+#[test]
+fn mixed_route_dispositions_schedule_only_retryable_routes() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    publish_empty_core_generation(&data_root);
+    let retryable_route = route_identity(0xc1);
+    let blocked_route = route_identity(0xc2);
+    let executor_retryable = retryable_route.clone();
+    let executor_blocked = blocked_route.clone();
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let mut publication = publish_empty_authoritative_generation(execution.index_root);
+            publication.route_results = [
+                (&executor_retryable, "unavailable"),
+                (&executor_blocked, "incompatible"),
+            ]
+            .into_iter()
+            .map(|(route, class)| {
+                let mut result =
+                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false);
+                result.source_failure_total = 1;
+                result.source_failures = vec![SourceBackedRefreshSourceFailure {
+                    route_identity: route.as_str().to_owned(),
+                    source_identity: "dd".repeat(32),
+                    provider: "fixture".to_owned(),
+                    class: class.to_owned(),
+                    carried_forward: true,
+                    source_selector: "fixture source".to_owned(),
+                    detail: "injected route disposition".to_owned(),
+                }];
+                result
+            })
+            .collect();
+            Ok(publication)
+        },
+    ));
+    coordinator.initialize_watch_route_authority(BTreeSet::from([
+        retryable_route.clone(),
+        blocked_route.clone(),
+    ]));
+    coordinator.record_watch_routes(
+        [
+            (retryable_route.clone(), EventWatermark::new(3, 1)),
+            (blocked_route.clone(), EventWatermark::new(3, 1)),
+        ],
+        super::super::source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    let mut runtime = source_refresh_only_runtime();
+
+    let completed = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+
+    assert!(!completed.failed);
+    assert_eq!(runtime.history_retry.consecutive_failures, 0);
+    let terminal = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(
+        terminal["structured_outcome"]["retryable_routes"],
+        json!([retryable_route.as_str()])
+    );
+    assert_eq!(
+        terminal["structured_outcome"]["blocked_routes"],
+        json!([blocked_route.as_str()])
+    );
+    let now = super::super::source_route_ledger_now_ms();
+    let delay = coordinator
+        .next_dirty_route_due_in_ms(now)
+        .expect("mixed outcome retains retryable route");
+    assert!(coordinator
+        .enqueue_next_scheduled_refresh(&data_root, now.saturating_add(delay))
+        .unwrap());
+    let queued = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(
+        queued["refresh_scope"]["routes"],
+        json!([retryable_route.as_str()])
+    );
+}
+
+#[test]
+fn failed_attached_demand_is_terminal_replayable_and_never_executes_a_successor() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed_executions = Arc::clone(&executions);
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |_execution: SourceBackedRefreshExecution<'_>| {
+            observed_executions.fetch_add(1, Ordering::SeqCst);
+            executor_entered.wait();
+            executor_release.wait();
+            Err(SourceBackedRouteError::new(
+                SourceBackedRouteErrorKind::SourceChanged,
+                "injected predecessor failure",
+            )
+            .into())
+        },
+    )));
+    coordinator.enqueue_for_test(None);
+    let logical_request_id = uuid::Uuid::from_u128(0x294_0001).to_string();
+    let authority = crate::commands::import::explicit_source_catalog_authority_for_test(7);
+
+    let (iteration, attached) = std::thread::scope(|scope| {
+        let scheduler_coordinator = Arc::clone(&coordinator);
+        let scheduler_root = data_root.clone();
+        let scheduler = scope.spawn(move || {
+            let mut runtime = source_refresh_only_runtime();
+            run_source_refresh_cycle(&scheduler_root, &mut runtime, &scheduler_coordinator)
+        });
+        entered.wait();
+        let attached = coordinator
+            .enqueue_fresh_catalog_demand_for_test(
+                &data_root,
+                None,
+                logical_request_id.clone(),
+                authority.clone(),
+            )
+            .expect("attached logical freshness demand");
+        assert_eq!(attached["logical_phase"], "attached");
+        release.wait();
+        (scheduler.join().unwrap(), attached)
+    });
+
+    assert!(iteration.failed);
+    let physical_attempt_id = attached["physical_attempt_id"].as_str().unwrap().to_owned();
+    let terminal = coordinator
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "op": "source_refresh_status",
+                "request_id": logical_request_id,
+            }),
+        )
+        .unwrap()
+        .expect("terminal logical demand");
+    assert_eq!(terminal["request_state"], "failed");
+    assert_eq!(terminal["logical_phase"], "terminal");
+    assert_eq!(
+        terminal["structured_outcome"]["physical_attempt_id"],
+        physical_attempt_id
+    );
+    assert!(!coordinator.has_pending_request());
+
+    let mut idle_runtime = source_refresh_only_runtime();
+    let idle = run_source_refresh_cycle(&data_root, &mut idle_runtime, &coordinator);
+    assert!(!idle.did_work);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    drop(coordinator);
+
+    let restarted = CoreRefreshEngine::new();
+    let _ = restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap();
+    assert!(!restarted.has_pending_request());
+    assert!(restarted.run_next(&data_root).is_none());
+    let replay = restarted
+        .enqueue_fresh_catalog_demand_for_test(&data_root, None, logical_request_id, authority)
+        .expect("same-ID terminal replay after restart");
+    assert_eq!(replay, terminal);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn persistent_admission_status_failure_uses_scheduler_backoff() {
     let temp = tempfile::tempdir().unwrap();
@@ -288,7 +551,7 @@ fn scheduler_failed_terminal_retry_preserves_successor_across_restart() {
         false,
     )
     .unwrap();
-    assert_eq!(recorded["queued_successors"].as_array().unwrap().len(), 2);
+    assert_eq!(recorded["queued_successors"].as_array().unwrap().len(), 1);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     let exact_failed_root = coordinator
         .handle_ipc_request(
@@ -427,7 +690,7 @@ fn blocked_retry_writer_serializes_concurrent_admission_and_restart() {
     let recorded =
         record_source_refresh_retry(&data_root, &mut backoff, &coordinator, retry.job, false)
             .unwrap();
-    assert_eq!(recorded["queued_successors"].as_array().unwrap().len(), 2);
+    assert_eq!(recorded["queued_successors"].as_array().unwrap().len(), 1);
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     let before_restart = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
     assert_eq!(before_restart["request_id"], recorded["request_id"]);
@@ -558,57 +821,54 @@ fn failed_terminal_root_keeps_capacity_through_successful_retry_and_restart() {
 }
 
 #[test]
-fn generic_backoff_write_serializes_concurrent_admission_and_restart() {
+fn stale_global_backoff_cannot_overwrite_durable_same_id_admission() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
-    let status_entered = Arc::new(Barrier::new(2));
-    let status_release = Arc::new(Barrier::new(2));
-    let coordinator = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         |_execution: SourceBackedRefreshExecution<'_>| {
-            panic!("backoff race must not execute refresh work")
+            panic!("stale global backoff must not execute refresh work")
         },
-    )));
+    ));
     let mut runtime = DaemonRuntime::default();
     runtime.history_retry.record_failure();
+    make_history_retry_due(&mut runtime);
 
-    let request_id = std::thread::scope(|scope| {
-        let scheduler_coordinator = Arc::clone(&coordinator);
-        let scheduler_root = data_root.clone();
-        let entered = Arc::clone(&status_entered);
-        let release = Arc::clone(&status_release);
-        let scheduler = scope.spawn(move || {
-            install_before_core_scheduler_status_hook_for_test(move || {
-                entered.wait();
-                release.wait();
-            });
-            run_daemon_scheduler_cycle_with_activity(
-                &daemon_args(),
-                &scheduler_root,
-                &mut runtime,
-                None,
-                false,
-                None,
-                Some(&scheduler_coordinator),
-            )
-            .unwrap()
-        });
-        status_entered.wait();
-        let response = enqueue_synthetic_refresh_successor(&coordinator, &data_root, 0);
-        let request_id = response["request_id"].as_str().unwrap().to_owned();
-        let admitted = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
-        assert_eq!(admitted["request_id"], request_id);
-        assert_eq!(admitted["request_state"], "queued");
-        status_release.wait();
-        let iteration = scheduler.join().unwrap();
-        assert!(!iteration.did_work);
-        request_id
+    let idle = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        &data_root,
+        &mut runtime,
+        None,
+        false,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(!idle.did_work);
+    assert_eq!(runtime.history_retry.consecutive_failures, 0);
+
+    let request_id = uuid::Uuid::from_u128(0x294_0002).to_string();
+    let request = json!({
+        "schema_version": 1,
+        "op": "source_refresh_request",
+        "request_id": request_id,
+        "mode": "wait",
+        "operation": "refresh",
     });
+    let admitted = coordinator
+        .handle_ipc_request(&data_root, &request)
+        .unwrap()
+        .expect("durable admission");
+    let replayed = coordinator
+        .handle_ipc_request(&data_root, &request)
+        .unwrap()
+        .expect("same-ID replay");
+    assert_eq!(admitted, replayed);
     let durable = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
     assert_eq!(durable["request_id"], request_id);
     assert_eq!(durable["request_state"], "queued");
-    assert_eq!(durable["consecutive_failures"], 1);
-    assert!(durable["retry_after_ms"].as_u64().is_some());
+    assert!(durable.get("consecutive_failures").is_none());
+    assert!(durable.get("retry_after_ms").is_none());
     drop(coordinator);
 
     let restarted = CoreRefreshEngine::new();
@@ -628,7 +888,5 @@ fn generic_backoff_write_serializes_concurrent_admission_and_restart() {
         .expect("exact acknowledged request survives restart");
     assert_eq!(recovered["request_id"], request_id);
     assert_eq!(recovered["request_state"], "queued");
-    let durable = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
-    assert_eq!(durable["request_id"], request_id);
-    assert_eq!(durable["request_state"], "queued");
+    assert_eq!(recovered, admitted);
 }

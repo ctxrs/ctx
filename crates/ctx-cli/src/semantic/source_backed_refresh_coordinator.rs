@@ -1,6 +1,7 @@
 #[cfg(test)]
 use std::sync::Arc;
 use std::{
+    collections::BTreeSet,
     fmt,
     path::Path,
     time::{Duration as StdDuration, Instant as StdInstant},
@@ -37,7 +38,7 @@ pub(crate) use ctx_history_refresh::{
 pub(crate) use ctx_history_refresh::{
     EventWatermark, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
     SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-    SourceBackedRefreshTimings,
+    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
 
 #[cfg(test)]
@@ -257,9 +258,11 @@ impl CoreRefreshEngine {
     }
 }
 
+#[allow(unused_imports)] // Stable typed terminal outcome for command/API integrations.
 pub(crate) use client::{
     coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshObservation,
+    SourceBackedRefreshTerminalError,
 };
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::count_verified_index_opens;
