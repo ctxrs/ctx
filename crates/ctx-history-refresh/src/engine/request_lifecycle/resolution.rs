@@ -419,23 +419,26 @@ impl CoreRefreshEngine {
         if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
             if !run.terminal_persistence_pending {
                 let post_publication_fence = publication_ready.then(|| coverage_fence(request_id));
-                let coverage_certificate = self.finish_route_admissions(
+                match self.finish_route_admissions_and_persist(
+                    data_root,
                     request_id,
                     publication_ready,
                     post_publication_fence.as_ref(),
-                );
-                if let Err(error) = self.persist_job_status(data_root, request_id) {
-                    run.terminal_persistence_pending = true;
-                    let mut state = self.lock_state();
-                    if let Some(active_request_id) = state.active_request_id.clone() {
-                        if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
-                            active.last_error = Some(format!(
-                                "persist logical demand coverage after publication: {error:#}"
-                            ));
+                ) {
+                    Ok(finish) => {
+                        run.coverage_certificate = finish.coverage_certificate;
+                    }
+                    Err(error) => {
+                        run.terminal_persistence_pending = true;
+                        let mut state = self.lock_state();
+                        if let Some(active_request_id) = state.active_request_id.clone() {
+                            if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
+                                active.last_error = Some(format!(
+                                    "persist logical demand coverage after publication: {error:#}"
+                                ));
+                            }
                         }
                     }
-                } else {
-                    run.coverage_certificate = coverage_certificate;
                 }
             }
         }

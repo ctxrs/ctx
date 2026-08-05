@@ -129,7 +129,12 @@ impl CoreRefreshEngine {
         if request_state == "failed" {
             let failed = recover_failed_attempt(&job)?;
             let failed_request_id = failed.request_id.clone();
-            let has_successors = !queued_successors.is_empty();
+            let failure_route_dispositions = failed.failure_outcome.as_ref().map(|outcome| {
+                (
+                    outcome.retryable_routes.clone(),
+                    outcome.blocked_routes.clone(),
+                )
+            });
             {
                 let mut state = self.lock_state();
                 state.attempts.push_back(failed);
@@ -138,10 +143,24 @@ impl CoreRefreshEngine {
                     .manual_all_continuations
                     .extend(recovered_continuations);
                 state.current_published_generation = active_generation;
+                if let Some((retryable_routes, blocked_routes)) =
+                    failure_route_dispositions.as_ref()
+                {
+                    Self::restore_route_dispositions_locked(
+                        &mut state,
+                        retryable_routes,
+                        blocked_routes,
+                    );
+                }
                 trim_terminal_attempt_history(&mut state);
             }
-            if has_successors {
-                self.persist_job_status(data_root, &failed_request_id)?;
+            let finish = self.finish_route_admissions(&failed_request_id, false, None);
+            let has_successors = {
+                let state = self.lock_state();
+                state.active_request_id.is_some() || !state.pending_request_ids.is_empty()
+            };
+            if finish.durable_request_id != failed_request_id || has_successors {
+                self.persist_job_status(data_root, &finish.durable_request_id)?;
             }
             return Ok(has_successors);
         }
@@ -186,6 +205,11 @@ impl CoreRefreshEngine {
         recovered_continuations: BTreeMap<String, ManualAllContinuation>,
         active_generation: Option<String>,
     ) -> Result<()> {
+        let route_dispositions = attempt
+            .receipt
+            .as_ref()
+            .map(SourceBackedRefreshReceipt::route_retry_dispositions)
+            .unwrap_or_default();
         let mut state = self.lock_state();
         terminal.install(&mut state);
         state.attempts.push_back(attempt);
@@ -194,6 +218,11 @@ impl CoreRefreshEngine {
             .manual_all_continuations
             .extend(recovered_continuations);
         state.current_published_generation = active_generation;
+        Self::restore_route_dispositions_locked(
+            &mut state,
+            &route_dispositions.0,
+            &route_dispositions.1,
+        );
         trim_terminal_attempt_history(&mut state);
         Ok(())
     }
@@ -441,7 +470,12 @@ fn recover_failure_outcome(
             "malformed_source",
             "unsupported_schema",
             "source_failures",
+            "logical_source_failures",
             "source_refresh_failed",
+            "source_refresh_internal",
+            "resource_unavailable",
+            "index_incompatible",
+            "index_corruption",
             "source_refresh_admission_failed",
             TERMINAL_COVERAGE_ERROR_CODE,
         ],
@@ -456,6 +490,8 @@ fn recover_failure_outcome(
             "incompatible",
             "mixed",
             "internal",
+            "resource_unavailable",
+            "corruption",
             "control_plane",
             "coverage",
         ],
@@ -466,14 +502,76 @@ fn recover_failure_outcome(
         .ok_or_else(|| {
             anyhow!("durable terminal source refresh outcome has invalid retryability")
         })?;
+    let affected_routes = recover_outcome_routes(fields, "affected_routes")?;
+    let retry_advice = match fields.get("retry_advice") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => [
+            "retry_affected_routes",
+            "retry_request",
+            "retry_admission",
+            "retry_finalization",
+            "inspect_sources",
+            "upgrade_or_reconfigure",
+            "rebuild_index",
+        ]
+        .into_iter()
+        .find(|accepted| accepted == value)
+        .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid retry advice"))
+        .map(Some)?,
+        Some(_) => bail!("durable terminal source refresh outcome has invalid retry advice"),
+    };
+    let retryable_routes = fields
+        .get("retryable_routes")
+        .map(|_| recover_outcome_routes(fields, "retryable_routes"))
+        .transpose()?;
+    let blocked_routes = fields
+        .get("blocked_routes")
+        .map(|_| recover_outcome_routes(fields, "blocked_routes"))
+        .transpose()?;
+    match (retryable_routes, blocked_routes) {
+        (Some(retryable_routes), Some(blocked_routes)) => {
+            if !retryable_routes.is_disjoint(&blocked_routes)
+                || retryable_routes
+                    .union(&blocked_routes)
+                    .ne(affected_routes.iter())
+                || (!affected_routes.is_empty() && retryable != !retryable_routes.is_empty())
+            {
+                bail!("durable terminal source refresh outcome has inconsistent route disposition");
+            }
+            Ok(Some(
+                SourceBackedRefreshFailureOutcome::with_route_dispositions(
+                    code,
+                    class,
+                    retryable,
+                    retryable_routes,
+                    blocked_routes,
+                    retry_advice,
+                ),
+            ))
+        }
+        (None, None) => Ok(Some(SourceBackedRefreshFailureOutcome::new(
+            code,
+            class,
+            retryable,
+            affected_routes,
+            retry_advice,
+        ))),
+        _ => bail!("durable terminal source refresh outcome has incomplete route disposition"),
+    }
+}
+
+fn recover_outcome_routes(
+    fields: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<BTreeSet<SourceRouteIdentity>> {
     let routes = fields
-        .get("affected_routes")
+        .get(field)
         .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid routes"))?;
+        .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid `{field}`"))?;
     if routes.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
         bail!("durable terminal source refresh outcome exceeds its route bound");
     }
-    let affected_routes = routes
+    let parsed = routes
         .iter()
         .map(|route| {
             route
@@ -484,29 +582,10 @@ fn recover_failure_outcome(
                 })
         })
         .collect::<Result<BTreeSet<_>>>()?;
-    let retry_advice = match fields.get("retry_advice") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) => [
-            "retry_affected_routes",
-            "retry_request",
-            "retry_admission",
-            "retry_finalization",
-            "inspect_sources",
-            "upgrade_or_reconfigure",
-        ]
-        .into_iter()
-        .find(|accepted| accepted == value)
-        .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid retry advice"))
-        .map(Some)?,
-        Some(_) => bail!("durable terminal source refresh outcome has invalid retry advice"),
-    };
-    Ok(Some(SourceBackedRefreshFailureOutcome::new(
-        code,
-        class,
-        retryable,
-        affected_routes,
-        retry_advice,
-    )))
+    if parsed.len() != routes.len() {
+        bail!("durable terminal source refresh outcome has duplicate `{field}`");
+    }
+    Ok(parsed)
 }
 
 fn required_outcome_value(

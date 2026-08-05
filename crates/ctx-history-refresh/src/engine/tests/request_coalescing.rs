@@ -211,6 +211,14 @@ fn unchanged_nonempty_publication_is_no_op_by_generation_identity() {
     assert_eq!(status["receipt"]["generation_changed"], false);
     assert_eq!(status["receipt"]["current"]["current_source_count"], 1);
     assert_eq!(status["receipt"]["current"]["current_indexed_documents"], 2);
+    assert_eq!(
+        status["structured_outcome"]["retained_generation"],
+        "generation-1"
+    );
+    assert_eq!(
+        status["structured_outcome"]["published_generation"],
+        "generation-1"
+    );
 }
 
 #[test]
@@ -646,7 +654,8 @@ fn attached_logical_status_projects_one_physical_progress_owner_and_replays_stab
     let coordinator = Arc::new(CoreRefreshEngine::new());
     let predecessor = coordinator.enqueue_periodic(temp.path()).unwrap();
     let predecessor_id = request_id(&predecessor);
-    assert!(predecessor["progress"].get("total_sources").is_none());
+    assert_eq!(predecessor["progress"]["total_sources"], 0);
+    assert_eq!(predecessor["progress"]["total_sources_known"], false);
     let (gate, runner_started, runner_release) = RunningRefreshGate::new();
 
     std::thread::scope(|scope| {

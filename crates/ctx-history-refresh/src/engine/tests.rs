@@ -1099,6 +1099,202 @@ fn exact_route_receipt_failures_back_off_or_block_until_a_new_event() {
 }
 
 #[test]
+fn failed_exact_predecessor_cancels_attached_broad_successor_and_retains_route_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(0x64);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_entered = Arc::clone(&entered);
+    let executor_release = Arc::clone(&release);
+    let failed_route = route.clone();
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            assert_eq!(
+                execution.scope,
+                SourceBackedRefreshScope::exact([failed_route.clone()])
+            );
+            executor_entered.wait();
+            executor_release.wait();
+            Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
+                failed_routes: SourceBackedSourceFailures::from_failures([
+                    SourceBackedFailedRoute::new(
+                        failed_route.clone(),
+                        "65".repeat(32),
+                        CaptureProvider::Codex,
+                        SourceBackedSourceFailureClass::Unavailable,
+                        false,
+                        "fixture source",
+                        "temporarily unavailable",
+                    ),
+                ]),
+            }
+            .into())
+        });
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor(executor));
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+    coordinator.reconcile_watch_routes([route.clone()], EventWatermark::new(8, 0), observed_at_ms);
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let logical_request_id = Uuid::from_u128(0x64).to_string();
+    let authority = test_catalog_authority(8, 0);
+
+    let physical = std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        let runner_data_root = data_root.clone();
+        let handle = scope.spawn(move || {
+            runner
+                .run_next(&runner_data_root)
+                .expect("failed exact predecessor")
+        });
+        entered.wait();
+        let attached = coordinator
+            .enqueue_fresh_catalog_demand_for_test(
+                &data_root,
+                None,
+                logical_request_id.clone(),
+                authority,
+            )
+            .expect("attached broad logical successor");
+        assert_eq!(attached["logical_phase"], "attached");
+        release.wait();
+        handle.join().unwrap()
+    });
+
+    assert!(physical.failed);
+    let logical = coordinator
+        .status(&logical_request_id)
+        .expect("terminal logical successor");
+    assert_eq!(logical["request_state"], "failed");
+    assert_eq!(logical["logical_phase"], "terminal");
+    assert_eq!(
+        logical["structured_outcome"]["physical_attempt_id"],
+        physical.job["request_id"]
+    );
+    assert_eq!(
+        logical["structured_outcome"]["retryable_routes"],
+        json!([route.as_str()])
+    );
+    assert!(!coordinator.has_pending_request());
+    assert_eq!(
+        read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root)).unwrap()
+            ["request_id"],
+        logical_request_id
+    );
+    let mut global_retry = physical.job.clone();
+    global_retry["retryable"] = json!(true);
+    global_retry["retry_after_ms"] = json!(30_000);
+    let authoritative = coordinator
+        .persist_retry_status(&data_root, global_retry)
+        .expect("route-local terminal authority");
+    assert_eq!(authoritative["request_id"], logical_request_id);
+    assert!(authoritative.get("retryable").is_none());
+    assert!(authoritative.get("retry_after_ms").is_none());
+    assert_eq!(
+        coordinator.dirty_route_ids_for_test(),
+        BTreeSet::from([route.clone()])
+    );
+    assert!(!coordinator.route_is_permanently_blocked_for_test(&route));
+    assert!(coordinator
+        .next_dirty_route_due_in_ms(ledger_now_ms())
+        .is_some_and(|delay| delay > 0));
+    assert!(!coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+}
+
+#[test]
+fn successful_partial_publication_retains_mixed_route_retry_dispositions() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    let retryable_route = route_identity(0x62);
+    let blocked_route = route_identity(0x63);
+    let routes = BTreeSet::from([retryable_route.clone(), blocked_route.clone()]);
+    let executor_retryable_route = retryable_route.clone();
+    let executor_blocked_route = blocked_route.clone();
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            let commit = ctx_history_index::GenerationWriter::open(
+                execution.index_root,
+                WriterOptions::default(),
+            )?
+            .into_writer()
+            .map_err(crate::committed_generation_recovery_error)?
+            .commit(|_| true)?;
+            let mut publication = empty_test_publication(commit.generation_id);
+            publication.route_results = [
+                (&executor_retryable_route, "unavailable"),
+                (&executor_blocked_route, "incompatible"),
+            ]
+            .into_iter()
+            .map(|(route, class)| {
+                let mut result =
+                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false);
+                result.source_failure_total = 1;
+                result.source_failures = vec![SourceBackedRefreshSourceFailure {
+                    route_identity: route.as_str().to_owned(),
+                    source_identity: "ef".repeat(32),
+                    provider: "fixture".to_owned(),
+                    class: class.to_owned(),
+                    carried_forward: true,
+                    source_selector: "fixture logical source".to_owned(),
+                    detail: "fixture partial source failure".to_owned(),
+                }];
+                result
+            })
+            .collect();
+            Ok(publication)
+        });
+    let coordinator = CoreRefreshEngine::with_executor(executor);
+    let observed_at_ms = ledger_now_ms().saturating_sub(1_000);
+    coordinator.reconcile_watch_routes(routes.clone(), EventWatermark::new(4, 0), observed_at_ms);
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+
+    let run = coordinator
+        .run_next(&data_root)
+        .expect("partial publication");
+
+    assert!(!run.failed, "{:#}", run.job);
+    assert_eq!(
+        run.job["structured_outcome"]["code"],
+        "completed_with_source_failures"
+    );
+    assert_eq!(run.job["structured_outcome"]["retryable"], true);
+    assert_eq!(
+        run.job["structured_outcome"]["retryable_routes"],
+        json!([retryable_route.as_str()])
+    );
+    assert_eq!(
+        run.job["structured_outcome"]["blocked_routes"],
+        json!([blocked_route.as_str()])
+    );
+    assert_eq!(
+        run.job["structured_outcome"]["retained_generation"],
+        run.job["published_generation"]
+    );
+    assert_eq!(
+        run.job["structured_outcome"]["published_generation"],
+        run.job["published_generation"]
+    );
+    assert_eq!(coordinator.dirty_route_ids_for_test(), routes);
+    assert!(!coordinator.route_is_permanently_blocked_for_test(&retryable_route));
+    assert!(coordinator.route_is_permanently_blocked_for_test(&blocked_route));
+    assert!(coordinator
+        .next_dirty_route_due_in_ms(ledger_now_ms())
+        .is_some());
+    coordinator.record_watch_routes(
+        [(blocked_route.clone(), EventWatermark::new(4, 1))],
+        observed_at_ms,
+    );
+    assert!(!coordinator.route_is_permanently_blocked_for_test(&blocked_route));
+}
+
+#[test]
 fn systemic_exact_publication_failure_leaves_the_route_dirty_with_backoff() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

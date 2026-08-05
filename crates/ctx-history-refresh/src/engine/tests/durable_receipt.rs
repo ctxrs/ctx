@@ -500,19 +500,26 @@ fn pointer_crash_recovers_exact_manual_all_continuation_receipt_without_recaptur
 }
 
 #[test]
-fn failed_terminal_restart_preserves_fresh_successor() {
+fn failed_predecessor_terminalizes_and_recovers_its_attached_fresh_demand() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
     let first = CoreRefreshEngine::new();
     first.enqueue_periodic(&data_root).unwrap();
-    let successor_id = Arc::new(Mutex::new(None::<String>));
-    let recorded_successor = Arc::clone(&successor_id);
+    let successor_id = Uuid::from_u128(0x5a11ed).to_string();
+    let successor_authority = test_catalog_authority(3, 0);
     let run = first
         .run_next_with(
             |_, coordinator| {
-                let successor = enqueue_synthetic_fresh_request(coordinator, &data_root, 3);
-                *recorded_successor.lock().unwrap() = Some(request_id(&successor));
+                let successor = coordinator
+                    .enqueue_fresh_catalog_demand_for_test(
+                        &data_root,
+                        None,
+                        successor_id.clone(),
+                        successor_authority.clone(),
+                    )
+                    .expect("attached synthetic fresh request");
+                assert_eq!(request_id(&successor), successor_id);
                 Err(anyhow!("injected terminal provider failure"))
             },
             || Ok(None),
@@ -521,18 +528,33 @@ fn failed_terminal_restart_preserves_fresh_successor() {
         )
         .unwrap();
     assert!(run.failed);
-    let successor_id = successor_id.lock().unwrap().clone().unwrap();
+    let exact_failure = first.status(&successor_id).unwrap();
+    assert_eq!(exact_failure["request_state"], "failed");
+    assert_eq!(exact_failure["logical_phase"], "terminal");
+    assert_eq!(
+        exact_failure["structured_outcome"]["physical_attempt_id"],
+        run.job["request_id"]
+    );
+    assert!(!first.has_pending_request());
+    let crash_window = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("physical failure persisted before logical cancellation");
+    assert_eq!(
+        crash_window["queued_successors"][0]["request_id"],
+        successor_id
+    );
     drop(first);
 
     let restarted = CoreRefreshEngine::new();
-    assert!(restarted
+    assert!(!restarted
         .recover_interrupted_publication(&data_root)
         .unwrap());
-    assert_eq!(
-        restarted.status(&successor_id).unwrap()["request_state"],
-        "queued"
-    );
-    assert!(restarted.has_pending_request());
+    assert_eq!(restarted.status(&successor_id).unwrap(), exact_failure);
+    assert!(!restarted.has_pending_request());
+    assert!(restarted.run_next(&data_root).is_none());
+    let replay = restarted
+        .enqueue_fresh_catalog_demand_for_test(&data_root, None, successor_id, successor_authority)
+        .expect("same-ID terminal replay after restart");
+    assert_eq!(replay, exact_failure);
 }
 
 #[test]

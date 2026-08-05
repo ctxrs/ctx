@@ -524,11 +524,19 @@ impl CoreRefreshEngine {
                         job_with_queued_successors(&state, pending.terminal_job.clone()),
                         pending.did_work(),
                         pending.failed(),
+                        pending.scheduler_retry(),
                         attempt.refresh_scope.clone(),
                     )
                 })
             });
-        if let Some((request_id, terminal_job, did_work, failed_run, refresh_scope)) = pending_retry
+        if let Some((
+            request_id,
+            terminal_job,
+            did_work,
+            failed_run,
+            scheduler_retry,
+            refresh_scope,
+        )) = pending_retry
         {
             // Keep terminal retry publication under the admission lock. An
             // acknowledged successor must never be followed by an older
@@ -580,7 +588,7 @@ impl CoreRefreshEngine {
                     state.current_published_generation = Some(published_generation.clone());
                     Some(published_generation)
                 }
-                PendingTerminalOutcome::Failed => {
+                PendingTerminalOutcome::Failed { .. } => {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
                     attempt.state = SourceBackedRefreshState::Failed;
                     attempt.progress.phase = "failed".to_owned();
@@ -592,7 +600,7 @@ impl CoreRefreshEngine {
                     attempt.published_generation.clone()
                 }
             };
-            if failed_run {
+            if failed_run && scheduler_retry {
                 // The daemon still has to add its durable retry deadline to
                 // this terminal root. Reserve the root's queue slot until
                 // that lock-serialized write completes.
@@ -639,6 +647,23 @@ impl CoreRefreshEngine {
         };
 
         let execution = execute(&request_id, self);
+        let attempted_routes = {
+            let state = self.lock_state();
+            state
+                .route_admissions
+                .get(&request_id)
+                .map(|admissions| {
+                    admissions
+                        .iter()
+                        .map(|admission| admission.route().clone())
+                        .collect::<BTreeSet<_>>()
+                })
+                .filter(|routes| !routes.is_empty())
+                .unwrap_or_else(|| match &refresh_scope {
+                    SourceBackedRefreshScope::All => BTreeSet::new(),
+                    SourceBackedRefreshScope::Exact(routes) => routes.clone(),
+                })
+        };
         let execution_failure_type = execution
             .as_ref()
             .err()
@@ -646,7 +671,7 @@ impl CoreRefreshEngine {
         let execution_failure_outcome = execution
             .as_ref()
             .err()
-            .map(|error| source_backed_refresh_failure_outcome(error, &refresh_scope));
+            .map(|error| source_backed_refresh_failure_outcome(error, &attempted_routes));
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
             (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
@@ -800,7 +825,7 @@ impl CoreRefreshEngine {
                         Some(execution_failure_outcome.unwrap_or_else(|| {
                             source_backed_refresh_failure_outcome(
                                 &anyhow!("terminal source refresh verification failed"),
-                                &refresh_scope,
+                                &attempted_routes,
                             )
                         }));
                     attempt.last_error = Some(error);
@@ -815,7 +840,9 @@ impl CoreRefreshEngine {
                     state.pending_terminal_persistence = Some(PendingTerminalPersistence {
                         request_id: request_id.clone(),
                         terminal_job: failure_job,
-                        outcome: PendingTerminalOutcome::Failed,
+                        outcome: PendingTerminalOutcome::Failed {
+                            scheduler_retry: true,
+                        },
                     });
                     terminal_persistence_pending = true;
                 } else {

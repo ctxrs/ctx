@@ -196,6 +196,27 @@ impl SourceBackedRefreshReceipt {
             .count()
     }
 
+    pub(super) fn route_retry_dispositions(
+        &self,
+    ) -> (BTreeSet<SourceRouteIdentity>, BTreeSet<SourceRouteIdentity>) {
+        let mut retryable = BTreeSet::new();
+        let mut blocked = BTreeSet::new();
+        for result in &self.route_results {
+            let Some(disposition) = source_backed_route_retry_disposition(result) else {
+                continue;
+            };
+            let Ok(route) = SourceRouteIdentity::from_sha256(result.route_identity.clone()) else {
+                continue;
+            };
+            if disposition {
+                retryable.insert(route);
+            } else {
+                blocked.insert(route);
+            }
+        }
+        (retryable, blocked)
+    }
+
     pub fn catalog_route_outcome(
         &self,
         catalog_lineage: &str,
@@ -519,6 +540,31 @@ impl SourceBackedRefreshRouteOutcome {
     }
 }
 
+/// Returns `None` when the route is clean, `Some(true)` when it should retry,
+/// and `Some(false)` when the admitted observation should remain blocked.
+/// The route outcome and exact source-failure count are authoritative. A
+/// truncated diagnostic vector can only make a partial success retryable; it
+/// can never incorrectly classify unknown failures as permanently blocked.
+pub(super) fn source_backed_route_retry_disposition(
+    result: &SourceBackedRefreshRouteResult,
+) -> Option<bool> {
+    if let Some(class) = result.outcome.failure_class() {
+        return Some(matches!(class, "unavailable" | "source_changed"));
+    }
+    if result.source_failure_total == 0 {
+        return None;
+    }
+    if result.source_failures.len() < result.source_failure_total {
+        return Some(true);
+    }
+    Some(
+        result
+            .source_failures
+            .iter()
+            .any(|failure| matches!(failure.class.as_str(), "unavailable" | "source_changed")),
+    )
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SourceBackedRefreshCatalogRouteOutcome {
     pub catalog_lineage: String,
@@ -646,6 +692,8 @@ pub(super) struct SourceBackedRefreshFailureOutcome {
     pub(super) class: &'static str,
     pub(super) retryable: bool,
     pub(super) affected_routes: BTreeSet<SourceRouteIdentity>,
+    pub(super) retryable_routes: BTreeSet<SourceRouteIdentity>,
+    pub(super) blocked_routes: BTreeSet<SourceRouteIdentity>,
     pub(super) retry_advice: Option<&'static str>,
 }
 
@@ -657,11 +705,37 @@ impl SourceBackedRefreshFailureOutcome {
         affected_routes: BTreeSet<SourceRouteIdentity>,
         retry_advice: Option<&'static str>,
     ) -> Self {
+        let (retryable_routes, blocked_routes) = if retryable {
+            (affected_routes.clone(), BTreeSet::new())
+        } else {
+            (BTreeSet::new(), affected_routes.clone())
+        };
+        Self::with_route_dispositions(
+            code,
+            class,
+            retryable,
+            retryable_routes,
+            blocked_routes,
+            retry_advice,
+        )
+    }
+
+    pub(super) fn with_route_dispositions(
+        code: &'static str,
+        class: &'static str,
+        retryable: bool,
+        retryable_routes: BTreeSet<SourceRouteIdentity>,
+        blocked_routes: BTreeSet<SourceRouteIdentity>,
+        retry_advice: Option<&'static str>,
+    ) -> Self {
+        let affected_routes = retryable_routes.union(&blocked_routes).cloned().collect();
         Self {
             code,
             class,
             retryable,
             affected_routes,
+            retryable_routes,
+            blocked_routes,
             retry_advice,
         }
     }
@@ -677,6 +751,14 @@ impl SourceBackedRefreshFailureOutcome {
             "class": self.class,
             "retryable": self.retryable,
             "affected_routes": self.affected_routes
+                .iter()
+                .map(SourceRouteIdentity::as_str)
+                .collect::<Vec<_>>(),
+            "retryable_routes": self.retryable_routes
+                .iter()
+                .map(SourceRouteIdentity::as_str)
+                .collect::<Vec<_>>(),
+            "blocked_routes": self.blocked_routes
                 .iter()
                 .map(SourceRouteIdentity::as_str)
                 .collect::<Vec<_>>(),
@@ -778,14 +860,8 @@ impl SourceBackedRefreshAttempt {
     fn structured_outcome_json(&self) -> Option<Value> {
         if let Some(receipt) = self.receipt.as_ref() {
             let code = receipt.terminal_outcome();
-            let retryable = receipt.route_results.iter().any(|result| {
-                matches!(
-                    result.outcome.failure_class(),
-                    Some("unavailable" | "source_changed")
-                ) || result.source_failures.iter().any(|failure| {
-                    matches!(failure.class.as_str(), "unavailable" | "source_changed")
-                })
-            });
+            let (retryable_routes, blocked_routes) = receipt.route_retry_dispositions();
+            let retryable = !retryable_routes.is_empty();
             let affected_routes = receipt
                 .route_results
                 .iter()
@@ -807,8 +883,16 @@ impl SourceBackedRefreshAttempt {
                 },
                 "retryable": retryable,
                 "affected_routes": affected_routes,
+                "retryable_routes": retryable_routes
+                    .iter()
+                    .map(SourceRouteIdentity::as_str)
+                    .collect::<Vec<_>>(),
+                "blocked_routes": blocked_routes
+                    .iter()
+                    .map(SourceRouteIdentity::as_str)
+                    .collect::<Vec<_>>(),
                 "physical_attempt_id": self.physical_attempt_id(),
-                "retained_generation": (!receipt.generation_changed)
+                "retained_generation": (code != "completed" || !receipt.generation_changed)
                     .then_some(receipt.published_generation.as_str()),
                 "published_generation": receipt.published_generation,
                 "retry_advice": retryable.then_some("retry_affected_routes"),
@@ -923,8 +1007,7 @@ impl SourceBackedRefreshAttempt {
             "request_id": self.request_id,
             "request_state": self.state.as_str(),
             "operation": self.operation.as_str(),
-            "source_count": self.progress_total_sources_known
-                .then_some(self.progress.total_sources),
+            "source_count": self.progress.total_sources,
             "requested_at_ms": self.requested_at_ms,
             "started_at_ms": self.started_at_ms,
             "finished_at_ms": self.finished_at_ms,
@@ -1080,14 +1163,10 @@ fn apply_read_projection(
             .to_json_with_total_known(progress_owner.progress_total_sources_known),
     );
     if job {
-        if progress_owner.progress_total_sources_known {
-            fields.insert(
-                "source_count".to_owned(),
-                json!(progress_owner.progress.total_sources),
-            );
-        } else {
-            fields.remove("source_count");
-        }
+        fields.insert(
+            "source_count".to_owned(),
+            json!(progress_owner.progress.total_sources),
+        );
     }
     if let Some(outcome) = fields
         .get_mut("structured_outcome")

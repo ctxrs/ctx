@@ -89,6 +89,15 @@ impl CoreRefreshEngine {
         if durable_queue_entry_count(&state) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             bail!("source refresh retry queue exceeds its bounded capacity");
         }
+        if let Some(authoritative) = authoritative_route_terminal_job(&state, &request_id) {
+            // Route retry/block disposition is already part of the engine's
+            // durable terminal outcome. Do not let a caller turn it into a
+            // second global scheduler retry or replace a canceled logical
+            // successor's exact terminal image.
+            self.write_status(data_root, &authoritative)?;
+            state.pending_scheduler_retry_root_id = None;
+            return Ok(authoritative);
+        }
         let job = job_with_queued_successors(&state, job);
         // Serialize retry metadata against the same queue authority as IPC
         // admission so an older scheduler snapshot cannot erase a successor.
@@ -107,6 +116,17 @@ impl CoreRefreshEngine {
         let mut state = self.lock_state();
         if durable_queue_entry_count(&state) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             bail!("source refresh scheduler queue exceeds its bounded capacity");
+        }
+        if let Some(request_id) = scheduler_job
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|request_id| find_attempt(&state, request_id).is_some())
+        {
+            if let Some(authoritative) = authoritative_route_terminal_job(&state, request_id) {
+                self.write_status(data_root, &authoritative)?;
+                state.pending_scheduler_retry_root_id = None;
+                return Ok(authoritative);
+            }
         }
         let durable_root = state
             .pending_scheduler_retry_root_id
@@ -168,6 +188,38 @@ fn overlay_daemon_retry_state(mut durable_job: Value, scheduler_job: &Value) -> 
         }
     }
     durable_job
+}
+
+fn authoritative_route_terminal_job(
+    state: &CoreRefreshEngineState,
+    request_id: &str,
+) -> Option<Value> {
+    let attempt = find_attempt(state, request_id)?;
+    let outcome = attempt.failure_outcome.as_ref()?;
+    if outcome.affected_routes.is_empty() {
+        return None;
+    }
+    let physical_attempt_id = attempt
+        .physical_attempt_id
+        .as_deref()
+        .unwrap_or(attempt.request_id.as_str());
+    let durable_request_id = state
+        .attempts
+        .iter()
+        .rev()
+        .find(|candidate| {
+            candidate.request_id != physical_attempt_id
+                && candidate.state == SourceBackedRefreshState::Failed
+                && candidate
+                    .physical_attempt_id
+                    .as_deref()
+                    .unwrap_or(candidate.request_id.as_str())
+                    == physical_attempt_id
+                && candidate.failure_outcome.as_ref() == Some(outcome)
+        })
+        .map(|candidate| candidate.request_id.as_str())
+        .unwrap_or(request_id);
+    durable_job_json(state, durable_request_id)
 }
 
 pub(super) fn durable_job_json(state: &CoreRefreshEngineState, request_id: &str) -> Option<Value> {

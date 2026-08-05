@@ -232,4 +232,12 @@ impl CoreRefreshEngine {
             .get(request_id)
             .is_some_and(ManualAllContinuation::is_fully_covered)
     }
+
+    pub fn dirty_route_ids_for_test(&self) -> BTreeSet<SourceRouteIdentity> {
+        self.lock_state().dirty_routes.route_ids()
+    }
+
+    pub fn route_is_permanently_blocked_for_test(&self, route: &SourceRouteIdentity) -> bool {
+        self.lock_state().dirty_routes.is_permanently_blocked(route)
+    }
 }

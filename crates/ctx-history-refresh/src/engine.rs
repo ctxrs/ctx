@@ -41,8 +41,8 @@ pub use progress_model::{
     SourceBackedRefreshProgress, SourceBackedRefreshTimings,
 };
 use read_model::{
-    projected_job_json, projected_status_json, SourceBackedRefreshAttempt,
-    SourceBackedRefreshFailureOutcome,
+    projected_job_json, projected_status_json, source_backed_route_retry_disposition,
+    SourceBackedRefreshAttempt, SourceBackedRefreshFailureOutcome,
 };
 pub(super) use read_model::{refresh_scope_from_json, refresh_scope_json};
 pub use read_model::{
@@ -233,7 +233,9 @@ enum PendingTerminalOutcome {
         terminal: CoreRefreshTerminalSuccess,
         did_work: bool,
     },
-    Failed,
+    Failed {
+        scheduler_retry: bool,
+    },
 }
 
 impl PendingTerminalPersistence {
@@ -245,8 +247,22 @@ impl PendingTerminalPersistence {
     }
 
     fn failed(&self) -> bool {
-        matches!(self.outcome, PendingTerminalOutcome::Failed)
+        matches!(self.outcome, PendingTerminalOutcome::Failed { .. })
     }
+
+    fn scheduler_retry(&self) -> bool {
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::Failed {
+                scheduler_retry: true
+            }
+        )
+    }
+}
+
+struct RouteAdmissionFinish {
+    coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
+    durable_request_id: String,
 }
 
 impl fmt::Debug for PendingTerminalPersistence {
@@ -767,6 +783,8 @@ impl CoreRefreshEngine {
             "progress": {
                 "phase": "maintenance_wake",
                 "completed_sources": 0,
+                "total_sources": 0,
+                "total_sources_known": false,
             },
             "daemon_mode": metadata.daemon_mode.as_str(),
             "trigger": metadata.trigger,
@@ -780,9 +798,58 @@ impl CoreRefreshEngine {
         request_id: &str,
         publication_ready: bool,
         post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
-    ) -> Option<SourceBackedRefreshCoverageCertificate> {
-        let now_ms = source_route_ledger_now_ms();
+    ) -> RouteAdmissionFinish {
         let mut state = self.lock_state();
+        Self::finish_route_admissions_locked(
+            &mut state,
+            request_id,
+            publication_ready,
+            post_publication_fence,
+        )
+    }
+
+    fn finish_route_admissions_and_persist(
+        &self,
+        data_root: &Path,
+        request_id: &str,
+        publication_ready: bool,
+        post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
+    ) -> Result<RouteAdmissionFinish> {
+        let mut state = self.lock_state();
+        let finish = Self::finish_route_admissions_locked(
+            &mut state,
+            request_id,
+            publication_ready,
+            post_publication_fence,
+        );
+        let job = durable_job_json(&state, &finish.durable_request_id).ok_or_else(|| {
+            anyhow!(
+                "source refresh request `{}` disappeared during route finalization",
+                finish.durable_request_id
+            )
+        })?;
+        if let Err(error) = self.write_status(data_root, &job) {
+            if finish.durable_request_id != request_id {
+                state.pending_terminal_persistence = Some(PendingTerminalPersistence {
+                    request_id: finish.durable_request_id.clone(),
+                    terminal_job: job,
+                    outcome: PendingTerminalOutcome::Failed {
+                        scheduler_retry: false,
+                    },
+                });
+            }
+            return Err(error);
+        }
+        Ok(finish)
+    }
+
+    fn finish_route_admissions_locked(
+        state: &mut CoreRefreshEngineState,
+        request_id: &str,
+        publication_ready: bool,
+        post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
+    ) -> RouteAdmissionFinish {
+        let now_ms = source_route_ledger_now_ms();
         let admissions = state
             .route_admissions
             .remove(request_id)
@@ -800,7 +867,7 @@ impl CoreRefreshEngine {
         let predecessor_event_watermarks =
             retained_predecessor_event_watermarks.unwrap_or_default();
         let current_event_watermarks = state.route_event_watermarks.clone();
-        let attempt = find_attempt(&state, request_id).cloned();
+        let attempt = find_attempt(state, request_id).cloned();
         let route_results = attempt
             .as_ref()
             .and_then(|attempt| attempt.receipt.as_ref())
@@ -814,12 +881,20 @@ impl CoreRefreshEngine {
         let mut covered_route_results = BTreeMap::new();
         let mut certified_routes = BTreeMap::new();
         for admission in admissions {
-            let retry = !publication_ready
+            let terminal_failed = !publication_ready
                 || attempt
                     .as_ref()
                     .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::Published);
-            if retry {
-                state.dirty_routes.retryable_failure(&admission, now_ms);
+            if terminal_failed {
+                let blocked = attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.failure_outcome.as_ref())
+                    .is_some_and(|outcome| outcome.blocked_routes.contains(admission.route()));
+                if blocked {
+                    state.dirty_routes.permanent_failure(&admission);
+                } else {
+                    state.dirty_routes.retryable_failure(&admission, now_ms);
+                }
                 continue;
             }
             let Some(result) = route_results
@@ -830,19 +905,15 @@ impl CoreRefreshEngine {
                 state.dirty_routes.retryable_failure(&admission, now_ms);
                 continue;
             };
-            if let Some(failure) = result.outcome.failure_class() {
-                match failure {
-                    "unavailable" | "source_changed" => {
-                        state.dirty_routes.retryable_failure(&admission, now_ms);
-                    }
-                    "unreadable" | "incompatible" => {
-                        state.dirty_routes.permanent_failure(&admission);
-                    }
-                    _ => {
-                        state.dirty_routes.retryable_failure(&admission, now_ms);
-                    }
+            if let Some(retryable) = source_backed_route_retry_disposition(result) {
+                if retryable {
+                    state.dirty_routes.retryable_failure(&admission, now_ms);
+                } else {
+                    state.dirty_routes.permanent_failure(&admission);
                 }
-            } else if result.outcome.is_success() {
+                continue;
+            }
+            if result.outcome.is_success() {
                 let verified_boundary = attempt.as_ref().and_then(|attempt| {
                     let observation = attempt.route_observations.get(admission.route())?;
                     let admitted_watermark = predecessor_event_watermarks
@@ -888,6 +959,29 @@ impl CoreRefreshEngine {
                 state.dirty_routes.retryable_failure(&admission, now_ms);
             }
         }
+        if attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.state == SourceBackedRefreshState::Failed)
+        {
+            let durable_request_id = Self::terminalize_failed_predecessor_demands(
+                state,
+                request_id,
+                attempt.as_ref().expect("failed predecessor snapshot"),
+            )
+            .unwrap_or_else(|| request_id.to_owned());
+            if attempt
+                .as_ref()
+                .and_then(|attempt| attempt.failure_outcome.as_ref())
+                .is_some_and(|outcome| !outcome.affected_routes.is_empty())
+                && state.pending_scheduler_retry_root_id.as_deref() == Some(request_id)
+            {
+                state.pending_scheduler_retry_root_id = None;
+            }
+            return RouteAdmissionFinish {
+                coverage_certificate: None,
+                durable_request_id,
+            };
+        }
         for continuation in state.manual_all_continuations.values_mut() {
             if continuation.predecessor_request_id != request_id {
                 continue;
@@ -904,7 +998,8 @@ impl CoreRefreshEngine {
                                 attempt.route_observations.get(route) == Some(admitted)
                                     && receipt.route_results.iter().any(|result| {
                                         result.route_identity == route.as_str()
-                                            && result.outcome.is_success()
+                                            && source_backed_route_retry_disposition(result)
+                                                .is_none()
                                     })
                             });
                         if covered {
@@ -985,14 +1080,114 @@ impl CoreRefreshEngine {
                 .and_then(|attempt| attempt.timings)
                 .unwrap_or_default();
         }
-        let attempt = attempt.filter(|attempt| {
-            publication_ready && attempt.state == SourceBackedRefreshState::Published
-        })?;
-        Some(SourceBackedRefreshCoverageCertificate {
-            request_id: request_id.to_owned(),
-            published_generation: attempt.published_generation.clone()?,
-            routes: certified_routes,
-        })
+        let coverage_certificate = attempt
+            .filter(|attempt| {
+                publication_ready && attempt.state == SourceBackedRefreshState::Published
+            })
+            .and_then(|attempt| {
+                Some(SourceBackedRefreshCoverageCertificate {
+                    request_id: request_id.to_owned(),
+                    published_generation: attempt.published_generation.clone()?,
+                    routes: certified_routes,
+                })
+            });
+        RouteAdmissionFinish {
+            coverage_certificate,
+            durable_request_id: request_id.to_owned(),
+        }
+    }
+
+    fn terminalize_failed_predecessor_demands(
+        state: &mut CoreRefreshEngineState,
+        predecessor_request_id: &str,
+        predecessor: &SourceBackedRefreshAttempt,
+    ) -> Option<String> {
+        let dependent_request_ids = state
+            .manual_all_continuations
+            .iter()
+            .filter(|(_, continuation)| {
+                continuation.predecessor_request_id == predecessor_request_id
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        debug_assert!(
+            dependent_request_ids.len() <= 1,
+            "one predecessor must have at most one exact broad successor"
+        );
+        let mut durable_request_id = None;
+        for request_id in dependent_request_ids {
+            let fallback_routes = find_attempt(state, &request_id)
+                .and_then(|attempt| match &attempt.refresh_scope {
+                    SourceBackedRefreshScope::All => None,
+                    SourceBackedRefreshScope::Exact(routes) => Some(routes.clone()),
+                })
+                .unwrap_or_default();
+            let failure_outcome = predecessor.failure_outcome.clone().unwrap_or_else(|| {
+                SourceBackedRefreshFailureOutcome::new(
+                    "source_refresh_failed",
+                    "internal",
+                    true,
+                    fallback_routes,
+                    Some("retry_request"),
+                )
+            });
+            if let Some(logical) = find_attempt_mut(state, &request_id) {
+                logical.state = SourceBackedRefreshState::Failed;
+                logical.finished_at_ms = predecessor
+                    .finished_at_ms
+                    .or_else(|| Some(utc_now().timestamp_millis()));
+                logical.published_generation = predecessor.published_generation.clone();
+                logical.progress = predecessor.progress.clone();
+                logical.progress.phase = "failed".to_owned();
+                logical.progress_total_sources_known = predecessor.progress_total_sources_known;
+                logical.physical_attempt_id = Some(predecessor_request_id.to_owned());
+                logical.failure_type = predecessor.failure_type;
+                logical.failure_outcome = Some(failure_outcome);
+                logical.last_error = predecessor.last_error.as_ref().map(|detail| {
+                    format!("physical predecessor `{predecessor_request_id}` failed: {detail}")
+                });
+            }
+            state.manual_all_continuations.remove(&request_id);
+            state.admission_resolutions_in_flight.remove(&request_id);
+            state.unacknowledged_admissions.remove(&request_id);
+            state.route_admissions.remove(&request_id);
+            state.route_admission_watermarks.remove(&request_id);
+            state
+                .pending_request_ids
+                .retain(|pending| pending != &request_id);
+            if state.active_request_id.as_deref() == Some(request_id.as_str()) {
+                state.active_request_id = state.pending_request_ids.pop_front();
+            }
+            durable_request_id.get_or_insert(request_id);
+        }
+        durable_request_id
+    }
+
+    fn restore_route_dispositions_locked(
+        state: &mut CoreRefreshEngineState,
+        retryable_routes: &BTreeSet<SourceRouteIdentity>,
+        blocked_routes: &BTreeSet<SourceRouteIdentity>,
+    ) {
+        let routes = retryable_routes
+            .union(blocked_routes)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if routes.is_empty() {
+            return;
+        }
+        let now_ms = source_route_ledger_now_ms();
+        let watermark = state.dirty_routes.seed_watermark();
+        for route in &routes {
+            state
+                .route_event_watermarks
+                .entry(route.clone())
+                .and_modify(|current| *current = (*current).max(watermark))
+                .or_insert(watermark);
+        }
+        state
+            .dirty_routes
+            .seed_exact_routes(routes, watermark, now_ms);
+        state.dirty_routes.block_exact_routes(blocked_routes.iter());
     }
 
     pub(super) fn lock_state(&self) -> std::sync::MutexGuard<'_, CoreRefreshEngineState> {
