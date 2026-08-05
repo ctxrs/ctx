@@ -208,6 +208,15 @@ py_library(
         "https://files.pythonhosted.org/packages/97/75/10a9ebee3fd790d20926a90a2547f0bf78f371b2f13aa822c759680ca7b9/tomli-2.0.1-py3-none-any.whl",
     ],
 )
+http_archive(
+    name = "ctx_scc_linux_x86_64",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+exports_files(["scc"])
+""",
+    sha256 = "3d9d65b00ca874c2b29151abe7e1480736f5229edc3ce8e4b2791460cdfabf5a",
+    urls = ["https://github.com/boyter/scc/releases/download/v3.7.0/scc_Linux_x86_64.tar.gz"],
+)
 http_jar(
     name = "ctx_bazel_diff",
     sha256 = "331fa4d5f220e99e727d3c9a4fd89a23fe27806f99c4788fa9fa233e350fef5f",

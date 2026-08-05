@@ -122,9 +122,11 @@ case "${mode}" in
     run bash scripts/tests/macos-release-signing-test.sh
     ;;
   loc_check)
-    run bash scripts/tests/check_loc_bazel_inputs_test.sh
-    run bash scripts/tests/check_loc_test.sh
-    run bash scripts/check-loc.sh
+    loc_scc="${2:-}"
+    [[ -n "${loc_scc}" ]] || fail 'loc_check requires the pinned scc runfile'
+    run bash scripts/tests/check_loc_bazel_inputs_test.sh "${loc_scc}"
+    run env CTX_LOC_SCC="${loc_scc}" bash scripts/tests/check_loc_test.sh
+    run env CTX_LOC_SCC="${loc_scc}" bash scripts/check-loc.sh
     ;;
   public_control_surface_check)
     run bash scripts/tests/check-public-control-surface-test.sh

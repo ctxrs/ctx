@@ -86,7 +86,8 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
 LOC_CHECK_DATA = [
     ":loc_check_inputs",
     "Cargo.toml",
-    "scripts/check-loc-exceptions.tsv",
+    "scripts/check-loc-policy-v2.json",
+    "@ctx_scc_linux_x86_64//:scc",
     "//crates/ctx-cli:loc_check_inputs",
     "//crates/ctx-history-capture:loc_check_inputs",
     "//crates/ctx-history-core:loc_check_inputs",
@@ -812,6 +813,7 @@ sh_test(
 non_rust_gate(
     name = "loc_check",
     mode = "loc_check",
+    args = ["$(rootpath @ctx_scc_linux_x86_64//:scc)"],
     data = LOC_CHECK_DATA,
 )
 non_rust_gate(
