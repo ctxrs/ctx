@@ -105,7 +105,9 @@ pub use reader::VerifiedIndex;
 pub(crate) use schema::required_field;
 pub(crate) use schema::{fields_from_schema, lexical_schema, validate_schema, Fields};
 pub use search_projection::project_body_search;
-pub use writer_support::BaseEventIdentityLookup;
+pub use writer_support::{
+    BaseEventIdentityLookup, CandidateEventOriginResolution, CandidateEventOriginResolver,
+};
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},

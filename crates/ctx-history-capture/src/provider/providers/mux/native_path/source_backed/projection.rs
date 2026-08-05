@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, CoreContentPolicyStatus, CoreRecord, EventIdentityInput, NativeItemKey,
-    SourceKey, TypedKey,
+    SessionRelationshipKind, SourceKey, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde_json::Value;
@@ -203,17 +203,25 @@ impl MuxProjector {
         let mut record = CoreRecord::new_selected(
             event_id,
             self.binding.session_id,
-            self.binding.root_session_id,
+            self.binding.session_id,
             self.source.clone(),
             event_sequence,
             event.event_type.as_str(),
             agent_type,
-            self.binding.parent_session_id.is_none(),
+            true,
             PARSER_REVISION,
             body,
         )
         .map_err(contract)?;
-        record.parent_session_id = self.binding.parent_session_id;
+        if let Some(parent_session_id) = self.binding.parent_session_id {
+            record
+                .set_session_relationship(
+                    SessionRelationshipKind::Delegated,
+                    Some(parent_session_id),
+                    self.binding.root_session_id,
+                )
+                .map_err(contract)?;
+        }
         record.provider_session_id = Some(self.binding.metadata.provider_session_id.clone());
         record.native_event_id = Some(native_event_id);
         record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());

@@ -6,13 +6,13 @@ use tantivy::schema::{
 };
 
 use ctx_history_core::{
-    CoreContent, CoreRecord, RepositoryVcsObservationKind, SourceKey, StableEntityId,
+    CoreContent, CoreRecord, EventOrigin, RepositoryVcsObservationKind, SourceKey, StableEntityId,
     StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 
 use crate::{Fields, IndexError, Result};
 
-const BASE_FIELD_VALUES: usize = 30;
+const BASE_FIELD_VALUES: usize = 33;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
 pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
 const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
@@ -651,6 +651,23 @@ impl IndexDocument {
             target.add_text(fields.parent_session_id, parent_session_id.to_string());
         }
         target.add_text(fields.root_session_id, record.root_session_id.to_string());
+        target.add_text(
+            fields.session_relationship_kind,
+            record.session_relationship.as_str().to_owned(),
+        );
+        target.add_text(
+            fields.event_origin_kind,
+            record.event_origin.kind_str().to_owned(),
+        );
+        if let EventOrigin::CopiedFromAncestor {
+            ancestor_event_id, ..
+        } = &record.event_origin
+        {
+            target.add_text(
+                fields.origin_event_identity_digest,
+                crate::hex(&ancestor_event_id.digest()),
+            );
+        }
         target.add_shared_text(fields.source_key, source.token);
         target.add_shared_text(fields.provider, source.provider);
         target.add_shared_text(fields.source_format, source.source_format);

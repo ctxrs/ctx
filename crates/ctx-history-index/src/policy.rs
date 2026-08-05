@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 10;
 pub const SOURCE_ROUTE_SNAPSHOT_REVISION: u32 = 1;
 pub const AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS: u32 = 3;
-pub const LEXICAL_SCHEMA_REVISION: u32 = 17;
+pub const LEXICAL_SCHEMA_REVISION: u32 = 18;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 4;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
@@ -281,11 +281,11 @@ mod tests {
             .contains_key("core_repository_association_policy_revision"));
         assert_eq!(first.policy_version, 10);
         assert_eq!(first.lexical.event_projector_revision, 4);
-        assert_eq!(first.lexical.schema_revision, 17);
+        assert_eq!(first.lexical.schema_revision, 18);
         assert_eq!(first.lexical.tokenizer_revision, 2);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "f9204898f2c6783d94954d1aad4e374bd507f538b547fb0d66c8b8174c6838a3"
+            "32f3851e10da262f6e9f71467e1579f295eab84e353916ddaabaf7bfe409c3f4"
         );
     }
 

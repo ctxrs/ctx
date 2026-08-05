@@ -37,11 +37,13 @@ use super::{
     ActiveGenerationPointer,
 };
 
+mod lineage;
 mod spill;
 
+use lineage::{verify_incremental_lineage, verify_lineage};
 use spill::{
-    ProjectionAccumulator, ProjectionDeltas, SpillVerificationIdentities, VerificationSpill,
-    VERIFICATION_SPILL_BUFFER_BYTES, VERIFICATION_SPILL_RECORD_BYTES,
+    IdentityDeltaSpill, ProjectionAccumulator, ProjectionDeltas, SpillVerificationIdentities,
+    VerificationSpill, VERIFICATION_SPILL_BUFFER_BYTES, VERIFICATION_SPILL_RECORD_BYTES,
 };
 
 #[derive(Default)]
@@ -120,6 +122,8 @@ thread_local! {
     static LOGICAL_PASSES: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_TERMS: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_DOCUMENTS: Cell<usize> = const { Cell::new(0) };
+    static CANDIDATE_LINEAGE_DECODES: Cell<usize> = const { Cell::new(0) };
+    static CANDIDATE_LINEAGE_SPILLS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn verify_searcher_structure(
@@ -476,13 +480,25 @@ pub(crate) fn verify_publication_candidate(
     verify_searcher_structure(searcher, manifest)?;
     let fields = fields_from_schema(searcher.schema())?;
     query::validate_verification_projection(fields)?;
-    let expected_parent_sessions =
-        verify_candidate_event_identities(searcher, fields, &changed_segments)?;
+    let mut changed_identities = IdentityDeltaSpill::create()?;
+    let expected_parent_sessions = verify_candidate_event_identities(
+        searcher,
+        fields,
+        &changed_segments,
+        &mut changed_identities,
+    )?;
     verify_candidate_session_identities(
         searcher,
         fields,
         &changed_segments,
         expected_parent_sessions,
+    )?;
+    verify_incremental_lineage(
+        searcher,
+        base_searcher,
+        fields,
+        &changed_segments,
+        &changed_identities,
     )
 }
 
@@ -490,6 +506,7 @@ fn verify_candidate_event_identities(
     searcher: &Searcher,
     fields: crate::Fields,
     changed_segments: &[usize],
+    changed_identities: &mut IdentityDeltaSpill,
 ) -> Result<u64> {
     if changed_segments.is_empty() {
         return Ok(0);
@@ -532,6 +549,16 @@ fn verify_candidate_event_identities(
                     parent_sessions = parent_sessions
                         .checked_add(u64::from(record.identities.parent_session.is_some()))
                         .ok_or(IndexError::CountOverflow)?;
+                    changed_identities.push(SpillVerificationIdentities {
+                        event: record.identities.event,
+                        session: record.identities.session,
+                        parent_session: record.identities.parent_session,
+                        root_session: record.identities.root_session,
+                        session_relationship: record.identities.session_relationship,
+                        event_origin: record.identities.event_origin,
+                        session_source_ordinal: 0,
+                    })?;
+                    note_candidate_lineage_spill();
                     record.identities
                 } else {
                     query::stored_verification_identities(searcher, address, fields)?
@@ -698,6 +725,22 @@ fn note_candidate_identity_document() {
 #[cfg(not(test))]
 fn note_candidate_identity_document() {}
 
+#[cfg(test)]
+pub(super) fn note_candidate_lineage_decode() {
+    CANDIDATE_LINEAGE_DECODES.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+pub(super) fn note_candidate_lineage_decode() {}
+
+#[cfg(test)]
+pub(super) fn note_candidate_lineage_spill() {
+    CANDIDATE_LINEAGE_SPILLS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+pub(super) fn note_candidate_lineage_spill() {}
+
 fn verification_worker_budget(document_count: u64) -> usize {
     let available = std::thread::available_parallelism()
         .map(usize::from)
@@ -785,6 +828,8 @@ pub(crate) fn reset_verification_activity() {
     LOGICAL_PASSES.with(|count| count.set(0));
     CANDIDATE_IDENTITY_TERMS.with(|count| count.set(0));
     CANDIDATE_IDENTITY_DOCUMENTS.with(|count| count.set(0));
+    CANDIDATE_LINEAGE_DECODES.with(|count| count.set(0));
+    CANDIDATE_LINEAGE_SPILLS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
@@ -805,5 +850,13 @@ pub(crate) fn candidate_identity_verification_activity() -> (usize, usize) {
     (
         CANDIDATE_IDENTITY_TERMS.with(Cell::get),
         CANDIDATE_IDENTITY_DOCUMENTS.with(Cell::get),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_lineage_verification_activity() -> (usize, usize) {
+    (
+        CANDIDATE_LINEAGE_DECODES.with(Cell::get),
+        CANDIDATE_LINEAGE_SPILLS.with(Cell::get),
     )
 }

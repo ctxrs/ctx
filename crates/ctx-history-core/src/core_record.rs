@@ -34,10 +34,11 @@ use validation::{
     validate_related_session_identity, validate_size, validate_text,
 };
 
-pub const CORE_RECORD_VERSION: u32 = 1;
+pub const CORE_RECORD_VERSION: u32 = 2;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
 pub const CORE_CONTENT_POLICY_REVISION: u32 = 2;
 pub const CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION: u32 = 1;
+pub const CORE_SESSION_LINEAGE_REVISION: u32 = 1;
 /// Frozen domain for the exact canonical Core-record leaf algorithm.
 pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 /// Frozen identity of the per-source Core-record accumulator algorithm.
@@ -94,6 +95,7 @@ struct CoreContractRevisions {
     content_policy: u32,
     mcp_tool_call_attribution: u32,
     mcp_exchange: u32,
+    session_lineage: u32,
     accumulator_identity: &'static [u8],
     repository_contract: u32,
     repository_observation: u32,
@@ -112,6 +114,7 @@ impl CoreContractRevisions {
             content_policy: CORE_CONTENT_POLICY_REVISION,
             mcp_tool_call_attribution: CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION,
             mcp_exchange: CORE_MCP_EXCHANGE_REVISION,
+            session_lineage: CORE_SESSION_LINEAGE_REVISION,
             accumulator_identity: CORE_RECORD_ACCUMULATOR_IDENTITY,
             repository_contract: CORE_REPOSITORY_CONTRACT_REVISION,
             repository_observation: CORE_REPOSITORY_OBSERVATION_REVISION,
@@ -134,6 +137,7 @@ fn core_record_contract_fingerprint_for(revisions: CoreContractRevisions) -> Str
     digest.update(revisions.content_policy.to_be_bytes());
     digest.update(revisions.mcp_tool_call_attribution.to_be_bytes());
     digest.update(revisions.mcp_exchange.to_be_bytes());
+    digest.update(revisions.session_lineage.to_be_bytes());
     digest.update(revisions.repository_contract.to_be_bytes());
     digest.update(revisions.repository_observation.to_be_bytes());
     digest.update(revisions.bounded_shell_subset.to_be_bytes());
@@ -237,6 +241,10 @@ pub enum CoreRecordError {
     },
     #[error("Core record contains an invalid stable identity relationship")]
     InvalidIdentityRelationship,
+    #[error("Core record session relationship fields are inconsistent")]
+    InvalidSessionRelationship,
+    #[error("Core record event origin is malformed or self-referential")]
+    InvalidEventOrigin,
     #[error("Core record content does not match its policy status")]
     InvalidContentPolicyState,
     #[error("Core record MCP exchange has an invalid shape or relationship")]
@@ -313,6 +321,122 @@ pub struct McpToolCallAttribution {
     pub tool: String,
 }
 
+/// Provider-neutral meaning of one session's relationship to its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRelationshipKind {
+    Root,
+    Delegated,
+    Forked,
+    ResumedFrom,
+    WorkflowChild,
+    RelatedUnknown,
+}
+
+impl SessionRelationshipKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Delegated => "delegated",
+            Self::Forked => "forked",
+            Self::ResumedFrom => "resumed_from",
+            Self::WorkflowChild => "workflow_child",
+            Self::RelatedUnknown => "related_unknown",
+        }
+    }
+
+    pub const fn is_primary(self) -> bool {
+        !matches!(self, Self::Delegated | Self::WorkflowChild)
+    }
+}
+
+/// Exact structural proof admitted for a copied event edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventCopyProofKind {
+    NativeEventIdentity,
+    NativeCopiedFromField,
+    NativeCallResultIdentity,
+    CertifiedOrderedPrefix,
+}
+
+/// Provider-neutral origin of one event within its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EventOrigin {
+    Unknown,
+    UniqueToSession,
+    CopiedFromAncestor {
+        ancestor_session_id: StableEntityId,
+        ancestor_event_id: StableEntityId,
+        proof: EventCopyProofKind,
+    },
+}
+
+impl EventOrigin {
+    pub const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::UniqueToSession => "unique_to_session",
+            Self::CopiedFromAncestor { .. } => "copied_from_ancestor",
+        }
+    }
+
+    pub const fn copied_from_ancestor(
+        &self,
+    ) -> Option<(StableEntityId, StableEntityId, EventCopyProofKind)> {
+        match self {
+            Self::CopiedFromAncestor {
+                ancestor_session_id,
+                ancestor_event_id,
+                proof,
+            } => Some((*ancestor_session_id, *ancestor_event_id, *proof)),
+            Self::Unknown | Self::UniqueToSession => None,
+        }
+    }
+}
+
+fn validate_session_relationship_fields(
+    session_id: StableEntityId,
+    kind: SessionRelationshipKind,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    is_primary: bool,
+) -> CoreRecordResult<()> {
+    session_id
+        .validate_contract()
+        .map_err(|_| CoreRecordError::InvalidSessionRelationship)?;
+    validate_related_session_identity(root_session_id)
+        .map_err(|_| CoreRecordError::InvalidSessionRelationship)?;
+    if let Some(parent_session_id) = parent_session_id {
+        validate_related_session_identity(parent_session_id)
+            .map_err(|_| CoreRecordError::InvalidSessionRelationship)?;
+    }
+    if is_primary != kind.is_primary() {
+        return Err(CoreRecordError::InvalidSessionRelationship);
+    }
+    match kind {
+        SessionRelationshipKind::Root => {
+            if parent_session_id.is_some() || root_session_id != session_id {
+                return Err(CoreRecordError::InvalidSessionRelationship);
+            }
+        }
+        SessionRelationshipKind::Delegated
+        | SessionRelationshipKind::Forked
+        | SessionRelationshipKind::ResumedFrom
+        | SessionRelationshipKind::WorkflowChild
+        | SessionRelationshipKind::RelatedUnknown => {
+            let Some(parent_session_id) = parent_session_id else {
+                return Err(CoreRecordError::InvalidSessionRelationship);
+            };
+            if parent_session_id == session_id || root_session_id == session_id {
+                return Err(CoreRecordError::InvalidSessionRelationship);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One complete, generation-owned normalized history event.
 ///
 /// Provider read-time locators are intentionally absent. `source` identifies
@@ -325,6 +449,8 @@ pub struct CoreRecord {
     pub session_id: StableEntityId,
     pub parent_session_id: Option<StableEntityId>,
     pub root_session_id: StableEntityId,
+    pub session_relationship: SessionRelationshipKind,
+    pub event_origin: EventOrigin,
     pub source: SourceKey,
     pub provider_session_id: Option<String>,
     pub native_event_id: Option<TypedKey>,
@@ -383,6 +509,8 @@ struct RepositoryReuseInput<'a> {
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
     root_session_id: StableEntityId,
+    session_relationship: SessionRelationshipKind,
+    event_origin: &'a EventOrigin,
     source: &'a SourceKey,
     provider_session_id: &'a Option<String>,
     native_event_id: &'a Option<TypedKey>,
@@ -412,6 +540,8 @@ impl<'a> From<&'a CoreRecord> for RepositoryReuseInput<'a> {
             session_id: record.session_id,
             parent_session_id: record.parent_session_id,
             root_session_id: record.root_session_id,
+            session_relationship: record.session_relationship,
+            event_origin: &record.event_origin,
             source: &record.source,
             provider_session_id: &record.provider_session_id,
             native_event_id: &record.native_event_id,
@@ -460,6 +590,8 @@ impl CoreRecord {
             session_id,
             parent_session_id: None,
             root_session_id,
+            session_relationship: SessionRelationshipKind::Root,
+            event_origin: EventOrigin::Unknown,
             source,
             provider_session_id: None,
             native_event_id: None,
@@ -513,6 +645,8 @@ impl CoreRecord {
         if let Some(parent) = self.parent_session_id {
             validate_related_session_identity(parent)?;
         }
+        self.validate_session_relationship()?;
+        self.validate_event_origin()?;
         validate_optional_text(
             "provider_session_id",
             self.provider_session_id.as_deref(),
@@ -566,6 +700,62 @@ impl CoreRecord {
         self.repository_candidate_evidence.validate_contract()?;
         self.validate_repositories()?;
         Ok(content_bytes)
+    }
+
+    /// Atomically sets the complete typed session relationship projection.
+    ///
+    /// Validation happens before mutation so callers cannot leave parent,
+    /// root, primary, and relationship fields partially updated.
+    pub fn set_session_relationship(
+        &mut self,
+        kind: SessionRelationshipKind,
+        parent_session_id: Option<StableEntityId>,
+        root_session_id: StableEntityId,
+    ) -> CoreRecordResult<()> {
+        validate_session_relationship_fields(
+            self.session_id,
+            kind,
+            parent_session_id,
+            root_session_id,
+            kind.is_primary(),
+        )?;
+        self.parent_session_id = parent_session_id;
+        self.root_session_id = root_session_id;
+        self.session_relationship = kind;
+        self.is_primary = kind.is_primary();
+        Ok(())
+    }
+
+    fn validate_session_relationship(&self) -> CoreRecordResult<()> {
+        validate_session_relationship_fields(
+            self.session_id,
+            self.session_relationship,
+            self.parent_session_id,
+            self.root_session_id,
+            self.is_primary,
+        )
+    }
+
+    fn validate_event_origin(&self) -> CoreRecordResult<()> {
+        let EventOrigin::CopiedFromAncestor {
+            ancestor_session_id,
+            ancestor_event_id,
+            ..
+        } = &self.event_origin
+        else {
+            return Ok(());
+        };
+        validate_related_session_identity(*ancestor_session_id)?;
+        ancestor_event_id
+            .validate_contract()
+            .map_err(|_| CoreRecordError::InvalidEventOrigin)?;
+        if ancestor_event_id.entity_kind() != StableEntityKind::Event
+            || *ancestor_session_id == self.session_id
+            || *ancestor_event_id == self.event_id
+        {
+            return Err(CoreRecordError::InvalidEventOrigin);
+        }
+        Ok(())
     }
 
     pub fn encode_stored(&self) -> CoreRecordResult<Vec<u8>> {

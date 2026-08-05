@@ -95,17 +95,26 @@ fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEvent
     let mut core_record = CoreRecord::new_selected(
         event.event_id,
         event.session_id,
-        event.root_session_id,
+        event.session_id,
         event.source.clone(),
         event.event_sequence,
         event.event_type.clone(),
         event.agent_type.clone(),
-        event.is_primary,
+        true,
         "source-index-test-v1",
         body,
     )
     .unwrap();
-    core_record.parent_session_id = event.parent_session_id;
+    if let Some(parent_session_id) = event.parent_session_id {
+        let kind = if event.is_primary {
+            SessionRelationshipKind::RelatedUnknown
+        } else {
+            SessionRelationshipKind::Delegated
+        };
+        core_record
+            .set_session_relationship(kind, Some(parent_session_id), event.root_session_id)
+            .unwrap();
+    }
     core_record.provider_session_id = event.provider_session_id.clone();
     core_record.native_event_id = event.native_event_id.clone();
     core_record.occurred_at_unix_ms = event.occurred_at_unix_ms;

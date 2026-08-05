@@ -41,6 +41,8 @@ fn record() -> CoreRecord {
         session_id,
         parent_session_id: None,
         root_session_id: session_id,
+        session_relationship: SessionRelationshipKind::Root,
+        event_origin: EventOrigin::Unknown,
         source,
         provider_session_id: Some("session".to_owned()),
         native_event_id: Some(TypedKey::U64(1)),
@@ -92,6 +94,14 @@ fn selected_constructor_defaults_the_active_core_contract() {
 
     assert_eq!(constructed.record_version, CORE_RECORD_VERSION);
     assert_eq!(
+        constructed.session_relationship,
+        SessionRelationshipKind::Root
+    );
+    assert_eq!(constructed.event_origin, EventOrigin::Unknown);
+    assert_eq!(constructed.root_session_id, constructed.session_id);
+    assert!(constructed.parent_session_id.is_none());
+    assert!(constructed.is_primary);
+    assert_eq!(
         constructed.normalization_revision,
         CORE_NORMALIZATION_REVISION
     );
@@ -108,6 +118,165 @@ fn selected_constructor_defaults_the_active_core_contract() {
     assert!(constructed.metadata.is_empty());
     assert!(constructed.repository_bindings.is_empty());
     assert!(constructed.repository_file_invocation_evidence.is_empty());
+}
+
+fn related_session_id(label: &str) -> StableEntityId {
+    let source = source();
+    let native_session_key =
+        NativeSessionKey::native_id("session", TypedKey::utf8(label).unwrap()).unwrap();
+    derive_session_id(SessionIdentityInput {
+        source: &source,
+        logical_session_kind: "thread",
+        native_session_key: &native_session_key,
+    })
+    .unwrap()
+}
+
+fn related_event_id(session_id: StableEntityId, sequence: u64) -> StableEntityId {
+    let source = source();
+    let native_item_key = NativeItemKey::native_id("message", TypedKey::U64(sequence)).unwrap();
+    derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &native_item_key,
+        subrecord_selector: None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn selected_constructor_preserves_an_existing_non_primary_child_projection() {
+    let child_session_id = related_session_id("compatibility-child");
+    let parent_session_id = related_session_id("compatibility-parent");
+    let event_id = related_event_id(child_session_id, 2);
+    let mut child = CoreRecord::new_selected(
+        event_id,
+        child_session_id,
+        child_session_id,
+        source(),
+        2,
+        "message",
+        "subagent",
+        true,
+        "provider-parser-v7",
+        "child body",
+    )
+    .unwrap();
+
+    child
+        .set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(parent_session_id),
+            parent_session_id,
+        )
+        .unwrap();
+    child.validate_contract().unwrap();
+    assert_eq!(child.parent_session_id, Some(parent_session_id));
+    assert_eq!(child.root_session_id, parent_session_id);
+    assert!(!child.is_primary);
+}
+
+#[test]
+fn relationship_setter_updates_every_projection_atomically() {
+    let mut record = record();
+    let parent = related_session_id("parent");
+    let root = related_session_id("root");
+
+    record
+        .set_session_relationship(SessionRelationshipKind::Delegated, Some(parent), root)
+        .unwrap();
+    assert_eq!(record.parent_session_id, Some(parent));
+    assert_eq!(record.root_session_id, root);
+    assert_eq!(
+        record.session_relationship,
+        SessionRelationshipKind::Delegated
+    );
+    assert!(!record.is_primary);
+    record.validate_contract().unwrap();
+
+    let before = record.clone();
+    assert!(matches!(
+        record.set_session_relationship(SessionRelationshipKind::Forked, None, root),
+        Err(CoreRecordError::InvalidSessionRelationship)
+    ));
+    assert_eq!(record, before);
+}
+
+#[test]
+fn relationship_validation_rejects_drift_and_self_parent_edges() {
+    let parent = related_session_id("parent");
+    let mut record = record();
+    record
+        .set_session_relationship(
+            SessionRelationshipKind::RelatedUnknown,
+            Some(parent),
+            parent,
+        )
+        .unwrap();
+    assert!(record.is_primary);
+
+    record.is_primary = false;
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidSessionRelationship)
+    ));
+    record.is_primary = true;
+    record.parent_session_id = Some(record.session_id);
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidSessionRelationship)
+    ));
+}
+
+#[test]
+fn event_origin_has_an_exact_fail_closed_wire_shape() {
+    let ancestor_session_id = related_session_id("ancestor");
+    let ancestor_event_id = related_event_id(ancestor_session_id, 41);
+    let mut record = record();
+    record.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id,
+        ancestor_event_id,
+        proof: EventCopyProofKind::NativeCopiedFromField,
+    };
+    let encoded = record.encode_stored().unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        wire["event_origin"],
+        serde_json::json!({
+            "kind": "copied_from_ancestor",
+            "ancestor_session_id": ancestor_session_id,
+            "ancestor_event_id": ancestor_event_id,
+            "proof": "native_copied_from_field"
+        })
+    );
+
+    for malformed in [
+        serde_json::json!({"kind": "copied_from_ancestor", "ancestor_session_id": ancestor_session_id, "ancestor_event_id": ancestor_event_id, "proof": "body_similarity"}),
+        serde_json::json!({"kind": "copied_from_ancestor", "ancestor_session_id": ancestor_session_id, "ancestor_event_id": ancestor_event_id, "proof": "native_event_identity", "provider_payload": true}),
+        serde_json::json!({"kind": "assumed_unique"}),
+    ] {
+        let mut candidate = wire.clone();
+        candidate["event_origin"] = malformed;
+        assert!(matches!(
+            CoreRecord::decode_stored(&serde_json::to_vec(&candidate).unwrap()),
+            Err(CoreRecordError::Json(_))
+        ));
+    }
+}
+
+#[test]
+fn copied_origin_rejects_self_references() {
+    let mut record = record();
+    record.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: record.session_id,
+        ancestor_event_id: record.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidEventOrigin)
+    ));
 }
 
 fn mcp_tool_call(server: impl Into<String>, tool: impl Into<String>) -> McpToolCallAttribution {
@@ -575,7 +744,7 @@ fn mcp_tool_call_bounds_each_decoded_utf8_component_at_exact_64_kib() {
 
 #[test]
 fn mcp_tool_call_changes_stored_payload_but_not_stable_identity() {
-    assert_eq!(CORE_RECORD_VERSION, 1);
+    assert_eq!(CORE_RECORD_VERSION, 2);
     assert_eq!(crate::IDENTITY_VERSION, 1);
     assert_eq!(CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION, 1);
 
@@ -1653,18 +1822,34 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e"
+        "bc71a6638f1bc5729c534518e1731f8f9fef8678db08eea91db1ccf9cee1043b"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "209e0c8677b765b8b1bfea1dbdf8f3ff7732e61150713de296628d661ad72b50"
+        "3b7c681c128f468d4987c7fe305af15b3dbd4c830c0a222b3664a05245bbbe46"
     );
     for changed in [
         CoreContractRevisions {
+            record: current.record + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            normalization: current.normalization + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            content_policy: current.content_policy + 1,
+            ..current
+        },
+        CoreContractRevisions {
             mcp_tool_call_attribution: current.mcp_tool_call_attribution + 1,
+            ..current
+        },
+        CoreContractRevisions {
+            session_lineage: current.session_lineage + 1,
             ..current
         },
         CoreContractRevisions {

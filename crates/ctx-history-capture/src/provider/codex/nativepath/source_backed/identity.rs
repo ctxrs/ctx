@@ -421,16 +421,23 @@ pub(super) fn codex_core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        root_session_id,
+        session_id,
         source.clone(),
         raw_ordinal,
         event_type.as_str(),
         agent_type,
-        is_primary,
+        true,
         CODEX_PARSER_REVISION,
         lexical_body,
     )?;
-    record.parent_session_id = parent_session_id;
+    if let Some(parent_session_id) = parent_session_id {
+        let kind = if is_primary {
+            ctx_history_core::SessionRelationshipKind::RelatedUnknown
+        } else {
+            ctx_history_core::SessionRelationshipKind::Delegated
+        };
+        record.set_session_relationship(kind, Some(parent_session_id), root_session_id)?;
+    }
     record.provider_session_id = Some(native_session_id.to_owned());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());

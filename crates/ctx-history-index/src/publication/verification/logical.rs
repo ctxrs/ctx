@@ -152,6 +152,7 @@ fn verify_searcher_with_options(
         &verification_spill,
         &mut projection_deltas,
     )?;
+    verify_lineage(searcher, fields, &verification_spill)?;
     verify_remaining_query_projections(searcher, fields, &mut projection_deltas)?;
     verify_query_projection_completion(searcher, &projection_deltas)?;
     verify_manifest_aggregates(manifest, source_aggregates)?;
@@ -236,9 +237,12 @@ fn verify_segment(
         identity_writer.write_record(
             doc_id,
             SpillVerificationIdentities {
+                event: record.identities.event,
                 session: record.identities.session,
                 parent_session: record.identities.parent_session,
                 root_session: record.identities.root_session,
+                session_relationship: record.identities.session_relationship,
+                event_origin: record.identities.event_origin,
                 session_source_ordinal: source_ordinal,
             },
             projection_delta,
@@ -394,6 +398,23 @@ fn expected_query_projection_delta(
         fields.root_session_id,
         &core.root_session_id.to_string(),
     ));
+    add(Term::from_field_text(
+        fields.session_relationship_kind,
+        core.session_relationship.as_str(),
+    ));
+    add(Term::from_field_text(
+        fields.event_origin_kind,
+        core.event_origin.kind_str(),
+    ));
+    if let ctx_history_core::EventOrigin::CopiedFromAncestor {
+        ancestor_event_id, ..
+    } = &core.event_origin
+    {
+        add(Term::from_field_text(
+            fields.origin_event_identity_digest,
+            &hex(&ancestor_event_id.digest()),
+        ));
+    }
     add(Term::from_field_text(
         fields.source_key,
         &record.source_owner,
@@ -599,9 +620,12 @@ fn verify_remaining_query_projections(
     Ok(())
 }
 
-fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 21] {
+fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 24] {
     [
         fields.event_identity_digest,
+        fields.session_relationship_kind,
+        fields.event_origin_kind,
+        fields.origin_event_identity_digest,
         fields.source_key,
         fields.provider,
         fields.source_format,

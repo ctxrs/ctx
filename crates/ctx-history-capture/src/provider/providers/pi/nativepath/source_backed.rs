@@ -417,17 +417,25 @@ impl JsonlFamilyProjector for PiProjector {
         let mut core = CoreRecord::new_selected(
             event_id,
             self.session_id,
-            self.root_session_id,
+            self.session_id,
             self.source.clone(),
             ordinal,
             event_type.as_str(),
             agent_type.as_str(),
-            is_primary,
+            true,
             PARSER_REVISION,
             body,
         )
         .map_err(contract)?;
-        core.parent_session_id = self.parent_session_id;
+        if let Some(parent_session_id) = self.parent_session_id {
+            let kind = if is_primary {
+                ctx_history_core::SessionRelationshipKind::RelatedUnknown
+            } else {
+                ctx_history_core::SessionRelationshipKind::Delegated
+            };
+            core.set_session_relationship(kind, Some(parent_session_id), self.root_session_id)
+                .map_err(contract)?;
+        }
         core.provider_session_id = Some(self.binding.native_session_id.clone());
         core.native_event_id = Some(native_event_id);
         core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());

@@ -23,7 +23,7 @@ mod tests {
         EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
         RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
         RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-        SourceKey, SourceObservation, TypedKey, MAX_CORE_CONTENT_BYTES,
+        SessionRelationshipKind, SourceKey, SourceObservation, TypedKey, MAX_CORE_CONTENT_BYTES,
     };
     use ctx_history_index::{
         AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,

@@ -9,8 +9,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, McpExchangeContent, McpJsonCapture, McpPayloadOmissionReason,
     NativeItemKey, NativeSessionKey, PositionStability, ProjectionContractError,
-    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, SubrecordSelector, TypedKey,
-    MAX_CORE_CONTENT_BYTES,
+    SessionIdentityInput, SessionRelationshipKind, SourceAnchor, SourceKey, StableEntityId,
+    SubrecordSelector, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -771,16 +771,23 @@ fn project_event(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        root_session_id,
+        session_id,
         source.clone(),
         event.provider_event_sequence_index,
         event.event_type.as_str(),
         session.agent_type.as_str(),
-        session.is_primary,
+        true,
         adapter.effective_parser_revision(),
         body,
     )?;
-    record.parent_session_id = parent_session_id;
+    if let Some(parent_session_id) = parent_session_id {
+        let kind = if session.is_primary {
+            SessionRelationshipKind::RelatedUnknown
+        } else {
+            SessionRelationshipKind::Delegated
+        };
+        record.set_session_relationship(kind, Some(parent_session_id), root_session_id)?;
+    }
     record.provider_session_id = Some(session.provider_session_id.clone());
     record.native_event_id = Some(native_event_key);
     record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());

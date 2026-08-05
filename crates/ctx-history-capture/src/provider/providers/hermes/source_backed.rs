@@ -12,8 +12,8 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, CaptureProvider, CertifiedSource, CoreRecord, CoreRecordError,
-    EventIdentityInput, NativeItemKey, ProjectionContractError, ScannedSourceCounts, SourceAnchor,
-    SourceKey, TypedKey,
+    EventIdentityInput, NativeItemKey, ProjectionContractError, ScannedSourceCounts,
+    SessionRelationshipKind, SourceAnchor, SourceKey, TypedKey,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -622,16 +622,23 @@ fn project_message(
     let mut record = CoreRecord::new_selected(
         event_id,
         session.session_id,
-        session.root_session_id,
+        session.session_id,
         source.clone(),
         native.provider_event_index,
         native.event_type.as_str(),
         session.agent_type.clone(),
-        session.is_primary,
+        true,
         HERMES_SOURCE_PARSER_REVISION,
         body,
     )?;
-    record.parent_session_id = session.parent_session_id;
+    if let Some(parent_session_id) = session.parent_session_id {
+        let kind = if session.is_primary {
+            SessionRelationshipKind::RelatedUnknown
+        } else {
+            SessionRelationshipKind::Delegated
+        };
+        record.set_session_relationship(kind, Some(parent_session_id), session.root_session_id)?;
+    }
     record.provider_session_id = Some(row.session_id);
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(native.occurred_at.timestamp_millis());

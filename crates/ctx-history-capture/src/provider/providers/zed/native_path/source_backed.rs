@@ -3,8 +3,8 @@ use std::path::Path;
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, NativeItemKey, NativeSessionKey, PositionStability,
-    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceObservation, StableEntityId,
-    TypedKey,
+    ProjectionContractError, SessionIdentityInput, SessionRelationshipKind, SourceAnchor,
+    SourceObservation, StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_index::GenerationWriter;
@@ -283,16 +283,22 @@ fn zed_core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        context.root_session_id,
+        session_id,
         source.clone(),
         event_sequence,
         event.event_type.as_str(),
         agent_type.as_str(),
-        context.parent_session_id.is_none(),
+        true,
         ZED_PARSER_REVISION,
         event.normalized_body,
     )?;
-    record.parent_session_id = context.parent_session_id;
+    if let Some(parent_session_id) = context.parent_session_id {
+        record.set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(parent_session_id),
+            context.root_session_id,
+        )?;
+    }
     record.provider_session_id = Some(session.thread_id.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());

@@ -192,7 +192,13 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
     let other = document_for_session(&source, "other-session", 2, "shared parity needle");
     let mut subagent = document_for_session(&source, "subagent-session", 3, "shared parity needle");
     subagent.agent_type = "subagent".to_owned();
-    subagent.is_primary = false;
+    subagent
+        .set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(target.session_id),
+            target.session_id,
+        )
+        .unwrap();
     subagent.validate_contract().unwrap();
 
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())

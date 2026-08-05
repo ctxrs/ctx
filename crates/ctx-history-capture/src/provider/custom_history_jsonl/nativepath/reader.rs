@@ -245,17 +245,26 @@ fn core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        root_session_id,
+        session_id,
         source.clone(),
         event.event_index,
         event.event_type.clone(),
         session.agent_type.clone(),
-        session.is_primary,
+        true,
         CUSTOM_SOURCE_BACKED_PARSER_REVISION,
         std::mem::take(&mut event.body),
     )
     .map_err(core_contract)?;
-    record.parent_session_id = parent_session_id;
+    if let Some(parent_session_id) = parent_session_id {
+        let kind = if session.is_primary {
+            ctx_history_core::SessionRelationshipKind::RelatedUnknown
+        } else {
+            ctx_history_core::SessionRelationshipKind::Delegated
+        };
+        record
+            .set_session_relationship(kind, Some(parent_session_id), root_session_id)
+            .map_err(core_contract)?;
+    }
     record.provider_session_id = Some(custom_history_internal_session_id(
         &source_record.provider_key,
         &event.source_id,

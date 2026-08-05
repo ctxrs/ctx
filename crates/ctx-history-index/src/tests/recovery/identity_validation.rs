@@ -40,6 +40,149 @@ fn duplicate_event_identity_is_rejected_by_prepublication_term_audit() {
 }
 
 #[test]
+fn copied_event_resolves_exactly_to_its_declared_ancestor() {
+    let temp = tempdir().unwrap();
+    let source = source("valid-copy.jsonl");
+    let original = document_for_session(&source, "root", 1, "original");
+    let mut copy = document_for_session(&source, "child", 2, "copy");
+    copy.set_session_relationship(
+        SessionRelationshipKind::Forked,
+        Some(original.session_id),
+        original.session_id,
+    )
+    .unwrap();
+    copy.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: original.session_id,
+        ancestor_event_id: original.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(original).unwrap();
+    writer.add_core_record(copy).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+}
+
+#[test]
+fn copied_event_with_a_missing_target_cannot_publish() {
+    let temp = tempdir().unwrap();
+    let source = source("missing-copy.jsonl");
+    let missing = document_for_session(&source, "root", 1, "missing");
+    let mut copy = document_for_session(&source, "child", 2, "copy");
+    copy.set_session_relationship(
+        SessionRelationshipKind::Forked,
+        Some(missing.session_id),
+        missing.session_id,
+    )
+    .unwrap();
+    copy.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: missing.session_id,
+        ancestor_event_id: missing.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(copy).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    assert!(matches!(
+        writer.commit(|_| true),
+        Err(IndexError::InvalidSessionRelationshipGraph(_))
+            | Err(IndexError::InvalidEventOriginGraph(_))
+    ));
+}
+
+#[test]
+fn direct_copy_chain_resolves_to_one_noncopy_original() {
+    let temp = tempdir().unwrap();
+    let source = source("copy-chain.jsonl");
+    let original = document_for_session(&source, "root", 1, "original");
+    let mut middle = document_for_session(&source, "middle", 2, "middle copy");
+    middle
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(original.session_id),
+            original.session_id,
+        )
+        .unwrap();
+    middle.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: original.session_id,
+        ancestor_event_id: original.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+    let mut leaf = document_for_session(&source, "leaf", 3, "leaf copy");
+    leaf.set_session_relationship(
+        SessionRelationshipKind::Forked,
+        Some(middle.session_id),
+        original.session_id,
+    )
+    .unwrap();
+    leaf.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: middle.session_id,
+        ancestor_event_id: middle.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [original, middle, leaf] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+}
+
+#[test]
+fn cyclic_session_relationships_cannot_publish() {
+    let temp = tempdir().unwrap();
+    let source = source("session-cycle.jsonl");
+    let root = document_for_session(&source, "root", 1, "root");
+    let mut first = document_for_session(&source, "first", 2, "first");
+    let mut second = document_for_session(&source, "second", 3, "second");
+    first
+        .set_session_relationship(
+            SessionRelationshipKind::RelatedUnknown,
+            Some(second.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    second
+        .set_session_relationship(
+            SessionRelationshipKind::RelatedUnknown,
+            Some(first.session_id),
+            root.session_id,
+        )
+        .unwrap();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [root, first, second] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    assert!(matches!(
+        writer.commit(|_| true),
+        Err(IndexError::InvalidSessionRelationshipGraph(
+            "session relationship cycle"
+        ))
+    ));
+}
+
+#[test]
 fn verified_generation_rejects_a_forged_duplicate_event_identity() {
     let temp = tempdir().unwrap();
     let source = source("session.jsonl");

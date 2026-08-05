@@ -6,7 +6,7 @@ use ctx_history_core::{
     CORE_REPOSITORY_CONTRACT_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
-    CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
+    CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION, CORE_SESSION_LINEAGE_REVISION,
     MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES,
 };
 
@@ -131,6 +131,15 @@ pub(super) fn inventory() -> Value {
             "pro_operation": ["file_blame", "commit_blame", "pull_request_blame"],
             "core_source_delta_kind": ["present", "removed"],
             "core_event_delta_kind": ["added", "replaced", "tombstoned"],
+            "session_relationship_kind": [
+                "root", "delegated", "forked", "resumed_from", "workflow_child",
+                "related_unknown"
+            ],
+            "event_origin_kind": ["unknown", "unique_to_session", "copied_from_ancestor"],
+            "event_copy_proof_kind": [
+                "native_event_identity", "native_copied_from_field",
+                "native_call_result_identity", "certified_ordered_prefix"
+            ],
             "repository_candidate_kind": [
                 "session_cwd", "declared_tool_workdir", "derived_effective_cwd",
                 "command_specific_repository_path", "file_activity_path", "vcs_activity_path",
@@ -266,7 +275,8 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "CoreRecord": fields(&[
                 "record_version", "event_id", "session_id", "parent_session_id",
-                "root_session_id", "source", "provider_session_id", "native_event_id",
+                "root_session_id", "session_relationship", "event_origin", "source",
+                "provider_session_id", "native_event_id",
                 "event_sequence", "occurred_at_unix_ms", "event_type", "role", "agent_type",
                 "is_primary", "workspace", "branch", "cwd", "parser_revision",
                 "normalization_revision", "content", "metadata", "repository_candidate_evidence",
@@ -274,6 +284,10 @@ pub(super) fn inventory() -> Value {
                 "repository_file_invocation_evidence", "repository_file_observations",
                 "repository_vcs_observations"
             ], &["mcp_tool_call"]),
+            "EventOrigin.unknown": fields(&["kind"], &[]),
+            "EventOrigin.unique_to_session": fields(&["kind"], &[]),
+            "EventOrigin.copied_from_ancestor": fields(
+                &["kind", "ancestor_session_id", "ancestor_event_id", "proof"], &[]),
             "McpToolCallAttribution": fields(&["server", "tool"], &[]),
             "RepositoryCandidateEvidence": fields(&[
                 "repository_observation_revision", "bounded_shell_subset_revision",
@@ -330,6 +344,7 @@ pub(super) fn inventory() -> Value {
             "repository_local_root_authorization_fingerprint_revision":
                 CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
             "mcp_tool_call_attribution_revision": CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION,
+            "session_lineage_revision": CORE_SESSION_LINEAGE_REVISION,
             "mcp_tool_call_attribution": {
                 "wire_path": "CoreRecord.mcp_tool_call",
                 "presence": "optional_omitted_when_absent_explicit_null_rejected",

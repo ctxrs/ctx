@@ -252,6 +252,10 @@ pub enum IndexError {
     },
     #[error("stored lexical document field {0} is missing, malformed, or inconsistent")]
     InvalidStoredDocumentField(&'static str),
+    #[error("session relationship graph is invalid: {0}")]
+    InvalidSessionRelationshipGraph(&'static str),
+    #[error("copied-event origin graph is invalid: {0}")]
+    InvalidEventOriginGraph(&'static str),
     #[error("lexical index checksum verification failed for one or more active files")]
     ChecksumMismatch,
     #[error("ID prefix must contain 1 to 32 hexadecimal digits, with optional hyphens")]

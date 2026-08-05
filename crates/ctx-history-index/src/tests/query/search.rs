@@ -20,16 +20,19 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     root.cwd = Some("/work/ctx-root".to_owned());
     root.occurred_at_unix_ms = Some(100);
     let root_session_id = root.session_id;
-    root.root_session_id = root_session_id;
 
     let mut child = document_for_session(&codex_child, "child-thread", 2, "shared needle");
-    child.parent_session_id = Some(root_session_id);
-    child.root_session_id = root_session_id;
+    child
+        .set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(root_session_id),
+            root_session_id,
+        )
+        .unwrap();
     child.branch = Some("feature/query-seam".to_owned());
     child.workspace = Some("ChildSpace".to_owned());
     child.cwd = Some("/work/child".to_owned());
     child.agent_type = "subagent".to_owned();
-    child.is_primary = false;
     child.event_type = "tool_call".to_owned();
     child.role = Some("assistant".to_owned());
     child.occurred_at_unix_ms = Some(200);
@@ -40,7 +43,6 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     other.branch = Some("release".to_owned());
     other.occurred_at_unix_ms = Some(300);
     let other_session_id = other.session_id;
-    other.root_session_id = other_session_id;
 
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()

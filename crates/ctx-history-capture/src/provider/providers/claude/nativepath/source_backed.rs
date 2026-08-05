@@ -531,17 +531,26 @@ fn core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         identities.session_id,
-        identities.root_session_id,
+        identities.session_id,
         source.clone(),
         event_sequence,
         event_kind(row.kind),
         identities.agent_type,
-        identities.is_primary,
+        true,
         PARSER_REVISION,
         normalized_body,
     )
     .map_err(contract)?;
-    record.parent_session_id = identities.parent_session_id;
+    if let Some(parent_session_id) = identities.parent_session_id {
+        let kind = if identities.is_primary {
+            ctx_history_core::SessionRelationshipKind::RelatedUnknown
+        } else {
+            ctx_history_core::SessionRelationshipKind::Delegated
+        };
+        record
+            .set_session_relationship(kind, Some(parent_session_id), identities.root_session_id)
+            .map_err(contract)?;
+    }
     record.provider_session_id = Some(binding.key.provider_session_id());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = row

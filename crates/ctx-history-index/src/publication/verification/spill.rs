@@ -1,20 +1,28 @@
 use std::{
+    cmp::Reverse,
+    collections::BinaryHeap,
     fs::File,
     io::{BufWriter, Write},
 };
 
 use tantivy::DocAddress;
 
-use crate::{query::CompactIdentity, IndexError, Result};
+use ctx_history_core::SessionRelationshipKind;
+
+use crate::{
+    query::{CompactEventOrigin, CompactIdentity},
+    IndexError, Result,
+};
 
 pub(super) const VERIFICATION_SPILL_BUFFER_BYTES: usize = 8 * 1024;
 const COMPACT_IDENTITY_BYTES: usize = 32;
 const SOURCE_ORDINAL_BYTES: usize = std::mem::size_of::<u32>();
-const IDENTITY_SPILL_RECORD_BYTES: usize = COMPACT_IDENTITY_BYTES * 3 + SOURCE_ORDINAL_BYTES + 1;
+const IDENTITY_SPILL_RECORD_BYTES: usize = COMPACT_IDENTITY_BYTES * 6 + SOURCE_ORDINAL_BYTES + 3;
 const QUERY_PROJECTION_ACCUMULATOR_BYTES: usize = 32;
 pub(super) const VERIFICATION_SPILL_RECORD_BYTES: usize =
     IDENTITY_SPILL_RECORD_BYTES + QUERY_PROJECTION_ACCUMULATOR_BYTES;
 const MAX_VERIFICATION_LAYOUT_HEAP_BYTES: usize = 16 * 1024 * 1024;
+const IDENTITY_SORT_RUN_RECORDS: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ProjectionAccumulator([u8; QUERY_PROJECTION_ACCUMULATOR_BYTES]);
@@ -47,10 +55,177 @@ impl ProjectionAccumulator {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SpillVerificationIdentities {
+    pub(super) event: CompactIdentity,
     pub(super) session: CompactIdentity,
     pub(super) parent_session: Option<CompactIdentity>,
     pub(super) root_session: CompactIdentity,
+    pub(super) session_relationship: SessionRelationshipKind,
+    pub(super) event_origin: CompactEventOrigin,
     pub(super) session_source_ordinal: u32,
+}
+
+/// Sequential identity-only scratch for records changed relative to an audited base.
+/// Its physical and logical size is proportional only to the candidate delta.
+pub(super) struct IdentityDeltaSpill {
+    file: File,
+    records: u64,
+}
+
+pub(super) struct IdentityKeySpill {
+    file: File,
+    records: u64,
+}
+
+impl IdentityDeltaSpill {
+    pub(super) fn create() -> Result<Self> {
+        Ok(Self {
+            file: tempfile::tempfile()?,
+            records: 0,
+        })
+    }
+
+    pub(super) fn push(&mut self, identities: SpillVerificationIdentities) -> Result<()> {
+        let offset = self
+            .records
+            .checked_mul(IDENTITY_SPILL_RECORD_BYTES as u64)
+            .ok_or(IndexError::CountOverflow)?;
+        write_spill_all_at(&self.file, &encode_record(identities), offset)?;
+        self.records = self
+            .records
+            .checked_add(1)
+            .ok_or(IndexError::CountOverflow)?;
+        Ok(())
+    }
+
+    pub(super) fn for_each(
+        &self,
+        mut visit: impl FnMut(SpillVerificationIdentities) -> Result<()>,
+    ) -> Result<()> {
+        let mut encoded = [0_u8; IDENTITY_SPILL_RECORD_BYTES];
+        for ordinal in 0..self.records {
+            let offset = ordinal
+                .checked_mul(IDENTITY_SPILL_RECORD_BYTES as u64)
+                .ok_or(IndexError::CountOverflow)?;
+            read_spill_exact_at(&self.file, &mut encoded, offset)?;
+            visit(decode_record(&encoded, "core_record")?)?;
+        }
+        Ok(())
+    }
+}
+
+impl IdentityKeySpill {
+    pub(super) fn create() -> Result<Self> {
+        Ok(Self {
+            file: tempfile::tempfile()?,
+            records: 0,
+        })
+    }
+
+    pub(super) fn push(&mut self, identity: CompactIdentity) -> Result<()> {
+        let offset = self
+            .records
+            .checked_mul(COMPACT_IDENTITY_BYTES as u64)
+            .ok_or(IndexError::CountOverflow)?;
+        write_spill_all_at(&self.file, &identity.digest, offset)?;
+        self.records = self
+            .records
+            .checked_add(1)
+            .ok_or(IndexError::CountOverflow)?;
+        Ok(())
+    }
+
+    pub(super) fn for_each_unique(
+        &self,
+        mut visit: impl FnMut(CompactIdentity) -> Result<()>,
+    ) -> Result<()> {
+        let runs_file = tempfile::tempfile()?;
+        let mut runs = Vec::<(u64, usize)>::new();
+        let mut input_ordinal = 0_u64;
+        let mut run_offset = 0_u64;
+        while input_ordinal < self.records {
+            let remaining = usize::try_from((self.records - input_ordinal).min(
+                u64::try_from(IDENTITY_SORT_RUN_RECORDS).map_err(|_| IndexError::CountOverflow)?,
+            ))
+            .map_err(|_| IndexError::CountOverflow)?;
+            let mut identities = Vec::with_capacity(remaining);
+            for _ in 0..remaining {
+                let mut digest = [0_u8; COMPACT_IDENTITY_BYTES];
+                read_spill_exact_at(
+                    &self.file,
+                    &mut digest,
+                    input_ordinal
+                        .checked_mul(COMPACT_IDENTITY_BYTES as u64)
+                        .ok_or(IndexError::CountOverflow)?,
+                )?;
+                identities.push(digest);
+                input_ordinal += 1;
+            }
+            identities.sort_unstable();
+            identities.dedup();
+            let run_bytes = identities
+                .len()
+                .checked_mul(COMPACT_IDENTITY_BYTES)
+                .ok_or(IndexError::CountOverflow)?;
+            let layout_bytes = runs
+                .len()
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(std::mem::size_of::<(u64, usize)>() * 3))
+                .ok_or(IndexError::CountOverflow)?;
+            if layout_bytes > MAX_VERIFICATION_LAYOUT_HEAP_BYTES {
+                return Err(IndexError::VerificationScratchLimitExceeded {
+                    required_bytes: layout_bytes as u64,
+                    maximum_bytes: MAX_VERIFICATION_LAYOUT_HEAP_BYTES as u64,
+                });
+            }
+            for digest in &identities {
+                write_spill_all_at(&runs_file, digest, run_offset)?;
+                run_offset = run_offset
+                    .checked_add(COMPACT_IDENTITY_BYTES as u64)
+                    .ok_or(IndexError::CountOverflow)?;
+            }
+            runs.push((
+                run_offset
+                    .checked_sub(run_bytes as u64)
+                    .ok_or(IndexError::CountOverflow)?,
+                identities.len(),
+            ));
+        }
+
+        let mut positions = vec![0_usize; runs.len()];
+        let mut heap = BinaryHeap::<Reverse<([u8; 32], usize)>>::new();
+        for (run, (offset, count)) in runs.iter().copied().enumerate() {
+            if count != 0 {
+                heap.push(Reverse((read_identity_at(&runs_file, offset)?, run)));
+            }
+        }
+        let mut previous = None;
+        while let Some(Reverse((digest, run))) = heap.pop() {
+            if previous != Some(digest) {
+                visit(CompactIdentity { digest })?;
+                previous = Some(digest);
+            }
+            positions[run] += 1;
+            let (offset, count) = runs[run];
+            if positions[run] < count {
+                let next_offset = offset
+                    .checked_add(
+                        u64::try_from(positions[run])
+                            .map_err(|_| IndexError::CountOverflow)?
+                            .checked_mul(COMPACT_IDENTITY_BYTES as u64)
+                            .ok_or(IndexError::CountOverflow)?,
+                    )
+                    .ok_or(IndexError::CountOverflow)?;
+                heap.push(Reverse((read_identity_at(&runs_file, next_offset)?, run)));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn read_identity_at(file: &File, offset: u64) -> Result<[u8; COMPACT_IDENTITY_BYTES]> {
+    let mut digest = [0_u8; COMPACT_IDENTITY_BYTES];
+    read_spill_exact_at(file, &mut digest, offset)?;
+    Ok(digest)
 }
 
 /// Anonymous fixed-size identity and query-projection state for one audit.
@@ -401,6 +576,7 @@ fn projection_segment_bytes(max_doc: u32) -> Result<u64> {
 fn encode_record(identities: SpillVerificationIdentities) -> [u8; IDENTITY_SPILL_RECORD_BYTES] {
     let mut encoded = [0_u8; IDENTITY_SPILL_RECORD_BYTES];
     let mut cursor = 0;
+    encode_identity(&mut encoded, &mut cursor, identities.event);
     encode_identity(&mut encoded, &mut cursor, identities.session);
     encoded[cursor] = u8::from(identities.parent_session.is_some());
     cursor += 1;
@@ -412,6 +588,28 @@ fn encode_record(identities: SpillVerificationIdentities) -> [u8; IDENTITY_SPILL
             .unwrap_or(CompactIdentity { digest: [0; 32] }),
     );
     encode_identity(&mut encoded, &mut cursor, identities.root_session);
+    encoded[cursor] = encode_relationship_kind(identities.session_relationship);
+    cursor += 1;
+    let (origin_kind, ancestor_session, ancestor_event) = match identities.event_origin {
+        CompactEventOrigin::Unknown => (0, None, None),
+        CompactEventOrigin::UniqueToSession => (1, None, None),
+        CompactEventOrigin::CopiedFromAncestor {
+            ancestor_session,
+            ancestor_event,
+        } => (2, Some(ancestor_session), Some(ancestor_event)),
+    };
+    encoded[cursor] = origin_kind;
+    cursor += 1;
+    encode_identity(
+        &mut encoded,
+        &mut cursor,
+        ancestor_session.unwrap_or(CompactIdentity { digest: [0; 32] }),
+    );
+    encode_identity(
+        &mut encoded,
+        &mut cursor,
+        ancestor_event.unwrap_or(CompactIdentity { digest: [0; 32] }),
+    );
     encoded[cursor..cursor + SOURCE_ORDINAL_BYTES]
         .copy_from_slice(&identities.session_source_ordinal.to_be_bytes());
     encoded
@@ -431,6 +629,7 @@ fn decode_record(
     field: &'static str,
 ) -> Result<SpillVerificationIdentities> {
     let mut cursor = 0;
+    let event = decode_identity(encoded, &mut cursor);
     let session = decode_identity(encoded, &mut cursor);
     let has_parent = match encoded[cursor] {
         0 => false,
@@ -440,6 +639,12 @@ fn decode_record(
     cursor += 1;
     let parent = decode_identity(encoded, &mut cursor);
     let root_session = decode_identity(encoded, &mut cursor);
+    let session_relationship = decode_relationship_kind(encoded[cursor], field)?;
+    cursor += 1;
+    let origin_kind = encoded[cursor];
+    cursor += 1;
+    let ancestor_session = decode_identity(encoded, &mut cursor);
+    let ancestor_event = decode_identity(encoded, &mut cursor);
     let session_source_ordinal = u32::from_be_bytes(
         encoded[cursor..cursor + SOURCE_ORDINAL_BYTES]
             .try_into()
@@ -448,12 +653,53 @@ fn decode_record(
     if !has_parent && parent.digest != [0; 32] {
         return Err(IndexError::InvalidStoredDocumentField(field));
     }
+    let event_origin = match origin_kind {
+        0 if ancestor_session.digest == [0; 32] && ancestor_event.digest == [0; 32] => {
+            CompactEventOrigin::Unknown
+        }
+        1 if ancestor_session.digest == [0; 32] && ancestor_event.digest == [0; 32] => {
+            CompactEventOrigin::UniqueToSession
+        }
+        2 if ancestor_session.digest != [0; 32] && ancestor_event.digest != [0; 32] => {
+            CompactEventOrigin::CopiedFromAncestor {
+                ancestor_session,
+                ancestor_event,
+            }
+        }
+        _ => return Err(IndexError::InvalidStoredDocumentField(field)),
+    };
     Ok(SpillVerificationIdentities {
+        event,
         session,
         parent_session: has_parent.then_some(parent),
         root_session,
+        session_relationship,
+        event_origin,
         session_source_ordinal,
     })
+}
+
+fn encode_relationship_kind(kind: SessionRelationshipKind) -> u8 {
+    match kind {
+        SessionRelationshipKind::Root => 0,
+        SessionRelationshipKind::Delegated => 1,
+        SessionRelationshipKind::Forked => 2,
+        SessionRelationshipKind::ResumedFrom => 3,
+        SessionRelationshipKind::WorkflowChild => 4,
+        SessionRelationshipKind::RelatedUnknown => 5,
+    }
+}
+
+fn decode_relationship_kind(encoded: u8, field: &'static str) -> Result<SessionRelationshipKind> {
+    match encoded {
+        0 => Ok(SessionRelationshipKind::Root),
+        1 => Ok(SessionRelationshipKind::Delegated),
+        2 => Ok(SessionRelationshipKind::Forked),
+        3 => Ok(SessionRelationshipKind::ResumedFrom),
+        4 => Ok(SessionRelationshipKind::WorkflowChild),
+        5 => Ok(SessionRelationshipKind::RelatedUnknown),
+        _ => Err(IndexError::InvalidStoredDocumentField(field)),
+    }
 }
 
 fn decode_identity(
@@ -500,6 +746,20 @@ fn write_spill_at(file: &File, buffer: &[u8], offset: u64) -> std::io::Result<us
     file.write_at(buffer, offset)
 }
 
+fn write_spill_all_at(file: &File, mut buffer: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        let written = write_spill_at(file, buffer, offset)?;
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buffer = &buffer[written..];
+        offset = offset
+            .checked_add(written as u64)
+            .ok_or_else(|| std::io::Error::other("identity spill offset overflow"))?;
+    }
+    Ok(())
+}
+
 impl Drop for VerificationSpill {
     fn drop(&mut self) {
         if let Some(witness) = &self.cleanup_witness {
@@ -514,9 +774,15 @@ mod tests {
 
     fn identities() -> SpillVerificationIdentities {
         SpillVerificationIdentities {
+            event: CompactIdentity { digest: [7; 32] },
             session: CompactIdentity { digest: [1; 32] },
             parent_session: Some(CompactIdentity { digest: [2; 32] }),
             root_session: CompactIdentity { digest: [3; 32] },
+            session_relationship: SessionRelationshipKind::Forked,
+            event_origin: CompactEventOrigin::CopiedFromAncestor {
+                ancestor_session: CompactIdentity { digest: [5; 32] },
+                ancestor_event: CompactIdentity { digest: [6; 32] },
+            },
             session_source_ordinal: 4,
         }
     }

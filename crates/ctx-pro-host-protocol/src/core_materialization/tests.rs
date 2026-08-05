@@ -7,12 +7,13 @@ use crate::{
 };
 use ctx_history_core::{
     derive_event_id, derive_session_id, CoreContent, CoreContentPolicyStatus, EventIdentityInput,
-    McpExchangeContent, McpInvocationContent, McpJsonCapture, NativeItemKey, NativeSessionKey,
-    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidateEvidence,
-    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryVcsObservation,
-    RepositoryVcsObservationKind, SessionIdentityInput, SourceAnchor, TypedKey,
-    CORE_CONTENT_POLICY_REVISION, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    EventOrigin, McpExchangeContent, McpInvocationContent, McpJsonCapture, NativeItemKey,
+    NativeSessionKey, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
+    RepositoryCandidateEvidence, RepositoryEvidence, RepositoryEvidenceConfidence,
+    RepositoryEvidenceKind, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryVcsObservation, RepositoryVcsObservationKind, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
 use uuid::Uuid;
 
@@ -138,6 +139,8 @@ fn record(source: &SourceKey, sequence: u64, body: String, two_repositories: boo
         session_id,
         parent_session_id: None,
         root_session_id: session_id,
+        session_relationship: SessionRelationshipKind::Root,
+        event_origin: EventOrigin::Unknown,
         source: source.clone(),
         provider_session_id: Some("provider-session".to_owned()),
         native_event_id: None,

@@ -8,8 +8,8 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput, SourceAnchor,
-    SourceKey, StableEntityId, SubrecordSelector, TypedKey,
+    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, SourceKey, StableEntityId, SubrecordSelector, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -385,17 +385,26 @@ fn core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         binding.session_id,
-        binding.root_session_id,
+        binding.session_id,
         source.clone(),
         ordinal,
         event_type.as_str(),
         agent_type.as_str(),
-        binding.is_primary,
+        true,
         PARSER_REVISION,
         body,
     )
     .map_err(contract)?;
-    record.parent_session_id = binding.parent_session_id;
+    if let Some(parent_session_id) = binding.parent_session_id {
+        let kind = if binding.is_primary {
+            SessionRelationshipKind::RelatedUnknown
+        } else {
+            SessionRelationshipKind::Delegated
+        };
+        record
+            .set_session_relationship(kind, Some(parent_session_id), binding.root_session_id)
+            .map_err(contract)?;
+    }
     record.provider_session_id = Some(binding.provider_session_id.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(

@@ -159,6 +159,30 @@ pub struct BaseEventIdentityLookup {
     pub(super) event_id_field: Field,
 }
 
+/// Exact outcome from a sealed candidate-generation native-event resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateEventOriginResolution {
+    Missing,
+    Unique(ctx_history_core::StableEntityId),
+    Ambiguous,
+}
+
+/// Provider-neutral seam for resolving direct copied-event evidence.
+///
+/// Implementations must be built from a sealed view containing both fresh
+/// candidate identities and reused base-generation identities. Resolution is
+/// exact over identity metadata only; implementations must not inspect bodies,
+/// infer from text/time, or return `Missing` merely because a fresh producer has
+/// not run yet.
+pub trait CandidateEventOriginResolver: Send + Sync {
+    fn resolve(
+        &self,
+        ancestor_session_id: ctx_history_core::StableEntityId,
+        canonical_provider_native_event_key: &ctx_history_core::TypedKey,
+        collision_selector: Option<&ctx_history_core::SubrecordSelector>,
+    ) -> Result<CandidateEventOriginResolution>;
+}
+
 impl BaseEventIdentityLookup {
     /// Returns whether the immutable base generation contains `event_id`.
     pub fn contains(&self, event_id: Uuid) -> Result<bool> {

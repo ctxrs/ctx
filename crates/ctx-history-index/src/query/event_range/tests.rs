@@ -5,9 +5,9 @@ use ctx_history_core::{
     CertifiedSourceDeletion, CertifiedSourceInventory, CoreContentPolicyStatus, CoreRecord,
     EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
     RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
-    RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceFrontier, SourceInventoryObservation, SourceKey, SourceObservation, SubrecordSelector,
-    TypedKey,
+    RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, SourceFrontier, SourceInventoryObservation, SourceKey,
+    SourceObservation, SubrecordSelector, TypedKey,
 };
 use tantivy::indexer::NoMergePolicy;
 use tempfile::tempdir;
@@ -236,7 +236,6 @@ fn range_is_half_open_timestamped_provider_neutral_and_tie_ordered() {
         record(&claude, 6, 1, Some(until), "exclusive"),
     ];
     records[4].agent_type = "subagent".to_owned();
-    records[4].is_primary = false;
     let codex_records = records
         .iter()
         .filter(|record| record.source.provider() == "codex")
@@ -652,17 +651,23 @@ fn unknown_event_type_full_identity_relationships_and_metadata_roundtrip_exactly
     let mut expected = CoreRecord::new_selected(
         event_id,
         session_id,
-        root_session_id,
+        session_id,
         source.clone(),
         42,
         "provider_future_event_v99",
         "specialist",
-        false,
+        true,
         "event-range-test-future-parser-v7",
         "complete 雪 🦀 body",
     )
     .unwrap();
-    expected.parent_session_id = Some(parent_session_id);
+    expected
+        .set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(parent_session_id),
+            root_session_id,
+        )
+        .unwrap();
     expected.provider_session_id = Some("provider-thread-β".to_owned());
     expected.native_event_id = Some(native_event_id);
     expected.occurred_at_unix_ms = Some(1_700_000_000_123);
@@ -698,9 +703,54 @@ fn unknown_event_type_full_identity_relationships_and_metadata_roundtrip_exactly
         });
     expected.validate_contract().unwrap();
 
-    publish(temp.path(), 1, &[(source.clone(), vec![expected.clone()])]);
+    let ancestor = |session_id: StableEntityId, sequence: u64, body: &str| {
+        let native_item_key = NativeItemKey::native_id("lineage", TypedKey::U64(sequence)).unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id,
+            logical_item_kind: "lineage",
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        CoreRecord::new_selected(
+            event_id,
+            session_id,
+            session_id,
+            source.clone(),
+            sequence,
+            "lineage",
+            "primary",
+            true,
+            "event-range-test-future-parser-v7",
+            body,
+        )
+        .unwrap()
+    };
+    let root = ancestor(root_session_id, 1, "root");
+    let mut parent = ancestor(parent_session_id, 2, "parent");
+    parent
+        .set_session_relationship(
+            SessionRelationshipKind::RelatedUnknown,
+            Some(root_session_id),
+            root_session_id,
+        )
+        .unwrap();
+    publish(
+        temp.path(),
+        1,
+        &[(source.clone(), vec![root, parent, expected.clone()])],
+    );
     let index = VerifiedIndex::open(temp.path()).unwrap();
-    let selection = CoreEventRangeSelection::all(CoreEventRangeFilters::default()).unwrap();
+    let selection = CoreEventRangeSelection::with_filters(
+        i64::MIN,
+        i64::MAX,
+        CoreEventRangeFilters {
+            session_id: Some(session_id.as_uuid()),
+            ..CoreEventRangeFilters::default()
+        },
+    )
+    .unwrap();
     let page = index.core_event_range_page(&selection, None, 8).unwrap();
 
     assert!(page.terminal);
@@ -819,20 +869,30 @@ fn invalid_ranges_filters_and_limits_fail_before_querying() {
 fn complete_filters_apply_before_item_and_byte_limits() {
     let temp = tempdir().unwrap();
     let source = test_source("codex", "filters");
+    let subagent_source = test_source("codex", "filters-subagent");
     let mut primary = record(&source, 1, 1, Some(100), "primary");
     primary.branch = Some("main".to_owned());
     primary.event_type = "tool_result".to_owned();
     primary.role = Some("assistant".to_owned());
     primary.agent_type = "codex".to_owned();
     primary.workspace = Some("/Work/CTX".to_owned());
-    let mut subagent = record(&source, 2, 2, Some(101), "subagent");
-    subagent.is_primary = false;
+    let mut subagent = record(&subagent_source, 2, 2, Some(101), "subagent");
+    subagent
+        .set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(primary.session_id),
+            primary.session_id,
+        )
+        .unwrap();
     subagent.agent_type = "subagent".to_owned();
     let session_id = primary.session_id.as_uuid();
     publish(
         temp.path(),
         1,
-        &[(source.clone(), vec![primary.clone(), subagent])],
+        &[
+            (source.clone(), vec![primary.clone()]),
+            (subagent_source, vec![subagent]),
+        ],
     );
     let index = VerifiedIndex::open(temp.path()).unwrap();
     let selection = CoreEventRangeSelection::with_filters(

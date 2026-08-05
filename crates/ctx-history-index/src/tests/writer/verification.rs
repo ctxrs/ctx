@@ -177,6 +177,11 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit_for
         (2, 5),
         "one changed identity must sample the retained session without replaying its records"
     );
+    assert_eq!(
+        crate::publication::candidate_lineage_verification_activity(),
+        (4, 1),
+        "one tiny append must spill only itself and decode only its changed/retained session edge"
+    );
 }
 
 #[test]

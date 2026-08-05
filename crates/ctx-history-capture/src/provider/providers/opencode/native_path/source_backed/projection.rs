@@ -518,16 +518,23 @@ pub(super) fn core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         session.session_id,
-        session.root_session_id,
+        session.session_id,
         source.clone(),
         event_sequence,
         event_kind_label(kind),
         agent_type,
-        is_primary,
+        true,
         PARSER_REVISION,
         body,
     )?;
-    record.parent_session_id = session.parent_session_id;
+    if let Some(parent_session_id) = session.parent_session_id {
+        let kind = if is_primary {
+            ctx_history_core::SessionRelationshipKind::RelatedUnknown
+        } else {
+            ctx_history_core::SessionRelationshipKind::Delegated
+        };
+        record.set_session_relationship(kind, Some(parent_session_id), session.root_session_id)?;
+    }
     record.provider_session_id = Some(session.native_identity.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(normalized_time);
