@@ -702,10 +702,13 @@ steps:
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.zst*" . \
         --step public-cli-macos-arm64
       buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-*" . \
+        "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz*" . \
         --step semantic-model-archives
       buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx-multilingual-e5-small-coreml-*" . \
+        "target/public-cli-artifacts/ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz*" . \
+        --step semantic-model-archives
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz*" . \
         --step semantic-coreml-archive
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-linux-x64-cuda12.tar.zst*" . \

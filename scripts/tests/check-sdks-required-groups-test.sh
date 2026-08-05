@@ -12,6 +12,7 @@ fail() {
 
 make_fixture() {
   local name="$1"
+  local tool
   fixture="${test_root}/${name}"
   mkdir -p \
     "${fixture}/bin" \
@@ -29,6 +30,12 @@ make_fixture() {
   cp "${repo_root}/scripts/check-sdks.sh" "${fixture}/scripts/check-sdks.sh"
   cp "${repo_root}/scripts/check-sdk-no-publish.sh" \
     "${fixture}/scripts/check-sdk-no-publish.sh"
+  # Keep missing-tool mutations independent of the host image. Expose only
+  # the base utilities exercised by the fixture; SDK commands are supplied by
+  # each case below.
+  for tool in bash cp dirname find grep head mkdir mktemp rm; do
+    ln -s "$(command -v "${tool}")" "${fixture}/bin/${tool}"
+  done
   printf '{"private": true}\n' >"${fixture}/sdks/typescript/package.json"
   : >"${fixture}/sdks/typescript/package-lock.json"
   : >"${fixture}/sdks/typescript/tsconfig.types.json"
@@ -57,7 +64,7 @@ write_executable() {
 
 run_check() {
   env \
-    PATH="${fixture}/bin:/usr/bin:/bin" \
+    PATH="${fixture}/bin" \
     SDK_TEST_LOG="${log}" \
     bash "${fixture}/scripts/check-sdks.sh" "$@" >"${output}" 2>&1
 }
