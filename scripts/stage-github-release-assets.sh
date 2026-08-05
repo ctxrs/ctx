@@ -114,6 +114,35 @@ sha256_file() {
   exit 127
 }
 
+require_plain_directory() {
+  local path="${1%/}"
+  local label="$2"
+  local parent
+
+  [[ -n "${path}" ]] || path="/"
+  [[ -d "${path}" && ! -L "${path}" ]] || {
+    printf '%s must be a non-symlink directory: %s\n' "${label}" "${path}" >&2
+    exit 1
+  }
+  parent="$(dirname "${path}")"
+  [[ -d "${parent}" && ! -L "${parent}" ]] || {
+    printf '%s parent must be a non-symlink directory: %s\n' \
+      "${label}" "${parent}" >&2
+    exit 1
+  }
+}
+
+require_regular_input() {
+  local path="$1"
+  local label="$2"
+
+  [[ -f "${path}" && ! -L "${path}" ]] || {
+    printf '%s must be a regular non-symlink file: %s\n' \
+      "${label}" "${path}" >&2
+    exit 1
+  }
+}
+
 transcode_runtime_asset() {
   local platform="$1"
   local source_name dest_name source_path dest_path
@@ -130,10 +159,7 @@ transcode_runtime_asset() {
   esac
   source_path="${artifact_dir%/}/${source_name}"
   dest_path="${artifact_dir%/}/${dest_name}"
-  test -f "${source_path}" || {
-    printf 'runtime source archive missing: %s\n' "${source_path}" >&2
-    exit 1
-  }
+  require_regular_input "${source_path}" "runtime source archive"
   command -v python3 >/dev/null 2>&1 || {
     printf 'python3 is required to transcode runtime archives\n' >&2
     exit 127
@@ -217,6 +243,7 @@ if [[ "${mode}" == "transcode" ]]; then
   if [[ "${transcode_candidate_dir}" != /* ]]; then
     transcode_candidate_dir="${repo_root}/${transcode_candidate_dir}"
   fi
+  require_plain_directory "${transcode_candidate_dir}" "runtime artifact root"
   python3 -I "${bundle_tool}" require-unsealed \
     --candidate-dir "${transcode_candidate_dir}"
   artifact_dir="${transcode_candidate_dir}"
@@ -228,6 +255,7 @@ requested_artifact_dir="${artifact_dir}"
 if [[ "${requested_artifact_dir}" != /* ]]; then
   requested_artifact_dir="${repo_root}/${requested_artifact_dir}"
 fi
+require_plain_directory "${requested_artifact_dir}" "release artifact root"
 
 stage_asset() {
   local source_name="$1"
@@ -236,12 +264,10 @@ stage_asset() {
   local source_path="${artifact_dir%/}/${source_name}"
   local source_sha_path="${source_path}.sha256"
   local dest_path="${out_dir%/}/${dest_name}"
-  local expected_sha actual_sha
+  local expected_sha actual_sha staged_sha
 
-  if [[ ! -f "${source_path}" ]]; then
-    printf 'missing public CLI artifact: %s\n' "${source_path}" >&2
-    exit 1
-  fi
+  require_regular_input "${source_path}" "public release artifact"
+  require_regular_input "${source_sha_path}" "public artifact checksum"
   if [[ ! -s "${source_sha_path}" ]]; then
     printf 'missing public artifact checksum: %s\n' "${source_sha_path}" >&2
     exit 1
@@ -259,7 +285,14 @@ stage_asset() {
   fi
 
   install -m "${mode}" "${source_path}" "${dest_path}"
-  printf '%s  %s\n' "${actual_sha}" "${dest_name}" >> "${out_dir%/}/SHA256SUMS"
+  require_regular_input "${dest_path}" "staged release artifact"
+  staged_sha="$(sha256_file "${dest_path}")"
+  if [[ "$(printf '%s' "${staged_sha}" | tr 'A-F' 'a-f')" != "$(printf '%s' "${expected_sha}" | tr 'A-F' 'a-f')" ]]; then
+    printf 'staged artifact checksum mismatch for %s: expected %s got %s\n' \
+      "${dest_path}" "${expected_sha}" "${staged_sha}" >&2
+    exit 1
+  fi
+  printf '%s  %s\n' "${staged_sha}" "${dest_name}" >> "${out_dir%/}/SHA256SUMS"
 }
 
 verify_and_stage_cli_evidence() {
@@ -267,6 +300,20 @@ verify_and_stage_cli_evidence() {
   local dest_name="$2"
   local platform="$3"
   local source_path="${artifact_dir%/}/${source_name}"
+  local evidence
+
+  for evidence in \
+    "${source_path}" \
+    "${source_path}.sha256" \
+    "${source_path}.build-info.json" \
+    "${source_path}.candidate.json" \
+    "${source_path}.cdx.json" \
+    "${source_path}.cdx.json.sha256" \
+    "${source_path}.size.json" \
+    "${source_path}.third-party-notices.txt" \
+    "${source_path}.third-party-notices.txt.sha256"; do
+    require_regular_input "${evidence}" "public CLI producer input"
+  done
 
   python3 -I scripts/check-public-cli-build-info.py \
     --artifact "${source_path}" \
@@ -305,10 +352,8 @@ stage_runtime_asset() {
       ;;
   esac
 
-  if [[ ! -f "${artifact_dir%/}/${asset_name}" ]]; then
-    printf 'required ONNX Runtime sidecar missing: %s\n' "${artifact_dir%/}/${asset_name}" >&2
-    exit 1
-  fi
+  require_regular_input \
+    "${artifact_dir%/}/${asset_name}" "required ONNX Runtime sidecar"
 
   if [[ "${platform}" == "windows-x64" ]]; then
     bash scripts/build-onnxruntime-sidecar.sh --validate \
@@ -386,11 +431,9 @@ required_runtime_assets=(
   ctx-onnxruntime-freebsd-x64.tar.gz
 )
 for required_runtime_asset in "${required_runtime_assets[@]}"; do
-  if [[ ! -f "${artifact_dir%/}/${required_runtime_asset}" ]]; then
-    printf 'required ONNX Runtime sidecar missing: %s\n' \
-      "${artifact_dir%/}/${required_runtime_asset}" >&2
-    exit 1
-  fi
+  require_regular_input \
+    "${artifact_dir%/}/${required_runtime_asset}" \
+    "required ONNX Runtime sidecar"
 done
 
 validate_macos_signing_evidence() (
@@ -407,18 +450,22 @@ validate_macos_signing_evidence() (
   local release_attestation="${artifact_dir%/}/ctx-onnxruntime-${platform}.release-attestation.json"
   local release_attestation_cms="${artifact_dir%/}/ctx-onnxruntime-${platform}.release-attestation.cms"
   local build_info="${artifact_dir%/}/ctx-${platform}.build-info.json"
-  local source_commit work nested
+  local source_commit work nested producer_input
 
   # JSON records diagnostics and archive bindings. The Developer ID CMS
   # checks below are the cross-platform authorization for executable bytes.
-  [[ -s "${cli_evidence}" ]] || {
-    printf 'required macOS CLI signing evidence missing: %s\n' "${cli_evidence}" >&2
-    exit 1
-  }
-  [[ -s "${runtime_evidence}" ]] || {
-    printf 'required macOS runtime signing evidence missing: %s\n' "${runtime_evidence}" >&2
-    exit 1
-  }
+  for producer_input in \
+    "${binary}" "${binary}.sha256" "${runtime}" "${runtime}.sha256" \
+    "${cli_evidence}" "${runtime_evidence}" "${build_info}" \
+    "${cli_attestation}" "${cli_attestation_cms}" \
+    "${runtime_attestation}" "${runtime_attestation_cms}" \
+    "${release_attestation}" "${release_attestation_cms}"; do
+    require_regular_input "${producer_input}" "macOS release producer input"
+    [[ -s "${producer_input}" ]] || {
+      printf 'macOS release producer input is empty: %s\n' "${producer_input}" >&2
+      exit 1
+    }
+  done
   source_commit="$(python3 - "${build_info}" "${platform}" <<'PY'
 import json
 import re
@@ -546,8 +593,6 @@ stage_runtime_asset freebsd-x64
 
 if [[ "${include_semantic}" == "1" ]]; then
   semantic_fields="$(mktemp "${TMPDIR:-/tmp}/ctx-semantic-release.XXXXXX")"
-  bash scripts/construct-semantic-release-catalog.sh \
-    "${artifact_dir}" "${semantic_fields}"
   semantic_assets=(
     ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
     ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz
@@ -560,6 +605,16 @@ if [[ "${include_semantic}" == "1" ]]; then
     ctx-onnxruntime-freebsd-x64.tar.zst
     ctx-onnxruntime-linux-x64-cuda12.tar.zst
   )
+  for semantic_asset in "${semantic_assets[@]}"; do
+    require_regular_input \
+      "${artifact_dir%/}/${semantic_asset}.sha256" \
+      "Semantic producer checksum"
+    require_regular_input \
+      "${artifact_dir%/}/${semantic_asset}.asset.json" \
+      "Semantic producer record"
+  done
+  bash scripts/construct-semantic-release-catalog.sh \
+    "${artifact_dir}" "${semantic_fields}"
   for semantic_asset in "${semantic_assets[@]}"; do
     stage_asset "${semantic_asset}" "${semantic_asset}" 0644
   done

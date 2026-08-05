@@ -28,6 +28,10 @@ class BundleError(ValueError):
     pass
 
 
+class DestinationExists(BundleError):
+    pass
+
+
 def completion_leaf(platform: str) -> str:
     if platform not in {"linux-x64", "linux-aarch64"}:
         raise BundleError(f"unsupported Linux release platform: {platform}")
@@ -113,12 +117,21 @@ def _file_record(
         raise BundleError(f"release leaf is not a regular file: {name}")
     digest = hashlib.sha256()
     size = 0
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-            size += len(chunk)
-        if durable:
-            os.fsync(source.fileno())
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != before[:2] or not stat.S_ISREG(
+            opened.st_mode
+        ):
+            raise BundleError(f"release leaf changed while opened: {name}")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+            if durable:
+                os.fsync(source.fileno())
+    finally:
+        os.close(descriptor)
     if _binding(path) != before:
         raise BundleError(f"release leaf changed while verified: {name}")
     return {
@@ -286,7 +299,106 @@ def _tree_records(root: Path) -> dict[str, tuple[str, int, str, int]]:
     return records
 
 
-def _rename_noreplace(source: Path, destination: Path) -> None:
+def _durable_tree(root: Path, label: str) -> None:
+    root_binding = _require_directory(root, label)
+    directories: list[Path] = []
+    for current, child_directories, files in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        current_binding = _require_directory(current_path, label)
+        directories.append(current_path)
+        for name in sorted(child_directories):
+            child = current_path / name
+            if not stat.S_ISDIR(_binding(child)[2]):
+                raise BundleError(f"{label} contains a non-directory entry: {child}")
+        for name in sorted(files):
+            path = current_path / name
+            before = _binding(path)
+            if not stat.S_ISREG(before[2]):
+                raise BundleError(f"{label} contains a non-regular file: {path}")
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != before[:2] or not stat.S_ISREG(
+                    opened.st_mode
+                ):
+                    raise BundleError(f"{label} changed while opened: {path}")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            if _binding(path) != before:
+                raise BundleError(f"{label} changed while made durable: {path}")
+        if _binding(current_path) != current_binding:
+            raise BundleError(f"{label} changed while inspected: {current_path}")
+    for directory in reversed(directories):
+        _fsync_directory(directory)
+    if _binding(root) != root_binding:
+        raise BundleError(f"{label} changed while made durable")
+
+
+def _valid_leaf_name(name: str, label: str) -> str:
+    if (
+        name in {"", ".", ".."}
+        or os.sep in name
+        or (os.altsep is not None and os.altsep in name)
+    ):
+        raise BundleError(f"{label} has an invalid leaf name: {name!r}")
+    return name
+
+
+def _open_bound_directory(path: Path, label: str, *, create: bool = False) -> int:
+    path = _absolute(path)
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in path.parts[1:]:
+            component = _valid_leaf_name(component, label)
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise BundleError(f"{label} does not exist: {path}")
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise BundleError(
+                        f"{label} contains a symlink or non-directory component: {path}"
+                    ) from error
+                raise
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _entry_binding(parent_descriptor: int, leaf: str) -> os.stat_result | None:
+    try:
+        return os.stat(leaf, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _rename_noreplace_at(
+    source_parent: int,
+    source_leaf: str,
+    destination_parent: int,
+    destination_leaf: str,
+    destination: Path,
+) -> None:
+    source_leaf = _valid_leaf_name(source_leaf, "release stage")
+    destination_leaf = _valid_leaf_name(destination_leaf, "release destination")
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
@@ -300,17 +412,17 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
     ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        -100,
-        os.fsencode(source),
-        -100,
-        os.fsencode(destination),
+        source_parent,
+        os.fsencode(source_leaf),
+        destination_parent,
+        os.fsencode(destination_leaf),
         RENAME_NOREPLACE,
     )
     if result == 0:
         return
     number = ctypes.get_errno()
     if number == errno.EEXIST:
-        raise BundleError(f"release destination already exists: {destination}")
+        raise DestinationExists(f"release destination already exists: {destination}")
     raise OSError(number, f"could not commit release destination: {destination}")
 
 
@@ -341,16 +453,10 @@ def resolve_destinations(
 
 
 def _ensure_parent(path: Path) -> None:
-    current = Path("/")
-    for component in path.parts[1:]:
-        current /= component
-        try:
-            mode = current.lstat().st_mode
-        except FileNotFoundError:
-            current.mkdir(mode=0o700)
-            continue
-        if not stat.S_ISDIR(mode):
-            raise BundleError(f"release destination parent contains a link or file: {current}")
+    descriptor = _open_bound_directory(
+        path, "release destination parent", create=True
+    )
+    os.close(descriptor)
 
 
 def preflight_destinations(
@@ -359,11 +465,27 @@ def preflight_destinations(
     output, symbols = resolve_destinations(
         repo_root, output_argument, private_symbols_argument
     )
-    for destination in (output, symbols):
-        if destination.exists() or destination.is_symlink():
-            raise BundleError(f"release destination already exists: {destination}")
     _ensure_parent(output.parent)
     _ensure_parent(symbols.parent)
+    output_parent = _open_bound_directory(
+        output.parent, "public release destination parent"
+    )
+    symbols_parent = _open_bound_directory(
+        symbols.parent, "private symbol destination parent"
+    )
+    try:
+        if _entry_binding(output_parent, _valid_leaf_name(output.name, "public output")):
+            raise BundleError(f"release destination already exists: {output}")
+        existing_symbols = _entry_binding(
+            symbols_parent, _valid_leaf_name(symbols.name, "private symbol output")
+        )
+        if existing_symbols is not None and not stat.S_ISDIR(existing_symbols.st_mode):
+            raise BundleError(
+                f"private symbol destination is not an ordinary directory: {symbols}"
+            )
+    finally:
+        os.close(symbols_parent)
+        os.close(output_parent)
     return output, symbols
 
 
@@ -373,8 +495,18 @@ def commit_directory(stage: Path, output: Path) -> None:
     _require_directory(stage, "release stage")
     if stage.parent != output.parent or stage == output:
         raise BundleError("release stage must be a sibling of its final destination")
-    _rename_noreplace(stage, output)
-    _fsync_directory(output.parent)
+    stage_leaf = _valid_leaf_name(stage.name, "release stage")
+    output_leaf = _valid_leaf_name(output.name, "release destination")
+    parent = _open_bound_directory(output.parent, "release destination parent")
+    try:
+        _durable_tree(stage, "release staged tree")
+        bound_stage = _entry_binding(parent, stage_leaf)
+        if bound_stage is None or not stat.S_ISDIR(bound_stage.st_mode):
+            raise BundleError(f"release stage is not a bound directory: {stage}")
+        _rename_noreplace_at(parent, stage_leaf, parent, output_leaf, output)
+        os.fsync(parent)
+    finally:
+        os.close(parent)
 
 
 def commit_bundle(
@@ -396,42 +528,108 @@ def commit_bundle(
         raise BundleError("release stage must be a sibling of its final destination")
     if stage == output or output == symbols_output:
         raise BundleError("release commit paths are invalid")
-    verify_bundle(stage, platform, source_commit, seal_sha256=seal_sha256)
-    source_symbols = _tree_records(symbols_source)
-    if phase_hook is not None:
-        phase_hook("after-verification")
-    verify_bundle(stage, platform, source_commit, seal_sha256=seal_sha256)
-    if _tree_records(symbols_source) != source_symbols:
-        raise BundleError("private symbol bundle changed after verification")
-    if output.exists() or output.is_symlink():
-        raise BundleError(f"release destination already exists: {output}")
-    if symbols_output.exists() or symbols_output.is_symlink():
-        raise BundleError(f"release destination already exists: {symbols_output}")
-    _ensure_parent(symbols_output.parent)
-    symbols_stage = symbols_output.parent / f".ctx-symbols.{secrets.token_hex(16)}"
+    stage_leaf = _valid_leaf_name(stage.name, "release stage")
+    output_leaf = _valid_leaf_name(output.name, "public release destination")
+    symbols_leaf = _valid_leaf_name(
+        symbols_output.name, "private symbol destination"
+    )
+    output_parent = _open_bound_directory(
+        output.parent, "public release destination parent"
+    )
     try:
-        shutil.copytree(symbols_source, symbols_stage, symlinks=False)
-        if (
-            _tree_records(symbols_stage) != source_symbols
-            or _tree_records(symbols_source) != source_symbols
-        ):
-            raise BundleError("private symbol bundle changed while staged")
-        if phase_hook is not None:
-            phase_hook("before-symbol-commit")
-        _rename_noreplace(symbols_stage, symbols_output)
-        _fsync_directory(symbols_output.parent)
+        symbols_parent = _open_bound_directory(
+            symbols_output.parent, "private symbol destination parent"
+        )
         try:
+            verify_bundle(stage, platform, source_commit, seal_sha256=seal_sha256)
+            source_symbols = _tree_records(symbols_source)
+            if _entry_binding(output_parent, output_leaf) is not None:
+                raise BundleError(f"release destination already exists: {output}")
+
+            existing_symbols = _entry_binding(symbols_parent, symbols_leaf)
+            symbols_stage: Path | None = None
+            if existing_symbols is not None:
+                if not stat.S_ISDIR(existing_symbols.st_mode) or (
+                    _tree_records(symbols_output) != source_symbols
+                ):
+                    raise BundleError(
+                        f"private symbol destination does not match this release: {symbols_output}"
+                    )
+                _durable_tree(symbols_output, "existing private symbol tree")
+                if _tree_records(symbols_output) != source_symbols:
+                    raise BundleError(
+                        f"private symbol destination changed while reused: {symbols_output}"
+                    )
+                os.fsync(symbols_parent)
+            else:
+                symbols_stage = symbols_output.parent / (
+                    f".ctx-symbols.{secrets.token_hex(16)}"
+                )
+                symbols_stage_leaf = _valid_leaf_name(
+                    symbols_stage.name, "private symbol stage"
+                )
+                try:
+                    shutil.copytree(symbols_source, symbols_stage, symlinks=False)
+                    if (
+                        _tree_records(symbols_stage) != source_symbols
+                        or _tree_records(symbols_source) != source_symbols
+                    ):
+                        raise BundleError("private symbol bundle changed while staged")
+                    _durable_tree(symbols_stage, "private symbol staged tree")
+                    if _tree_records(symbols_stage) != source_symbols:
+                        raise BundleError(
+                            "private symbol bundle changed while made durable"
+                        )
+                    if phase_hook is not None:
+                        phase_hook("before-symbol-commit")
+                    try:
+                        _rename_noreplace_at(
+                            symbols_parent,
+                            symbols_stage_leaf,
+                            symbols_parent,
+                            symbols_leaf,
+                            symbols_output,
+                        )
+                        symbols_stage = None
+                        os.fsync(symbols_parent)
+                    except DestinationExists:
+                        if (
+                            _entry_binding(symbols_parent, symbols_leaf) is None
+                            or _tree_records(symbols_output) != source_symbols
+                        ):
+                            raise
+                        _durable_tree(
+                            symbols_output, "existing private symbol tree"
+                        )
+                        if _tree_records(symbols_output) != source_symbols:
+                            raise BundleError(
+                                "private symbol destination changed while reused"
+                            )
+                        os.fsync(symbols_parent)
+                finally:
+                    if (
+                        symbols_stage is not None
+                        and symbols_stage.exists()
+                        and not symbols_stage.is_symlink()
+                    ):
+                        shutil.rmtree(symbols_stage)
+
             if phase_hook is not None:
                 phase_hook("before-public-commit")
-            _rename_noreplace(stage, output)
-            _fsync_directory(output.parent)
-        except BaseException:
-            _rename_noreplace(symbols_output, symbols_stage)
-            _fsync_directory(symbols_output.parent)
-            raise
+            if (
+                _entry_binding(symbols_parent, symbols_leaf) is None
+                or _tree_records(symbols_output) != source_symbols
+            ):
+                raise BundleError("private symbol destination changed before publication")
+            verify_bundle(stage, platform, source_commit, seal_sha256=seal_sha256)
+            _rename_noreplace_at(
+                output_parent, stage_leaf, output_parent, output_leaf, output
+            )
+            os.fsync(output_parent)
+        finally:
+            os.close(symbols_parent)
     finally:
-        if symbols_stage.exists() and not symbols_stage.is_symlink():
-            shutil.rmtree(symbols_stage)
+        os.close(output_parent)
 
 
 def main() -> int:

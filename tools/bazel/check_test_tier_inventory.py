@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Require every Bazel test to be release-routed or tagged manual, exactly."""
+"""Require every Bazel test to be release-routed or tagged manual, exactly.
+
+The manual tag is the explicit reviewed exclusion mechanism for this graph-derived
+policy; there is intentionally no second maintained inventory.
+"""
 
 from __future__ import annotations
 

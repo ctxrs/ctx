@@ -10,6 +10,8 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-stage-assets-test.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
 unset CTX_RELEASE_PINNED_CONSUMER CTX_PUBLIC_RELEASE_SOURCE_COMMIT
 real_python3="$(command -v python3)"
+real_install="$(command -v install)"
+export CTX_REAL_INSTALL="${real_install}"
 
 repo_root="${tmp_dir}/repo"
 mkdir -p "${repo_root}/contracts" "${repo_root}/scripts/release"
@@ -87,7 +89,20 @@ case "$*" in
     ;;
 esac
 SH
-chmod +x "${fake_bin}/bash" "${fake_bin}/python3"
+cat > "${fake_bin}/install" <<'SH'
+#!/bin/sh
+if [ -n "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF:-}" ] \
+  && [ "${3:-}" = "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}" ] \
+  && [ ! -e "${CTX_FAKE_INSTALL_SUBSTITUTION_FLAG:?}" ]; then
+  mv "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}" \
+    "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}.original"
+  mv "${CTX_FAKE_INSTALL_SUBSTITUTE_FOREIGN:?}" \
+    "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}"
+  : >"${CTX_FAKE_INSTALL_SUBSTITUTION_FLAG}"
+fi
+exec "${CTX_REAL_INSTALL:?}" "$@"
+SH
+chmod +x "${fake_bin}/bash" "${fake_bin}/python3" "${fake_bin}/install"
 
 cli_sources=(
   ctx
@@ -129,6 +144,9 @@ do
   printf 'synthetic %s\n' "${asset}" > "${matrix}/${asset}"
   sha256sum "${matrix}/${asset}" | awk '{print $1}' > "${matrix}/${asset}.sha256"
 done
+for asset in "${semantic_runtimes[@]}" "${extra_semantic_assets[@]}"; do
+  printf '{}\n' >"${matrix}/${asset}.asset.json"
+done
 
 for binary in "${cli_sources[@]}"; do
   printf '{}\n' > "${matrix}/${binary}.build-info.json"
@@ -147,13 +165,17 @@ for binary in ctx ctx-linux-aarch64; do
   printf '{"status":"clean"}\n' \
     > "${matrix}/${binary}.dependency-advisory.json"
 done
-for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 freebsd-x64; do
-  printf '{}\n' \
-    > "${matrix}/ctx-onnxruntime-${platform}.tar.zst.asset.json"
-done
 for platform in macos-arm64 macos-x64; do
   printf '{}\n' > "${matrix}/ctx-${platform}.signing.json"
   printf '{}\n' > "${matrix}/ctx-onnxruntime-${platform}.signing.json"
+  printf '{}\n' > "${matrix}/ctx-${platform}.attestation.json"
+  printf 'cms\n' > "${matrix}/ctx-${platform}.attestation.cms"
+  printf '{}\n' > "${matrix}/ctx-onnxruntime-${platform}.attestation.json"
+  printf 'cms\n' > "${matrix}/ctx-onnxruntime-${platform}.attestation.cms"
+  printf '{}\n' \
+    > "${matrix}/ctx-onnxruntime-${platform}.release-attestation.json"
+  printf 'cms\n' \
+    > "${matrix}/ctx-onnxruntime-${platform}.release-attestation.cms"
 done
 
 seal_linux_fixture() {
@@ -304,6 +326,24 @@ CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" \
   --with-semantic "${matrix}" "${semantic_output}"
 assert_exact_assets "${semantic_output}" 34 "${semantic_assets[@]}"
 
+late_copy="${tmp_dir}/late-copy"
+cp -a "${matrix}" "${late_copy}"
+late_copy_leaf="${late_copy}/ctx-freebsd-x64"
+printf 'late foreign CLI bytes\n' >"${tmp_dir}/late-copy-foreign"
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/late-copy-sbom.log" \
+  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/late-copy-build-info.log" \
+  CTX_FAKE_INSTALL_SUBSTITUTE_LEAF="${late_copy_leaf}" \
+  CTX_FAKE_INSTALL_SUBSTITUTE_FOREIGN="${tmp_dir}/late-copy-foreign" \
+  CTX_FAKE_INSTALL_SUBSTITUTION_FLAG="${tmp_dir}/late-copy.flag" \
+  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${late_copy}" "${tmp_dir}/late-copy-output" \
+  >"${tmp_dir}/late-copy.out" 2>"${tmp_dir}/late-copy.err"; then
+  printf 'GitHub stager accepted bytes substituted after source hashing\n' >&2
+  exit 1
+fi
+grep -Fq 'staged artifact checksum mismatch' "${tmp_dir}/late-copy.err"
+test ! -e "${tmp_dir}/late-copy-output"
+
 printf 'retired proof payload\n' > "${matrix}/ctx-linux-x64.native-runtime-proof.txt"
 ignored_proof_output="${tmp_dir}/ignored-proof"
 CTX_FAKE_SBOM_LOG="${tmp_dir}/ignored-proof-sbom.log" \
@@ -405,6 +445,18 @@ if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
 fi
 grep -Fqx sentinel "${tmp_dir}/leaf-sentinel"
 
+cp -a "${matrix}" "${tmp_dir}/linked-record"
+rm "${tmp_dir}/linked-record/ctx-macos-arm64.build-info.json"
+ln -s "${tmp_dir}/leaf-sentinel" \
+  "${tmp_dir}/linked-record/ctx-macos-arm64.build-info.json"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${tmp_dir}/linked-record" \
+  "${tmp_dir}/linked-record-output" >/dev/null 2>&1; then
+  printf 'GitHub stager followed a producer record link\n' >&2
+  exit 1
+fi
+test ! -e "${tmp_dir}/linked-record-output"
+
 mkdir "${tmp_dir}/linked-parent"
 ln -s "${matrix}" "${tmp_dir}/linked-parent/candidate"
 if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
@@ -414,8 +466,8 @@ if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
   exit 1
 fi
 
-# Restore the runtime mutation so a deterministic substitution reaches the
-# validators after the descriptor-anchored snapshot has completed.
+# Restore the runtime mutation so a deterministic source-root substitution
+# reaches the validators after initial candidate verification.
 printf 'synthetic %s\n' ctx-onnxruntime-linux-x64.tar.gz \
   > "${matrix}/ctx-onnxruntime-linux-x64.tar.gz"
 substitution_external="${tmp_dir}/substitution-external"
@@ -432,7 +484,7 @@ if CTX_FAKE_SBOM_LOG="${tmp_dir}/substitution-sbom.log" \
   printf 'GitHub stager reported success after candidate parent substitution\n' >&2
   exit 1
 fi
-grep -Eq 'missing public CLI artifact|checksum mismatch' \
+grep -Eq 'regular non-symlink|missing public CLI artifact|checksum mismatch' \
   "${tmp_dir}/substitution.err" || {
   cat "${tmp_dir}/substitution.err" >&2
   exit 1

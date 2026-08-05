@@ -27,11 +27,42 @@ sha256_file() {
   fi
 }
 
+require_plain_directory() {
+  local path="${1%/}"
+  local label="$2"
+  local parent
+
+  [[ -n "${path}" ]] || path="/"
+  [[ -d "${path}" && ! -L "${path}" ]] || {
+    printf '%s must be a non-symlink directory: %s\n' "${label}" "${path}" >&2
+    exit 1
+  }
+  parent="$(dirname "${path}")"
+  [[ -d "${parent}" && ! -L "${parent}" ]] || {
+    printf '%s parent must be a non-symlink directory: %s\n' \
+      "${label}" "${parent}" >&2
+    exit 1
+  }
+}
+
+require_regular_input() {
+  local path="$1"
+  local label="$2"
+
+  [[ -f "${path}" && ! -L "${path}" ]] || {
+    printf '%s must be a regular non-symlink file: %s\n' \
+      "${label}" "${path}" >&2
+    exit 1
+  }
+}
+
 stage_semantic_assets() {
   local artifact_dir="$1"
   local output_dir="$2"
   local script_dir="$3"
   local temporary artifact source checksum record expected actual
+  local source_checksum_digest source_record_digest
+  local staged_actual staged_checksum_digest staged_record_digest staged_expected
   local artifacts
 
   [[ ! -e "${output_dir}" && ! -L "${output_dir}" ]] || {
@@ -55,14 +86,15 @@ stage_semantic_assets() {
     ctx-onnxruntime-linux-x64-cuda12.tar.zst
   )
 
-  bash "${script_dir}/construct-semantic-release-catalog.sh" \
-    "${artifact_dir}" "${temporary}/semantic-release.env"
   : > "${temporary}/SHA256SUMS"
   for artifact in "${artifacts[@]}"; do
     source="${artifact_dir%/}/${artifact}"
     checksum="${source}.sha256"
     record="${source}.asset.json"
-    [[ -f "${source}" && -s "${checksum}" && -s "${record}" ]] || {
+    require_regular_input "${source}" "Semantic producer archive"
+    require_regular_input "${checksum}" "Semantic producer checksum"
+    require_regular_input "${record}" "Semantic producer record"
+    [[ -s "${checksum}" && -s "${record}" ]] || {
       printf 'incomplete Semantic producer output for %s\n' "${artifact}" >&2
       exit 1
     }
@@ -72,11 +104,42 @@ stage_semantic_assets() {
       printf 'Semantic producer checksum mismatch for %s\n' "${artifact}" >&2
       exit 1
     }
+    source_checksum_digest="$(sha256_file "${checksum}")"
+    source_record_digest="$(sha256_file "${record}")"
     install -m 0644 "${source}" "${temporary}/${artifact}"
+    require_regular_input \
+      "${temporary}/${artifact}" "staged Semantic archive"
+    staged_actual="$(sha256_file "${temporary}/${artifact}")"
+    [[ "${staged_actual}" == "${expected}" ]] || {
+      printf 'staged Semantic archive checksum mismatch for %s\n' "${artifact}" >&2
+      exit 1
+    }
     install -m 0644 "${checksum}" "${temporary}/${artifact}.sha256"
+    require_regular_input \
+      "${temporary}/${artifact}.sha256" "staged Semantic checksum"
+    staged_checksum_digest="$(sha256_file "${temporary}/${artifact}.sha256")"
+    [[ "${staged_checksum_digest}" == "${source_checksum_digest}" ]] || {
+      printf 'staged Semantic checksum changed while copied for %s\n' "${artifact}" >&2
+      exit 1
+    }
+    staged_expected="$(awk 'NR == 1 { print $1 }' "${temporary}/${artifact}.sha256")"
+    [[ "${staged_expected}" =~ ^[0-9a-f]{64}$ && "${staged_expected}" == "${staged_actual}" ]] || {
+      printf 'staged Semantic checksum does not bind archive %s\n' "${artifact}" >&2
+      exit 1
+    }
     install -m 0644 "${record}" "${temporary}/${artifact}.asset.json"
-    printf '%s  %s\n' "${actual}" "${artifact}" >> "${temporary}/SHA256SUMS"
+    require_regular_input \
+      "${temporary}/${artifact}.asset.json" "staged Semantic record"
+    staged_record_digest="$(sha256_file "${temporary}/${artifact}.asset.json")"
+    [[ "${staged_record_digest}" == "${source_record_digest}" ]] || {
+      printf 'staged Semantic record changed while copied for %s\n' "${artifact}" >&2
+      exit 1
+    }
+    printf '%s  %s\n' "${staged_actual}" "${artifact}" >> "${temporary}/SHA256SUMS"
   done
+
+  bash "${script_dir}/construct-semantic-release-catalog.sh" \
+    "${temporary}" "${temporary}/semantic-release.env"
 
   python3 -I "${bundle_tool}" commit-directory \
     --stage-dir "${temporary}" \
@@ -85,4 +148,5 @@ stage_semantic_assets() {
   printf 'staged unsigned Semantic release handoff %s\n' "${output_dir}"
 }
 
+require_plain_directory "${artifact_dir}" "Semantic artifact root"
 stage_semantic_assets "${artifact_dir}" "${output_dir}" "${script_dir}"

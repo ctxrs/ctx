@@ -8,6 +8,8 @@ else
 fi
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-semantic-handoff-test.XXXXXX")"
 trap 'rm -rf -- "${tmp_dir}"' EXIT
+real_install="$(command -v install)"
+export CTX_REAL_INSTALL="${real_install}"
 
 repo_root="${tmp_dir}/repo"
 mkdir -p "${repo_root}/scripts/release"
@@ -24,21 +26,31 @@ matrix="${tmp_dir}/matrix"
 mkdir -p "${fake_bin}" "${matrix}"
 cat >"${fake_bin}/bash" <<'SH'
 #!/bin/sh
-if [ -n "${CTX_FAKE_SUBSTITUTE_LEAF:-}" ] \
-  && [ ! -e "${CTX_FAKE_SUBSTITUTION_FLAG:?}" ]; then
-  mv "${CTX_FAKE_SUBSTITUTE_LEAF}" "${CTX_FAKE_SUBSTITUTE_LEAF}.original"
-  mv "${CTX_FAKE_SUBSTITUTE_FOREIGN:?}" "${CTX_FAKE_SUBSTITUTE_LEAF}"
-  : >"${CTX_FAKE_SUBSTITUTION_FLAG}"
-fi
 case "${1:-}" in
   *construct-semantic-release-catalog.sh)
+    if [ -n "${CTX_FAKE_CATALOG_INPUT_LOG:-}" ]; then
+      printf '%s\n' "$2" >"${CTX_FAKE_CATALOG_INPUT_LOG}"
+    fi
     printf 'SEMANTIC_ASSET_COUNT=10\n' >"$3"
     exit 0
     ;;
 esac
 exec /bin/bash "$@"
 SH
-chmod +x "${fake_bin}/bash"
+cat >"${fake_bin}/install" <<'SH'
+#!/bin/sh
+if [ -n "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF:-}" ] \
+  && [ "${3:-}" = "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}" ] \
+  && [ ! -e "${CTX_FAKE_INSTALL_SUBSTITUTION_FLAG:?}" ]; then
+  mv "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}" \
+    "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}.original"
+  mv "${CTX_FAKE_INSTALL_SUBSTITUTE_FOREIGN:?}" \
+    "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}"
+  : >"${CTX_FAKE_INSTALL_SUBSTITUTION_FLAG}"
+fi
+exec "${CTX_REAL_INSTALL:?}" "$@"
+SH
+chmod +x "${fake_bin}/bash" "${fake_bin}/install"
 
 semantic_assets=(
   ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
@@ -66,14 +78,19 @@ run_stage() {
 success_output="${tmp_dir}/success"
 CTX_RELEASE_PINNED_CONSUMER=irrelevant \
   CTX_PUBLIC_RELEASE_SOURCE_COMMIT="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+  CTX_FAKE_CATALOG_INPUT_LOG="${tmp_dir}/catalog-input.log" \
   run_stage "${matrix}" "${success_output}"
 test "$(find "${success_output}" -maxdepth 1 -type f | wc -l)" -eq 32
 test "$(wc -l <"${success_output}/SHA256SUMS")" -eq 10
 grep -Fx 'SEMANTIC_ASSET_COUNT=10' "${success_output}/semantic-release.env"
+test "$(cat "${tmp_dir}/catalog-input.log")" != "${matrix}"
 for asset in "${semantic_assets[@]}"; do
   cmp "${matrix}/${asset}" "${success_output}/${asset}"
   cmp "${matrix}/${asset}.sha256" "${success_output}/${asset}.sha256"
   cmp "${matrix}/${asset}.asset.json" "${success_output}/${asset}.asset.json"
+  grep -Fqx \
+    "$(sha256sum "${success_output}/${asset}" | awk '{print $1}')  ${asset}" \
+    "${success_output}/SHA256SUMS"
 done
 test ! -e "${matrix}/ctx-linux-x64.release-complete.json"
 test ! -e "${matrix}/ctx-linux-aarch64.release-complete.json"
@@ -86,7 +103,7 @@ if run_stage "${missing}" "${tmp_dir}/missing-output" \
   printf 'Semantic handoff accepted a missing asset\n' >&2
   exit 1
 fi
-grep -Eq 'incomplete|No such file' "${tmp_dir}/missing.err"
+grep -Eq 'incomplete|No such file|regular non-symlink' "${tmp_dir}/missing.err"
 test ! -e "${tmp_dir}/missing-output"
 
 bad_checksum="${tmp_dir}/bad-checksum"
@@ -117,16 +134,32 @@ race="${tmp_dir}/race"
 cp -a "${matrix}" "${race}"
 race_leaf="${race}/${semantic_assets[3]}"
 printf 'foreign runtime bytes\n' >"${tmp_dir}/foreign-runtime"
-if CTX_FAKE_SUBSTITUTE_LEAF="${race_leaf}" \
-  CTX_FAKE_SUBSTITUTE_FOREIGN="${tmp_dir}/foreign-runtime" \
-  CTX_FAKE_SUBSTITUTION_FLAG="${tmp_dir}/race.flag" \
+if CTX_FAKE_INSTALL_SUBSTITUTE_LEAF="${race_leaf}" \
+  CTX_FAKE_INSTALL_SUBSTITUTE_FOREIGN="${tmp_dir}/foreign-runtime" \
+  CTX_FAKE_INSTALL_SUBSTITUTION_FLAG="${tmp_dir}/race.flag" \
   run_stage "${race}" "${tmp_dir}/race-output" \
   >"${tmp_dir}/race.out" 2>"${tmp_dir}/race.err"; then
   printf 'Semantic handoff ignored a source substitution\n' >&2
   exit 1
 fi
-grep -Fq 'checksum mismatch' "${tmp_dir}/race.err"
+grep -Fq 'staged Semantic archive checksum mismatch' "${tmp_dir}/race.err"
 test ! -e "${tmp_dir}/race-output"
+
+for linked_suffix in .sha256 .asset.json; do
+  linked_sidecar="${tmp_dir}/linked-sidecar-${linked_suffix#.}"
+  cp -a "${matrix}" "${linked_sidecar}"
+  rm "${linked_sidecar}/${semantic_assets[4]}${linked_suffix}"
+  ln -s "${sentinel}" \
+    "${linked_sidecar}/${semantic_assets[4]}${linked_suffix}"
+  if run_stage \
+    "${linked_sidecar}" \
+    "${linked_sidecar}-output" >/dev/null 2>&1; then
+    printf 'Semantic handoff followed a producer sidecar link: %s\n' \
+      "${linked_suffix}" >&2
+    exit 1
+  fi
+  test ! -e "${linked_sidecar}-output"
+done
 
 collision="${tmp_dir}/collision"
 mkdir "${collision}"

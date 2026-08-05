@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -186,13 +187,15 @@ class ReleaseBundleTests(unittest.TestCase):
     def test_commit_renames_exact_stage_and_preserves_recursive_symbols(self) -> None:
         expected_ctx = (self.stage / "ctx").read_bytes()
         with mock.patch.object(
-            BUNDLE, "_fsync_directory", wraps=BUNDLE._fsync_directory
-        ) as sync_directory:
+            BUNDLE, "_durable_tree", wraps=BUNDLE._durable_tree
+        ) as durable_tree:
             self.commit()
-        self.assertIn(
-            mock.call(self.symbols_output.parent), sync_directory.call_args_list
+        self.assertTrue(
+            any(
+                call.args[1] == "private symbol staged tree"
+                for call in durable_tree.call_args_list
+            )
         )
-        self.assertIn(mock.call(self.output.parent), sync_directory.call_args_list)
         self.assertFalse(self.stage.exists())
         self.assertEqual((self.output / "ctx").read_bytes(), expected_ctx)
         self.assertEqual((self.output / "ctx").stat().st_mode & 0o777, 0o755)
@@ -206,18 +209,47 @@ class ReleaseBundleTests(unittest.TestCase):
             seal_sha256=self.seal(self.output),
         )
 
-    def test_generic_directory_commit_fsyncs_destination_parent(self) -> None:
+    def test_generic_directory_commit_makes_nested_tree_durable_and_fsyncs_bound_parent(self) -> None:
         stage = self.output.parent / ".generic-stage"
-        stage.mkdir()
-        (stage / "asset").write_text("asset\n")
+        (stage / "nested").mkdir(parents=True)
+        (stage / "nested/asset").write_text("asset\n")
         output = self.output.parent / "generic-output"
         with mock.patch.object(
             BUNDLE, "_fsync_directory", wraps=BUNDLE._fsync_directory
-        ) as sync_directory:
+        ) as sync_directory, mock.patch.object(
+            BUNDLE, "_rename_noreplace_at", wraps=BUNDLE._rename_noreplace_at
+        ) as rename, mock.patch.object(
+            BUNDLE.os, "fsync", wraps=os.fsync
+        ) as fsync:
             BUNDLE.commit_directory(stage, output)
-        sync_directory.assert_called_once_with(output.parent)
+        self.assertEqual(
+            sync_directory.call_args_list,
+            [mock.call(stage / "nested"), mock.call(stage)],
+        )
+        source_parent, source_leaf, destination_parent, destination_leaf, _ = (
+            rename.call_args.args
+        )
+        self.assertEqual(source_parent, destination_parent)
+        self.assertEqual(source_leaf, ".generic-stage")
+        self.assertEqual(destination_leaf, "generic-output")
+        self.assertIn(mock.call(destination_parent), fsync.call_args_list)
+        self.assertEqual((output / "nested/asset").read_text(), "asset\n")
 
-    def test_public_collision_rolls_back_private_commit(self) -> None:
+    def test_generic_commit_rejects_symlinked_destination_parent(self) -> None:
+        outside = self.root / "generic-outside"
+        outside.mkdir()
+        (outside / ".stage").mkdir()
+        (outside / ".stage/asset").write_text("asset\n")
+        linked_parent = self.root / "generic-linked-parent"
+        linked_parent.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(BUNDLE.BundleError, "symlink|non-directory"):
+            BUNDLE.commit_directory(
+                linked_parent / ".stage", linked_parent / "output"
+            )
+        self.assertFalse((outside / "output").exists())
+        self.assertTrue((outside / ".stage").is_dir())
+
+    def test_public_collision_leaves_exact_private_commit_for_retry(self) -> None:
         def collide(phase: str) -> None:
             if phase == "before-public-commit":
                 self.output.mkdir()
@@ -226,8 +258,37 @@ class ReleaseBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(BUNDLE.BundleError, "already exists"):
             self.commit(collide)
         self.assertEqual((self.output / "sentinel").read_text(), "sentinel\n")
-        self.assertFalse(self.symbols_output.exists())
+        self.assertEqual(
+            BUNDLE._tree_records(self.symbols_output),
+            BUNDLE._tree_records(self.symbols),
+        )
         self.assertTrue(self.stage.is_dir())
+
+    def test_existing_exact_symbols_are_reused_but_mismatch_fails_closed(self) -> None:
+        shutil.copytree(self.symbols, self.symbols_output)
+        self.commit()
+        self.assertTrue(self.output.is_dir())
+        self.assertEqual(
+            BUNDLE._tree_records(self.symbols_output),
+            BUNDLE._tree_records(self.symbols),
+        )
+
+        retry_output = self.root / "retry/candidate"
+        retry_output.parent.mkdir()
+        retry_stage = retry_output.parent / ".stage"
+        retry_seal = self._make_stage(retry_stage)
+        (self.symbols_output / "manifest.json").write_text("different\n")
+        with self.assertRaisesRegex(BUNDLE.BundleError, "does not match"):
+            BUNDLE.commit_bundle(
+                retry_stage,
+                retry_output,
+                self.symbols,
+                self.symbols_output,
+                self.platform,
+                self.source_commit,
+                seal_sha256=retry_seal,
+            )
+        self.assertFalse(retry_output.exists())
 
     def test_symbol_collision_happens_before_public_commit(self) -> None:
         def collide(phase: str) -> None:
@@ -257,7 +318,21 @@ class ReleaseBundleTests(unittest.TestCase):
                 seal_sha256=seal,
             )
 
-    def test_commit_rechecks_stage_against_pre_smoke_seal(self) -> None:
+    def test_before_public_hook_mutation_fails_final_verify_without_publication(self) -> None:
+        def mutate(phase: str) -> None:
+            if phase == "before-public-commit":
+                (self.stage / "ctx").write_bytes(b"mutated after smoke\n")
+
+        with self.assertRaisesRegex(BUNDLE.BundleError, "does not match"):
+            self.commit(mutate)
+        self.assertFalse(self.output.exists())
+        self.assertTrue(self.stage.is_dir())
+        self.assertEqual(
+            BUNDLE._tree_records(self.symbols_output),
+            BUNDLE._tree_records(self.symbols),
+        )
+
+    def test_commit_rechecks_substituted_stage_against_pre_smoke_seal(self) -> None:
         original_seal = self.seal()
         replacement = self.output.parent / ".replacement"
         self._make_stage(replacement)
@@ -269,7 +344,7 @@ class ReleaseBundleTests(unittest.TestCase):
         original = self.output.parent / ".original"
 
         def substitute(phase: str) -> None:
-            if phase == "after-verification":
+            if phase == "before-public-commit":
                 os.rename(self.stage, original)
                 os.rename(replacement, self.stage)
 
@@ -285,7 +360,10 @@ class ReleaseBundleTests(unittest.TestCase):
                 phase_hook=substitute,
             )
         self.assertFalse(self.output.exists())
-        self.assertFalse(self.symbols_output.exists())
+        self.assertEqual(
+            BUNDLE._tree_records(self.symbols_output),
+            BUNDLE._tree_records(self.symbols),
+        )
 
     def test_recursive_symbol_link_is_rejected_without_touching_target(self) -> None:
         outside = self.root / "outside"
@@ -296,7 +374,7 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertEqual(outside.read_text(), "sentinel\n")
         self.assertFalse(self.output.exists())
 
-    def test_preflight_resolves_defaults_and_rejects_symlinked_parent(self) -> None:
+    def test_preflight_allows_existing_symbol_directory_and_rejects_symlinked_parent(self) -> None:
         output, symbols = BUNDLE.preflight_destinations(
             self.repo, "target/release", None
         )
@@ -305,12 +383,60 @@ class ReleaseBundleTests(unittest.TestCase):
         outside = self.root / "outside-parent"
         outside.mkdir()
         (self.repo / "linked").symlink_to(outside, target_is_directory=True)
-        with self.assertRaisesRegex(BUNDLE.BundleError, "link or file"):
+        with self.assertRaisesRegex(BUNDLE.BundleError, "symlink|non-directory"):
             BUNDLE.preflight_destinations(
                 self.repo,
                 "linked/candidate",
                 str(self.root / "private/other"),
             )
+        self.assertEqual(list(outside.iterdir()), [])
+
+        self.symbols_output.mkdir()
+        self.assertEqual(
+            BUNDLE.preflight_destinations(
+                self.repo,
+                "target/another-release",
+                str(self.symbols_output),
+            )[1],
+            self.symbols_output,
+        )
+
+    def test_commit_rejects_symlinked_destination_parent_before_symbols(self) -> None:
+        outside = self.root / "outside-destination"
+        outside.mkdir()
+        linked_parent = self.root / "linked-destination"
+        linked_parent.symlink_to(outside, target_is_directory=True)
+        linked_stage = linked_parent / ".stage"
+        linked_seal = self._make_stage(outside / ".stage")
+        with self.assertRaisesRegex(BUNDLE.BundleError, "symlink|non-directory"):
+            BUNDLE.commit_bundle(
+                linked_stage,
+                linked_parent / "candidate",
+                self.symbols,
+                self.symbols_output,
+                self.platform,
+                self.source_commit,
+                seal_sha256=linked_seal,
+            )
+        self.assertFalse((outside / "candidate").exists())
+        self.assertFalse(self.symbols_output.exists())
+
+    def test_commit_rejects_symlinked_symbol_parent_before_publication(self) -> None:
+        outside = self.root / "outside-symbols"
+        outside.mkdir()
+        linked_parent = self.root / "linked-symbols"
+        linked_parent.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(BUNDLE.BundleError, "symlink|non-directory"):
+            BUNDLE.commit_bundle(
+                self.stage,
+                self.output,
+                self.symbols,
+                linked_parent / "symbols",
+                self.platform,
+                self.source_commit,
+                seal_sha256=self.seal(),
+            )
+        self.assertFalse(self.output.exists())
         self.assertEqual(list(outside.iterdir()), [])
 
 

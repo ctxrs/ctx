@@ -443,7 +443,7 @@ grep -F -- '--source-commit "${source_commit}"' \
   scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'verify_and_stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64' \
   scripts/stage-github-release-assets.sh >/dev/null
-grep -F 'required ONNX Runtime sidecar missing' \
+grep -F 'required ONNX Runtime sidecar' \
   scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' \
   scripts/check-github-release-assets.sh >/dev/null
