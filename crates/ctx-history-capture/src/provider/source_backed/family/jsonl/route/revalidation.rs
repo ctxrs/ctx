@@ -5,6 +5,8 @@ pub(super) fn reset_terminal(resident: &Mutex<FamilyResident>) -> SourceBackedRo
         .lock()
         .map_err(|_| route_internal("JSONL resident catalog lock was poisoned"))?;
     resident.terminal_sources.clear();
+    resident.absent_sources.clear();
+    resident.opening_membership = None;
     resident.certified_inventory = None;
     resident.opening_inventory = None;
     Ok(())
@@ -45,13 +47,22 @@ pub(super) fn revalidate_complete_inventory(
     resident: &Mutex<FamilyResident>,
     expected_inventory: &CertifiedSourceInventory,
 ) -> Result<bool> {
-    let (owned_sources, expected_sources, certified_inventory, opening_inventory) = {
+    let (
+        owned_sources,
+        expected_sources,
+        absent_sources,
+        opening_membership,
+        certified_inventory,
+        opening_inventory,
+    ) = {
         let resident = resident.lock().map_err(|_| {
             CaptureError::InvalidPayload("JSONL resident catalog lock was poisoned".to_owned())
         })?;
         (
             resident.owned_sources.clone(),
             resident.terminal_sources.clone(),
+            resident.absent_sources.clone(),
+            resident.opening_membership.clone(),
             resident.certified_inventory.clone(),
             resident.opening_inventory.clone(),
         )
@@ -62,70 +73,37 @@ pub(super) fn revalidate_complete_inventory(
     let Some(opening_inventory) = opening_inventory else {
         return Ok(false);
     };
-    if adapter.inventory_mode() == JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions {
-        opening_inventory.revalidate_root_same_object()?;
+    let Some(opening_membership) = opening_membership else {
+        return Ok(false);
+    };
+    opening_inventory.revalidate_terminal_root(root, adapter.inventory_mode())?;
+
+    let current_membership = adapter.observe_terminal_membership(root, &opening_inventory)?;
+    if !opening_membership.admits(
+        &current_membership,
+        adapter.inventory_mode(),
+        &expected_sources,
+        &owned_sources,
+    ) {
+        return Ok(false);
     }
 
-    // This is the single terminal filesystem witness for the route. Earlier
-    // callbacks only bind writer targets; this callback rediscovers membership
-    // and verifies every admitted leaf. Framed JSONL may grow only when its
-    // exact certified prefix remains unchanged.
-    let current = adapter.discover(root)?;
-    if current.root_missing()
-        && adapter.root_missing_mode() == JsonlFamilyRootMissingMode::Unavailable
-    {
-        return Ok(false);
+    // This is the single terminal filesystem witness for the route. It observes
+    // only retained membership routes and their physical proofs; provider
+    // discovery, identity probing, parsing, and content cataloging are admission
+    // work and are never repeated here.
+    for evidence in expected_sources.values() {
+        evidence.terminal_proof.revalidate()?;
     }
-    if !current.retains_authorities_from(&opening_inventory) {
-        return Ok(false);
+    for dependency in &opening_inventory.exact_dependencies {
+        dependency.revalidate()?;
     }
-    let mut current_by_descriptor = HashMap::with_capacity(current.leaves().len());
-    for leaf in current.leaves() {
-        if current_by_descriptor
-            .insert(leaf.source().exact_descriptor_digest(), leaf)
-            .is_some()
-        {
+    for absent in &absent_sources {
+        if !absent.remains_absent()? {
             return Ok(false);
         }
     }
-    if adapter.inventory_mode() == JsonlFamilyInventoryMode::Exact {
-        let current_inventory = current.certify_selected_against(
-            &current,
-            expected_sources
-                .values()
-                .map(|evidence| evidence.certificate.observation().source().clone())
-                .collect(),
-        )?;
-        if current_inventory != *expected_inventory {
-            return Ok(false);
-        }
-    }
-    for (digest, evidence) in &expected_sources {
-        let Some(leaf) = current_by_descriptor.get(digest).copied() else {
-            return Ok(false);
-        };
-        if !leaf
-            .source()
-            .exact_descriptor_eq(evidence.certificate.observation().source())
-        {
-            return Ok(false);
-        }
-        if !adapter.revalidate_leaf(leaf, &evidence.certificate, evidence.checkpoint.as_ref())? {
-            return Ok(false);
-        }
-    }
-    for (digest, owned) in &owned_sources {
-        if expected_sources.contains_key(digest) {
-            continue;
-        }
-        if current_by_descriptor
-            .get(digest)
-            .is_some_and(|current| current.source().exact_descriptor_eq(owned))
-        {
-            return Ok(false);
-        }
-    }
-    current.revalidate_root()?;
+    opening_inventory.revalidate_terminal_root(root, adapter.inventory_mode())?;
     Ok(true)
 }
 

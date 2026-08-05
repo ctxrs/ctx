@@ -46,6 +46,8 @@ use super::{
 };
 #[cfg(test)]
 use crate::provider::codex::catalog::discover_codex_session_catalog;
+#[cfg(test)]
+use crate::provider::codex::nativepath::revalidate_codex_source_observation;
 use crate::{
     common::io::{
         open_provider_source_file, OpenedProviderSourcePath, ProviderSourceRoot,
@@ -53,8 +55,7 @@ use crate::{
         PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
     },
     provider::codex::{
-        catalog::catalog_codex_explicit_session_opened,
-        nativepath::{opened_codex_file_observation, revalidate_codex_source_observation},
+        catalog::catalog_codex_explicit_session_opened, nativepath::opened_codex_file_observation,
     },
     CaptureError, CODEX_SESSION_SOURCE_FORMAT,
 };
@@ -134,6 +135,7 @@ pub enum CodexSourceBackedErrorV0 {
     ExplicitSourceIdentityChanged,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct CodexTerminalSourceEvidenceV0 {
     pub(crate) source: CodexCatalogSource,
@@ -142,6 +144,7 @@ pub(crate) struct CodexTerminalSourceEvidenceV0 {
     pub(crate) full_revision_sha256: [u8; 32],
 }
 
+#[cfg(test)]
 impl CodexTerminalSourceEvidenceV0 {
     pub(crate) fn new(
         mut source: CodexCatalogSource,
@@ -400,9 +403,8 @@ use catalog::discover_codex_session_tree_inventory_v0;
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
     discover_codex_session_tree_inventory_from_plans_v0,
-    install_after_codex_catalog_authority_hook, install_after_codex_directory_visit_hook,
-    install_after_codex_metadata_inventory_hook, managed_codex_session_source, writer_base_sources,
-    CodexCatalogWorkV0,
+    install_after_codex_catalog_authority_hook, install_after_codex_metadata_inventory_hook,
+    managed_codex_session_source, writer_base_sources, CodexCatalogWorkV0,
 };
 pub(crate) use catalog::{
     observe_codex_explicit_session_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
@@ -415,7 +417,6 @@ use cold::{
 };
 #[cfg(test)]
 use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
-use identity::source_observation;
 use identity::{
     certify_scan, codex_core_record, codex_session_identity, codex_source_key, decode_append_proof,
     validate_owner, CodexEventIdentityStateV0,

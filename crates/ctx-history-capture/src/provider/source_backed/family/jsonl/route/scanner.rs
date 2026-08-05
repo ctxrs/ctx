@@ -1,5 +1,7 @@
 use ctx_history_core::{CertifiedSource, CertifiedSourceAppend};
 
+use super::JsonlFamilyTerminalProof;
+
 use crate::repository_attribution::RepositoryAttributor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,20 +50,29 @@ impl JsonlFamilyWorkerContext {
 pub(crate) struct JsonlFamilyOptimizedLeafOutcome {
     pub(super) certificate: CertifiedSource,
     pub(super) append: Option<CertifiedSourceAppend>,
+    pub(super) terminal_proof: JsonlFamilyTerminalProof,
 }
 
 impl JsonlFamilyOptimizedLeafOutcome {
-    pub(crate) fn replacement(certificate: CertifiedSource) -> Self {
+    pub(crate) fn replacement(
+        certificate: CertifiedSource,
+        terminal_proof: JsonlFamilyTerminalProof,
+    ) -> Self {
         Self {
             certificate,
             append: None,
+            terminal_proof,
         }
     }
 
-    pub(crate) fn append(append: CertifiedSourceAppend) -> Self {
+    pub(crate) fn append(
+        append: CertifiedSourceAppend,
+        terminal_proof: JsonlFamilyTerminalProof,
+    ) -> Self {
         Self {
             certificate: append.current().clone(),
             append: Some(append),
+            terminal_proof,
         }
     }
 }

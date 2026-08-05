@@ -2,7 +2,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Barrier},
 };
 
 use ctx_history_core::{CoreRecord, TypedKey};
@@ -127,6 +127,87 @@ fn active_source_family_contract_prompt_history_rejects_same_content_pathname_re
     let retained = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(retained.generation_id(), initial.commit.generation_id);
     assert_eq!(retained.document_count(), 1);
+}
+
+#[test]
+fn active_source_family_contract_prompt_history_defers_live_suffix_exactly_once() {
+    let temp = tempdir().unwrap();
+    let history = temp.path().join("history.jsonl");
+    write_lines(
+        &history,
+        &[prompt_line("session", 1_700_000_000, "frozen prompt")],
+    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&history, [14; 32]);
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::new(input).unwrap();
+    let driver = jsonl_family_driver(Arc::new(adapter.clone()), history.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(
+        SourceBackedRoute::automatic(
+            ProviderSource {
+                provider: CaptureProvider::Codex,
+                path: history.clone(),
+                exists: true,
+                source_format: SOURCE_FORMAT,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )
+        .unwrap(),
+    );
+    let index_root = temp.path().join("index");
+    let cold =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let worker_barrier = Arc::clone(&barrier);
+    let append_path = history.clone();
+    let worker = std::thread::spawn(move || {
+        worker_barrier.wait();
+        append(
+            &append_path,
+            &prompt_line("session", 1_700_000_001, "deferred prompt"),
+        );
+        worker_barrier.wait();
+    });
+    adapter.set_after_scan_hook(move || {
+        barrier.wait();
+        barrier.wait();
+    });
+
+    let deferred =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    worker.join().unwrap();
+    assert!(
+        deferred.failed_routes.is_empty(),
+        "unexpected route failures: {:?}",
+        deferred.failed_routes
+    );
+    assert_eq!(deferred.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        1
+    );
+
+    let caught_up =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert!(caught_up.failed_routes.is_empty());
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        2
+    );
+
+    let no_op =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(no_op.commit.generation_id, caught_up.commit.generation_id);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        2
+    );
 }
 
 #[test]

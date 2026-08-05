@@ -31,7 +31,7 @@ use crate::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
             JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
             JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjector, JsonlFamilyPublication,
-            JsonlFamilyRootMissingMode, JsonlFamilyWorkerContext,
+            JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
         },
         SourceBackedRouteErrorKind,
     },
@@ -43,11 +43,10 @@ mod projection;
 mod snapshot;
 use path::absolute_lexical_path;
 use projection::{core_record, retained_record_bytes};
-pub(crate) use snapshot::revalidate_codex_prompt_history_source_backed_v0;
 use snapshot::{
     decode_checkpoint, exact_ordinary_file_observation_matches, observation_wire,
-    opened_file_from_start, stable_current_ordinary_file_observation, verify_frozen_prefix,
-    CheckpointV0, CodexPromptHistoryFrozenSnapshotV0,
+    opened_file_from_start, stable_current_ordinary_file_observation, terminal_prefix,
+    verify_frozen_prefix, CheckpointV0, CodexPromptHistoryFrozenSnapshotV0,
 };
 
 const SOURCE_FORMAT: &str = "codex_history_jsonl";
@@ -150,10 +149,11 @@ pub(crate) struct CodexPromptHistorySourceBackedPageV0 {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CodexPromptHistorySourceBackedScanV0 {
-    pub(crate) source: CodexPromptHistorySourceBackedSourceV0,
     pub(crate) certificate: CertifiedSource,
     pub(crate) disposition: CodexPromptHistorySourceBackedDispositionV0,
     pub(crate) emitted_documents: u64,
+    terminal_prefix_bytes: u64,
+    terminal_prefix_sha256: [u8; 32],
     #[cfg(test)]
     pub(crate) terminal: bool,
 }
@@ -258,7 +258,6 @@ pub(crate) fn observe_codex_prompt_history_source_backed_explicit_v0(
 #[derive(Default)]
 struct CodexPromptHistoryJsonlFamilyStateV0 {
     discovered_source: Option<CodexPromptHistorySourceBackedSourceV0>,
-    terminal_source: Option<CodexPromptHistorySourceBackedSourceV0>,
     #[cfg(test)]
     after_scan_hook: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -298,22 +297,6 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
             "prompt-history after-scan hook is already installed"
         );
         state.after_scan_hook = Some(Box::new(hook));
-    }
-
-    fn remember_scanned_source(
-        &self,
-        source: CodexPromptHistorySourceBackedSourceV0,
-    ) -> crate::Result<()> {
-        let mut state = self.state.lock().map_err(|_| prompt_family_state_error())?;
-        state.terminal_source = Some(source);
-        #[cfg(test)]
-        let after_scan_hook = state.after_scan_hook.take();
-        drop(state);
-        #[cfg(test)]
-        if let Some(hook) = after_scan_hook {
-            hook();
-        }
-        Ok(())
     }
 
     fn discover_family(&self, route_path: &Path) -> crate::Result<JsonlFamilyInventory> {
@@ -406,10 +389,18 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
             })
             .map_err(prompt_family_capture_error)?;
         validate_prompt_family_scan_counts(&scan, base)?;
+        let terminal_proof = JsonlFamilyTerminalProof::frozen_prefix(
+            leaf,
+            scan.terminal_prefix_bytes,
+            scan.terminal_prefix_sha256,
+        )?;
         let outcome = match scan.disposition {
             CodexPromptHistorySourceBackedDispositionV0::Cold
             | CodexPromptHistorySourceBackedDispositionV0::Replacement => {
-                JsonlFamilyOptimizedLeafOutcome::replacement(scan.certificate.clone())
+                JsonlFamilyOptimizedLeafOutcome::replacement(
+                    scan.certificate.clone(),
+                    terminal_proof,
+                )
             }
             CodexPromptHistorySourceBackedDispositionV0::Unchanged
             | CodexPromptHistorySourceBackedDispositionV0::Append => {
@@ -430,10 +421,19 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
                     *frontier.certified_prefix_digest(),
                 )
                 .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-                JsonlFamilyOptimizedLeafOutcome::append(append)
+                JsonlFamilyOptimizedLeafOutcome::append(append, terminal_proof)
             }
         };
-        self.remember_scanned_source(scan.source)?;
+        #[cfg(test)]
+        if let Some(hook) = self
+            .state
+            .lock()
+            .map_err(|_| prompt_family_state_error())?
+            .after_scan_hook
+            .take()
+        {
+            hook();
+        }
         Ok(outcome)
     }
 }
@@ -507,27 +507,6 @@ impl JsonlFamilyAdapter for CodexPromptHistoryJsonlFamilyAdapterV0 {
 
     fn base_source_path(&self, _certificate: &CertifiedSource) -> crate::Result<PathBuf> {
         Ok(self.route_path.clone())
-    }
-
-    fn revalidate_leaf(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        certificate: &CertifiedSource,
-        _checkpoint: Option<&crate::provider::source_backed::family::jsonl::JsonlCheckpoint>,
-    ) -> crate::Result<bool> {
-        let source = self
-            .state
-            .lock()
-            .map_err(|_| prompt_family_state_error())?
-            .terminal_source
-            .clone();
-        let Some(source) = source else {
-            return Ok(false);
-        };
-        if !source.source().exact_descriptor_eq(leaf.source()) {
-            return Ok(false);
-        }
-        Ok(revalidate_codex_prompt_history_source_backed_v0(&source, certificate).is_ok())
     }
 }
 
@@ -674,11 +653,13 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
     if let Some(prior) = prior {
         if exact_ordinary_file_observation_matches(opening_metadata, opening_token, prior)? {
             let _checkpoint = decode_checkpoint(prior)?;
+            let (terminal_prefix_bytes, terminal_prefix_sha256) = terminal_prefix(prior)?;
             return Ok(CodexPromptHistorySourceBackedScanV0 {
-                source,
                 certificate: prior.clone(),
                 disposition: CodexPromptHistorySourceBackedDispositionV0::Unchanged,
                 emitted_documents: 0,
+                terminal_prefix_bytes,
+                terminal_prefix_sha256,
                 #[cfg(test)]
                 terminal: _checkpoint.terminal,
             });
@@ -758,10 +739,11 @@ fn scan_codex_prompt_history_source_backed_inner_v0(
     verify_frozen_prefix(&source.opened, frozen_len, analysis.whole_source_digest)?;
 
     Ok(CodexPromptHistorySourceBackedScanV0 {
-        source,
         certificate,
         disposition,
         emitted_documents,
+        terminal_prefix_bytes: frozen_len,
+        terminal_prefix_sha256: analysis.whole_source_digest,
         #[cfg(test)]
         terminal: analysis.terminal,
     })

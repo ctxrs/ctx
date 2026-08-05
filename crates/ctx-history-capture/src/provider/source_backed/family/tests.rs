@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::jsonl::*;
-use crate::common::io::open_provider_source_file;
+use crate::{common::io::open_provider_source_file, CaptureError};
 
 fn opened(path: &std::path::Path) -> Arc<crate::common::io::OpenedProviderSourceFile> {
     Arc::new(open_provider_source_file(path).unwrap())
@@ -478,6 +478,128 @@ fn active_source_family_contract_jsonl_rewrite_truncate_and_replacement_fail_clo
         revalidation.is_err(),
         "a rewrite between prefix hashing and terminal observation must fail closed"
     );
+}
+
+#[test]
+fn active_source_family_contract_jsonl_terminal_proof_allows_continuous_append() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("events.jsonl");
+    let initial = b"{\"n\":1}\n{\"n\":2}\n";
+    fs::write(&path, initial).unwrap();
+    let (_, _, checkpoint) = drain(&path, None);
+    let source = opened(&path);
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"n\":3}\n")
+        .unwrap();
+
+    let first = Arc::new(std::sync::Barrier::new(2));
+    let second = Arc::new(std::sync::Barrier::new(2));
+    let worker_first = Arc::clone(&first);
+    let worker_second = Arc::clone(&second);
+    let append_path = path.clone();
+    let worker = std::thread::spawn(move || {
+        worker_first.wait();
+        OpenOptions::new()
+            .append(true)
+            .open(&append_path)
+            .unwrap()
+            .write_all(b"{\"n\":4}\n")
+            .unwrap();
+        worker_first.wait();
+
+        worker_second.wait();
+        OpenOptions::new()
+            .append(true)
+            .open(&append_path)
+            .unwrap()
+            .write_all(b"{\"n\":5}\n")
+            .unwrap();
+        worker_second.wait();
+    });
+    set_after_jsonl_prefix_hash_hook(move || {
+        first.wait();
+        first.wait();
+    });
+    set_after_second_jsonl_prefix_hash_hook(move || {
+        second.wait();
+        second.wait();
+    });
+
+    reset_jsonl_prefix_hash_bytes();
+    revalidate_frozen_prefix(
+        &path,
+        source.as_ref(),
+        checkpoint.source_observation(),
+        checkpoint.complete_prefix_end(),
+        *checkpoint.complete_prefix_sha256(),
+    )
+    .unwrap();
+    worker.join().unwrap();
+
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        (initial.len() + 3 * b"{\"n\":3}\n".len()) as u64
+    );
+    assert_eq!(
+        jsonl_prefix_hash_bytes(),
+        3 * checkpoint.complete_prefix_end(),
+        "a growing source needs exactly the shared verifier's three prefix proofs"
+    );
+}
+
+#[test]
+fn active_source_family_contract_jsonl_terminal_proof_rejects_rewrite_plus_append() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("events.jsonl");
+    fs::write(&path, b"{\"n\":1}\n{\"n\":2}\n").unwrap();
+    let (_, _, checkpoint) = drain(&path, None);
+    let source = opened(&path);
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"n\":3}\n")
+        .unwrap();
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let worker_barrier = Arc::clone(&barrier);
+    let rewrite_path = path.clone();
+    let worker = std::thread::spawn(move || {
+        worker_barrier.wait();
+        OpenOptions::new()
+            .write(true)
+            .open(&rewrite_path)
+            .unwrap()
+            .write_all(b"{\"n\":9}\n")
+            .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&rewrite_path)
+            .unwrap()
+            .write_all(b"{\"n\":4}\n")
+            .unwrap();
+        worker_barrier.wait();
+    });
+    set_after_second_jsonl_prefix_hash_hook(move || {
+        barrier.wait();
+        barrier.wait();
+    });
+
+    let revalidation = revalidate_frozen_prefix(
+        &path,
+        source.as_ref(),
+        checkpoint.source_observation(),
+        checkpoint.complete_prefix_end(),
+        *checkpoint.complete_prefix_sha256(),
+    );
+    worker.join().unwrap();
+    assert!(matches!(
+        revalidation,
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
 }
 
 #[test]

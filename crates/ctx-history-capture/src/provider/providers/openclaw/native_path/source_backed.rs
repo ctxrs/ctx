@@ -30,8 +30,8 @@ use crate::{
         normalization::{provider_explicit_result_value_text, provider_timestamp_value},
         source_backed::family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
-            JsonlRecordRef,
+            JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyTerminalProof,
+            JsonlFamilyWorkerContext, JsonlRecordRef,
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
@@ -132,6 +132,8 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
         let authority = Arc::new(ProviderSourceRoot::open(&authority_path)?);
         let mut leaves = Vec::with_capacity(inventory.paths.len());
         let mut identities = BTreeSet::new();
+        let mut exact_dependency_paths = BTreeSet::new();
+        let mut exact_dependencies = Vec::new();
         for path in inventory.paths {
             let transcript_relative_path = relative_to_authority(&authority, &path)?;
             let index_relative_path = transcript_relative_path
@@ -148,6 +150,16 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             let transcript = authority.open_file(&transcript_relative_path)?;
             let compound = admit_compound(&authority, &path, &index_relative_path, &transcript)?;
             transcript.revalidate()?;
+            if exact_dependency_paths.insert(index_relative_path.clone()) {
+                if let Some(index_file) = &compound.index_file {
+                    exact_dependencies.push(JsonlFamilyTerminalProof::exact_opened_path(
+                        authority.named_path().join(&index_relative_path),
+                        Arc::clone(&authority),
+                        index_relative_path.clone(),
+                        index_file,
+                    )?);
+                }
+            }
             let binding = Binding {
                 index_relative_path,
                 native_session_id,
@@ -163,7 +175,10 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
                 TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?,
             )?);
         }
-        JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+        Ok(
+            JsonlFamilyInventory::present(self.provider(), root, authority, leaves)?
+                .with_exact_dependencies(exact_dependencies),
+        )
     }
 
     fn projector(

@@ -1166,16 +1166,11 @@ fn active_source_family_contract_codex_tree_rejects_deleted_source_reappearance(
 
     let recreate_path = selected.clone();
     super::super::set_after_codex_session_tree_stage_hook(move |_| {
-        crate::provider::codex::nativepath::install_after_codex_directory_visit_hook(
-            PathBuf::from("nested"),
-            move || {
-                fs::write(
-                    recreate_path,
-                    codex_rollout_bytes(native_session_id, &["reappearedsourcemarker"]),
-                )
-                .unwrap();
-            },
-        );
+        fs::write(
+            recreate_path,
+            codex_rollout_bytes(native_session_id, &["reappearedsourcemarker"]),
+        )
+        .unwrap();
     });
     let failed = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
     assert_carried_route_failure(

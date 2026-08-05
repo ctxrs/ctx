@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -16,17 +17,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    observe_opened_file, revalidate_frozen_prefix, JsonlCheckpoint, JsonlFileObservation,
-    JsonlOversizedRecordPolicy, JsonlProbe, JsonlRecordRef,
+    observe_opened_file, revalidate_frozen_prefix, revalidate_frozen_prefix_sha256,
+    JsonlCheckpoint, JsonlFileObservation, JsonlOversizedRecordPolicy, JsonlProbe, JsonlRecordRef,
 };
 use crate::{
-    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    common::io::{open_provider_source_path, OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::{
         source_backed_base_sources, SourceBackedGenerationSink, SourceBackedRevalidationTarget,
         SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
         SourceBackedRouteResult,
     },
-    CaptureError, Result,
+    CaptureError, Result, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
+    PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+    PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
 
 const FAMILY_POLICY_REVISION: &str = "borrowed-jsonl-certified-append-v1";
@@ -39,7 +42,7 @@ const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
 mod leaf;
 #[cfg(test)]
 use leaf::family_scanner_worker_count_policy;
-use leaf::{physical_identity, scan_leaves, source_observation};
+use leaf::{physical_identity, scan_leaves};
 #[cfg(test)]
 use leaf::{prepare_leaf, JsonlLeafOutput, JsonlLeafOutputEvent};
 mod ownership;
@@ -154,6 +157,17 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory>;
+
+    /// Observes only physical route membership. Implementations must not parse
+    /// identities or hash transcript bodies; content authority belongs to the
+    /// task-local terminal proofs returned by leaf scans.
+    fn observe_terminal_membership(
+        &self,
+        root: &Path,
+        opening: &JsonlFamilyInventory,
+    ) -> Result<JsonlFamilyMembershipObservation> {
+        JsonlFamilyMembershipObservation::observe(root, opening)
+    }
 
     fn discovery_error_kind(&self, _error: &CaptureError) -> SourceBackedRouteErrorKind {
         SourceBackedRouteErrorKind::InvalidSource
@@ -279,23 +293,357 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         default_base_source_path(self, certificate)
     }
 
-    /// Revalidates one terminal leaf at commit time. Optimized adapters may
-    /// retain provider-native evidence; the default uses the shared physical
-    /// checkpoint and exact-prefix rules.
-    fn revalidate_leaf(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        certificate: &CertifiedSource,
-        checkpoint: Option<&JsonlCheckpoint>,
-    ) -> Result<bool> {
-        default_revalidate_leaf(leaf, certificate, checkpoint)
-    }
-
     fn owns(&self, source: &SourceKey) -> bool {
         source.provider() == self.provider().as_str()
             && source.source_format() == self.source_format()
             && source.schema_variant() == self.schema_variant()
             && source.provider_identity_version() == 1
+    }
+}
+
+/// Content-free physical membership observed at admission or at the terminal
+/// fence. Source hints are optional and are used only to recognize a deleted
+/// logical source that reappears at a new physical route under frozen mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JsonlFamilyMembershipObservation {
+    root_missing: bool,
+    paths: BTreeSet<PathBuf>,
+    source_hints: HashMap<PathBuf, SourceKey>,
+}
+
+impl JsonlFamilyMembershipObservation {
+    pub(crate) fn observe(root: &Path, opening: &JsonlFamilyInventory) -> Result<Self> {
+        let roots = match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.is_file() => vec![std::path::absolute(root)?],
+            Ok(metadata) if metadata.is_dir() => vec![std::path::absolute(root)?],
+            Ok(_) => {
+                return Err(CaptureError::InvalidProviderTranscriptPath {
+                    path: root.to_path_buf(),
+                    reason: "JSONL membership root must be a regular file or directory",
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound && opening.root_missing => {
+                return Ok(Self {
+                    root_missing: true,
+                    paths: BTreeSet::new(),
+                    source_hints: HashMap::new(),
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => opening
+                .authorities
+                .iter()
+                .map(|authority| authority.named_path().to_path_buf())
+                .collect(),
+            Err(error) => return Err(error.into()),
+        };
+        Self::observe_roots(&roots, opening)
+    }
+
+    pub(crate) fn observe_roots(roots: &[PathBuf], opening: &JsonlFamilyInventory) -> Result<Self> {
+        let mut paths = BTreeSet::new();
+        let mut directories = 0_usize;
+        let mut entries = 0_usize;
+        for root in roots {
+            observe_membership_path(root, 0, &mut directories, &mut entries, &mut paths)?;
+        }
+        let source_hints = opening
+            .leaves
+            .iter()
+            .filter(|leaf| paths.contains(&leaf.source_path))
+            .map(|leaf| (leaf.source_path.clone(), leaf.source.clone()))
+            .collect();
+        Ok(Self {
+            root_missing: false,
+            paths,
+            source_hints,
+        })
+    }
+
+    pub(crate) fn unbound_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.paths
+            .iter()
+            .filter(|path| !self.source_hints.contains_key(*path))
+    }
+
+    pub(crate) fn bind_source_hint(&mut self, path: PathBuf, source: SourceKey) {
+        if self.paths.contains(&path) {
+            self.source_hints.insert(path, source);
+        }
+    }
+
+    fn admits(
+        &self,
+        current: &Self,
+        mode: JsonlFamilyInventoryMode,
+        expected_sources: &HashMap<[u8; 32], TerminalSourceEvidence>,
+        owned_sources: &HashMap<[u8; 32], SourceKey>,
+    ) -> bool {
+        if self.root_missing != current.root_missing {
+            return false;
+        }
+        match mode {
+            JsonlFamilyInventoryMode::Exact => self.paths == current.paths,
+            JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions => {
+                current.source_hints.values().all(|source| {
+                    let digest = source.exact_descriptor_digest();
+                    !owned_sources
+                        .get(&digest)
+                        .is_some_and(|owned| owned.exact_descriptor_eq(source))
+                        || expected_sources.contains_key(&digest)
+                })
+            }
+        }
+    }
+}
+
+fn observe_membership_path(
+    path: &Path,
+    depth: usize,
+    directories: &mut usize,
+    entries: &mut usize,
+    paths: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    if path.as_os_str().as_encoded_bytes().len() > PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL membership path exceeds the provider inventory bound".to_owned(),
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CaptureError::InvalidProviderTranscriptPath {
+            path: path.to_path_buf(),
+            reason: "JSONL membership routes must not be symbolic links",
+        });
+    }
+    if metadata.is_file() {
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "json" | "jsonl"))
+        {
+            paths.insert(std::path::absolute(path)?);
+        }
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    if depth > PROVIDER_JSONL_INVENTORY_MAX_DEPTH {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL membership directory depth exceeds the provider inventory bound".to_owned(),
+        ));
+    }
+    *directories = directories.saturating_add(1);
+    if *directories > PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL membership directory count exceeds the provider inventory bound".to_owned(),
+        ));
+    }
+    let mut children = fs::read_dir(path)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    *entries = entries.saturating_add(children.len());
+    if *entries > PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES {
+        return Err(CaptureError::InvalidPayload(
+            "JSONL membership entry count exceeds the provider inventory bound".to_owned(),
+        ));
+    }
+    children.sort_by_key(fs::DirEntry::file_name);
+    for child in children {
+        observe_membership_path(
+            &child.path(),
+            depth.saturating_add(1),
+            directories,
+            entries,
+            paths,
+        )?;
+    }
+    Ok(())
+}
+
+/// Task-local physical evidence for one optimized or generic JSONL leaf.
+///
+/// This is deliberately not serialized into a source frontier. It retains the
+/// admitted route authority only until the generation's terminal callback and
+/// lets the shared family enforce append-safe versus exact replacement rules.
+#[derive(Debug, Clone)]
+pub(crate) enum JsonlFamilyTerminalProof {
+    FrozenPrefix {
+        source_path: PathBuf,
+        authority_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        admitted: JsonlFileObservation,
+        prefix_length: u64,
+        prefix_sha256: [u8; 32],
+        hash_kind: JsonlFamilyTerminalPrefixHash,
+    },
+    ExactFile {
+        source_path: PathBuf,
+        authority_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        observation: JsonlFileObservation,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum JsonlFamilyTerminalPrefixHash {
+    Sha256,
+    SharedJsonlDomain,
+}
+
+impl JsonlFamilyTerminalProof {
+    pub(crate) fn frozen_prefix(
+        leaf: &JsonlFamilyLeaf,
+        prefix_length: u64,
+        prefix_sha256: [u8; 32],
+    ) -> Result<Self> {
+        Self::frozen_prefix_with_hash(
+            leaf,
+            prefix_length,
+            prefix_sha256,
+            JsonlFamilyTerminalPrefixHash::Sha256,
+        )
+    }
+
+    fn frozen_shared_prefix(
+        leaf: &JsonlFamilyLeaf,
+        prefix_length: u64,
+        prefix_sha256: [u8; 32],
+    ) -> Result<Self> {
+        Self::frozen_prefix_with_hash(
+            leaf,
+            prefix_length,
+            prefix_sha256,
+            JsonlFamilyTerminalPrefixHash::SharedJsonlDomain,
+        )
+    }
+
+    fn frozen_prefix_with_hash(
+        leaf: &JsonlFamilyLeaf,
+        prefix_length: u64,
+        prefix_sha256: [u8; 32],
+        hash_kind: JsonlFamilyTerminalPrefixHash,
+    ) -> Result<Self> {
+        if prefix_length > leaf.observation.length {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        let opened = leaf.authority.open_file(&leaf.authority_path)?;
+        let current = observe_opened_file(&leaf.source_path, &opened)?;
+        if !leaf.observation.admits_frozen_prefix_in(&current) {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        if current != leaf.observation {
+            match hash_kind {
+                JsonlFamilyTerminalPrefixHash::Sha256 => revalidate_frozen_prefix_sha256(
+                    &leaf.source_path,
+                    &opened,
+                    &leaf.observation,
+                    prefix_length,
+                    prefix_sha256,
+                )?,
+                JsonlFamilyTerminalPrefixHash::SharedJsonlDomain => revalidate_frozen_prefix(
+                    &leaf.source_path,
+                    &opened,
+                    &leaf.observation,
+                    prefix_length,
+                    prefix_sha256,
+                )?,
+            };
+        }
+        Ok(Self::FrozenPrefix {
+            source_path: leaf.source_path.clone(),
+            authority_path: leaf.authority_path.clone(),
+            authority: Arc::clone(&leaf.authority),
+            admitted: leaf.observation.clone(),
+            prefix_length,
+            prefix_sha256,
+            hash_kind,
+        })
+    }
+
+    pub(crate) fn exact_file(leaf: &JsonlFamilyLeaf) -> Result<Self> {
+        let proof = Self::exact_path(
+            leaf.source_path.clone(),
+            Arc::clone(&leaf.authority),
+            leaf.authority_path.clone(),
+        )?;
+        let Self::ExactFile { observation, .. } = &proof else {
+            return Err(CaptureError::SystemInvariant(
+                "exact JSONL proof constructor returned the wrong proof kind",
+            ));
+        };
+        if observation != &leaf.observation {
+            return Err(CaptureError::SourceChangedDuringCapture);
+        }
+        Ok(proof)
+    }
+
+    pub(crate) fn exact_path(
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+    ) -> Result<Self> {
+        let opened = authority.open_file(&authority_path)?;
+        Self::exact_opened_path(source_path, authority, authority_path, &opened)
+    }
+
+    pub(crate) fn exact_opened_path(
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+        opened: &OpenedProviderSourceFile,
+    ) -> Result<Self> {
+        let observation = observe_opened_file(&source_path, opened)?;
+        opened.revalidate_leaf()?;
+        Ok(Self::ExactFile {
+            source_path,
+            authority_path,
+            authority,
+            observation,
+        })
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        match self {
+            Self::FrozenPrefix {
+                source_path,
+                authority_path,
+                authority,
+                admitted,
+                prefix_length,
+                prefix_sha256,
+                hash_kind,
+            } => {
+                let opened = authority.open_file(authority_path)?;
+                match hash_kind {
+                    JsonlFamilyTerminalPrefixHash::Sha256 => revalidate_frozen_prefix_sha256(
+                        source_path,
+                        &opened,
+                        admitted,
+                        *prefix_length,
+                        *prefix_sha256,
+                    )?,
+                    JsonlFamilyTerminalPrefixHash::SharedJsonlDomain => revalidate_frozen_prefix(
+                        source_path,
+                        &opened,
+                        admitted,
+                        *prefix_length,
+                        *prefix_sha256,
+                    )?,
+                };
+            }
+            Self::ExactFile {
+                source_path,
+                authority_path,
+                authority,
+                observation,
+            } => {
+                let opened = authority.open_file(authority_path)?;
+                if observe_opened_file(source_path, &opened)? != *observation {
+                    return Err(CaptureError::SourceChangedDuringCapture);
+                }
+                opened.revalidate_leaf()?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -451,34 +799,13 @@ impl JsonlFamilyLeaf {
         &self.binding
     }
 
+    #[cfg(test)]
     pub(crate) fn open_verified(&self) -> Result<Arc<OpenedProviderSourceFile>> {
         let opened = self.authority.open_file(&self.authority_path)?;
         if observe_opened_file(&self.source_path, &opened)? != self.observation {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
         Ok(Arc::new(opened))
-    }
-
-    fn open_for_revalidation(
-        &self,
-    ) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
-        let opened = self.authority.open_file(&self.authority_path)?;
-        let current = observe_opened_file(&self.source_path, &opened)?;
-        if current != self.observation {
-            if self.whole_record || !self.observation.is_same_file_growth_to(&current) {
-                return Err(CaptureError::SourceChangedDuringCapture);
-            }
-            if let Some(probe) = &self.identity_probe {
-                revalidate_frozen_prefix(
-                    &self.source_path,
-                    &opened,
-                    &probe.observation,
-                    probe.complete_prefix_end,
-                    super::prefix_digest(&probe.prefix_hasher),
-                )?;
-            }
-        }
-        Ok((Arc::new(opened), current))
     }
 
     fn open_for_scan(&self) -> Result<(Self, Arc<OpenedProviderSourceFile>)> {
@@ -540,6 +867,7 @@ pub(crate) struct JsonlFamilyInventory {
     authorities: Vec<Arc<ProviderSourceRoot>>,
     leaves: Vec<JsonlFamilyLeaf>,
     rejected_leaves: Vec<JsonlFamilyRejectedLeaf>,
+    exact_dependencies: Vec<JsonlFamilyTerminalProof>,
 }
 
 impl JsonlFamilyInventory {
@@ -620,6 +948,7 @@ impl JsonlFamilyInventory {
             authorities,
             leaves,
             rejected_leaves,
+            exact_dependencies: Vec::new(),
         })
     }
 
@@ -630,7 +959,16 @@ impl JsonlFamilyInventory {
             authorities: Vec::new(),
             leaves: Vec::new(),
             rejected_leaves: Vec::new(),
+            exact_dependencies: Vec::new(),
         })
+    }
+
+    pub(crate) fn with_exact_dependencies(
+        mut self,
+        exact_dependencies: Vec<JsonlFamilyTerminalProof>,
+    ) -> Self {
+        self.exact_dependencies = exact_dependencies;
+        self
     }
 
     pub(crate) fn root_missing(&self) -> bool {
@@ -706,14 +1044,22 @@ impl JsonlFamilyInventory {
         Ok(())
     }
 
-    fn retains_authorities_from(&self, opening: &Self) -> bool {
-        self.root_missing == opening.root_missing
-            && opening.authorities.iter().all(|expected| {
-                self.authorities.iter().any(|current| {
-                    current.named_path() == expected.named_path()
-                        && current.same_object_as(expected)
-                })
-            })
+    fn revalidate_terminal_root(&self, root: &Path, mode: JsonlFamilyInventoryMode) -> Result<()> {
+        if self.root_missing {
+            return match open_provider_source_path(root) {
+                Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(())
+                }
+                Ok(_) => Err(CaptureError::SourceChangedDuringCapture),
+                Err(error) => Err(error),
+            };
+        }
+        match mode {
+            JsonlFamilyInventoryMode::Exact => self.revalidate_root(),
+            JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions => {
+                self.revalidate_root_same_object()
+            }
+        }
     }
 }
 
@@ -756,7 +1102,7 @@ impl FamilyCheckpoint {
 #[derive(Debug, Clone)]
 struct TerminalSourceEvidence {
     certificate: CertifiedSource,
-    checkpoint: Option<JsonlCheckpoint>,
+    terminal_proof: JsonlFamilyTerminalProof,
 }
 
 fn default_base_source_path(
@@ -793,38 +1139,67 @@ fn default_base_source_path(
     Ok(checkpoint.physical.identity().source_path().clone())
 }
 
-fn default_revalidate_leaf(
-    leaf: &JsonlFamilyLeaf,
-    certificate: &CertifiedSource,
-    checkpoint: Option<&JsonlCheckpoint>,
-) -> Result<bool> {
-    if leaf.whole_record {
-        if source_observation(leaf.source(), leaf.observation())? != *certificate.observation() {
-            return Ok(false);
-        }
-        drop(leaf.open_verified()?);
-    } else if let Some(checkpoint) = checkpoint {
-        let (opened, _) = leaf.open_for_revalidation()?;
-        revalidate_frozen_prefix(
-            leaf.source_path(),
-            opened.as_ref(),
-            checkpoint.source_observation(),
-            checkpoint.complete_prefix_end(),
-            *checkpoint.complete_prefix_sha256(),
-        )?;
-    } else if source_observation(leaf.source(), leaf.observation())? != *certificate.observation() {
-        return Ok(false);
-    }
-    Ok(true)
-}
-
 #[derive(Default)]
 struct FamilyResident {
     ownership_initialized: bool,
     owned_sources: HashMap<[u8; 32], SourceKey>,
     terminal_sources: HashMap<[u8; 32], TerminalSourceEvidence>,
+    absent_sources: Vec<JsonlFamilyAbsentMember>,
+    opening_membership: Option<JsonlFamilyMembershipObservation>,
     certified_inventory: Option<CertifiedSourceInventory>,
     opening_inventory: Option<JsonlFamilyInventory>,
+}
+
+#[derive(Debug, Clone)]
+struct JsonlFamilyAbsentMember {
+    source_path: PathBuf,
+    authority: Option<Arc<ProviderSourceRoot>>,
+    authority_path: PathBuf,
+}
+
+impl JsonlFamilyAbsentMember {
+    fn from_path(opening: &JsonlFamilyInventory, source_path: PathBuf) -> Option<Self> {
+        if opening
+            .authorities
+            .iter()
+            .any(|authority| source_path == authority.named_path())
+        {
+            return None;
+        }
+        let relative = opening.authorities.iter().find_map(|authority| {
+            source_path
+                .strip_prefix(authority.named_path())
+                .ok()
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| (Arc::clone(authority), path.to_path_buf()))
+        });
+        Some(match relative {
+            Some((authority, authority_path)) => Self {
+                source_path,
+                authority: Some(authority),
+                authority_path,
+            },
+            None => Self {
+                authority_path: PathBuf::new(),
+                source_path,
+                authority: None,
+            },
+        })
+    }
+
+    fn remains_absent(&self) -> Result<bool> {
+        let opened = match &self.authority {
+            Some(authority) => authority.open_path(&self.authority_path),
+            None => open_provider_source_path(&self.source_path),
+        };
+        match opened {
+            Ok(_) => Ok(false),
+            Err(CaptureError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 pub(crate) fn jsonl_family_driver(
@@ -865,7 +1240,8 @@ pub(crate) fn jsonl_family_driver(
         ) {
             Ok(revalidated) => Ok(revalidated),
             Err(error)
-                if terminal_adapter.scan_error_kind(&error)
+                if normalized_jsonl_error_kind(&error)
+                    .unwrap_or_else(|| terminal_adapter.scan_error_kind(&error))
                     == SourceBackedRouteErrorKind::SourceChanged =>
             {
                 Ok(false)
@@ -884,6 +1260,9 @@ fn capture(
     reset_terminal(resident)?;
     let opening = adapter
         .discover(root)
+        .map_err(|error| route_discovery(adapter, error))?;
+    let opening_membership = adapter
+        .observe_terminal_membership(root, &opening)
         .map_err(|error| route_discovery(adapter, error))?;
     if opening.root_missing()
         && adapter.root_missing_mode() == JsonlFamilyRootMissingMode::Unavailable
@@ -963,23 +1342,22 @@ fn capture(
         .iter()
         .map(|leaf| leaf.source().clone())
         .collect::<Vec<_>>();
-    let inventory = match adapter.inventory_mode() {
-        JsonlFamilyInventoryMode::Exact => {
-            let closing = adapter
-                .discover(root)
-                .map_err(|error| route_discovery(adapter, error))?;
-            opening
-                .certify_selected_against(&closing, selected_sources)
-                .map_err(route_invalid)?
-        }
-        JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions => opening
-            .certify_selected_against(&opening, selected_sources)
-            .map_err(route_invalid)?,
-    };
+    let inventory = opening
+        .certify_selected_against(&opening, selected_sources)
+        .map_err(route_invalid)?;
     sink.certify_complete_inventory(inventory.clone())
         .map_err(route_internal)?;
-    for base in bases {
+    let mut absent_sources = Vec::new();
+    for base in &bases {
         if !inventory.contains(base.observation().source()) {
+            if let Some(absent) = JsonlFamilyAbsentMember::from_path(
+                &opening,
+                adapter
+                    .base_source_path(base)
+                    .map_err(|error| route_scan(adapter, error))?,
+            ) {
+                absent_sources.push(absent);
+            }
             let deletion = CertifiedSourceDeletion::from_inventory(
                 base.observation().source().clone(),
                 &inventory,
@@ -995,6 +1373,8 @@ fn capture(
     resident.ownership_initialized = true;
     resident.owned_sources = owned_sources;
     resident.terminal_sources = terminal_sources;
+    resident.absent_sources = absent_sources;
+    resident.opening_membership = Some(opening_membership);
     resident.certified_inventory = Some(inventory);
     resident.opening_inventory = Some(opening);
     Ok(())
@@ -1027,11 +1407,43 @@ fn route_discovery(
     adapter: &dyn JsonlFamilyAdapter,
     error: CaptureError,
 ) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(adapter.discovery_error_kind(&error), error.to_string())
+    SourceBackedRouteError::new(
+        normalized_jsonl_error_kind(&error).unwrap_or_else(|| adapter.discovery_error_kind(&error)),
+        error.to_string(),
+    )
 }
 
 fn route_scan(adapter: &dyn JsonlFamilyAdapter, error: CaptureError) -> SourceBackedRouteError {
-    SourceBackedRouteError::new(adapter.scan_error_kind(&error), error.to_string())
+    let kind = match &error {
+        CaptureError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Some(SourceBackedRouteErrorKind::SourceChanged)
+        }
+        CaptureError::SystemIo { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            Some(SourceBackedRouteErrorKind::SourceChanged)
+        }
+        _ => normalized_jsonl_error_kind(&error),
+    }
+    .unwrap_or_else(|| adapter.scan_error_kind(&error));
+    SourceBackedRouteError::new(kind, error.to_string())
+}
+
+fn normalized_jsonl_error_kind(error: &CaptureError) -> Option<SourceBackedRouteErrorKind> {
+    match error {
+        CaptureError::SourceChangedDuringCapture => Some(SourceBackedRouteErrorKind::SourceChanged),
+        CaptureError::InvalidProviderTranscriptPath { reason, .. }
+            if *reason == "provider source changed while its authority handle was retained" =>
+        {
+            Some(SourceBackedRouteErrorKind::SourceChanged)
+        }
+        CaptureError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        CaptureError::SystemIo { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            None
+        }
+        CaptureError::Io(_) | CaptureError::SystemIo { .. } => {
+            Some(SourceBackedRouteErrorKind::ResourceUnavailable)
+        }
+        _ => None,
+    }
 }
 
 fn route_internal(error: impl std::fmt::Display) -> SourceBackedRouteError {

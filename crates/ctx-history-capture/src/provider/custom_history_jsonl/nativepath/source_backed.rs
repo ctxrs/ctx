@@ -39,9 +39,9 @@ use crate::{
         custom_history_jsonl::{validate_custom_history_identifier, validate_custom_source_record},
         normalization::{provider_policy_event_text, provider_value_text},
         source_backed::family::jsonl::{
-            JsonlCheckpoint, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
-            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome,
-            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRootMissingMode,
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope, JsonlFamilyInventory,
+            JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjector,
+            JsonlFamilyPublication, JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof,
             JsonlFamilyWorkerContext,
         },
     },
@@ -323,17 +323,18 @@ impl JsonlFamilyAdapter for CustomHistoryJsonlFamilyAdapter {
             }
         };
         let receipt = *receipt;
+        let terminal_proof = JsonlFamilyTerminalProof::exact_file(leaf)?;
         let optimized = match (receipt.disposition, receipt.append) {
             (
                 CustomHistorySourceBackedDisposition::Unchanged
                 | CustomHistorySourceBackedDisposition::Append,
                 Some(append),
-            ) => JsonlFamilyOptimizedLeafOutcome::append(append),
+            ) => JsonlFamilyOptimizedLeafOutcome::append(append, terminal_proof),
             (
                 CustomHistorySourceBackedDisposition::Cold
                 | CustomHistorySourceBackedDisposition::Replacement,
                 None,
-            ) => JsonlFamilyOptimizedLeafOutcome::replacement(receipt.certificate),
+            ) => JsonlFamilyOptimizedLeafOutcome::replacement(receipt.certificate, terminal_proof),
             _ => {
                 return Err(CaptureError::SystemInvariant(
                     "Custom History disposition and append evidence disagree",
@@ -352,19 +353,6 @@ impl JsonlFamilyAdapter for CustomHistoryJsonlFamilyAdapter {
             .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
         decode_checkpoint(certificate).map_err(custom_history_family_capture_error)?;
         std::path::absolute(self.input.path()).map_err(CaptureError::from)
-    }
-
-    fn revalidate_leaf(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        certificate: &CertifiedSource,
-        checkpoint: Option<&JsonlCheckpoint>,
-    ) -> crate::Result<bool> {
-        if checkpoint.is_some() || !self.source.exact_descriptor_eq(leaf.source()) {
-            return Ok(false);
-        }
-        revalidate_custom_history_source_backed(&self.input, certificate)
-            .map_err(custom_history_family_capture_error)
     }
 
     fn owns(&self, source: &SourceKey) -> bool {
@@ -695,6 +683,7 @@ fn stage_custom_history_source_backed_explicit(
     )))
 }
 
+#[cfg(test)]
 pub(crate) fn revalidate_custom_history_source_backed(
     input: &CustomHistorySourceBackedInput,
     certificate: &CertifiedSource,
