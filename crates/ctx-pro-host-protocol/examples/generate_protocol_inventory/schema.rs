@@ -234,12 +234,8 @@ pub(super) fn inventory() -> Value {
                 &["reason", "candidates", "candidates_truncated"], &[]),
             "BlameDiagnosticCandidate.repository": fields(
                 &["kind", "selector"], &[]),
-            "BlameDiagnosticCandidate.file": fields(
-                &["kind", "repository", "path"], &[]),
             "BlameDiagnosticCandidate.commit": fields(
                 &["kind", "repository", "oid"], &[]),
-            "BlameDiagnosticCandidate.pull_request": fields(
-                &["kind", "repository", "selector"], &[]),
             "BlameOutcome": fields(&["attribution", "coverage"], &[]),
             "BlameCoverage": fields(&[
                 "unit", "evaluated", "proven", "possible", "conflicting", "none"

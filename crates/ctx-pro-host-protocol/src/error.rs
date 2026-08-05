@@ -1,10 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::{
-    query::pull_request_selector::pull_request_selector_kind, MAX_BLAME_DIAGNOSTIC_CANDIDATES,
-    MAX_BLAME_TARGET_BYTES,
-};
+use crate::{MAX_BLAME_DIAGNOSTIC_CANDIDATES, MAX_BLAME_TARGET_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +33,8 @@ pub enum BlameDiagnosticReason {
     TargetNotIndexed,
     RepositorySelectorNotIndexed,
     RepositoryNotBound,
+    CheckoutUnavailable,
+    GitUnavailable,
     RepositoryAmbiguous,
     TargetAmbiguous,
     CommitRewriteAmbiguous,
@@ -47,31 +46,14 @@ pub enum BlameDiagnosticReason {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BlameDiagnosticCandidate {
-    Repository {
-        selector: String,
-    },
-    File {
-        repository: String,
-        path: String,
-    },
-    Commit {
-        repository: String,
-        oid: String,
-    },
-    PullRequest {
-        repository: String,
-        selector: String,
-    },
+    Repository { selector: String },
+    Commit { repository: String, oid: String },
 }
 
 impl BlameDiagnosticCandidate {
     fn validate(&self) -> Result<(), ProtocolError> {
         match self {
             Self::Repository { selector } => validate_logical_repository(selector),
-            Self::File { repository, path } => {
-                validate_logical_repository(repository)?;
-                validate_relative_target_path(path)
-            }
             Self::Commit { repository, oid } => {
                 validate_logical_repository(repository)?;
                 if !matches!(oid.len(), 40 | 64)
@@ -81,18 +63,6 @@ impl BlameDiagnosticCandidate {
                 {
                     return Err(invalid_blame_details(
                         "blame diagnostic commit candidate must use a full lowercase Git object ID",
-                    ));
-                }
-                Ok(())
-            }
-            Self::PullRequest {
-                repository,
-                selector,
-            } => {
-                validate_logical_repository(repository)?;
-                if pull_request_selector_kind(selector).is_none() {
-                    return Err(invalid_blame_details(
-                        "blame diagnostic pull request candidate must use a canonical selector",
                     ));
                 }
                 Ok(())
@@ -110,9 +80,7 @@ impl BlameDiagnosticCandidate {
 
     const fn target_discriminant(&self) -> Option<u8> {
         match self {
-            Self::File { .. } => Some(0),
-            Self::Commit { .. } => Some(1),
-            Self::PullRequest { .. } => Some(2),
+            Self::Commit { .. } => Some(0),
             Self::Repository { .. } => None,
         }
     }
@@ -192,6 +160,8 @@ impl BlameDiagnosticDetails {
             BlameDiagnosticReason::TargetNotIndexed
             | BlameDiagnosticReason::RepositorySelectorNotIndexed
             | BlameDiagnosticReason::RepositoryNotBound
+            | BlameDiagnosticReason::CheckoutUnavailable
+            | BlameDiagnosticReason::GitUnavailable
             | BlameDiagnosticReason::FileBlameNotCovered
             | BlameDiagnosticReason::CommitBlameNotCovered
             | BlameDiagnosticReason::PullRequestBlameNotCovered => {
@@ -291,6 +261,10 @@ impl ProtocolError {
             ) | (
                 ErrorClass::MissingRepository,
                 BlameDiagnosticReason::RepositoryNotBound
+                    | BlameDiagnosticReason::CheckoutUnavailable
+            ) | (
+                ErrorClass::MissingSource,
+                BlameDiagnosticReason::GitUnavailable
             ) | (
                 ErrorClass::Ambiguous,
                 BlameDiagnosticReason::RepositoryAmbiguous
@@ -341,24 +315,6 @@ fn validate_logical_repository(value: &str) -> Result<(), ProtocolError> {
     {
         return Err(invalid_blame_details(
             "blame diagnostic repository candidate is not a safe logical selector",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_relative_target_path(value: &str) -> Result<(), ProtocolError> {
-    if value.trim().is_empty()
-        || value.len() > MAX_BLAME_TARGET_BYTES
-        || value.chars().any(char::is_control)
-        || value.starts_with('/')
-        || value.starts_with('\\')
-        || value.contains('\\')
-        || value
-            .split('/')
-            .any(|component| matches!(component, "" | "." | ".."))
-    {
-        return Err(invalid_blame_details(
-            "blame diagnostic file candidate must use a safe relative path",
         ));
     }
     Ok(())

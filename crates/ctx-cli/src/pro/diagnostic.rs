@@ -1,6 +1,9 @@
 use std::{error::Error, fmt};
 
-use ctx_pro_host_protocol::{ErrorClass, ProtocolError};
+use ctx_pro_host_protocol::{
+    BlameDiagnosticCandidate as ProtocolCandidate, BlameDiagnosticReason as ProtocolReason,
+    ErrorClass, ProtocolError,
+};
 use serde::Serialize;
 
 pub(crate) const MAX_BLAME_DIAGNOSTIC_CANDIDATES: usize = 5;
@@ -42,7 +45,6 @@ impl Error for BlameDiagnostic {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // Typed protocol reasons are populated after the protocol lane lands.
 pub(crate) enum BlameDiagnosticReason {
     ProNotInstalled,
     EntitlementRequired,
@@ -127,23 +129,9 @@ pub(crate) enum BlameNextActionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(dead_code)] // Typed candidate details are pending in the protocol lane.
 pub(crate) enum BlameDiagnosticCandidate {
-    Repository {
-        selector: String,
-    },
-    File {
-        repository: String,
-        path: String,
-    },
-    Commit {
-        repository: String,
-        oid: String,
-    },
-    PullRequest {
-        repository: String,
-        selector: String,
-    },
+    Repository { selector: String },
+    Commit { repository: String, oid: String },
 }
 
 #[derive(Default)]
@@ -213,15 +201,112 @@ impl BlameNextAction {
     }
 }
 
-/// Single adoption seam for protocol-owned typed error details.
-///
-/// This base revision exposes only `class`, untrusted `message`, and
-/// `retryable`. When the protocol lane adds its validated reason, freshness,
-/// and candidate detail types, map those fields here to public enum values and
-/// code-owned prose/actions. Never inspect `ProtocolError.message`, and keep
-/// action argv host-authored.
-fn protocol_diagnostic_details(_error: &ProtocolError) -> ProtocolDiagnosticDetails {
-    ProtocolDiagnosticDetails::default()
+/// Maps only protocol-validated enums and candidate identities. The helper's
+/// free-form message is intentionally ignored.
+fn protocol_diagnostic_details(error: &ProtocolError) -> ProtocolDiagnosticDetails {
+    let Some(details) = &error.details else {
+        return ProtocolDiagnosticDetails::default();
+    };
+    let (reason, message, next_action) = match details.reason {
+        ProtocolReason::TargetNotIndexed => (
+            BlameDiagnosticReason::TargetNotIndexed,
+            RESOURCE_NOT_FOUND_DIAGNOSTIC,
+            None,
+        ),
+        ProtocolReason::RepositorySelectorNotIndexed => (
+            BlameDiagnosticReason::RepositorySelectorNotIndexed,
+            "No indexed Pro repository matches the requested selector.",
+            Some((
+                BlameNextActionKind::SpecifyRepository,
+                &["ctx", "blame"] as &[_],
+            )),
+        ),
+        ProtocolReason::RepositoryNotBound => (
+            BlameDiagnosticReason::RepositoryNotBound,
+            "The blame target is not bound to a repository.",
+            Some((
+                BlameNextActionKind::SpecifyRepository,
+                &["ctx", "blame"] as &[_],
+            )),
+        ),
+        ProtocolReason::CheckoutUnavailable => (
+            BlameDiagnosticReason::CheckoutUnavailable,
+            "The repository checkout required for this blame request is unavailable.",
+            Some((
+                BlameNextActionKind::RetryFromCheckout,
+                &["ctx", "blame"] as &[_],
+            )),
+        ),
+        ProtocolReason::GitUnavailable => (
+            BlameDiagnosticReason::GitUnavailable,
+            "Git is unavailable for this blame request.",
+            None,
+        ),
+        ProtocolReason::RepositoryAmbiguous => (
+            BlameDiagnosticReason::RepositoryAmbiguous,
+            "More than one repository matches this blame target.",
+            Some((
+                BlameNextActionKind::SpecifyRepository,
+                &["ctx", "blame"] as &[_],
+            )),
+        ),
+        ProtocolReason::TargetAmbiguous => (
+            BlameDiagnosticReason::TargetAmbiguous,
+            "More than one target matches this blame request.",
+            Some((BlameNextActionKind::SelectCommit, &["ctx", "blame"] as &[_])),
+        ),
+        ProtocolReason::CommitRewriteAmbiguous => (
+            BlameDiagnosticReason::CommitRewriteAmbiguous,
+            "More than one surviving commit matches the requested rewritten commit.",
+            Some((BlameNextActionKind::SelectCommit, &["ctx", "blame"] as &[_])),
+        ),
+        ProtocolReason::FileBlameNotCovered => (
+            BlameDiagnosticReason::FileBlameNotCovered,
+            "This Pro graph does not cover file blame.",
+            Some((
+                BlameNextActionKind::CheckStatus,
+                &["ctx", "pro", "status"] as &[_],
+            )),
+        ),
+        ProtocolReason::CommitBlameNotCovered => (
+            BlameDiagnosticReason::CommitBlameNotCovered,
+            "This Pro graph does not cover commit blame.",
+            Some((
+                BlameNextActionKind::CheckStatus,
+                &["ctx", "pro", "status"] as &[_],
+            )),
+        ),
+        ProtocolReason::PullRequestBlameNotCovered => (
+            BlameDiagnosticReason::PullRequestBlameNotCovered,
+            "This Pro graph does not cover pull request blame.",
+            Some((
+                BlameNextActionKind::CheckStatus,
+                &["ctx", "pro", "status"] as &[_],
+            )),
+        ),
+    };
+    ProtocolDiagnosticDetails {
+        reason: Some(reason),
+        message: Some(message),
+        next_action,
+        candidates: details
+            .candidates
+            .iter()
+            .map(|candidate| match candidate {
+                ProtocolCandidate::Repository { selector } => {
+                    BlameDiagnosticCandidate::Repository {
+                        selector: selector.clone(),
+                    }
+                }
+                ProtocolCandidate::Commit { repository, oid } => BlameDiagnosticCandidate::Commit {
+                    repository: repository.clone(),
+                    oid: oid.clone(),
+                },
+            })
+            .collect(),
+        candidates_truncated: details.candidates_truncated,
+        ..ProtocolDiagnosticDetails::default()
+    }
 }
 
 fn protocol_class_mapping(class: ErrorClass) -> DiagnosticMapping {
@@ -297,6 +382,12 @@ fn protocol_class_mapping(class: ErrorClass) -> DiagnosticMapping {
             BlameDiagnosticReason::TargetOrRepositoryAmbiguous,
             "The blame target or repository selector is ambiguous.",
             None,
+        ),
+        ErrorClass::OperationUnavailable => mapping(
+            "operation_unavailable",
+            BlameDiagnosticReason::OperationNotCovered,
+            "This ctx Pro graph does not cover the requested blame operation.",
+            Some((BlameNextActionKind::CheckStatus, &["ctx", "pro", "status"])),
         ),
         ErrorClass::Corrupt => mapping(
             "corrupt_graph",
@@ -547,25 +638,12 @@ fn sanitize_candidate(candidate: BlameDiagnosticCandidate) -> Option<BlameDiagno
                 selector: sanitize_repository(&selector)?,
             })
         }
-        BlameDiagnosticCandidate::File { repository, path } => {
-            Some(BlameDiagnosticCandidate::File {
-                repository: sanitize_repository(&repository)?,
-                path: sanitize_relative_path(&path)?,
-            })
-        }
         BlameDiagnosticCandidate::Commit { repository, oid } => {
             Some(BlameDiagnosticCandidate::Commit {
                 repository: sanitize_repository(&repository)?,
                 oid: sanitize_commit_oid(&oid)?,
             })
         }
-        BlameDiagnosticCandidate::PullRequest {
-            repository,
-            selector,
-        } => Some(BlameDiagnosticCandidate::PullRequest {
-            repository: sanitize_repository(&repository)?,
-            selector: sanitize_pull_request_selector(&selector)?,
-        }),
     }
 }
 
@@ -577,23 +655,7 @@ fn sanitize_repository(value: &str) -> Option<String> {
         || looks_like_private_local_path(value)
         || !value
             .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-._/".contains(character))
-    {
-        return None;
-    }
-    Some(value.to_owned())
-}
-
-fn sanitize_relative_path(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES
-        || value.chars().any(char::is_control)
-        || value.starts_with(['/', '\\', '~'])
-        || value.contains('\\')
-        || value
-            .split('/')
-            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+            .all(|character| character.is_ascii_alphanumeric() || "-._/:".contains(character))
     {
         return None;
     }
@@ -606,21 +668,6 @@ fn sanitize_commit_oid(value: &str) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
     .then(|| value.to_owned())
-}
-
-fn sanitize_pull_request_selector(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES
-        || value.chars().any(char::is_control)
-        || looks_like_private_local_path(value)
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-._/:#".contains(character))
-    {
-        return None;
-    }
-    Some(value.to_owned())
 }
 
 fn looks_like_private_local_path(value: &str) -> bool {
@@ -704,10 +751,6 @@ mod tests {
             repository("a/repo"),
             repository("a/repo"),
             repository("token=malicious"),
-            BlameDiagnosticCandidate::File {
-                repository: "safe/repo".to_owned(),
-                path: "bad\nvalue".to_owned(),
-            },
             BlameDiagnosticCandidate::Commit {
                 repository: "safe/repo".to_owned(),
                 oid: "a".repeat(40),

@@ -539,24 +539,10 @@ fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract()
             },
         ),
         (
-            "BlameDiagnosticCandidate.file",
-            BlameDiagnosticCandidate::File {
-                repository: "workspace:ctx".to_owned(),
-                path: "src/lib.rs".to_owned(),
-            },
-        ),
-        (
             "BlameDiagnosticCandidate.commit",
             BlameDiagnosticCandidate::Commit {
                 repository: "workspace:ctx".to_owned(),
                 oid: "a".repeat(40),
-            },
-        ),
-        (
-            "BlameDiagnosticCandidate.pull_request",
-            BlameDiagnosticCandidate::PullRequest {
-                repository: "workspace:ctx".to_owned(),
-                selector: "311".to_owned(),
             },
         ),
     ] {
