@@ -30,7 +30,7 @@ MCP_ATTRIBUTION_PUBLIC_SUITES = {
             "exact_raw_limit_omits_oversized_arguments_but_publishes_result": ["max_plus_one"],
             "invalid_attribution_preserves_terminal_content_and_all_stable_identities": ["stable_ids"],
             "malformed_mcp_results_are_rejected_without_hiding_later_valid_content": ["malformed_identity"],
-            "mcp_attribution_canaries_are_not_indexed_or_ranked": ["search_nonindexing"],
+            "codex_dual_layer_mcp_metadata_and_exchange_invocation_keep_search_contract": ["search_nonindexing"],
             "malformed_duplicate_terminals_abstain_without_losing_public_content_or_ids": ["malformed_identity"],
             "nested_duplicate_json_is_unavailable_without_losing_terminal_text": ["result_preservation"],
             "over_8_mib_mcp_result_is_admitted_once_and_indexable": ["result_preservation"],
@@ -76,7 +76,8 @@ MCP_ATTRIBUTION_PUBLIC_SUITES = {
         target = "//crates/ctx-history-index:mcp_attribution_search_tests",
         selected_inventory = False,
         tests = {
-            "mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked": ["search_nonindexing"],
+            "mcp_invocation_projection_is_searchable_narrow_and_response_neutral": ["search_nonindexing"],
+            "separate_calls_and_mixed_outputs_keep_their_existing_scope_and_weight": ["search_nonindexing"],
         },
     ),
 }

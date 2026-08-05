@@ -60,7 +60,7 @@ esac
 case "${1:-}" in
   --version)
     version=0.25.0
-    case "$0" in
+    case "${0##*/}" in
       *bad-version*) version=9.9.9 ;;
       *ctx-v1*) version=1.0.0 ;;
     esac
@@ -69,7 +69,7 @@ case "${1:-}" in
   setup)
     ;;
   import)
-    case "$0" in
+    case "${0##*/}" in
       *ctx-v1*)
         generation_directory=generation-11111111111111111111111111111111
         mkdir -p \
@@ -171,6 +171,19 @@ for access_case in absent-helper-trial absent-helper-locked absent-helper-unavai
     exit 1
   }
 done
+
+ctx_v1_parent="${tmp}/ctx-v1-parent"
+mkdir -p "${ctx_v1_parent}"
+ordinary_fake="${ctx_v1_parent}/ctx"
+cp "${fake}" "${ordinary_fake}"
+cp "${pro_status_fixtures}/absent-helper-trial.json" "${ordinary_fake}.pro-status.json"
+ordinary_result="${tmp}/result-ordinary-under-ctx-v1-parent.json"
+"${smoke}" "${ordinary_fake}" "${tmp}/fixture.jsonl" 0.25.0 "${ordinary_result}" >/dev/null
+[[ "$(tr -d '\r\n' < "${ordinary_result}")" == "${expected}" ]] || {
+  printf 'candidate smoke fake matched an ancestor path instead of its basename\n' >&2
+  cat "${ordinary_result}" >&2
+  exit 1
+}
 
 v1_fake="${tmp}/ctx-v1"
 cp "${fake}" "${v1_fake}"

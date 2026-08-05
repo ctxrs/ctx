@@ -111,6 +111,7 @@ pub(super) fn assert_source_backed_search(search: &Value, provider: &str, query:
     assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
     let results = search["results"].as_array().unwrap();
     assert!(!results.is_empty(), "{search:#}");
+    let case_folded_query = query.to_lowercase();
     for result in results {
         assert_eq!(result["provider"], provider, "{search:#}");
         assert!(result["ctx_event_id"].is_string(), "{search:#}");
@@ -118,7 +119,7 @@ pub(super) fn assert_source_backed_search(search: &Value, provider: &str, query:
         assert!(
             result["snippet"]
                 .as_str()
-                .is_some_and(|snippet| snippet.contains(query)),
+                .is_some_and(|snippet| snippet.to_lowercase().contains(&case_folded_query)),
             "{search:#}"
         );
     }

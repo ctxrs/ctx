@@ -1504,7 +1504,7 @@
           "class": "search_nonindexing",
           "kind": "rust_test",
           "suite": "codex_direct_result",
-          "test": "mcp_attribution_canaries_are_not_indexed_or_ranked",
+          "test": "codex_dual_layer_mcp_metadata_and_exchange_invocation_keep_search_contract",
           "scope": "tuple"
         },
         {
@@ -1532,7 +1532,14 @@
           "class": "search_nonindexing",
           "kind": "rust_test",
           "suite": "mcp_attribution_search",
-          "test": "mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked",
+          "test": "mcp_invocation_projection_is_searchable_narrow_and_response_neutral",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "search_nonindexing",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_search",
+          "test": "separate_calls_and_mixed_outputs_keep_their_existing_scope_and_weight",
           "scope": "provider_neutral"
         },
         {
@@ -2079,7 +2086,14 @@
           "class": "search_nonindexing",
           "kind": "rust_test",
           "suite": "mcp_attribution_search",
-          "test": "mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked",
+          "test": "mcp_invocation_projection_is_searchable_narrow_and_response_neutral",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "search_nonindexing",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_search",
+          "test": "separate_calls_and_mixed_outputs_keep_their_existing_scope_and_weight",
           "scope": "provider_neutral"
         }
       ],
@@ -2755,7 +2769,14 @@
           "class": "search_nonindexing",
           "kind": "rust_test",
           "suite": "mcp_attribution_search",
-          "test": "mcp_attribution_and_exchange_are_stored_but_never_indexed_or_ranked",
+          "test": "mcp_invocation_projection_is_searchable_narrow_and_response_neutral",
+          "scope": "provider_neutral"
+        },
+        {
+          "class": "search_nonindexing",
+          "kind": "rust_test",
+          "suite": "mcp_attribution_search",
+          "test": "separate_calls_and_mixed_outputs_keep_their_existing_scope_and_weight",
           "scope": "provider_neutral"
         }
       ],
