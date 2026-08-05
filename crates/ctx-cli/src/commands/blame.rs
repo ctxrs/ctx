@@ -323,7 +323,7 @@ fn run_with(
         BlameTarget,
         u32,
         Option<String>,
-    ) -> Result<ctx_pro_host_protocol::BlameResult>,
+    ) -> Result<crate::pro::HostedBlameResult>,
     hydrate: impl FnOnce(
         &std::path::Path,
         &ctx_pro_host_protocol::BlameResult,
@@ -346,7 +346,7 @@ fn run_with(
             &result.target,
             ctx_pro_host_protocol::ResolvedBlameTarget::File { .. }
         ) {
-            let previews = hydrate(&data_root, &result);
+            let previews = hydrate(&data_root, &result.result);
             emit_blame_result(&result, json, local_usage, ui, |result, json, ui| {
                 print_blame_result_with_evidence_preview(result, json, &previews, ui)
             })?;
@@ -365,7 +365,7 @@ fn present_blame_result<T>(result: Result<T>, json: bool, ui: &mut crate::ui::Ui
 }
 
 fn referral_cta_eligible(
-    result: &ctx_pro_host_protocol::BlameResult,
+    result: &crate::pro::HostedBlameResult,
     json: bool,
     interactive: bool,
 ) -> bool {
@@ -373,14 +373,14 @@ fn referral_cta_eligible(
 }
 
 fn emit_blame_result(
-    result: &ctx_pro_host_protocol::BlameResult,
+    result: &crate::pro::HostedBlameResult,
     json: bool,
     local_usage: &mut crate::local_usage::CliUsage,
     ui: &mut crate::ui::Ui,
-    emit: impl FnOnce(&ctx_pro_host_protocol::BlameResult, bool, &mut crate::ui::Ui) -> Result<usize>,
+    emit: impl FnOnce(&crate::pro::HostedBlameResult, bool, &mut crate::ui::Ui) -> Result<usize>,
 ) -> Result<()> {
     let measured_output_bytes = emit(result, json, ui)?;
-    local_usage.set_blame_result(result);
+    local_usage.set_blame_result(&result.result);
     local_usage.set_measured_output_bytes(measured_output_bytes);
     Ok(())
 }

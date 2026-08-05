@@ -30,7 +30,7 @@ use std::io;
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
     blame, blame_diagnostic, preflight_core_materialization, selected_helper_artifact_sha256,
-    stable_error_code, stable_error_diagnostic, sync_core_materialization,
+    stable_error_code, sync_core_materialization, BlameResultFreshness, HostedBlameResult,
     RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
 #[cfg(test)]
@@ -68,13 +68,17 @@ pub(crate) fn write_stable_error_json(
     else {
         return Ok(false);
     };
-    serde_json::to_writer(
-        &mut *output,
-        &StableErrorOutput {
-            error: code,
-            error_code: code,
-        },
-    )?;
+    if let Some(diagnostic) = diagnostic {
+        serde_json::to_writer(&mut *output, &diagnostic)?;
+    } else {
+        serde_json::to_writer(
+            &mut *output,
+            &StableErrorOutput {
+                error: code,
+                error_code: code,
+            },
+        )?;
+    }
     writeln!(output)?;
     Ok(true)
 }
@@ -140,12 +144,45 @@ pub(crate) fn human_blame_result<T>(
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
-    let Some(document) = human_actionable_error_document(ui.stderr_context(), &error, "ctx pro")
-    else {
+    let document = human_blame_diagnostic_document(ui.stderr_context(), &error)
+        .or_else(|| human_actionable_error_document(ui.stderr_context(), &error, "ctx pro"));
+    let Some(document) = document else {
         return Err(actionable_error(error));
     };
     ui.write_stderr(&document)?;
     Err(crate::dispatch::rendered_cli_error())
+}
+
+fn human_blame_diagnostic_document(
+    context: &RenderContext,
+    error: &anyhow::Error,
+) -> Option<Document> {
+    let diagnostic = blame_diagnostic(error)?;
+    let mut document = outcome(
+        context,
+        Outcome {
+            state: OutcomeState::Error,
+            title: diagnostic.message,
+            detail: None,
+        },
+    );
+    if let Some(action) = diagnostic.next_action {
+        let command = action
+            .argv
+            .iter()
+            .map(|argument| crate::transcript::shell_quote_arg(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !command.is_empty() {
+            document.push_blank();
+            document.append(hint(
+                context,
+                Hint { text: "Try:" },
+                Some(Action { command: &command }),
+            ));
+        }
+    }
+    Some(document)
 }
 
 fn human_actionable_error_document(

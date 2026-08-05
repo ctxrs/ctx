@@ -238,17 +238,6 @@ impl ProtocolError {
 
     pub fn validate(&self) -> Result<(), ProtocolError> {
         let Some(details) = &self.details else {
-            if matches!(
-                self.class,
-                ErrorClass::MissingRepository
-                    | ErrorClass::ResourceNotFound
-                    | ErrorClass::Ambiguous
-                    | ErrorClass::OperationUnavailable
-            ) {
-                return Err(invalid_blame_details(
-                    "this blame error class requires typed diagnostic details",
-                ));
-            }
             return Ok(());
         };
         details.validate()?;

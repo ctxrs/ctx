@@ -8,15 +8,17 @@ use super::{
     layout::{push_authored, push_heading, push_notice},
     pull_request, target, BlameEvidenceContext,
 };
+use crate::pro::BlameResultFreshness;
 
 pub(super) fn render(
     result: &BlameResult,
+    freshness: Option<BlameResultFreshness>,
     context: &RenderContext,
     evidence_context: &BlameEvidenceContext,
 ) -> Document {
     let mut document = Document::new();
     let serialized = serde_json::to_value(result).unwrap_or(Value::Null);
-    if render_contract_summary(&mut document, context, &serialized) {
+    if render_contract_summary(&mut document, context, &serialized, freshness) {
         document.push_blank();
     }
     target::render(&mut document, context, result);
@@ -45,6 +47,7 @@ fn render_contract_summary(
     document: &mut Document,
     context: &RenderContext,
     value: &Value,
+    freshness: Option<BlameResultFreshness>,
 ) -> bool {
     let Some(attribution) = value
         .pointer("/outcome/attribution")
@@ -66,7 +69,9 @@ fn render_contract_summary(
         }
     }
 
-    if value.pointer("/freshness/state").and_then(Value::as_str) == Some("stale_committed") {
+    let stale = freshness == Some(BlameResultFreshness::StaleCommitted)
+        || value.pointer("/freshness/state").and_then(Value::as_str) == Some("stale_committed");
+    if stale {
         push_notice(
             document,
             context,
@@ -155,7 +160,12 @@ mod tests {
             "freshness": {"state": "stale_committed"}
         });
         let mut document = Document::new();
-        assert!(render_contract_summary(&mut document, &context(), &value));
+        assert!(render_contract_summary(
+            &mut document,
+            &context(),
+            &value,
+            None
+        ));
         assert_eq!(
             document.render_plain(),
             include_str!("../../../testdata/pro/blame_outcome_contract.golden.txt")
@@ -164,7 +174,12 @@ mod tests {
         let mut current = value;
         current["freshness"]["state"] = json!("current");
         let mut document = Document::new();
-        assert!(render_contract_summary(&mut document, &context(), &current));
+        assert!(render_contract_summary(
+            &mut document,
+            &context(),
+            &current,
+            None
+        ));
         assert!(!document.render_plain().contains("fresh"));
     }
 
@@ -175,7 +190,12 @@ mod tests {
             json!({"outcome": {"attribution": "future_state"}, "matches": []}),
         ] {
             let mut document = Document::new();
-            assert!(!render_contract_summary(&mut document, &context(), &value));
+            assert!(!render_contract_summary(
+                &mut document,
+                &context(),
+                &value,
+                None
+            ));
             assert!(document.render_plain().is_empty());
         }
     }

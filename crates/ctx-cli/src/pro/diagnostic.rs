@@ -75,12 +75,7 @@ pub(crate) enum BlameDiagnosticReason {
     CommitRewriteAmbiguous,
     GraphCorrupt,
     RequestInvalid,
-    InvalidTarget,
-    InvalidRepositorySelector,
-    InvalidCursor,
     InvalidBounds,
-    CatchingUp,
-    GenerationChanged,
     HelperIncompatible,
     HelperResponseInvalid,
     HelperTimedOut,
@@ -216,26 +211,17 @@ fn protocol_diagnostic_details(error: &ProtocolError) -> ProtocolDiagnosticDetai
         ProtocolReason::RepositorySelectorNotIndexed => (
             BlameDiagnosticReason::RepositorySelectorNotIndexed,
             "No indexed Pro repository matches the requested selector.",
-            Some((
-                BlameNextActionKind::SpecifyRepository,
-                &["ctx", "blame"] as &[_],
-            )),
+            None,
         ),
         ProtocolReason::RepositoryNotBound => (
             BlameDiagnosticReason::RepositoryNotBound,
             "The blame target is not bound to a repository.",
-            Some((
-                BlameNextActionKind::SpecifyRepository,
-                &["ctx", "blame"] as &[_],
-            )),
+            None,
         ),
         ProtocolReason::CheckoutUnavailable => (
             BlameDiagnosticReason::CheckoutUnavailable,
             "The repository checkout required for this blame request is unavailable.",
-            Some((
-                BlameNextActionKind::RetryFromCheckout,
-                &["ctx", "blame"] as &[_],
-            )),
+            None,
         ),
         ProtocolReason::GitUnavailable => (
             BlameDiagnosticReason::GitUnavailable,
@@ -245,20 +231,17 @@ fn protocol_diagnostic_details(error: &ProtocolError) -> ProtocolDiagnosticDetai
         ProtocolReason::RepositoryAmbiguous => (
             BlameDiagnosticReason::RepositoryAmbiguous,
             "More than one repository matches this blame target.",
-            Some((
-                BlameNextActionKind::SpecifyRepository,
-                &["ctx", "blame"] as &[_],
-            )),
+            None,
         ),
         ProtocolReason::TargetAmbiguous => (
             BlameDiagnosticReason::TargetAmbiguous,
             "More than one target matches this blame request.",
-            Some((BlameNextActionKind::SelectCommit, &["ctx", "blame"] as &[_])),
+            None,
         ),
         ProtocolReason::CommitRewriteAmbiguous => (
             BlameDiagnosticReason::CommitRewriteAmbiguous,
             "More than one surviving commit matches the requested rewritten commit.",
-            Some((BlameNextActionKind::SelectCommit, &["ctx", "blame"] as &[_])),
+            None,
         ),
         ProtocolReason::FileBlameNotCovered => (
             BlameDiagnosticReason::FileBlameNotCovered,

@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     io::Read,
+    ops::Deref,
     path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio},
     sync::{
@@ -14,8 +15,8 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_pro_host_protocol::{
     read_frame, write_frame, BlameResult, BlameTarget, Capability, EntitlementAccessState,
-    HelloRequest, HelperEnvelope, HelperMessage, HostMessage, StatusRequest, StatusResult,
-    PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
+    HelloRequest, HelperEnvelope, HelperMessage, HostMessage, QuerySnapshotExpectation,
+    StatusRequest, StatusResult, PROTOCOL_FINGERPRINT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -39,9 +40,7 @@ use support::{helper_executable, helper_path};
 mod errors;
 use errors::protocol_error;
 pub(super) use errors::typed_blame_diagnostic;
-pub(crate) use errors::{
-    blame_diagnostic, stable_error_code, stable_error_diagnostic, RESOURCE_NOT_FOUND_DIAGNOSTIC,
-};
+pub(crate) use errors::{blame_diagnostic, stable_error_code, RESOURCE_NOT_FOUND_DIAGNOSTIC};
 
 #[path = "client_output.rs"]
 mod core_materialization;
@@ -87,6 +86,27 @@ pub(crate) struct MaterializeReport {
     pub(crate) batches: u64,
     pub(crate) observations: u64,
     pub(crate) replayed_batches: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BlameResultFreshness {
+    Current,
+    StaleCommitted,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HostedBlameResult {
+    pub(crate) result: BlameResult,
+    pub(crate) freshness: BlameResultFreshness,
+}
+
+impl Deref for HostedBlameResult {
+    type Target = BlameResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
 }
 
 mod materialization;

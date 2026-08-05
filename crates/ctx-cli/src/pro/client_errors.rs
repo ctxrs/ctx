@@ -31,15 +31,6 @@ pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
         .find_map(|cause| stable_error_code_from_text(&cause.to_string()))
 }
 
-pub(crate) fn stable_error_diagnostic(error: &anyhow::Error) -> Option<&'static str> {
-    match stable_error_code(error)? {
-        // Preserve the existing renderer contract until the output lane adopts
-        // `blame_diagnostic` as one structured object on every surface.
-        "resource_not_found" => blame_diagnostic(error).map(|value| value.message),
-        _ => None,
-    }
-}
-
 fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
     let code = text.split(':').next().unwrap_or_default();
     match code {
@@ -199,7 +190,7 @@ mod tests {
         ));
         assert_eq!(stable_error_code(&error), Some("resource_not_found"));
         assert_eq!(
-            stable_error_diagnostic(&error),
+            blame_diagnostic(&error).map(|diagnostic| diagnostic.message),
             Some(RESOURCE_NOT_FOUND_DIAGNOSTIC)
         );
         assert!(!error.to_string().contains("untrusted helper detail"));

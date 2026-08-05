@@ -91,12 +91,7 @@ fn tool_pro_blame_with(
     arguments: &Value,
     data_root: &Path,
     parsed_target: Result<BlameTarget>,
-    blame: impl FnOnce(
-        &Path,
-        BlameTarget,
-        u32,
-        Option<String>,
-    ) -> Result<ctx_pro_host_protocol::BlameResult>,
+    blame: impl FnOnce(&Path, BlameTarget, u32, Option<String>) -> Result<crate::pro::HostedBlameResult>,
     hydrate: impl FnOnce(
         &Path,
         &ctx_pro_host_protocol::BlameResult,
@@ -139,7 +134,7 @@ fn tool_pro_blame_with(
             &result.target,
             ctx_pro_host_protocol::ResolvedBlameTarget::File { .. }
         )
-        .then(|| hydrate(data_root, &result));
+        .then(|| hydrate(data_root, &result.result));
         Ok(crate::pro::blame_result_json(&result, previews.as_ref()))
     })();
     finish_mcp_blame_telemetry(&mut telemetry, started, result)

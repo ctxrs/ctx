@@ -5,7 +5,7 @@ pub(crate) fn blame(
     target: BlameTarget,
     limit: u32,
     cursor: Option<String>,
-) -> Result<BlameResult> {
+) -> Result<HostedBlameResult> {
     blame_with_policy(
         data_root,
         target,
@@ -21,8 +21,15 @@ pub(super) fn blame_with_policy(
     limit: u32,
     cursor: Option<String>,
     policy: BlameFreshnessPolicy,
-) -> Result<BlameResult> {
+) -> Result<HostedBlameResult> {
     let expected_active_generation = prepare_blame_freshness(data_root, policy)?;
+    let active_before = expected_active_generation.clone().map_or_else(
+        || {
+            crate::semantic::pin_active_verified_generation(data_root)
+                .map(|pin| pin.generation_id().to_owned())
+        },
+        Ok,
+    )?;
     let result = blame_once(
         data_root,
         target,
@@ -30,13 +37,29 @@ pub(super) fn blame_with_policy(
         cursor,
         expected_active_generation.as_deref(),
     )?;
+    let active_after = crate::semantic::pin_active_verified_generation(data_root)?
+        .generation_id()
+        .to_owned();
     if let Some(expected_generation) = expected_active_generation {
-        let active_generation = crate::semantic::pin_active_verified_generation(data_root)?
-            .generation_id()
-            .to_owned();
-        ensure_active_core_generation_is_unchanged(&expected_generation, &active_generation)?;
+        ensure_active_core_generation_is_unchanged(&expected_generation, &active_after)?;
     }
-    Ok(result)
+    let served_generation = match &result.snapshot {
+        QuerySnapshotExpectation::Core { receipt } => &receipt.core_generation_id,
+    };
+    let freshness = if served_generation == &active_before && served_generation == &active_after {
+        BlameResultFreshness::Current
+    } else {
+        BlameResultFreshness::StaleCommitted
+    };
+    if freshness == BlameResultFreshness::StaleCommitted
+        && (result.outcome.attribution == ctx_pro_host_protocol::BlameAttribution::None
+            || result.outcome.coverage.none > 0)
+    {
+        bail!(
+            "stale_source: the committed Pro generation cannot prove an absent producer while Core is newer"
+        );
+    }
+    Ok(HostedBlameResult { result, freshness })
 }
 
 pub(super) fn ensure_active_core_generation_is_unchanged(
