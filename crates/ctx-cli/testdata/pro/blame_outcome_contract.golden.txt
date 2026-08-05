@@ -1,0 +1,5 @@
+Producer evidence conflicts
+  10 committed lines evaluated on this page · 7 proven · 1 possible · 1 conflicting · 1
+  none
+! Result is from stale committed history; newer Core history may still be
+  materializing.

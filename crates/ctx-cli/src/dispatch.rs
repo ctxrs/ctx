@@ -580,7 +580,11 @@ fn command_json_output(command: &CommandRoot) -> bool {
 }
 
 fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) -> bool {
-    json_output && matches!(command, CommandRoot::Pro(_) | CommandRoot::Referral(_))
+    json_output
+        && matches!(
+            command,
+            CommandRoot::Pro(_) | CommandRoot::Referral(_) | CommandRoot::Blame(_)
+        )
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {
@@ -745,6 +749,8 @@ mod tests {
             &["referral", "create", "agent-smith", "--format=json"][..],
             &["referral", "status", "--format=json"][..],
             &["referral", "payout", "--format=json"][..],
+            &["blame", "file", "src/main.rs", "--format=json"][..],
+            &["blame", "commit", "abc1234", "--format=json"][..],
         ] {
             let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
@@ -759,8 +765,6 @@ mod tests {
             &["pro"][..],
             &["referral", "status"][..],
             &["blame", "file", "src/main.rs"][..],
-            &["blame", "file", "src/main.rs", "--format=json"][..],
-            &["blame", "commit", "abc1234", "--format=json"][..],
             &["status", "--format=json"][..],
         ] {
             let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))

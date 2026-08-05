@@ -168,6 +168,19 @@ page exceeds that MCP-specific cap, the tool returns a small
 `ctx blame ... --format json`; it does not truncate a match or evidence entry and does
 not fabricate a continuation cursor.
 
+Successful `structuredContent` has the same semantics as CLI blame JSON,
+including `outcome.attribution` (`proven`, `possible`, `conflicting`, or `none`)
+and per-page evaluated coverage. File and PR coverage counts never perform a
+total-result scan and never uses a partial state. Conflicting producer evidence
+is a successful tool result, while target, repository, and commit-rewrite
+ambiguities are failures. The text fallback leads with the same outcome and page
+coverage.
+
+When the integrated host can establish freshness, MCP and CLI JSON include the
+same `freshness` object. Routine `current` freshness stays out of human CLI
+output; `stale_committed` is warned. A stale miss fails rather than claiming
+`none`.
+
 `pro_status` is read-only. `blame` advertises `readOnlyHint: false` because its
 bounded maintenance wake can cause the daemon to advance the encrypted derived
 Pro graph. Ordinary blame reads the latest committed Pro generation while that
@@ -178,8 +191,14 @@ and idempotent.
 PR activity remains separate from code production. PR code membership appears
 only when structured captured forge evidence names the canonical PR and exact
 Git object ID in the same recognized record. When that proof is absent, the
-result explicitly contains no PR-commit relationship. MCP Pro errors use stable
-`error_code` values in `structuredContent`.
+result explicitly contains no PR-commit relationship. MCP Pro failures set
+`isError: true` and put the exact CLI JSON diagnostic in `structuredContent`:
+matching stable `error`/`error_code`, closed `reason`, trusted `message`,
+`retryable`, and applicable freshness, one typed argv action, or at most five
+sanitized candidates. Text is rendered from that object. Helper prose and paths
+are never exposed. Core search is only an explicit advisory for current `none`,
+current `target_not_indexed`, or `operation_unavailable`; MCP never invokes it
+automatically.
 Helper/graph readiness and subscription access are separate fields. Access is
 `trial`, `active`, `canceling_paid`, `offline_grace`, `locked`, or null when it
 cannot be determined.

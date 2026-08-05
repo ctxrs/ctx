@@ -12,6 +12,22 @@ pub(super) fn is_blame_result(value: &Value) -> bool {
 
 pub(super) fn render_blame_text(value: &Value) -> String {
     let mut out = String::from("ctx blame\n");
+    if let Some(attribution) = value
+        .pointer("/outcome/attribution")
+        .and_then(Value::as_str)
+    {
+        if let Some(heading) = outcome_heading(attribution) {
+            out.push_str(&format!("outcome: {heading}\n"));
+        }
+    }
+    if let Some(coverage) = value.pointer("/outcome/coverage") {
+        if let Some(rendered) = coverage_text(coverage) {
+            out.push_str(&format!("page coverage: {rendered}\n"));
+        }
+    }
+    if let Some(freshness) = value.pointer("/freshness/state").and_then(Value::as_str) {
+        out.push_str(&format!("freshness: {}\n", escape_controls(freshness)));
+    }
     if let Some(snapshot) = value.get("snapshot") {
         push_scalar(&mut out, "snapshot.kind", snapshot.get("kind"), "");
         if let Some(receipt) = snapshot.get("receipt") {
@@ -93,6 +109,55 @@ pub(super) fn render_blame_text(value: &Value) -> String {
         push_scalar(&mut out, "next.cursor", next.get("cursor"), "");
     }
     out
+}
+
+fn outcome_heading(attribution: &str) -> Option<&'static str> {
+    match attribution {
+        "proven" => Some("Producer proven"),
+        "possible" => Some("Possible producer found"),
+        "conflicting" => Some("Producer evidence conflicts"),
+        "none" => Some("No producer proven"),
+        _ => None,
+    }
+}
+
+fn coverage_text(coverage: &Value) -> Option<String> {
+    let evaluated = coverage.get("evaluated")?.as_u64()?;
+    let unit = coverage.get("unit")?.as_str()?;
+    Some(format!(
+        "{} {} evaluated · {} proven · {} possible · {} conflicting · {} none",
+        evaluated,
+        coverage_units(unit, evaluated),
+        coverage.get("proven")?.as_u64()?,
+        coverage.get("possible")?.as_u64()?,
+        coverage.get("conflicting")?.as_u64()?,
+        coverage.get("none")?.as_u64()?,
+    ))
+}
+
+fn coverage_units(unit: &str, evaluated: u64) -> String {
+    let singular = evaluated == 1;
+    match unit {
+        "committed_line" => if singular {
+            "committed line"
+        } else {
+            "committed lines"
+        }
+        .to_owned(),
+        "commit_fact" => if singular {
+            "commit fact"
+        } else {
+            "commit facts"
+        }
+        .to_owned(),
+        "pull_request_relationship" => if singular {
+            "pull request relationship"
+        } else {
+            "pull request relationships"
+        }
+        .to_owned(),
+        _ => unit.replace('_', " "),
+    }
 }
 
 fn render_match(out: &mut String, index: usize, value: &Value) {
@@ -454,5 +519,31 @@ mod tests {
 
         assert!(rendered.contains("parent_session.display: manager"));
         assert!(rendered.contains("owning_root.display: root"));
+    }
+
+    #[test]
+    fn fallback_leads_with_integrated_outcome_page_coverage_and_freshness() {
+        let value = json!({
+            "target": {"kind": "pull_request"},
+            "outcome": {
+                "attribution": "possible",
+                "coverage": {
+                    "unit": "pull_request_relationship",
+                    "evaluated": 3,
+                    "proven": 1,
+                    "possible": 2,
+                    "conflicting": 0,
+                    "none": 0
+                }
+            },
+            "freshness": {"state": "current"},
+            "matches": [],
+            "evidence": []
+        });
+
+        let rendered = render_blame_text(&value);
+        assert!(rendered.starts_with(
+            "ctx blame\noutcome: Possible producer found\npage coverage: 3 pull request relationships evaluated · 1 proven · 2 possible · 0 conflicting · 0 none\nfreshness: current\n"
+        ));
     }
 }

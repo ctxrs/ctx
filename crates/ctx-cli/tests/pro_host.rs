@@ -430,12 +430,14 @@ fn missing_blame_resource_has_trusted_human_diagnostic() {
 #[test]
 fn missing_blame_resource_keeps_stable_json_mode_code() {
     let (_root, mut command) = missing_resource_command();
-    command
-        .arg("--format=json")
-        .assert()
-        .failure()
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::eq("Error: resource_not_found\n"));
+    let output = command.arg("--format=json").output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["error"], "resource_not_found");
+    assert_eq!(diagnostic["error_code"], "resource_not_found");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Error:"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("/secret/graph/path"));
 }
 
 #[test]

@@ -310,6 +310,16 @@ fn missing_blame_resource_matches_cli_json_error_code() {
     initialize_current_query_store(&root);
     let helper = root.join("ctx-pro-blame-missing-resource");
     write_blame_error_helper(&helper, "resource_not_found");
+    let mut cli = ctx(&temp);
+    let cli_output = cli
+        .env("CTX_PRO_HELPER", &helper)
+        .args(["blame", "commit", "0123456789abcdef", "--format=json"])
+        .output()
+        .unwrap();
+    assert!(!cli_output.status.success());
+    assert!(cli_output.stdout.is_empty());
+    let cli_diagnostic: Value = serde_json::from_slice(&cli_output.stderr).unwrap();
+
     let responses = mcp_roundtrip_with_env(
         &temp,
         &[
@@ -331,13 +341,22 @@ fn missing_blame_resource_matches_cli_json_error_code() {
     );
     let result = &responses[1]["result"];
     assert_eq!(result["isError"], true, "{result:#}");
-    let diagnostic = "No indexed Pro resource matches the requested blame target.";
-    assert_eq!(result["structuredContent"]["error"], diagnostic);
+    assert_eq!(result["structuredContent"], cli_diagnostic);
     assert_eq!(
         result["structuredContent"]["error_code"],
         "resource_not_found"
     );
-    assert_eq!(result["content"][0]["text"], diagnostic);
+    let expected_text = result["structuredContent"]
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| result["structuredContent"]["error"].as_str())
+        .unwrap();
+    assert!(result["content"][0]["text"]
+        .as_str()
+        .is_some_and(|text| text.starts_with(expected_text)));
+    assert!(!serde_json::to_string(result)
+        .unwrap()
+        .contains("/secret/graph/path"));
 }
 
 #[cfg(unix)]

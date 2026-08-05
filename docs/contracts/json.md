@@ -1004,12 +1004,14 @@ root-local retry metadata; setup and `--keep-data` fail until a later
 Successful `ctx blame <target> [--type file|commit|pr] --format json`, the
 explicit `ctx blame file|commit|pr --format json` compatibility forms, and MCP
 `blame` return one host-extended result object with the protocol `BlameResult`
-fields at top level plus `evidence_context`. There is no enclosing payload
-wrapper, prose summary, or suggested claims:
+fields at top level plus host-owned context. There is no enclosing payload
+wrapper or prose summary:
 
 - `snapshot`, the exact Core materialization receipt used by the helper query;
 - `target`, a resolved tagged `file`, `commit`, or `pull_request` target;
 - `git_snapshot`, required for file results and null for commit/PR results;
+- `outcome`, with `attribution` (`proven`, `possible`, `conflicting`, or `none`)
+  and per-page `coverage`;
 - `matches`, typed `file`, `commit`, or `pull_request` matches corresponding to
   the resolved target;
 - `evidence`, a complete deduplicated table numbered contiguously from one;
@@ -1017,6 +1019,22 @@ wrapper, prose summary, or suggested claims:
   `more_committed_lines` reason;
 - `evidence_context`, a host-owned object added after the helper response is
   validated, with `status` and `items` fields.
+
+`outcome.coverage` contains `unit`, `evaluated`, `proven`, `possible`,
+`conflicting`, and `none`. The unit is `committed_line`, `commit_fact`, or
+`pull_request_relationship`; the four state counts sum exactly to `evaluated`.
+These are counts for the returned page, not a total-result scan, and pagination
+does not create a `partial` attribution state. Producer conflict is useful
+successful output with `attribution: "conflicting"`; target, repository, and
+commit-rewrite ambiguity remain failures.
+
+When the integrated host API can compare the served Pro generation with active
+Core, CLI JSON and MCP `structuredContent` both include the same top-level
+`freshness` object. It has `state` (`current` or `stale_committed`), optional
+`served_generation` and `active_generation`, and `catch_up_active`. Human output
+hides routine `current` freshness and warns for `stale_committed`. A stale
+positive result may succeed, but a stale `none` would be inconclusive and is a
+typed failure instead.
 
 CLI JSON and MCP serialize the identical `evidence_context` object without
 changing the private helper `BlameResult` or protocol version:
@@ -1110,21 +1128,37 @@ state. Tampering returns `invalid_request`; a changed snapshot returns
 Core `show` JSON remains the session/event retrieval contract. There are no Pro
 `show`, `timeline`, `facts`, or `related` payloads or compatibility aliases.
 
-Human CLI failures exit nonzero with a stable error token on stderr. When a Pro
-or referral command is explicitly invoked with `--format json`, a classified
-failure instead writes one compact JSON object to stderr with matching `error`
-and `error_code` strings. It contains no untrusted service or helper detail and
-is never ANSI-decorated. MCP failures set `isError: true` and return `error`
-plus `error_code` in `structuredContent`.
+Human CLI failures exit nonzero with an outcome-first diagnostic, one trusted
+detail, and at most one action. `ctx blame --format json` writes the canonical
+typed diagnostic object to stderr rather than raw `Error` text. Its `error` and
+`error_code` are equal stable codes; `reason` is closed; `message` is trusted
+host prose; `retryable` is a boolean; and `freshness`, `next_action`,
+`candidates`, and `candidates_truncated` appear only when applicable.
+`next_action` contains one closed `kind` and a complete argument-safe `argv`
+beginning with `ctx`, never a shell command string. Candidates are typed,
+sorted, deduplicated, sanitized, and capped at five. Helper messages, error
+chains, executable paths, checkout paths, graph identifiers, and credential
+details never enter the public object.
+
+MCP failures set `isError: true`, place that same diagnostic object in
+`structuredContent`, and render text from its trusted `message` and optional
+single action. A successful `conflicting` attribution does not set `isError`.
 Stable codes include `pro_not_installed`, `commercial_unavailable`,
-`entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
+`entitlement_required`, `entitlement_expired`, `entitlement_invalid`,
+`helper_upgrade_required`, `key_store_unavailable`,
 `key_store_locked`, `not_materialized`, `protocol_mismatch`,
-`source_unavailable`, `repository_unavailable`, `resource_not_found`, `line_out_of_range`,
+`source_unavailable`, `repository_unavailable`, `resource_not_found`,
+`operation_unavailable`, `line_out_of_range`,
 `stale_snapshot`, `stale_fact`, `ambiguous`, `corrupt_graph`,
 `invalid_request`, `invalid_response`, `cancelled`,
 `helper_crashed`, and `helper_timeout`.
 Native key-store failures use only `key_store_unavailable` and
 `key_store_locked`. Unshipped `credential_vault_*` spellings are not aliases.
+
+Core search is advisory only for a current `none` result, current
+`target_not_indexed`, or `operation_unavailable`. The action is never executed
+automatically and is not suggested for stale/catching-up state, invalid input,
+ambiguity, repository access, entitlement, repair, or transport failures.
 
 ## Referrals
 
