@@ -39,6 +39,8 @@ TOML_VERSION = re.compile(
 CONTAINER_GATE_INPUTS = (
     (Path("scripts/check-public-cli-artifact.sh"), 0o555),
     (Path("scripts/check-release-binary-compat.sh"), 0o555),
+    (Path("scripts/public-cli-host-runtime-evidence.sh"), 0o555),
+    (Path("scripts/public-cli-runtime-authority.sh"), 0o555),
     (Path("scripts/run-native-candidate-smoke.sh"), 0o555),
     (Path("contracts/public-control-surface-v1.json"), 0o444),
     (Path("tests/fixtures/custom-history-jsonl/basic.jsonl"), 0o444),
@@ -401,6 +403,7 @@ def run_container_gates(
     artifact: Path,
     version: str,
     platform: str,
+    builder_image_id: str,
     runtime_image_id: str,
     inspector_image_id: str,
 ) -> None:
@@ -430,6 +433,39 @@ def run_container_gates(
         "/tmp:rw,nosuid,nodev,exec",
     ]
     with staged_container_gate_source(source_repo) as gate_source:
+        authority = run_checked(
+            common
+            + [
+                "-v",
+                f"{gate_source}:/repo:ro",
+                "-w",
+                "/repo",
+                builder_image_id,
+                "bash",
+                "-euo",
+                "pipefail",
+                "-c",
+                (
+                    "IFS=$'\\t' read -r host_system host_arch "
+                    "host_native_arch process_translated _native_arch_probe "
+                    "hardware_identity emulation hypervisor evidence_complete "
+                    "< <(scripts/public-cli-host-runtime-evidence.sh); "
+                    "scripts/public-cli-runtime-authority.sh "
+                    "\"$1\" \"$host_system\" \"$host_arch\" passed "
+                    "\"$host_native_arch\" \"$process_translated\" "
+                    "\"$hardware_identity\" \"$emulation\" "
+                    "\"$hypervisor\" \"$evidence_complete\""
+                ),
+                "bash",
+                platform,
+            ],
+            "pinned builder authority gate",
+        )
+        if authority != "authoritative":
+            raise BuildInfoError(
+                "pinned builder authority gate returned "
+                f"{authority or 'no authority'}"
+            )
         run_checked(
             common
             + [
@@ -582,6 +618,7 @@ def create(args: argparse.Namespace) -> None:
         artifact=args.artifact.resolve(strict=True),
         version=args.version,
         platform=args.platform,
+        builder_image_id=builder_image_id,
         runtime_image_id=runtime_image_id,
         inspector_image_id=inspector_image_id,
     )

@@ -8,6 +8,9 @@ else
 fi
 
 wrapper="${source_root}/scripts/release/build-linux-bazel-release.sh"
+controller="${source_root}/scripts/release/run-linux-bazel-release-controller.sh"
+controller_recipe="${source_root}/scripts/release/linux-bazel-release-controller.Dockerfile"
+controller_receipt="${source_root}/scripts/release/write-linux-bazel-controller-receipt.py"
 publisher="${source_root}/scripts/release/publish-linux-bazel-release.py"
 candidate_io="${source_root}/scripts/release/completed_candidate_io.py"
 dogfood_wrapper="${source_root}/scripts/release/build-linux-x64-bazel-dogfood.sh"
@@ -26,7 +29,7 @@ for required in \
   'docker_platform=linux/arm64' \
   'requires a native ${expected_host_arch} host' \
   'requires a native ${expected_host_arch} Docker daemon' \
-  'emulation is diagnostic only' \
+  'use the pinned Ubuntu 22 controller route' \
   'scripts/public-cli-host-runtime-evidence.sh' \
   'scripts/public-cli-runtime-authority.sh' \
   '/build/release-input/${CTX_RELEASE_BINARY_NAME}.build-info.json' \
@@ -35,6 +38,7 @@ for required in \
   '/build/release-symbol-output/bundle' \
   'scripts/release/publish-linux-bazel-release.py' \
   'scripts/build-onnxruntime-sidecar.sh' \
+  '"${task_root}/cache"' \
   '--transcode-runtime "${CTX_PUBLIC_TARGET_PLATFORM}"' \
   'ctx-${CTX_PUBLIC_TARGET_PLATFORM}.release-complete.json' \
   '--network none' \
@@ -50,6 +54,41 @@ for required in \
     exit 1
   }
 done
+
+for required in \
+  'docker.io/library/ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982' \
+  'scripts/public-cli-runtime-authority.sh' \
+  'pinned Ubuntu 22 outer controller is not authoritative' \
+  'CTX_ONNXRUNTIME_CACHE_DIR=${sidecar_cache}' \
+  'd304445daa7e6429293dc02035063b7993fb6a489ee90d8851bff497952836dc' \
+  '50eed4c67aef71f5a33e82df66788f5415840c66827b6ef2fdf799a046ad59de' \
+  'scripts/release/build-linux-bazel-release.sh' \
+  'scripts/release/write-linux-bazel-controller-receipt.py' \
+  '--controller-receipt'; do
+  grep -Fq -- "${required}" "${controller}" || {
+    printf 'Linux controller wrapper missing contract: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+for required in \
+  'org.ctx.release.role="ctx-public-bazel-controller"' \
+  'DOCKER_VERSION="27.5.1"' \
+  'BUILDX_VERSION="0.20.1"' \
+  'zstd' \
+  'getconf GNU_LIBC_VERSION' \
+  'glibc 2.35'; do
+  grep -Fq -- "${required}" "${controller_recipe}" || {
+    printf 'Linux controller recipe missing contract: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+grep -Fq 'outer controller is not authoritative' "${controller_receipt}"
+if grep -Fq -- '--construction-host' \
+  "${source_root}/scripts/public-cli-runtime-authority.sh" \
+  "${wrapper}" "${controller}"; then
+  echo 'Linux release route retains a second relaxed authority scope' >&2
+  exit 1
+fi
 
 if grep -Fq -- '-v "${output_dir}:' "${wrapper}" \
   || grep -Fq -- 'mktemp -d "${private_symbols_parent}/' "${wrapper}" \

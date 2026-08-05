@@ -233,7 +233,7 @@ host_authority="$(
     "${emulation}" "${hypervisor}" "${evidence_complete}"
 )"
 [[ "${host_authority}" == "authoritative" ]] \
-  || die "${platform} host evidence is not authoritative; emulation is diagnostic only"
+  || die "${platform} host evidence is not authoritative; use the pinned Ubuntu 22 controller route from other Linux hosts"
 
 daemon_arch="$(docker info --format '{{.Architecture}}')"
 case "${daemon_arch}" in
@@ -346,6 +346,7 @@ install -d -m 0700 \
   "${task_root}/release-input" \
   "${task_root}/release-output" \
   "${task_root}/release-symbol-output" \
+  "${task_root}/cache" \
   "${cache_root}"
 
 docker_run_args=(

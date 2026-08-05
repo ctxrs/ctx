@@ -467,9 +467,16 @@ expect_failure 'missing required macOS signing tool: rcodesign' "${test_root}/re
   "${launcher}" --preflight
 mv "${fake_bin}/rcodesign.off" "${fake_bin}/rcodesign"
 
-handoff_artifact="$(new_artifact handoff-cli)"
-CTX_TEST_ONLY_MACOS_SIGNER_PATH="${fake_signer}" \
-  "${launcher}" macos-arm64 cli "${handoff_artifact}" "${test_root}/handoff-evidence"
+for handoff_platform in macos-arm64 macos-x64; do
+  handoff_artifact="$(new_artifact "handoff-${handoff_platform}-cli")"
+  handoff_evidence="${test_root}/handoff-${handoff_platform}-evidence"
+  CTX_TEST_ONLY_MACOS_SIGNER_PATH="${fake_signer}" \
+    "${launcher}" "${handoff_platform}" cli \
+      "${handoff_artifact}" "${handoff_evidence}"
+  [[ "$(cat "${TMPDIR}/fake-signer-argv.txt")" == \
+    "${handoff_platform} cli ${handoff_artifact} ${handoff_evidence}" ]] || \
+    fail "real launcher parser changed the ${handoff_platform} packaging handoff"
+done
 for handoff_file in "${TMPDIR}/fake-signer-argv.txt" "${TMPDIR}/fake-signer-environment.txt"; do
   for secret in \
     cDEyLXNlY3JldC1zZW50aW5lbA== \
