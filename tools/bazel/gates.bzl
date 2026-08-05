@@ -67,6 +67,13 @@ def loc_check_inputs(name):
     )
 
 def _loc_check_manifest_impl(ctx):
+    generated = sorted([
+        source.short_path
+        for source in ctx.files.srcs
+        if not source.is_source
+    ])
+    if generated:
+        fail("LOC source manifest received generated inputs: %s" % ", ".join(generated))
     paths = sorted({source.short_path: True for source in ctx.files.srcs}.keys())
     ctx.actions.write(
         output = ctx.outputs.out,

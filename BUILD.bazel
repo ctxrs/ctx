@@ -102,6 +102,7 @@ LOC_CHECK_SOURCE_DATA = [
     "//crates/ctx-sdk:loc_check_inputs",
     "//sdks/go:loc_check_inputs",
     "//sdks/go/examples/dogfood:loc_check_inputs",
+    "//scripts/source-backed-recovery:loc_check_inputs",
     "//tools/bazel:loc_check_inputs",
     "//tools/bazel/mingw:loc_check_inputs",
     "//tools/bazel/patches:loc_check_inputs",

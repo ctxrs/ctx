@@ -42,6 +42,8 @@ if grep -Eq '^(bazel-[^/]*/|external/|target/)' "${manifest}"; then
 fi
 for path in \
   crates/ctx-history-capture/src/provider/source_backed/driver.rs \
+  scripts/source-backed-recovery/fault_shim.c \
+  scripts/source-backed-recovery/run-bazel-linux-fault-test.sh \
   tools/bazel/release_routes_test.bzl \
   scripts/check-loc.py; do
   grep -Fxq "${path}" "${manifest}" || {
