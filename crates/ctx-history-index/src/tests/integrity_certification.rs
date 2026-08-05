@@ -77,6 +77,40 @@ fn explicit_scrub_forces_one_full_hash_and_refreshes_reusable_authority() {
 }
 
 #[test]
+fn physical_audit_uses_explicit_topology_without_decoding_the_pointer_file() {
+    let (temp, _, _) = published_fixture("explicit-topology-authority.jsonl");
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let generation_path = crate::publication::slot_path(temp.path(), pointer.active());
+    let index = open_slot_index(temp.path(), pointer.active()).unwrap();
+    let unsupported_pointer = serde_json::json!({
+        "version": 1,
+        "active": {
+            "generation_id": pointer.active().generation_id(),
+            "directory": pointer.active().directory(),
+        },
+        "previous": null,
+    });
+    fs::write(
+        temp.path().join("active-generation.json"),
+        serde_json::to_vec(&unsupported_pointer).unwrap(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load_active_generation_pointer(temp.path()),
+        Err(IndexError::UnsupportedActiveGenerationPointer(1))
+    ));
+    for topology_authority in [None, Some(&pointer)] {
+        assert_eq!(
+            physical_integrity_digest(&index, &generation_path, topology_authority).unwrap(),
+            pointer.active().physical_integrity_digest()
+        );
+    }
+}
+
+#[test]
 fn each_new_generation_hashes_once_and_is_immediately_restart_reusable() {
     let (temp, source, baseline) = published_fixture("one-hash-generation.jsonl");
     let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())

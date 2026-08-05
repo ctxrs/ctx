@@ -108,6 +108,7 @@ pub(crate) fn migrate_allowlisted_predecessor(
         &predecessor_searcher,
         &predecessor_publication.manifest,
         &slot_path(root, pointer.active()),
+        Some(pointer),
         pointer.active().physical_integrity_digest(),
     )?;
     migration_checkpoint(MigrationStage::AfterPredecessorVerification, None)?;
@@ -132,8 +133,7 @@ pub(crate) fn migrate_allowlisted_predecessor(
     }
 
     migration_checkpoint(MigrationStage::BeforeCandidateCreation, None)?;
-    let candidate =
-        create_authenticated_migration_candidate(root, pointer.active(), &predecessor_index)?;
+    let candidate = create_authenticated_migration_candidate(root, pointer, &predecessor_index)?;
     let candidate_path = root
         .join(INDEX_GENERATIONS_DIRECTORY)
         .join(&candidate.directory_name);
@@ -188,11 +188,11 @@ pub(crate) fn republish_current_for_qualification(
         &current_searcher,
         &current_publication.manifest,
         &slot_path(root, pointer.active()),
+        Some(pointer),
         pointer.active().physical_integrity_digest(),
     )?;
 
-    let candidate =
-        create_authenticated_migration_candidate(root, pointer.active(), &current_index)?;
+    let candidate = create_authenticated_migration_candidate(root, pointer, &current_index)?;
     let candidate_path = root
         .join(INDEX_GENERATIONS_DIRECTORY)
         .join(&candidate.directory_name);
@@ -300,6 +300,7 @@ fn migrate_candidate(
 
     let verified = verify_candidate(
         root,
+        predecessor_pointer,
         candidate_path,
         candidate_directory_name,
         predecessor_metas,
@@ -357,6 +358,7 @@ struct VerifiedMigrationCandidate {
 #[allow(clippy::too_many_arguments)]
 fn verify_candidate(
     root: &Path,
+    predecessor_pointer: &ActiveGenerationPointer,
     candidate_path: &Path,
     candidate_directory_name: &str,
     predecessor_metas: &tantivy::IndexMeta,
@@ -394,7 +396,8 @@ fn verify_candidate(
     if searcher_generation(&searcher) != meta_generation(&metas) {
         return Err(IndexError::ConcurrentGenerationChange);
     }
-    let physical_integrity_audit = physical_integrity_audit(&reopened, candidate_path)?;
+    let physical_integrity_audit =
+        physical_integrity_audit(&reopened, candidate_path, Some(predecessor_pointer))?;
     verify_searcher(&searcher, expected_manifest)?;
     let slot = GenerationSlot::new(
         expected_generation_id.to_owned(),

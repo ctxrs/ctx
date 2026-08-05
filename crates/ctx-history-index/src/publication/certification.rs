@@ -239,7 +239,7 @@ pub(crate) fn verify_or_certify_physical_integrity(
     }
 
     let generation_path = super::slot_path(root, slot);
-    let audit = physical_integrity_audit(index, &generation_path)?;
+    let audit = physical_integrity_audit(index, &generation_path, Some(pointer))?;
     if audit.digest() != slot.physical_integrity_digest() {
         return Err(IndexError::ChecksumMismatch);
     }
@@ -253,7 +253,7 @@ pub(crate) fn scrub_and_certify_physical_integrity(
     index: &tantivy::Index,
 ) -> Result<()> {
     let generation_path = super::slot_path(root, slot);
-    let audit = physical_integrity_audit(index, &generation_path)?;
+    let audit = physical_integrity_audit(index, &generation_path, Some(pointer))?;
     if audit.digest() != slot.physical_integrity_digest() {
         return Err(IndexError::ChecksumMismatch);
     }

@@ -157,7 +157,7 @@ fn metadata_factory_runs_inside_the_terminal_authority_fence_without_reopen() {
     let active_path = crate::publication::slot_path(temp.path(), pointer.active());
     let active_index = open_slot_index(temp.path(), pointer.active()).unwrap();
     assert_eq!(
-        physical_integrity_digest(&active_index, &active_path).unwrap(),
+        physical_integrity_digest(&active_index, &active_path, Some(&pointer)).unwrap(),
         pointer.active().physical_integrity_digest()
     );
 
@@ -368,7 +368,7 @@ fn metadata_does_not_change_logical_generation_identity() {
         let path = crate::publication::slot_path(root, pointer.active());
         let index = open_slot_index(root, pointer.active()).unwrap();
         assert_eq!(
-            physical_integrity_digest(&index, &path).unwrap(),
+            physical_integrity_digest(&index, &path, Some(&pointer)).unwrap(),
             pointer.active().physical_integrity_digest()
         );
     }

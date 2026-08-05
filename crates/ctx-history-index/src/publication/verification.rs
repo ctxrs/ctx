@@ -32,7 +32,10 @@ use crate::{
     GenerationManifest, IndexError, Result,
 };
 
-use super::certification::{open_artifact, recapture_artifact, ArtifactIdentity};
+use super::{
+    certification::{open_artifact, recapture_artifact, ArtifactIdentity},
+    ActiveGenerationPointer,
+};
 
 mod spill;
 
@@ -143,11 +146,13 @@ pub(crate) fn verify_complete_searcher(
     searcher: &Searcher,
     manifest: &GenerationManifest,
     generation_path: &Path,
+    topology_authority: Option<&ActiveGenerationPointer>,
     expected_physical_integrity_digest: &str,
 ) -> Result<()> {
     verify_physical_integrity(
         searcher.index(),
         generation_path,
+        topology_authority,
         expected_physical_integrity_digest,
     )?;
     verify_searcher(searcher, manifest)
@@ -203,16 +208,22 @@ impl PhysicalIntegrityAudit {
 /// and temporary files are deliberately excluded because queries do not read them.
 /// Segment bytes are streamed once and checked against their Tantivy CRC footer
 /// while their stronger SHA-256 is computed.
+///
+/// `topology_authority` is the caller's already-decoded publication topology.
+/// `None` is reserved for a new root or a source-authoritative cold rebuild whose
+/// incompatible pointer must remain opaque until the candidate replaces it.
 pub(crate) fn physical_integrity_digest(
     index: &tantivy::Index,
     generation_path: &Path,
+    topology_authority: Option<&ActiveGenerationPointer>,
 ) -> Result<String> {
-    Ok(physical_integrity_audit(index, generation_path)?.digest)
+    Ok(physical_integrity_audit(index, generation_path, topology_authority)?.digest)
 }
 
 pub(crate) fn physical_integrity_audit(
     index: &tantivy::Index,
     generation_path: &Path,
+    topology_authority: Option<&ActiveGenerationPointer>,
 ) -> Result<PhysicalIntegrityAudit> {
     #[cfg(test)]
     CHECKSUM_WALKS.with(|count| count.set(count.get() + 1));
@@ -227,7 +238,6 @@ pub(crate) fn physical_integrity_audit(
         })
         .and_then(Path::parent)
         .ok_or(IndexError::ChecksumMismatch)?;
-    let pointer = super::load_active_generation_pointer(root)?;
     let mut paths = active_index_files(index)?;
     paths.insert(PathBuf::from(TANTIVY_META_FILE));
     let entries = paths
@@ -239,7 +249,7 @@ pub(crate) fn physical_integrity_audit(
                 generation_path,
                 &path,
                 path != Path::new(TANTIVY_META_FILE),
-                pointer.as_ref(),
+                topology_authority,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -260,9 +270,10 @@ pub(crate) fn physical_integrity_audit(
 pub(crate) fn verify_physical_integrity(
     index: &tantivy::Index,
     generation_path: &Path,
+    topology_authority: Option<&ActiveGenerationPointer>,
     expected_digest: &str,
 ) -> Result<()> {
-    let audit = physical_integrity_audit(index, generation_path)?;
+    let audit = physical_integrity_audit(index, generation_path, topology_authority)?;
     if audit.digest != expected_digest {
         return Err(IndexError::ChecksumMismatch);
     }
