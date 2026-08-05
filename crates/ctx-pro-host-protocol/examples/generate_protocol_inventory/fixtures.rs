@@ -275,6 +275,17 @@ pub(super) fn blame_result() -> BlameResult {
             },
         },
         git_snapshot: None,
+        outcome: BlameOutcome {
+            attribution: BlameAttribution::None,
+            coverage: BlameCoverage {
+                unit: BlameCoverageUnit::CommitFact,
+                evaluated: 0,
+                proven: 0,
+                possible: 0,
+                conflicting: 0,
+                none: 0,
+            },
+        },
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,

@@ -1,4 +1,4 @@
-//! Exact, bounded Protocol V1 between the OSS `ctx` host and a local Pro helper.
+//! Exact, bounded Protocol V2 between the OSS `ctx` host and a local Pro helper.
 //!
 //! The public crate is the only wire authority. Private products consume this
 //! crate and its generated inventory at one exact source revision.
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub use ctx_history_core::{CoreRecord, SourceKey, StableEntityId};
 
 pub const FRAME_MAGIC: &[u8; 6] = b"CTXPRO";
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 include!("protocol_fingerprint.rs");
 pub const FRAME_HEADER_BYTES: usize = FRAME_MAGIC.len() + 2 + 4;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 80 * 1024 * 1024;
@@ -16,10 +16,11 @@ pub const MAX_BLAME_RESULTS: u32 = 100;
 pub const MAX_BLAME_CURSOR_BYTES: usize = 256;
 pub const MAX_BLAME_EVIDENCE: usize = 3_200;
 pub const MAX_BLAME_ATTRIBUTIONS_PER_MATCH: usize = 100;
+pub const MAX_BLAME_DIAGNOSTIC_CANDIDATES: usize = 5;
 pub const MAX_CITATIONS_PER_FACT: usize = 32;
 pub const MAX_BLAME_TARGET_BYTES: usize = 8 * 1024;
-/// Canonical generated Protocol V1 inventory shipped by this exact crate revision.
-pub const PROTOCOL_INVENTORY_JSON: &str = include_str!("../testdata/v1/inventory.json");
+/// Canonical generated Protocol V2 inventory shipped by this exact crate revision.
+pub const PROTOCOL_INVENTORY_JSON: &str = include_str!("../testdata/v2/inventory.json");
 /// Canonical entitlement vectors shipped by this exact crate revision.
 pub const ENTITLEMENT_GOLDEN_JSON: &str = include_str!("../testdata/entitlement/v1/golden.json");
 
@@ -34,7 +35,10 @@ pub use entitlement::{
     INSTALLATION_PUBLIC_KEY_BYTES,
 };
 mod error;
-pub use error::{ErrorClass, ProtocolError};
+pub use error::{
+    BlameDiagnosticCandidate, BlameDiagnosticDetails, BlameDiagnosticReason, ErrorClass,
+    ProtocolError,
+};
 mod frame;
 pub use frame::{read_frame, write_frame, FrameError};
 mod layout;
@@ -66,12 +70,13 @@ pub use message::{
 };
 mod query;
 pub use query::{
-    canonical_logical_repository_id, AgentAttribution, BlameContinuation, BlameMatch, BlameRequest,
-    BlameResult, BlameTarget, CommitBlameMatch, CommitFactType, CommitPredicate,
-    ContinuationReason, FactConfidence, FactState, FileBlameMatch, GitSnapshot, LineRange,
-    NumberedEvidence, ProductionRelationship, PullRequestAction, PullRequestActivity,
-    PullRequestBlameMatch, PullRequestBlameRelationship, PullRequestCommit,
-    PullRequestCommitRelationship, QuerySnapshotExpectation, ResolvedBlameTarget, WorktreeStatus,
+    canonical_logical_repository_id, AgentAttribution, BlameAttribution, BlameContinuation,
+    BlameCoverage, BlameCoverageUnit, BlameMatch, BlameOutcome, BlameRequest, BlameResult,
+    BlameTarget, CommitBlameMatch, CommitFactType, CommitPredicate, ContinuationReason,
+    FactConfidence, FactState, FileBlameMatch, GitSnapshot, LineRange, NumberedEvidence,
+    ProductionRelationship, PullRequestAction, PullRequestActivity, PullRequestBlameMatch,
+    PullRequestBlameRelationship, PullRequestCommit, PullRequestCommitRelationship,
+    QuerySnapshotExpectation, ResolvedBlameTarget, WorktreeStatus,
 };
 mod core_materialization;
 pub use core_materialization::{

@@ -23,7 +23,7 @@ CONFORMANCE_DATA = glob(["testdata/**/*.json"])
 
 PROTOCOL_AUTHORITY_DATA = [
     "testdata/entitlement/v1/golden.json",
-    "testdata/v1/inventory.json",
+    "testdata/v2/inventory.json",
 ]
 
 filegroup(
@@ -72,13 +72,13 @@ sh_test(
     srcs = ["check_inventory.sh"],
     args = [
         "$(rootpath :generate_protocol_inventory)",
-        "$(rootpath testdata/v1/inventory.json)",
+        "$(rootpath testdata/v2/inventory.json)",
         "$(rootpath src/protocol_fingerprint.rs)",
     ],
     data = [
         ":generate_protocol_inventory",
         "src/protocol_fingerprint.rs",
-        "testdata/v1/inventory.json",
+        "testdata/v2/inventory.json",
     ],
 )
 

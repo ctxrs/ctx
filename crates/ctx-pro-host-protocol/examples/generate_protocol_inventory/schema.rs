@@ -36,7 +36,7 @@ pub(super) fn inventory() -> Value {
         request_id,
         message: HelperMessage::Error(ProtocolError::new(
             ErrorClass::ProtocolMismatch,
-            "exact Protocol V1 mismatch",
+            "exact Protocol V2 mismatch",
         )),
     };
     json!({
@@ -79,6 +79,7 @@ pub(super) fn inventory() -> Value {
             "blame_cursor_bytes": MAX_BLAME_CURSOR_BYTES,
             "blame_evidence": MAX_BLAME_EVIDENCE,
             "blame_attributions_per_match": MAX_BLAME_ATTRIBUTIONS_PER_MATCH,
+            "blame_diagnostic_candidates": MAX_BLAME_DIAGNOSTIC_CANDIDATES,
             "citations_per_fact": MAX_CITATIONS_PER_FACT,
             "blame_target_bytes": MAX_BLAME_TARGET_BYTES,
             "mcp_tool_call_attribution_component_bytes":
@@ -104,8 +105,22 @@ pub(super) fn inventory() -> Value {
                 "entitlement_expired", "key_store_unavailable", "key_store_locked",
                 "not_materialized", "protocol_mismatch", "missing_source",
                 "missing_repository", "resource_not_found", "stale_fact",
-                "line_out_of_range", "stale_snapshot", "ambiguous", "corrupt",
-                "invalid_request", "bounds", "rebuild_required", "sequence", "internal"
+                "line_out_of_range", "stale_snapshot", "ambiguous",
+                "operation_unavailable", "corrupt", "invalid_request", "bounds", "rebuild_required",
+                "sequence", "internal"
+            ],
+            "blame_attribution": ["proven", "possible", "conflicting", "none"],
+            "blame_coverage_unit": [
+                "committed_line", "commit_fact", "pull_request_relationship"
+            ],
+            "blame_diagnostic_reason": [
+                "target_not_indexed", "repository_selector_not_indexed",
+                "repository_not_bound", "repository_ambiguous", "target_ambiguous",
+                "commit_rewrite_ambiguous", "file_blame_not_covered",
+                "commit_blame_not_covered", "pull_request_blame_not_covered"
+            ],
+            "blame_diagnostic_candidate_kind": [
+                "repository", "file", "commit", "pull_request"
             ],
             "core_projection_currentness": [
                 "not_materialized", "partial", "stale", "needs_rebuild", "current"
@@ -213,8 +228,24 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "CoreMaterializationFinished": fields(&["receipt", "replayed"], &[]),
             "QuerySnapshotExpectation.core": fields(&["kind", "receipt"], &[]),
+            "ProtocolError": fields(
+                &["class", "message", "retryable", "details"], &[]),
+            "BlameDiagnosticDetails": fields(
+                &["reason", "candidates", "candidates_truncated"], &[]),
+            "BlameDiagnosticCandidate.repository": fields(
+                &["kind", "selector"], &[]),
+            "BlameDiagnosticCandidate.file": fields(
+                &["kind", "repository", "path"], &[]),
+            "BlameDiagnosticCandidate.commit": fields(
+                &["kind", "repository", "oid"], &[]),
+            "BlameDiagnosticCandidate.pull_request": fields(
+                &["kind", "repository", "selector"], &[]),
+            "BlameOutcome": fields(&["attribution", "coverage"], &[]),
+            "BlameCoverage": fields(&[
+                "unit", "evaluated", "proven", "possible", "conflicting", "none"
+            ], &[]),
             "BlameResult": fields(&[
-                "snapshot", "target", "git_snapshot", "matches", "evidence", "next"
+                "snapshot", "target", "git_snapshot", "outcome", "matches", "evidence", "next"
             ], &[]),
             "EvidenceCitation": fields(&[
                 "core_generation_id", "source", "session_id", "event_id", "event_sequence",

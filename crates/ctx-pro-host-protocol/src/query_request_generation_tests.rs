@@ -99,6 +99,17 @@ fn file_result(result_snapshot: QuerySnapshotExpectation, generations: &[String]
             head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             worktree_status: WorktreeStatus::Clean,
         }),
+        outcome: BlameOutcome {
+            attribution: BlameAttribution::None,
+            coverage: BlameCoverage {
+                unit: BlameCoverageUnit::CommittedLine,
+                evaluated: 1,
+                proven: 0,
+                possible: 0,
+                conflicting: 0,
+                none: 1,
+            },
+        },
         matches: vec![BlameMatch::File(FileBlameMatch {
             id: "file-match:1".to_owned(),
             lines: LineRange { start: 1, end: 1 },
@@ -131,6 +142,17 @@ fn empty_file_result(result_snapshot: QuerySnapshotExpectation) -> BlameResult {
             head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             worktree_status: WorktreeStatus::Clean,
         }),
+        outcome: BlameOutcome {
+            attribution: BlameAttribution::None,
+            coverage: BlameCoverage {
+                unit: BlameCoverageUnit::CommittedLine,
+                evaluated: 0,
+                proven: 0,
+                possible: 0,
+                conflicting: 0,
+                none: 0,
+            },
+        },
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
@@ -185,6 +207,11 @@ fn missing_or_malformed_result_snapshot_fails_deserialization() {
     malformed["snapshot"]["receipt"]["materializer_revision"] =
         serde_json::Value::String(String::new());
     assert!(serde_json::from_value::<BlameResult>(malformed).is_err());
+
+    let mut missing_outcome =
+        serde_json::to_value(empty_file_result(snapshot('a', "materializer-v1"))).unwrap();
+    missing_outcome.as_object_mut().unwrap().remove("outcome");
+    assert!(serde_json::from_value::<BlameResult>(missing_outcome).is_err());
 }
 
 #[test]
@@ -209,4 +236,72 @@ fn malformed_or_missing_citation_generation_fails_typed_response_validation() {
         .unwrap()
         .remove("core_generation_id");
     assert!(serde_json::from_value::<BlameResult>(missing).is_err());
+}
+
+#[test]
+fn outcome_uses_four_conservative_states_over_exact_page_coverage() {
+    let request = file_request('a');
+    let base = file_result(snapshot('a', "materializer-v1"), &["a".repeat(64)]);
+    for (attribution, counts) in [
+        (BlameAttribution::Proven, (1, 0, 0, 0)),
+        (BlameAttribution::Possible, (0, 1, 0, 0)),
+        (BlameAttribution::Conflicting, (0, 0, 1, 0)),
+        (BlameAttribution::None, (0, 0, 0, 1)),
+    ] {
+        let mut result = base.clone();
+        result.outcome = BlameOutcome {
+            attribution,
+            coverage: BlameCoverage {
+                unit: BlameCoverageUnit::CommittedLine,
+                evaluated: 1,
+                proven: counts.0,
+                possible: counts.1,
+                conflicting: counts.2,
+                none: counts.3,
+            },
+        };
+        result.validate_for_request(&request).unwrap();
+    }
+
+    let mut mixed = base;
+    mixed.outcome = BlameOutcome {
+        attribution: BlameAttribution::Possible,
+        coverage: BlameCoverage {
+            unit: BlameCoverageUnit::CommittedLine,
+            evaluated: 1,
+            proven: 1,
+            possible: 0,
+            conflicting: 0,
+            none: 0,
+        },
+    };
+    assert_eq!(mixed.validate().unwrap_err().class, ErrorClass::Corrupt);
+}
+
+#[test]
+fn outcome_rejects_wrong_count_sum_unit_page_scope_and_unknown_fields() {
+    let base = file_result(snapshot('a', "materializer-v1"), &["a".repeat(64)]);
+
+    let mut wrong_sum = base.clone();
+    wrong_sum.outcome.coverage.evaluated = 2;
+    assert_eq!(wrong_sum.validate().unwrap_err().class, ErrorClass::Corrupt);
+
+    let mut wrong_unit = base.clone();
+    wrong_unit.outcome.coverage.unit = BlameCoverageUnit::CommitFact;
+    assert_eq!(
+        wrong_unit.validate().unwrap_err().class,
+        ErrorClass::Corrupt
+    );
+
+    let mut wrong_page = base.clone();
+    wrong_page.outcome.coverage.evaluated = 2;
+    wrong_page.outcome.coverage.none = 2;
+    assert_eq!(
+        wrong_page.validate().unwrap_err().class,
+        ErrorClass::Corrupt
+    );
+
+    let mut unknown = serde_json::to_value(base).unwrap();
+    unknown["outcome"]["partial"] = serde_json::json!(false);
+    assert!(serde_json::from_value::<BlameResult>(unknown).is_err());
 }

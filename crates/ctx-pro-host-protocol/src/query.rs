@@ -9,7 +9,7 @@ use super::{
 };
 
 #[path = "query_pull_request_selector.rs"]
-mod pull_request_selector;
+pub(crate) mod pull_request_selector;
 use pull_request_selector::{pull_request_selector_kind, PullRequestSelectorKind};
 
 /// Exact completed authority that a cited blame request requires the derived graph to match.
@@ -377,11 +377,92 @@ pub struct NumberedEvidence {
     pub citation: EvidenceCitation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlameAttribution {
+    Proven,
+    Possible,
+    Conflicting,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlameCoverageUnit {
+    CommittedLine,
+    CommitFact,
+    PullRequestRelationship,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameCoverage {
+    pub unit: BlameCoverageUnit,
+    pub evaluated: u32,
+    pub proven: u32,
+    pub possible: u32,
+    pub conflicting: u32,
+    pub none: u32,
+}
+
+impl BlameCoverage {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let counted = self
+            .proven
+            .checked_add(self.possible)
+            .and_then(|count| count.checked_add(self.conflicting))
+            .and_then(|count| count.checked_add(self.none))
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorClass::Bounds, "blame coverage count overflowed")
+            })?;
+        if counted != self.evaluated {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame coverage counts must sum to the evaluated page count",
+            ));
+        }
+        Ok(())
+    }
+
+    const fn aggregate_attribution(&self) -> BlameAttribution {
+        if self.conflicting > 0 {
+            BlameAttribution::Conflicting
+        } else if self.evaluated > 0 && self.proven == self.evaluated {
+            BlameAttribution::Proven
+        } else if self.proven > 0 || self.possible > 0 {
+            BlameAttribution::Possible
+        } else {
+            BlameAttribution::None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameOutcome {
+    pub attribution: BlameAttribution,
+    pub coverage: BlameCoverage,
+}
+
+impl BlameOutcome {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        self.coverage.validate()?;
+        if self.attribution != self.coverage.aggregate_attribution() {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame attribution must be the conservative aggregate of page coverage",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlameResult {
     pub snapshot: QuerySnapshotExpectation,
     pub target: ResolvedBlameTarget,
     pub git_snapshot: Option<GitSnapshot>,
+    pub outcome: BlameOutcome,
     pub matches: Vec<BlameMatch>,
     pub evidence: Vec<NumberedEvidence>,
     pub next: Option<BlameContinuation>,
@@ -393,6 +474,7 @@ struct BlameResultWire {
     snapshot: QuerySnapshotExpectation,
     target: ResolvedBlameTarget,
     git_snapshot: Option<GitSnapshot>,
+    outcome: BlameOutcome,
     matches: Vec<BlameMatch>,
     evidence: Vec<NumberedEvidence>,
     next: Option<BlameContinuation>,
@@ -408,6 +490,7 @@ impl<'de> Deserialize<'de> for BlameResult {
             snapshot: wire.snapshot,
             target: wire.target,
             git_snapshot: wire.git_snapshot,
+            outcome: wire.outcome,
             matches: wire.matches,
             evidence: wire.evidence,
             next: wire.next,
@@ -422,6 +505,7 @@ impl<'de> Deserialize<'de> for BlameResult {
 impl BlameResult {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         self.snapshot.validate()?;
+        self.outcome.validate()?;
         if self.matches.len() > MAX_BLAME_RESULTS as usize {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
@@ -458,6 +542,24 @@ impl BlameResult {
                 None,
             ) => {}
         }
+        let expected_unit = match &self.target {
+            ResolvedBlameTarget::File { .. } => BlameCoverageUnit::CommittedLine,
+            ResolvedBlameTarget::Commit { .. } => BlameCoverageUnit::CommitFact,
+            ResolvedBlameTarget::PullRequest { .. } => BlameCoverageUnit::PullRequestRelationship,
+        };
+        if self.outcome.coverage.unit != expected_unit {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame coverage unit does not match the resolved target kind",
+            ));
+        }
+        let page_evaluated = self.page_evaluated_units()?;
+        if self.outcome.coverage.evaluated != page_evaluated {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame coverage must describe exactly the returned page",
+            ));
+        }
         self.target.validate()?;
         if let Some(next) = &self.next {
             validate_cursor(Some(&next.cursor))?;
@@ -488,6 +590,40 @@ impl BlameResult {
             ));
         }
         Ok(())
+    }
+
+    fn page_evaluated_units(&self) -> Result<u32, ProtocolError> {
+        match &self.target {
+            ResolvedBlameTarget::File { .. } => {
+                self.matches.iter().try_fold(0_u32, |count, item| {
+                    let BlameMatch::File(item) = item else {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "file blame coverage contains a non-file match",
+                        ));
+                    };
+                    let lines = item
+                        .lines
+                        .end
+                        .checked_sub(item.lines.start)
+                        .and_then(|span| span.checked_add(1))
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorClass::Bounds,
+                                "file blame line count overflowed",
+                            )
+                        })?;
+                    count.checked_add(lines).ok_or_else(|| {
+                        ProtocolError::new(ErrorClass::Bounds, "file blame page count overflowed")
+                    })
+                })
+            }
+            ResolvedBlameTarget::Commit { .. } | ResolvedBlameTarget::PullRequest { .. } => {
+                u32::try_from(self.matches.len()).map_err(|_| {
+                    ProtocolError::new(ErrorClass::Bounds, "blame page count exceeds u32")
+                })
+            }
+        }
     }
 
     pub fn validate_for_request(&self, request: &BlameRequest) -> Result<(), ProtocolError> {

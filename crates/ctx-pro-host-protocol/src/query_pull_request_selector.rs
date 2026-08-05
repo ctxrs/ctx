@@ -1,10 +1,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PullRequestSelectorKind {
+pub(crate) enum PullRequestSelectorKind {
     Number,
     CanonicalUrl,
 }
 
-pub(super) fn pull_request_selector_kind(value: &str) -> Option<PullRequestSelectorKind> {
+pub(crate) fn pull_request_selector_kind(value: &str) -> Option<PullRequestSelectorKind> {
     if positive_decimal(value) {
         return Some(PullRequestSelectorKind::Number);
     }
