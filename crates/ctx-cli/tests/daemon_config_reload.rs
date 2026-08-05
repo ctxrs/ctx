@@ -467,6 +467,7 @@ mod unix {
         write_nonsemantic_codex_session(&temp);
         initialize_store(&temp, &binary);
         let mut daemon = spawn_daemon(&temp, &binary, 1);
+        wait_for_active_cycle(&temp, daemon.pid());
         let setup = run_supported_setup(&temp, &binary);
         assert_eq!(setup["daemon_autostart"]["pid"], daemon.pid());
         wait_for_active_cycle(&temp, daemon.pid());
