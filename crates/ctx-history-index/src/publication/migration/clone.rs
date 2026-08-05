@@ -4,7 +4,7 @@ use tantivy::Index;
 
 use crate::{IndexError, Result};
 
-use super::super::GenerationSlot;
+use super::super::ActiveGenerationPointer;
 
 #[cfg(not(any(
     target_os = "linux",
@@ -33,13 +33,16 @@ const TANTIVY_LOCK_FILES: [&str; 2] = [".tantivy-meta.lock", ".tantivy-writer.lo
 
 pub(super) fn create_authenticated_migration_candidate(
     root: &Path,
-    base: &GenerationSlot,
+    predecessor_pointer: &ActiveGenerationPointer,
     predecessor_index: &Index,
 ) -> Result<MigrationCandidate> {
     #[cfg(test)]
     if portable::forced_for_test() {
-        let (candidate, guard) =
-            portable::create_authenticated_migration_candidate(root, base, predecessor_index)?;
+        let (candidate, guard) = portable::create_authenticated_migration_candidate(
+            root,
+            predecessor_pointer,
+            predecessor_index,
+        )?;
         return Ok(MigrationCandidate::new(
             candidate,
             CandidateAuthentication::Portable(guard),
@@ -47,8 +50,11 @@ pub(super) fn create_authenticated_migration_candidate(
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let (candidate, guard) =
-            unix::create_authenticated_migration_candidate(root, base, predecessor_index)?;
+        let (candidate, guard) = unix::create_authenticated_migration_candidate(
+            root,
+            predecessor_pointer,
+            predecessor_index,
+        )?;
         Ok(MigrationCandidate::new(
             candidate,
             CandidateAuthentication::DescriptorClone(guard),
@@ -56,8 +62,11 @@ pub(super) fn create_authenticated_migration_candidate(
     }
     #[cfg(any(target_os = "windows", target_os = "freebsd"))]
     {
-        let (candidate, guard) =
-            portable::create_authenticated_migration_candidate(root, base, predecessor_index)?;
+        let (candidate, guard) = portable::create_authenticated_migration_candidate(
+            root,
+            predecessor_pointer,
+            predecessor_index,
+        )?;
         Ok(MigrationCandidate::new(
             candidate,
             CandidateAuthentication::Portable(guard),
@@ -128,7 +137,7 @@ mod unix {
     };
 
     use super::super::super::{
-        generation::CandidateGeneration, lexical_index_settings, GenerationSlot,
+        generation::CandidateGeneration, lexical_index_settings, ActiveGenerationPointer,
         INDEX_GENERATIONS_DIRECTORY,
     };
     use super::exact_copy::copy_exact_authenticated_file;
@@ -226,9 +235,10 @@ mod unix {
 
     pub(super) fn create_authenticated_migration_candidate(
         root: &Path,
-        base: &GenerationSlot,
+        predecessor_pointer: &ActiveGenerationPointer,
         predecessor_index: &Index,
     ) -> Result<(CandidateGeneration, CandidateGuard)> {
+        let base = predecessor_pointer.active();
         let root_path = root.to_path_buf();
         let root_directory = BoundDirectory::open_path(root)?;
         validate_path_binding(root, root_directory.identity)?;
@@ -291,7 +301,8 @@ mod unix {
                     crate::LEXICAL_SCHEMA_VERSION,
                 ));
             }
-            let cloned_digest = physical_integrity_digest(&index, &destination_path)?;
+            let cloned_digest =
+                physical_integrity_digest(&index, &destination_path, Some(predecessor_pointer))?;
             if cloned_digest != base.physical_integrity_digest() {
                 return Err(IndexError::ChecksumMismatch);
             }

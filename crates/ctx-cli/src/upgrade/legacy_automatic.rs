@@ -1,7 +1,7 @@
 #[cfg(unix)]
 mod unix {
     use std::{
-        env, fs,
+        env, fs, io,
         os::unix::{ffi::OsStringExt as _, process::CommandExt as _},
         path::{Path, PathBuf},
         process::{self, Command, Stdio},
@@ -33,6 +33,8 @@ mod unix {
     const HELPER_CANDIDATE_SHA_ENV: &str = "CTX_LEGACY_AUTO_UPGRADE_CANDIDATE_SHA256";
     const LEGACY_VERSION: &str = "0.25.0";
     const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+    const LEGACY_STAGE_DIRECTORY_SCAN_LIMIT: usize = 4_096;
+    const LEGACY_STAGE_REMOVAL_LIMIT: usize = 32;
 
     pub(super) fn run() -> Result<bool> {
         if env::var_os(HELPER_ENV).is_some() {
@@ -213,6 +215,8 @@ mod unix {
                         discard_legacy_previous_binary(&target)
                             .context("discard committed v0.25 executable backup")?;
                         finish_replacement_daemon_handoff(&data_root, &handoff_id)?;
+                        // Residue cleanup is best-effort and cannot delay the durable handoff.
+                        discard_abandoned_legacy_stages(&target);
                         return Ok(());
                     }
                     _ => {}
@@ -225,6 +229,63 @@ mod unix {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    fn discard_abandoned_legacy_stages(target: &Path) {
+        // v0.25 names each stage with its publisher PID and Unix timestamp. A
+        // dead publisher cannot commit that stage; uncertain liveness is kept.
+        let Some(parent) = target.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(parent) else {
+            return;
+        };
+        let mut removed = 0;
+        for entry in entries.take(LEGACY_STAGE_DIRECTORY_SCAN_LIMIT).flatten() {
+            if removed == LEGACY_STAGE_REMOVAL_LIMIT {
+                break;
+            }
+            let Some(owner_pid) = legacy_stage_owner_pid(&entry.file_name()) else {
+                continue;
+            };
+            if legacy_stage_owner_may_be_active(owner_pid) {
+                continue;
+            }
+            if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+                continue;
+            }
+            if fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            if let Ok(directory) = fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+        }
+    }
+
+    fn legacy_stage_owner_pid(name: &std::ffi::OsStr) -> Option<u32> {
+        let identity = name
+            .to_str()?
+            .strip_prefix(".ctx-upgrade-")?
+            .strip_suffix(".new")?;
+        let (pid, nonce) = identity.split_once('.')?;
+        if nonce.is_empty() || nonce.contains('.') || nonce.parse::<u64>().is_err() {
+            return None;
+        }
+        let pid = pid.parse::<u32>().ok()?;
+        (pid > 0).then_some(pid)
+    }
+
+    fn legacy_stage_owner_may_be_active(pid: u32) -> bool {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return true;
+        };
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
 
     fn required_absolute_path(key: &str) -> Result<PathBuf> {
@@ -246,6 +307,34 @@ mod unix {
             }
         }
         HELPER_TIMEOUT
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn legacy_stage_owner_requires_the_exact_v025_name_contract() {
+            assert_eq!(
+                legacy_stage_owner_pid(std::ffi::OsStr::new(".ctx-upgrade-123.456.new")),
+                Some(123)
+            );
+            for name in [
+                ".ctx-upgrade-0.456.new",
+                ".ctx-upgrade-123.new",
+                ".ctx-upgrade-123.nonce.new",
+                ".ctx-upgrade-123.456.extra.new",
+                ".ctx-upgrade-123.456.install.json.new",
+                ".ctx-upgrade-forged.new",
+            ] {
+                assert_eq!(legacy_stage_owner_pid(std::ffi::OsStr::new(name)), None);
+            }
+        }
+
+        #[test]
+        fn current_process_legacy_stage_owner_is_active() {
+            assert!(legacy_stage_owner_may_be_active(process::id()));
+        }
     }
 }
 

@@ -483,7 +483,8 @@ impl GenerationWriter {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        let physical_integrity_audit = physical_integrity_audit(&index, candidate_path)?;
+        let physical_integrity_audit =
+            physical_integrity_audit(&index, candidate_path, self.active_pointer.as_ref())?;
         verify_publication_candidate(&searcher, manifest, self.base_searcher.as_ref())?;
         let slot = GenerationSlot::new(
             generation_id.to_owned(),

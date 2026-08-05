@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 const ATTRIBUTION_SERVER_CANARY: &str = "zzsrvattributioncanary7e41qphx";
 const ATTRIBUTION_TOOL_CANARY: &str = "zztoolattributioncanary9b26wkmd";
+const INVOCATION_ARGUMENT_CANARY: &str = "zzinvocationargumentcanary5c83rmqv";
 
 fn write_session(root: &Path, native_session_id: &str, events: &[Value]) {
     fs::create_dir_all(root).unwrap();
@@ -969,7 +970,7 @@ fn appended_malformed_duplicate_retracts_attribution_without_touching_neighbor_i
 }
 
 #[test]
-fn mcp_attribution_canaries_are_not_indexed_or_ranked() {
+fn codex_dual_layer_mcp_metadata_and_exchange_invocation_keep_search_contract() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -984,7 +985,7 @@ fn mcp_attribution_canaries_are_not_indexed_or_ranked() {
                 json!({
                     "server": ATTRIBUTION_SERVER_CANARY,
                     "tool": ATTRIBUTION_TOOL_CANARY,
-                    "arguments": {"path": "/workspace/result.txt"}
+                    "arguments": {"path": INVOCATION_ARGUMENT_CANARY}
                 }),
                 json!({
                     "Ok": {
@@ -1010,7 +1011,6 @@ fn mcp_attribution_canaries_are_not_indexed_or_ranked() {
     let verified = VerifiedIndex::open(&index).unwrap();
     let candidates = verified.search_event_candidates(body, 10).unwrap();
     assert_eq!(candidates.len(), 2);
-    assert_eq!(candidates[0].score, candidates[1].score);
 
     let attributed = candidates
         .iter()
@@ -1021,18 +1021,45 @@ fn mcp_attribution_canaries_are_not_indexed_or_ranked() {
         })
         .find(|core| core.mcp_tool_call.is_some())
         .expect("MCP result remains available through its body match");
-    let invocation = &attributed.content.structured_content.as_ref().unwrap()
-        ["provider_native_tool_result"]["invocation"];
-    assert_eq!(invocation["server"], ATTRIBUTION_SERVER_CANARY);
-    assert_eq!(invocation["tool"], ATTRIBUTION_TOOL_CANARY);
+    let attributed_id = attributed.event_id;
+    assert_eq!(
+        attributed.mcp_tool_call,
+        Some(McpToolCallAttribution {
+            server: ATTRIBUTION_SERVER_CANARY.to_owned(),
+            tool: ATTRIBUTION_TOOL_CANARY.to_owned(),
+        })
+    );
+    let invocation = attributed
+        .content
+        .mcp_exchange
+        .as_ref()
+        .unwrap()
+        .invocation
+        .as_ref()
+        .unwrap();
+    assert_eq!(invocation.server, ATTRIBUTION_SERVER_CANARY);
+    assert_eq!(invocation.tool, ATTRIBUTION_TOOL_CANARY);
+    assert_eq!(
+        invocation.arguments,
+        McpJsonCapture::Present {
+            value: json!({"path": INVOCATION_ARGUMENT_CANARY})
+        }
+    );
 
-    for canary in [ATTRIBUTION_SERVER_CANARY, ATTRIBUTION_TOOL_CANARY] {
-        assert!(
-            verified
-                .search_event_candidates(canary, 10)
-                .unwrap()
-                .is_empty(),
-            "MCP attribution metadata became searchable: {canary}"
+    for canary in [
+        ATTRIBUTION_SERVER_CANARY,
+        ATTRIBUTION_TOOL_CANARY,
+        INVOCATION_ARGUMENT_CANARY,
+    ] {
+        let invocation_matches = verified.search_event_candidates(canary, 10).unwrap();
+        assert_eq!(
+            invocation_matches.len(),
+            1,
+            "selected MCP invocation data was not narrowly searchable: {canary}"
+        );
+        assert_eq!(
+            invocation_matches[0].event.event_id, attributed_id,
+            "selected MCP invocation data matched the wrong event: {canary}"
         );
     }
 }

@@ -1,6 +1,9 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("//tools/bazel:gates.bzl", "loc_check_inputs")
 
 package(default_visibility = ["//visibility:public"])
+
+loc_check_inputs(name = "loc_check_inputs")
 
 filegroup(
     name = "local_fault_harness_sources",

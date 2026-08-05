@@ -561,7 +561,7 @@ fn relabel_active_manifest(root: &Path, mutate: impl FnOnce(&mut GenerationManif
     let slot = GenerationSlot::new(
         generation_id,
         pointer.active().directory().to_owned(),
-        physical_integrity_digest(&index, &generation_path).unwrap(),
+        physical_integrity_digest(&index, &generation_path, Some(&pointer)).unwrap(),
     )
     .unwrap();
     publish_active_generation_pointer(root, &ActiveGenerationPointer::new(slot, None).unwrap())

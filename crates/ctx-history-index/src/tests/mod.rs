@@ -294,7 +294,8 @@ fn publish_unchecked_generation(
     );
     prepared.commit().unwrap();
     payload_writer.wait_merging_threads().unwrap();
-    let physical_integrity_digest = physical_integrity_digest(index, &generation_path).unwrap();
+    let physical_integrity_digest =
+        physical_integrity_digest(index, &generation_path, Some(&pointer)).unwrap();
     let active = GenerationSlot::new(
         generation_id,
         pointer.active().directory().to_owned(),

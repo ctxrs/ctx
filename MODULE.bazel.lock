@@ -2511,7 +2511,7 @@
           "@@//Cargo.lock": "1649712ff9a77aea2a0026920cf533daf0c2938fa2c547be34e782b6d1ed0e46",
           "@@//crates/ctx-protocol/Cargo.toml": "e9e75a7c7ca116f86e58ee0e09d174612607c8c45cce0213e66825e403046bce",
           "@@//crates/ctx-history-index/Cargo.toml": "10e4310ad71f4e5d1d0cf993ce911698cf73ceaaeaa48badafe875bb9c476db2",
-          "@@//MODULE.bazel": "20834b3d9327e513b0c131704b5a05dac4c5e27c30dbb5356fab07ca524eb200",
+          "@@//MODULE.bazel": "29d2a363d47f7bcc1578d034a73cda70ba1eddb0e999fc2982dc747195d79d69",
           "@@//crates/ctx-history-refresh/Cargo.toml": "c8ac6df96ad8f00a608359d20f53a8a14b333b44e5b5b3d73a9d3d893de99ff3",
           "@@rules_rust~~rust_host_tools~rust_host_tools//rust_host_tools": "ENOENT",
           "@@//crates/ctx-history-capture/Cargo.toml": "2ee85100761ce5e9766a89e20dd18c4288a6f4c073d4328d7743b964d62838ae",

@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::super::super::{
-    generation::CandidateGeneration, lexical_index_settings, GenerationSlot,
+    generation::CandidateGeneration, lexical_index_settings, ActiveGenerationPointer,
     INDEX_GENERATIONS_DIRECTORY,
 };
 use super::{
@@ -183,9 +183,10 @@ struct ClonePlan {
 
 pub(super) fn create_authenticated_migration_candidate(
     root: &Path,
-    base: &GenerationSlot,
+    predecessor_pointer: &ActiveGenerationPointer,
     predecessor_index: &Index,
 ) -> Result<(CandidateGeneration, CandidateGuard)> {
+    let base = predecessor_pointer.active();
     let root_directory = BoundDirectory::open_path(root)?;
     let generations_name = Path::new(INDEX_GENERATIONS_DIRECTORY);
     let generations = BoundDirectory::open_at(&root_directory, generations_name)?;
@@ -238,7 +239,8 @@ pub(super) fn create_authenticated_migration_candidate(
                 crate::LEXICAL_SCHEMA_VERSION,
             ));
         }
-        let cloned_digest = physical_integrity_digest(&index, &destination_path)?;
+        let cloned_digest =
+            physical_integrity_digest(&index, &destination_path, Some(predecessor_pointer))?;
         if cloned_digest != base.physical_integrity_digest() {
             return Err(IndexError::ChecksumMismatch);
         }

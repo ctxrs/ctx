@@ -16,6 +16,19 @@ fn object_keys(value: &Value) -> BTreeSet<&str> {
         .collect()
 }
 
+fn unmarked_filesystem_root(path: &Path) -> &Path {
+    let root = path
+        .ancestors()
+        .last()
+        .expect("an absolute temporary path has a filesystem root");
+    assert!(
+        !root.join(".idea").exists(),
+        "test root has an .idea marker"
+    );
+    assert!(!root.join(".git").exists(), "test root has a Git marker");
+    root
+}
+
 #[test]
 fn sources_json_keeps_the_v1_top_level_and_source_fields() {
     let temp = tempdir();
@@ -60,13 +73,41 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
     );
 
     let mut no_path_command = ctx(&temp);
-    no_path_command.current_dir(temp.path());
+    no_path_command.current_dir(unmarked_filesystem_root(temp.path()));
     let no_path_report =
         json_output(no_path_command.args(["sources", "--provider", "firebender", "--format=json"]));
     assert_eq!(object_keys(&no_path_report), object_keys(&packet));
     assert!(no_path_report["sources"].as_array().unwrap().is_empty());
     assert_eq!(no_path_report["issues_truncated"], false);
     assert!(no_path_report["issues"].as_array().unwrap().is_empty());
+
+    let marked_project = temp.path().join("marked-firebender-project");
+    fs::create_dir_all(marked_project.join(".idea")).unwrap();
+    let marked_report = json_output(ctx(&temp).current_dir(&marked_project).args([
+        "sources",
+        "--provider",
+        "firebender",
+        "--format=json",
+    ]));
+    let marked_sources = marked_report["sources"].as_array().unwrap();
+    assert_eq!(marked_sources.len(), 1, "{marked_report:#}");
+    let firebender = &marked_sources[0];
+    assert_eq!(firebender["provider"], "firebender");
+    assert_eq!(
+        firebender["source_format"],
+        "firebender_chat_history_sqlite"
+    );
+    assert_eq!(firebender["status"], "missing");
+    assert_eq!(firebender["exists"], false);
+    assert_eq!(firebender["native_import"], true);
+    assert_eq!(firebender["importable"], false);
+    assert_eq!(
+        firebender["path"],
+        marked_project
+            .join(".idea/firebender/chat_history.db")
+            .display()
+            .to_string()
+    );
 }
 
 #[test]
@@ -121,28 +162,50 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
     assert!(!stderr.contains("relative-provider-root"), "{stderr}");
 
     let unestablished = tempdir();
-    let stdout = success_stdout(ctx(&unestablished).args(["sources", "--provider", "firebender"]));
-    assert!(
-        stdout.contains("has no established automatic history location"),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("ctx import --provider firebender --path <path>"),
-        "{stdout}"
-    );
-    assert!(
-        !stdout.contains("insufficient_official_evidence"),
-        "{stdout}"
-    );
-    let stderr = failure_stderr(ctx(&unestablished).args([
+    let unmarked_cwd = unmarked_filesystem_root(unestablished.path());
+    let stdout = success_stdout(ctx(&unestablished).current_dir(unmarked_cwd).args([
+        "sources",
+        "--provider",
+        "firebender",
+    ]));
+    assert!(stdout.contains("No history sources found"), "{stdout}");
+    assert!(stdout.contains("ctx sources --all"), "{stdout}");
+    let stderr = failure_stderr(ctx(&unestablished).current_dir(unmarked_cwd).args([
         "import",
         "--provider",
         "firebender",
         "--format=json",
     ]));
     assert!(
-        stderr.contains("has no official automatic history location established")
-            || stderr.contains("no official automatic Firebender history location is established"),
+        stderr.contains("no importable firebender history source was discovered"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ctx import --provider firebender --path <path>"),
+        "{stderr}"
+    );
+
+    let marked_project = unestablished.path().join("marked-firebender-project");
+    fs::create_dir_all(marked_project.join(".idea")).unwrap();
+    let stdout = success_stdout(ctx(&unestablished).current_dir(&marked_project).args([
+        "sources",
+        "--provider",
+        "firebender",
+    ]));
+    assert!(stdout.contains("firebender"), "{stdout}");
+    assert!(
+        stdout.contains(".idea/firebender/chat_history.db"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("missing"), "{stdout}");
+    let stderr = failure_stderr(ctx(&unestablished).current_dir(&marked_project).args([
+        "import",
+        "--provider",
+        "firebender",
+        "--format=json",
+    ]));
+    assert!(
+        stderr.contains("no importable firebender history source was discovered"),
         "{stderr}"
     );
     assert!(

@@ -3,13 +3,25 @@
 _LOC_CHECK_EXTENSIONS = [
     "bash",
     "bzl",
+    "c",
+    "cc",
     "cjs",
+    "cpp",
     "cs",
+    "cxx",
     "go",
+    "h",
+    "hh",
+    "hpp",
+    "hxx",
     "java",
     "js",
     "jsx",
+    "kt",
+    "kts",
     "mjs",
+    "ps1",
+    "psm1",
     "py",
     "rs",
     "sh",
@@ -31,6 +43,9 @@ _LOC_CHECK_EXCLUDES = [
     "fixtures/**",
     "gen/**",
     "generated/**",
+    "bazel-*/**",
+    "external/**",
+    "target/**",
 ]
 
 def loc_check_inputs(name):
@@ -50,6 +65,31 @@ def loc_check_inputs(name):
         ),
         visibility = ["//visibility:public"],
     )
+
+def _loc_check_manifest_impl(ctx):
+    generated = sorted([
+        source.short_path
+        for source in ctx.files.srcs
+        if not source.is_source
+    ])
+    if generated:
+        fail("LOC source manifest received generated inputs: %s" % ", ".join(generated))
+    paths = sorted({source.short_path: True for source in ctx.files.srcs}.keys())
+    ctx.actions.write(
+        output = ctx.outputs.out,
+        content = "\n".join(paths) + "\n",
+    )
+    return [DefaultInfo(files = depset([ctx.outputs.out]))]
+
+_loc_check_manifest = rule(
+    implementation = _loc_check_manifest_impl,
+    attrs = {"srcs": attr.label_list(allow_files = True)},
+    outputs = {"out": "%{name}.txt"},
+)
+
+def loc_check_manifest(name, srcs):
+    """Writes the exact declared LOC source inventory for sandboxed checks."""
+    _loc_check_manifest(name = name, srcs = srcs)
 
 def non_rust_gate(name, mode, args = [], data = [], tags = []):
     native.sh_test(

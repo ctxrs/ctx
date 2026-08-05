@@ -267,8 +267,9 @@ impl PreparationBase {
         if *verified {
             return Ok(());
         }
-        let pointer = load_active_generation_pointer(&self.root)?;
-        if pointer.as_ref().map(|pointer| pointer.active()) != Some(&self.slot) {
+        let pointer = load_active_generation_pointer(&self.root)?
+            .ok_or(IndexError::ConcurrentGenerationChange)?;
+        if pointer.active() != &self.slot {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         let generation_path = self
@@ -278,6 +279,7 @@ impl PreparationBase {
         verify_physical_integrity(
             self.searcher.index(),
             &generation_path,
+            Some(&pointer),
             self.slot.physical_integrity_digest(),
         )
         .map_err(|error| self.rebuild_required(error))?;

@@ -3,15 +3,32 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 checker="$(cd "${script_dir}/.." && pwd)/check-loc.sh"
-schema_header=$'path\tkind\tceiling\tdisposition\towner\trationale\texit_or_review\treview_by'
-today=2026-07-22
-future=2099-12-31
+root_policy="$(cd "${script_dir}/.." && pwd)/check-loc-policy-v2.json"
+scc_bin="${CTX_LOC_SCC:-}"
+[[ -n "${scc_bin}" && -x "${scc_bin}" ]] || {
+  printf 'check-loc test failed: CTX_LOC_SCC must name the pinned executable\n' >&2
+  exit 1
+}
+scc_bin="$(cd "$(dirname "${scc_bin}")" && pwd)/$(basename "${scc_bin}")"
+
+IFS=$'\t' read -r scc_version scc_archive_sha scc_binary_sha < <(
+  python3 - "${root_policy}" <<'PY'
+import json
+import sys
+
+metric = json.load(open(sys.argv[1], encoding="utf-8"))["metric"]
+print(metric["version"], metric["archive_sha256"], metric["binary_sha256"], sep="\t")
+PY
+)
+policy_binary_sha="${scc_binary_sha}"
+
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "${tmp}"' EXIT
 
 case_number=0
 failures=0
 current_case=''
+snapshot=''
 gate_status=0
 gate_output=''
 
@@ -24,40 +41,89 @@ new_case() {
   local name="$1"
   case_number=$((case_number + 1))
   current_case="${tmp}/case-${case_number}-${name}"
-  mkdir -p "${current_case}/scripts" "${current_case}/src" "${current_case}/tests"
+  snapshot=''
+  policy_binary_sha="${scc_binary_sha}"
+  mkdir -p "${current_case}/scripts"
   git -C "${current_case}" init -q
-  printf '%s\n' "${schema_header}" > "${current_case}/scripts/check-loc-exceptions.tsv"
-  git -C "${current_case}" add scripts/check-loc-exceptions.tsv
+  git -C "${current_case}" config user.email loc-policy@example.invalid
+  git -C "${current_case}" config user.name 'LOC Policy Test'
 }
 
-make_lines() {
+make_code() {
   local path="$1"
   local count="$2"
   mkdir -p "$(dirname "${path}")"
-  awk -v count="${count}" 'BEGIN { for (i = 1; i <= count; i++) print "// fixture line " i }' > "${path}"
+  case "${path}" in
+    *.js|*.jsx|*.mjs|*.cjs|*.ts|*.tsx)
+      awk -v count="${count}" 'BEGIN { for (i = 1; i <= count; i++) print "const fixture_" i " = " i ";" }' > "${path}"
+      ;;
+    *.bzl|*/BUILD|*/BUILD.bazel|*/MODULE.bazel)
+      awk -v count="${count}" 'BEGIN { for (i = 1; i <= count; i++) print "fixture_" i " = " i }' > "${path}"
+      ;;
+    *)
+      awk -v count="${count}" 'BEGIN { for (i = 1; i <= count; i++) print "fn fixture_" i "() {}" }' > "${path}"
+      ;;
+  esac
 }
 
-add_row() {
-  local path="$1" kind="$2" ceiling="$3" disposition="$4"
-  local owner="$5" rationale="$6" exit_or_review="$7" review_by="$8"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${path}" "${kind}" "${ceiling}" "${disposition}" "${owner}" "${rationale}" "${exit_or_review}" "${review_by}" \
-    >> "${current_case}/scripts/check-loc-exceptions.tsv"
+append_comments() {
+  local path="$1"
+  local count="$2"
+  awk -v count="${count}" 'BEGIN { for (i = 1; i <= count; i++) print "// comment " i }' >> "${path}"
 }
 
-add_valid_temporary_row() {
-  local path="$1" kind="$2" ceiling="$3" review_by="${4:-${future}}"
-  local normal_limit=1000
-  [[ "${kind}" == test ]] && normal_limit=1500
-  add_row \
-    "${path}" \
-    "${kind}" \
-    "${ceiling}" \
-    temporary \
-    component:test-fixture \
-    'Parser and projection responsibilities remain together until the named extraction lands.' \
-    "Remove after ${path} is reduced to at most ${normal_limit} physical lines and scripts/check-loc.sh passes." \
-    "${review_by}"
+commit_snapshot() {
+  git -C "${current_case}" add -A
+  git -C "${current_case}" commit -q --allow-empty -m snapshot
+  snapshot="$(git -C "${current_case}" rev-parse HEAD)"
+}
+
+write_policy() {
+  local policy="${current_case}/scripts/check-loc-policy-v2.json"
+  python3 - \
+    "${policy}" \
+    "${snapshot}" \
+    "${scc_version}" \
+    "${scc_archive_sha}" \
+    "${policy_binary_sha}" \
+    "$@" <<'PY'
+import json
+import sys
+
+path, snapshot, version, archive_sha, binary_sha, *fields = sys.argv[1:]
+if len(fields) % 3:
+    raise SystemExit("entries must be path/kind/baseline triples")
+entries = []
+for index in range(0, len(fields), 3):
+    entries.append(
+        {
+            "path": fields[index],
+            "kind": fields[index + 1],
+            "code_baseline": int(fields[index + 2]),
+        }
+    )
+value = {
+    "schema_version": 2,
+    "policy": "Fixture policy: existing excess is frozen; checked-in ceilings ratchet on shrink.",
+    "metric": {
+        "tool": "scc",
+        "version": version,
+        "report_field": "Code",
+        "archive_sha256": archive_sha,
+        "binary_sha256": binary_sha,
+    },
+    "limits": {
+        "production": {"advisory": 1000, "hard": 1500},
+        "test": {"advisory": 1500, "hard": 2500},
+    },
+    "grandfathered_at": snapshot,
+    "grandfathered": entries,
+}
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(value, output, indent=2)
+    output.write("\n")
+PY
+  git -C "${current_case}" add scripts/check-loc-policy-v2.json
 }
 
 run_gate() {
@@ -65,7 +131,9 @@ run_gate() {
   set +e
   (
     cd "${current_case}"
-    CTX_LOC_TODAY="${today}" bash "${checker}"
+    CTX_LOC_POLICY_FILE=scripts/check-loc-policy-v2.json \
+      CTX_LOC_SCC="${scc_bin}" \
+      bash "${checker}"
   ) > "${output_file}" 2>&1
   gate_status=$?
   set -e
@@ -80,230 +148,137 @@ expect_pass() {
   fi
 }
 
-expect_fail() {
-  local name="$1" expected="$2"
+expect_pass_with() {
+  local name="$1"
+  local expected="$2"
   run_gate
-  if ((gate_status == 0)); then
-    fail "${name}: expected failure"
-    return
-  fi
-  if ! grep -F -- "${expected}" <<< "${gate_output}" >/dev/null; then
+  if ((gate_status != 0)); then
+    fail "${name}: expected pass, got status ${gate_status}: ${gate_output}"
+  elif ! grep -F -- "${expected}" <<< "${gate_output}" >/dev/null; then
     fail "${name}: output did not contain '${expected}': ${gate_output}"
   fi
 }
 
-new_case valid-temporary
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1001
-expect_pass 'exact temporary ceiling'
+expect_fail() {
+  local name="$1"
+  local expected="$2"
+  run_gate
+  if ((gate_status == 0)); then
+    fail "${name}: expected failure"
+  elif ! grep -F -- "${expected}" <<< "${gate_output}" >/dev/null; then
+    fail "${name}: output did not contain '${expected}': ${gate_output}"
+  fi
+}
 
-new_case review-due-today
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1001 "${today}"
-expect_pass 'review date remains valid through the named day'
+new_case cloc-not-physical
+commit_snapshot
+write_policy
+make_code "${current_case}/src/hard.rs" 1500
+append_comments "${current_case}/src/hard.rs" 500
+expect_pass 'production hard limit counts code, not physical lines'
 
-new_case valid-cohesive
-make_lines "${current_case}/tests/contract_matrix.rs" 1501
-git -C "${current_case}" add tests/contract_matrix.rs
-add_row \
-  tests/contract_matrix.rs test 1501 cohesive component:test-fixture \
-  'Splitting this contract matrix would duplicate fixture ordering and cross-provider invariants.' \
-  'Review when the matrix no longer shares cross-provider ordering and invariant assertions.' \
-  "${future}"
-expect_pass 'specific cohesive exception'
+new_case advisories
+commit_snapshot
+write_policy
+make_code "${current_case}/src/review.rs" 1001
+make_code "${current_case}/web/example.test.mjs" 2000
+expect_pass_with 'advisories do not fail' 'LOC advisory report'
 
-new_case expired-review
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1001 2026-07-21
-expect_fail 'expired review date' 'review_by expired on 2026-07-21'
+new_case production-hard-limit
+commit_snapshot
+write_policy
+make_code "${current_case}/src/new.rs" 1501
+expect_fail 'new production file above hard limit' '1501 CLOC > hard limit 1500'
 
-new_case invalid-calendar-date
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1001 2026-02-30
-expect_fail 'real calendar date' 'review_by must be a real YYYY-MM-DD date'
+new_case test-hard-limit
+commit_snapshot
+write_policy
+make_code "${current_case}/tests/new.rs" 2501
+expect_fail 'new test file above hard limit' '2501 CLOC > hard limit 2500'
 
-new_case glob-path
-add_valid_temporary_row 'src/*.rs' source 1001
-expect_fail 'glob path' 'path must be one normalized exact repository path'
+new_case valid-grandfathered
+make_code "${current_case}/src/legacy.rs" 1600
+commit_snapshot
+write_policy src/legacy.rs production 1600
+expect_pass_with 'grandfathered hard excess' 'grandfathered ceiling 1600'
 
-new_case traversal-path
-add_valid_temporary_row 'src/../large.rs' source 1001
-expect_fail 'normalized path' 'path must be one normalized exact repository path'
+new_case grandfathered-growth
+make_code "${current_case}/src/legacy.rs" 1600
+commit_snapshot
+write_policy src/legacy.rs production 1600
+make_code "${current_case}/src/legacy.rs" 1601
+expect_fail 'growth above grandfathered baseline' 'shrink-ratchet ceiling 1600'
 
-new_case trailing-slash-path
-add_valid_temporary_row 'src/' source 1001
-expect_fail 'file path cannot end in slash' 'path must be one normalized exact repository path'
+new_case stale-shrink-ceiling
+make_code "${current_case}/src/legacy.rs" 1600
+commit_snapshot
+write_policy src/legacy.rs production 1600
+make_code "${current_case}/src/legacy.rs" 1550
+expect_fail 'shrink requires lowering the checked-in ratchet' 'stale shrink-ratchet ceiling'
+write_policy src/legacy.rs production 1550
+expect_pass 'lowered shrink-ratchet ceiling passes'
 
-new_case missing-path
-add_valid_temporary_row src/missing.rs source 1001
-expect_fail 'missing path' 'exception path is not tracked in git'
+new_case merged-shrink-ratchet
+make_code "${current_case}/src/legacy.rs" 1600
+commit_snapshot
+write_policy src/legacy.rs production 1600
+make_code "${current_case}/src/legacy.rs" 1550
+write_policy src/legacy.rs production 1550
+git -C "${current_case}" add -A
+git -C "${current_case}" commit -q -m shrink
+make_code "${current_case}/src/legacy.rs" 1551
+expect_fail 'merged shrink becomes the new ceiling' 'shrink-ratchet ceiling 1550'
 
-new_case tracked-path-missing-from-worktree
-make_lines "${current_case}/src/missing.rs" 1001
-git -C "${current_case}" add src/missing.rs
-rm -- "${current_case}/src/missing.rs"
-add_valid_temporary_row src/missing.rs source 1001
-expect_fail 'tracked path missing from worktree' 'exception path is missing from the worktree'
+new_case stale-below-hard
+make_code "${current_case}/src/legacy.rs" 1600
+commit_snapshot
+write_policy src/legacy.rs production 1600
+make_code "${current_case}/src/legacy.rs" 1500
+expect_fail 'entry is stale at the hard limit' 'stale grandfathered entry'
 
-new_case duplicate-path
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1001
-add_valid_temporary_row src/large.rs source 1001
-expect_fail 'duplicate path' 'duplicate exception for src/large.rs'
+new_case new-path-cannot-be-grandfathered
+commit_snapshot
+make_code "${current_case}/src/new.rs" 1600
+git -C "${current_case}" add src/new.rs
+write_policy src/new.rs production 1600
+expect_fail 'new path cannot be grandfathered' 'does not exist at'
 
-new_case duplicate-rationale
-make_lines "${current_case}/src/large.rs" 1001
-make_lines "${current_case}/src/other.rs" 1001
-git -C "${current_case}" add src/large.rs src/other.rs
-add_valid_temporary_row src/large.rs source 1001
-add_valid_temporary_row src/other.rs source 1001
-expect_pass 'duplicate rationale is allowed'
+new_case baseline-mismatch
+make_code "${current_case}/src/legacy.rs" 1600
+commit_snapshot
+write_policy src/legacy.rs production 1599
+expect_fail 'checked-in ceiling must equal current CLOC' 'shrink-ratchet ceiling 1599'
 
-new_case short-metadata
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 temporary component:test-fixture \
-  'Parser seam' \
-  'When reviewed.' \
-  "${future}"
-expect_pass 'short non-placeholder metadata with temporary trigger'
-
-new_case punctuated-temporary-trigger
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 temporary component:test-fixture \
-  'Parser seam' \
-  'Once: reviewed.' \
-  "${future}"
-expect_pass 'punctuated temporary trigger'
+new_case duplicate-entry
+make_code "${current_case}/src/legacy.rs" 1600
+commit_snapshot
+write_policy src/legacy.rs production 1600 src/legacy.rs production 1600
+expect_fail 'duplicate grandfathered path' 'grandfathered paths must be unique'
 
 new_case wrong-kind
-make_lines "${current_case}/tests/large.rs" 1501
-git -C "${current_case}" add tests/large.rs
-add_valid_temporary_row tests/large.rs source 1501
-expect_fail 'wrong kind' 'exception kind is source, actual kind is test'
+make_code "${current_case}/tests/legacy.rs" 2600
+commit_snapshot
+write_policy tests/legacy.rs production 2600
+expect_fail 'grandfathered kind follows path classification' 'kind does not match path classification'
 
-new_case test-support-kind
-make_lines "${current_case}/src/test_support.rs" 1501
-git -C "${current_case}" add src/test_support.rs
-add_valid_temporary_row src/test_support.rs test 1501
-expect_pass 'test_support classification'
+new_case nested-starlark
+commit_snapshot
+write_policy
+make_code "${current_case}/tools/build_defs/oversized.bzl" 1501
+expect_fail 'untracked nested Starlark obeys production hard limit' '1501 CLOC > hard limit 1500'
 
-new_case stale-below-limit
-make_lines "${current_case}/src/large.rs" 1000
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1000
-expect_fail 'stale below normal limit' 'remove the exception'
+new_case ignored-source
+printf 'ignored.rs\n' > "${current_case}/.gitignore"
+commit_snapshot
+write_policy
+make_code "${current_case}/ignored.rs" 1600
+expect_pass 'ignored source is outside Git-owned inventory'
 
-new_case stale-below-ceiling
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1002
-expect_fail 'ceiling must equal current LOC after shrinkage' 'refresh the ceiling to exact LOC'
-
-new_case ceiling-growth
-make_lines "${current_case}/src/large.rs" 1002
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source 1001
-expect_fail 'ceiling growth' '1002 lines > approved ceiling 1001'
-
-new_case malformed-ceiling
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_valid_temporary_row src/large.rs source zero
-expect_fail 'malformed ceiling' 'ceiling must be a positive integer'
-
-new_case untracked-over-limit
-make_lines "${current_case}/src/large.rs" 1001
-expect_fail 'untracked oversized file' 'src/large.rs (source): 1001 lines > limit 1000'
-
-new_case untracked-nested-bzl-over-limit
-make_lines "${current_case}/tools/build_defs/cache_probe.bzl" 1001
-expect_fail 'untracked nested Starlark file' 'tools/build_defs/cache_probe.bzl (source): 1001 lines > limit 1000'
-
-new_case untracked-exception
-make_lines "${current_case}/src/large.rs" 1001
-add_valid_temporary_row src/large.rs source 1001
-expect_fail 'untracked exception cannot be approved' 'exception path is not tracked in git'
-
-new_case legacy-header
-printf '%s\n' $'path\tmax_lines\tkind\treason\treview_after' > "${current_case}/scripts/check-loc-exceptions.tsv"
-expect_fail 'legacy schema rejected' 'expected exact schema header'
-
-new_case malformed-columns
-printf '%s\n' $'src/large.rs\tsource\t1001\ttemporary' >> "${current_case}/scripts/check-loc-exceptions.tsv"
-expect_fail 'malformed column count' 'expected 8 tab-separated columns'
-
-new_case empty-metadata
-printf '%s\n' $'src/large.rs\tsource\t1001\ttemporary\tcomponent:test-fixture\t\tWhen reviewed.\t2099-12-31' >> "${current_case}/scripts/check-loc-exceptions.tsv"
-expect_fail 'empty metadata' 'all 8 columns are required'
-
-new_case invalid-disposition
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 permanent component:test-fixture \
-  'Parser and projection responsibilities remain together until the named extraction lands.' \
-  'Review when the parser and projection no longer share one bounded state transition.' \
-  "${future}"
-expect_fail 'invalid disposition' 'disposition must be temporary or cohesive'
-
-new_case individual-owner
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 temporary Alice \
-  'Parser and projection responsibilities remain together until the named extraction lands.' \
-  'Remove after src/large.rs is reduced to at most 1000 physical lines and scripts/check-loc.sh passes.' \
-  "${future}"
-expect_fail 'stable component owner' 'owner must be a stable team:<slug> or component:<slug>'
-
-new_case generic-rationale
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 temporary component:test-fixture \
-  TODO \
-  'Remove after src/large.rs is reduced to at most 1000 physical lines and scripts/check-loc.sh passes.' \
-  "${future}"
-expect_fail 'placeholder rationale' 'rationale must not use a placeholder value'
-
-new_case placeholder-exit
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 temporary component:test-fixture \
-  'Parser and projection responsibilities remain together until the named extraction lands.' \
-  TBD \
-  "${future}"
-expect_fail 'placeholder exit text' 'exit_or_review must not use a placeholder value'
-
-new_case missing-temporary-trigger
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 temporary component:test-fixture \
-  'Parser seam' \
-  'Review the extraction.' \
-  "${future}"
-expect_fail 'temporary exit trigger' 'temporary exit_or_review must contain after, once, or when'
-
-new_case generic-cohesive-harm
-make_lines "${current_case}/src/large.rs" 1001
-git -C "${current_case}" add src/large.rs
-add_row \
-  src/large.rs source 1001 cohesive component:test-fixture \
-  'Splitting this file would merely be inconvenient for the current maintainers.' \
-  'Review when the module gains an independently testable responsibility boundary.' \
-  "${future}"
-expect_fail 'cohesive split harm' 'cohesive rationale must discuss splitting'
+new_case scc-hash-drift
+commit_snapshot
+policy_binary_sha="$(printf '0%.0s' {1..64})"
+write_policy
+expect_fail 'runtime scc binary must match the checked-in pin' 'scc binary hash mismatch'
 
 if ((failures > 0)); then
   exit 1

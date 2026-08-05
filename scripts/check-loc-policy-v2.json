@@ -1,0 +1,34 @@
+{
+  "schema_version": 2,
+  "policy": "Existing hard-limit excess is frozen at the named snapshot. Its checked-in ceiling must equal current CLOC, so shrinkage lowers the ratchet and growth fails. New paths cannot be grandfathered.",
+  "metric": {
+    "tool": "scc",
+    "version": "3.7.0",
+    "report_field": "Code",
+    "archive_sha256": "3d9d65b00ca874c2b29151abe7e1480736f5229edc3ce8e4b2791460cdfabf5a",
+    "binary_sha256": "1fde0c8fcd2b31f65d18caa442331eb015171fdb71ba9177df95af0d42e44126"
+  },
+  "limits": {
+    "production": {
+      "advisory": 1000,
+      "hard": 1500
+    },
+    "test": {
+      "advisory": 1500,
+      "hard": 2500
+    }
+  },
+  "grandfathered_at": "1f3d26aa000cc7c2708e8aa6ddc835ca529f6a6a",
+  "grandfathered": [
+    {
+      "path": "crates/ctx-history-capture/src/provider_sources/resolvers/profile_project.rs",
+      "kind": "production",
+      "code_baseline": 1726
+    },
+    {
+      "path": "crates/ctx-protocol/src/lib.rs",
+      "kind": "production",
+      "code_baseline": 1781
+    }
+  ]
+}

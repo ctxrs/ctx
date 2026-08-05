@@ -1,6 +1,12 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@rules_rust//rust:defs.bzl", "rustfmt_test")
-load("//tools/bazel:gates.bzl", "loc_check_inputs", "non_rust_gate", "real_harness_gate")
+load(
+    "//tools/bazel:gates.bzl",
+    "loc_check_inputs",
+    "loc_check_manifest",
+    "non_rust_gate",
+    "real_harness_gate",
+)
 load(
     "//tools/bazel:release_routes.bzl",
     "public_cli_release_advisory_gates",
@@ -83,10 +89,9 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-sdk:cargo_package_data",
 ]
 
-LOC_CHECK_DATA = [
+LOC_CHECK_SOURCE_DATA = [
     ":loc_check_inputs",
     "Cargo.toml",
-    "scripts/check-loc-exceptions.tsv",
     "//crates/ctx-cli:loc_check_inputs",
     "//crates/ctx-history-capture:loc_check_inputs",
     "//crates/ctx-history-core:loc_check_inputs",
@@ -97,10 +102,22 @@ LOC_CHECK_DATA = [
     "//crates/ctx-sdk:loc_check_inputs",
     "//sdks/go:loc_check_inputs",
     "//sdks/go/examples/dogfood:loc_check_inputs",
+    "//scripts/source-backed-recovery:loc_check_inputs",
     "//tools/bazel:loc_check_inputs",
     "//tools/bazel/mingw:loc_check_inputs",
     "//tools/bazel/patches:loc_check_inputs",
     "//tools/bazel/platforms:loc_check_inputs",
+]
+
+loc_check_manifest(
+    name = "loc_check_source_manifest",
+    srcs = LOC_CHECK_SOURCE_DATA,
+)
+
+LOC_CHECK_DATA = LOC_CHECK_SOURCE_DATA + [
+    ":loc_check_source_manifest",
+    "scripts/check-loc-policy-v2.json",
+    "@ctx_scc_linux_x86_64//:scc",
 ]
 
 # Keep the direct-checkout and Bazel package audits on the exact same source
@@ -812,6 +829,10 @@ sh_test(
 non_rust_gate(
     name = "loc_check",
     mode = "loc_check",
+    args = [
+        "$(rootpath @ctx_scc_linux_x86_64//:scc)",
+        "$(rootpath :loc_check_source_manifest)",
+    ],
     data = LOC_CHECK_DATA,
 )
 non_rust_gate(
