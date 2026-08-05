@@ -24,14 +24,16 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::PromptLine;
+#[cfg(test)]
+use crate::common::io::open_provider_source_file;
 use crate::{
-    common::io::{open_provider_source_file, OpenedProviderSourceFile, ProviderSourceRoot},
+    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::source_backed::{
         family::jsonl::{
-            observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
-            JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
-            JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjector, JsonlFamilyPublication,
-            JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope, JsonlFamilyInventory,
+            JsonlFamilyInventoryMode, JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome,
+            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRootMissingMode,
+            JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
         },
         SourceBackedRouteErrorKind,
     },
@@ -243,6 +245,7 @@ where
 }
 
 /// Acquires one retained ordinary-file capability without a canonicalize/check/open sequence.
+#[cfg(test)]
 pub(crate) fn observe_codex_prompt_history_source_backed_explicit_v0(
     input: &CodexPromptHistorySourceBackedInputV0,
 ) -> CodexPromptHistorySourceBackedResultV0<CodexPromptHistorySourceBackedSourceV0> {
@@ -260,6 +263,8 @@ struct CodexPromptHistoryJsonlFamilyStateV0 {
     discovered_source: Option<CodexPromptHistorySourceBackedSourceV0>,
     #[cfg(test)]
     after_scan_hook: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    after_family_source_open_hook: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// Shared-family adapter for Codex's single prompt-history JSONL file. The
@@ -299,23 +304,22 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
         state.after_scan_hook = Some(Box::new(hook));
     }
 
+    #[cfg(test)]
+    fn set_after_family_source_open_hook(&self, hook: impl FnOnce() + Send + 'static) {
+        let mut state = self.state.lock().expect("prompt-history state lock");
+        assert!(
+            state.after_family_source_open_hook.is_none(),
+            "prompt-history after-source-open hook is already installed"
+        );
+        state.after_family_source_open_hook = Some(Box::new(hook));
+    }
+
     fn discover_family(&self, route_path: &Path) -> crate::Result<JsonlFamilyInventory> {
         if route_path != self.route_path {
             return Err(CaptureError::InvalidPayload(
                 "Codex prompt-history JSONL route path changed".to_owned(),
             ));
         }
-        let source = match observe_codex_prompt_history_source_backed_explicit_v0(&self.input) {
-            Ok(source) => source,
-            Err(error) if prompt_history_error_is_not_found(&error) => {
-                self.state
-                    .lock()
-                    .map_err(|_| prompt_family_state_error())?
-                    .discovered_source = None;
-                return JsonlFamilyInventory::missing(CaptureProvider::Codex, route_path);
-            }
-            Err(error) => return Err(prompt_family_capture_error(error)),
-        };
         let parent = route_path.parent().ok_or_else(|| {
             CaptureError::InvalidPayload("Codex prompt-history JSONL path has no parent".to_owned())
         })?;
@@ -324,19 +328,50 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
                 "Codex prompt-history JSONL path has no filename".to_owned(),
             )
         })?;
-        let authority = Arc::new(ProviderSourceRoot::open(parent)?);
-        let opened = authority.open_file(&authority_path)?;
-        let observation = observe_opened_file(route_path, &opened)?;
-        let binding = TypedKey::bytes(source.source().exact_descriptor_digest().to_vec())
+        let retained = (|| -> crate::Result<_> {
+            let authority = Arc::new(ProviderSourceRoot::open(parent)?);
+            let opened = Arc::new(authority.open_file(&authority_path)?);
+            Ok((authority, opened))
+        })();
+        let (authority, opened) = match retained {
+            Ok(retained) => retained,
+            Err(error) if capture_error_is_not_found(&error) => {
+                self.state
+                    .lock()
+                    .map_err(|_| prompt_family_state_error())?
+                    .discovered_source = None;
+                return JsonlFamilyInventory::missing(CaptureProvider::Codex, route_path);
+            }
+            Err(error) => return Err(error),
+        };
+        #[cfg(test)]
+        if let Some(hook) = self
+            .state
+            .lock()
+            .map_err(|_| prompt_family_state_error())?
+            .after_family_source_open_hook
+            .take()
+        {
+            hook();
+        }
+        let source_key = self
+            .input
+            .source_key()
+            .map_err(prompt_family_capture_error)?;
+        let binding = TypedKey::bytes(source_key.exact_descriptor_digest().to_vec())
             .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        let leaf = JsonlFamilyLeaf::bind_observed(
-            source.source().clone(),
+        let leaf = JsonlFamilyLeaf::bind_opened(
+            source_key.clone(),
             route_path.to_path_buf(),
             Arc::clone(&authority),
             authority_path,
             binding,
-            observation,
-        );
+            &opened,
+        )?;
+        let source = CodexPromptHistorySourceBackedSourceV0 {
+            source: source_key,
+            opened,
+        };
         self.state
             .lock()
             .map_err(|_| prompt_family_state_error())?
@@ -438,15 +473,10 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
     }
 }
 
-fn prompt_history_error_is_not_found(error: &CodexPromptHistorySourceBackedErrorV0) -> bool {
+fn capture_error_is_not_found(error: &CaptureError) -> bool {
     match error {
-        CodexPromptHistorySourceBackedErrorV0::Io(error)
-        | CodexPromptHistorySourceBackedErrorV0::Capture(CaptureError::Io(error)) => {
-            error.kind() == std::io::ErrorKind::NotFound
-        }
-        CodexPromptHistorySourceBackedErrorV0::Capture(CaptureError::SystemIo {
-            source, ..
-        }) => source.kind() == std::io::ErrorKind::NotFound,
+        CaptureError::Io(error) => error.kind() == std::io::ErrorKind::NotFound,
+        CaptureError::SystemIo { source, .. } => source.kind() == std::io::ErrorKind::NotFound,
         _ => false,
     }
 }

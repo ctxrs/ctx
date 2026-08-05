@@ -982,6 +982,28 @@ pub(crate) struct JsonlFamilyLeaf {
 }
 
 impl JsonlFamilyLeaf {
+    /// Binds admission to a descriptor already retained by an optimized
+    /// adapter. The adapter may keep the same descriptor for its scan, avoiding
+    /// a pathname reopen between shared leaf admission and provider parsing.
+    pub(crate) fn bind_opened(
+        source: SourceKey,
+        source_path: PathBuf,
+        authority: Arc<ProviderSourceRoot>,
+        authority_path: PathBuf,
+        binding: TypedKey,
+        opened: &OpenedProviderSourceFile,
+    ) -> Result<Self> {
+        let observation = observe_opened_file(&source_path, opened)?;
+        Ok(Self::bind_observed(
+            source,
+            source_path,
+            authority,
+            authority_path,
+            binding,
+            observation,
+        ))
+    }
+
     pub(crate) fn bind_observed(
         source: SourceKey,
         source_path: PathBuf,

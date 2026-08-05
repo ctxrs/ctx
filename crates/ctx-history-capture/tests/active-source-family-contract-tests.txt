@@ -1,6 +1,7 @@
 common::io::root_handle::tests::active_source_family_contract_retained_handle_allows_growth_and_rejects_replacement
 provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_preserves_append_noop_and_rewrite_lifecycle
 provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_rejects_inflight_disappearance_then_deletes
+provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_rejects_scanner_leaf_open_same_length_inode_swap
 provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_rejects_same_content_pathname_replacement
 provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_defers_live_suffix_exactly_once
 provider::codex::nativepath::source_backed::tests::lifecycle::active_source_family_contract_codex_append_publishes_then_catches_up
