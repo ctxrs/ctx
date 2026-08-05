@@ -323,7 +323,8 @@ impl JsonlFamilyAdapter for CustomHistoryJsonlFamilyAdapter {
             }
         };
         let receipt = *receipt;
-        let terminal_proof = JsonlFamilyTerminalProof::exact_file(leaf)?;
+        let terminal_proof =
+            JsonlFamilyTerminalProof::exact_file(self, leaf, &receipt.certificate)?;
         let optimized = match (receipt.disposition, receipt.append) {
             (
                 CustomHistorySourceBackedDisposition::Unchanged

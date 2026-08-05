@@ -733,7 +733,7 @@ pub(super) fn prepare_leaf(
         return Ok(PreparedLeaf {
             certificate: base.clone(),
             append: Some(append),
-            terminal_proof: terminal_proof_for_checkpoint(adapter, &leaf, &decoded.physical)?,
+            terminal_proof: terminal_proof_for_checkpoint(adapter, &leaf, base, &decoded.physical)?,
         });
     }
 
@@ -866,14 +866,16 @@ pub(super) fn prepare_leaf(
     } else {
         None
     };
+    let terminal_proof =
+        terminal_proof_for_checkpoint(adapter, &leaf, &certificate, &terminal_checkpoint)?;
     Ok(PreparedLeaf {
         certificate,
         append,
-        terminal_proof: terminal_proof_for_checkpoint(adapter, &leaf, &terminal_checkpoint)?,
+        terminal_proof,
     })
 }
 
-fn validate_optimized_outcome(
+pub(super) fn validate_optimized_outcome(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
@@ -901,6 +903,9 @@ fn validate_optimized_outcome(
             ));
         }
     }
+    outcome
+        .terminal_proof
+        .validate_for(adapter, leaf, &outcome.certificate)?;
     Ok(PreparedLeaf {
         certificate: outcome.certificate,
         append: outcome.append,
@@ -911,13 +916,16 @@ fn validate_optimized_outcome(
 fn terminal_proof_for_checkpoint(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
+    certificate: &CertifiedSource,
     checkpoint: &JsonlCheckpoint,
 ) -> Result<JsonlFamilyTerminalProof> {
     if leaf.whole_record || adapter.append_mode() == JsonlFamilyAppendMode::Replacement {
-        JsonlFamilyTerminalProof::exact_file(leaf)
+        JsonlFamilyTerminalProof::exact_file(adapter, leaf, certificate)
     } else {
         JsonlFamilyTerminalProof::frozen_shared_prefix(
+            adapter,
             leaf,
+            certificate,
             checkpoint.complete_prefix_end(),
             *checkpoint.complete_prefix_sha256(),
         )

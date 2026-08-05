@@ -25,8 +25,8 @@ use identity::observe_metadata;
 use revalidation::hash_prefix;
 #[cfg(test)]
 pub(crate) use revalidation::{
-    jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_jsonl_prefix_hash_hook,
-    set_after_second_jsonl_prefix_hash_hook,
+    jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_final_jsonl_prefix_hash_hook,
+    set_after_jsonl_prefix_hash_hook, set_after_second_jsonl_prefix_hash_hook,
 };
 pub(crate) use revalidation::{
     observe_opened_file, revalidate_frozen_prefix, revalidate_frozen_prefix_sha256,

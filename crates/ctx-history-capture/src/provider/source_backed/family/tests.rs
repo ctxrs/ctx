@@ -9,7 +9,10 @@ use std::{
 };
 
 use super::jsonl::*;
-use crate::{common::io::open_provider_source_file, CaptureError};
+use crate::{
+    common::io::{open_provider_source_file, ProviderSourceRoot},
+    CaptureError,
+};
 
 fn opened(path: &std::path::Path) -> Arc<crate::common::io::OpenedProviderSourceFile> {
     Arc::new(open_provider_source_file(path).unwrap())
@@ -599,6 +602,57 @@ fn active_source_family_contract_jsonl_terminal_proof_rejects_rewrite_plus_appen
     assert!(matches!(
         revalidation,
         Err(CaptureError::SourceChangedDuringCapture)
+    ));
+}
+
+#[test]
+fn active_source_family_contract_jsonl_terminal_proof_rejects_leaf_route_swap_after_final_hash() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("events.jsonl");
+    let moved = temp.path().join("events-moved.jsonl");
+    let initial = b"{\"n\":1}\n{\"n\":2}\n";
+    let appended = b"{\"n\":3}\n";
+    fs::write(&path, initial).unwrap();
+    let (_, _, checkpoint) = drain(&path, None);
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended)
+        .unwrap();
+
+    let authority = ProviderSourceRoot::open(temp.path()).unwrap();
+    let source = authority
+        .open_file(std::path::Path::new("events.jsonl"))
+        .unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let worker_barrier = Arc::clone(&barrier);
+    let replacement_path = path.clone();
+    let worker = std::thread::spawn(move || {
+        worker_barrier.wait();
+        fs::rename(&replacement_path, moved).unwrap();
+        let mut replacement = initial.to_vec();
+        replacement.extend_from_slice(appended);
+        fs::write(&replacement_path, replacement).unwrap();
+        worker_barrier.wait();
+    });
+    set_after_final_jsonl_prefix_hash_hook(move || {
+        barrier.wait();
+        barrier.wait();
+    });
+
+    let revalidation = revalidate_frozen_prefix(
+        &path,
+        &source,
+        checkpoint.source_observation(),
+        checkpoint.complete_prefix_end(),
+        *checkpoint.complete_prefix_sha256(),
+    );
+    worker.join().unwrap();
+    assert!(matches!(
+        revalidation,
+        Err(CaptureError::SourceChangedDuringCapture)
+            | Err(CaptureError::InvalidProviderTranscriptPath { .. })
     ));
 }
 

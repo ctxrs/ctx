@@ -137,7 +137,9 @@ fn expected_state(
             )
             .unwrap();
             let terminal_proof = JsonlFamilyTerminalProof::frozen_shared_prefix(
+                adapter,
                 leaf,
+                &certificate,
                 checkpoint.complete_prefix_end(),
                 *checkpoint.complete_prefix_sha256(),
             )
@@ -1017,9 +1019,10 @@ impl JsonlFamilyAdapter for OptimizedLeafTestAdapter {
             },
         )
         .map_err(contract_error)?;
+        let terminal_proof = JsonlFamilyTerminalProof::exact_file(self, leaf, &certificate)?;
         Ok(Some(JsonlFamilyOptimizedLeafOutcome::replacement(
             certificate,
-            JsonlFamilyTerminalProof::exact_file(leaf)?,
+            terminal_proof,
         )))
     }
 }
@@ -1375,6 +1378,102 @@ fn optimized_leaf_execution_keeps_publication_inside_the_shared_family() {
         prepared.certificate.parser_revision(),
         adapter.parser_revision()
     );
+}
+
+fn optimized_test_certificate(
+    adapter: &dyn JsonlFamilyAdapter,
+    leaf: &JsonlFamilyLeaf,
+    content_digest: [u8; 32],
+) -> CertifiedSource {
+    let observation = super::leaf::source_observation(leaf.source(), leaf.observation()).unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        adapter.parser_revision(),
+        content_digest,
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 0,
+            rejected_records: 0,
+            ignored_records: 1,
+            indexed_documents: 0,
+            certified_bytes: TEST_RECORD.len() as u64,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn active_source_family_contract_jsonl_optimized_proof_rejects_cross_leaf_binding() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("optimized.jsonl"), TEST_RECORD).unwrap();
+    let adapter = OptimizedLeafTestAdapter {
+        scans: AtomicUsize::new(0),
+        emit_wrong_source: false,
+    };
+    let inventory = adapter.discover(&root).unwrap();
+    let first = inventory.leaves().first().unwrap();
+    let other_source = SourceKey::derive(
+        adapter.provider().as_str(),
+        TEST_SOURCE_FORMAT,
+        TEST_SCHEMA,
+        1,
+        SourceAnchor::provider_native(
+            "terminal-witness-file",
+            TypedKey::utf8("other-optimized-leaf").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let other = JsonlFamilyLeaf::bind_observed(
+        other_source,
+        first.source_path.clone(),
+        Arc::clone(&first.authority),
+        first.authority_path.clone(),
+        first.binding.clone(),
+        first.observation.clone(),
+    );
+    let first_certificate =
+        optimized_test_certificate(&adapter, first, Sha256::digest(TEST_RECORD).into());
+    let other_certificate =
+        optimized_test_certificate(&adapter, &other, Sha256::digest(TEST_RECORD).into());
+    let proof = JsonlFamilyTerminalProof::exact_file(&adapter, first, &first_certificate).unwrap();
+    let outcome = JsonlFamilyOptimizedLeafOutcome::replacement(other_certificate, proof);
+
+    let error = super::leaf::validate_optimized_outcome(&adapter, &other, None, outcome)
+        .err()
+        .expect("proof from another optimized leaf must be rejected");
+    assert!(error
+        .to_string()
+        .contains("bound to another leaf or certificate"));
+}
+
+#[test]
+fn active_source_family_contract_jsonl_optimized_proof_rejects_mismatched_certificate() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("optimized.jsonl"), TEST_RECORD).unwrap();
+    let adapter = OptimizedLeafTestAdapter {
+        scans: AtomicUsize::new(0),
+        emit_wrong_source: false,
+    };
+    let inventory = adapter.discover(&root).unwrap();
+    let leaf = inventory.leaves().first().unwrap();
+    let certificate =
+        optimized_test_certificate(&adapter, leaf, Sha256::digest(TEST_RECORD).into());
+    let mismatched = optimized_test_certificate(&adapter, leaf, [9; 32]);
+    let proof = JsonlFamilyTerminalProof::exact_file(&adapter, leaf, &certificate).unwrap();
+    let outcome = JsonlFamilyOptimizedLeafOutcome::replacement(mismatched, proof);
+
+    let error = super::leaf::validate_optimized_outcome(&adapter, leaf, None, outcome)
+        .err()
+        .expect("proof from another certificate must be rejected");
+    assert!(error
+        .to_string()
+        .contains("bound to another leaf or certificate"));
 }
 
 #[test]

@@ -130,6 +130,74 @@ fn active_source_family_contract_prompt_history_rejects_same_content_pathname_re
 }
 
 #[test]
+fn active_source_family_contract_prompt_history_rejects_inflight_disappearance_then_deletes() {
+    let temp = tempdir().unwrap();
+    let history = temp.path().join("history.jsonl");
+    write_lines(
+        &history,
+        &[prompt_line("session", 1_700_000_000, "retained prompt")],
+    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&history, [18; 32]);
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::new(input).unwrap();
+    let driver = jsonl_family_driver(Arc::new(adapter.clone()), history.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(
+        SourceBackedRoute::automatic(
+            ProviderSource {
+                provider: CaptureProvider::Codex,
+                path: history.clone(),
+                exists: true,
+                source_format: SOURCE_FORMAT,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )
+        .unwrap(),
+    );
+    let index_root = temp.path().join("index");
+    let initial =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    append(
+        &history,
+        &prompt_line("session", 1_700_000_001, "discarded prompt"),
+    );
+    let removed = history.clone();
+    adapter.set_after_scan_hook(move || fs::remove_file(removed).unwrap());
+
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(failed.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(failed.failed_routes.len(), 1);
+    assert_eq!(
+        failed.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(failed.failed_routes[0].carried_forward);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        1
+    );
+
+    let deleted =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert!(
+        deleted.failed_routes.is_empty(),
+        "unexpected deletion failure: {:?}",
+        deleted.failed_routes
+    );
+    assert_ne!(deleted.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        0
+    );
+}
+
+#[test]
 fn active_source_family_contract_prompt_history_defers_live_suffix_exactly_once() {
     let temp = tempdir().unwrap();
     let history = temp.path().join("history.jsonl");

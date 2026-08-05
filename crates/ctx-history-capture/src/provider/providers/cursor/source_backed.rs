@@ -192,7 +192,7 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
                 None
             };
             for proof in &route_proofs {
-                proof.revalidate()?;
+                proof.revalidate_dependency()?;
             }
             let source = source_key(&native_session_id)?;
             let selected = routes.remove(0);

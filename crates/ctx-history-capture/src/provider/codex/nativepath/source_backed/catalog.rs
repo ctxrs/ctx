@@ -739,8 +739,10 @@ pub(super) fn codex_native_session_id_path_hint(path: &Path) -> Option<String> {
 
 pub(super) fn codex_terminal_native_session_id_hint(
     path: &Path,
+    authority: &ProviderSourceRoot,
+    authority_path: &Path,
 ) -> CodexSourceBackedResultV0<Option<String>> {
-    let opened = open_provider_source_file(path)?;
+    let opened = authority.open_file(authority_path)?;
     Ok(
         crate::provider::codex::catalog::probe_codex_native_session_id(&opened)?
             .or_else(|| codex_native_session_id_path_hint(path)),

@@ -34,6 +34,7 @@ struct CodexSessionJsonlFamilyStateV0 {
 }
 
 fn scan_codex_session_jsonl_leaf_v0(
+    adapter: &dyn JsonlFamilyAdapter,
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
@@ -79,7 +80,9 @@ fn scan_codex_session_jsonl_leaf_v0(
     )
     .map_err(codex_family_capture_error)?;
     let terminal_proof = JsonlFamilyTerminalProof::frozen_prefix(
+        adapter,
         leaf,
+        &outcome.certificate,
         outcome.terminal_prefix_bytes,
         outcome.terminal_prefix_sha256,
     )?;
@@ -520,13 +523,20 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
         opening: &JsonlFamilyInventory,
     ) -> Result<JsonlFamilyMembershipObservation> {
         self.run_pending_stage_observer();
-        let mut observation =
-            JsonlFamilyMembershipObservation::observe_roots(self.roots(), opening)?;
-        let candidates = observation.unbound_paths().cloned().collect::<Vec<_>>();
-        for path in candidates {
-            if let Some(native_session_id) =
-                super::catalog::codex_terminal_native_session_id_hint(&path)
-                    .map_err(codex_family_capture_error)?
+        let mut observation = JsonlFamilyMembershipObservation::observe_authorities(opening)?;
+        let candidates = observation
+            .unbound_routes()
+            .map(|(path, authority, authority_path)| {
+                (path.to_path_buf(), authority, authority_path.to_path_buf())
+            })
+            .collect::<Vec<_>>();
+        for (path, authority, authority_path) in candidates {
+            if let Some(native_session_id) = super::catalog::codex_terminal_native_session_id_hint(
+                &path,
+                &authority,
+                &authority_path,
+            )
+            .map_err(codex_family_capture_error)?
             {
                 observation.bind_source_hint(
                     path,
@@ -600,6 +610,7 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
         emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
     ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
         scan_codex_session_jsonl_leaf_v0(
+            self,
             &self.state,
             leaf,
             base,
@@ -806,6 +817,7 @@ impl JsonlFamilyAdapter for CodexExplicitSessionJsonlFamilyAdapterV0 {
         emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
     ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
         scan_codex_session_jsonl_leaf_v0(
+            self,
             &self.state,
             leaf,
             base,

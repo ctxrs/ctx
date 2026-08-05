@@ -93,10 +93,12 @@ pub(super) fn revalidate_complete_inventory(
     // discovery, identity probing, parsing, and content cataloging are admission
     // work and are never repeated here.
     for evidence in expected_sources.values() {
-        evidence.terminal_proof.revalidate()?;
+        evidence
+            .terminal_proof
+            .revalidate_for(&evidence.certificate)?;
     }
     for dependency in &opening_inventory.exact_dependencies {
-        dependency.revalidate()?;
+        dependency.revalidate_dependency()?;
     }
     for absent in &absent_sources {
         if !absent.remains_absent()? {

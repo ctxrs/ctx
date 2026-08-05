@@ -14,6 +14,8 @@ thread_local! {
         const { RefCell::new(None) };
     static AFTER_SECOND_PREFIX_HASH_HOOK: RefCell<Option<Box<dyn FnOnce()>>> =
         const { RefCell::new(None) };
+    static AFTER_FINAL_PREFIX_HASH_HOOK: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -41,6 +43,13 @@ pub(crate) fn set_after_second_jsonl_prefix_hash_hook(hook: impl FnOnce() + 'sta
 }
 
 #[cfg(test)]
+pub(crate) fn set_after_final_jsonl_prefix_hash_hook(hook: impl FnOnce() + 'static) {
+    AFTER_FINAL_PREFIX_HASH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
 fn run_after_jsonl_prefix_hash_hook() {
     AFTER_PREFIX_HASH_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
@@ -52,6 +61,15 @@ fn run_after_jsonl_prefix_hash_hook() {
 #[cfg(test)]
 fn run_after_second_jsonl_prefix_hash_hook() {
     AFTER_SECOND_PREFIX_HASH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_after_final_jsonl_prefix_hash_hook() {
+    AFTER_FINAL_PREFIX_HASH_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
             hook();
         }
@@ -176,6 +194,13 @@ fn revalidate_frozen_prefix_with_hasher(
         expected_prefix_digest,
         prefix_hasher,
     )?;
+    #[cfg(test)]
+    run_after_final_jsonl_prefix_hash_hook();
+    // Bind the final content proof to both the retained object that was hashed
+    // and the authority-relative directory entry that currently names it.
+    // Append growth remains permitted because this compares object identity,
+    // while replacement, ancestor swaps, and route retargeting fail closed.
+    source_file.revalidate_same_object()?;
     Ok(after)
 }
 

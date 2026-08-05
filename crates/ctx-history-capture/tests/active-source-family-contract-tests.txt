@@ -1,5 +1,6 @@
 common::io::root_handle::tests::active_source_family_contract_retained_handle_allows_growth_and_rejects_replacement
 provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_preserves_append_noop_and_rewrite_lifecycle
+provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_rejects_inflight_disappearance_then_deletes
 provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_rejects_same_content_pathname_replacement
 provider::codex::nativepath::prompt_history::source_backed::tests::active_source_family_contract_prompt_history_defers_live_suffix_exactly_once
 provider::codex::nativepath::source_backed::tests::lifecycle::active_source_family_contract_codex_append_publishes_then_catches_up
@@ -11,6 +12,8 @@ provider::source_backed::family::jsonl::route::tests::active_source_family_contr
 provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_frozen_multi_root_defers_new_leaves
 provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_frozen_rejects_root_swap_without_recataloging
 provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_frozen_root_replacement_fails_closed
+provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_optimized_proof_rejects_cross_leaf_binding
+provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_optimized_proof_rejects_mismatched_certificate
 provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_terminal_inventory_accepts_proven_append
 provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_terminal_inventory_observes_live_tree
 provider::source_backed::family::jsonl::route::tests::active_source_family_contract_jsonl_terminal_inventory_rejects_reappearance
@@ -23,6 +26,7 @@ provider::source_backed::family::tests::active_source_family_contract_jsonl_phys
 provider::source_backed::family::tests::active_source_family_contract_jsonl_probe_and_scan_share_one_growing_source
 provider::source_backed::family::tests::active_source_family_contract_jsonl_rewrite_truncate_and_replacement_fail_closed
 provider::source_backed::family::tests::active_source_family_contract_jsonl_terminal_proof_allows_continuous_append
+provider::source_backed::family::tests::active_source_family_contract_jsonl_terminal_proof_rejects_leaf_route_swap_after_final_hash
 provider::source_backed::family::tests::active_source_family_contract_jsonl_terminal_proof_rejects_rewrite_plus_append
 provider::source_backed::tests::codex_active_contracts::active_source_family_contract_codex_tree_admits_append_during_cold_catalog
 provider::source_backed::tests::codex_active_contracts::active_source_family_contract_codex_tree_defers_append_after_staging
@@ -33,5 +37,6 @@ provider::source_backed::tests::codex_active_contracts::active_source_family_con
 provider::source_backed::tests::codex_active_contracts::active_source_family_contract_explicit_codex_append_catches_up
 provider::source_backed::tests::codex_active_contracts::active_source_family_contract_explicit_codex_defers_append_after_staging
 provider::source_backed::tests::codex_active_contracts::active_source_family_contract_explicit_codex_deletes_disappeared_file
+provider::source_backed::tests::codex_active_contracts::active_source_family_contract_explicit_codex_replacement_rejects_inode_swap
 provider::sqlite::tests::active_source_family_contract_sqlite_reads_active_wal_without_provider_writes
 provider_sources::sqlite_source::tests::active_source_family_contract_sqlite_keeps_a_pinned_view_and_fails_changed_writer_generation

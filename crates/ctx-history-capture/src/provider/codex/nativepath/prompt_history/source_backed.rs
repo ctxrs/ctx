@@ -307,9 +307,7 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
         }
         let source = match observe_codex_prompt_history_source_backed_explicit_v0(&self.input) {
             Ok(source) => source,
-            Err(CodexPromptHistorySourceBackedErrorV0::Io(error))
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
+            Err(error) if prompt_history_error_is_not_found(&error) => {
                 self.state
                     .lock()
                     .map_err(|_| prompt_family_state_error())?
@@ -390,7 +388,9 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
             .map_err(prompt_family_capture_error)?;
         validate_prompt_family_scan_counts(&scan, base)?;
         let terminal_proof = JsonlFamilyTerminalProof::frozen_prefix(
+            self,
             leaf,
+            &scan.certificate,
             scan.terminal_prefix_bytes,
             scan.terminal_prefix_sha256,
         )?;
@@ -435,6 +435,19 @@ impl CodexPromptHistoryJsonlFamilyAdapterV0 {
             hook();
         }
         Ok(outcome)
+    }
+}
+
+fn prompt_history_error_is_not_found(error: &CodexPromptHistorySourceBackedErrorV0) -> bool {
+    match error {
+        CodexPromptHistorySourceBackedErrorV0::Io(error)
+        | CodexPromptHistorySourceBackedErrorV0::Capture(CaptureError::Io(error)) => {
+            error.kind() == std::io::ErrorKind::NotFound
+        }
+        CodexPromptHistorySourceBackedErrorV0::Capture(CaptureError::SystemIo {
+            source, ..
+        }) => source.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
     }
 }
 

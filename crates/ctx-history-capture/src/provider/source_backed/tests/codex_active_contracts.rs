@@ -745,6 +745,72 @@ fn active_source_family_contract_explicit_codex_append_catches_up() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn active_source_family_contract_explicit_codex_replacement_rejects_inode_swap() {
+    let temp = tempdir().unwrap();
+    let selected = temp.path().join("selected.jsonl");
+    let moved = temp.path().join("selected-scanned.jsonl");
+    let index = temp.path().join("index");
+    let native_session_id = "019facf0-3333-7777-8888-000000000014";
+    fs::write(
+        &selected,
+        codex_rollout_bytes(native_session_id, &["explicitinodeswapbase"]),
+    )
+    .unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        fixture_provider_source_at(
+            CaptureProvider::Codex,
+            "codex_session_jsonl",
+            ProviderImportSupport::Explicit,
+            &selected,
+        ),
+        SourceBackedRouteSelection::ExplicitManual,
+    )
+    .unwrap();
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    };
+    let seeded = refresh_source_backed_generation(&index, &registry, options.clone()).unwrap();
+    let seeded_generation = seeded.commit.generation_id.clone();
+
+    let append = codex_rollout_bytes(native_session_id, &["discarded", "inode swap staged"]);
+    let line = append.split(|byte| *byte == b'\n').nth(2).unwrap();
+    let mut file = fs::OpenOptions::new().append(true).open(&selected).unwrap();
+    file.write_all(line).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.sync_all().unwrap();
+    let replacement = fs::read(&selected).unwrap();
+    let swap_path = selected.clone();
+    super::super::set_after_explicit_codex_stage_hook(move |_| {
+        fs::rename(&swap_path, moved).unwrap();
+        fs::write(swap_path, replacement).unwrap();
+    });
+
+    let failed = refresh_source_backed_generation(&index, &registry, options).unwrap();
+    assert_carried_route_failure(
+        &failed,
+        &seeded_generation,
+        SourceBackedSourceFailureClass::SourceChanged,
+    );
+    let retained = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(retained.generation_id(), seeded_generation);
+    assert_eq!(
+        retained
+            .search_event_candidates("explicitinodeswapbase", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(retained
+        .search_event_candidates("inode swap staged", 8)
+        .unwrap()
+        .is_empty());
+}
+
 #[test]
 fn active_source_family_contract_explicit_codex_defers_append_after_staging() {
     let temp = tempdir().unwrap();
