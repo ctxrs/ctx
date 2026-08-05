@@ -524,12 +524,13 @@ if command -v ruby >/dev/null 2>&1; then
         abort "#{key} must use the complete Linux release transaction" unless command.include?("scripts/release/build-linux-bazel-release.sh")
         abort "#{key} must not write runtime leaves after public commit" if command.include?("scripts/build-onnxruntime-sidecar.sh") || command.include?("--transcode-runtime")
         abort "#{key} native smoke must use the completed candidate handoff" unless command.include?("publish-linux-bazel-release.py run-complete")
-        abort "#{key} native smoke must execute the pinned CLI descriptor" unless command.include?("'{ctx}'")
-        runtime_leaf = "'{leaf:ctx-onnxruntime-#{platform}.tar.gz}'"
-        abort "#{key} native smoke must consume the pinned runtime descriptor" unless command.include?(runtime_leaf)
+        binary = key == "public-cli-linux-x64" ? "ctx" : "ctx-linux-aarch64"
+        cli_leaf = "'{candidate}/#{binary}'"
+        abort "#{key} native smoke must execute the pinned named CLI leaf" unless command.include?(cli_leaf)
+        runtime_leaf = "'{candidate}/ctx-onnxruntime-#{platform}.tar.gz'"
+        abort "#{key} native smoke must consume the pinned named runtime leaf" unless command.include?(runtime_leaf)
         marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
         abort "#{key} must upload #{marker}" unless Array(step["artifact_paths"]).include?(marker)
-        binary = key == "public-cli-linux-x64" ? "ctx" : "ctx-linux-aarch64"
         advisory = "target/public-cli-artifacts/#{binary}.dependency-advisory.json"
         abort "#{key} must upload #{advisory}" unless Array(step["artifact_paths"]).include?(advisory)
       else
@@ -856,16 +857,22 @@ if "publish-linux-bazel-release.py" not in handoff or "consume-complete" not in 
     raise SystemExit("Semantic handoff must consume an FD-pinned completed candidate")
 for source, label in ((staging, "GitHub"), (handoff, "Semantic")):
     for required in (
-        "--consumer-admission",
-        "claim-consumer-admission",
-        "{admission-fd}",
+        "consume-complete",
+        'worker_program+=$\'\\nstage_complete_candidate "$@"\'',
         "ambient completed-candidate admission markers are forbidden",
         "HEAD^{commit}",
     ):
         if required not in source:
             raise SystemExit(f"{label} staging admission is missing {required}")
-    if "CTX_RELEASE_PINNED_CONSUMER=1" in source:
-        raise SystemExit(f"{label} staging still trusts an ambient worker marker")
+    for forbidden in (
+        "--ctx-pinned-worker",
+        "--consumer-admission",
+        "claim-consumer-admission",
+        "{admission-fd}",
+        "CTX_RELEASE_PINNED_CONSUMER=1",
+    ):
+        if forbidden in source:
+            raise SystemExit(f"{label} staging exposes retired admission path {forbidden}")
 for platform in ("linux-x64", "linux-aarch64"):
     if f"--platform {platform}" not in handoff:
         raise SystemExit(f"Semantic handoff must require {platform} completion identity")

@@ -19,22 +19,22 @@ import sys
 from typing import Callable, Sequence
 
 
-_ADMISSION_PATH = Path(__file__).with_name("completed_candidate_admission.py")
-_ADMISSION_SPEC = importlib.util.spec_from_file_location(
-    "ctx_completed_candidate_admission", _ADMISSION_PATH
+_IO_PATH = Path(__file__).with_name("completed_candidate_io.py")
+_IO_SPEC = importlib.util.spec_from_file_location(
+    "ctx_completed_candidate_io", _IO_PATH
 )
-if _ADMISSION_SPEC is None or _ADMISSION_SPEC.loader is None:
-    raise RuntimeError("could not load completed candidate admission helper")
-_ADMISSION = importlib.util.module_from_spec(_ADMISSION_SPEC)
-_ADMISSION_SPEC.loader.exec_module(_ADMISSION)
-ADMISSION_CONSUMERS = _ADMISSION.ADMISSION_CONSUMERS
-AdmissionError = _ADMISSION.AdmissionError
-DescriptorBinding = _ADMISSION.DescriptorBinding
-claim_admission = _ADMISSION.claim_admission
-_descriptor_binding = _ADMISSION.descriptor_binding
-expand_command = _ADMISSION.expand_command
-issue_admission = _ADMISSION.issue_admission
-_mount_id = _ADMISSION.mount_id
+if _IO_SPEC is None or _IO_SPEC.loader is None:
+    raise RuntimeError("could not load completed candidate descriptor helper")
+_IO = importlib.util.module_from_spec(_IO_SPEC)
+_IO_SPEC.loader.exec_module(_IO)
+CandidateIOError = _IO.CandidateIOError
+PublicationError = CandidateIOError
+DescriptorBinding = _IO.DescriptorBinding
+PinnedTreeSnapshot = _IO.PinnedTreeSnapshot
+_copy_regular_descriptor = _IO.copy_regular_descriptor
+_descriptor_binding = _IO.descriptor_binding
+expand_command = _IO.expand_command
+_mount_id = _IO.mount_id
 
 
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -43,10 +43,6 @@ RENAME_NOREPLACE = 1
 COMPLETION_KIND = "ctx-public-linux-release-completion"
 COMPLETION_SCHEMA_VERSION = 1
 MAX_COMPLETION_BYTES = 1024 * 1024
-
-
-class PublicationError(ValueError):
-    pass
 
 
 def release_leaf(name: str) -> str:
@@ -323,99 +319,9 @@ def _sha256_descriptor(
     return digest.hexdigest(), size
 
 
-def _copy_regular_file(
-    source_parent: int,
-    destination_parent: int,
-    name: str,
-) -> None:
-    source_descriptor = os.open(name, FILE_FLAGS, dir_fd=source_parent)
-    destination_descriptor = -1
-    try:
-        before = os.fstat(source_descriptor)
-        if not stat.S_ISREG(before.st_mode):
-            raise PublicationError(f"release source is not a regular file: {name}")
-        destination_descriptor = os.open(
-            name,
-            os.O_WRONLY
-            | os.O_CLOEXEC
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_NOFOLLOW,
-            stat.S_IMODE(before.st_mode),
-            dir_fd=destination_parent,
-        )
-        while True:
-            chunk = os.read(source_descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            _write_all(destination_descriptor, chunk)
-        after = os.fstat(source_descriptor)
-        observed_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        observed_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if observed_after != observed_before:
-            raise PublicationError(f"release source changed while copied: {name}")
-        os.fchmod(destination_descriptor, stat.S_IMODE(before.st_mode))
-        os.fsync(destination_descriptor)
-    finally:
-        if destination_descriptor >= 0:
-            os.close(destination_descriptor)
-        os.close(source_descriptor)
-
-
 def _directory_names(descriptor: int) -> list[str]:
     with os.scandir(descriptor) as entries:
         return sorted(entry.name for entry in entries)
-
-
-def _copy_flat_directory(source_descriptor: int, destination_descriptor: int) -> None:
-    names = _directory_names(source_descriptor)
-    for name in names:
-        release_leaf(name)
-        entry = os.stat(name, dir_fd=source_descriptor, follow_symlinks=False)
-        if not stat.S_ISREG(entry.st_mode):
-            raise PublicationError(
-                f"public release source contains a link or non-file: {name}"
-            )
-        _copy_regular_file(source_descriptor, destination_descriptor, name)
-    if _directory_names(source_descriptor) != names:
-        raise PublicationError("public release source changed while copied")
-
-
-def _copy_tree(source_descriptor: int, destination_descriptor: int) -> None:
-    names = _directory_names(source_descriptor)
-    for name in names:
-        release_leaf(name)
-        source_entry = os.stat(name, dir_fd=source_descriptor, follow_symlinks=False)
-        if stat.S_ISREG(source_entry.st_mode):
-            _copy_regular_file(source_descriptor, destination_descriptor, name)
-            continue
-        if not stat.S_ISDIR(source_entry.st_mode):
-            raise PublicationError(
-                f"private symbol source contains a link or special file: {name}"
-            )
-        source_child = os.open(name, DIRECTORY_FLAGS, dir_fd=source_descriptor)
-        os.mkdir(name, 0o700, dir_fd=destination_descriptor)
-        destination_child = os.open(name, DIRECTORY_FLAGS, dir_fd=destination_descriptor)
-        try:
-            _copy_tree(source_child, destination_child)
-            os.fsync(destination_child)
-        finally:
-            os.close(destination_child)
-            os.close(source_child)
-    if _directory_names(source_descriptor) != names:
-        raise PublicationError("private symbol source changed while copied")
 
 
 def _new_stage_container(parent_descriptor: int, label: str) -> tuple[str, int]:
@@ -909,6 +815,19 @@ class CompletedCandidateSnapshot:
     def materialize(self, snapshot_root: Path) -> MaterializedCandidateSnapshot:
         return MaterializedCandidateSnapshot.create(self, snapshot_root)
 
+    def copy_to(self, destination_descriptor: int) -> None:
+        for name in self.names:
+            record = self.records[name]
+            _copy_regular_descriptor(
+                self.descriptors[name],
+                destination_descriptor,
+                name,
+                self.bindings[name],
+                str(record["sha256"]),
+                int(record["size"]),
+            )
+        self.revalidate()
+
     def close(self) -> None:
         for descriptor in self.descriptors.values():
             try:
@@ -1154,21 +1073,35 @@ def publish(
     source_commit: str,
     phase_hook: Callable[[str], None] | None = None,
 ) -> None:
-    artifact_source_descriptor = _open_directory(artifact_source, create=False)
-    symbols_source_descriptor = _open_directory(private_symbols_source, create=False)
-    output_parent_descriptor = _open_directory(output.parent, create=False)
-    symbols_parent_descriptor = _open_directory(private_symbols.parent, create=False)
+    artifact_snapshot = CompletedCandidateSnapshot.open(
+        artifact_source,
+        [platform],
+        source_commit,
+        allow_extra=False,
+    )
+    symbols_snapshot: PinnedTreeSnapshot | None = None
+    output_parent_descriptor = -1
+    symbols_parent_descriptor = -1
     artifact_stage_name = ""
     artifact_stage_descriptor = -1
     symbols_stage_name = ""
     symbols_stage_descriptor = -1
     try:
-        _verify_complete_descriptor(
-            artifact_source_descriptor,
-            platform,
-            source_commit,
-            allow_extra=False,
+        symbols_source_descriptor = _open_directory(
+            private_symbols_source, create=False
         )
+        symbols_snapshot = PinnedTreeSnapshot(
+            symbols_source_descriptor,
+            private_symbols_source,
+            owns_descriptor=True,
+            verify_root=_verify_directory_binding,
+        )
+        output_parent_descriptor = _open_directory(output.parent, create=False)
+        symbols_parent_descriptor = _open_directory(
+            private_symbols.parent, create=False
+        )
+        if phase_hook is not None:
+            phase_hook("after-source-verification")
         _require_absent(
             output_parent_descriptor, output.name, "public release candidate"
         )
@@ -1180,9 +1113,7 @@ def publish(
         artifact_stage_name, artifact_stage_descriptor = _new_stage_container(
             output_parent_descriptor, "release-publish"
         )
-        _copy_flat_directory(
-            artifact_source_descriptor, artifact_stage_descriptor
-        )
+        artifact_snapshot.copy_to(artifact_stage_descriptor)
         _verify_complete_descriptor(
             artifact_stage_descriptor,
             platform,
@@ -1194,8 +1125,10 @@ def publish(
         symbols_stage_name, symbols_stage_descriptor = _new_stage_container(
             symbols_parent_descriptor, "symbol-publish"
         )
-        _copy_tree(symbols_source_descriptor, symbols_stage_descriptor)
+        symbols_snapshot.copy_to(symbols_stage_descriptor)
         os.fsync(symbols_stage_descriptor)
+        artifact_snapshot.revalidate()
+        symbols_snapshot.revalidate()
 
         if phase_hook is not None:
             phase_hook("before-symbol-commit")
@@ -1332,10 +1265,13 @@ def publish(
                 )
             finally:
                 os.close(symbols_stage_descriptor)
-        os.close(symbols_parent_descriptor)
-        os.close(output_parent_descriptor)
-        os.close(symbols_source_descriptor)
-        os.close(artifact_source_descriptor)
+        if symbols_parent_descriptor >= 0:
+            os.close(symbols_parent_descriptor)
+        if output_parent_descriptor >= 0:
+            os.close(output_parent_descriptor)
+        if symbols_snapshot is not None:
+            symbols_snapshot.close()
+        artifact_snapshot.close()
 
 
 def consume_complete_candidate(
@@ -1346,7 +1282,6 @@ def consume_complete_candidate(
     command: Sequence[str],
     *,
     allow_extra: bool,
-    consumer_admission: str | None = None,
     before_consume: Callable[[], None] | None = None,
 ) -> int:
     source = CompletedCandidateSnapshot.open(
@@ -1356,20 +1291,8 @@ def consume_complete_candidate(
         allow_extra=allow_extra,
     )
     snapshot: MaterializedCandidateSnapshot | None = None
-    admission_descriptor = -1
     try:
         snapshot = source.materialize(snapshot_root)
-        if consumer_admission is not None:
-            if not any("{admission-fd}" in value for value in command):
-                raise PublicationError(
-                    "completed candidate consumer command omitted its admission FD"
-                )
-            admission_descriptor = issue_admission(
-                snapshot.descriptor,
-                snapshot.root_binding,
-                consumer_admission,
-                source_commit,
-            )
         if before_consume is not None:
             before_consume()
         ctx_argument = None
@@ -1383,11 +1306,8 @@ def consume_complete_candidate(
                 for name in snapshot.descriptors
             },
             command,
-            admission_descriptor if admission_descriptor >= 0 else None,
         )
         pass_fds = snapshot.pass_fds()
-        if admission_descriptor >= 0:
-            pass_fds = (*pass_fds, admission_descriptor)
         result = subprocess.run(
             argv,
             check=False,
@@ -1397,8 +1317,6 @@ def consume_complete_candidate(
         source.revalidate()
         return result.returncode
     finally:
-        if admission_descriptor >= 0:
-            os.close(admission_descriptor)
         if snapshot is not None:
             snapshot.close()
         source.close()
@@ -1471,16 +1389,7 @@ def main() -> int:
     consume_parser.add_argument("--platform", action="append", default=[])
     consume_parser.add_argument("--source-commit", required=True)
     consume_parser.add_argument("--allow-extra", action="store_true")
-    consume_parser.add_argument(
-        "--consumer-admission", choices=sorted(ADMISSION_CONSUMERS)
-    )
     consume_parser.add_argument("remainder", nargs=argparse.REMAINDER)
-    claim_parser = commands.add_parser("claim-consumer-admission")
-    claim_parser.add_argument("--admission-fd", type=int, required=True)
-    claim_parser.add_argument("--candidate-dir", required=True)
-    claim_parser.add_argument(
-        "--consumer", choices=sorted(ADMISSION_CONSUMERS), required=True
-    )
     run_parser = commands.add_parser("run-complete")
     run_parser.add_argument("--candidate-dir", type=Path, required=True)
     run_parser.add_argument("--platform", required=True)
@@ -1537,15 +1446,6 @@ def main() -> int:
                 args.source_commit,
                 remainder,
                 allow_extra=args.allow_extra,
-                consumer_admission=args.consumer_admission,
-            )
-        elif args.command == "claim-consumer-admission":
-            print(
-                claim_admission(
-                    args.admission_fd,
-                    args.candidate_dir,
-                    args.consumer,
-                )
             )
         elif args.command == "run-complete":
             remainder = args.remainder
@@ -1564,7 +1464,7 @@ def main() -> int:
                 args.expected_device,
                 args.expected_inode,
             )
-    except (AdmissionError, PublicationError, OSError) as error:
+    except (CandidateIOError, PublicationError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

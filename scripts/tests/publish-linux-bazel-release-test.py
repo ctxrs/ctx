@@ -38,7 +38,14 @@ class LinuxReleasePublicationTests(unittest.TestCase):
         self.symbols_source.mkdir()
         (self.symbols_source / "manifest.json").write_bytes(b"{}\n")
         (self.symbols_source / "symbols.tar.gz").write_bytes(b"symbols\n")
-        for path in self.symbols_source.iterdir():
+        nested_symbols = self.symbols_source / "nested"
+        nested_symbols.mkdir()
+        (nested_symbols / "ctx.debug").write_bytes(b"nested symbols\n")
+        for path in (
+            self.symbols_source / "manifest.json",
+            self.symbols_source / "symbols.tar.gz",
+            nested_symbols / "ctx.debug",
+        ):
             path.chmod(0o600)
 
     def tearDown(self) -> None:
@@ -166,6 +173,67 @@ class LinuxReleasePublicationTests(unittest.TestCase):
         self.assertEqual((output / "ctx.sha256").stat().st_mode & 0o777, 0o644)
         self.assertEqual((symbols / "manifest.json").read_bytes(), b"{}\n")
         self.assertEqual((symbols / "symbols.tar.gz").read_bytes(), b"symbols\n")
+        self.assertEqual(
+            (symbols / "nested/ctx.debug").read_bytes(), b"nested symbols\n"
+        )
+
+    def test_public_source_root_swap_after_verification_fails_before_commit(self) -> None:
+        replacement = self.root / "replacement-candidate"
+        self._make_artifact_source(replacement)
+        marker = replacement / PUBLISHER.completion_leaf(self.platform)
+        marker.unlink()
+        (replacement / "ctx").write_bytes(b"foreign public bytes\n")
+        (replacement / "ctx").chmod(0o755)
+        PUBLISHER.seal_candidate(replacement, self.platform, self.source_commit)
+        original = self.root / "verified-candidate"
+        output, symbols = self.preflight(
+            str(self.root / "public/candidate"), str(self.root / "private/symbols")
+        )
+
+        def substitute(phase: str) -> None:
+            if phase == "after-source-verification":
+                os.rename(self.artifact_source, original)
+                os.rename(replacement, self.artifact_source)
+
+        with self.assertRaisesRegex(
+            PUBLISHER.PublicationError, "(changed while pinned|substituted)"
+        ):
+            self.publish(output, symbols, substitute)
+        self.assertEqual((original / "ctx").read_bytes(), b"candidate leaf ctx\n")
+        self.assertEqual(
+            (self.artifact_source / "ctx").read_bytes(), b"foreign public bytes\n"
+        )
+        self.assertFalse(output.exists())
+        self.assertFalse(symbols.exists())
+
+    def test_private_symbol_root_swap_after_verification_fails_before_commit(self) -> None:
+        replacement = self.root / "replacement-symbols"
+        replacement.mkdir()
+        (replacement / "manifest.json").write_bytes(b"foreign manifest\n")
+        (replacement / "symbols.tar.gz").write_bytes(b"foreign symbols\n")
+        original = self.root / "verified-symbols"
+        output, symbols = self.preflight(
+            str(self.root / "public/candidate"), str(self.root / "private/symbols")
+        )
+
+        def substitute(phase: str) -> None:
+            if phase == "after-source-verification":
+                os.rename(self.symbols_source, original)
+                os.rename(replacement, self.symbols_source)
+
+        with self.assertRaisesRegex(
+            PUBLISHER.PublicationError, "(changed while pinned|substituted)"
+        ):
+            self.publish(output, symbols, substitute)
+        self.assertEqual(
+            (original / "nested/ctx.debug").read_bytes(), b"nested symbols\n"
+        )
+        self.assertEqual(
+            (self.symbols_source / "symbols.tar.gz").read_bytes(),
+            b"foreign symbols\n",
+        )
+        self.assertFalse(output.exists())
+        self.assertFalse(symbols.exists())
 
     def test_symbol_collision_fails_before_any_public_candidate(self) -> None:
         output, symbols = self.preflight(
@@ -394,69 +462,22 @@ class LinuxReleasePublicationTests(unittest.TestCase):
             )
         )
 
-    def test_consumer_admission_is_inherited_and_one_shot(self) -> None:
-        source = PUBLISHER.CompletedCandidateSnapshot.open(
-            self.artifact_source,
-            [self.platform],
-            self.source_commit,
-            allow_extra=False,
-        )
-        snapshot = source.materialize(self.root)
-        admission = PUBLISHER.issue_admission(
-            snapshot.descriptor, snapshot.root_binding, "github", self.source_commit
-        )
-        try:
-            self.assertEqual(
-                PUBLISHER.claim_admission(
-                    admission, snapshot.candidate_argument(), "github"
-                ),
-                self.source_commit,
-            )
-            with self.assertRaisesRegex(PUBLISHER.AdmissionError, "invalid"):
-                PUBLISHER.claim_admission(
-                    admission, snapshot.candidate_argument(), "github"
-                )
-        finally:
-            os.close(admission)
-            snapshot.close()
-            source.close()
-
-    def test_consumer_admission_binds_consumer_and_root_descriptor(self) -> None:
-        source = PUBLISHER.CompletedCandidateSnapshot.open(
-            self.artifact_source,
-            [self.platform],
-            self.source_commit,
-            allow_extra=False,
-        )
-        snapshot = source.materialize(self.root)
-        admissions = [
-            PUBLISHER.issue_admission(
-                snapshot.descriptor,
-                snapshot.root_binding,
-                "github",
-                self.source_commit,
+    def test_command_expansion_preserves_shell_parameter_names(self) -> None:
+        self.assertEqual(
+            PUBLISHER.expand_command(
+                "/proc/self/fd/10",
+                "/proc/self/fd/11",
+                {"ctx.version": "/proc/self/fd/12"},
+                [
+                    "${ctx} ${candidate} {ctx} {candidate}/ctx "
+                    "{leaf:ctx.version}",
+                ],
             ),
-            PUBLISHER.issue_admission(
-                snapshot.descriptor,
-                snapshot.root_binding,
-                "github",
-                self.source_commit,
-            ),
-        ]
-        try:
-            with self.assertRaisesRegex(PUBLISHER.AdmissionError, "invalid"):
-                PUBLISHER.claim_admission(
-                    admissions[0], snapshot.candidate_argument(), "semantic"
-                )
-            with self.assertRaisesRegex(PUBLISHER.AdmissionError, "invalid"):
-                PUBLISHER.claim_admission(
-                    admissions[1], "/proc/self/fd/999999", "github"
-                )
-        finally:
-            for admission in admissions:
-                os.close(admission)
-            snapshot.close()
-            source.close()
+            [
+                "${ctx} ${candidate} /proc/self/fd/11 "
+                "/proc/self/fd/10/ctx /proc/self/fd/12",
+            ],
+        )
 
     def test_run_handoff_executes_pinned_ctx_not_restored_foreign_path(self) -> None:
         marker = self.artifact_source / PUBLISHER.completion_leaf(self.platform)

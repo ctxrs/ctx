@@ -132,7 +132,9 @@ else
     echo "error: runtime archive not found: ${runtime_archive}" >&2
     exit 1
   fi
-  runtime_archive="$(cd "$(dirname "${runtime_archive}")" && pwd -P)/$(basename "${runtime_archive}")"
+  if [[ ! "${runtime_archive}" =~ ^/proc/self/fd/[0-9]+/[^/]+$ ]]; then
+    runtime_archive="$(cd "$(dirname "${runtime_archive}")" && pwd -P)/$(basename "${runtime_archive}")"
+  fi
   runtime_sha_path="${runtime_archive}.sha256"
   if [[ ! -s "${runtime_sha_path}" ]]; then
     echo "error: runtime archive checksum missing or empty: ${runtime_sha_path}" >&2
@@ -167,12 +169,25 @@ run_bounded() {
   shift
   python3 -I - "${limit_seconds}" "$@" <<'PY'
 import subprocess
+import os
+import re
 import sys
 
 limit = int(sys.argv[1])
 command = sys.argv[2:]
+pass_fds = set()
+for argument in command:
+    for match in re.finditer(r"/proc/self/fd/([0-9]+)(?:/|$)", argument):
+        descriptor = int(match.group(1))
+        os.fstat(descriptor)
+        pass_fds.add(descriptor)
 try:
-    result = subprocess.run(command, timeout=limit, check=False)
+    result = subprocess.run(
+        command,
+        timeout=limit,
+        check=False,
+        pass_fds=tuple(sorted(pass_fds)),
+    )
 except subprocess.TimeoutExpired:
     print(f"error: smoke command exceeded {limit} seconds", file=sys.stderr)
     raise SystemExit(124)
@@ -259,7 +274,9 @@ IFS=$'\t' read -r \
   hardware_identity emulation hypervisor evidence_complete \
   < <("${script_dir}/public-cli-host-runtime-evidence.sh")
 
-if [[ "${ctx_bin}" == */* ]]; then
+if [[ "${ctx_bin}" =~ ^/proc/self/fd/[0-9]+/[^/]+$ ]]; then
+  ctx_source="${ctx_bin}"
+elif [[ "${ctx_bin}" == */* ]]; then
   ctx_source="$(cd "$(dirname "${ctx_bin}")" && pwd -P)/$(basename "${ctx_bin}")"
 else
   ctx_source="$(command -v "${ctx_bin}")"

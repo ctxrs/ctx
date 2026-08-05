@@ -9,7 +9,7 @@ fi
 
 wrapper="${source_root}/scripts/release/build-linux-bazel-release.sh"
 publisher="${source_root}/scripts/release/publish-linux-bazel-release.py"
-admission="${source_root}/scripts/release/completed_candidate_admission.py"
+candidate_io="${source_root}/scripts/release/completed_candidate_io.py"
 dogfood_wrapper="${source_root}/scripts/release/build-linux-x64-bazel-dogfood.sh"
 recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
@@ -64,7 +64,8 @@ for required in \
   'ctx-public-linux-release-completion' \
   'class CompletedCandidateSnapshot' \
   'consume-complete' \
-  'claim-consumer-admission' \
+  'artifact_snapshot.copy_to' \
+  'symbols_snapshot.copy_to' \
   'release destination appeared during publication'; do
   grep -Fq -- "${required}" "${publisher}" || {
     printf 'native Linux publisher missing descriptor contract: %s\n' \
@@ -73,14 +74,14 @@ for required in \
   }
 done
 for required in \
-  'ctx-completed-candidate-consumer-admission' \
-  'os.pipe2(os.O_CLOEXEC)' \
   '/proc/self/fdinfo/' \
-  'candidate != f"/proc/self/fd/{candidate_descriptor}"' \
-  'stat.S_ISFIFO' \
-  'root_binding'; do
-  grep -Fq -- "${required}" "${admission}" || {
-    printf 'completed candidate admission helper missing contract: %s\n' \
+  'class DescriptorBinding' \
+  'class PinnedTreeSnapshot' \
+  'copy_regular_descriptor' \
+  'def expand_command' \
+  'completed release command contains an unbound placeholder'; do
+  grep -Fq -- "${required}" "${candidate_io}" || {
+    printf 'completed candidate descriptor helper missing contract: %s\n' \
       "${required}" >&2
     exit 1
   }
@@ -89,9 +90,8 @@ done
 for consumer in "${staging}" "${semantic_staging}"; do
   for required in \
     'consume-complete' \
-    '--consumer-admission' \
-    'claim-consumer-admission' \
-    '{admission-fd}' \
+    'worker_program' \
+    'stage_complete_candidate "$@"' \
     'ambient completed-candidate admission markers are forbidden' \
     'git' \
     'rev-parse' \
@@ -102,16 +102,24 @@ for consumer in "${staging}" "${semantic_staging}"; do
       exit 1
     }
   done
-  if grep -Fq 'CTX_RELEASE_PINNED_CONSUMER=1' "${consumer}"; then
-    printf 'completed candidate consumer bypasses the pinned snapshot: %s\n' \
-      "${consumer}" >&2
-    exit 1
-  fi
+  for forbidden in \
+    '--ctx-pinned-worker' \
+    '--consumer-admission' \
+    'claim-consumer-admission' \
+    '{admission-fd}' \
+    'CTX_RELEASE_PINNED_CONSUMER=1'; do
+    if grep -Fq -- "${forbidden}" "${consumer}"; then
+      printf 'completed candidate consumer exposes retired admission %s: %s\n' \
+        "${forbidden}" "${consumer}" >&2
+      exit 1
+    fi
+  done
 done
 for placeholder in \
-  "'{ctx}'" \
-  "'{leaf:ctx-onnxruntime-linux-x64.tar.gz}'" \
-  "'{leaf:ctx-onnxruntime-linux-aarch64.tar.gz}'"; do
+  "'{candidate}/ctx'" \
+  "'{candidate}/ctx-linux-aarch64'" \
+  "'{candidate}/ctx-onnxruntime-linux-x64.tar.gz'" \
+  "'{candidate}/ctx-onnxruntime-linux-aarch64.tar.gz'"; do
   grep -Fq -- "${placeholder}" "${pipeline}" || {
     printf 'Linux native smoke does not use pinned descriptor %s\n' \
       "${placeholder}" >&2

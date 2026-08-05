@@ -111,27 +111,27 @@ steps:
           --platform linux-x64 \
           --source-commit "${source_commit}" -- \
           bash -ceu '
-            ctx="$1"
+            ctx_path="$1"
             runtime="$2"
             version_file="$3"
             smoke_root="$4"
             expected_version="$(sed -n "s/^ctx //p" "${version_file}")"
             [[ -n "${expected_version}" ]]
             scripts/run-native-candidate-smoke.sh \
-              "${ctx}" \
+              "${ctx_path}" \
               tests/fixtures/custom-history-jsonl/basic.jsonl \
               "${expected_version}" \
               "${smoke_root}/candidate-smoke.json"
             scripts/smoke-daemon-semantic-release.sh \
               --runtime-archive "${runtime}" \
               --runtime-platform linux-x64 \
-              --ctx "${ctx}" \
+              --ctx "${ctx_path}" \
               --data-root "${smoke_root}" \
               --require-authoritative \
               --keep-root >"${smoke_root}/smoke.log" 2>&1
-          ' bash '{ctx}' \
-            '{leaf:ctx-onnxruntime-linux-x64.tar.gz}' \
-            '{leaf:ctx.version}' "${smoke_root}"
+          ' bash '{candidate}/ctx' \
+            '{candidate}/ctx-onnxruntime-linux-x64.tar.gz' \
+            '{candidate}/ctx.version' "${smoke_root}"
       fi
     agents:
       queue: "release-linux-managed"
@@ -180,7 +180,7 @@ steps:
           --platform linux-aarch64 \
           --source-commit "${source_commit}" -- \
           bash -ceu '
-            ctx="$1"
+            ctx_path="$1"
             runtime="$2"
             version_file="$3"
             smoke_root="$4"
@@ -188,20 +188,20 @@ steps:
               "${version_file}")"
             [[ -n "${expected_version}" ]]
             scripts/run-native-candidate-smoke.sh \
-              "${ctx}" \
+              "${ctx_path}" \
               tests/fixtures/custom-history-jsonl/basic.jsonl \
               "${expected_version}" \
               "${smoke_root}/candidate-smoke.json"
             scripts/smoke-daemon-semantic-release.sh \
               --runtime-archive "${runtime}" \
               --runtime-platform linux-aarch64 \
-              --ctx "${ctx}" \
+              --ctx "${ctx_path}" \
               --data-root "${smoke_root}" \
               --require-authoritative \
               --keep-root >"${smoke_root}/smoke.log" 2>&1
-          ' bash '{ctx}' \
-            '{leaf:ctx-onnxruntime-linux-aarch64.tar.gz}' \
-            '{leaf:ctx-linux-aarch64.version}' "${smoke_root}"
+          ' bash '{candidate}/ctx-linux-aarch64' \
+            '{candidate}/ctx-onnxruntime-linux-aarch64.tar.gz' \
+            '{candidate}/ctx-linux-aarch64.version' "${smoke_root}"
       fi
     agents:
       queue: "linux-arm64"

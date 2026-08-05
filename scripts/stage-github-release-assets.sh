@@ -31,20 +31,7 @@ USAGE
 
 mode="stage"
 include_semantic="0"
-worker_mode="0"
-admission_descriptor=""
 case "${1:-}" in
-  --ctx-pinned-worker)
-    [[ "$#" -eq 5 && "${2:-}" =~ ^[0-9]+$ && "${5:-}" =~ ^[01]$ ]] || {
-      printf 'invalid completed-candidate worker admission\n' >&2
-      exit 2
-    }
-    worker_mode="1"
-    admission_descriptor="$2"
-    artifact_dir="$3"
-    out_dir="$4"
-    include_semantic="$5"
-    ;;
   --transcode-runtime)
     [[ "$#" -ge 2 && "$#" -le 3 ]] || {
       usage
@@ -105,16 +92,7 @@ resolve_checkout_commit() {
     -u GIT_WORK_TREE \
     git -C "${repo_root}" rev-parse --verify HEAD^{commit}
 }
-if [[ "${worker_mode}" == "1" ]]; then
-  source_commit="$(
-    python3 -I "${publisher}" claim-consumer-admission \
-      --admission-fd "${admission_descriptor}" \
-      --candidate-dir "${artifact_dir}" \
-      --consumer github
-  )"
-else
-  source_commit="$(resolve_checkout_commit)"
-fi
+source_commit="$(resolve_checkout_commit)"
 if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" == "0000000000000000000000000000000000000000" ]]; then
   printf 'could not resolve the exact public source commit\n' >&2
   exit 1
@@ -255,26 +233,6 @@ requested_artifact_dir="${artifact_dir}"
 if [[ "${requested_artifact_dir}" != /* ]]; then
   requested_artifact_dir="${repo_root}/${requested_artifact_dir}"
 fi
-if [[ "${worker_mode}" == "0" ]]; then
-  consumer_command=(
-    /bin/bash "${BASH_SOURCE[0]}"
-    --ctx-pinned-worker
-    "{admission-fd}"
-    "{candidate}"
-    "${out_dir}"
-    "${include_semantic}"
-  )
-  python3 -I "${publisher}" consume-complete \
-    --candidate-dir "${requested_artifact_dir}" \
-    --snapshot-root "${TMPDIR:-/tmp}" \
-    --platform linux-x64 \
-    --platform linux-aarch64 \
-    --source-commit "${source_commit}" \
-    --allow-extra \
-    --consumer-admission github -- "${consumer_command[@]}"
-  exit $?
-fi
-artifact_dir="${requested_artifact_dir}"
 
 stage_asset() {
   local source_name="$1"
@@ -410,6 +368,20 @@ PY
   stage_asset "${asset_name}" "${asset_name}" 0644
 }
 
+stage_complete_candidate() {
+local artifact_dir="$1"
+local out_dir="$2"
+local include_semantic="$3"
+local source_commit="$4"
+local repo_root="$5"
+local required_runtime_asset cli_dest semantic_fields semantic_asset
+local required_runtime_assets semantic_assets
+
+[[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || {
+  printf 'completed GitHub staging source commit is invalid\n' >&2
+  exit 1
+}
+cd "${repo_root}"
 required_runtime_assets=(
   ctx-onnxruntime-linux-x64.tar.gz
   ctx-onnxruntime-linux-aarch64.tar.gz
@@ -600,3 +572,22 @@ if [[ "${include_semantic}" == "1" ]]; then
 fi
 
 printf 'staged GitHub release assets in %s\n' "${out_dir}"
+}
+
+worker_program="$(declare -f \
+  sha256_file \
+  stage_asset \
+  verify_and_stage_cli_evidence \
+  stage_runtime_asset \
+  stage_complete_candidate)"
+worker_program+=$'\nstage_complete_candidate "$@"'
+python3 -I "${publisher}" consume-complete \
+  --candidate-dir "${requested_artifact_dir}" \
+  --snapshot-root "${TMPDIR:-/tmp}" \
+  --platform linux-x64 \
+  --platform linux-aarch64 \
+  --source-commit "${source_commit}" \
+  --allow-extra -- \
+  /bin/bash -ceu "${worker_program}" bash \
+    "{candidate}" "${out_dir}" "${include_semantic}" \
+    "${source_commit}" "${repo_root}"

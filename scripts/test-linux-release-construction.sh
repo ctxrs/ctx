@@ -18,7 +18,7 @@ install -m 0755 \
   "${release_contract_root}/scripts"
 install -m 0755 scripts/release/publish-linux-bazel-release.py \
   "${release_contract_root}/scripts/release"
-install -m 0644 scripts/release/completed_candidate_admission.py \
+install -m 0644 scripts/release/completed_candidate_io.py \
   "${release_contract_root}/scripts/release"
 cp -L contracts/release-targets-v1.json \
   "${release_contract_root}/contracts/release-targets-v1.json"

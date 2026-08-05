@@ -17,8 +17,8 @@ cp "${source_root}/scripts/stage-github-release-assets.sh" \
   "${repo_root}/scripts/stage-github-release-assets.sh"
 cp "${source_root}/scripts/release/publish-linux-bazel-release.py" \
   "${repo_root}/scripts/release/publish-linux-bazel-release.py"
-cp "${source_root}/scripts/release/completed_candidate_admission.py" \
-  "${repo_root}/scripts/release/completed_candidate_admission.py"
+cp "${source_root}/scripts/release/completed_candidate_io.py" \
+  "${repo_root}/scripts/release/completed_candidate_io.py"
 ln -s "${source_root}/contracts/release-targets-v1.json" \
   "${repo_root}/contracts/release-targets-v1.json"
 for dependency in \
@@ -395,14 +395,56 @@ grep -Fq 'ambient public source commit conflicts with checkout HEAD' \
   "${tmp_dir}/forged-source.err"
 test ! -e "${tmp_dir}/forged-source-output"
 
-if /bin/bash "${stage}" --ctx-pinned-worker 9 \
-  /proc/self/fd/8 "${tmp_dir}/direct-worker-output" 0 \
-  >"${tmp_dir}/direct-worker.out" 2>"${tmp_dir}/direct-worker.err"; then
-  printf 'GitHub worker accepted a non-inherited admission descriptor\n' >&2
-  exit 1
-fi
-grep -Fq 'admission descriptor was not inherited' \
-  "${tmp_dir}/direct-worker.err"
+python3 - "${stage}" "${tmp_dir}/missing-marker" \
+  "${tmp_dir}/direct-worker-output" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+stage, candidate, output = sys.argv[1:]
+root = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY)
+base = {
+    "candidate_fd": root,
+    "consumer": "github",
+    "kind": "ctx-completed-candidate-consumer-admission",
+    "nonce": "1" * 64,
+    "root_binding": [1, 2, 3, 4, 5, 6, 7],
+    "schema_version": 1,
+    "source_commit": "a" * 40,
+}
+payloads = [base, base, {**base, "consumer": "semantic", "candidate_fd": 999999}]
+try:
+    for payload in payloads:
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, (json.dumps(payload) + "\n").encode())
+        os.close(write_fd)
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                stage,
+                "--ctx-pinned-worker",
+                str(read_fd),
+                f"/proc/self/fd/{root}",
+                output,
+                "0",
+            ],
+            pass_fds=(read_fd, root),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        os.close(read_fd)
+        if result.returncode == 0 or "unknown staging mode" not in result.stderr:
+            raise SystemExit(
+                "handcrafted or replayed pipe entered retired GitHub worker path"
+            )
+finally:
+    os.close(root)
+if Path(output).exists():
+    raise SystemExit("retired GitHub worker produced output without manifests")
+PY
 
 cp -a "${matrix}" "${tmp_dir}/partial-candidate"
 rm "${tmp_dir}/partial-candidate/ctx.size.json"
