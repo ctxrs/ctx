@@ -35,12 +35,15 @@ use durable_queue::{
 };
 use generation_authority::CoreRefreshTerminalSuccess;
 pub use generation_authority::PinnedCorePublication;
-use progress_model::SourceBackedRefreshState;
+use progress_model::{status_progress_total_sources_known, SourceBackedRefreshState};
 pub use progress_model::{
     SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
     SourceBackedRefreshProgress, SourceBackedRefreshTimings,
 };
-use read_model::SourceBackedRefreshAttempt;
+use read_model::{
+    projected_job_json, projected_status_json, SourceBackedRefreshAttempt,
+    SourceBackedRefreshFailureOutcome,
+};
 pub(super) use read_model::{refresh_scope_from_json, refresh_scope_json};
 pub use read_model::{
     SourceBackedRefreshCatalogRouteOutcome, SourceBackedRefreshReceipt,
@@ -65,6 +68,7 @@ pub(crate) struct SourceBackedRefreshProgressUpdate {
     pub(super) phase: String,
     pub(super) completed_sources: usize,
     pub(super) total_sources: usize,
+    pub(super) total_sources_known: bool,
     pub(super) current_source: Option<String>,
     pub(super) completed_records: Option<u64>,
     pub(super) completed_bytes: Option<u64>,
@@ -123,10 +127,35 @@ impl SourceBackedRefreshExecution<'_> {
         completed_bytes: Option<u64>,
         current_source_progress: Option<SourceBackedCurrentSourceProgress>,
     ) -> Result<()> {
+        self.report_detailed_progress_with_total_state(
+            phase,
+            completed_sources,
+            total_sources,
+            true,
+            current_source,
+            completed_records,
+            completed_bytes,
+            current_source_progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn report_detailed_progress_with_total_state(
+        &self,
+        phase: &str,
+        completed_sources: usize,
+        total_sources: usize,
+        total_sources_known: bool,
+        current_source: Option<String>,
+        completed_records: Option<u64>,
+        completed_bytes: Option<u64>,
+        current_source_progress: Option<SourceBackedCurrentSourceProgress>,
+    ) -> Result<()> {
         (self.report_progress)(SourceBackedRefreshProgressUpdate {
             phase: phase.to_owned(),
             completed_sources,
             total_sources,
+            total_sources_known,
             current_source,
             completed_records,
             completed_bytes,
@@ -730,13 +759,14 @@ impl CoreRefreshEngine {
             "schema_version": 1,
             "owner": "daemon",
             "request_id": request_id,
+            "logical_request_id": request_id,
             "request_state": "queued",
+            "logical_phase": "waiting",
             "previous_generation": published_generation.clone(),
             "published_generation": published_generation,
             "progress": {
                 "phase": "maintenance_wake",
                 "completed_sources": 0,
-                "total_sources": 0,
             },
             "daemon_mode": metadata.daemon_mode.as_str(),
             "trigger": metadata.trigger,

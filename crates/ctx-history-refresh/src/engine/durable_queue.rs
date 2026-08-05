@@ -154,6 +154,7 @@ fn update_progress(
         completed_bytes: update.completed_bytes,
         current_source_progress: update.current_source_progress,
     };
+    attempt.progress_total_sources_known = update.total_sources_known;
     durable_job_json(state, request_id)
 }
 
@@ -170,9 +171,7 @@ fn overlay_daemon_retry_state(mut durable_job: Value, scheduler_job: &Value) -> 
 }
 
 pub(super) fn durable_job_json(state: &CoreRefreshEngineState, request_id: &str) -> Option<Value> {
-    find_attempt(state, request_id)
-        .map(SourceBackedRefreshAttempt::job_json)
-        .map(|job| job_with_queued_successors(state, job))
+    projected_job_json(state, request_id).map(|job| job_with_queued_successors(state, job))
 }
 
 pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job: Value) -> Value {
@@ -189,7 +188,9 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
                 SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued
             )
         }) {
-            successors.push(job_with_logical_demand(state, active.job_json()));
+            if let Some(job) = projected_job_json(state, &active.request_id) {
+                successors.push(job_with_logical_demand(state, job));
+            }
         }
     }
     successors.extend(
@@ -203,7 +204,7 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
                     SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued
                 )
             })
-            .map(SourceBackedRefreshAttempt::job_json)
+            .filter_map(|attempt| projected_job_json(state, &attempt.request_id))
             .map(|job| job_with_logical_demand(state, job)),
     );
     let Some(object) = job.as_object_mut() else {
@@ -396,6 +397,7 @@ fn recover_pending_attempt(
         refresh_scope,
     );
     attempt.request_id = request_id.to_owned();
+    attempt.physical_attempt_id = optional_pending_string(job, "physical_attempt_id")?;
     attempt.state = if request_state == Some("admission_pending") {
         SourceBackedRefreshState::AdmissionPending
     } else {
@@ -421,6 +423,14 @@ fn recover_pending_attempt(
                 .ok_or_else(|| anyhow!("durable source refresh {role} has invalid predecessor ID"))
         })
         .transpose()?;
+    if attempt.physical_attempt_id.is_none() {
+        attempt.physical_attempt_id = Some(
+            attempt
+                .coalesced_into_request_id
+                .clone()
+                .unwrap_or_else(|| attempt.request_id.clone()),
+        );
+    }
     if let Some(requested_at_ms) = job
         .get("requested_at_ms")
         .or_else(|| job.get("last_run_at_ms"))
@@ -446,6 +456,14 @@ fn recover_pending_attempt(
         bail!("durable admission-pending source refresh has no freshness requirement");
     }
     Ok(attempt)
+}
+
+fn optional_pending_string(job: &Value, field: &str) -> Result<Option<String>> {
+    match job.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(_) => bail!("durable source refresh has invalid `{field}`"),
+    }
 }
 
 fn optional_sha256(job: &Value, field: &str) -> Result<Option<String>> {

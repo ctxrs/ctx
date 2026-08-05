@@ -206,6 +206,7 @@ impl CoreRefreshEngine {
             attempt.progress.phase = "published".to_owned();
             attempt.progress.completed_sources = receipt.route_results.len();
             attempt.progress.total_sources = receipt.route_results.len();
+            attempt.progress_total_sources_known = true;
             attempt.scanned_routes = Some(0);
             attempt.unsupported_routes = Some(
                 receipt
@@ -220,6 +221,7 @@ impl CoreRefreshEngine {
             attempt.publication_receipt = Some(publication_receipt);
             attempt.timings = Some(continuation.covered_timings);
             attempt.failure_type = None;
+            attempt.failure_outcome = None;
             attempt.last_error = None;
             receipt
         };

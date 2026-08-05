@@ -135,6 +135,7 @@ fn duplicate_concurrent_requests_launch_one_writer() {
                         phase: "refreshing".to_owned(),
                         completed_sources: 0,
                         total_sources: 1,
+                        total_sources_known: true,
                         current_source: Some("source-a".to_owned()),
                         completed_records: Some(1),
                         completed_bytes: Some(128),
@@ -637,4 +638,67 @@ fn manual_all_fresh_after_running_startup_scan_queues_one_successor() {
     assert!(!successor_run.failed);
     assert_eq!(request_id(&successor_run.job), successor_request_id);
     assert!(!coordinator.has_pending_request());
+}
+
+#[test]
+fn attached_logical_status_projects_one_physical_progress_owner_and_replays_stably() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let predecessor = coordinator.enqueue_periodic(temp.path()).unwrap();
+    let predecessor_id = request_id(&predecessor);
+    assert!(predecessor["progress"].get("total_sources").is_none());
+    let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+
+    std::thread::scope(|scope| {
+        let runner = Arc::clone(&coordinator);
+        scope.spawn(move || {
+            runner
+                .run_next_with(
+                    |request_id, engine| {
+                        engine.set_progress(
+                            request_id,
+                            SourceBackedRefreshProgressUpdate {
+                                phase: "parsing".to_owned(),
+                                completed_sources: 2,
+                                total_sources: 5,
+                                total_sources_known: true,
+                                current_source: Some("codex".to_owned()),
+                                completed_records: Some(89),
+                                completed_bytes: Some(4_096),
+                                current_source_progress: None,
+                            },
+                        );
+                        runner_started.send(()).expect("signal physical progress");
+                        let _ = runner_release.recv();
+                        Ok(test_publication("attached-generation"))
+                    },
+                    || Ok(Some("attached-generation".to_owned())),
+                    |_| Ok(()),
+                    |_| Ok(()),
+                )
+                .expect("running predecessor");
+        });
+        gate.wait_until_started();
+
+        let demand_id = Uuid::from_u128(0x30501).to_string();
+        let attached = coordinator
+            .enqueue_fresh_demand_for_test(None, demand_id.clone(), BTreeMap::new())
+            .unwrap();
+        assert_eq!(attached["request_id"], demand_id);
+        assert_eq!(attached["logical_phase"], "attached");
+        assert_eq!(attached["physical_attempt_id"], predecessor_id);
+        assert_eq!(attached["physical_attempt_state"], "running");
+        assert_eq!(attached["progress_owner_request_id"], predecessor_id);
+        assert_eq!(attached["progress"]["phase"], "parsing");
+        assert_eq!(attached["progress"]["completed_sources"], 2);
+        assert_eq!(attached["progress"]["total_sources"], 5);
+        assert_eq!(attached["progress"]["completed_records"], 89);
+        assert_eq!(attached["progress"]["completed_bytes"], 4_096);
+
+        let replay = coordinator
+            .enqueue_fresh_demand_for_test(None, demand_id, BTreeMap::new())
+            .unwrap();
+        assert_eq!(replay, attached);
+        gate.release();
+    });
 }

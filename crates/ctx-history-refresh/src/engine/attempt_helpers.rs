@@ -54,6 +54,121 @@ pub(super) fn source_backed_refresh_error_summary(error: &anyhow::Error) -> Stri
     format!("source-backed refresh retained no usable source: {failed_routes}")
 }
 
+pub(super) fn source_backed_refresh_failure_outcome(
+    error: &anyhow::Error,
+    scope: &SourceBackedRefreshScope,
+) -> SourceBackedRefreshFailureOutcome {
+    if let Some(failed_routes) = error.chain().find_map(|cause| {
+        let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =
+            cause.downcast_ref::<SourceBackedCoordinatorError>()?
+        else {
+            return None;
+        };
+        Some(failed_routes)
+    }) {
+        let affected_routes = failed_routes
+            .failures()
+            .iter()
+            .map(|failure| failure.route_identity.clone())
+            .collect();
+        let classes = [
+            SourceBackedSourceFailureClass::Unavailable,
+            SourceBackedSourceFailureClass::SourceChanged,
+            SourceBackedSourceFailureClass::Unreadable,
+            SourceBackedSourceFailureClass::Incompatible,
+        ]
+        .into_iter()
+        .filter(|class| failed_routes.class_total(*class) != 0)
+        .collect::<Vec<_>>();
+        let (code, class) = match classes.as_slice() {
+            [SourceBackedSourceFailureClass::Unavailable] => ("source_unavailable", "unavailable"),
+            [SourceBackedSourceFailureClass::SourceChanged] => ("source_changed", "source_changed"),
+            [SourceBackedSourceFailureClass::Unreadable] => ("malformed_source", "unreadable"),
+            [SourceBackedSourceFailureClass::Incompatible] => {
+                ("unsupported_schema", "incompatible")
+            }
+            _ => ("source_failures", "mixed"),
+        };
+        let retryable = classes.iter().any(|class| {
+            matches!(
+                class,
+                SourceBackedSourceFailureClass::Unavailable
+                    | SourceBackedSourceFailureClass::SourceChanged
+            )
+        });
+        return SourceBackedRefreshFailureOutcome::new(
+            code,
+            class,
+            retryable,
+            affected_routes,
+            Some(if retryable {
+                "retry_affected_routes"
+            } else {
+                "inspect_sources"
+            }),
+        );
+    }
+
+    if let Some(route_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<SourceBackedRouteError>())
+    {
+        let (code, class, retryable, retry_advice) = match route_error.kind {
+            SourceBackedRouteErrorKind::Unavailable => (
+                "source_unavailable",
+                "unavailable",
+                true,
+                "retry_affected_routes",
+            ),
+            SourceBackedRouteErrorKind::SourceChanged => (
+                "source_changed",
+                "source_changed",
+                true,
+                "retry_affected_routes",
+            ),
+            SourceBackedRouteErrorKind::InvalidSource => {
+                ("malformed_source", "unreadable", false, "inspect_sources")
+            }
+            SourceBackedRouteErrorKind::Unsupported => (
+                "unsupported_schema",
+                "incompatible",
+                false,
+                "upgrade_or_reconfigure",
+            ),
+            SourceBackedRouteErrorKind::ResourceUnavailable
+            | SourceBackedRouteErrorKind::Internal => {
+                ("source_refresh_failed", "internal", true, "retry_request")
+            }
+        };
+        return SourceBackedRefreshFailureOutcome::new(
+            code,
+            class,
+            retryable,
+            refresh_scope_routes(scope),
+            Some(retry_advice),
+        );
+    }
+
+    SourceBackedRefreshFailureOutcome::new(
+        "source_refresh_failed",
+        "internal",
+        true,
+        refresh_scope_routes(scope),
+        Some(if matches!(scope, SourceBackedRefreshScope::Exact(_)) {
+            "retry_affected_routes"
+        } else {
+            "retry_request"
+        }),
+    )
+}
+
+fn refresh_scope_routes(scope: &SourceBackedRefreshScope) -> BTreeSet<SourceRouteIdentity> {
+    match scope {
+        SourceBackedRefreshScope::All => BTreeSet::new(),
+        SourceBackedRefreshScope::Exact(routes) => routes.clone(),
+    }
+}
+
 pub(super) fn find_attempt<'a>(
     state: &'a CoreRefreshEngineState,
     request_id: &str,
@@ -93,8 +208,9 @@ pub(super) fn new_refresh_attempt(
     requested_catalog: Option<ExplicitSourceCatalogAuthority>,
     refresh_scope: SourceBackedRefreshScope,
 ) -> SourceBackedRefreshAttempt {
+    let request_id = Uuid::now_v7().to_string();
     SourceBackedRefreshAttempt {
-        request_id: Uuid::now_v7().to_string(),
+        request_id: request_id.clone(),
         state: SourceBackedRefreshState::Queued,
         requested_at_ms: utc_now().timestamp_millis(),
         started_at_ms: None,
@@ -111,6 +227,8 @@ pub(super) fn new_refresh_attempt(
         coalesced_logical_demands: 0,
         coalesced_requests: 0,
         progress: SourceBackedRefreshProgress::default(),
+        progress_total_sources_known: false,
+        physical_attempt_id: Some(request_id),
         scanned_routes: None,
         unsupported_routes: None,
         certified_source_count: None,
@@ -124,6 +242,7 @@ pub(super) fn new_refresh_attempt(
         trigger: metadata.trigger,
         trigger_provenance: metadata.trigger_provenance,
         failure_type: None,
+        failure_outcome: None,
         last_error: None,
     }
 }

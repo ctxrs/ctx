@@ -136,7 +136,8 @@ impl CoreRefreshEngine {
             let existing = find_attempt(&state, logical_request_id).ok_or_else(|| {
                 anyhow!("source refresh request `{logical_request_id}` disappeared during replay")
             })?;
-            let response = existing.to_json();
+            let response = projected_status_json(&state, logical_request_id)
+                .ok_or_else(|| anyhow!("replayed source refresh request disappeared"))?;
             if defer_admission_until_response
                 && existing.state == SourceBackedRefreshState::AdmissionPending
             {
@@ -190,10 +191,11 @@ impl CoreRefreshEngine {
             }
         };
         if retained_error.is_some() {
-            let attempt = find_attempt(&state, &request_id).ok_or_else(|| {
+            find_attempt(&state, &request_id).ok_or_else(|| {
                 anyhow!("retained source refresh request `{request_id}` is unknown")
             })?;
-            let response = attempt.to_json();
+            let response = projected_status_json(&state, &request_id)
+                .ok_or_else(|| anyhow!("retained source refresh request disappeared"))?;
             trim_terminal_attempt_history(&mut state);
             return Ok(response);
         }
@@ -207,9 +209,7 @@ impl CoreRefreshEngine {
             let _ = self.write_durable_admission_status(data_root, &confirmed_job);
         }
         trim_terminal_attempt_history(&mut state);
-        Ok(find_attempt(&state, &request_id)
-            .map(SourceBackedRefreshAttempt::to_json)
-            .unwrap_or(response))
+        Ok(projected_status_json(&state, &request_id).unwrap_or(response))
     }
 
     fn reconfirm_retained_admission_locked(
@@ -497,6 +497,13 @@ impl CoreRefreshEngine {
     ) -> Result<Option<SourceBackedRefreshRun>> {
         let snapshot = AdmissionResolutionSnapshot::capture(state);
         state.manual_all_continuations.remove(request_id);
+        let failure_outcome = SourceBackedRefreshFailureOutcome::new(
+            "source_refresh_admission_failed",
+            "control_plane",
+            true,
+            BTreeSet::new(),
+            Some("retry_admission"),
+        );
         let (scope, last_error) = {
             let attempt = find_attempt_mut(state, request_id)
                 .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
@@ -504,6 +511,7 @@ impl CoreRefreshEngine {
             attempt.state = SourceBackedRefreshState::Failed;
             attempt.finished_at_ms = Some(utc_now().timestamp_millis());
             attempt.progress.phase = "failed".to_owned();
+            attempt.failure_outcome = Some(failure_outcome);
             attempt.last_error = Some(last_error.clone());
             (attempt.refresh_scope.clone(), last_error)
         };

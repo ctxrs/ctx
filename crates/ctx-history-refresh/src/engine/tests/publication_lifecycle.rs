@@ -16,6 +16,7 @@ fn failed_refresh_retains_the_previous_published_generation() {
                         phase: "refreshing".to_owned(),
                         completed_sources: 0,
                         total_sources: 1,
+                        total_sources_known: true,
                         current_source: Some("source-a".to_owned()),
                         completed_records: Some(3),
                         completed_bytes: Some(384),
@@ -140,6 +141,67 @@ fn mixed_cold_route_failures_keep_a_typed_aggregate_classification() {
         .unwrap();
     assert!(run.failed);
     assert_eq!(run.job["failure_type"], "source_failures", "{:#?}", run.job);
+}
+
+#[test]
+fn retryable_route_failure_exposes_a_bounded_structured_terminal_outcome() {
+    let coordinator = CoreRefreshEngine::new();
+    let request = coordinator.enqueue(Some("retained-generation".to_owned()));
+    let request_id = request_id(&request);
+    let route = route_identity(0x5a);
+    let failed_route = route.clone();
+    let run = coordinator
+        .run_next_with(
+            |_, _| {
+                Err(SourceBackedCoordinatorError::NoUsableSourceRoutes {
+                    failed_routes: SourceBackedSourceFailures::from_failures([
+                        SourceBackedFailedRoute::new(
+                            failed_route,
+                            "21".repeat(32),
+                            CaptureProvider::Codex,
+                            SourceBackedSourceFailureClass::SourceChanged,
+                            true,
+                            "fixture source",
+                            "changed during refresh",
+                        ),
+                    ]),
+                }
+                .into())
+            },
+            || Ok(Some("retained-generation".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("typed route failure");
+
+    assert!(run.failed);
+    assert_eq!(run.job["logical_phase"], "terminal");
+    assert_eq!(run.job["error_code"], "source_changed");
+    assert_eq!(run.job["structured_outcome"]["code"], "source_changed");
+    assert_eq!(run.job["structured_outcome"]["class"], "source_changed");
+    assert_eq!(run.job["structured_outcome"]["retryable"], true);
+    assert_eq!(
+        run.job["structured_outcome"]["affected_routes"],
+        json!([route.as_str()])
+    );
+    assert_eq!(
+        run.job["structured_outcome"]["physical_attempt_id"],
+        request_id
+    );
+    assert_eq!(
+        run.job["structured_outcome"]["retained_generation"],
+        "retained-generation"
+    );
+    assert!(run.job["structured_outcome"]
+        .get("published_generation")
+        .is_none());
+    assert_eq!(
+        run.job["structured_outcome"]["retry_advice"],
+        "retry_affected_routes"
+    );
+    assert!(run.job["structured_outcome"]["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("changed during refresh")));
 }
 
 #[test]
@@ -619,6 +681,7 @@ fn recovered_wait_after_restart_attaches_to_equivalent_running_attempt() {
                 phase: "refreshing".to_owned(),
                 completed_sources: 0,
                 total_sources: 1,
+                total_sources_known: true,
                 current_source: Some("interrupted-source".to_owned()),
                 completed_records: Some(5),
                 completed_bytes: Some(640),

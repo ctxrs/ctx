@@ -21,12 +21,25 @@ use rusqlite::Connection;
 use super::*;
 use crate::{
     orchestration::{
-        automatic_registry_route_failures, execute_capture_owned_refresh_with,
-        refresh_all_provider_sources, refresh_all_provider_sources_route_local,
-        reject_blocking_automatic_registry_issues, source_backed_requested_route_observations,
+        automatic_registry_route_failures, exclusive_scan_stage_duration,
+        execute_capture_owned_refresh_with, refresh_all_provider_sources,
+        refresh_all_provider_sources_route_local, reject_blocking_automatic_registry_issues,
+        source_backed_requested_route_observations,
     },
     publication::observation::install_after_capture_scan_before_metadata_hook_for_test,
 };
+
+#[test]
+fn refresh_scan_timing_excludes_the_separately_reported_commit_interval() {
+    assert_eq!(
+        exclusive_scan_stage_duration(StdDuration::from_micros(700), StdDuration::from_micros(250),),
+        StdDuration::from_micros(450),
+    );
+    assert_eq!(
+        exclusive_scan_stage_duration(StdDuration::from_micros(100), StdDuration::from_micros(250),),
+        StdDuration::ZERO,
+    );
+}
 
 #[path = "tests/harness.rs"]
 mod harness;

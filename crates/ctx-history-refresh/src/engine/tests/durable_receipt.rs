@@ -185,6 +185,16 @@ fn lone_failed_terminal_recovers_exact_status_without_reenqueue() {
     assert!(!failed.terminal_persistence_pending);
     let exact_failure = first.status(&request_id).unwrap();
     assert_eq!(exact_failure["request_state"], "failed");
+    assert_eq!(exact_failure["logical_phase"], "terminal");
+    assert_eq!(exact_failure["physical_attempt_id"], request_id);
+    assert_eq!(
+        exact_failure["structured_outcome"]["physical_attempt_id"],
+        request_id
+    );
+    assert_eq!(
+        exact_failure["structured_outcome"]["code"],
+        "source_refresh_failed"
+    );
     assert_eq!(exact_failure["last_error"], "exact lone terminal failure");
     drop(first);
 
