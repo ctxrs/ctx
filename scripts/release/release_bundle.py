@@ -785,6 +785,8 @@ def main() -> int:
         elif args.command == "require-unsealed":
             require_unsealed(args.candidate_dir)
         elif args.command == "require-directory":
+            if ".." in args.directory.parts:
+                raise BundleError("required directory must not contain '..'")
             directory = _absolute(args.directory)
             descriptor = _open_bound_directory(
                 directory, "required directory"

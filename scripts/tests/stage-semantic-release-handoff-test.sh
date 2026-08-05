@@ -173,6 +173,24 @@ fi
 grep -Eqi 'symlink|non-directory' "${tmp_dir}/higher-link.err"
 test ! -e "${tmp_dir}/higher-link-output"
 
+mkdir -p "${tmp_dir}/parent-component/real" \
+  "${tmp_dir}/parent-component/foreign"
+cp -a "${matrix}" "${tmp_dir}/parent-component/real/candidate"
+cp -a "${matrix}" "${tmp_dir}/parent-component/foreign/candidate"
+ln -s "${tmp_dir}/parent-component/foreign/nested" \
+  "${tmp_dir}/parent-component/real/link"
+mkdir "${tmp_dir}/parent-component/foreign/nested"
+if run_stage \
+  "${tmp_dir}/parent-component/real/link/../candidate" \
+  "${tmp_dir}/parent-component-output" \
+  >"${tmp_dir}/parent-component.out" \
+  2>"${tmp_dir}/parent-component.err"; then
+  printf 'Semantic handoff accepted a producer path with a parent component\n' >&2
+  exit 1
+fi
+grep -Fq "must not contain '..'" "${tmp_dir}/parent-component.err"
+test ! -e "${tmp_dir}/parent-component-output"
+
 collision="${tmp_dir}/collision"
 mkdir "${collision}"
 printf 'sentinel\n' >"${collision}/sentinel"

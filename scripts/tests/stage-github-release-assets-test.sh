@@ -536,6 +536,25 @@ fi
 grep -Eqi 'symlink|non-directory' "${tmp_dir}/higher-link.err"
 test ! -e "${tmp_dir}/higher-link-output"
 
+mkdir -p "${tmp_dir}/parent-component/real" \
+  "${tmp_dir}/parent-component/foreign"
+cp -a "${matrix}" "${tmp_dir}/parent-component/real/candidate"
+cp -a "${matrix}" "${tmp_dir}/parent-component/foreign/candidate"
+ln -s "${tmp_dir}/parent-component/foreign/nested" \
+  "${tmp_dir}/parent-component/real/link"
+mkdir "${tmp_dir}/parent-component/foreign/nested"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" \
+  "${tmp_dir}/parent-component/real/link/../candidate" \
+  "${tmp_dir}/parent-component-output" \
+  >"${tmp_dir}/parent-component.out" \
+  2>"${tmp_dir}/parent-component.err"; then
+  printf 'GitHub stager accepted a producer path with a parent component\n' >&2
+  exit 1
+fi
+grep -Fq "must not contain '..'" "${tmp_dir}/parent-component.err"
+test ! -e "${tmp_dir}/parent-component-output"
+
 # Restore the runtime mutation so a deterministic source-root substitution
 # reaches the validators after initial candidate verification.
 printf 'synthetic %s\n' ctx-onnxruntime-linux-x64.tar.gz \
