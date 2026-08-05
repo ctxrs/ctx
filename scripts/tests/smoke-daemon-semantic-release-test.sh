@@ -294,4 +294,107 @@ if find "${tmp}/onnx-runs" -name packaged-runtime-proof.txt -print -quit | grep 
   exit 1
 fi
 
+candidate="${tmp}/completed-candidate"
+mkdir "${candidate}"
+candidate_leaves=(
+  ctx
+  ctx.build-info.json
+  ctx.candidate.json
+  ctx.cdx.json
+  ctx.cdx.json.sha256
+  ctx.dependency-advisory.json
+  ctx.sha256
+  ctx.size.json
+  ctx.third-party-notices.txt
+  ctx.third-party-notices.txt.sha256
+  ctx.version
+  ctx-onnxruntime-linux-x64.tar.gz
+  ctx-onnxruntime-linux-x64.tar.gz.sha256
+  ctx-onnxruntime-linux-x64.tar.zst
+  ctx-onnxruntime-linux-x64.tar.zst.asset.json
+  ctx-onnxruntime-linux-x64.tar.zst.sha256
+)
+for leaf in "${candidate_leaves[@]}"; do
+  case "${leaf}" in
+    ctx)
+      cp "${cpu_ctx}" "${candidate}/${leaf}"
+      chmod 0755 "${candidate}/${leaf}"
+      ;;
+    ctx.build-info.json)
+      cp "${cpu_ctx}.build-info.json" "${candidate}/${leaf}"
+      ;;
+    ctx.version)
+      printf 'ctx 0.25.0\n' > "${candidate}/${leaf}"
+      ;;
+    ctx-onnxruntime-linux-x64.tar.gz)
+      cp "${runtime_archive}" "${candidate}/${leaf}"
+      ;;
+    ctx-onnxruntime-linux-x64.tar.gz.sha256)
+      cp "${runtime_archive}.sha256" "${candidate}/${leaf}"
+      ;;
+    *)
+      printf 'completed candidate leaf %s\n' "${leaf}" > "${candidate}/${leaf}"
+      ;;
+  esac
+done
+candidate_commit=0123456789abcdef0123456789abcdef01234567
+publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
+python3 -I "${publisher}" seal \
+  --candidate-dir "${candidate}" \
+  --platform linux-x64 \
+  --source-commit "${candidate_commit}" >/dev/null
+mkdir -p "${release_root}/tests/fixtures/custom-history-jsonl"
+printf '{}\n' > \
+  "${release_root}/tests/fixtures/custom-history-jsonl/basic.jsonl"
+cat > "${release_root}/scripts/run-native-candidate-smoke.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ctx_path="$1"
+fixture="$2"
+expected_version="$3"
+output="$4"
+[[ -x "${ctx_path}" && -s "${fixture}" && "${expected_version}" == "0.25.0" ]]
+[[ "$("${ctx_path}" --version)" == "ctx ${expected_version}" ]]
+printf '{"status":"passed"}\n' > "${output}"
+EOF
+chmod 0755 "${release_root}/scripts/run-native-candidate-smoke.sh"
+nested_smoke_root="${tmp}/nested-native-smoke"
+mkdir -p "${nested_smoke_root}"
+if ! python3 -I "${publisher}" run-complete \
+  --candidate-dir "${candidate}" \
+  --platform linux-x64 \
+  --source-commit "${candidate_commit}" -- \
+  bash -ceu '
+    ctx_path="$1"
+    runtime="$2"
+    version_file="$3"
+    smoke_root="$4"
+    execution_root="$5"
+    cd "${execution_root}"
+    expected_version="$(sed -n "s/^ctx //p" "${version_file}")"
+    [[ -n "${expected_version}" ]]
+    scripts/run-native-candidate-smoke.sh \
+      "${ctx_path}" \
+      tests/fixtures/custom-history-jsonl/basic.jsonl \
+      "${expected_version}" \
+      "${smoke_root}/candidate-smoke.json"
+    scripts/smoke-daemon-semantic-release.sh \
+      --runtime-archive "${runtime}" \
+      --runtime-platform linux-x64 \
+      --ctx "${ctx_path}" \
+      --data-root "${smoke_root}" \
+      --require-authoritative \
+      --timeout-seconds 30
+  ' bash '{candidate}/ctx' \
+    '{candidate}/ctx-onnxruntime-linux-x64.tar.gz' \
+    '{candidate}/ctx.version' "${nested_smoke_root}" "${release_root}" \
+  > "${tmp}/nested-onnx.out" 2> "${tmp}/nested-onnx.err"; then
+  cat "${tmp}/nested-onnx.out" >&2
+  cat "${tmp}/nested-onnx.err" >&2
+  exit 1
+fi
+grep -Fq 'ctx semantic smoke ok:' "${tmp}/nested-onnx.out"
+grep -Fq '"status":"passed"' \
+  "${nested_smoke_root}/candidate-smoke.json"
+
 printf 'daemon semantic release smoke contract tests passed\n'

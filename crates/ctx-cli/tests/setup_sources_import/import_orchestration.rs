@@ -72,6 +72,7 @@ fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
             Err(error) => panic!("start isolated source-refresh daemon: {error}"),
         }
     };
+    let daemon_pid = child.id();
     let mut daemon = SourceRefreshDaemon { child: Some(child) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -96,6 +97,7 @@ fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
             .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok());
         if status.as_ref().is_some_and(|status| {
             status["daemon"]["running"] == true
+                && status["daemon"]["pid"] == daemon_pid
                 && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
             return daemon;

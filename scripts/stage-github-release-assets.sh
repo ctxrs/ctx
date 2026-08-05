@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${CTX_RELEASE_PINNED_CONSUMER+x}" == "x" ]]; then
+  printf 'ambient completed-candidate admission markers are forbidden\n' >&2
+  exit 1
+fi
+
 usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/stage-github-release-assets.sh [ARTIFACT_DIR] [OUT_DIR]
@@ -19,7 +24,8 @@ The additive --with-semantic mode validates and stages the ten signed Semantic
 assets after preserving the six legacy runtime assets.
 
 The transcode mode converts a validated builder-owned Unix .tar.zst sidecar
-to the deterministic .tar.gz transport consumed by release installers.
+to the deterministic .tar.gz transport consumed by release installers. It is
+only valid in private builder staging before a completion marker is created.
 USAGE
 }
 
@@ -72,12 +78,27 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
-source_commit="${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}"
-if [[ -z "${source_commit}" ]]; then
-  source_commit="$(git rev-parse --verify HEAD^{commit})"
-fi
+publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
+resolve_checkout_commit() {
+  env \
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    -u GIT_CEILING_DIRECTORIES \
+    -u GIT_COMMON_DIR \
+    -u GIT_DIR \
+    -u GIT_DISCOVERY_ACROSS_FILESYSTEM \
+    -u GIT_INDEX_FILE \
+    -u GIT_NAMESPACE \
+    -u GIT_OBJECT_DIRECTORY \
+    -u GIT_WORK_TREE \
+    git -C "${repo_root}" rev-parse --verify HEAD^{commit}
+}
+source_commit="$(resolve_checkout_commit)"
 if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" == "0000000000000000000000000000000000000000" ]]; then
   printf 'could not resolve the exact public source commit\n' >&2
+  exit 1
+fi
+if [[ -n "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}" && "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" != "${source_commit}" ]]; then
+  printf 'ambient public source commit conflicts with checkout HEAD\n' >&2
   exit 1
 fi
 
@@ -197,8 +218,20 @@ if [[ "${mode}" == "transcode" ]]; then
     usage
     exit 2
   }
+  transcode_candidate_dir="${artifact_dir}"
+  if [[ "${transcode_candidate_dir}" != /* ]]; then
+    transcode_candidate_dir="${repo_root}/${transcode_candidate_dir}"
+  fi
+  python3 -I "${publisher}" require-unsealed \
+    --candidate-dir "${transcode_candidate_dir}"
+  artifact_dir="${transcode_candidate_dir}"
   transcode_runtime_asset "${transcode_platform}"
   exit 0
+fi
+
+requested_artifact_dir="${artifact_dir}"
+if [[ "${requested_artifact_dir}" != /* ]]; then
+  requested_artifact_dir="${repo_root}/${requested_artifact_dir}"
 fi
 
 stage_asset() {
@@ -335,6 +368,20 @@ PY
   stage_asset "${asset_name}" "${asset_name}" 0644
 }
 
+stage_complete_candidate() {
+local artifact_dir="$1"
+local out_dir="$2"
+local include_semantic="$3"
+local source_commit="$4"
+local repo_root="$5"
+local required_runtime_asset cli_dest semantic_fields semantic_asset
+local required_runtime_assets semantic_assets
+
+[[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || {
+  printf 'completed GitHub staging source commit is invalid\n' >&2
+  exit 1
+}
+cd "${repo_root}"
 required_runtime_assets=(
   ctx-onnxruntime-linux-x64.tar.gz
   ctx-onnxruntime-linux-aarch64.tar.gz
@@ -504,7 +551,6 @@ stage_runtime_asset freebsd-x64
 
 if [[ "${include_semantic}" == "1" ]]; then
   semantic_fields="$(mktemp "${TMPDIR:-/tmp}/ctx-semantic-release.XXXXXX")"
-  trap 'rm -f "${semantic_fields}"' EXIT
   bash scripts/construct-semantic-release-catalog.sh \
     "${artifact_dir}" "${semantic_fields}"
   semantic_assets=(
@@ -523,7 +569,25 @@ if [[ "${include_semantic}" == "1" ]]; then
     stage_asset "${semantic_asset}" "${semantic_asset}" 0644
   done
   rm -f "${semantic_fields}"
-  trap - EXIT
 fi
 
 printf 'staged GitHub release assets in %s\n' "${out_dir}"
+}
+
+worker_program="$(declare -f \
+  sha256_file \
+  stage_asset \
+  verify_and_stage_cli_evidence \
+  stage_runtime_asset \
+  stage_complete_candidate)"
+worker_program+=$'\nstage_complete_candidate "$@"'
+python3 -I "${publisher}" consume-complete \
+  --candidate-dir "${requested_artifact_dir}" \
+  --snapshot-root "${TMPDIR:-/tmp}" \
+  --platform linux-x64 \
+  --platform linux-aarch64 \
+  --source-commit "${source_commit}" \
+  --allow-extra -- \
+  /bin/bash -ceu "${worker_program}" bash \
+    "{candidate}" "${out_dir}" "${include_semantic}" \
+    "${source_commit}" "${repo_root}"

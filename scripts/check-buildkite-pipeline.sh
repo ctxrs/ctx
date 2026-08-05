@@ -520,7 +520,22 @@ if command -v ruby >/dev/null 2>&1; then
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
       abort "missing runtime-producing artifact step #{key}" unless step
       command = step["command"].to_s
-      abort "#{key} must build its ONNX Runtime sidecar" unless command.include?("scripts/build-onnxruntime-sidecar.sh #{platform}")
+      if key.start_with?("public-cli-linux-")
+        abort "#{key} must use the complete Linux release transaction" unless command.include?("scripts/release/build-linux-bazel-release.sh")
+        abort "#{key} must not write runtime leaves after public commit" if command.include?("scripts/build-onnxruntime-sidecar.sh") || command.include?("--transcode-runtime")
+        abort "#{key} native smoke must use the completed candidate handoff" unless command.include?("publish-linux-bazel-release.py run-complete")
+        binary = key == "public-cli-linux-x64" ? "ctx" : "ctx-linux-aarch64"
+        cli_leaf = "'{candidate}/#{binary}'"
+        abort "#{key} native smoke must execute the pinned named CLI leaf" unless command.include?(cli_leaf)
+        runtime_leaf = "'{candidate}/ctx-onnxruntime-#{platform}.tar.gz'"
+        abort "#{key} native smoke must consume the pinned named runtime leaf" unless command.include?(runtime_leaf)
+        marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
+        abort "#{key} must upload #{marker}" unless Array(step["artifact_paths"]).include?(marker)
+        advisory = "target/public-cli-artifacts/#{binary}.dependency-advisory.json"
+        abort "#{key} must upload #{advisory}" unless Array(step["artifact_paths"]).include?(advisory)
+      else
+        abort "#{key} must build its ONNX Runtime sidecar" unless command.include?("scripts/build-onnxruntime-sidecar.sh #{platform}")
+      end
       archive = platform == "windows-x64" ? "ctx-onnxruntime-windows-x64.zip" : "ctx-onnxruntime-#{platform}.tar.gz"
       abort "#{key} must upload #{archive}" unless Array(step["artifact_paths"]).include?("target/public-cli-artifacts/#{archive}")
       abort "#{key} must upload #{archive}.sha256" unless Array(step["artifact_paths"]).include?("target/public-cli-artifacts/#{archive}.sha256")
@@ -561,6 +576,7 @@ if command -v ruby >/dev/null 2>&1; then
       abort "release candidate staging does not bind artifacts from #{producer}" unless candidate_command.include?("--step #{producer}")
     end
     abort "release candidate staging must run exact-byte public assembly" unless candidate_command.include?("scripts/stage-github-release-assets.sh") && candidate_command.include?("target/github-release-assets")
+    abort "GitHub staging must bind the public source commit to checkout HEAD" unless candidate_command.include?("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") && candidate_command.include?("git rev-parse --verify HEAD^{commit}")
     abort "release candidate staging must upload the immutable manifest" unless Array(candidate["artifact_paths"]).include?("target/github-release-assets/*")
     semantic_assets = %w[
       ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
@@ -614,6 +630,11 @@ if command -v ruby >/dev/null 2>&1; then
       stem = artifact.sub(/\.(tar\.xz|tar\.zst|zip)\z/, "")
       abort "Semantic gather does not download #{artifact}" unless gather_command.include?(stem)
     end
+    %w[linux-x64 linux-aarch64].each do |platform|
+      marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
+      abort "Semantic gather does not download exact completion identity #{marker}" unless gather_command.include?(marker)
+    end
+    abort "Semantic gather must bind the public source commit" unless gather_command.include?("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") && gather_command.include?("git rev-parse --verify HEAD^{commit}")
     abort "Semantic gather must construct and stage the unsigned handoff" unless gather_command.include?("scripts/stage-semantic-release-handoff.sh")
     abort "public Semantic gather must not sign release metadata" if gather_command.match?(/sign|private/i)
   ' "${pipeline}"
@@ -832,6 +853,29 @@ for artifact in semantic_artifacts:
         raise SystemExit(f"Semantic handoff/publication contract is missing {artifact}")
 if "construct-semantic-release-catalog.sh" not in handoff:
     raise SystemExit("Semantic handoff must construct the six public metadata fields")
+if "publish-linux-bazel-release.py" not in handoff or "consume-complete" not in handoff:
+    raise SystemExit("Semantic handoff must consume an FD-pinned completed candidate")
+for source, label in ((staging, "GitHub"), (handoff, "Semantic")):
+    for required in (
+        "consume-complete",
+        'worker_program+=$\'\\nstage_complete_candidate "$@"\'',
+        "ambient completed-candidate admission markers are forbidden",
+        "HEAD^{commit}",
+    ):
+        if required not in source:
+            raise SystemExit(f"{label} staging admission is missing {required}")
+    for forbidden in (
+        "--ctx-pinned-worker",
+        "--consumer-admission",
+        "claim-consumer-admission",
+        "{admission-fd}",
+        "CTX_RELEASE_PINNED_CONSUMER=1",
+    ):
+        if forbidden in source:
+            raise SystemExit(f"{label} staging exposes retired admission path {forbidden}")
+for platform in ("linux-x64", "linux-aarch64"):
+    if f"--platform {platform}" not in handoff:
+        raise SystemExit(f"Semantic handoff must require {platform} completion identity")
 if "--with-semantic" not in staging:
     raise SystemExit("release staging must have an explicit additive Semantic mode")
 for platform in (

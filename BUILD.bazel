@@ -408,6 +408,8 @@ sh_test(
         "scripts/check-public-cli-build-info.py",
         "scripts/macos-release-signing-evidence.py",
         "scripts/macos-release-publisher-policy.sh",
+        "scripts/release/completed_candidate_io.py",
+        "scripts/release/publish-linux-bazel-release.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
         "scripts/release_sbom/dependency_materials.py",
@@ -415,6 +417,22 @@ sh_test(
         "scripts/verify-macos-release-attestation.sh",
     ],
     tags = ["release-gate"],
+)
+
+sh_test(
+    name = "stage_semantic_release_handoff_tests",
+    srcs = ["scripts/tests/stage-semantic-release-handoff-test.sh"],
+    data = [
+        "scripts/construct-semantic-release-catalog.sh",
+        "scripts/release/completed_candidate_io.py",
+        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/stage-semantic-release-handoff.sh",
+    ],
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
 )
 
 py_test(
@@ -732,6 +750,21 @@ py_test(
     tags = ["release-gate"],
 )
 
+py_test(
+    name = "linux_bazel_release_publication_tests",
+    srcs = [
+        "scripts/release/completed_candidate_io.py",
+        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/tests/publish-linux-bazel-release-test.py",
+    ],
+    main = "scripts/tests/publish-linux-bazel-release-test.py",
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
 sh_test(
     name = "native_bazel_packaging_contract_tests",
     srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
@@ -741,8 +774,11 @@ sh_test(
         "scripts/release/build-linux-bazel-release.sh",
         "scripts/release/build-linux-x64-bazel-dogfood.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
+        "scripts/release/completed_candidate_io.py",
+        "scripts/release/publish-linux-bazel-release.py",
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/stage-github-release-assets.sh",
+        "scripts/stage-semantic-release-handoff.sh",
         "//tools/bazel:release_routes.bzl",
     ],
     tags = ["release-gate"],
