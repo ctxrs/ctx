@@ -810,7 +810,7 @@ pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job:
 fn record_source_refresh_retry(
     _data_root: &Path,
     backoff: &mut DaemonRetryBackoff,
-    _coordinator: &CoreRefreshEngine,
+    coordinator: &CoreRefreshEngine,
     mut job: Value,
     status_persistence_pending: bool,
 ) -> Result<Value> {
@@ -822,6 +822,18 @@ fn record_source_refresh_retry(
     }
 
     backoff.reset();
+    let status = RefreshStatus::classify_schema_v1(&job)?;
+    if status
+        .terminal_outcome()
+        .and_then(|outcome| outcome.retry_advice)
+        == Some(RefreshRetryAdvice::RetryAdmission)
+    {
+        let request_id = job
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("terminal retry-admission status has no request ID"))?;
+        coordinator.complete_retry_admission_handoff(request_id)?;
+    }
     // The engine already persisted this capture terminal together with its
     // logical-demand queue. Rewriting it here could discard the durable image
     // needed to cancel/replay attached demands after restart.
@@ -893,6 +905,7 @@ use std::{
 use anyhow::Result;
 use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::utc_now;
+use ctx_history_refresh::{RefreshRetryAdvice, RefreshStatus};
 use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};
 

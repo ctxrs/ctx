@@ -5,8 +5,10 @@ use std::{
     os::unix::net::UnixListener,
 };
 
+use crate::semantic::model_runtime::SharedSemanticRuntime;
 use crate::semantic::query_service::{
-    write_daemon_service_endpoint, DaemonIpcService, DaemonQueryEndpoint,
+    start_daemon_source_refresh_service_with_coordinator_for_test, write_daemon_service_endpoint,
+    DaemonIpcService, DaemonQueryEndpoint,
 };
 
 const TEST_ENDPOINT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -23,6 +25,45 @@ fn source_refresh_endpoint(socket_path: &Path) -> DaemonQueryEndpoint {
         path: socket_path.to_owned(),
         token: TEST_ENDPOINT_TOKEN.to_owned(),
     }
+}
+
+#[test]
+fn background_maintenance_wake_is_accepted_through_client_and_coordinator() -> Result<()> {
+    let data_root = short_data_root()?;
+    ctx_history_core::platform_security::establish_private_data_root(data_root.path())?;
+    let writer = ctx_history_index::GenerationWriter::open(
+        source_backed_index_root(data_root.path()),
+        ctx_history_index::WriterOptions::default(),
+    )?
+    .into_writer()
+    .map_err(crate::semantic::committed_generation_recovery_error)?;
+    let generation = writer.commit(|_| true)?.generation_id;
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let service = start_daemon_source_refresh_service_with_coordinator_for_test(
+        data_root.path(),
+        SharedSemanticRuntime::default(),
+        StdDuration::from_secs(1),
+        Arc::clone(&coordinator),
+    )?;
+
+    let observation = coordinate_source_backed_refresh_with_catalog(
+        data_root.path(),
+        SourceBackedRefreshMode::Background,
+        SourceBackedRefreshOperation::Refresh,
+        None,
+        false,
+        false,
+        None,
+    )?;
+
+    assert_eq!(observation.mode, SourceBackedRefreshMode::Background);
+    assert_eq!(observation.status, "queued");
+    assert!(observation.daemon_available);
+    assert!(observation.request_id.is_some());
+    assert_eq!(observation.pin.generation_id(), generation);
+    assert!(!coordinator.has_pending_request());
+    drop(service);
+    Ok(())
 }
 
 #[test]

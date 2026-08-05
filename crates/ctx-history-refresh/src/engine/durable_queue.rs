@@ -108,6 +108,38 @@ impl CoreRefreshEngine {
         Ok(job)
     }
 
+    /// Completes the scheduler handoff for a durably terminal admission-fence
+    /// failure. This releases queue capacity without resubmitting capture work
+    /// or changing the failed logical request's terminal image.
+    pub fn complete_retry_admission_handoff(&self, request_id: &str) -> Result<()> {
+        let mut state = self.lock_state();
+        let attempt = find_attempt(&state, request_id)
+            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
+        let retry_admission = attempt.state == SourceBackedRefreshState::Failed
+            && attempt.failure_outcome.as_ref().is_some_and(|outcome| {
+                outcome.code == "source_refresh_admission_failed"
+                    && outcome.retry_advice == Some("retry_admission")
+            });
+        if !retry_admission {
+            bail!("source refresh request `{request_id}` has no terminal retry-admission handoff");
+        }
+        match state.pending_scheduler_retry_root_id.as_deref() {
+            None => Ok(()),
+            Some(pending) if pending == request_id => {
+                state.pending_scheduler_retry_root_id = None;
+                Ok(())
+            }
+            Some(pending) => bail!(
+                "source refresh retry-admission handoff belongs to `{pending}`, not `{request_id}`"
+            ),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_scheduler_retry_root_for_test(&self) -> Option<String> {
+        self.lock_state().pending_scheduler_retry_root_id.clone()
+    }
+
     pub fn persist_scheduler_status(
         &self,
         data_root: &Path,

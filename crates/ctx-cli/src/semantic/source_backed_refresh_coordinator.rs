@@ -1,7 +1,6 @@
 #[cfg(test)]
 use std::sync::Arc;
 use std::{
-    collections::BTreeSet,
     fmt,
     path::Path,
     time::{Duration as StdDuration, Instant as StdInstant},
@@ -29,14 +28,15 @@ pub(in crate::semantic) use ctx_history_refresh::RefreshEngine as CoreRefreshEng
 pub(crate) use ctx_history_refresh::{
     explicit_catalog_request_is_accounted_for, nonzero_duration_micros, open_verified_index,
     optional_generation, published_refresh_receipt_for_index, source_backed_index_root,
-    PinnedCorePublication, SourceBackedCurrentSourceProgress,
+    PinnedCorePublication, RefreshOutcomeClass, RefreshRequestState, RefreshStatus,
+    RefreshStatusKind, RefreshTerminalOutcome, SourceBackedCurrentSourceProgress,
     SourceBackedCurrentSourceProgressStage, SourceBackedPublicationMetadata,
     SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
 };
 
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::{
-    EventWatermark, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
+    EventWatermark, RefreshLogicalPhase, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
     SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
     SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };

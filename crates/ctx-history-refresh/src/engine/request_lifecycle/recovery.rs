@@ -461,41 +461,19 @@ fn recover_failure_outcome(
     let fields = value
         .as_object()
         .ok_or_else(|| anyhow!("durable terminal source refresh has invalid structured outcome"))?;
-    let code = required_outcome_value(
-        fields,
-        "code",
-        &[
-            "source_unavailable",
-            "source_changed",
-            "malformed_source",
-            "unsupported_schema",
-            "source_failures",
-            "logical_source_failures",
-            "source_refresh_failed",
-            "source_refresh_internal",
-            "resource_unavailable",
-            "index_incompatible",
-            "index_corruption",
-            "source_refresh_admission_failed",
-            TERMINAL_COVERAGE_ERROR_CODE,
-        ],
-    )?;
-    let class = required_outcome_value(
-        fields,
-        "class",
-        &[
-            "unavailable",
-            "source_changed",
-            "unreadable",
-            "incompatible",
-            "mixed",
-            "internal",
-            "resource_unavailable",
-            "corruption",
-            "control_plane",
-            "coverage",
-        ],
-    )?;
+    let code: RefreshOutcomeCode = required_outcome_text(fields, "code")?.parse()?;
+    if !code.is_failure() {
+        bail!("durable terminal source refresh outcome has invalid `code`");
+    }
+    let class: RefreshOutcomeClass = required_outcome_text(fields, "class")?.parse()?;
+    if matches!(
+        class,
+        RefreshOutcomeClass::Completed
+            | RefreshOutcomeClass::CompletedWithRetryableFailures
+            | RefreshOutcomeClass::CompletedWithDiagnostics
+    ) {
+        bail!("durable terminal source refresh outcome has invalid `class`");
+    }
     let retryable = fields
         .get("retryable")
         .and_then(Value::as_bool)
@@ -505,19 +483,14 @@ fn recover_failure_outcome(
     let affected_routes = recover_outcome_routes(fields, "affected_routes")?;
     let retry_advice = match fields.get("retry_advice") {
         None | Some(Value::Null) => None,
-        Some(Value::String(value)) => [
-            "retry_affected_routes",
-            "retry_request",
-            "retry_admission",
-            "retry_finalization",
-            "inspect_sources",
-            "upgrade_or_reconfigure",
-            "rebuild_index",
-        ]
-        .into_iter()
-        .find(|accepted| accepted == value)
-        .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid retry advice"))
-        .map(Some)?,
+        Some(Value::String(value)) => Some(
+            value
+                .parse::<RefreshRetryAdvice>()
+                .map_err(|_| {
+                    anyhow!("durable terminal source refresh outcome has invalid retry advice")
+                })?
+                .as_str(),
+        ),
         Some(_) => bail!("durable terminal source refresh outcome has invalid retry advice"),
     };
     let retryable_routes = fields
@@ -540,8 +513,8 @@ fn recover_failure_outcome(
             }
             Ok(Some(
                 SourceBackedRefreshFailureOutcome::with_route_dispositions(
-                    code,
-                    class,
+                    code.as_str(),
+                    class.as_str(),
                     retryable,
                     retryable_routes,
                     blocked_routes,
@@ -550,8 +523,8 @@ fn recover_failure_outcome(
             ))
         }
         (None, None) => Ok(Some(SourceBackedRefreshFailureOutcome::new(
-            code,
-            class,
+            code.as_str(),
+            class.as_str(),
             retryable,
             affected_routes,
             retry_advice,
@@ -588,19 +561,14 @@ fn recover_outcome_routes(
     Ok(parsed)
 }
 
-fn required_outcome_value(
-    fields: &serde_json::Map<String, Value>,
+fn required_outcome_text<'a>(
+    fields: &'a serde_json::Map<String, Value>,
     field: &str,
-    accepted: &[&'static str],
-) -> Result<&'static str> {
-    let value = fields
+) -> Result<&'a str> {
+    fields
         .get(field)
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid `{field}`"))?;
-    accepted
-        .iter()
-        .copied()
-        .find(|accepted| *accepted == value)
+        .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid `{field}`"))
 }
 

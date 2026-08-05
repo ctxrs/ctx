@@ -198,6 +198,129 @@ fn mixed_route_dispositions_schedule_only_retryable_routes() {
 }
 
 #[test]
+fn terminal_admission_fence_failure_releases_root_before_exact_dirty_route_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
+    publish_empty_core_generation(&data_root);
+    let dirty_route = route_identity(0xd1);
+    let executor_route = dirty_route.clone();
+    let scopes = Arc::new(Mutex::new(Vec::new()));
+    let observed_scopes = Arc::clone(&scopes);
+    let fence_calls = Arc::new(AtomicUsize::new(0));
+    let observed_fence_calls = Arc::clone(&fence_calls);
+    let coordinator = CoreRefreshEngine::with_runtime_for_test(
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            observed_scopes
+                .lock()
+                .unwrap()
+                .push(execution.scope.clone());
+            assert_eq!(
+                execution.scope,
+                SourceBackedRefreshScope::Exact(BTreeSet::from([executor_route.clone()]))
+            );
+            let mut publication = publish_empty_authoritative_generation(execution.index_root);
+            publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+                executor_route.as_str().to_owned(),
+                true,
+            )];
+            Ok(publication)
+        }),
+        Arc::new(move |_data_root, _catalog| {
+            if observed_fence_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("injected admission-fence failure");
+            }
+            Ok(BTreeMap::new())
+        }),
+        Arc::new(write_daemon_job_status),
+    );
+    coordinator.initialize_watch_route_authority(BTreeSet::from([dirty_route.clone()]));
+    let request_id = "019fcaaa-0000-7000-8000-0000000002b1";
+    let admitted = coordinator
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "schema_version": 1,
+                "op": "source_refresh_request",
+                "request_id": request_id,
+                "mode": "wait",
+                "operation": "refresh",
+                "fresh_after_admitted_snapshot": true,
+            }),
+        )
+        .unwrap()
+        .expect("durable pending admission");
+    assert_eq!(admitted["request_state"], "admission_pending");
+    let mut runtime = source_refresh_only_runtime();
+
+    let failed = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+
+    assert!(failed.failed);
+    assert_eq!(runtime.history_retry.consecutive_failures, 0);
+    assert_eq!(fence_calls.load(Ordering::SeqCst), 1);
+    assert!(scopes.lock().unwrap().is_empty());
+    assert_eq!(coordinator.pending_scheduler_retry_root_for_test(), None);
+    let terminal = coordinator
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "op": "source_refresh_status",
+                "request_id": request_id,
+            }),
+        )
+        .unwrap()
+        .expect("terminal failed admission");
+    assert_eq!(terminal["request_state"], "failed");
+    assert_eq!(terminal["logical_phase"], "terminal");
+    assert_eq!(
+        terminal["structured_outcome"]["code"],
+        "source_refresh_admission_failed"
+    );
+    assert_eq!(
+        terminal["structured_outcome"]["retry_advice"],
+        "retry_admission"
+    );
+    coordinator.record_watch_routes(
+        [(dirty_route.clone(), EventWatermark::new(7, 1))],
+        super::super::source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    assert_eq!(
+        coordinator.scheduled_route_ids_for_test(),
+        BTreeSet::from([dirty_route.clone()])
+    );
+    assert!(coordinator
+        .enqueue_next_scheduled_refresh(&data_root, u64::MAX)
+        .unwrap());
+    let queued = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(queued["refresh_scope"]["kind"], "exact");
+    assert_eq!(
+        queued["refresh_scope"]["routes"],
+        json!([dirty_route.as_str()])
+    );
+
+    let exact = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+
+    assert!(!exact.failed);
+    assert_eq!(
+        scopes.lock().unwrap().as_slice(),
+        &[SourceBackedRefreshScope::Exact(BTreeSet::from([
+            dirty_route
+        ]))]
+    );
+    let replay = coordinator
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "op": "source_refresh_status",
+                "request_id": request_id,
+            }),
+        )
+        .unwrap()
+        .expect("failed admission remains replayable");
+    assert_eq!(replay, terminal);
+}
+
+#[test]
 fn failed_attached_demand_is_terminal_replayable_and_never_executes_a_successor() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

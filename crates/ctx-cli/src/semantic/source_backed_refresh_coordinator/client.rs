@@ -10,7 +10,6 @@ type SourceBackedRefreshProgressReporter<'a> =
     &'a mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>;
 
 const SOURCE_REFRESH_PROGRESS_HEARTBEAT: StdDuration = StdDuration::from_secs(5);
-const SOURCE_REFRESH_STRUCTURED_ROUTE_LIMIT: usize = 256;
 
 #[derive(Debug)]
 pub(crate) struct SourceBackedRefreshDaemonUnavailable {
@@ -96,19 +95,51 @@ impl std::error::Error for SourceBackedRefreshTerminalError {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum SourceRefreshProtocolState {
-    AdmissionPending,
-    Queued,
-    Running,
-    Published,
-    Failed,
-}
-
-#[derive(Debug)]
-struct SourceRefreshProtocolStatus {
-    state: SourceRefreshProtocolState,
-    structured_outcome: Option<SourceBackedRefreshTerminalError>,
+impl From<RefreshTerminalOutcome> for SourceBackedRefreshTerminalError {
+    fn from(outcome: RefreshTerminalOutcome) -> Self {
+        let capture_error = match outcome.class {
+            RefreshOutcomeClass::Incompatible => Some(CaptureError::UnsupportedSchema(
+                outcome
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| outcome.code.as_str().to_owned()),
+            )),
+            RefreshOutcomeClass::Unreadable => Some(CaptureError::InvalidPayload(
+                outcome
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| outcome.code.as_str().to_owned()),
+            )),
+            _ => None,
+        };
+        Self {
+            code: outcome.code.as_str().to_owned(),
+            class: outcome.class.as_str().to_owned(),
+            retryable: outcome.retryable,
+            affected_routes: outcome
+                .affected_routes
+                .into_iter()
+                .map(|route| route.as_str().to_owned())
+                .collect(),
+            retryable_routes: outcome
+                .retryable_routes
+                .into_iter()
+                .map(|route| route.as_str().to_owned())
+                .collect(),
+            blocked_routes: outcome
+                .blocked_routes
+                .into_iter()
+                .map(|route| route.as_str().to_owned())
+                .collect(),
+            physical_attempt_id: outcome.physical_attempt_id,
+            retained_generation: outcome.retained_generation,
+            retry_advice: outcome
+                .retry_advice
+                .map(|advice| advice.as_str().to_owned()),
+            detail: outcome.detail,
+            capture_error,
+        }
+    }
 }
 
 const AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT: usize = 3;
@@ -634,7 +665,7 @@ fn wait_for_published_generation_inner(
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
         let protocol = source_refresh_protocol_status(&response)?;
-        let protocol_state = protocol.state;
+        let protocol_state = protocol.request_state();
         if let Some(report_progress) = report_progress.as_deref_mut() {
             let progress = SourceBackedRefreshProgress::from_status_json(&response)?;
             if should_report_progress(
@@ -651,7 +682,7 @@ fn wait_for_published_generation_inner(
             }
         }
         match protocol_state {
-            SourceRefreshProtocolState::Published => {
+            RefreshRequestState::Published => {
                 let expected = response
                     .get("published_generation")
                     .and_then(Value::as_str)
@@ -708,12 +739,12 @@ fn wait_for_published_generation_inner(
                     pin,
                 });
             }
-            SourceRefreshProtocolState::Failed => {
-                return failed_refresh_response(&response, protocol.structured_outcome);
+            RefreshRequestState::Failed => {
+                return failed_refresh_response(&response, protocol.into_terminal_outcome());
             }
-            SourceRefreshProtocolState::AdmissionPending
-            | SourceRefreshProtocolState::Queued
-            | SourceRefreshProtocolState::Running => {
+            RefreshRequestState::AdmissionPending
+            | RefreshRequestState::Queued
+            | RefreshRequestState::Running => {
                 std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
             }
         }
@@ -766,12 +797,12 @@ fn should_report_progress(
     last_progress: Option<&SourceBackedRefreshProgress>,
     last_reported_at: Option<StdInstant>,
     progress: &SourceBackedRefreshProgress,
-    protocol_state: SourceRefreshProtocolState,
+    protocol_state: RefreshRequestState,
     now: StdInstant,
 ) -> bool {
     matches!(
         protocol_state,
-        SourceRefreshProtocolState::Published | SourceRefreshProtocolState::Failed
+        RefreshRequestState::Published | RefreshRequestState::Failed
     ) || last_progress != Some(progress)
         || last_reported_at.is_some_and(|at| {
             now.saturating_duration_since(at) >= SOURCE_REFRESH_PROGRESS_HEARTBEAT
@@ -780,10 +811,10 @@ fn should_report_progress(
 
 fn failed_refresh_response(
     response: &Value,
-    structured: Option<SourceBackedRefreshTerminalError>,
+    structured: Option<RefreshTerminalOutcome>,
 ) -> Result<SourceBackedRefreshObservation> {
     if let Some(structured) = structured {
-        return Err(structured.into());
+        return Err(SourceBackedRefreshTerminalError::from(structured).into());
     }
 
     legacy_failed_refresh_response(response)
@@ -903,277 +934,13 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{label} has no request ID"))
 }
 
-fn source_refresh_protocol_state(response: &Value) -> Result<SourceRefreshProtocolState> {
-    Ok(source_refresh_protocol_status(response)?.state)
+fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
+    Ok(source_refresh_protocol_status(response)?.request_state())
 }
 
-fn source_refresh_protocol_status(response: &Value) -> Result<SourceRefreshProtocolStatus> {
-    let state = typed_refresh_state(
-        response
-            .get("request_state")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("daemon source refresh response has no request state"))?,
-    )?;
-    let Some(logical_phase) = response.get("logical_phase") else {
-        if TYPED_STATUS_FIELDS
-            .iter()
-            .any(|field| response.get(*field).is_some())
-        {
-            bail!("daemon source refresh response has a partial typed logical status");
-        }
-        // Explicit compatibility for records written before logical/physical
-        // status and structured terminal outcomes existed.
-        return Ok(SourceRefreshProtocolStatus {
-            state,
-            structured_outcome: None,
-        });
-    };
-    let logical_phase = logical_phase
-        .as_str()
-        .filter(|phase| {
-            [
-                "waiting",
-                "attached",
-                "coverage_check",
-                "exact_successor",
-                "direct",
-                "terminal",
-            ]
-            .contains(phase)
-        })
-        .ok_or_else(|| anyhow!("daemon source refresh response has invalid logical phase"))?;
-    let request_id = required_status_string(response, "request_id")?;
-    if required_status_string(response, "logical_request_id")? != request_id {
-        bail!("daemon source refresh logical request authority does not match its request ID");
-    }
-    let physical_attempt_id = required_status_string(response, "physical_attempt_id")?;
-    typed_refresh_state(required_status_string(response, "physical_attempt_state")?)?;
-    required_status_string(response, "progress_owner_request_id")?;
-    typed_refresh_state(required_status_string(
-        response,
-        "progress_owner_attempt_state",
-    )?)?;
-
-    let terminal = matches!(
-        state,
-        SourceRefreshProtocolState::Published | SourceRefreshProtocolState::Failed
-    );
-    if (logical_phase == "terminal") != terminal {
-        bail!("daemon source refresh logical phase disagrees with its request state");
-    }
-    let structured_outcome = response
-        .get("structured_outcome")
-        .map(parse_structured_outcome)
-        .transpose()?;
-    if terminal != structured_outcome.is_some() {
-        bail!("daemon source refresh terminal state has no structured outcome");
-    }
-    if structured_outcome
-        .as_ref()
-        .is_some_and(|outcome| outcome.physical_attempt_id != physical_attempt_id)
-    {
-        bail!("daemon source refresh outcome names a different physical attempt");
-    }
-    Ok(SourceRefreshProtocolStatus {
-        state,
-        structured_outcome,
-    })
-}
-
-const TYPED_STATUS_FIELDS: &[&str] = &[
-    "logical_request_id",
-    "physical_attempt_id",
-    "physical_attempt_state",
-    "progress_owner_request_id",
-    "progress_owner_attempt_state",
-    "structured_outcome",
-];
-
-fn typed_refresh_state(state: &str) -> Result<SourceRefreshProtocolState> {
-    match state {
-        "admission_pending" => Ok(SourceRefreshProtocolState::AdmissionPending),
-        "queued" => Ok(SourceRefreshProtocolState::Queued),
-        "running" => Ok(SourceRefreshProtocolState::Running),
-        "published" => Ok(SourceRefreshProtocolState::Published),
-        "failed" => Ok(SourceRefreshProtocolState::Failed),
-        _ => Err(anyhow!(
-            "daemon source refresh response has unknown typed state `{state}`"
-        )),
-    }
-}
-
-fn required_status_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("daemon source refresh response has invalid `{field}`"))
-}
-
-const OUTCOME_CODES: &[&str] = &[
-    "completed",
-    "completed_with_rejections",
-    "completed_with_source_failures",
-    "completed_with_rejections_and_source_failures",
-    "source_unavailable",
-    "source_changed",
-    "malformed_source",
-    "unsupported_schema",
-    "source_failures",
-    "logical_source_failures",
-    "source_refresh_failed",
-    "source_refresh_internal",
-    "resource_unavailable",
-    "index_incompatible",
-    "index_corruption",
-    "source_refresh_admission_failed",
-    "all_provider_terminal_coverage_unavailable",
-];
-const OUTCOME_CLASSES: &[&str] = &[
-    "completed",
-    "completed_with_retryable_failures",
-    "completed_with_diagnostics",
-    "unavailable",
-    "source_changed",
-    "unreadable",
-    "incompatible",
-    "mixed",
-    "internal",
-    "resource_unavailable",
-    "corruption",
-    "control_plane",
-    "coverage",
-];
-const RETRY_ADVICES: &[&str] = &[
-    "retry_affected_routes",
-    "retry_request",
-    "retry_admission",
-    "retry_finalization",
-    "inspect_sources",
-    "upgrade_or_reconfigure",
-    "rebuild_index",
-];
-
-fn parse_structured_outcome(value: &Value) -> Result<SourceBackedRefreshTerminalError> {
-    let fields = value
-        .as_object()
-        .ok_or_else(|| anyhow!("daemon source refresh structured outcome is not an object"))?;
-    let code = known_outcome_string(fields, "code", OUTCOME_CODES)?;
-    let class = known_outcome_string(fields, "class", OUTCOME_CLASSES)?;
-    let retryable = fields
-        .get("retryable")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            anyhow!("daemon source refresh structured outcome has invalid retryability")
-        })?;
-    let affected_routes = structured_outcome_routes(fields, "affected_routes")?;
-    let retryable_routes = structured_outcome_routes(fields, "retryable_routes")?;
-    let blocked_routes = structured_outcome_routes(fields, "blocked_routes")?;
-    if !retryable_routes.is_disjoint(&blocked_routes)
-        || !retryable_routes.is_subset(&affected_routes)
-        || !blocked_routes.is_subset(&affected_routes)
-        || (!affected_routes.is_empty() && retryable != !retryable_routes.is_empty())
-    {
-        bail!("daemon source refresh structured outcome has inconsistent route dispositions");
-    }
-    let physical_attempt_id = known_outcome_string(fields, "physical_attempt_id", &[])?;
-    let retained_generation = optional_outcome_string(fields, "retained_generation")?;
-    let retry_advice = optional_outcome_string(fields, "retry_advice")?;
-    if retry_advice
-        .as_deref()
-        .is_some_and(|advice| !RETRY_ADVICES.contains(&advice))
-    {
-        bail!("daemon source refresh structured outcome has invalid retry advice");
-    }
-    let detail = optional_outcome_string(fields, "detail")?;
-    optional_outcome_string(fields, "published_generation")?;
-    let capture_error = match class.as_str() {
-        "incompatible" => Some(CaptureError::UnsupportedSchema(
-            detail.clone().unwrap_or_else(|| code.clone()),
-        )),
-        "unreadable" => Some(CaptureError::InvalidPayload(
-            detail.clone().unwrap_or_else(|| code.clone()),
-        )),
-        _ => None,
-    };
-    Ok(SourceBackedRefreshTerminalError {
-        code,
-        class,
-        retryable,
-        affected_routes: affected_routes
-            .into_iter()
-            .map(|route| route.as_str().to_owned())
-            .collect(),
-        retryable_routes: retryable_routes
-            .into_iter()
-            .map(|route| route.as_str().to_owned())
-            .collect(),
-        blocked_routes: blocked_routes
-            .into_iter()
-            .map(|route| route.as_str().to_owned())
-            .collect(),
-        physical_attempt_id,
-        retained_generation,
-        retry_advice,
-        detail,
-        capture_error,
-    })
-}
-
-fn known_outcome_string(
-    fields: &serde_json::Map<String, Value>,
-    field: &str,
-    accepted: &[&str],
-) -> Result<String> {
-    let value = fields
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("daemon source refresh structured outcome has invalid `{field}`"))?;
-    if !accepted.is_empty() && !accepted.contains(&value) {
-        bail!("daemon source refresh structured outcome has unknown {field} `{value}`");
-    }
-    Ok(value.to_owned())
-}
-
-fn optional_outcome_string(
-    fields: &serde_json::Map<String, Value>,
-    field: &str,
-) -> Result<Option<String>> {
-    match fields.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        _ => Err(anyhow!(
-            "daemon source refresh structured outcome has invalid `{field}`"
-        )),
-    }
-}
-
-fn structured_outcome_routes(
-    fields: &serde_json::Map<String, Value>,
-    field: &str,
-) -> Result<BTreeSet<ctx_history_index::SourceRouteIdentity>> {
-    let values = fields
-        .get(field)
-        .and_then(Value::as_array)
-        .filter(|routes| routes.len() <= SOURCE_REFRESH_STRUCTURED_ROUTE_LIMIT)
-        .ok_or_else(|| anyhow!("daemon source refresh structured outcome has invalid `{field}`"))?;
-    let routes = values
-        .iter()
-        .map(|route| {
-            route
-                .as_str()
-                .ok_or_else(|| anyhow!("daemon source refresh outcome route is not a string"))
-                .and_then(|route| {
-                    ctx_history_index::SourceRouteIdentity::from_sha256(route.to_owned())
-                        .map_err(Into::into)
-                })
-        })
-        .collect::<Result<BTreeSet<_>>>()?;
-    if routes.len() != values.len() {
-        bail!("daemon source refresh structured outcome has duplicate `{field}` routes");
-    }
-    Ok(routes)
+fn source_refresh_protocol_status(response: &Value) -> Result<RefreshStatusKind> {
+    RefreshStatus::classify_schema_v1(response)
+        .context("validate engine-owned source refresh status")
 }
 
 pub(super) fn validate_source_refresh_status_response_authority(
@@ -1308,21 +1075,21 @@ mod progress_poll_tests {
             Some(&progress),
             Some(now),
             &progress,
-            SourceRefreshProtocolState::Running,
+            RefreshRequestState::Running,
             now,
         ));
         assert!(should_report_progress(
             Some(&progress),
             Some(now),
             &progress,
-            SourceRefreshProtocolState::Running,
+            RefreshRequestState::Running,
             now + SOURCE_REFRESH_PROGRESS_HEARTBEAT,
         ));
         assert!(should_report_progress(
             Some(&progress),
             Some(now),
             &progress,
-            SourceRefreshProtocolState::Published,
+            RefreshRequestState::Published,
             now,
         ));
     }
@@ -1331,8 +1098,8 @@ mod progress_poll_tests {
     fn structured_terminal_error_preserves_engine_route_dispositions() {
         let response = typed_terminal_status();
         let protocol = source_refresh_protocol_status(&response).unwrap();
-        assert_eq!(protocol.state, SourceRefreshProtocolState::Failed);
-        let error = match failed_refresh_response(&response, protocol.structured_outcome) {
+        assert_eq!(protocol.request_state(), RefreshRequestState::Failed);
+        let error = match failed_refresh_response(&response, protocol.into_terminal_outcome()) {
             Ok(_) => panic!("failed status must return a terminal error"),
             Err(error) => error,
         };
@@ -1403,8 +1170,13 @@ mod progress_poll_tests {
         });
 
         let protocol = source_refresh_protocol_status(&response).unwrap();
-        assert_eq!(protocol.state, SourceRefreshProtocolState::Queued);
-        assert!(protocol.structured_outcome.is_none());
+        assert_eq!(protocol.request_state(), RefreshRequestState::Queued);
+        assert!(matches!(
+            protocol,
+            RefreshStatusKind::Logical(ref status)
+                if status.logical_phase == RefreshLogicalPhase::Attached
+                    && status.structured_outcome.is_none()
+        ));
     }
 
     #[test]
@@ -1417,7 +1189,12 @@ mod progress_poll_tests {
             "previous_generation": "c1".repeat(32),
         });
         let protocol = source_refresh_protocol_status(&response).unwrap();
-        assert!(protocol.structured_outcome.is_none());
+        assert!(matches!(
+            protocol,
+            RefreshStatusKind::Legacy {
+                request_state: RefreshRequestState::Failed
+            }
+        ));
         let error = match failed_refresh_response(&response, None) {
             Ok(_) => panic!("legacy failed status must return an error"),
             Err(error) => error,
