@@ -21,7 +21,7 @@ die() {
   exit 1
 }
 
-platform=""
+target_id=""
 source_commit=""
 output_dir=""
 private_symbols_dir=""
@@ -30,7 +30,7 @@ while (( $# > 0 )); do
   case "$1" in
     --platform)
       shift
-      platform="${1:-}"
+      target_id="${1:-}"
       ;;
     --source-commit)
       shift
@@ -61,8 +61,9 @@ while (( $# > 0 )); do
   shift
 done
 
-case "${platform}" in
+case "${target_id}" in
   linux-x64)
+    platform=linux-x64
     expected_arch=x86_64
     docker_platform=linux/amd64
     docker_archive_arch=x86_64
@@ -71,9 +72,9 @@ case "${platform}" in
     buildx_arch=amd64
     buildx_sha256=8c38f60308a895fa570f1410e453c5de11aafd65a99fa99965d96d24b6225a78
     zstd_binary_sha256=d304445daa7e6429293dc02035063b7993fb6a489ee90d8851bff497952836dc
-    artifact_name=ctx
     ;;
   linux-arm64)
+    platform=linux-aarch64
     expected_arch=aarch64
     docker_platform=linux/arm64
     docker_archive_arch=aarch64
@@ -82,7 +83,6 @@ case "${platform}" in
     buildx_arch=arm64
     buildx_sha256=f7d867e9f1a3c00b32dd580f56594e229df05e3fb1b083b7099c91c2e7d2ce1e
     zstd_binary_sha256=50eed4c67aef71f5a33e82df66788f5415840c66827b6ef2fdf799a046ad59de
-    artifact_name=ctx-linux-aarch64
     ;;
   *)
     echo "error: --platform must be linux-x64 or linux-arm64" >&2
@@ -103,9 +103,19 @@ for command in docker git python3 sha256sum stat; do
 done
 [[ "$(uname -s)" == Linux ]] \
   || die "the pinned Linux controller requires a Linux Docker launch host"
+docker_ambient_selectors=(
+  DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG DOCKER_CERT_PATH DOCKER_TLS \
+  DOCKER_TLS_VERIFY DOCKER_DEFAULT_PLATFORM DOCKER_API_VERSION \
+  BUILDX_BUILDER BUILDKIT_HOST
+)
+for selector in "${docker_ambient_selectors[@]}"; do
+  [[ -z "${!selector+x}" ]] \
+    || die "ambient Docker selector is forbidden: ${selector}"
+done
 docker_socket="${CTX_LINUX_RELEASE_DOCKER_SOCKET:-/var/run/docker.sock}"
 [[ "${docker_socket}" == /* ]] || die "Docker socket path must be absolute"
-[[ -S "${docker_socket}" ]] || die "Docker socket is unavailable: ${docker_socket}"
+[[ -S "${docker_socket}" && ! -L "${docker_socket}" ]] \
+  || die "Docker socket is unavailable: ${docker_socket}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "${repo_root}"
@@ -167,10 +177,65 @@ done
 osv_scanner="$(cd "$(dirname "${osv_scanner}")" && pwd -P)/$(basename "${osv_scanner}")"
 osv_database="$(cd "${osv_database}" && pwd -P)"
 osv_metadata="$(cd "$(dirname "${osv_metadata}")" && pwd -P)/$(basename "${osv_metadata}")"
-controller_home="${work_root}/controller-home"
-controller_tmp="${work_root}/controller-tmp"
+controller_task_prefix="${work_root}/ctx-linux-release-controller."
+controller_task_root="$(mktemp -d "${controller_task_prefix}XXXXXX")"
+read -r controller_task_device controller_task_inode \
+  < <(stat -c '%d %i' -- "${controller_task_root}")
+cleanup_controller_task() {
+  if [[ "${controller_task_root:-}" == "${controller_task_prefix}"* \
+    && -d "${controller_task_root}" && ! -L "${controller_task_root}" ]]; then
+    python3 -I scripts/release/publish-linux-bazel-release.py \
+      cleanup-task-root \
+      --work-root "${work_root}" \
+      --task-root "${controller_task_root}" \
+      --expected-device "${controller_task_device}" \
+      --expected-inode "${controller_task_inode}"
+  fi
+}
+trap cleanup_controller_task EXIT
+launcher_docker_config="${controller_task_root}/launcher-docker-config"
+controller_docker_config="${controller_task_root}/controller-docker-config"
+launcher_home="${controller_task_root}/launcher-home"
+controller_home="${controller_task_root}/home"
+controller_tmp="${controller_task_root}/tmp"
 sidecar_cache="${cache_root}/onnxruntime-sidecar"
-install -d -m 0700 "${controller_home}" "${controller_tmp}" "${sidecar_cache}"
+install -d -m 0700 \
+  "${launcher_docker_config}" "${controller_docker_config}" \
+  "${launcher_home}" "${controller_home}" "${controller_tmp}" \
+  "${sidecar_cache}"
+docker_host="unix://${docker_socket}"
+docker_cli=(env)
+for selector in "${docker_ambient_selectors[@]}"; do
+  docker_cli+=(-u "${selector}")
+done
+docker_cli+=(
+  "HOME=${launcher_home}"
+  docker
+  --host "${docker_host}"
+  --config "${launcher_docker_config}"
+)
+
+socket_identity() {
+  stat -c $'%d\t%i\t%f' -- "${docker_socket}"
+}
+docker_daemon_identity() {
+  local raw arch version daemon_id
+  raw="$(
+    "${docker_cli[@]}" info --format \
+      '{{printf "%s\t%s\t%s" .Architecture .ServerVersion .ID}}'
+  )"
+  IFS=$'\t' read -r arch version daemon_id <<<"${raw}"
+  case "${arch}" in
+    amd64|x86_64) arch=x86_64 ;;
+    arm64|aarch64) arch=aarch64 ;;
+    *) die "Docker daemon architecture is unsupported: ${arch:-missing}" ;;
+  esac
+  [[ -n "${version}" && -n "${daemon_id}" ]] \
+    || die "Docker daemon identity is incomplete"
+  printf '%s\t%s\t%s\n' "${arch}" "${version}" "${daemon_id}"
+}
+docker_socket_before="$(socket_identity)"
+docker_daemon_before="$(docker_daemon_identity)"
 
 IFS=$'\t' read -r \
   launcher_system launcher_arch launcher_native_arch launcher_translated \
@@ -194,11 +259,8 @@ case "${launcher_authority}" in
   *) die "launcher authority classifier returned an invalid result" ;;
 esac
 
-daemon_arch="$(docker info --format '{{.Architecture}}')"
-case "${daemon_arch}" in
-  amd64|x86_64) daemon_arch=x86_64 ;;
-  arm64|aarch64) daemon_arch=aarch64 ;;
-esac
+IFS=$'\t' read -r daemon_arch daemon_version daemon_id \
+  <<<"${docker_daemon_before}"
 [[ "${daemon_arch}" == "${expected_arch}" ]] \
   || die "${platform} requires a native ${expected_arch} Docker daemon"
 
@@ -210,9 +272,10 @@ buildx_version=0.20.1
 controller_recipe=scripts/release/linux-bazel-release-controller.Dockerfile
 controller_tag="ctx-public-cli-bazel:${platform}-controller-ubuntu-22.04"
 
-docker pull --platform "${docker_platform}" "${controller_base}" >/dev/null
+"${docker_cli[@]}" pull --platform "${docker_platform}" \
+  "${controller_base}" >/dev/null
 actual_base_digest="$(
-  docker image inspect "${controller_base}" \
+  "${docker_cli[@]}" image inspect "${controller_base}" \
     --format '{{range .RepoDigests}}{{println .}}{{end}}' \
     | sed -n 's/^.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' \
     | sort -u
@@ -220,7 +283,7 @@ actual_base_digest="$(
 [[ "${actual_base_digest}" == "${controller_base_digest}" ]] \
   || die "resolved controller base does not match its pinned digest"
 
-docker build \
+"${docker_cli[@]}" build \
   --platform "${docker_platform}" \
   --provenance=false \
   --build-arg "UBUNTU_IMAGE=${controller_base}" \
@@ -235,10 +298,12 @@ docker build \
   -t "${controller_tag}" \
   -f "${controller_recipe}" \
   scripts/release
-controller_image_id="$(docker image inspect "${controller_tag}" --format '{{.Id}}')"
+controller_image_id="$(
+  "${docker_cli[@]}" image inspect "${controller_tag}" --format '{{.Id}}'
+)"
 [[ "${controller_image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] \
   || die "controller image did not resolve to an immutable image ID"
-[[ "$(docker image inspect "${controller_image_id}" --format '{{.Id}}')" \
+[[ "$("${docker_cli[@]}" image inspect "${controller_image_id}" --format '{{.Id}}')" \
   == "${controller_image_id}" ]] \
   || die "controller image ID does not resolve exactly"
 for label_contract in \
@@ -251,7 +316,7 @@ for label_contract in \
   label="${label_contract%%=*}"
   expected="${label_contract#*=}"
   actual="$(
-    docker image inspect "${controller_image_id}" \
+    "${docker_cli[@]}" image inspect "${controller_image_id}" \
       --format "{{index .Config.Labels \"${label}\"}}"
   )"
   [[ "${actual}" == "${expected}" ]] \
@@ -273,18 +338,31 @@ controller_common=(
   -e USER=ctx-controller
   -e LOGNAME=ctx-controller
   -e "TMPDIR=${controller_tmp}"
-  -v "${docker_socket}:/var/run/docker.sock"
+  -e DOCKER_HOST=unix:///run/ctx-release/docker.sock
+  -e "DOCKER_CONFIG=${controller_docker_config}"
+  -e CTX_LINUX_RELEASE_DOCKER_SOCKET=/run/ctx-release/docker.sock
+  -e "CTX_LINUX_RELEASE_DOCKER_CONFIG=${controller_docker_config}"
+  -v "${docker_socket}:/run/ctx-release/docker.sock"
   -v "${repo_root}:${repo_root}:ro"
   -v "${work_root}:${work_root}:rw"
   -w "${repo_root}"
 )
 
-controller_preflight="$(
-  docker "${controller_common[@]}" \
+controller_probe() {
+  "${docker_cli[@]}" "${controller_common[@]}" \
     --network none \
     "${controller_image_id}" \
     bash -ceu '
       platform="$1"
+      docker_host="${DOCKER_HOST}"
+      docker_config="${DOCKER_CONFIG}"
+      docker_cli=(
+        env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG
+        -u DOCKER_CERT_PATH -u DOCKER_TLS -u DOCKER_TLS_VERIFY
+        -u DOCKER_DEFAULT_PLATFORM -u DOCKER_API_VERSION
+        -u BUILDX_BUILDER -u BUILDKIT_HOST
+        "HOME=${HOME}" docker --host "${docker_host}" --config "${docker_config}"
+      )
       IFS=$'"'"'\t'"'"' read -r \
         system arch native_arch translated native_probe hardware emulation \
         hypervisor complete \
@@ -298,9 +376,9 @@ controller_preflight="$(
           "${translated}" "${hardware}" "${emulation}" "${hypervisor}" \
           "${complete}" "" "${os_id}" "${os_version}" "${os_product}"
       )"
-      client_version="$(docker --version)"
+      client_version="$("${docker_cli[@]}" --version)"
       client_sha="$(sha256sum /usr/local/bin/docker | awk '"'"'{print $1}'"'"')"
-      buildx_version="$(docker buildx version)"
+      buildx_version="$("${docker_cli[@]}" buildx version)"
       buildx_sha="$(
         sha256sum /usr/local/lib/docker/cli-plugins/docker-buildx \
           | awk '"'"'{print $1}'"'"'
@@ -308,8 +386,11 @@ controller_preflight="$(
       zstd_version="$(zstd --version)"
       zstd_sha="$(sha256sum /usr/bin/zstd | awk '"'"'{print $1}'"'"')"
       daemon="$(
-        docker info --format \
+        "${docker_cli[@]}" info --format \
           '"'"'{{printf "%s\t%s\t%s" .Architecture .ServerVersion .ID}}'"'"'
+      )"
+      socket="$(
+        stat -c $'"'"'%d\t%i\t%f'"'"' "${CTX_LINUX_RELEASE_DOCKER_SOCKET}"
       )"
       printf '"'"'evidence\t%s\nos\t%s\nauthority\t%s\n'"'"' \
         "${evidence}" "${os}" "${authority}"
@@ -317,10 +398,12 @@ controller_preflight="$(
         "${client_version}" "${client_sha}"
       printf '"'"'buildx_version\t%s\nbuildx_sha\t%s\n'"'"' \
         "${buildx_version}" "${buildx_sha}"
-      printf '"'"'zstd_version\t%s\nzstd_sha\t%s\ndaemon\t%s\n'"'"' \
-        "${zstd_version}" "${zstd_sha}" "${daemon}"
+      printf '"'"'zstd_version\t%s\nzstd_sha\t%s\ndaemon\t%s\nsocket\t%s\n'"'"' \
+        "${zstd_version}" "${zstd_sha}" "${daemon}" "${socket}"
     ' controller-preflight "${platform}"
-)" || die "pinned Ubuntu 22 controller preflight failed"
+}
+controller_preflight="$(controller_probe)" \
+  || die "pinned Ubuntu 22 controller preflight failed"
 
 controller_evidence=""
 controller_os=""
@@ -332,6 +415,7 @@ controller_buildx_sha=""
 controller_zstd_version=""
 controller_zstd_sha=""
 controller_daemon=""
+controller_socket=""
 while IFS=$'\t' read -r key value; do
   case "${key}" in
     evidence) controller_evidence="${value}" ;;
@@ -344,6 +428,7 @@ while IFS=$'\t' read -r key value; do
     zstd_version) controller_zstd_version="${value}" ;;
     zstd_sha) controller_zstd_sha="${value}" ;;
     daemon) controller_daemon="${value}" ;;
+    socket) controller_socket="${value}" ;;
     *) die "controller preflight returned an unknown field" ;;
   esac
 done <<<"${controller_preflight}"
@@ -373,6 +458,16 @@ esac
 [[ "${controller_daemon_arch}" == "${expected_arch}" \
   && -n "${controller_daemon_version}" && -n "${controller_daemon_id}" ]] \
   || die "controller Docker daemon evidence is incomplete or non-native"
+controller_daemon_identity="${controller_daemon_arch}"$'\t'"${controller_daemon_version}"$'\t'"${controller_daemon_id}"
+[[ "${controller_daemon_identity}" == "${docker_daemon_before}" ]] \
+  || die "controller Docker context does not resolve to the validated launcher daemon"
+IFS=$'\t' read -r controller_socket_device_before \
+  controller_socket_inode_before controller_socket_mode_before \
+  <<<"${controller_socket}"
+[[ -n "${controller_socket_device_before}" \
+  && -n "${controller_socket_inode_before}" \
+  && -n "${controller_socket_mode_before}" ]] \
+  || die "controller Docker socket evidence is incomplete"
 
 git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
 controller_run=("${controller_common[@]}")
@@ -402,10 +497,10 @@ case "${git_common_dir}/" in
   *) controller_run+=(-v "${git_common_dir}:${git_common_dir}:ro") ;;
 esac
 
-docker "${controller_run[@]}" \
+"${docker_cli[@]}" "${controller_run[@]}" \
   "${controller_image_id}" \
   scripts/release/build-linux-bazel-release.sh \
-    --platform "${platform}" \
+    --platform "${target_id}" \
     --source-commit "${source_commit}" \
     --output-dir "${output_dir}" \
     --private-symbols-dir "${private_symbols_dir}"
@@ -414,24 +509,44 @@ docker "${controller_run[@]}" \
   && "$(git rev-parse --verify HEAD^{tree})" == "${source_tree}" \
   && -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
   || die "source checkout changed during controller construction"
-artifact="${output_dir}/${artifact_name}"
-build_info="${artifact}.build-info.json"
-completion="${output_dir}/ctx-${platform}.release-complete.json"
+docker_socket_after="$(socket_identity)"
+docker_daemon_after="$(docker_daemon_identity)"
+[[ "${docker_socket_after}" == "${docker_socket_before}" ]] \
+  || die "Docker Unix socket authority changed during construction"
+[[ "${docker_daemon_after}" == "${docker_daemon_before}" ]] \
+  || die "Docker daemon authority changed during construction"
+controller_postflight="$(controller_probe)" \
+  || die "pinned Ubuntu 22 controller postflight failed"
+[[ "${controller_postflight}" == "${controller_preflight}" ]] \
+  || die "controller Docker or toolchain authority changed during construction"
+controller_socket_after="$(
+  sed -n $'s/^socket\t//p' <<<"${controller_postflight}"
+)"
+IFS=$'\t' read -r controller_socket_device_after \
+  controller_socket_inode_after controller_socket_mode_after \
+  <<<"${controller_socket_after}"
+IFS=$'\t' read -r socket_device_before socket_inode_before socket_mode_before \
+  <<<"${docker_socket_before}"
+IFS=$'\t' read -r socket_device_after socket_inode_after socket_mode_after \
+  <<<"${docker_socket_after}"
 python3 -I scripts/release/write-linux-bazel-controller-receipt.py \
-  --artifact "${artifact}" \
-  --build-info "${build_info}" \
   --buildx-sha256 "${controller_buildx_sha}" \
   --buildx-version "${controller_buildx_version}" \
-  --completion "${completion}" \
+  --candidate-dir "${output_dir}" \
   --controller-authority "${controller_authority}" \
   --controller-base-image "${controller_base}" \
   --controller-evidence "${controller_evidence}" \
   --controller-image-id "${controller_image_id}" \
   --controller-os "${controller_os}" \
   --controller-recipe "${controller_recipe}" \
-  --daemon-arch "${controller_daemon_arch}" \
-  --daemon-id "${controller_daemon_id}" \
-  --daemon-version "${controller_daemon_version}" \
+  --controller-socket-device-after "${controller_socket_device_after}" \
+  --controller-socket-device-before "${controller_socket_device_before}" \
+  --controller-socket-inode-after "${controller_socket_inode_after}" \
+  --controller-socket-inode-before "${controller_socket_inode_before}" \
+  --controller-socket-mode-after "${controller_socket_mode_after}" \
+  --controller-socket-mode-before "${controller_socket_mode_before}" \
+  --daemon-after "${docker_daemon_after}" \
+  --daemon-before "${docker_daemon_before}" \
   --docker-client-sha256 "${controller_docker_sha}" \
   --docker-client-version "${controller_docker_version}" \
   --launcher-authority "${launcher_authority}" \
@@ -439,10 +554,23 @@ python3 -I scripts/release/write-linux-bazel-controller-receipt.py \
   --launcher-os "${launcher_os}" \
   --output "${controller_receipt}" \
   --platform "${platform}" \
+  --socket-device-after "${socket_device_after}" \
+  --socket-device-before "${socket_device_before}" \
+  --socket-inode-after "${socket_inode_after}" \
+  --socket-inode-before "${socket_inode_before}" \
+  --socket-mode-after "${socket_mode_after}" \
+  --socket-mode-before "${socket_mode_before}" \
   --source-commit "${source_commit}" \
   --source-tree "${source_tree}" \
   --zstd-sha256 "${controller_zstd_sha}" \
   --zstd-version "${controller_zstd_version}"
 
+[[ "$(socket_identity)" == "${docker_socket_before}" ]] \
+  || die "Docker Unix socket authority changed while writing the receipt"
+[[ "$(docker_daemon_identity)" == "${docker_daemon_before}" ]] \
+  || die "Docker daemon authority changed while writing the receipt"
+
 printf 'authoritative %s controller receipt: %s\n' \
   "${platform}" "${controller_receipt}"
+trap - EXIT
+cleanup_controller_task

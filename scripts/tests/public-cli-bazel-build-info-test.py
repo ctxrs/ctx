@@ -100,6 +100,24 @@ class BuildInfoProducerTests(unittest.TestCase):
             "runtime_image_id": "sha256:" + "b" * 64,
             "inspector_image_id": "sha256:" + "c" * 64,
         }
+        self.docker_config = inputs / "docker-config"
+        self.docker_config.mkdir()
+        self.docker_home = inputs / "docker-home"
+        self.docker_home.mkdir()
+        self.docker_command = [
+            "/usr/bin/env",
+            *(
+                value
+                for selector in PRODUCER.AMBIENT_DOCKER_SELECTORS
+                for value in ("-u", selector)
+            ),
+            f"HOME={self.docker_home}",
+            "/usr/bin/docker",
+            "--host",
+            "unix:///run/ctx-release/docker.sock",
+            "--config",
+            str(self.docker_config),
+        ]
 
     def write_artifact(self, target: str, cargo_lock_sha256: str) -> None:
         self.artifact.write_text(
@@ -127,6 +145,9 @@ esac
             **self.common,
             **self.images,
             "docker": "/usr/bin/docker",
+            "docker_config": self.docker_config,
+            "docker_home": self.docker_home,
+            "docker_host": "unix:///run/ctx-release/docker.sock",
             "output": output,
             "rust_version": "rustc 1.97.1 (8bab26f4f 2026-07-10)",
         }
@@ -226,7 +247,7 @@ esac
                 ) as checked,
             ):
                 PRODUCER.run_container_gates(
-                    docker="/usr/bin/docker",
+                    docker_command=self.docker_command,
                     source_repo=ROOT,
                     artifact=self.artifact,
                     version="0.26.0",
@@ -238,6 +259,9 @@ esac
                 self.assertEqual(len(checked.call_args_list), 3)
                 for call in checked.call_args_list:
                     command = call.args[0]
+                    self.assertEqual(
+                        command[: len(self.docker_command)], self.docker_command
+                    )
                     self.assertEqual(
                         command[command.index("--platform") + 1],
                         docker_platform,
@@ -252,7 +276,7 @@ esac
                 "pinned builder authority gate returned non_authoritative",
             ):
                 PRODUCER.run_container_gates(
-                    docker="/usr/bin/docker",
+                    docker_command=self.docker_command,
                     source_repo=ROOT,
                     artifact=self.artifact,
                     version="0.26.0",
@@ -403,7 +427,7 @@ esac
 
         with mock.patch.object(PRODUCER, "run_checked", side_effect=capture):
             PRODUCER.run_container_gates(
-                docker="/usr/bin/docker",
+                docker_command=self.docker_command,
                 source_repo=ROOT,
                 artifact=self.artifact,
                 version="0.26.0",

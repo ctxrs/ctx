@@ -13,7 +13,7 @@ import stat
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 try:
     import tomllib
@@ -44,6 +44,18 @@ CONTAINER_GATE_INPUTS = (
     (Path("scripts/run-native-candidate-smoke.sh"), 0o555),
     (Path("contracts/public-control-surface-v1.json"), 0o444),
     (Path("tests/fixtures/custom-history-jsonl/basic.jsonl"), 0o444),
+)
+AMBIENT_DOCKER_SELECTORS = (
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+    "DOCKER_CERT_PATH",
+    "DOCKER_TLS",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_DEFAULT_PLATFORM",
+    "DOCKER_API_VERSION",
+    "BUILDX_BUILDER",
+    "BUILDKIT_HOST",
 )
 
 
@@ -346,24 +358,26 @@ def expected_document(
     }
 
 
-def docker_inspect(docker: str, image: str, template: str, label: str) -> str:
+def docker_inspect(
+    docker_command: Sequence[str], image: str, template: str, label: str
+) -> str:
     return run_checked(
-        [docker, "image", "inspect", image, "--format", template],
+        [*docker_command, "image", "inspect", image, "--format", template],
         f"{label} image inspection",
     )
 
 
 def verify_image(
-    docker: str,
+    docker_command: Sequence[str],
     image: str,
     label: str,
     expected_labels: dict[str, str],
 ) -> None:
-    if docker_inspect(docker, image, "{{.Id}}", label) != image:
+    if docker_inspect(docker_command, image, "{{.Id}}", label) != image:
         raise BuildInfoError(f"{label} image ID does not resolve exactly")
     for key, expected in expected_labels.items():
         observed = docker_inspect(
-            docker,
+            docker_command,
             image,
             f'{{{{index .Config.Labels "{key}"}}}}',
             label,
@@ -398,7 +412,7 @@ def staged_container_gate_source(source_repo: Path) -> Iterator[Path]:
 
 def run_container_gates(
     *,
-    docker: str,
+    docker_command: Sequence[str],
     source_repo: Path,
     artifact: Path,
     version: str,
@@ -415,7 +429,7 @@ def run_container_gates(
     if docker_platform is None:
         raise BuildInfoError("container gates require an owned native Linux target")
     common = [
-        docker,
+        *docker_command,
         "run",
         "--rm",
         "--platform",
@@ -587,8 +601,22 @@ def create(args: argparse.Namespace) -> None:
         "org.ctx.release.base-image": linux_build["builder_image"],
         "org.ctx.release.ubuntu-snapshot": linux_build["ubuntu_snapshot"],
     }
-    verify_image(
+    docker_command = [
+        "/usr/bin/env",
+        *(
+            value
+            for selector in AMBIENT_DOCKER_SELECTORS
+            for value in ("-u", selector)
+        ),
+        f"HOME={args.docker_home}",
         args.docker,
+        "--host",
+        args.docker_host,
+        "--config",
+        str(args.docker_config),
+    ]
+    verify_image(
+        docker_command,
         builder_image_id,
         "builder",
         {
@@ -601,19 +629,19 @@ def create(args: argparse.Namespace) -> None:
         },
     )
     verify_image(
-        args.docker,
+        docker_command,
         runtime_image_id,
         "runtime",
         {**base_labels, "org.ctx.release.role": "runtime"},
     )
     verify_image(
-        args.docker,
+        docker_command,
         inspector_image_id,
         "inspector",
         {**base_labels, "org.ctx.release.role": "inspector"},
     )
     run_container_gates(
-        docker=args.docker,
+        docker_command=docker_command,
         source_repo=args.source_repo.resolve(strict=True),
         artifact=args.artifact.resolve(strict=True),
         version=args.version,
@@ -720,6 +748,9 @@ def parser() -> argparse.ArgumentParser:
     add_common_arguments(create_parser)
     create_parser.add_argument("--builder-image-id", required=True)
     create_parser.add_argument("--docker", default="docker")
+    create_parser.add_argument("--docker-config", type=Path, required=True)
+    create_parser.add_argument("--docker-home", type=Path, required=True)
+    create_parser.add_argument("--docker-host", required=True)
     create_parser.add_argument("--inspector-image-id", required=True)
     create_parser.add_argument("--output", type=Path, required=True)
     create_parser.add_argument("--runtime-image-id", required=True)

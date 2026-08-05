@@ -767,6 +767,23 @@ py_test(
     target_compatible_with = ["@platforms//os:linux"],
 )
 
+py_test(
+    name = "linux_bazel_controller_receipt_tests",
+    srcs = [
+        "scripts/release/completed_candidate_io.py",
+        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/release/write-linux-bazel-controller-receipt.py",
+        "scripts/tests/linux-bazel-controller-receipt-test.py",
+    ],
+    data = ["scripts/release/linux-bazel-release-controller.Dockerfile"],
+    main = "scripts/tests/linux-bazel-controller-receipt-test.py",
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
 sh_test(
     name = "native_bazel_packaging_contract_tests",
     srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
