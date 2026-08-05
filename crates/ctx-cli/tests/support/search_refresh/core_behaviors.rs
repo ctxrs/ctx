@@ -683,7 +683,7 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
     let stderr =
         failure_stderr(ctx(&temp).args(["search", query, "--refresh", "wait", "--format=json"]));
     assert!(
-        stderr.contains("daemon-owned source refresh failed"),
+        stderr.contains("daemon-owned source-backed refresh failed"),
         "{stderr}"
     );
     assert!(

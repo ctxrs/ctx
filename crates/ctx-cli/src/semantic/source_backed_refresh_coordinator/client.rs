@@ -66,7 +66,7 @@ impl fmt::Display for SourceBackedRefreshTerminalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "daemon-owned source refresh failed (code={}, class={}, retryable={}, attempt={}",
+            "daemon-owned source-backed refresh failed (code={}, class={}, retryable={}, attempt={}",
             self.code, self.class, self.retryable, self.physical_attempt_id
         )?;
         write!(
