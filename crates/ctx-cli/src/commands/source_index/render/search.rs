@@ -7,7 +7,9 @@ use crate::{
     },
 };
 
-use super::human::{push_action, push_field, push_heading, push_prefixed, push_wrapped, short_id};
+use super::human::{
+    display_width, push_action, push_field, push_heading, push_prefixed, push_wrapped, short_id,
+};
 
 const CARD_INDENT: usize = 3;
 const CARD_LABEL_WIDTH: usize = 7;
@@ -55,19 +57,7 @@ pub(in crate::commands::source_index) fn render_search_document(
     }
 
     let mut document = Document::new();
-    push_heading(
-        &mut document,
-        &format!(
-            "{} {}",
-            results.len(),
-            if results.len() == 1 {
-                "result"
-            } else {
-                "results"
-            }
-        ),
-        Token::Heading,
-    );
+    render_results_heading(&mut document, value, results.len(), context);
 
     for (position, result) in results.iter().enumerate() {
         document.push_blank();
@@ -97,6 +87,53 @@ pub(in crate::commands::source_index) fn render_search_document(
         push_heading(&mut document, "More results available.", Token::Warning);
     }
     document
+}
+
+fn render_results_heading(
+    document: &mut Document,
+    value: &Value,
+    result_count: usize,
+    context: &RenderContext,
+) {
+    let outcome = format!(
+        "{result_count} {}",
+        if result_count == 1 {
+            "result"
+        } else {
+            "results"
+        }
+    );
+    let order = "relevance order";
+    let includes_subagents =
+        value["filters"]["include_subagents"] == true && value["filters"]["primary_only"] != true;
+    let scope = if includes_subagents {
+        "primary + subagent sessions"
+    } else {
+        "primary sessions"
+    };
+    let separator = if context.unicode() { " · " } else { " | " };
+    let width = display_width(&outcome)
+        .saturating_add(display_width(separator).saturating_mul(2))
+        .saturating_add(display_width(order))
+        .saturating_add(display_width(scope));
+
+    if context
+        .content_width()
+        .is_none_or(|available| width <= available)
+    {
+        document.push_line(
+            Line::new()
+                .with(Span::new(outcome, Token::Heading))
+                .with(Span::new(separator, Token::Label))
+                .with(Span::new(order, Token::Label))
+                .with(Span::new(separator, Token::Label))
+                .with(Span::new(scope, Token::Label)),
+        );
+    } else {
+        push_heading(document, &outcome, Token::Heading);
+        push_wrapped(document, context, 2, order, Token::Label);
+        push_wrapped(document, context, 2, scope, Token::Label);
+    }
 }
 
 fn render_empty(value: &Value, context: &RenderContext) -> Document {
@@ -136,7 +173,7 @@ fn render_result(
         context,
         0,
         &format!("{position}. "),
-        Token::Success,
+        Token::Accent,
         headline,
         Token::Heading,
     );
@@ -167,18 +204,8 @@ fn render_result(
         Token::Text,
     );
 
-    let rank = result["rank"].as_u64().unwrap_or_default();
     let event_id = result["ctx_event_id"].as_str().unwrap_or("unknown");
-    let matched = format!("#{rank}{separator}event {}", short_id(event_id));
-    push_field(
-        document,
-        context,
-        CARD_INDENT,
-        "Match",
-        CARD_LABEL_WIDTH,
-        &matched,
-        Token::Text,
-    );
+    render_event_summary(document, context, event_id, result["timestamp"].as_str());
 
     if let Some(more) = result["more_matches_in_session"]
         .as_u64()
@@ -234,18 +261,65 @@ fn render_result(
                 );
             }
         }
-        if event_id != "unknown" {
-            document.push_blank();
-            push_field(
-                document,
-                context,
-                CARD_INDENT,
-                "Citation",
-                VERBOSE_LABEL_WIDTH,
-                &format!("event {event_id}"),
-                Token::Reference,
-            );
-        }
+    }
+}
+
+fn render_event_summary(
+    document: &mut Document,
+    context: &RenderContext,
+    event_id: &str,
+    timestamp: Option<&str>,
+) {
+    let event_id = short_id(event_id);
+    let (time, time_token) = timestamp
+        .filter(|timestamp| !timestamp.is_empty())
+        .map_or(("time unavailable", Token::Label), |timestamp| {
+            (timestamp, Token::Text)
+        });
+    let separator = if context.unicode() { " · " } else { " | " };
+    let prefix_width = CARD_INDENT
+        .saturating_add(CARD_LABEL_WIDTH)
+        .saturating_add(2);
+    let combined_width = prefix_width
+        .saturating_add(display_width(&event_id))
+        .saturating_add(display_width(separator))
+        .saturating_add(display_width(time));
+
+    if context
+        .content_width()
+        .is_none_or(|available| combined_width <= available)
+    {
+        document.push_line(
+            Line::new()
+                .with(Span::text(" ".repeat(CARD_INDENT)))
+                .with(Span::new("Event", Token::Label))
+                .with(Span::text(" ".repeat(
+                    CARD_LABEL_WIDTH.saturating_sub(display_width("Event")),
+                )))
+                .with(Span::text("  "))
+                .with(Span::new(event_id, Token::Reference))
+                .with(Span::new(separator, Token::Label))
+                .with(Span::new(time, time_token)),
+        );
+    } else {
+        push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "Event",
+            CARD_LABEL_WIDTH,
+            &event_id,
+            Token::Reference,
+        );
+        push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "Time",
+            CARD_LABEL_WIDTH,
+            time,
+            time_token,
+        );
     }
 }
 
@@ -269,6 +343,56 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
             );
         }
     }
+    if let Some(sequence) = result["event_seq"].as_u64() {
+        push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "Sequence",
+            VERBOSE_LABEL_WIDTH,
+            &sequence.to_string(),
+            Token::Text,
+        );
+    }
+    let workspace = result["workspace"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let cwd = result["cwd"].as_str().filter(|value| !value.is_empty());
+    if let Some(workspace) = workspace {
+        push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "Workspace",
+            VERBOSE_LABEL_WIDTH,
+            workspace,
+            Token::Text,
+        );
+    }
+    if let Some(cwd) = cwd.filter(|cwd| Some(*cwd) != workspace) {
+        push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "CWD",
+            VERBOSE_LABEL_WIDTH,
+            cwd,
+            Token::Text,
+        );
+    }
+    if let Some(branch) = result["branch"].as_str().filter(|value| !value.is_empty()) {
+        push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "Branch",
+            VERBOSE_LABEL_WIDTH,
+            branch,
+            Token::Text,
+        );
+    }
+    render_agent_field(document, context, result);
+    render_lineage_fields(document, context, result);
     if let Some(rank) = result["rank"].as_u64() {
         push_field(
             document,
@@ -290,5 +414,78 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
             &format!("{score:.2}"),
             Token::Text,
         );
+    }
+}
+
+fn render_agent_field(document: &mut Document, context: &RenderContext, result: &Value) {
+    let scope = result["is_primary"]
+        .as_bool()
+        .map(|is_primary| if is_primary { "primary" } else { "subagent" });
+    let agent_type = result["agent_type"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .filter(|agent_type| Some(*agent_type) != scope);
+    let agent = match (scope, agent_type) {
+        (Some(scope), Some(agent_type)) => {
+            let separator = if context.unicode() { " · " } else { " | " };
+            format!("{scope}{separator}{agent_type}")
+        }
+        (Some(scope), None) => scope.to_owned(),
+        (None, Some(agent_type)) => agent_type.to_owned(),
+        (None, None) => return,
+    };
+    push_field(
+        document,
+        context,
+        CARD_INDENT,
+        "Agent",
+        VERBOSE_LABEL_WIDTH,
+        &agent,
+        Token::Text,
+    );
+}
+
+fn render_lineage_fields(document: &mut Document, context: &RenderContext, result: &Value) {
+    let direct = result["ctx_session_id"].as_str();
+    let parent = result["parent_ctx_session_id"]
+        .as_str()
+        .filter(|parent| Some(*parent) != direct);
+    let root = result["root_ctx_session_id"]
+        .as_str()
+        .filter(|root| Some(*root) != direct);
+    match (parent, root) {
+        (Some(parent), Some(root)) if parent == root => push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "Parent / root",
+            VERBOSE_LABEL_WIDTH,
+            parent,
+            Token::Reference,
+        ),
+        (parent, root) => {
+            if let Some(parent) = parent {
+                push_field(
+                    document,
+                    context,
+                    CARD_INDENT,
+                    "Parent",
+                    VERBOSE_LABEL_WIDTH,
+                    parent,
+                    Token::Reference,
+                );
+            }
+            if let Some(root) = root {
+                push_field(
+                    document,
+                    context,
+                    CARD_INDENT,
+                    "Root",
+                    VERBOSE_LABEL_WIDTH,
+                    root,
+                    Token::Reference,
+                );
+            }
+        }
     }
 }

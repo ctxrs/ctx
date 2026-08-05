@@ -9,11 +9,11 @@ use crate::{
     commands::locate::{LocateArgs, LocateTarget},
     local_usage::{CliUsage, ResultObservationAction},
     output::{compact_json, print_json},
-    ui::{canonical_human_output_bytes, Document, Line, Span, Token, Ui},
+    ui::{canonical_human_output_bytes, Ui},
 };
 
 use super::{
-    render::{pretty_json_stdout_bytes, timestamp_json},
+    render::{pretty_json_stdout_bytes, render_locate_document, timestamp_json},
     shared::{open_index, resolve_core_event, validate_ctx_id, validate_session_selector},
     show::resolve_show_session,
 };
@@ -62,8 +62,9 @@ pub(crate) fn run_locate(
         print_json(value)?;
         output_bytes
     } else {
-        let document = render_locate_document(&value);
-        let output_bytes = canonical_human_output_bytes(|_| render_locate_document(&value));
+        let document = render_locate_document(&value, ui.stdout_context());
+        let output_bytes =
+            canonical_human_output_bytes(|context| render_locate_document(&value, context));
         ui.write_stdout(&document)?;
         output_bytes
     };
@@ -121,55 +122,4 @@ fn source_value(source: &SourceKey) -> Value {
         "schema_variant": source.schema_variant(),
         "provider_identity_version": source.provider_identity_version(),
     })
-}
-
-fn render_locate_document(value: &Value) -> Document {
-    let mut document = Document::new();
-    let target = value["target"].as_str().unwrap_or("item");
-    document.push_line(Line::styled(capitalize(target), Token::Heading));
-    for (label, field, token) in [
-        (
-            "ID",
-            if target == "session" {
-                "ctx_session_id"
-            } else {
-                "ctx_event_id"
-            },
-            Token::Reference,
-        ),
-        ("Provider", "provider", Token::Accent),
-        ("Provider session", "provider_session_id", Token::Reference),
-    ] {
-        if let Some(field_value) = value[field].as_str() {
-            document.push_line(
-                Line::new()
-                    .with(Span::new(format!("{label}: "), Token::Label))
-                    .with(Span::new(field_value, token)),
-            );
-        }
-    }
-    document.push_blank();
-    document.push_line(Line::styled("Core source", Token::Heading));
-    for (label, field) in [
-        ("ID", "ctx_source_id"),
-        ("Format", "source_format"),
-        ("Schema", "schema_variant"),
-    ] {
-        if let Some(field_value) = value["source"][field].as_str() {
-            document.push_line(
-                Line::new()
-                    .with(Span::new(format!("{label}: "), Token::Label))
-                    .with(Span::new(field_value, Token::Reference)),
-            );
-        }
-    }
-    document
-}
-
-fn capitalize(value: &str) -> String {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
 }

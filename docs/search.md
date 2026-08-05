@@ -13,6 +13,11 @@ snippets and typed event/session presentation come from those stored records.
 
 Default results are session-diverse: ctx shows the strongest matching event
 from each session, then lets you drill into dense event-level results.
+Human output labels the result window as relevance ordered and identifies
+whether it contains primary sessions or primary plus subagent sessions. Each
+result's `Event` row shows the short ctx event ID and the matched event's exact
+UTC RFC 3339 millisecond timestamp; an indexed event without a timestamp says
+`time unavailable`. These timestamps do not change result ordering.
 
 ## Search examples
 
@@ -50,6 +55,11 @@ A result can include:
 Search result IDs are ctx-owned. Commands accept complete IDs or unambiguous
 prefixes of at least eight hex characters. Provider-owned IDs are metadata;
 provider lookup must be explicit.
+
+`--verbose` keeps the complete event and session IDs and additionally shows the
+stored event sequence plus available workspace/working-directory, branch,
+agent, and session-lineage context. Equal or redundant context values are shown
+once. Paths remain verbose-only.
 
 ## Filters
 

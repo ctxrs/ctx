@@ -2,10 +2,10 @@ use serde_json::Value;
 
 use crate::{
     commands::mcp_tool_call::{mcp_tool_call_display, MCP_TOOL_CALL_JSON_GUIDANCE},
-    ui::{Document, RenderContext, Token},
+    ui::{Document, Line, RenderContext, Span, Token},
 };
 
-use super::human::{push_field, push_heading, push_prefixed, push_wrapped};
+use super::human::{display_width, push_field, push_heading, push_prefixed, push_wrapped};
 
 const HEADER_LABEL_WIDTH: usize = 16;
 const EVENT_INDENT: usize = 3;
@@ -238,28 +238,22 @@ fn render_event(document: &mut Document, context: &RenderContext, position: usiz
         &title,
         Token::Heading,
     );
-    if let Some(occurred_at) = event["occurred_at"].as_str() {
-        push_field(
-            document,
-            context,
-            EVENT_INDENT,
-            "Time",
-            EVENT_LABEL_WIDTH,
-            occurred_at,
-            Token::Text,
-        );
-    }
-    if let Some(event_id) = event["ctx_event_id"].as_str() {
-        push_field(
-            document,
-            context,
-            EVENT_INDENT,
-            "Event",
-            EVENT_LABEL_WIDTH,
-            event_id,
-            Token::Reference,
-        );
-    }
+    let (time, time_token) = event["occurred_at"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map_or(("time unavailable", Token::Label), |value| {
+            (value, Token::Text)
+        });
+    push_field(
+        document,
+        context,
+        EVENT_INDENT,
+        "Time",
+        EVENT_LABEL_WIDTH,
+        time,
+        time_token,
+    );
+    render_event_identity(document, context, event);
     if let Some(attribution) = mcp_tool_call_display(event) {
         push_field(
             document,
@@ -293,5 +287,68 @@ fn render_event(document: &mut Document, context: &RenderContext, position: usiz
     document.push_blank();
     for logical_line in event["text"].as_str().unwrap_or_default().split('\n') {
         push_wrapped(document, context, EVENT_INDENT, logical_line, Token::Text);
+    }
+}
+
+fn render_event_identity(document: &mut Document, context: &RenderContext, event: &Value) {
+    let Some(event_id) = event["ctx_event_id"].as_str() else {
+        return;
+    };
+    let Some(sequence) = event["sequence"].as_u64() else {
+        push_field(
+            document,
+            context,
+            EVENT_INDENT,
+            "Event",
+            EVENT_LABEL_WIDTH,
+            event_id,
+            Token::Reference,
+        );
+        return;
+    };
+    let sequence = sequence.to_string();
+    let separator = if context.unicode() { " · " } else { " | " };
+    let prefix_width = EVENT_INDENT
+        .saturating_add(EVENT_LABEL_WIDTH)
+        .saturating_add(2);
+    let combined_width = prefix_width
+        .saturating_add(display_width(event_id))
+        .saturating_add(display_width(separator))
+        .saturating_add(display_width("seq "))
+        .saturating_add(display_width(&sequence));
+
+    if context
+        .content_width()
+        .is_none_or(|available| combined_width <= available)
+    {
+        document.push_line(
+            Line::new()
+                .with(Span::text(" ".repeat(EVENT_INDENT)))
+                .with(Span::new("Event", Token::Label))
+                .with(Span::text("  "))
+                .with(Span::new(event_id, Token::Reference))
+                .with(Span::new(separator, Token::Label))
+                .with(Span::new("seq ", Token::Label))
+                .with(Span::new(sequence, Token::Text)),
+        );
+    } else {
+        push_field(
+            document,
+            context,
+            EVENT_INDENT,
+            "Event",
+            EVENT_LABEL_WIDTH,
+            event_id,
+            Token::Reference,
+        );
+        push_field(
+            document,
+            context,
+            EVENT_INDENT,
+            "Sequence",
+            EVENT_LABEL_WIDTH,
+            &sequence,
+            Token::Text,
+        );
     }
 }

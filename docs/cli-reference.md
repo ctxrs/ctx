@@ -752,6 +752,11 @@ accepts `text` or `json`.
 The result identifies the Core source with `ctx_source_id`, `source_format`,
 `schema_variant`, and `provider_identity_version`. It does not expose a provider
 path, reopen provider history, or recreate provider-native locator state.
+Human event output also identifies the owning ctx session, exact event time,
+and stored event sequence. Human session output labels its timestamp `First
+event`: this is the first stored event in the indexed session, not a claimed
+provider-session start. A missing supported timestamp is shown as `time
+unavailable`.
 
 ## Search
 
@@ -831,6 +836,12 @@ search uses a non-default data root. Each result's `rank` is its one-based
 position in the final shaped window. `retrieval_score` preserves the backend's
 diagnostic score, which can be non-monotonic after query-coverage and
 session-diversity shaping.
+Human output states `relevance order` and its primary-session or
+primary-plus-subagent scope in the result heading. Its compact `Event` row pairs
+the short event ID with the exact matched-event UTC RFC 3339 millisecond time;
+timestamps never re-sort results. `--verbose` additionally renders the stored
+event sequence and available workspace/working-directory, branch, agent, and
+parent/root lineage without repeating equal values.
 Custom history imports can be filtered by canonical
 `--history-source provider_key/source_id`, or by exact `--provider-key`,
 `--source-id`, and `--source-format` values. The plugin/source alias is for

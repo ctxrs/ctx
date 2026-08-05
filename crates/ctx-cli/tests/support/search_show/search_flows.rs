@@ -128,11 +128,55 @@ fn fresh_home_search_mvp_flow() {
         located_by_provider_id["source"]["source_format"],
         "codex_session_jsonl"
     );
+    let located_session_human = ctx(&temp)
+        .args(["locate", "session", &ctx_session_id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let located_session_human = String::from_utf8(located_session_human).unwrap();
+    assert!(
+        located_session_human.contains(&format!(
+            "First event       {}",
+            located_by_provider_id["started_at"].as_str().unwrap()
+        )),
+        "{located_session_human}"
+    );
+    assert!(!located_session_human.contains("Started"));
 
     let located_event =
         json_output(ctx(&temp).args(["locate", "event", &ctx_event_id, "--format=json"]));
     assert_eq!(located_event["ctx_event_id"], ctx_event_id);
     assert_eq!(located_event["ctx_session_id"], ctx_session_id);
+    let located_event_human = ctx(&temp)
+        .args(["locate", "event", &ctx_event_id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let located_event_human = String::from_utf8(located_event_human).unwrap();
+    assert!(
+        located_event_human.contains(&format!("Session           {ctx_session_id}")),
+        "{located_event_human}"
+    );
+    assert!(
+        located_event_human.contains(&format!(
+            "Time              {}",
+            located_event["occurred_at"].as_str().unwrap()
+        )),
+        "{located_event_human}"
+    );
+    assert!(
+        located_event_human.contains(&format!(
+            "Sequence          {}",
+            located_event["sequence"].as_u64().unwrap()
+        )),
+        "{located_event_human}"
+    );
+    assert!(!located_event_human.contains("Role"));
+    assert!(!located_event_human.contains("Type"));
 
     let term_search = json_output(ctx(&temp).args([
         "search",
@@ -206,9 +250,16 @@ fn fresh_home_search_mvp_flow() {
         .stdout
         .clone();
     let human_search = String::from_utf8(human_search).unwrap();
-    assert!(human_search.starts_with("1 result\n\n"), "{human_search}");
+    assert!(
+        human_search.starts_with("1 result · relevance order · primary sessions\n\n"),
+        "{human_search}"
+    );
     assert!(human_search.contains("1. "));
     assert!(human_search.contains("Session  codex · "), "{human_search}");
+    assert!(
+        human_search.contains("Event    44ce421b · 2026-06-23T15:00:02.000Z"),
+        "{human_search}"
+    );
     assert!(
         human_search.contains("Inspect\n") && human_search.contains(" show session "),
         "{human_search}"

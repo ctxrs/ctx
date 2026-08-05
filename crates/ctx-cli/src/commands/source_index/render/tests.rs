@@ -7,8 +7,9 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
-    render_search_document, render_show_document, render_show_jsonl, render_show_markdown,
-    render_show_text, search_snippet_fragment, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
+    render_locate_document, render_search_document, render_show_document, render_show_jsonl,
+    render_show_markdown, render_show_text, search_snippet_fragment, SEARCH_SNIPPET_MAX_BYTES,
+    SEARCH_SNIPPET_MAX_CHARS,
 };
 use crate::{
     cli::Cli,
@@ -199,6 +200,10 @@ fn context(width: usize, color: ColorMode) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
 }
 
+fn context_with_unicode(width: usize, unicode: bool) -> RenderContext {
+    RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).unicode(unicode))
+}
+
 fn search_value() -> Value {
     json!({
         "query": "Unicode cache key",
@@ -214,13 +219,26 @@ fn search_value() -> Value {
             "more_matches_in_session": 2,
             "ctx_event_id": EVENT_ID,
             "ctx_session_id": SESSION_ID,
+            "event_seq": 17,
+            "timestamp": "2026-07-30T12:00:00.123Z",
             "source_format": "codex_session_jsonl",
+            "parent_ctx_session_id": null,
+            "root_ctx_session_id": SESSION_ID,
+            "branch": "main",
+            "agent_type": "primary",
+            "is_primary": true,
+            "workspace": "/workspace/ctx",
+            "cwd": "/workspace/ctx",
             "suggested_next_commands": [
                 format!("ctx show event {EVENT_ID} --window 10"),
                 format!("ctx show session {SESSION_ID}"),
                 format!("ctx search 'Unicode cache key' --session {SESSION_ID}"),
             ],
         }],
+        "filters": {
+            "include_subagents": null,
+            "primary_only": null,
+        },
         "result_window": {
             "limit": 10,
             "returned": 1,
@@ -268,6 +286,7 @@ fn show_value() -> Value {
                 "provider_session_id": "demo-unicode-session",
                 "role": "user",
                 "event_type": "message",
+                "sequence": 17,
                 "occurred_at": "2026-07-30T12:00:00.000Z",
                 "text": "Fix the Unicode cache key regression.\nKeep source bytes exact.",
             },
@@ -278,10 +297,54 @@ fn show_value() -> Value {
                 "provider_session_id": "demo-unicode-session",
                 "role": "assistant",
                 "event_type": "message",
+                "sequence": 18,
                 "occurred_at": "2026-07-30T12:01:00.000Z",
                 "text": "Done.",
             },
         ],
+    })
+}
+
+fn locate_event_value() -> Value {
+    json!({
+        "schema_version": 1,
+        "target": "event",
+        "payload_type": "event_location",
+        "ctx_event_id": EVENT_ID,
+        "ctx_session_id": SESSION_ID,
+        "provider": "codex",
+        "provider_session_id": "demo-unicode-session",
+        "provider_event_id": "native-event-17",
+        "sequence": 17,
+        "event_type": "message",
+        "role": "user",
+        "occurred_at": "2026-07-30T12:00:00.123Z",
+        "source": {
+            "ctx_source_id": "01900003-0000-7000-8000-000000000004",
+            "source_format": "codex_session_jsonl",
+            "schema_variant": "codex-rollout-v1",
+            "provider_identity_version": 1,
+        },
+    })
+}
+
+fn locate_session_value() -> Value {
+    json!({
+        "schema_version": 1,
+        "target": "session",
+        "payload_type": "session_location",
+        "ctx_session_id": SESSION_ID,
+        "provider": "codex",
+        "provider_session_id": "demo-unicode-session",
+        "parent_ctx_session_id": null,
+        "root_ctx_session_id": SESSION_ID,
+        "started_at": "2026-07-30T12:00:00.123Z",
+        "source": {
+            "ctx_source_id": "01900003-0000-7000-8000-000000000004",
+            "source_format": "codex_session_jsonl",
+            "schema_variant": "codex-rollout-v1",
+            "provider_identity_version": 1,
+        },
     })
 }
 
@@ -373,6 +436,188 @@ fn primary_renderers_match_reference_goldens_at_80_columns() {
         render_show_document(&show_value(), &context).render_plain(),
         include_str!("goldens/show.txt")
     );
+    assert_eq!(
+        render_locate_document(&locate_event_value(), &context).render_plain(),
+        include_str!("goldens/locate_event.txt")
+    );
+    assert_eq!(
+        render_locate_document(&locate_session_value(), &context).render_plain(),
+        include_str!("goldens/locate_session.txt")
+    );
+}
+
+#[test]
+fn search_heading_discloses_relevance_order_and_truthful_agent_scope() {
+    for unicode in [true, false] {
+        let separator = if unicode { " · " } else { " | " };
+        let primary =
+            render_search_document(&search_value(), false, &context_with_unicode(80, unicode))
+                .render_plain();
+        assert!(
+            primary.starts_with(&format!(
+                "1 result{separator}relevance order{separator}primary sessions\n"
+            )),
+            "{primary}"
+        );
+
+        let mut included = search_value();
+        included["filters"]["include_subagents"] = json!(true);
+        let included = render_search_document(&included, false, &context_with_unicode(80, unicode))
+            .render_plain();
+        assert!(included.starts_with(&format!(
+            "1 result{separator}relevance order{separator}primary + subagent sessions\n"
+        )));
+        assert!(!included.contains("all sessions"));
+
+        let mut primary_only = search_value();
+        primary_only["filters"]["include_subagents"] = json!(true);
+        primary_only["filters"]["primary_only"] = json!(true);
+        let primary_only =
+            render_search_document(&primary_only, false, &context_with_unicode(80, unicode))
+                .render_plain();
+        assert!(primary_only.contains("primary sessions"), "{primary_only}");
+        assert!(!primary_only.contains("primary + subagent sessions"));
+    }
+
+    let narrow = render_search_document(&search_value(), false, &context_with_unicode(32, true))
+        .render_plain();
+    assert!(narrow.starts_with("1 result\n  relevance order\n  primary sessions\n"));
+
+    let mut included = search_value();
+    included["filters"]["include_subagents"] = json!(true);
+    for width in [32, 48, 80, 120] {
+        let context = context(width, ColorMode::Never);
+        let first = render_search_document(&included, false, &context);
+        let second = render_search_document(&included, false, &context);
+        assert_eq!(first.render_plain(), second.render_plain());
+        assert!(first.render_plain().contains("primary + subagent sessions"));
+        assert_fits(&first, &context);
+    }
+}
+
+#[test]
+fn search_event_row_uses_exact_milliseconds_and_quiet_missing_time() {
+    let document = render_search_document(&search_value(), false, &context(80, ColorMode::Never));
+    let rendered = document.render_plain();
+    assert!(rendered.contains("Event    01900001 · 2026-07-30T12:00:00.123Z"));
+    assert!(!rendered.contains("Match"));
+    assert!(document
+        .lines()
+        .iter()
+        .flat_map(|line| line.spans())
+        .any(|span| span.content() == "01900001" && span.token() == Token::Reference));
+    assert!(document
+        .lines()
+        .iter()
+        .flat_map(|line| line.spans())
+        .any(|span| {
+            span.content() == "2026-07-30T12:00:00.123Z" && span.token() == Token::Text
+        }));
+
+    let ascii = render_search_document(&search_value(), false, &context_with_unicode(80, false))
+        .render_plain();
+    assert!(
+        ascii.contains("Event    01900001 | 2026-07-30T12:00:00.123Z"),
+        "{ascii}"
+    );
+
+    let mut missing = search_value();
+    missing["results"][0]["timestamp"] = Value::Null;
+    let document = render_search_document(&missing, false, &context(32, ColorMode::Never));
+    let rendered = document.render_plain();
+    assert!(rendered.contains("Event    01900001"), "{rendered}");
+    assert!(rendered.contains("Time     time unavailable"), "{rendered}");
+    assert!(document
+        .lines()
+        .iter()
+        .flat_map(|line| line.spans())
+        .any(|span| span.content() == "time unavailable" && span.token() == Token::Label));
+}
+
+#[test]
+fn verbose_search_exposes_context_without_redundant_values_or_citation() {
+    let ordinary = render_search_document(&search_value(), false, &context(120, ColorMode::Never))
+        .render_plain();
+    for verbose_only in ["/workspace/ctx", "main", "Sequence", "Agent"] {
+        assert!(!ordinary.contains(verbose_only), "{ordinary}");
+    }
+
+    let verbose = render_search_document(&search_value(), true, &context(120, ColorMode::Never))
+        .render_plain();
+    assert!(verbose.contains("Sequence          17"), "{verbose}");
+    assert!(
+        verbose.contains("Workspace         /workspace/ctx"),
+        "{verbose}"
+    );
+    assert!(!verbose.contains("CWD"), "{verbose}");
+    assert!(verbose.contains("Branch            main"), "{verbose}");
+    assert!(verbose.contains("Agent             primary"), "{verbose}");
+    assert!(!verbose.contains("Citation"), "{verbose}");
+    assert_eq!(verbose.matches("primary").count(), 2, "{verbose}");
+
+    let mut nested = search_value();
+    nested["results"][0]["cwd"] = json!("/workspace/ctx/subdir");
+    nested["results"][0]["is_primary"] = json!(false);
+    nested["results"][0]["agent_type"] = json!("reviewer");
+    nested["results"][0]["parent_ctx_session_id"] = json!(PARENT_SESSION_ID);
+    nested["results"][0]["root_ctx_session_id"] = json!(ROOT_SESSION_ID);
+    let nested =
+        render_search_document(&nested, true, &context(120, ColorMode::Never)).render_plain();
+    for expected in [
+        "CWD               /workspace/ctx/subdir",
+        "Agent             subagent · reviewer",
+        PARENT_SESSION_ID,
+        ROOT_SESSION_ID,
+    ] {
+        assert!(nested.contains(expected), "{nested}");
+    }
+}
+
+#[test]
+fn show_and_locate_render_exact_chronology_and_missing_time() {
+    let shown = render_show_document(&show_value(), &context(80, ColorMode::Never)).render_plain();
+    assert!(shown.contains("Event  01900001-0000-7000-8000-000000000002 · seq 17"));
+    let shown_ascii =
+        render_show_document(&show_value(), &context_with_unicode(80, false)).render_plain();
+    assert!(shown_ascii.contains("Event  01900001-0000-7000-8000-000000000002 | seq 17"));
+
+    let mut missing_show = show_value();
+    missing_show["events"][0]["occurred_at"] = Value::Null;
+    let missing_show =
+        render_show_document(&missing_show, &context(80, ColorMode::Never)).render_plain();
+    assert!(missing_show.contains("Time   time unavailable"));
+
+    let located = render_locate_document(&locate_event_value(), &context(80, ColorMode::Never))
+        .render_plain();
+    assert!(located.contains(&format!("Session           {SESSION_ID}")));
+    assert!(located.contains("Time              2026-07-30T12:00:00.123Z"));
+    assert!(located.contains("Sequence          17"));
+    assert!(!located.contains("Role"));
+    assert!(!located.contains("Type"));
+
+    let session = render_locate_document(&locate_session_value(), &context(80, ColorMode::Never))
+        .render_plain();
+    assert!(session.contains("First event       2026-07-30T12:00:00.123Z"));
+    assert!(!session.contains("Started"));
+
+    let mut missing_locate = locate_event_value();
+    missing_locate["occurred_at"] = Value::Null;
+    let document = render_locate_document(&missing_locate, &context(80, ColorMode::Never));
+    assert!(document
+        .render_plain()
+        .contains("Time              time unavailable"));
+    assert!(document
+        .lines()
+        .iter()
+        .flat_map(|line| line.spans())
+        .any(|span| span.content() == "time unavailable" && span.token() == Token::Label));
+
+    let mut missing_session = locate_session_value();
+    missing_session["started_at"] = Value::Null;
+    let missing_session =
+        render_locate_document(&missing_session, &context(80, ColorMode::Never)).render_plain();
+    assert!(missing_session.contains("First event       time unavailable"));
+    assert!(!missing_session.contains("Started"));
 }
 
 #[test]
@@ -485,26 +730,39 @@ fn human_search_ranks_non_monotonic_scores_by_shaped_result_order() {
     first["rank"] = json!(1);
     first["retrieval_score"] = json!(0.25);
     first["session_importance"] = json!(0.25);
+    first["snippet"] = json!("First shaped result despite an older timestamp.");
+    first["timestamp"] = json!("2025-01-01T00:00:00.000Z");
     let mut second = first.clone();
     second["rank"] = json!(2);
     second["retrieval_score"] = json!(9.5);
     second["session_importance"] = json!(9.5);
     second["ctx_event_id"] = json!(SECOND_EVENT_ID);
+    second["snippet"] = json!("Second shaped result despite a newer timestamp.");
+    second["timestamp"] = json!("2026-01-01T00:00:00.000Z");
     value["results"] = json!([first, second]);
     value["result_window"]["returned"] = json!(2);
 
     let rendered =
         render_search_document(&value, false, &context(80, ColorMode::Never)).render_plain();
-    let match_lines = rendered
-        .lines()
-        .filter(|line| line.trim_start().starts_with("Match"))
-        .collect::<Vec<_>>();
-    assert_eq!(match_lines.len(), 2, "{rendered}");
-    assert!(match_lines[0].contains("#1"), "{rendered}");
-    assert!(match_lines[1].contains("#2"), "{rendered}");
-    assert!(!match_lines
-        .iter()
-        .any(|line| line.contains("0.25") || line.contains("9.50")));
+    let first_position = rendered.find("1. First shaped result").unwrap();
+    let second_position = rendered.find("2. Second shaped result").unwrap();
+    assert!(first_position < second_position, "{rendered}");
+    assert!(rendered.contains("2025-01-01T00:00:00.000Z"));
+    assert!(rendered.contains("2026-01-01T00:00:00.000Z"));
+    assert!(!rendered.contains("0.25") && !rendered.contains("9.50"));
+}
+
+#[test]
+fn show_preserves_provider_sequence_when_timestamps_are_non_monotonic() {
+    let mut value = show_value();
+    value["events"][0]["occurred_at"] = json!("2026-07-30T12:02:00.000Z");
+    value["events"][1]["occurred_at"] = json!("2026-07-30T12:01:00.000Z");
+    let rendered = render_show_document(&value, &context(80, ColorMode::Never)).render_plain();
+
+    assert!(
+        rendered.find("1. user message").unwrap() < rendered.find("2. assistant message").unwrap()
+    );
+    assert!(rendered.find("seq 17").unwrap() < rendered.find("seq 18").unwrap());
 }
 
 #[test]
@@ -574,6 +832,8 @@ fn primary_verbose_narrow_and_long_id_cases_preserve_reference_atoms() {
             render_search_document(&search_value(), false, &context),
             render_search_document(&search_value(), true, &context),
             render_show_document(&show_value(), &context),
+            render_locate_document(&locate_event_value(), &context),
+            render_locate_document(&locate_session_value(), &context),
         ];
         for document in documents {
             assert_fits(&document, &context);
@@ -588,6 +848,10 @@ fn primary_verbose_narrow_and_long_id_cases_preserve_reference_atoms() {
         assert_value_survives_layout(&shown, EVENT_ID);
         assert_value_survives_layout(&shown, SECOND_EVENT_ID);
         assert_value_survives_layout(&shown, SESSION_ID);
+
+        let located = render_locate_document(&locate_event_value(), &context).render_plain();
+        assert_value_survives_layout(&located, EVENT_ID);
+        assert_value_survives_layout(&located, SESSION_ID);
     }
 }
 
@@ -670,12 +934,16 @@ fn styled_output_strips_to_plain_and_canonical_bytes_ignore_color() {
             render_search_document(&search_value(), true, &styled),
             render_search_document(&empty_search_value(), false, &styled),
             render_show_document(&show_value(), &styled),
+            render_locate_document(&locate_event_value(), &styled),
+            render_locate_document(&locate_session_value(), &styled),
         ];
         let plain_documents = [
             render_search_document(&search_value(), false, &plain),
             render_search_document(&search_value(), true, &plain),
             render_search_document(&empty_search_value(), false, &plain),
             render_show_document(&show_value(), &plain),
+            render_locate_document(&locate_event_value(), &plain),
+            render_locate_document(&locate_session_value(), &plain),
         ];
 
         for (styled_document, plain_document) in styled_documents.into_iter().zip(plain_documents) {
@@ -684,6 +952,26 @@ fn styled_output_strips_to_plain_and_canonical_bytes_ignore_color() {
             assert_eq!(strip_ansi(&styled_output), plain_document.render_plain());
         }
     }
+}
+
+#[test]
+fn human_rendering_does_not_change_machine_values_or_compatibility_bytes() {
+    let search = search_value();
+    let show = show_value();
+    let locate = locate_event_value();
+    let before = [
+        serde_json::to_vec(&search).unwrap(),
+        serde_json::to_vec(&show).unwrap(),
+        serde_json::to_vec(&locate).unwrap(),
+    ];
+
+    let _ = render_search_document(&search, true, &context(80, ColorMode::Always));
+    let _ = render_show_document(&show, &context(80, ColorMode::Always));
+    let _ = render_locate_document(&locate, &context(80, ColorMode::Always));
+
+    assert_eq!(before[0], serde_json::to_vec(&search).unwrap());
+    assert_eq!(before[1], serde_json::to_vec(&show).unwrap());
+    assert_eq!(before[2], serde_json::to_vec(&locate).unwrap());
 }
 
 #[test]

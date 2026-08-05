@@ -1,0 +1,12 @@
+Event
+ID                01900001-0000-7000-8000-000000000002
+Session           01900000-0000-7000-8000-000000000001
+Provider          codex
+Provider session  demo-unicode-session
+Time              2026-07-30T12:00:00.123Z
+Sequence          17
+
+Core source
+ID                01900003-0000-7000-8000-000000000004
+Format            codex_session_jsonl
+Schema            codex-rollout-v1
