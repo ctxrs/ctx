@@ -683,7 +683,7 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
     let stderr =
         failure_stderr(ctx(&temp).args(["search", query, "--refresh", "wait", "--format=json"]));
     assert!(
-        stderr.contains("daemon-owned source-backed refresh failed"),
+        stderr.contains("daemon-owned source refresh failed"),
         "{stderr}"
     );
     assert!(
@@ -836,7 +836,7 @@ fn search_refresh_invalid_source_failure_retains_last_published_generation() {
             && stderr.contains("overlaps or contains the ctx data root"),
         "{stderr}"
     );
-    assert!(stderr.contains("retained generation"), "{stderr}");
+    assert!(stderr.contains("retained_generation=Some"), "{stderr}");
     assert!(stderr.contains(&initial_generation), "{stderr}");
 
     let failed = assert_daemon_refresh_failure(&temp, 0, Some(&initial_generation));

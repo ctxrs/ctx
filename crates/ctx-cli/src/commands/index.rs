@@ -13,7 +13,7 @@ use crate::analytics::{count_bucket, IndexOperation, IndexState, IndexTelemetry,
 use crate::config;
 use crate::output::{compact_json, print_json, JsonOutputFormat};
 use crate::semantic::source_epoch_status_report;
-use crate::ui::{Document, RenderContext, Ui};
+use crate::ui::{Document, LiveOutput, Ui};
 
 use super::index_dashboard::{render_semantic_disabled_wait, IndexDashboard};
 
@@ -126,25 +126,18 @@ fn run_index_watch(
 }
 
 fn index_watch_output(ui: &mut Ui) -> IndexWatchOutput<&mut (dyn io::Write + Send)> {
-    let context = *ui.stdout_context();
-    IndexWatchOutput::new(ui.stdout_writer(), context)
+    IndexWatchOutput::new(ui.stdout_live_output())
 }
 
 struct IndexWatchOutput<W> {
-    writer: W,
-    context: RenderContext,
-    interactive: bool,
-    rendered_lines: usize,
+    output: LiveOutput<W>,
     dashboard: IndexDashboard,
 }
 
 impl<W: io::Write> IndexWatchOutput<W> {
-    fn new(writer: W, context: RenderContext) -> Self {
+    fn new(output: LiveOutput<W>) -> Self {
         Self {
-            writer,
-            context,
-            interactive: context.is_terminal(),
-            rendered_lines: 0,
+            output,
             dashboard: IndexDashboard,
         }
     }
@@ -156,49 +149,28 @@ impl<W: io::Write> IndexWatchOutput<W> {
         } else {
             crate::ui::TestContext::pipe(crate::ui::StreamKind::Stdout)
         };
-        Self::new(writer, RenderContext::for_test(test_context))
+        let context = crate::ui::RenderContext::for_test(test_context);
+        Self::new(LiveOutput::new(writer, context))
     }
 
     fn print_json(&mut self, status: &Value) -> Result<()> {
-        writeln!(self.writer, "{}", serde_json::to_string(status)?)?;
-        self.writer.flush()?;
+        self.output.write_line(&serde_json::to_string(status)?)?;
         Ok(())
     }
 
     fn print_human(&mut self, status: &Value) -> io::Result<()> {
-        let document = self.dashboard.render(status, &self.context);
-        let frame = document.render(&self.context);
-        if !self.interactive {
-            self.writer.write_all(frame.as_bytes())?;
-            writeln!(self.writer)?;
-            return self.writer.flush();
-        }
+        let document = self.dashboard.render(status, self.output.context());
+        self.output.write_frame(&document, false)
+    }
 
-        let lines = frame.lines().collect::<Vec<_>>();
-        if self.rendered_lines == 0 {
-            self.writer.write_all(frame.as_bytes())?;
-            self.rendered_lines = lines.len();
-            return self.writer.flush();
-        }
-        write!(self.writer, "\u{1b}[{}A", self.rendered_lines)?;
-        let previous_lines = self.rendered_lines;
-        let height = self.rendered_lines.max(lines.len());
-        for row in 0..height {
-            write!(self.writer, "\r\u{1b}[2K")?;
-            if let Some(line) = lines.get(row) {
-                write!(self.writer, "{line}")?;
-            }
-            writeln!(self.writer)?;
-        }
-        if previous_lines > lines.len() {
-            write!(
-                self.writer,
-                "\u{1b}[{}A",
-                previous_lines.saturating_sub(lines.len())
-            )?;
-        }
-        self.rendered_lines = lines.len();
-        self.writer.flush()
+    #[cfg(test)]
+    fn writer(&self) -> &W {
+        self.output.inner()
+    }
+
+    #[cfg(test)]
+    fn into_writer(self) -> W {
+        self.output.into_inner()
     }
 }
 
@@ -337,6 +309,13 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
             "reason": source.report["refresh"].get("reason"),
             "request_state": source.report["refresh"].get("request_state"),
             "request_id": source.report["refresh"].get("request_id"),
+            "logical_request_id": source.report["refresh"].get("logical_request_id"),
+            "logical_phase": source.report["refresh"].get("logical_phase"),
+            "physical_attempt_id": source.report["refresh"].get("physical_attempt_id"),
+            "physical_attempt_state": source.report["refresh"].get("physical_attempt_state"),
+            "progress_owner_request_id": source.report["refresh"].get("progress_owner_request_id"),
+            "progress_owner_attempt_state": source.report["refresh"].get("progress_owner_attempt_state"),
+            "structured_outcome": source.report["refresh"].get("structured_outcome"),
             "published_generation": source.report["refresh"].get("published_generation"),
             "generation_id": source.report["refresh"].get("generation_id"),
             "generation_matches": source.report["refresh"].get("generation_matches"),

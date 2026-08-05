@@ -33,6 +33,7 @@ pub(super) struct AutomaticSourceRefreshImportContext<'a> {
     pub(super) provider_refreshes: &'a mut ProviderRefreshCollector,
     pub(super) config: &'a crate::config::AppConfig,
     pub(super) options: ImportRunOptions,
+    pub(super) ui: &'a mut crate::ui::Ui,
 }
 
 pub(super) fn run_automatic_source_refresh_import(
@@ -45,7 +46,8 @@ pub(super) fn run_automatic_source_refresh_import(
     }
     validate_selected_provider(context.args)?;
 
-    let progress = ProgressReporter::new(
+    let mut progress = ProgressReporter::new(
+        context.ui,
         context.options.progress,
         context.options.json,
         context.options.operation,
@@ -67,7 +69,7 @@ pub(super) fn run_automatic_source_refresh_import(
         context.config,
         context.args.no_daemon,
         ImportCoreRefreshRequest::Automatic,
-        &progress,
+        &mut progress,
     )?;
     let receipt = refresh
         .receipt
@@ -117,27 +119,6 @@ pub(super) fn run_automatic_source_refresh_import(
         receipt.source_failure_total(),
         receipt.rejected_record_total(),
     );
-
-    let partial = receipt.source_failure_total() != 0 || receipt.rejected_record_total() != 0;
-    let completion = if partial {
-        format!(
-            "Published valid history with {} source failure(s) and {} rejected record(s).",
-            receipt.source_failure_total(),
-            receipt.rejected_record_total()
-        )
-    } else if context.options.progress == crate::progress::ProgressArg::Json {
-        format!(
-            "Published Core generation {}.",
-            receipt.published_generation
-        )
-    } else {
-        "Finished refreshing local history.".to_owned()
-    };
-    progress.finish_line()?;
-    // The receipt exposes retained corpus bytes, not work performed by this
-    // invocation. Preserve the unknown per-run total instead of inventing a
-    // 100% work-byte result on warm no-op imports.
-    progress.done(if partial { "partial" } else { "published" }, completion, 0)?;
 
     let mut report_sources = vec![compact_json(json!({
         "status": if receipt.source_failure_total() != 0 || receipt.rejected_record_total() != 0 {

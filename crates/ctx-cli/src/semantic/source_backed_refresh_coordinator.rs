@@ -30,8 +30,7 @@ pub(crate) use ctx_history_refresh::{
     optional_generation, published_refresh_receipt_for_index, source_backed_index_root,
     PinnedCorePublication, RefreshOutcomeClass, RefreshRequestState, RefreshStatus,
     RefreshStatusKind, RefreshTerminalOutcome, SourceBackedCurrentSourceProgress,
-    SourceBackedCurrentSourceProgressStage, SourceBackedPublicationMetadata,
-    SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
+    SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
 };
 
 #[cfg(test)]
@@ -261,8 +260,8 @@ impl CoreRefreshEngine {
 #[allow(unused_imports)] // Stable typed terminal outcome for command/API integrations.
 pub(crate) use client::{
     coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshObservation,
-    SourceBackedRefreshTerminalError,
+    coordinate_source_backed_refresh_with_progress, SourceBackedRefreshDaemonUnavailable,
+    SourceBackedRefreshObservation, SourceBackedRefreshTerminalError,
 };
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::count_verified_index_opens;

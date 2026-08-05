@@ -30,6 +30,7 @@ pub(crate) struct HistorySourcePluginImportContext<'a> {
     pub(crate) refresh_trigger: ProviderRefreshTrigger,
     pub(crate) config: &'a crate::config::AppConfig,
     pub(crate) options: ImportRunOptions,
+    pub(crate) ui: &'a mut crate::ui::Ui,
 }
 
 pub(crate) fn run_history_source_plugin_import(
@@ -45,7 +46,8 @@ pub(crate) fn run_history_source_plugin_import(
         &context.args.history_source_manifest,
         context.args.history_source.as_deref(),
     )?;
-    let progress = ProgressReporter::new(
+    let mut progress = ProgressReporter::new(
+        context.ui,
         context.options.progress,
         context.options.json,
         context.options.operation,
@@ -75,7 +77,7 @@ pub(crate) fn run_history_source_plugin_import(
         context.config,
         context.args.no_daemon,
         ImportCoreRefreshRequest::ExplicitCatalog(&upsert.authority),
-        &progress,
+        &mut progress,
     )?;
     let receipt = refresh
         .receipt
@@ -162,33 +164,6 @@ pub(crate) fn run_history_source_plugin_import(
     context.telemetry.edges_imported = None;
     context.telemetry.skipped = None;
     context.telemetry.rejected_records = None;
-
-    let completion = if rejected_record_total != 0 {
-        format!(
-            "Published history source plugin {} with {rejected_record_total} rejected record(s).",
-            prepared.source().label()
-        )
-    } else if context.options.progress == crate::progress::ProgressArg::Json {
-        format!(
-            "Published history source plugin {} in Core generation {published_generation}.",
-            prepared.source().label()
-        )
-    } else {
-        format!(
-            "Published history source plugin {}.",
-            prepared.source().label()
-        )
-    };
-    progress.finish_line()?;
-    progress.done(
-        if rejected_record_total == 0 {
-            "published"
-        } else {
-            "partial"
-        },
-        completion,
-        stats.bytes,
-    )?;
 
     Ok(ImportReport {
         resume: context.args.resume,

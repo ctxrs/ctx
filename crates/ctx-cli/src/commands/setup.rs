@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 
 use crate::analytics::{self, SetupMode, SetupTelemetry};
 use crate::output::print_json;
+use crate::progress::{ProgressReporter, ProgressWriterError};
 use crate::semantic::{
-    autostart_daemon_and_wait, coordinate_source_backed_refresh,
+    autostart_daemon_and_wait, coordinate_source_backed_refresh_with_progress,
     daemon_autostart_suppression_reason, semantic_query_service_supported,
     source_epoch_status_report, DaemonHandoff, SourceBackedRefreshMode,
 };
@@ -64,13 +65,17 @@ pub(crate) fn run_setup(
     } else {
         None
     };
-    let refresh_request = request_source_refresh(
-        &data_root,
-        config.daemon.enabled,
-        args.no_daemon,
-        args.wait,
-        daemon_autostart_reason,
-    );
+    let refresh_request = {
+        let mut progress = ProgressReporter::new(ui, args.progress, json_output, "setup", 0);
+        request_source_refresh(
+            &data_root,
+            config.daemon.enabled,
+            args.no_daemon,
+            args.wait,
+            daemon_autostart_reason,
+            &mut progress,
+        )?
+    };
     let source = source_epoch_status_report(&data_root, config)?;
     let supervisor = source.report["daemon"]["supervisor"].clone();
     let lexical_status = source.report["lexical"]["status"]
@@ -140,9 +145,10 @@ fn request_source_refresh(
     no_daemon: bool,
     wait: bool,
     daemon_unavailable_reason: Option<&str>,
-) -> Value {
+    progress: &mut ProgressReporter<'_>,
+) -> Result<Value> {
     if no_daemon || !daemon_enabled {
-        return json!({
+        return Ok(json!({
             "status": "unavailable",
             "reason": if no_daemon {
                 "explicit_opt_out"
@@ -151,20 +157,23 @@ fn request_source_refresh(
             },
             "mode": if wait { "wait" } else { "background" },
             "daemon_available": false,
-        });
+        }));
     }
     let mode = if wait {
         SourceBackedRefreshMode::Wait
     } else {
         SourceBackedRefreshMode::Background
     };
-    match coordinate_source_backed_refresh(data_root, mode) {
+    let mut report_progress = |status: &crate::semantic::RefreshStatus| {
+        progress.source_refresh(status).map_err(anyhow::Error::new)
+    };
+    match coordinate_source_backed_refresh_with_progress(data_root, mode, &mut report_progress) {
         Ok(observation) => {
             let receipt = observation
                 .receipt
                 .as_ref()
                 .map(|receipt| receipt.to_json());
-            json!({
+            Ok(json!({
                 "status": observation.status,
                 "reason": Value::Null,
                 "mode": if wait { "wait" } else { "background" },
@@ -173,13 +182,19 @@ fn request_source_refresh(
                 "source_count": observation.source_count,
                 "published_generation": observation.pin.generation_id(),
                 "receipt": receipt,
-            })
+            }))
         }
         Err(error) => {
+            if error
+                .chain()
+                .any(|cause| cause.downcast_ref::<ProgressWriterError>().is_some())
+            {
+                return Err(error);
+            }
             let daemon_unavailable = error
                 .downcast_ref::<crate::semantic::SourceBackedRefreshDaemonUnavailable>()
                 .is_some();
-            json!({
+            Ok(json!({
                 "status": if daemon_unavailable {
                     "unavailable"
                 } else if !wait {
@@ -197,7 +212,7 @@ fn request_source_refresh(
                 "mode": if wait { "wait" } else { "background" },
                 "daemon_available": !daemon_unavailable,
                 "last_error": format!("{error:#}"),
-            })
+            }))
         }
     }
 }
@@ -316,7 +331,6 @@ fn render_setup_human(
             counted(count, "searchable event", "searchable events"),
         ));
     }
-    history_values.push(("Refresh", human_refresh_status(refresh_request).to_owned()));
     history_values.push(("Semantic", component_status(&source["semantic"]).to_owned()));
     if let Some(status) = daemon_human_status(&daemon) {
         history_values.push(("Background", status));
@@ -367,21 +381,6 @@ fn component_status(component: &Value) -> &str {
         .unwrap_or("unavailable")
 }
 
-fn human_refresh_status(refresh_request: &Value) -> String {
-    let status = component_status(refresh_request);
-    match status {
-        "accepted" | "pending" | "queued" | "running" => "in progress".to_owned(),
-        "published" => "ready".to_owned(),
-        "unavailable" => refresh_request
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(humanize_code)
-            .map(|reason| format!("unavailable ({reason})"))
-            .unwrap_or_else(|| "unavailable".to_owned()),
-        status => humanize_code(status),
-    }
-}
-
 fn daemon_human_status(daemon: &DaemonAutostartHuman<'_>) -> Option<String> {
     match daemon.handoff {
         Some(_) if supervisor_persistently_verified(daemon.supervisor) => None,
@@ -402,10 +401,6 @@ fn daemon_human_status(daemon: &DaemonAutostartHuman<'_>) -> Option<String> {
         None if daemon.reason == Some("daemon_disabled") => Some("disabled".to_owned()),
         None => None,
     }
-}
-
-fn humanize_code(value: &str) -> String {
-    value.replace('_', " ")
 }
 
 fn counted(count: u64, singular: &str, plural: &str) -> String {
@@ -576,7 +571,7 @@ mod tests {
             );
             let rendered = document.render_plain();
             assert!(rendered.starts_with("History indexing is queued\n"));
-            assert!(rendered.contains("Refresh   in progress\n"));
+            assert!(!rendered.contains("Refresh"));
             assert!(rendered.contains("Next\n  ctx index watch\n"));
             assert!(!rendered.contains("Estimated"));
             assert!(!rendered.contains("ctx search"));

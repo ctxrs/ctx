@@ -812,6 +812,13 @@ pub(super) struct SourceBackedRefreshAttempt {
 }
 
 impl SourceBackedRefreshAttempt {
+    fn source_count(&self) -> usize {
+        self.scanned_routes
+            .zip(self.unsupported_routes)
+            .map(|(scanned, unsupported)| scanned.saturating_sub(unsupported))
+            .unwrap_or(self.progress.total_sources)
+    }
+
     fn failure_code(&self) -> Option<&'static str> {
         self.last_error
             .as_deref()
@@ -1007,7 +1014,7 @@ impl SourceBackedRefreshAttempt {
             "request_id": self.request_id,
             "request_state": self.state.as_str(),
             "operation": self.operation.as_str(),
-            "source_count": self.progress.total_sources,
+            "source_count": self.source_count(),
             "requested_at_ms": self.requested_at_ms,
             "started_at_ms": self.started_at_ms,
             "finished_at_ms": self.finished_at_ms,
@@ -1165,7 +1172,7 @@ fn apply_read_projection(
     if job {
         fields.insert(
             "source_count".to_owned(),
-            json!(progress_owner.progress.total_sources),
+            json!(progress_owner.source_count()),
         );
     }
     if let Some(outcome) = fields

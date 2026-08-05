@@ -28,13 +28,13 @@ pub(super) fn wait_for_import_core_refresh(
     config: &AppConfig,
     no_daemon: bool,
     request: ImportCoreRefreshRequest<'_>,
-    progress: &ProgressReporter,
+    progress: &mut ProgressReporter<'_>,
 ) -> Result<SourceBackedRefreshObservation> {
     if !no_daemon {
         autostart_daemon_and_wait(data_root, config, DaemonTriggerCommandArg::Import)?;
     }
 
-    let mut report_progress = |update: &crate::semantic::SourceBackedRefreshProgress| {
+    let mut report_progress = |update: &crate::semantic::RefreshStatus| {
         progress.source_refresh(update).map_err(anyhow::Error::new)
     };
     let refresh = match request {

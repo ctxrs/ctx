@@ -1,15 +1,15 @@
 use std::{
-    io::{self, IsTerminal, Write},
-    sync::{Arc, Mutex},
+    fmt,
+    io::{self, Write},
     time::{Duration as StdDuration, Instant},
 };
 
 use clap::ValueEnum;
 use serde_json::json;
 
-use crate::semantic::{
-    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
-    SourceBackedRefreshProgress,
+use crate::{
+    semantic::{RefreshStatus, SourceBackedCurrentSourceProgress},
+    ui::{refresh_progress, Document, Line, LiveOutput, RefreshProgressSnapshot, Span, Token, Ui},
 };
 
 const MAX_PROGRESS_MESSAGE_BYTES: usize = 512;
@@ -26,45 +26,56 @@ pub(crate) enum ProgressArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgressRenderMode {
     None,
+    Live,
     Plain,
     Json,
 }
 
 #[derive(Debug)]
-struct ProgressState {
-    started: Instant,
+pub(crate) struct ProgressWriterError(io::Error);
+
+impl fmt::Display for ProgressWriterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "write progress output: {}", self.0)
+    }
 }
 
-#[derive(Clone)]
-pub(crate) struct ProgressReporter {
+impl std::error::Error for ProgressWriterError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+pub(crate) struct ProgressReporter<'a> {
     mode: ProgressRenderMode,
     operation: &'static str,
     total_bytes: u64,
-    state: Arc<Mutex<ProgressState>>,
+    started: Instant,
+    output: LiveOutput<&'a mut (dyn Write + Send)>,
 }
 
-impl ProgressReporter {
+impl<'a> ProgressReporter<'a> {
     pub(crate) fn new(
+        ui: &'a mut Ui,
         arg: ProgressArg,
         json_output: bool,
         operation: &'static str,
         total_bytes: u64,
     ) -> Self {
-        let stderr_is_terminal = std::io::stderr().is_terminal();
+        let live_output_capable = ui.stderr_context().live_output_capable();
         let mode = match arg {
             ProgressArg::None => ProgressRenderMode::None,
             ProgressArg::Json => ProgressRenderMode::Json,
             ProgressArg::Plain => ProgressRenderMode::Plain,
-            ProgressArg::Auto if json_output || !stderr_is_terminal => ProgressRenderMode::None,
-            ProgressArg::Auto => ProgressRenderMode::Plain,
+            ProgressArg::Auto if json_output || !live_output_capable => ProgressRenderMode::None,
+            ProgressArg::Auto => ProgressRenderMode::Live,
         };
         Self {
             mode,
             operation,
             total_bytes,
-            state: Arc::new(Mutex::new(ProgressState {
-                started: Instant::now(),
-            })),
+            started: Instant::now(),
+            output: ui.stderr_live_output(),
         }
     }
 
@@ -73,10 +84,10 @@ impl ProgressReporter {
     }
 
     pub(crate) fn message(
-        &self,
+        &mut self,
         phase: &'static str,
         message: impl Into<String>,
-    ) -> io::Result<()> {
+    ) -> Result<(), ProgressWriterError> {
         if !self.is_enabled() {
             return Ok(());
         }
@@ -90,54 +101,27 @@ impl ProgressReporter {
             total_files: None,
             imported_events: None,
             done: false,
-            refresh_progress: None,
+            refresh: None,
         })
     }
 
-    pub(crate) fn done(
-        &self,
-        phase: &'static str,
-        message: impl Into<String>,
-        completed_bytes: u64,
-    ) -> io::Result<()> {
+    pub(crate) fn source_refresh(
+        &mut self,
+        status: &RefreshStatus,
+    ) -> Result<(), ProgressWriterError> {
         if !self.is_enabled() {
             return Ok(());
         }
-        self.emit_status(ProgressLine {
-            phase: bounded_progress_text(phase, MAX_PROGRESS_PHASE_BYTES),
-            message: bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES),
-            completed_bytes,
-            total_bytes: self.total_bytes.max(completed_bytes),
-            completed_files: None,
-            total_files: None,
-            imported_events: None,
-            done: true,
-            refresh_progress: None,
-        })
+        let snapshot = RefreshProgressSnapshot::from_status(status).map_err(|error| {
+            ProgressWriterError(io::Error::new(io::ErrorKind::InvalidData, error))
+        })?;
+        self.emit_status(source_refresh_line(snapshot, self.total_bytes))
     }
 
-    pub(crate) fn source_refresh(&self, progress: &SourceBackedRefreshProgress) -> io::Result<()> {
-        if !self.is_enabled() {
-            return Ok(());
-        }
-        self.emit_status(source_refresh_line(progress))
-    }
-
-    pub(crate) fn finish_line(&self) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn emit_status(&self, line: ProgressLine) -> io::Result<()> {
-        let elapsed = self
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("progress state lock was poisoned"))?
-            .started
-            .elapsed();
-        let stderr = io::stderr();
-        let mut writer = stderr.lock();
-        write_progress(&mut writer, self.mode, self.operation, &line, elapsed)?;
-        writer.flush()
+    fn emit_status(&mut self, line: ProgressLine) -> Result<(), ProgressWriterError> {
+        let elapsed = self.started.elapsed();
+        write_progress(&mut self.output, self.mode, self.operation, &line, elapsed)
+            .map_err(ProgressWriterError)
     }
 }
 
@@ -150,11 +134,11 @@ struct ProgressLine {
     total_files: Option<usize>,
     imported_events: Option<usize>,
     done: bool,
-    refresh_progress: Option<SourceBackedRefreshProgress>,
+    refresh: Option<RefreshProgressSnapshot>,
 }
 
-fn write_progress(
-    writer: &mut impl Write,
+fn write_progress<W: Write>(
+    output: &mut LiveOutput<W>,
     mode: ProgressRenderMode,
     operation: &'static str,
     line: &ProgressLine,
@@ -162,8 +146,15 @@ fn write_progress(
 ) -> io::Result<()> {
     match mode {
         ProgressRenderMode::None => Ok(()),
-        ProgressRenderMode::Plain => writeln!(writer, "{}", line.message),
-        ProgressRenderMode::Json => writeln!(writer, "{}", progress_json(operation, line, elapsed)),
+        ProgressRenderMode::Live => {
+            let document = line.refresh.as_ref().map_or_else(
+                || Document::from_line(Line::new().with(Span::new(&line.message, Token::Text))),
+                |snapshot| refresh_progress(output.context(), snapshot),
+            );
+            output.write_frame(&document, line.done)
+        }
+        ProgressRenderMode::Plain => output.write_line(&line.message),
+        ProgressRenderMode::Json => output.write_line(&progress_json(operation, line, elapsed)),
     }
 }
 
@@ -184,9 +175,11 @@ fn progress_json(operation: &'static str, line: &ProgressLine, elapsed: StdDurat
         "imported_events": line.imported_events,
         "done": line.done,
     });
-    if let Some(progress) = line.refresh_progress.as_ref() {
+    if let Some(snapshot) = line.refresh.as_ref() {
+        let progress = snapshot.progress();
         value["completed_sources"] = json!(progress.completed_sources);
         value["total_sources"] = json!(progress.total_sources);
+        value["total_sources_known"] = json!(snapshot.total_sources_known());
         value["source_completed_records"] = json!(progress.completed_records);
         value["source_completed_bytes"] = json!(progress.completed_bytes);
         value["current_source"] = json!(progress
@@ -197,151 +190,47 @@ fn progress_json(operation: &'static str, line: &ProgressLine, elapsed: StdDurat
             .current_source_progress
             .map(SourceBackedCurrentSourceProgress::to_json)
             .unwrap_or(serde_json::Value::Null);
+        let status = snapshot.status().schema_v1_fields();
+        for field in [
+            "request_id",
+            "request_state",
+            "logical_request_id",
+            "logical_phase",
+            "physical_attempt_id",
+            "physical_attempt_state",
+            "progress_owner_request_id",
+            "progress_owner_attempt_state",
+            "structured_outcome",
+            "maintenance_wake",
+        ] {
+            if let Some(field_value) = status.get(field) {
+                value[field] = field_value.clone();
+            }
+        }
     }
     value.to_string()
 }
 
-fn source_refresh_line(progress: &SourceBackedRefreshProgress) -> ProgressLine {
-    let (phase, message, completed_bytes, total_bytes) = progress
-        .current_source_progress
-        .map(|current| detailed_source_refresh_line(progress, current))
-        .unwrap_or_else(|| source_level_refresh_line(progress));
+fn source_refresh_line(snapshot: RefreshProgressSnapshot, total_bytes: u64) -> ProgressLine {
+    let (completed_bytes, current_total_bytes) = snapshot.byte_progress();
+    let phase = snapshot.phase();
+    let message = snapshot.message();
+    let done = snapshot.is_terminal();
+    let imported_events = snapshot
+        .progress()
+        .completed_records
+        .and_then(|value| usize::try_from(value).ok());
     ProgressLine {
         phase: bounded_progress_text(&phase, MAX_PROGRESS_PHASE_BYTES),
         message: bounded_progress_text(&message, MAX_PROGRESS_MESSAGE_BYTES),
         completed_bytes,
-        total_bytes,
+        total_bytes: current_total_bytes.max(total_bytes),
         completed_files: None,
         total_files: None,
-        imported_events: progress
-            .completed_records
-            .and_then(|value| usize::try_from(value).ok()),
-        done: false,
-        refresh_progress: Some(progress.clone()),
+        imported_events,
+        done,
+        refresh: Some(snapshot),
     }
-}
-
-fn detailed_source_refresh_line(
-    progress: &SourceBackedRefreshProgress,
-    current: SourceBackedCurrentSourceProgress,
-) -> (String, String, u64, u64) {
-    let source = progress_source_label(progress);
-    let (completed_bytes, total_bytes) = match current.stage {
-        SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
-        | SourceBackedCurrentSourceProgressStage::OnlineBackup => (
-            current.snapshot_bytes_completed.unwrap_or_default(),
-            current.snapshot_bytes_total.unwrap_or_default(),
-        ),
-        SourceBackedCurrentSourceProgressStage::LogicalFingerprint
-        | SourceBackedCurrentSourceProgressStage::LogicalScan => (0, 0),
-    };
-    let details = match current.stage {
-        SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
-        | SourceBackedCurrentSourceProgressStage::OnlineBackup => {
-            snapshot_progress_details(current)
-        }
-        SourceBackedCurrentSourceProgressStage::LogicalFingerprint
-        | SourceBackedCurrentSourceProgressStage::LogicalScan => logical_progress_details(current),
-    };
-    let action = match current.stage {
-        SourceBackedCurrentSourceProgressStage::SourceFamilyCopy => "Copying SQLite snapshot files",
-        SourceBackedCurrentSourceProgressStage::OnlineBackup => "Copying SQLite snapshot",
-        SourceBackedCurrentSourceProgressStage::LogicalFingerprint => {
-            "Fingerprinting SQLite history"
-        }
-        SourceBackedCurrentSourceProgressStage::LogicalScan => "Scanning SQLite history",
-    };
-    let message = if details.is_empty() {
-        format!("{action} for {source}.")
-    } else {
-        format!("{action} for {source}: {details}.")
-    };
-    (
-        current.stage.as_str().to_owned(),
-        message,
-        completed_bytes,
-        total_bytes,
-    )
-}
-
-fn source_level_refresh_line(progress: &SourceBackedRefreshProgress) -> (String, String, u64, u64) {
-    let source_progress = format!(
-        "{} / {} sources",
-        progress.completed_sources, progress.total_sources
-    );
-    let source_work = match (progress.completed_records, progress.completed_bytes) {
-        (Some(records), Some(bytes)) => {
-            format!("; {records} records, {} scanned", format_bytes(bytes))
-        }
-        (Some(records), None) => format!("; {records} records"),
-        (None, Some(bytes)) => format!("; {} scanned", format_bytes(bytes)),
-        (None, None) => String::new(),
-    };
-    let message = match (progress.phase.as_str(), progress.current_source.as_deref()) {
-        ("discovering", _) => "Discovering local history sources.".to_owned(),
-        ("refreshing", Some(_)) => format!(
-            "Refreshing {} ({source_progress}{source_work}).",
-            progress_source_label(progress),
-        ),
-        ("verifying", _) => format!("Verifying refreshed history ({source_progress})."),
-        ("committing", _) | ("committed", _) => {
-            format!("Publishing refreshed history ({source_progress}).")
-        }
-        (_, Some(_)) => format!(
-            "Refreshing {} ({source_progress}; phase {}).",
-            progress_source_label(progress),
-            progress.phase.replace('_', " ")
-        ),
-        _ => format!(
-            "Refreshing local history ({source_progress}; phase {}).",
-            progress.phase.replace('_', " ")
-        ),
-    };
-    (progress.phase.clone(), message, 0, 0)
-}
-
-fn progress_source_label(progress: &SourceBackedRefreshProgress) -> String {
-    progress
-        .current_source
-        .as_deref()
-        .map(|source| bounded_progress_text(source, MAX_PROGRESS_SOURCE_BYTES))
-        .unwrap_or_else(|| "the current source".to_owned())
-}
-
-fn snapshot_progress_details(progress: SourceBackedCurrentSourceProgress) -> String {
-    let mut details = Vec::new();
-    match (
-        progress.snapshot_pages_completed,
-        progress.snapshot_pages_total,
-    ) {
-        (Some(completed), Some(total)) => details.push(format!("{completed} / {total} pages")),
-        (Some(completed), None) => details.push(format!("{completed} pages")),
-        (None, _) => {}
-    }
-    match (
-        progress.snapshot_bytes_completed,
-        progress.snapshot_bytes_total,
-    ) {
-        (Some(completed), Some(total)) => details.push(format!(
-            "{} / {} copied",
-            format_bytes(completed),
-            format_bytes(total)
-        )),
-        (Some(completed), None) => details.push(format!("{} copied", format_bytes(completed))),
-        (None, _) => {}
-    }
-    details.join(", ")
-}
-
-fn logical_progress_details(progress: SourceBackedCurrentSourceProgress) -> String {
-    let mut details = Vec::new();
-    if let Some(rows) = progress.logical_rows_scanned {
-        details.push(format!("{rows} rows"));
-    }
-    if let Some(bytes) = progress.logical_certified_bytes {
-        details.push(format!("{} certified", format_bytes(bytes)));
-    }
-    details.join(", ")
 }
 
 fn progress_percent(completed: u64, total: u64) -> f64 {
@@ -453,7 +342,178 @@ pub(crate) fn format_count(value: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use serde_json::json;
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedWriter {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn active_status() -> RefreshStatus {
+        RefreshStatus::parse_schema_v1(json!({
+            "request_id": "logical-request",
+            "request_state": "running",
+            "logical_request_id": "logical-request",
+            "logical_phase": "direct",
+            "physical_attempt_id": "physical-attempt",
+            "physical_attempt_state": "running",
+            "progress_owner_request_id": "physical-attempt",
+            "progress_owner_attempt_state": "running",
+            "progress": {
+                "phase": "refreshing",
+                "completed_sources": 1,
+                "total_sources": 2,
+                "total_sources_known": true,
+                "current_source": "/tmp/history\ncontrol.sqlite",
+                "completed_records": 4096,
+                "completed_bytes": 2048,
+                "current_source_progress": {
+                    "stage": "logical_scan",
+                    "logical_rows_scanned": 4096,
+                    "logical_certified_bytes": 2048
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn terminal_status() -> RefreshStatus {
+        RefreshStatus::parse_schema_v1(json!({
+            "request_id": "logical-request",
+            "request_state": "published",
+            "logical_request_id": "logical-request",
+            "logical_phase": "terminal",
+            "physical_attempt_id": "physical-attempt",
+            "physical_attempt_state": "published",
+            "progress_owner_request_id": "physical-attempt",
+            "progress_owner_attempt_state": "published",
+            "structured_outcome": {
+                "code": "completed",
+                "class": "completed",
+                "retryable": false,
+                "affected_routes": [],
+                "retryable_routes": [],
+                "blocked_routes": [],
+                "physical_attempt_id": "physical-attempt"
+            },
+            "progress": {
+                "phase": "committed",
+                "completed_sources": 2,
+                "total_sources": 2,
+                "total_sources_known": true
+            }
+        }))
+        .unwrap()
+    }
+
+    fn ui_with_stderr(
+        stderr: SharedWriter,
+        stderr_context: crate::ui::RenderContext,
+    ) -> (Ui, SharedWriter) {
+        let stdout = SharedWriter::default();
+        let stdout_capture = stdout.clone();
+        let stdout_context = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+            crate::ui::StreamKind::Stdout,
+        ));
+        (
+            Ui::with_writers(stdout, stdout_context, stderr, stderr_context),
+            stdout_capture,
+        )
+    }
+
+    #[test]
+    fn progress_mode_matrix_uses_injected_stderr_and_keeps_stdout_clean() {
+        let cases = [
+            (ProgressArg::Auto, true, false, false, true),
+            (ProgressArg::Auto, false, false, false, false),
+            (ProgressArg::Auto, true, false, true, false),
+            (ProgressArg::Auto, true, true, false, false),
+            (ProgressArg::Plain, false, false, false, true),
+            (ProgressArg::Plain, true, false, false, true),
+            (ProgressArg::Json, false, false, false, true),
+            (ProgressArg::Json, true, false, false, true),
+            (ProgressArg::None, true, false, false, false),
+        ];
+        for (arg, stderr_tty, term_dumb, final_json, expected_output) in cases {
+            let stderr = SharedWriter::default();
+            let stderr_capture = stderr.clone();
+            let test_context = if stderr_tty {
+                crate::ui::TestContext::tty(crate::ui::StreamKind::Stderr, 80).term_dumb(term_dumb)
+            } else {
+                crate::ui::TestContext::pipe(crate::ui::StreamKind::Stderr)
+            };
+            let (mut ui, stdout_capture) =
+                ui_with_stderr(stderr, crate::ui::RenderContext::for_test(test_context));
+            {
+                let mut reporter = ProgressReporter::new(&mut ui, arg, final_json, "import", 0);
+                reporter.source_refresh(&active_status()).unwrap();
+            }
+            assert_eq!(
+                !stderr_capture.text().is_empty(),
+                expected_output,
+                "mode={arg:?}, tty={stderr_tty}, term_dumb={term_dumb}, final_json={final_json}"
+            );
+            assert!(stdout_capture.text().is_empty());
+            if arg == ProgressArg::Plain {
+                assert!(!stderr_capture.text().contains('\u{1b}'));
+            }
+            if arg == ProgressArg::Json {
+                let value: serde_json::Value =
+                    serde_json::from_str(stderr_capture.text().trim()).unwrap();
+                assert_eq!(value["type"], "ctx_progress");
+                assert_eq!(value["logical_phase"], "direct");
+            }
+        }
+    }
+
+    #[test]
+    fn json_progress_releases_exactly_one_logical_terminal_done_event() {
+        let stderr = SharedWriter::default();
+        let capture = stderr.clone();
+        let (mut ui, stdout) = ui_with_stderr(
+            stderr,
+            crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+                crate::ui::StreamKind::Stderr,
+            )),
+        );
+        {
+            let mut reporter = ProgressReporter::new(&mut ui, ProgressArg::Json, false, "setup", 0);
+            reporter.source_refresh(&active_status()).unwrap();
+            reporter.source_refresh(&terminal_status()).unwrap();
+        }
+        let events = capture
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events.iter().filter(|event| event["done"] == true).count(),
+            1
+        );
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal["request_state"], "published");
+        assert_eq!(terminal["structured_outcome"]["code"], "completed");
+        assert!(stdout.text().is_empty());
+    }
 
     #[test]
     fn done_progress_json_forces_complete_bytes_with_incomplete_bytes() {
@@ -466,7 +526,7 @@ mod tests {
             total_files: None,
             imported_events: None,
             done: true,
-            refresh_progress: None,
+            refresh: None,
         };
 
         let value: serde_json::Value =
@@ -491,7 +551,7 @@ mod tests {
             total_files: Some(2),
             imported_events: Some(7),
             done: false,
-            refresh_progress: None,
+            refresh: None,
         };
 
         let rendered = progress_json("import", &line, StdDuration::from_secs(2));
@@ -520,7 +580,7 @@ mod tests {
             total_files: Some(4),
             imported_events: None,
             done: false,
-            refresh_progress: None,
+            refresh: None,
         };
 
         let plain = match ProgressRenderMode::Plain {
@@ -576,21 +636,24 @@ mod tests {
             total_files: None,
             imported_events: None,
             done: false,
-            refresh_progress: None,
+            refresh: None,
         };
         for (failure, expected) in [
             (WriterFailure::Write, "injected progress write failure"),
             (WriterFailure::Flush, "injected progress flush failure"),
         ] {
-            let mut writer = FailingWriter(failure);
+            let writer = FailingWriter(failure);
+            let context = crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
+                crate::ui::StreamKind::Stderr,
+            ));
+            let mut output = LiveOutput::new(writer, context);
             let result = write_progress(
-                &mut writer,
+                &mut output,
                 ProgressRenderMode::Json,
                 "import",
                 &line,
                 StdDuration::ZERO,
-            )
-            .and_then(|()| writer.flush());
+            );
             assert!(result
                 .expect_err("progress output failure must propagate")
                 .to_string()
@@ -600,26 +663,10 @@ mod tests {
 
     #[test]
     fn sqlite_logical_progress_is_typed_and_never_invents_a_total() {
-        let progress = SourceBackedRefreshProgress {
-            phase: "refreshing".to_owned(),
-            completed_sources: 1,
-            total_sources: 2,
-            current_source: Some("/tmp/history\ncontrol.sqlite".to_owned()),
-            completed_records: Some(4_096),
-            completed_bytes: Some(2_048),
-            current_source_progress: Some(SourceBackedCurrentSourceProgress {
-                stage: SourceBackedCurrentSourceProgressStage::LogicalScan,
-                snapshot_pages_completed: None,
-                snapshot_pages_total: None,
-                snapshot_bytes_completed: None,
-                snapshot_bytes_total: None,
-                logical_rows_scanned: Some(4_096),
-                logical_certified_bytes: Some(2_048),
-            }),
-        };
-        let line = source_refresh_line(&progress);
+        let snapshot = RefreshProgressSnapshot::from_status(&active_status()).unwrap();
+        let line = source_refresh_line(snapshot, 0);
         assert_eq!(line.phase, "logical_scan");
-        assert!(line.message.contains("4,096") || line.message.contains("4096"));
+        assert!(line.message.contains("history control.sqlite"));
         assert!(!line.message.contains('\n'));
         assert_eq!((line.completed_bytes, line.total_bytes), (0, 0));
 
@@ -634,6 +681,8 @@ mod tests {
             4_096
         );
         assert!(!value["current_source"].as_str().unwrap().contains('\n'));
+        assert_eq!(value["logical_phase"], "direct");
+        assert_eq!(value["physical_attempt_id"], "physical-attempt");
     }
 
     #[test]

@@ -608,13 +608,10 @@ fn assert_daemon_publication(
         .unwrap_or_else(|| panic!("latest daemon refresh omitted source_count: {status:#}"));
     assert_eq!(job["progress"]["phase"], "published", "{status:#}");
     assert_eq!(
-        job["progress"]["completed_sources"], latest_route_count,
+        job["progress"]["completed_sources"], job["progress"]["total_sources"],
         "{status:#}"
     );
-    assert_eq!(
-        job["progress"]["total_sources"], latest_route_count,
-        "{status:#}"
-    );
+    assert_eq!(job["progress"]["total_sources_known"], true, "{status:#}");
     // `core-refresh.json` is the daemon's mutable latest-job status, not the
     // durable receipt for the search request that returned this generation.
     // A watcher-driven periodic no-op may therefore replace that status before

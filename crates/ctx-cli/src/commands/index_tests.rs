@@ -1,13 +1,13 @@
 use std::{
-    io,
+    fs, io,
     sync::{Arc, Mutex},
 };
 
 use serde_json::json;
 
 use super::{
-    index_ready, index_terminal_error, index_wait_json, index_watch_output, IndexSelection,
-    IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
+    index_readiness_snapshot, index_ready, index_terminal_error, index_wait_json,
+    index_watch_output, IndexSelection, IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
 };
 use crate::output::JsonOutputFormat;
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
@@ -37,7 +37,7 @@ fn readiness(
     completed_sources: u64,
     daemon_running: bool,
 ) -> serde_json::Value {
-    json!({
+    let mut status = json!({
         "schema_version": 1,
         "initialized": true,
         "lexical": {
@@ -52,6 +52,22 @@ fn readiness(
             "status": refresh_status,
             "reason": if refresh_status == "ready" { serde_json::Value::Null } else { json!("core_refresh_pending") },
             "request_state": if refresh_status == "ready" { "published" } else { "running" },
+            "request_id": "logical-request",
+            "logical_request_id": "logical-request",
+            "logical_phase": if refresh_status == "ready" { "terminal" } else { "direct" },
+            "physical_attempt_id": "physical-attempt",
+            "physical_attempt_state": if refresh_status == "ready" { "published" } else { "running" },
+            "progress_owner_request_id": "physical-attempt",
+            "progress_owner_attempt_state": if refresh_status == "ready" { "published" } else { "running" },
+            "structured_outcome": if refresh_status == "ready" { json!({
+                "code": "completed",
+                "class": "completed",
+                "retryable": false,
+                "affected_routes": [],
+                "retryable_routes": [],
+                "blocked_routes": [],
+                "physical_attempt_id": "physical-attempt",
+            }) } else { serde_json::Value::Null },
             "published_generation": "generation-1",
             "generation_id": "generation-1",
             "generation_matches": refresh_status == "ready",
@@ -59,6 +75,7 @@ fn readiness(
                 "phase": if refresh_status == "ready" { "published" } else { "scanning_provider_sources" },
                 "completed_sources": completed_sources,
                 "total_sources": 12,
+                "total_sources_known": true,
                 "current_source": if refresh_status == "ready" { serde_json::Value::Null } else { json!("source.db") },
                 "completed_records": if refresh_status == "ready" { serde_json::Value::Null } else { json!(1234) },
                 "completed_bytes": if refresh_status == "ready" { serde_json::Value::Null } else { json!(4 * 1024 * 1024) },
@@ -76,7 +93,14 @@ fn readiness(
         },
         "local_only": true,
         "read_only": true,
-    })
+    });
+    if refresh_status != "ready" {
+        status["refresh"]
+            .as_object_mut()
+            .unwrap()
+            .remove("structured_outcome");
+    }
+    status
 }
 
 fn first_publication_pending() -> serde_json::Value {
@@ -118,7 +142,7 @@ fn machine_snapshot_contains_only_authoritative_readiness_units() {
     let status = first_publication_pending();
     let mut output = IndexWatchOutput::for_test(Vec::new(), false, 32);
     output.print_json(&status).unwrap();
-    let rendered = String::from_utf8(output.writer).unwrap();
+    let rendered = String::from_utf8(output.into_writer()).unwrap();
     let rendered: serde_json::Value = serde_json::from_str(rendered.trim()).unwrap();
     assert_eq!(rendered["refresh"]["progress"]["completed_sources"], 0);
     assert_eq!(rendered["refresh"]["progress"]["total_sources"], 12);
@@ -135,6 +159,66 @@ fn machine_snapshot_contains_only_authoritative_readiness_units() {
     ] {
         assert!(!rendered.to_string().contains(obsolete), "{rendered:#}");
     }
+}
+
+#[test]
+fn index_readiness_preserves_exact_engine_logical_and_physical_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let status_path = data_root.join("daemon/jobs/core-refresh.json");
+    fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+    let structured_outcome = json!({
+        "code": "source_refresh_failed",
+        "class": "internal",
+        "retryable": false,
+        "affected_routes": [],
+        "retryable_routes": [],
+        "blocked_routes": [],
+        "physical_attempt_id": "physical-attempt",
+    });
+    fs::write(
+        &status_path,
+        serde_json::to_vec(&json!({
+            "request_id": "logical-request",
+            "request_state": "failed",
+            "logical_request_id": "logical-request",
+            "logical_phase": "terminal",
+            "physical_attempt_id": "physical-attempt",
+            "physical_attempt_state": "failed",
+            "progress_owner_request_id": "progress-owner",
+            "progress_owner_attempt_state": "failed",
+            "structured_outcome": structured_outcome,
+            "progress": {
+                "phase": "committed",
+                "completed_sources": 0,
+                "total_sources": 0,
+                "total_sources_known": true,
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let snapshot = index_readiness_snapshot(&data_root).unwrap();
+    assert_eq!(snapshot["refresh"]["logical_request_id"], "logical-request");
+    assert_eq!(snapshot["refresh"]["logical_phase"], "terminal");
+    assert_eq!(
+        snapshot["refresh"]["physical_attempt_id"],
+        "physical-attempt"
+    );
+    assert_eq!(snapshot["refresh"]["physical_attempt_state"], "failed");
+    assert_eq!(
+        snapshot["refresh"]["progress_owner_request_id"],
+        "progress-owner"
+    );
+    assert_eq!(
+        snapshot["refresh"]["progress_owner_attempt_state"],
+        "failed"
+    );
+    assert_eq!(
+        snapshot["refresh"]["structured_outcome"],
+        structured_outcome
+    );
 }
 
 #[test]
@@ -314,14 +398,33 @@ fn interactive_watch_redraws_the_existing_block() {
     let mut output = IndexWatchOutput::for_test(Vec::new(), true, 80);
 
     output.print_human(&first).unwrap();
-    let first_frame = String::from_utf8(output.writer.clone()).unwrap();
+    let first_frame = String::from_utf8(output.writer().clone()).unwrap();
     let first_lines = first_frame.lines().count();
     output.print_human(&second).unwrap();
 
-    let rendered = String::from_utf8(output.writer).unwrap();
+    let rendered = String::from_utf8(output.into_writer()).unwrap();
     assert!(rendered.starts_with(&first_frame));
     assert!(rendered.contains(&format!("\u{1b}[{first_lines}A")));
     assert!(rendered.contains("4 / 12"));
+}
+
+#[test]
+fn term_dumb_watch_appends_like_a_pipe_even_when_stdout_is_a_tty() {
+    let stdout = SharedWriter::default();
+    let captured = stdout.clone();
+    let stdout_context =
+        RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).term_dumb(true));
+    let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
+    let mut ui = Ui::with_writers(stdout, stdout_context, Vec::new(), stderr_context);
+    {
+        let mut output = index_watch_output(&mut ui);
+        output.print_human(&readiness("pending", 0, true)).unwrap();
+        output.print_human(&readiness("pending", 4, true)).unwrap();
+    }
+    let rendered = captured.text();
+    assert_eq!(rendered.matches("Your history is searchable").count(), 2);
+    assert!(rendered.ends_with("\n\n"));
+    assert!(!rendered.contains('\u{1b}'));
 }
 
 #[test]

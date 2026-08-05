@@ -801,6 +801,36 @@ fn progress_json_setup_attempts_enabled_daemon_startup() {
 }
 
 #[test]
+fn setup_wait_progress_json_uses_stderr_and_keeps_final_json_on_stdout() {
+    let temp = tempdir();
+    let _daemon = start_full_source_refresh_daemon(&temp);
+    let output = ctx(&temp)
+        .args(["setup", "--wait", "--format=json", "--progress", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout["schema_version"], 2, "{stdout:#}");
+    let events = String::from_utf8(output.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|event| event["operation"] == "setup"));
+    assert_eq!(
+        events.iter().filter(|event| event["done"] == true).count(),
+        1
+    );
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["logical_phase"], "terminal");
+    assert!(terminal["structured_outcome"]["code"].is_string());
+}
+
+#[test]
 fn human_setup_without_sources_starts_daemon_and_reports_observed_refresh_state() {
     let temp = tempdir();
     let binary = copied_ctx_binary(&temp);
@@ -834,7 +864,7 @@ fn human_setup_without_sources_starts_daemon_and_reports_observed_refresh_state(
         );
         assert!(stdout.contains("  ctx index watch"), "{stdout}");
     }
-    assert!(stdout.contains("Refresh     in progress"), "{stdout}");
+    assert!(!stdout.contains("Refresh"), "{stdout}");
 
     let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     assert_eq!(running["daemon"]["status"], "running", "{running:#}");
@@ -1089,7 +1119,7 @@ fn human_wait_setup_starts_daemon_after_foreground_import() {
         .clone();
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("History is ready to search"), "{stdout}");
-    assert!(stdout.contains("Refresh     ready"), "{stdout}");
+    assert!(!stdout.contains("Refresh"), "{stdout}");
     assert!(stdout.contains("  ctx search \"test failure\""), "{stdout}");
 
     let running = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));

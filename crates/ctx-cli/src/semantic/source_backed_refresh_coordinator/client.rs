@@ -6,8 +6,7 @@ use observation_recovery::{
     request_bound_status_with_recovery, retained_request_unobservable, DISCONNECT_POLICY,
 };
 
-type SourceBackedRefreshProgressReporter<'a> =
-    &'a mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>;
+type SourceBackedRefreshProgressReporter<'a> = &'a mut dyn FnMut(&RefreshStatus) -> Result<()>;
 
 const SOURCE_REFRESH_PROGRESS_HEARTBEAT: StdDuration = StdDuration::from_secs(5);
 
@@ -360,6 +359,22 @@ pub(crate) fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_inner(data_root, mode, None)
+}
+
+pub(crate) fn coordinate_source_backed_refresh_with_progress(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_inner(data_root, mode, Some(report_progress))
+}
+
+fn coordinate_source_backed_refresh_inner(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
+) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_with_catalog(
         data_root,
         mode,
@@ -367,7 +382,7 @@ pub(crate) fn coordinate_source_backed_refresh(
         None,
         false,
         true,
-        None,
+        report_progress,
     )
 }
 
@@ -376,7 +391,7 @@ pub(crate) fn coordinate_import_source_backed_refresh_with_progress(
     mode: SourceBackedRefreshMode,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
-    report_progress: &mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>,
+    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_import_source_backed_refresh_inner(
         data_root,
@@ -491,6 +506,10 @@ fn coordinate_source_backed_refresh_with_catalog(
     source_refresh_protocol_state(&response)?;
 
     if mode == SourceBackedRefreshMode::Background {
+        if let Some(report_progress) = report_progress {
+            let status = source_refresh_progress_status(response.clone())?;
+            report_progress(&status).context("render daemon-owned source refresh progress")?;
+        }
         let pin = pin_published_generation(data_root)?.ok_or_else(|| {
             anyhow!(
                 "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
@@ -574,7 +593,7 @@ fn wait_for_published_generation_inner(
         mut report_progress,
     } = wait;
     let mut unknown_request_recovery = TypedUnknownRequestRecovery::new(&request_id);
-    let mut last_reported_progress = None;
+    let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
         let status_request = compact_json(json!({
@@ -664,20 +683,19 @@ fn wait_for_published_generation_inner(
         }
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
-        let protocol = source_refresh_protocol_status(&response)?;
+        let status = source_refresh_progress_status(response.clone())?;
+        let protocol = status.kind()?;
         let protocol_state = protocol.request_state();
         if let Some(report_progress) = report_progress.as_deref_mut() {
-            let progress = SourceBackedRefreshProgress::from_status_json(&response)?;
             if should_report_progress(
-                last_reported_progress.as_ref(),
+                last_reported_status.as_ref(),
                 last_reported_at,
-                &progress,
+                &status,
                 protocol_state,
                 StdInstant::now(),
             ) {
-                report_progress(&progress)
-                    .context("render daemon-owned source refresh progress")?;
-                last_reported_progress = Some(progress);
+                report_progress(&status).context("render daemon-owned source refresh progress")?;
+                last_reported_status = Some(status.clone());
                 last_reported_at = Some(StdInstant::now());
             }
         }
@@ -697,6 +715,7 @@ fn wait_for_published_generation_inner(
                 let publication_receipt = published_refresh_receipt(&response, &pin)?;
                 validate_status_publication_authority(&publication_receipt, &pin)?;
                 let receipt = published_request_outcome(&response, &pin)?;
+                let source_count = published_source_count(&response)?;
                 if let Some(expected_catalog) = expected_catalog {
                     if !explicit_catalog_request_is_accounted_for(
                         expected_catalog,
@@ -731,7 +750,7 @@ fn wait_for_published_generation_inner(
                     status: "published".to_owned(),
                     request_id: Some(request_id),
                     daemon_available: true,
-                    source_count: response_source_count(&response),
+                    source_count,
                     request_previous_generation,
                     request_generation_changed,
                     scanned_routes: Some(scanned_routes),
@@ -794,16 +813,16 @@ fn missing_status_publication_authority() -> Result<()> {
 }
 
 fn should_report_progress(
-    last_progress: Option<&SourceBackedRefreshProgress>,
+    last_status: Option<&RefreshStatus>,
     last_reported_at: Option<StdInstant>,
-    progress: &SourceBackedRefreshProgress,
+    status: &RefreshStatus,
     protocol_state: RefreshRequestState,
     now: StdInstant,
 ) -> bool {
     matches!(
         protocol_state,
         RefreshRequestState::Published | RefreshRequestState::Failed
-    ) || last_progress != Some(progress)
+    ) || last_status != Some(status)
         || last_reported_at.is_some_and(|at| {
             now.saturating_duration_since(at) >= SOURCE_REFRESH_PROGRESS_HEARTBEAT
         })
@@ -943,6 +962,11 @@ fn source_refresh_protocol_status(response: &Value) -> Result<RefreshStatusKind>
         .context("validate engine-owned source refresh status")
 }
 
+fn source_refresh_progress_status(response: Value) -> Result<RefreshStatus> {
+    RefreshStatus::parse_schema_v1(response)
+        .context("validate engine-owned source refresh progress status")
+}
+
 pub(super) fn validate_source_refresh_status_response_authority(
     response: &Value,
     expected_request_id: &str,
@@ -1031,6 +1055,26 @@ fn response_source_count(response: &Value) -> usize {
         .unwrap_or(0)
 }
 
+fn published_source_count(response: &Value) -> Result<usize> {
+    let scanned_routes = response
+        .get("scanned_routes")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| anyhow!("published daemon source refresh has no scanned route count"))?;
+    let unsupported_routes = response
+        .get("unsupported_routes")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| anyhow!("published daemon source refresh has no unsupported route count"))?;
+    scanned_routes
+        .checked_sub(unsupported_routes)
+        .ok_or_else(|| {
+            anyhow!(
+                "published daemon source refresh unsupported route count exceeds scanned routes"
+            )
+        })
+}
+
 #[cfg(test)]
 mod progress_poll_tests {
     use super::*;
@@ -1069,27 +1113,70 @@ mod progress_poll_tests {
 
     #[test]
     fn identical_poll_is_suppressed_until_heartbeat_or_terminal_state() {
-        let progress = SourceBackedRefreshProgress::default();
+        let status = RefreshStatus::parse_schema_v1(json!({
+            "request_id": "request",
+            "request_state": "running",
+            "progress": {
+                "phase": "refreshing",
+                "completed_sources": 0,
+                "total_sources": 0,
+                "total_sources_known": false
+            }
+        }))
+        .unwrap();
         let now = StdInstant::now();
         assert!(!should_report_progress(
-            Some(&progress),
+            Some(&status),
             Some(now),
-            &progress,
+            &status,
             RefreshRequestState::Running,
             now,
         ));
         assert!(should_report_progress(
-            Some(&progress),
+            Some(&status),
             Some(now),
-            &progress,
+            &status,
             RefreshRequestState::Running,
             now + SOURCE_REFRESH_PROGRESS_HEARTBEAT,
         ));
         assert!(should_report_progress(
-            Some(&progress),
+            Some(&status),
             Some(now),
-            &progress,
+            &status,
             RefreshRequestState::Published,
+            now,
+        ));
+    }
+
+    #[test]
+    fn logical_transition_with_unchanged_counters_is_reported() {
+        let status = |logical_phase: &str| {
+            RefreshStatus::parse_schema_v1(json!({
+                "request_id": "logical-request",
+                "request_state": "running",
+                "logical_request_id": "logical-request",
+                "logical_phase": logical_phase,
+                "physical_attempt_id": "physical-attempt",
+                "physical_attempt_state": "running",
+                "progress_owner_request_id": "physical-attempt",
+                "progress_owner_attempt_state": "running",
+                "progress": {
+                    "phase": "refreshing",
+                    "completed_sources": 1,
+                    "total_sources": 2,
+                    "total_sources_known": true
+                }
+            }))
+            .unwrap()
+        };
+        let attached = status("attached");
+        let coverage = status("coverage_check");
+        let now = StdInstant::now();
+        assert!(should_report_progress(
+            Some(&attached),
+            Some(now),
+            &coverage,
+            RefreshRequestState::Running,
             now,
         ));
     }

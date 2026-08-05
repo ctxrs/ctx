@@ -293,6 +293,16 @@ impl RefreshStatus {
         }
     }
 
+    /// Parses one schema-v1 status snapshot through the engine-owned logical
+    /// status and nested progress validators without changing its wire shape.
+    pub fn parse_schema_v1(fields: Value) -> Result<Self> {
+        let status = Self::from_schema_v1_fields(fields);
+        status.kind()?;
+        SourceBackedRefreshProgress::from_status_json(status.schema_v1_fields())?;
+        status.total_sources_known()?;
+        Ok(status)
+    }
+
     #[doc(hidden)]
     pub fn schema_v1_fields(&self) -> &Value {
         &self.schema_v1_fields
@@ -306,6 +316,26 @@ impl RefreshStatus {
 
     pub fn kind(&self) -> Result<RefreshStatusKind> {
         Self::classify_schema_v1(self.schema_v1_fields())
+    }
+
+    pub fn progress(&self) -> Result<SourceBackedRefreshProgress> {
+        SourceBackedRefreshProgress::from_status_json(self.schema_v1_fields())
+    }
+
+    pub fn total_sources_known(&self) -> Result<bool> {
+        let progress = self
+            .schema_v1_fields
+            .get("progress")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("daemon source refresh status has no progress object"))?;
+        match progress.get("total_sources_known") {
+            Some(Value::Bool(known)) => Ok(*known),
+            None => Ok(progress
+                .get("total_sources")
+                .and_then(Value::as_u64)
+                .is_some_and(|total| total != 0)),
+            Some(_) => bail!("daemon source refresh progress has an invalid total_sources_known"),
+        }
     }
 
     pub fn classify_schema_v1(fields: &Value) -> Result<RefreshStatusKind> {

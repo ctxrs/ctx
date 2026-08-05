@@ -6,6 +6,7 @@ mod hint;
 mod layout;
 mod outcome;
 mod progress;
+mod refresh_progress;
 mod section;
 mod table;
 
@@ -17,5 +18,6 @@ pub(crate) use hint::{hint, Action, Hint};
 pub(crate) use layout::is_copyable_atom;
 pub(crate) use outcome::{outcome, Outcome, OutcomeState};
 pub(crate) use progress::{progress, Progress};
+pub(crate) use refresh_progress::{refresh_progress, RefreshProgressSnapshot};
 pub(crate) use section::section;
 pub(crate) use table::{table, Table};

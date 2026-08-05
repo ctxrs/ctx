@@ -226,6 +226,14 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
 fn refresh_report_preserves_optional_active_source_record_and_byte_progress() {
     let job = json!({
         "request_state": "running",
+        "request_id": "logical-request",
+        "logical_request_id": "logical-request",
+        "logical_phase": "attached",
+        "physical_attempt_id": "physical-attempt",
+        "physical_attempt_state": "running",
+        "progress_owner_request_id": "progress-owner",
+        "progress_owner_attempt_state": "running",
+        "structured_outcome": {"code": "exact-engine-value"},
         "progress": {
             "phase": "refreshing",
             "completed_sources": 2,
@@ -242,6 +250,17 @@ fn refresh_report_preserves_optional_active_source_record_and_byte_progress() {
     assert_eq!(report["progress"]["current_source"], "source.db");
     assert_eq!(report["progress"]["completed_records"], 1234);
     assert_eq!(report["progress"]["completed_bytes"], 4 * 1024 * 1024);
+    for field in [
+        "logical_request_id",
+        "logical_phase",
+        "physical_attempt_id",
+        "physical_attempt_state",
+        "progress_owner_request_id",
+        "progress_owner_attempt_state",
+        "structured_outcome",
+    ] {
+        assert_eq!(report[field], job[field], "field={field}");
+    }
 }
 
 #[test]

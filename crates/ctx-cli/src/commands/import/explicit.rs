@@ -29,6 +29,7 @@ pub(crate) struct ExplicitSourceCatalogImportContext<'a> {
     pub(super) refresh_trigger: ProviderRefreshTrigger,
     pub(super) config: &'a crate::config::AppConfig,
     pub(super) options: ImportRunOptions,
+    pub(super) ui: &'a mut crate::ui::Ui,
 }
 
 pub(crate) fn run_explicit_source_catalog_import(
@@ -38,7 +39,8 @@ pub(crate) fn run_explicit_source_catalog_import(
         .context("explicit source catalog import requires --path")?;
     let stats = source_stats(&source.path)
         .with_context(|| format!("inspect explicit source {}", source.path.display()))?;
-    let progress = ProgressReporter::new(
+    let mut progress = ProgressReporter::new(
+        context.ui,
         context.options.progress,
         context.options.json,
         context.options.operation,
@@ -66,7 +68,7 @@ pub(crate) fn run_explicit_source_catalog_import(
         context.config,
         context.args.no_daemon,
         ImportCoreRefreshRequest::ExplicitCatalog(&upsert.authority),
-        &progress,
+        &mut progress,
     )?;
     let receipt = refresh
         .receipt
@@ -183,43 +185,6 @@ pub(crate) fn run_explicit_source_catalog_import(
     // performed by this import invocation.
     context.telemetry.rejected_records = None;
 
-    let completion = if let Some(failure_class) = requested_failure_class {
-        if context.options.progress == crate::progress::ProgressArg::Json {
-            format!(
-                "Explicit {} route failed ({}); Core generation {published_generation} remains authoritative.",
-                source.provider.as_str(),
-                failure_class
-            )
-        } else {
-            format!(
-                "The {} source failed ({}); retained history remains available.",
-                source.provider.as_str(),
-                failure_class
-            )
-        }
-    } else if requested_rejected {
-        format!(
-            "Published the {} source with {} rejected record(s); valid history remains available.",
-            source.provider.as_str(),
-            requested_outcome.rejected_record_total
-        )
-    } else if context.options.progress == crate::progress::ProgressArg::Json {
-        format!("Published Core generation {published_generation}.")
-    } else {
-        "Published the source for indexing.".to_owned()
-    };
-    progress.finish_line()?;
-    progress.done(
-        if !requested_succeeded {
-            "failed"
-        } else if requested_partial {
-            "partial"
-        } else {
-            "published"
-        },
-        completion,
-        stats.bytes,
-    )?;
     let source_status = if !requested_succeeded {
         "failure"
     } else if requested_partial {

@@ -721,8 +721,11 @@ fn search_refresh_wait_json_keeps_stderr_clean_and_reports_daemon_progress() {
     let status = assert_daemon_publication(&temp, &generation, 1, &["codex", "codex"]);
     let job = &status["daemon"]["jobs"]["core_refresh"];
     assert_eq!(job["progress"]["phase"], "published", "{status:#}");
-    assert_eq!(job["progress"]["completed_sources"], 1, "{status:#}");
-    assert_eq!(job["progress"]["total_sources"], 1, "{status:#}");
+    assert_eq!(
+        job["progress"]["completed_sources"], job["progress"]["total_sources"],
+        "{status:#}"
+    );
+    assert_eq!(job["progress"]["total_sources_known"], true, "{status:#}");
 }
 
 #[test]

@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::analytics::{ImportTelemetry, ProviderRefreshTrigger};
 use crate::progress::ProgressArg;
+use crate::ui::Ui;
 use crate::ImportArgs;
 
 mod automatic_source_refresh;
@@ -55,6 +56,11 @@ pub(crate) struct ImportRunOptions {
     pub(crate) operation: &'static str,
 }
 
+pub(crate) struct ImportRunPresentation<'a> {
+    pub(crate) options: ImportRunOptions,
+    pub(crate) ui: &'a mut Ui,
+}
+
 pub(crate) fn resume_mode_name(resume: bool) -> &'static str {
     if resume {
         "idempotent_rescan"
@@ -77,8 +83,9 @@ pub(crate) fn run_import_internal(
     provider_refreshes: &mut ProviderRefreshCollector,
     refresh_trigger: ProviderRefreshTrigger,
     config: &crate::config::AppConfig,
-    options: ImportRunOptions,
+    presentation: ImportRunPresentation<'_>,
 ) -> Result<ImportReport> {
+    let ImportRunPresentation { options, ui } = presentation;
     validate_import_args(args)?;
     if args.history_source.is_some() || !args.history_source_manifest.is_empty() {
         return run_history_source_plugin_import(HistorySourcePluginImportContext {
@@ -89,6 +96,7 @@ pub(crate) fn run_import_internal(
             refresh_trigger,
             config,
             options,
+            ui,
         });
     }
     if args.path.is_some() {
@@ -100,6 +108,7 @@ pub(crate) fn run_import_internal(
             refresh_trigger,
             config,
             options,
+            ui,
         });
     }
     run_automatic_source_refresh_import(AutomaticSourceRefreshImportContext {
@@ -108,6 +117,7 @@ pub(crate) fn run_import_internal(
         provider_refreshes,
         config,
         options,
+        ui,
     })
 }
 
