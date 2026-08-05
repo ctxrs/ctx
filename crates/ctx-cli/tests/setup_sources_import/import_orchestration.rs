@@ -195,6 +195,18 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
     assert!(stderr.contains(r#""operation":"import""#), "{stderr}");
+    assert!(
+        !stderr.contains("Refreshing the provider-authoritative source index"),
+        "{stderr}"
+    );
+    let events = stderr
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.iter().filter(|event| event["done"] == true).count(),
+        1
+    );
 }
 
 #[test]

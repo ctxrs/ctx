@@ -813,9 +813,18 @@ pub(super) struct SourceBackedRefreshAttempt {
 
 impl SourceBackedRefreshAttempt {
     fn source_count(&self) -> usize {
-        self.scanned_routes
-            .zip(self.unsupported_routes)
-            .map(|(scanned, unsupported)| scanned.saturating_sub(unsupported))
+        self.certified_source_count
+            .or_else(|| {
+                self.publication_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.current.source_count)
+            })
+            .or_else(|| {
+                self.receipt
+                    .as_ref()
+                    .map(|receipt| receipt.current.source_count)
+            })
+            .or(self.scanned_routes)
             .unwrap_or(self.progress.total_sources)
     }
 

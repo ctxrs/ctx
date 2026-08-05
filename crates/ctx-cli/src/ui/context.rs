@@ -160,14 +160,6 @@ impl RenderContext {
     pub(crate) const fn unicode(self) -> bool {
         self.unicode
     }
-
-    pub(super) const fn adapter_choice(self) -> anstream::ColorChoice {
-        if self.color_enabled {
-            anstream::ColorChoice::Always
-        } else {
-            anstream::ColorChoice::Never
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

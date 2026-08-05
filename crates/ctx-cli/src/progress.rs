@@ -211,11 +211,19 @@ fn progress_json(operation: &'static str, line: &ProgressLine, elapsed: StdDurat
     value.to_string()
 }
 
-fn source_refresh_line(snapshot: RefreshProgressSnapshot, total_bytes: u64) -> ProgressLine {
-    let (completed_bytes, current_total_bytes) = snapshot.byte_progress();
+fn source_refresh_line(
+    snapshot: RefreshProgressSnapshot,
+    legacy_terminal_total_bytes: u64,
+) -> ProgressLine {
+    let (completed_bytes, engine_total_bytes) = snapshot.byte_progress();
     let phase = snapshot.phase();
     let message = snapshot.message();
     let done = snapshot.is_terminal();
+    let total_bytes = if done && (completed_bytes, engine_total_bytes) == (0, 0) {
+        legacy_terminal_total_bytes
+    } else {
+        engine_total_bytes
+    };
     let imported_events = snapshot
         .progress()
         .completed_records
@@ -224,7 +232,7 @@ fn source_refresh_line(snapshot: RefreshProgressSnapshot, total_bytes: u64) -> P
         phase: bounded_progress_text(&phase, MAX_PROGRESS_PHASE_BYTES),
         message: bounded_progress_text(&message, MAX_PROGRESS_MESSAGE_BYTES),
         completed_bytes,
-        total_bytes: current_total_bytes.max(total_bytes),
+        total_bytes,
         completed_files: None,
         total_files: None,
         imported_events,
@@ -395,6 +403,34 @@ mod tests {
         .unwrap()
     }
 
+    fn active_transfer_status() -> RefreshStatus {
+        RefreshStatus::parse_schema_v1(json!({
+            "request_id": "explicit-import-request",
+            "request_state": "running",
+            "logical_request_id": "explicit-import-request",
+            "logical_phase": "attached",
+            "physical_attempt_id": "shared-physical-attempt",
+            "physical_attempt_state": "running",
+            "progress_owner_request_id": "shared-physical-attempt",
+            "progress_owner_attempt_state": "running",
+            "progress": {
+                "phase": "copying",
+                "completed_sources": 1,
+                "total_sources": 3,
+                "total_sources_known": true,
+                "current_source": "/explicit.sqlite",
+                "completed_records": 100,
+                "completed_bytes": 777,
+                "current_source_progress": {
+                    "stage": "online_backup",
+                    "snapshot_bytes_completed": 256,
+                    "snapshot_bytes_total": 512
+                }
+            }
+        }))
+        .unwrap()
+    }
+
     fn terminal_status() -> RefreshStatus {
         RefreshStatus::parse_schema_v1(json!({
             "request_id": "logical-request",
@@ -485,34 +521,54 @@ mod tests {
     }
 
     #[test]
-    fn json_progress_releases_exactly_one_logical_terminal_done_event() {
-        let stderr = SharedWriter::default();
-        let capture = stderr.clone();
-        let (mut ui, stdout) = ui_with_stderr(
-            stderr,
-            crate::ui::RenderContext::for_test(crate::ui::TestContext::pipe(
-                crate::ui::StreamKind::Stderr,
-            )),
+    fn active_and_terminal_refresh_jsonl_contract_is_exact() {
+        let active = progress_json(
+            "import",
+            &source_refresh_line(
+                RefreshProgressSnapshot::from_status(&active_transfer_status()).unwrap(),
+                4_096,
+            ),
+            StdDuration::from_secs(2),
         );
-        {
-            let mut reporter = ProgressReporter::new(&mut ui, ProgressArg::Json, false, "setup", 0);
-            reporter.source_refresh(&active_status()).unwrap();
-            reporter.source_refresh(&terminal_status()).unwrap();
-        }
-        let events = capture
-            .text()
-            .lines()
+        let terminal = progress_json(
+            "import",
+            &source_refresh_line(
+                RefreshProgressSnapshot::from_status(&terminal_status()).unwrap(),
+                4_096,
+            ),
+            StdDuration::from_secs(2),
+        );
+
+        assert_eq!(
+            active,
+            r#"{"completed_bytes":256,"completed_files":null,"completed_sources":1,"current_source":"/explicit.sqlite","current_source_progress":{"snapshot_bytes_completed":256,"snapshot_bytes_total":512,"stage":"online_backup"},"done":false,"elapsed_seconds":2.0,"eta_seconds":2.0,"imported_events":100,"logical_phase":"attached","logical_request_id":"explicit-import-request","message":"Refreshing history with shared work: /explicit.sqlite (1 / 3).","operation":"import","percent":50.0,"phase":"online_backup","physical_attempt_id":"shared-physical-attempt","physical_attempt_state":"running","progress_owner_attempt_state":"running","progress_owner_request_id":"shared-physical-attempt","request_id":"explicit-import-request","request_state":"running","source_completed_bytes":777,"source_completed_records":100,"total_bytes":512,"total_files":null,"total_sources":3,"total_sources_known":true,"type":"ctx_progress"}"#
+        );
+        assert_eq!(
+            terminal,
+            r#"{"completed_bytes":4096,"completed_files":null,"completed_sources":2,"current_source":null,"current_source_progress":null,"done":true,"elapsed_seconds":2.0,"eta_seconds":null,"imported_events":null,"logical_phase":"terminal","logical_request_id":"logical-request","message":"History refresh complete (2 / 2).","operation":"import","percent":100.0,"phase":"published","physical_attempt_id":"physical-attempt","physical_attempt_state":"published","progress_owner_attempt_state":"published","progress_owner_request_id":"physical-attempt","request_id":"logical-request","request_state":"published","source_completed_bytes":null,"source_completed_records":null,"structured_outcome":{"affected_routes":[],"blocked_routes":[],"class":"completed","code":"completed","physical_attempt_id":"physical-attempt","retryable":false,"retryable_routes":[]},"total_bytes":4096,"total_files":null,"total_sources":2,"total_sources_known":true,"type":"ctx_progress"}"#
+        );
+
+        let events = [&active, &terminal]
+            .into_iter()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(events.len(), 2);
         assert_eq!(
             events.iter().filter(|event| event["done"] == true).count(),
             1
         );
-        let terminal = events.last().unwrap();
-        assert_eq!(terminal["request_state"], "published");
-        assert_eq!(terminal["structured_outcome"]["code"], "completed");
-        assert!(stdout.text().is_empty());
+        assert_eq!(
+            (
+                events[0]["completed_bytes"].as_u64(),
+                events[0]["total_bytes"].as_u64()
+            ),
+            (Some(256), Some(512))
+        );
+        assert_eq!(events[0]["percent"], 50.0);
+        assert_eq!(events[0]["eta_seconds"], 2.0);
+        assert_ne!(
+            events[0]["logical_request_id"],
+            events[0]["progress_owner_request_id"]
+        );
     }
 
     #[test]
@@ -664,7 +720,7 @@ mod tests {
     #[test]
     fn sqlite_logical_progress_is_typed_and_never_invents_a_total() {
         let snapshot = RefreshProgressSnapshot::from_status(&active_status()).unwrap();
-        let line = source_refresh_line(snapshot, 0);
+        let line = source_refresh_line(snapshot, 8_192);
         assert_eq!(line.phase, "logical_scan");
         assert!(line.message.contains("history control.sqlite"));
         assert!(!line.message.contains('\n'));

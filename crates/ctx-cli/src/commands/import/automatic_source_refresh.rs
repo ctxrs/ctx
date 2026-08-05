@@ -53,10 +53,6 @@ pub(super) fn run_automatic_source_refresh_import(
         context.options.operation,
         0,
     );
-    progress.message(
-        "refreshing",
-        "Refreshing the provider-authoritative source index through the ctx daemon.",
-    )?;
     let home = crate::identity::home_dir()
         .context("resolve user home for provider-root safety preflight")?;
     let sources = discover_provider_sources(&home);

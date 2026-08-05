@@ -49,6 +49,34 @@ use harness::{
     SOURCE_REFRESH_REQUEST_OP, SOURCE_REFRESH_RESPONSE_MAX_BYTES,
 };
 
+#[test]
+fn read_model_source_count_keeps_unsupported_and_covered_inventory_disjoint() {
+    let mut attempt = new_refresh_attempt(
+        None,
+        SourceRefreshRuntimeMetadata::default(),
+        None,
+        SourceBackedRefreshScope::All,
+    );
+    attempt.state = SourceBackedRefreshState::Published;
+
+    for (name, scanned_routes, unsupported_routes, route_inventory, published_sources) in [
+        ("unsupported only", 0, 1, 1, 0),
+        ("mixed executable and unsupported", 1, 1, 2, 1),
+        ("inherited and covered diagnostics", 1, 3, 4, 1),
+    ] {
+        attempt.scanned_routes = Some(scanned_routes);
+        attempt.unsupported_routes = Some(unsupported_routes);
+        attempt.certified_source_count = Some(published_sources);
+        attempt.progress.total_sources = route_inventory;
+        attempt.progress_total_sources_known = true;
+        let job = attempt.job_json();
+        assert_eq!(job["source_count"], published_sources, "{name}");
+        assert_eq!(job["scanned_routes"], scanned_routes, "{name}");
+        assert_eq!(job["unsupported_routes"], unsupported_routes, "{name}");
+        assert_eq!(job["progress"]["total_sources"], route_inventory, "{name}");
+    }
+}
+
 #[path = "tests/registry_policy.rs"]
 mod registry_policy;
 

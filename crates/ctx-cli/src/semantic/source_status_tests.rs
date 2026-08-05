@@ -356,6 +356,36 @@ fn refresh_report_uses_typed_pending_ready_stale_and_unavailable_states() {
 }
 
 #[test]
+fn refresh_report_keeps_published_sources_distinct_from_route_inventory() {
+    let report = refresh_report(
+        Some(&json!({
+            "request_state": "published",
+            "published_generation": "generation-1",
+            "source_count": 38,
+            "scanned_routes": 38,
+            "unsupported_routes": 37,
+            "progress": {
+                "phase": "published",
+                "completed_sources": 38,
+                "total_sources": 38,
+                "total_sources_known": true,
+            },
+            "receipt": {
+                "outcome": "completed",
+                "current": {"current_source_count": 1},
+            },
+        })),
+        Some("generation-1"),
+        &json!({"running": true}),
+    );
+
+    assert_eq!(report["source_count"], 1);
+    assert_eq!(report["scanned_routes"], 38);
+    assert_eq!(report["unsupported_routes"], 37);
+    assert_eq!(report["progress"]["total_sources"], 38);
+}
+
+#[test]
 fn admission_pending_is_active_with_existing_and_empty_generations() {
     let (_temp, data_root, generation_id) = core_publication_fixture();
     super::super::paths_status::write_daemon_job_status(

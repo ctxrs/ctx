@@ -27,10 +27,8 @@ impl Ui {
             stdout_auto_color,
             term_is_dumb(),
         );
-        let stdout_writer: BoxedWriter = Box::new(MeasuredWriter::current(
-            anstream::AutoStream::new(stdout, stdout_context.adapter_choice()),
-            StreamKind::Stdout,
-        ));
+        let stdout_writer: BoxedWriter =
+            Box::new(MeasuredWriter::current(stdout, StreamKind::Stdout));
 
         let stderr = io::stderr();
         let stderr_terminal = stderr.is_terminal();
@@ -44,10 +42,8 @@ impl Ui {
             stderr_auto_color,
             term_is_dumb(),
         );
-        let stderr_writer: BoxedWriter = Box::new(MeasuredWriter::current(
-            anstream::AutoStream::new(stderr, stderr_context.adapter_choice()),
-            StreamKind::Stderr,
-        ));
+        let stderr_writer: BoxedWriter =
+            Box::new(MeasuredWriter::current(stderr, StreamKind::Stderr));
 
         Self {
             stdout: Destination::new(stdout_context, stdout_writer),
@@ -224,10 +220,7 @@ impl Destination {
     where
         W: Write + Send + 'static,
     {
-        let writer: BoxedWriter = Box::new(writer);
-        let adapted: BoxedWriter =
-            Box::new(anstream::AutoStream::new(writer, context.adapter_choice()));
-        let measured: BoxedWriter = Box::new(MeasuredWriter::current(adapted, context.stream()));
+        let measured: BoxedWriter = Box::new(MeasuredWriter::current(writer, context.stream()));
         Self::new(context, measured)
     }
 
@@ -283,6 +276,27 @@ fn stream_width(stream: StreamKind) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::ui::{Line, Span, TestContext, Token};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedWriter {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn document(lines: &[&str]) -> Document {
         let mut document = Document::new();
@@ -315,6 +329,51 @@ mod tests {
                 "after\n",
             )
         );
+    }
+
+    #[test]
+    fn ui_adapter_preserves_live_controls_when_tty_styling_is_disabled() {
+        let contexts = [
+            TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Never),
+            TestContext::tty(StreamKind::Stdout, 80)
+                .color(ColorMode::Auto)
+                .no_color(true),
+            TestContext::tty(StreamKind::Stdout, 80)
+                .color(ColorMode::Auto)
+                .auto_color(false),
+        ];
+        for test_context in contexts {
+            let stdout = SharedWriter::default();
+            let capture = stdout.clone();
+            let mut ui = Ui::with_writers(
+                stdout,
+                RenderContext::for_test(test_context),
+                Vec::new(),
+                RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+            );
+            let mut output = ui.stdout_live_output();
+            output
+                .write_frame(&document(&["long first row", "stale second row"]), false)
+                .unwrap();
+            output
+                .write_frame(&document(&["short replacement"]), false)
+                .unwrap();
+            output.write_frame(&document(&["done"]), true).unwrap();
+
+            let rendered = capture.text();
+            assert_eq!(
+                rendered,
+                concat!(
+                    "long first row\nstale second row\n",
+                    "\x1b[2A\r\x1b[2Kshort replacement\n\r\x1b[2K\n\x1b[1A",
+                    "\x1b[1A\r\x1b[2Kdone\n",
+                )
+            );
+            assert!(
+                !rendered.contains("\x1b[1m"),
+                "styling must remain disabled"
+            );
+        }
     }
 
     #[test]

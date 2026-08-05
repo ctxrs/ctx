@@ -88,10 +88,10 @@ impl RefreshProgressSnapshot {
         };
         match current.stage {
             SourceBackedCurrentSourceProgressStage::SourceFamilyCopy
-            | SourceBackedCurrentSourceProgressStage::OnlineBackup => (
-                current.snapshot_bytes_completed.unwrap_or_default(),
-                current.snapshot_bytes_total.unwrap_or_default(),
-            ),
+            | SourceBackedCurrentSourceProgressStage::OnlineBackup => current
+                .snapshot_bytes_completed
+                .zip(current.snapshot_bytes_total)
+                .unwrap_or((0, 0)),
             SourceBackedCurrentSourceProgressStage::LogicalFingerprint
             | SourceBackedCurrentSourceProgressStage::LogicalScan => (0, 0),
         }
@@ -388,6 +388,25 @@ mod tests {
         assert!(refresh_progress(&context, &unknown)
             .render_plain()
             .contains("measuring"));
+    }
+
+    #[test]
+    fn byte_progress_requires_one_complete_engine_snapshot_pair() {
+        let mut status = active_status("attached", "copying", true, 2);
+        status["progress"]["current_source_progress"] = json!({
+            "stage": "source_family_copy",
+            "snapshot_bytes_completed": 256,
+            "snapshot_bytes_total": 512,
+        });
+        let paired = RefreshProgressSnapshot::from_schema_v1(&status).unwrap();
+        assert_eq!(paired.byte_progress(), (256, 512));
+
+        status["progress"]["current_source_progress"]
+            .as_object_mut()
+            .unwrap()
+            .remove("snapshot_bytes_total");
+        let partial = RefreshProgressSnapshot::from_schema_v1(&status).unwrap();
+        assert_eq!(partial.byte_progress(), (0, 0));
     }
 
     #[test]

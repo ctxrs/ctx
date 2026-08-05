@@ -715,7 +715,7 @@ fn wait_for_published_generation_inner(
                 let publication_receipt = published_refresh_receipt(&response, &pin)?;
                 validate_status_publication_authority(&publication_receipt, &pin)?;
                 let receipt = published_request_outcome(&response, &pin)?;
-                let source_count = published_source_count(&response)?;
+                let source_count = published_source_count(&response, &publication_receipt)?;
                 if let Some(expected_catalog) = expected_catalog {
                     if !explicit_catalog_request_is_accounted_for(
                         expected_catalog,
@@ -1055,24 +1055,21 @@ fn response_source_count(response: &Value) -> usize {
         .unwrap_or(0)
 }
 
-fn published_source_count(response: &Value) -> Result<usize> {
-    let scanned_routes = response
+fn published_source_count(
+    response: &Value,
+    publication_receipt: &SourceBackedRefreshReceipt,
+) -> Result<usize> {
+    let _scanned_routes = response
         .get("scanned_routes")
         .and_then(Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| anyhow!("published daemon source refresh has no scanned route count"))?;
-    let unsupported_routes = response
+    let _unsupported_routes = response
         .get("unsupported_routes")
         .and_then(Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| anyhow!("published daemon source refresh has no unsupported route count"))?;
-    scanned_routes
-        .checked_sub(unsupported_routes)
-        .ok_or_else(|| {
-            anyhow!(
-                "published daemon source refresh unsupported route count exceeds scanned routes"
-            )
-        })
+    Ok(publication_receipt.current.source_count)
 }
 
 #[cfg(test)]
@@ -1109,6 +1106,42 @@ mod progress_poll_tests {
                 "detail": "typed mixed route outcome",
             },
         })
+    }
+
+    #[test]
+    fn published_source_count_uses_receipt_current_and_keeps_route_diagnostics_disjoint() {
+        for (name, scanned_routes, unsupported_routes, receipt_routes, published_sources) in [
+            ("unsupported only", 0, 1, 0, 0),
+            ("mixed executable and unsupported", 1, 1, 1, 1),
+            ("inherited and covered diagnostics", 0, 3, 1, 1),
+        ] {
+            let route_results = (0..receipt_routes)
+                .map(|index| {
+                    SourceBackedRefreshRouteResult::succeeded(format!("{index:064x}"), false)
+                })
+                .collect::<Vec<_>>();
+            let receipt = SourceBackedRefreshReceipt {
+                previous_generation: None,
+                published_generation: "published-generation".to_owned(),
+                generation_changed: true,
+                published_explicit_source_catalog: None,
+                current: SourceBackedRefreshCurrent {
+                    source_count: published_sources,
+                    ..SourceBackedRefreshCurrent::default()
+                },
+                route_results,
+                catalog_route_bindings: Vec::new(),
+            };
+            let response = json!({
+                "scanned_routes": scanned_routes,
+                "unsupported_routes": unsupported_routes,
+            });
+            assert_eq!(
+                published_source_count(&response, &receipt).unwrap(),
+                published_sources,
+                "{name}"
+            );
+        }
     }
 
     #[test]
