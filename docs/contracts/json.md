@@ -1028,10 +1028,8 @@ does not create a `partial` attribution state. Producer conflict is useful
 successful output with `attribution: "conflicting"`; target, repository, and
 commit-rewrite ambiguity remain failures.
 
-When the integrated host API can compare the served Pro generation with active
-Core, CLI JSON and MCP `structuredContent` both include the same top-level
-`freshness` object. It has `state` (`current` or `stale_committed`), optional
-`served_generation` and `active_generation`, and `catch_up_active`. Human output
+CLI JSON and MCP `structuredContent` both include the same top-level
+`freshness` object with `state` (`current` or `stale_committed`). Human output
 hides routine `current` freshness and warns for `stale_committed`. A stale
 positive result may succeed, but a stale `none` would be inconclusive and is a
 typed failure instead.

@@ -38,9 +38,9 @@ use support::{helper_executable, helper_path};
 
 #[path = "client_errors.rs"]
 mod errors;
-use errors::protocol_error;
 pub(super) use errors::typed_blame_diagnostic;
 pub(crate) use errors::{blame_diagnostic, stable_error_code, RESOURCE_NOT_FOUND_DIAGNOSTIC};
+use errors::{protocol_blame_error, protocol_error};
 
 #[path = "client_output.rs"]
 mod core_materialization;

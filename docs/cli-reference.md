@@ -546,8 +546,8 @@ relationships and never trigger a total-result scan or a `partial` state. A page
 never clips evidence for a returned match. Continuation cursors are opaque and
 bound to the request and graph state.
 
-When integrated freshness is available, JSON and MCP always include it. Human
-output hides routine currentness and warns when the result uses stale committed
+JSON and MCP always include freshness. Human output hides routine currentness
+and warns when the result uses stale committed
 history. A stale positive attribution may succeed; a stale no-attribution result
 fails because the miss would not be definitive.
 

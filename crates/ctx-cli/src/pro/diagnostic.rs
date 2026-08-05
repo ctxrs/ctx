@@ -2,7 +2,7 @@ use std::{error::Error, fmt};
 
 use ctx_pro_host_protocol::{
     BlameDiagnosticCandidate as ProtocolCandidate, BlameDiagnosticReason as ProtocolReason,
-    ErrorClass, ProtocolError,
+    BlameTarget, ErrorClass, ProtocolError,
 };
 use serde::Serialize;
 
@@ -161,6 +161,30 @@ impl BlameDiagnostic {
             legacy_retryable(code),
             ProtocolDiagnosticDetails::default(),
         ))
+    }
+
+    pub(crate) fn with_core_search_for(mut self, target: &BlameTarget) -> Self {
+        if matches!(
+            self.reason,
+            BlameDiagnosticReason::TargetNotIndexed | BlameDiagnosticReason::OperationNotCovered
+        ) {
+            let term = match target {
+                BlameTarget::File { path, .. } => path,
+                BlameTarget::Commit { oid, .. } => oid,
+                BlameTarget::PullRequest { selector, .. } => selector,
+            };
+            self.next_action = Some(BlameNextAction {
+                kind: BlameNextActionKind::SearchCore,
+                argv: vec![
+                    "ctx".to_owned(),
+                    "search".to_owned(),
+                    term.clone(),
+                    "--refresh".to_owned(),
+                    "off".to_owned(),
+                ],
+            });
+        }
+        self
     }
 
     fn from_mapping(

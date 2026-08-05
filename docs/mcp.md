@@ -176,8 +176,8 @@ is a successful tool result, while target, repository, and commit-rewrite
 ambiguities are failures. The text fallback leads with the same outcome and page
 coverage.
 
-When the integrated host can establish freshness, MCP and CLI JSON include the
-same `freshness` object. Routine `current` freshness stays out of human CLI
+MCP and CLI JSON include the same `freshness` object. Routine `current`
+freshness stays out of human CLI
 output; `stale_committed` is warned. A stale miss fails rather than claiming
 `none`.
 

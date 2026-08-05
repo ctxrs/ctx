@@ -1,4 +1,4 @@
-use ctx_pro_host_protocol::ProtocolError;
+use ctx_pro_host_protocol::{BlameTarget, ProtocolError};
 
 #[cfg(test)]
 use ctx_pro_host_protocol::ErrorClass;
@@ -8,6 +8,10 @@ pub(crate) use super::super::diagnostic::RESOURCE_NOT_FOUND_DIAGNOSTIC;
 
 pub(super) fn protocol_error(error: ProtocolError) -> anyhow::Error {
     anyhow::Error::new(BlameDiagnostic::from_protocol_error(error))
+}
+
+pub(super) fn protocol_blame_error(error: ProtocolError, target: &BlameTarget) -> anyhow::Error {
+    anyhow::Error::new(BlameDiagnostic::from_protocol_error(error).with_core_search_for(target))
 }
 
 pub(crate) fn blame_diagnostic(error: &anyhow::Error) -> Option<BlameDiagnostic> {

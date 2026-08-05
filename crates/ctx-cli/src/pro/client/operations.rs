@@ -43,23 +43,29 @@ pub(super) fn blame_with_policy(
     if let Some(expected_generation) = expected_active_generation {
         ensure_active_core_generation_is_unchanged(&expected_generation, &active_after)?;
     }
+    let freshness = classify_blame_freshness(&result, &active_before, &active_after)?;
+    Ok(HostedBlameResult { result, freshness })
+}
+
+pub(super) fn classify_blame_freshness(
+    result: &BlameResult,
+    active_before: &str,
+    active_after: &str,
+) -> Result<BlameResultFreshness> {
     let served_generation = match &result.snapshot {
         QuerySnapshotExpectation::Core { receipt } => &receipt.core_generation_id,
     };
-    let freshness = if served_generation == &active_before && served_generation == &active_after {
-        BlameResultFreshness::Current
-    } else {
-        BlameResultFreshness::StaleCommitted
-    };
-    if freshness == BlameResultFreshness::StaleCommitted
-        && (result.outcome.attribution == ctx_pro_host_protocol::BlameAttribution::None
-            || result.outcome.coverage.none > 0)
+    if served_generation == active_before && served_generation == active_after {
+        return Ok(BlameResultFreshness::Current);
+    }
+    if result.outcome.attribution == ctx_pro_host_protocol::BlameAttribution::None
+        || result.outcome.coverage.none > 0
     {
         bail!(
             "stale_source: the committed Pro generation cannot prove an absent producer while Core is newer"
         );
     }
-    Ok(HostedBlameResult { result, freshness })
+    Ok(BlameResultFreshness::StaleCommitted)
 }
 
 pub(super) fn ensure_active_core_generation_is_unchanged(
@@ -107,7 +113,9 @@ pub(super) fn blame_once(
             validate_blame_response(&request_context, &result)?;
             result
         }
-        HelperMessage::Error(error) => return Err(protocol_error(error)),
+        HelperMessage::Error(error) => {
+            return Err(protocol_blame_error(error, &request_context.target));
+        }
         _ => bail!("invalid_response: helper returned a non-blame response"),
     };
     let status_after = helper_status(&mut client)?;
