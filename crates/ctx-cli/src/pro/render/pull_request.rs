@@ -63,6 +63,18 @@ fn render_commit(document: &mut Document, context: &RenderContext, value: &PullR
     };
     push_heading(document, 2, &enum_heading(commit.relationship));
     push_resource_primary(document, context, 4, &commit.commit);
+    if let Some(time) = commit.fact_occurred_at_ms {
+        push_field(
+            document,
+            context,
+            6,
+            "Observed",
+            METADATA_LABEL_WIDTH,
+            &timestamp_text(time),
+            Token::Text,
+            true,
+        );
+    }
     push_references(
         document,
         context,
@@ -109,7 +121,7 @@ fn render_activity(
             document,
             context,
             6,
-            "occurred",
+            "Observed",
             METADATA_LABEL_WIDTH,
             &time,
             Token::Text,

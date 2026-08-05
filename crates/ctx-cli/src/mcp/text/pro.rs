@@ -1,3 +1,4 @@
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::Value;
 
 pub(super) fn is_blame_result(value: &Value) -> bool {
@@ -11,6 +12,23 @@ pub(super) fn is_blame_result(value: &Value) -> bool {
 
 pub(super) fn render_blame_text(value: &Value) -> String {
     let mut out = String::from("ctx blame\n");
+    if let Some(snapshot) = value.get("snapshot") {
+        push_scalar(&mut out, "snapshot.kind", snapshot.get("kind"), "");
+        if let Some(receipt) = snapshot.get("receipt") {
+            push_scalar(
+                &mut out,
+                "snapshot.receipt.core_generation_id",
+                receipt.get("core_generation_id"),
+                "",
+            );
+            push_scalar(
+                &mut out,
+                "snapshot.receipt.materializer_revision",
+                receipt.get("materializer_revision"),
+                "",
+            );
+        }
+    }
     if let Some(target) = value.get("target") {
         push_scalar(&mut out, "target.kind", target.get("kind"), "");
         match target.get("kind").and_then(Value::as_str) {
@@ -66,6 +84,10 @@ pub(super) fn render_blame_text(value: &Value) -> String {
         render_evidence(&mut out, item);
     }
 
+    if let Some(context) = value.get("evidence_context") {
+        render_evidence_context(&mut out, context);
+    }
+
     if let Some(next) = value.get("next") {
         push_scalar(&mut out, "next.reason", next.get("reason"), "");
         push_scalar(&mut out, "next.cursor", next.get("cursor"), "");
@@ -105,14 +127,16 @@ fn render_file_match(out: &mut String, value: &Value) {
 }
 
 fn render_commit_match(out: &mut String, value: &Value) {
-    for field in [
-        "fact_id",
-        "fact_type",
-        "predicate",
-        "fact_occurred_at_ms",
-        "confidence",
-        "state",
-    ] {
+    for field in ["fact_id", "fact_type", "predicate"] {
+        push_scalar(out, field, value.get(field), "  ");
+    }
+    push_timestamp_ms(
+        out,
+        "fact_observed_at",
+        value.get("fact_occurred_at_ms"),
+        "  ",
+    );
+    for field in ["confidence", "state"] {
         push_scalar(out, field, value.get(field), "  ");
     }
     push_resource(out, "subject", value.get("subject"), "  ");
@@ -132,13 +156,16 @@ fn render_pull_request_match(out: &mut String, value: &Value) {
     let body = relationship.get("value").unwrap_or(relationship);
     match relationship.get("kind").and_then(Value::as_str) {
         Some("activity") => {
-            for field in [
-                "fact_id",
-                "action",
-                "fact_occurred_at_ms",
-                "confidence",
-                "state",
-            ] {
+            for field in ["fact_id", "action"] {
+                push_scalar(out, field, body.get(field), "  ");
+            }
+            push_timestamp_ms(
+                out,
+                "fact_observed_at",
+                body.get("fact_occurred_at_ms"),
+                "  ",
+            );
+            for field in ["confidence", "state"] {
                 push_scalar(out, field, body.get(field), "  ");
             }
             push_resource(out, "session", body.get("session"), "  ");
@@ -150,6 +177,12 @@ fn render_pull_request_match(out: &mut String, value: &Value) {
             push_scalar(out, "fact_id", body.get("fact_id"), "  ");
             push_scalar(out, "relationship", body.get("relationship"), "  ");
             push_resource(out, "commit", body.get("commit"), "  ");
+            push_timestamp_ms(
+                out,
+                "fact_observed_at",
+                body.get("fact_occurred_at_ms"),
+                "  ",
+            );
             push_number_list(out, "evidence_numbers", body.get("evidence_numbers"), "  ");
             for (index, attribution) in array(body, "production").iter().enumerate() {
                 out.push_str(&format!("  production {}\n", index + 1));
@@ -172,6 +205,12 @@ fn render_attribution(out: &mut String, value: &Value, indent: &str) {
     push_resource(out, "parent_session", value.get("parent_session"), indent);
     push_resource(out, "direct_actor", value.get("direct_actor"), indent);
     push_resource(out, "owning_root", value.get("owning_root"), indent);
+    push_timestamp_ms(
+        out,
+        "fact_observed_at",
+        value.get("fact_occurred_at_ms"),
+        indent,
+    );
     push_scalar(out, "confidence", value.get("confidence"), indent);
     push_scalar(out, "state", value.get("state"), indent);
     push_number_list(
@@ -193,17 +232,12 @@ fn render_evidence(out: &mut String, value: &Value) {
         return;
     };
     for field in [
-        "observation_id",
-        "observation_seq",
-        "observation_kind",
+        "core_generation_id",
+        "source",
         "session_id",
         "event_id",
-        "event_seq",
-        "source_path",
-        "fixture_line",
-        "source_record_ordinal",
-        "source_record_subrecord_index",
-        "source_sha256",
+        "event_sequence",
+        "evidence_sha256",
     ] {
         push_scalar(out, field, citation.get(field), "  ");
     }
@@ -215,6 +249,27 @@ fn render_evidence(out: &mut String, value: &Value) {
             range.get("end_exclusive"),
             "  ",
         );
+    }
+}
+
+fn render_evidence_context(out: &mut String, value: &Value) {
+    out.push_str("\nevidence_context\n");
+    push_scalar(out, "status", value.get("status"), "  ");
+    let items = array(value, "items");
+    out.push_str(&format!("  items: {}\n", items.len()));
+    for (index, item) in items.iter().enumerate() {
+        out.push_str(&format!("  item {}\n", index + 1));
+        push_number_list(
+            out,
+            "citation_numbers",
+            item.get("citation_numbers"),
+            "    ",
+        );
+        for field in ["operation", "path", "prior_path", "tool_name"] {
+            push_scalar(out, field, item.get(field), "    ");
+        }
+        push_timestamp_ms(out, "event_time", item.get("event_occurred_at_ms"), "    ");
+        push_scalar(out, "excerpt", item.get("excerpt"), "    ");
     }
 }
 
@@ -255,6 +310,19 @@ fn push_scalar(out: &mut String, label: &str, value: Option<&Value>, indent: &st
     out.push_str(&format!("{indent}{label}: {rendered}\n"));
 }
 
+fn push_timestamp_ms(out: &mut String, label: &str, value: Option<&Value>, indent: &str) {
+    let Some(unix_ms) = value.and_then(Value::as_i64) else {
+        return;
+    };
+    let Some(timestamp) = DateTime::<Utc>::from_timestamp_millis(unix_ms) else {
+        return;
+    };
+    out.push_str(&format!(
+        "{indent}{label}: {}\n",
+        timestamp.to_rfc3339_opts(SecondsFormat::Millis, true)
+    ));
+}
+
 fn escape_controls(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -287,6 +355,13 @@ mod tests {
     #[test]
     fn fallback_contains_every_match_and_evidence_without_payload_labels() {
         let value = json!({
+            "snapshot": {
+                "kind": "core",
+                "receipt": {
+                    "core_generation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "materializer_revision": "materializer-v1"
+                }
+            },
             "target": {
                 "kind": "commit",
                 "commit": {"id": "commit:abc", "kind": "commit", "display": "abc"},
@@ -301,7 +376,7 @@ mod tests {
                     "predicate": "produced_by",
                     "subject": {"id": "commit:abc", "kind": "commit", "display": "abc"},
                     "object": {"id": "session:full", "kind": "session", "display": "session:full"},
-                    "fact_occurred_at_ms": null,
+                    "fact_occurred_at_ms": 1721000000123_i64,
                     "confidence": "explicit",
                     "state": "asserted",
                     "direct_actor": null,
@@ -311,14 +386,40 @@ mod tests {
             }],
             "evidence": [{
                 "number": 1,
-                "citation": {"event_id": "33333333-3333-4333-8333-333333333333"}
+                "citation": {
+                    "core_generation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "source": {"provider": "codex", "source_format": "codex_jsonl"},
+                    "session_id": "22222222-2222-4222-8222-222222222222",
+                    "event_id": "33333333-3333-4333-8333-333333333333",
+                    "event_sequence": 7,
+                    "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
             }],
+            "evidence_context": {
+                "status": "available",
+                "items": [{
+                    "citation_numbers": [1],
+                    "operation": "modify",
+                    "path": "src/lib.rs",
+                    "tool_name": "apply_patch",
+                    "event_occurred_at_ms": 1721000000123_i64,
+                    "excerpt": "update src/lib.rs"
+                }]
+            },
             "next": null
         });
         let rendered = render_blame_text(&value);
         assert!(rendered.contains("matches: 1"));
+        assert!(rendered.contains("snapshot.receipt.core_generation_id: aaaaa"));
         assert!(rendered.contains("object.display: session:full"));
         assert!(rendered.contains("event_id: 33333333-3333-4333-8333-333333333333"));
+        assert!(rendered.contains("event_sequence: 7"));
+        assert!(rendered.contains("evidence_context"));
+        assert!(rendered.contains("path: src/lib.rs"));
+        assert!(rendered.contains("fact_observed_at: 2024-"));
+        assert!(rendered.contains("event_time: 2024-"));
+        assert!(!rendered.contains("1721000000123"));
+        assert!(!rendered.contains("event_seq:"));
         assert!(!rendered.contains("payload_type"));
         assert!(!rendered.contains("omitted"));
     }

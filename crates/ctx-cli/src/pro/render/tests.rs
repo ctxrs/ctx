@@ -160,6 +160,7 @@ fn preview(
         prior_path: matches!(operation, RepositoryFileInvocationKind::Rename)
             .then(|| "src/old.rs".to_owned()),
         tool_name: "test_tool".to_owned(),
+        event_occurred_at_ms: Some(1_721_000_000_000),
         excerpt: excerpt.into(),
     }
 }
@@ -180,11 +181,17 @@ fn strip_ansi(rendered: &str) -> String {
 
 fn single_preview_excerpt_fragments(rendered: &str) -> Vec<&str> {
     let lines = rendered.lines().collect::<Vec<_>>();
-    let heading = lines
+    let event_time = lines
         .iter()
-        .position(|line| line.contains("file request"))
+        .position(|line| line.trim_start().starts_with("Event time"))
         .unwrap();
-    lines[heading + 1..]
+    let excerpt_start = event_time
+        + if lines[event_time].trim() == "Event time" {
+            2
+        } else {
+            1
+        };
+    lines[excerpt_start..]
         .iter()
         .map(|line| line.strip_prefix("    ").unwrap())
         .collect()
@@ -262,6 +269,7 @@ fn attribution(
         parent_session: None,
         direct_actor: None,
         owning_root: None,
+        fact_occurred_at_ms: None,
         confidence: if ambiguous {
             FactConfidence::Ambiguous
         } else {
@@ -425,6 +433,7 @@ fn pull_request_renderer_preserves_proof_edges_and_continuation_golden() {
                     fact_id: "fact:membership".to_owned(),
                     relationship: PullRequestCommitRelationship::ContainsCommit,
                     commit: resource("commit:deadbeef", ResourceKind::Commit, "deadbeef"),
+                    fact_occurred_at_ms: Some(1_721_000_000_500),
                     production: vec![
                         producer,
                         attribution(
@@ -484,6 +493,7 @@ fn paginated_pr_result(commit_page: bool) -> BlameResult {
             fact_id: "fact:membership".to_owned(),
             relationship: PullRequestCommitRelationship::ContainsCommit,
             commit: resource("commit:deadbeef", ResourceKind::Commit, "deadbeef"),
+            fact_occurred_at_ms: None,
             production: Vec::new(),
             evidence_numbers: vec![1],
         })
@@ -907,6 +917,8 @@ fn default_file_context_follows_its_numbered_evidence() {
         "{rendered}"
     );
     assert!(rendered.contains("  [1] Modify file request via test_tool\n"));
+    assert!(rendered.contains("Path        src/lib.rs"), "{rendered}");
+    assert!(rendered.contains("Event time  2024-"), "{rendered}");
 }
 
 #[test]
@@ -981,10 +993,40 @@ fn multiline_rename_excerpt_preserves_indented_logical_lines() {
         "{file}"
     );
     assert!(
+        file.contains("Path        src/old.rs → src/lib.rs"),
+        "{file}"
+    );
+    assert!(
         file.contains("    *** Update File: src/old.rs\n    *** Move to: src/lib.rs\n"),
         "{file}"
     );
     assert!(!file.contains("old.rs\\n***"), "{file}");
+}
+
+#[test]
+fn missing_preview_time_is_quiet_and_typed_values_use_global_sanitization() {
+    let result = file_preview_result(1);
+    let mut item = preview(
+        &result,
+        vec![1],
+        RepositoryFileInvocationKind::Modify,
+        "history\u{202e}\u{1b}",
+    );
+    item.event_occurred_at_ms = None;
+    item.path = "src/\u{202e}lib.rs\u{1b}".to_owned();
+    item.tool_name = "edit\u{202e}\u{1b}".to_owned();
+    let rendered = render_preview_plain(
+        &result,
+        &EvidencePreviewModel {
+            previews: vec![item],
+        },
+        120,
+    );
+
+    assert!(!rendered.contains("Event time"), "{rendered}");
+    assert!(rendered.contains("src/\u{202e}lib.rs\\x1b"), "{rendered}");
+    assert!(rendered.contains("edit\u{202e}\\x1b"), "{rendered}");
+    assert!(rendered.contains("history\\u{202e}\\x1b"), "{rendered}");
 }
 
 #[test]
@@ -1190,7 +1232,7 @@ fn absent_context_preserves_base_bytes_for_every_target_and_supported_width() {
 #[test]
 fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_truncation() {
     let result = file_preview_result(5);
-    let exact = "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES);
+    let exact = "X".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES);
     let mut previews = vec![preview(
         &result,
         vec![1, 2],
@@ -1223,7 +1265,7 @@ fn preview_cap_duplicate_grouping_and_aggregate_budget_are_enforced_without_trun
         "{plain}"
     );
     assert_eq!(
-        plain.chars().filter(|character| *character == 'Z').count(),
+        plain.chars().filter(|character| *character == 'X').count(),
         3 * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
         "one or more exact 512-byte excerpts were truncated"
     );
@@ -1282,7 +1324,7 @@ fn shared_admission_keeps_complete_items_identical_across_human_widths() {
                     &result,
                     vec![number],
                     RepositoryFileInvocationKind::Modify,
-                    "Z".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
+                    "X".repeat(MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES),
                 )
             })
             .collect(),
@@ -1310,7 +1352,7 @@ fn shared_admission_keeps_complete_items_identical_across_human_widths() {
                 .count();
             assert_eq!(admitted, shared_item_count, "{width}/{color:?}: {stripped}");
             assert_eq!(
-                stripped.matches('Z').count(),
+                stripped.matches('X').count(),
                 admitted * MAX_EVIDENCE_PREVIEW_EXCERPT_BYTES,
                 "partial excerpt at {width}/{color:?}: {stripped}"
             );

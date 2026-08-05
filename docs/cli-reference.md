@@ -504,6 +504,9 @@ File blame automatically attempts one bounded read of up to the first three
 exact cited Core records. Human output adds an
 `Evidence context (local history content)` section only when at least one
 record verifies and projects safely; otherwise the entire section is omitted.
+Each rendered item keeps the typed path separate from its exact excerpt, shows
+`old → new` for a rename, and shows `Event time` only when the authenticated
+Core event carries an exact timestamp.
 JSON and MCP always include the same status-bearing
 `evidence_context` object described in the JSON contract. Missing, stale,
 unsupported, oversized, or ambiguous evidence does not change attribution,
@@ -540,6 +543,12 @@ Commit output groups assertions as `Produced by`, `Possible producers`, and
 PR activity is separate from code production. A PR-to-commit relationship is
 shown only when structured forge evidence binds the canonical PR identity and
 exact Git object ID; otherwise output says `associated commits not proven`.
+When a returned relationship or production attribution carries an exact
+supporting-fact timestamp, human output labels it `Observed` and renders RFC
+3339 UTC milliseconds. This is history/provenance fact time, not Git author or
+committer time, PR creation or merge time, materialization time, or proof of
+completion. Missing fact times remain quiet, and timestamps never change the
+existing semantic ordering, cursors, or pagination.
 
 Stable Pro failure codes include `pro_not_installed`, `commercial_unavailable`,
 `entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,

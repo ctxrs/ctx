@@ -222,12 +222,21 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "AgentAttribution": fields(&[
                 "id", "relationship", "producing_session", "parent_session",
-                "direct_actor", "owning_root", "confidence", "state", "evidence_numbers"
+                "direct_actor", "owning_root", "fact_occurred_at_ms", "confidence", "state",
+                "evidence_numbers"
             ], &[]),
             "CommitBlameMatch": fields(&[
                 "fact_id", "fact_type", "predicate", "subject", "object",
                 "parent_session", "fact_occurred_at_ms", "confidence", "state",
                 "direct_actor", "owning_root", "evidence_numbers"
+            ], &[]),
+            "PullRequestActivity": fields(&[
+                "fact_id", "action", "session", "direct_actor", "owning_root",
+                "fact_occurred_at_ms", "confidence", "state", "evidence_numbers"
+            ], &[]),
+            "PullRequestCommit": fields(&[
+                "fact_id", "relationship", "commit", "fact_occurred_at_ms", "production",
+                "evidence_numbers"
             ], &[]),
             "CoreRecord": fields(&[
                 "record_version", "event_id", "session_id", "parent_session_id",

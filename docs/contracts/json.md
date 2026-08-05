@@ -1007,6 +1007,7 @@ explicit `ctx blame file|commit|pr --format json` compatibility forms, and MCP
 fields at top level plus `evidence_context`. There is no enclosing payload
 wrapper, prose summary, or suggested claims:
 
+- `snapshot`, the exact Core materialization receipt used by the helper query;
 - `target`, a resolved tagged `file`, `commit`, or `pull_request` target;
 - `git_snapshot`, required for file results and null for commit/PR results;
 - `matches`, typed `file`, `commit`, or `pull_request` matches corresponding to
@@ -1030,6 +1031,7 @@ changing the private helper `BlameResult` or protocol version:
         "operation": "modify",
         "path": "src/lib.rs",
         "tool_name": "apply_patch",
+        "event_occurred_at_ms": 1721000000123,
         "excerpt": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old_value\n+new_value\n*** End Patch"
       }
     ]
@@ -1044,7 +1046,12 @@ empty for `unavailable` and `not_applicable`. File blame reads at most the first
 three exact cited Core records under the fixed evidence and 4 KiB admission
 budgets. Each item describes provider-neutral requested file-operation intent,
 its target (and prior path for a rename), the provider-native tool name, and an
-exact excerpt; it does not independently assert a successful filesystem effect.
+exact excerpt. `event_occurred_at_ms`, when present, is the exact timestamp
+carried by that authenticated supporting Core event. It is not Git author or
+committer time, PR creation or merge time, materialization time, or proof that
+the requested operation completed. Grouped replay evidence omits the timestamp
+unless every grouped event carries the same exact value. The item does not
+independently assert a successful filesystem effect.
 Hydration failure never changes attribution, the helper result, exit
 status, or the evidence table. Commit and PR blame perform no Core evidence
 read. Human output renders the same admitted item list under
@@ -1060,9 +1067,25 @@ the query process never performs foreground materialization.
 File matches contain an inclusive committed line range, commit reference,
 line-level evidence numbers, and zero or more typed production attributions.
 Commit matches use a closed fact type and predicate vocabulary and preserve
-confidence and state. Human rendering groups them as `Produced by`,
+confidence and state. Production attributions and PR commit-membership
+relationships include nullable `fact_occurred_at_ms` alongside the existing
+commit and PR-activity field. A present value is the exact millisecond
+timestamp carried by that supporting provenance fact; absence remains JSON
+`null` on helper-protocol DTOs and is not replaced with a guess. It is not Git
+author or committer time, PR creation or merge time, materialization time, or
+proof of completion. Fact occurrence never changes relationship ordering,
+ranking, cursors, or page boundaries. Human and MCP text render present values
+as RFC 3339 UTC with milliseconds under the semantic label `Observed` and omit
+the line when no exact value exists.
+
+Human rendering groups commit matches as `Produced by`,
 `Possible producers`, and `Also recorded`, so inspection and reference facts
 cannot be mistaken for production.
+
+MCP `structuredContent` is byte-for-byte the same JSON value as CLI JSON. Its
+bounded text fallback includes the Core snapshot, current citation field names,
+the admitted `evidence_context`, and ISO UTC timestamps; it never substitutes
+raw epoch milliseconds. Generic `query_events` text remains page metadata only.
 
 PR matches contain exactly one activity or commit-membership relationship.
 Activity actions are typed and remain separate from production. A PR commit

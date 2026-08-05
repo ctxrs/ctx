@@ -750,6 +750,7 @@ fn automatic_evidence_context_bytes_are_included_in_local_usage_accounting() {
             path: "src/lib.rs".to_owned(),
             prior_path: None,
             tool_name: "test_tool".to_owned(),
+            event_occurred_at_ms: Some(1_721_000_000_000),
             excerpt: "modified: src/lib.rs".to_owned(),
         }],
     };

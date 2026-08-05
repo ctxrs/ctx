@@ -132,7 +132,7 @@ fn render_match(
             document,
             context,
             metadata_indent,
-            "occurred",
+            "Observed",
             METADATA_LABEL_WIDTH,
             &time,
             Token::Text,
