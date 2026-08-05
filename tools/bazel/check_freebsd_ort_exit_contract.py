@@ -13,8 +13,6 @@ import tomllib
 ORT_COMMIT = "f7994dc91b8f48c78afc506880b3f9f558957919"
 ORT_PATCH = "//tools/bazel/patches:ort-freebsd-release-env-order.patch"
 ORT_PATCH_SHA256 = "effab3c783745774ee1079e1fe37f6850042be2477cf26f17f76de6f26b3f73e"
-ORT_ENVIRONMENT_BEFORE = "988dba4a3c2b55a16abc6ea6beb1e038bca36c4dbe9578995b950cf739bf8968"
-ORT_ENVIRONMENT_SHA256 = "e82c55aefbf390569b2d3664278a458ab4be9b27ec80c209ecda8db4d639cb0c"
 ORT_VERSION = "2.0.0-rc.12"
 
 
@@ -95,56 +93,11 @@ def validate_patch_bytes(patch_bytes: bytes) -> None:
             raise ContractError(f"ORT FreeBSD patch is missing {line!r}")
 
 
-def validate_release_script(script_text: str) -> None:
-    required = (
-        'mktemp -d "${TMPDIR:-/tmp}/ctx-freebsd-release-cargo.XXXXXX"',
-        'export CARGO_HOME="${freebsd_release_cargo_home}"',
-        'export PATH="${CARGO_HOME}/bin:${PATH}"',
-        "CARGO_NET_OFFLINE=false release_cargo fetch --locked --target",
-        "export CARGO_NET_OFFLINE=true",
-        "scripts/prepare-freebsd-ort-release-source.sh",
-        "tools/bazel/patches/ort-freebsd-release-env-order.patch",
-    )
-    for token in required:
-        if token not in script_text:
-            raise ContractError(
-                f"FreeBSD release builder is missing required token {token!r}"
-            )
-    if script_text.count("prepare_freebsd_ort_release_source") != 3:
-        raise ContractError(
-            "FreeBSD release builder must define one preparation function and "
-            "invoke it in both native and cross build routes"
-        )
-    if script_text.count("scripts/prepare-freebsd-ort-release-source.sh") != 3:
-        raise ContractError(
-            "FreeBSD release builder must verify the patched checkout before "
-            "both builds and again after each build"
-        )
-
-
-def validate_prepare_script(script_text: str) -> None:
-    required = (
-        f'ORT_COMMIT="{ORT_COMMIT}"',
-        f'ORT_ENVIRONMENT_BEFORE="{ORT_ENVIRONMENT_BEFORE}"',
-        f'ORT_ENVIRONMENT_AFTER="{ORT_ENVIRONMENT_SHA256}"',
-        'git -C "${ort_checkout}" apply --unidiff-zero --check "${patch_file}"',
-        'git -C "${ort_checkout}" apply --unidiff-zero "${patch_file}"',
-        'changed="$(git -C "${ort_checkout}" diff --name-only)"',
-        '[ "${changed}" = "src/environment.rs" ]',
-    )
-    for token in required:
-        if token not in script_text:
-            raise ContractError(
-                f"FreeBSD ORT source preparation is missing required token {token!r}"
-            )
-
-
 def main() -> int:
-    if len(sys.argv) != 6:
+    if len(sys.argv) != 4:
         print(
             "usage: check_freebsd_ort_exit_contract.py "
-            "MODULE.bazel Cargo.toml ort-freebsd-release-env-order.patch "
-            "build-public-cli-artifact.sh prepare-freebsd-ort-release-source.sh",
+            "MODULE.bazel Cargo.toml ort-freebsd-release-env-order.patch",
             file=sys.stderr,
         )
         return 2
@@ -152,14 +105,12 @@ def main() -> int:
         validate_module_text(Path(sys.argv[1]).read_text(encoding="utf-8"))
         validate_cargo_text(Path(sys.argv[2]).read_text(encoding="utf-8"))
         validate_patch_bytes(Path(sys.argv[3]).read_bytes())
-        validate_release_script(Path(sys.argv[4]).read_text(encoding="utf-8"))
-        validate_prepare_script(Path(sys.argv[5]).read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError, ContractError) as error:
         print(f"FreeBSD ORT exit contract failed: {error}", file=sys.stderr)
         return 1
     print(
         "FreeBSD ORT exit contract: OK "
-        f"({ORT_COMMIT}, {ORT_PATCH_SHA256}, {ORT_ENVIRONMENT_SHA256})"
+        f"({ORT_COMMIT}, {ORT_PATCH_SHA256})"
     )
     return 0
 

@@ -1,7 +1,0 @@
-name	host_system	host_arch	exit_status	strategy
-native-amd64	FreeBSD	amd64	0	native-freebsd
-native-x86-64	FreeBSD	x86_64	0	native-freebsd
-linux-x86-64-cross	Linux	x86_64	0	linux-cross
-linux-arm64-cross	Linux	aarch64	0	linux-cross
-wrong-native-arch	FreeBSD	aarch64	1	-
-unsupported-darwin	Darwin	x86_64	1	-

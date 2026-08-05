@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: build-linux-bazel-release.sh --platform <linux-x64|linux-arm64> --source-commit SHA --output-dir PATH [--private-symbols-dir PATH]
+Usage: build-linux-bazel-release.sh --platform <linux-x64|linux-arm64> --source-commit SHA --output-dir PATH [--private-symbols-dir PATH] [--native-smoke-dir PATH]
 
 Builds and packages one complete native Linux candidate through the matching
 //:ctx_release_<target> --config=release route. The package version and output
@@ -26,6 +26,7 @@ target_id=""
 source_commit=""
 output_dir=""
 private_symbols_dir=""
+native_smoke_dir=""
 while (( $# > 0 )); do
   case "$1" in
     --platform)
@@ -43,6 +44,10 @@ while (( $# > 0 )); do
     --private-symbols-dir)
       shift
       private_symbols_dir="${1:-}"
+      ;;
+    --native-smoke-dir)
+      shift
+      native_smoke_dir="${1:-}"
       ;;
     -h|--help)
       usage
@@ -186,7 +191,7 @@ if [[ -n "${private_symbols_dir}" ]]; then
   destination_args+=(--private-symbols-dir "${private_symbols_dir}")
 fi
 destination_values="$(
-  python3 -I scripts/release/publish-linux-bazel-release.py \
+  python3 -I scripts/release/release_bundle.py \
     "${destination_args[@]}"
 )" || exit $?
 eval "${destination_values}"
@@ -205,7 +210,7 @@ preflight_args=(
   --output-dir "${output_dir}"
   --private-symbols-dir "${private_symbols_dir}"
 )
-python3 -I scripts/release/publish-linux-bazel-release.py \
+python3 -I scripts/release/release_bundle.py \
   "${preflight_args[@]}" >/dev/null
 
 release_work_root="${CTX_LINUX_RELEASE_WORK_ROOT:-/tmp}"
@@ -242,24 +247,23 @@ if [[ -n "${cache_root}" ]]; then
 fi
 task_prefix="${release_work_root}/ctx-public-${platform}-bazel-release."
 task_root="$(mktemp -d "${task_prefix}XXXXXX")"
-read -r task_device task_inode \
-  < <(stat -c '%d %i' -- "${task_root}")
 cache_root="${cache_root:-${task_root}/cache}"
+stage_prefix="$(dirname "${output_dir}")/.ctx-${platform}-release."
+release_stage="$(mktemp -d "${stage_prefix}XXXXXX")"
 cleanup() {
+  if [[ -n "${release_stage:-}" \
+    && "${release_stage}" == "${stage_prefix}"* \
+    && -d "${release_stage}" && ! -L "${release_stage}" ]]; then
+    rm -rf -- "${release_stage}"
+  fi
   if [[ "${task_root:-}" == "${task_prefix}"* \
     && -d "${task_root}" && ! -L "${task_root}" ]]; then
-    python3 -I scripts/release/publish-linux-bazel-release.py \
-      cleanup-task-root \
-      --work-root "${release_work_root}" \
-      --task-root "${task_root}" \
-      --expected-device "${task_device}" \
-      --expected-inode "${task_inode}"
+    rm -rf -- "${task_root}"
   fi
 }
 trap cleanup EXIT
 install -d -m 0700 \
   "${task_root}/release-input" \
-  "${task_root}/release-output" \
   "${task_root}/release-symbol-output" \
   "${task_root}/docker-home" \
   "${task_root}/cache" \
@@ -432,6 +436,7 @@ docker_run_args=(
   -e CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json
   -v "${repo_root}:${repo_root}:ro"
   -v "${task_root}:/build:rw"
+  -v "${release_stage}:/build/release-output:rw"
   -v "${osv_scanner_input}:/release-advisory/osv-scanner:ro"
   -v "${osv_database_input}:/release-advisory/database:ro"
   -v "${osv_metadata_input}:/release-advisory/database-metadata.json:ro"
@@ -564,21 +569,21 @@ python3 -I scripts/release/public-cli-bazel-build-info.py create \
 # of the same public commit unit as the CLI. No public candidate pathname is
 # writable after the directory transaction below.
 scripts/build-onnxruntime-sidecar.sh \
-  "${CTX_PUBLIC_TARGET_PLATFORM}" "${task_root}/release-output"
+  "${CTX_PUBLIC_TARGET_PLATFORM}" "${release_stage}"
 scripts/stage-github-release-assets.sh \
   --transcode-runtime "${CTX_PUBLIC_TARGET_PLATFORM}" \
-  "${task_root}/release-output"
-python3 -I scripts/release/publish-linux-bazel-release.py seal \
-  --candidate-dir "${task_root}/release-output" \
+  "${release_stage}"
+seal_sha256="$(python3 -I scripts/release/release_bundle.py seal \
+  --candidate-dir "${release_stage}" \
   --platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
-  --source-commit "${source_commit}" >/dev/null
+  --source-commit "${source_commit}")"
 
 [[ "$(git rev-parse --verify HEAD^{commit})" == "${source_commit}" ]] \
   || die "source commit changed during native Linux Bazel construction"
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
   || die "source checkout changed during native Linux Bazel construction"
 for leaf in "${release_leaves[@]}"; do
-  [[ -s "${task_root}/release-output/${leaf}" ]] \
+  [[ -s "${release_stage}/${leaf}" ]] \
     || die "packaged release output is missing: ${leaf}"
 done
 
@@ -592,17 +597,40 @@ docker_daemon_after="$(docker_daemon_identity)"
 [[ "${docker_daemon_after}" == "${docker_daemon_before}" ]] \
   || die "Docker daemon authority changed during construction"
 
-publish_args=(
-  publish
-  --artifact-source-dir "${task_root}/release-output"
+smoke_output_dir="${native_smoke_dir:-${task_root}/native-smoke}"
+mkdir -p "${smoke_output_dir}"
+scripts/run-native-candidate-smoke.sh \
+  "${release_stage}/${CTX_PUBLIC_TARGET_BINARY}" \
+  tests/fixtures/custom-history-jsonl/basic.jsonl \
+  "${version}" \
+  "${smoke_output_dir}/candidate-smoke.json"
+if [[ -n "${native_smoke_dir}" ]]; then
+  scripts/smoke-daemon-semantic-release.sh \
+    --runtime-archive "${release_stage}/${runtime_base}.tar.gz" \
+    --runtime-platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
+    --ctx "${release_stage}/${CTX_PUBLIC_TARGET_BINARY}" \
+    --data-root "${smoke_output_dir}" \
+    --require-authoritative \
+    --keep-root >"${smoke_output_dir}/smoke.log" 2>&1
+fi
+python3 -I scripts/release/release_bundle.py verify \
+  --candidate-dir "${release_stage}" \
+  --platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
+  --source-commit "${source_commit}" \
+  --seal-sha256 "${seal_sha256}"
+
+commit_args=(
+  commit
+  --stage-dir "${release_stage}"
   --output-dir "${output_dir}"
   --private-symbols-source-dir "${task_root}/release-symbol-output/bundle"
   --private-symbols-dir "${private_symbols_dir}"
   --platform "${CTX_PUBLIC_TARGET_PLATFORM}"
   --source-commit "${source_commit}"
+  --seal-sha256 "${seal_sha256}"
 )
-python3 -I scripts/release/publish-linux-bazel-release.py \
-  "${publish_args[@]}"
+python3 -I scripts/release/release_bundle.py "${commit_args[@]}"
+release_stage=""
 
 trap - EXIT
 cleanup

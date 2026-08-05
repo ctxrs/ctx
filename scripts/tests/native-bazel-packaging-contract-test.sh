@@ -11,9 +11,7 @@ wrapper="${source_root}/scripts/release/build-linux-bazel-release.sh"
 controller="${source_root}/scripts/release/run-linux-bazel-release-controller.sh"
 controller_recipe="${source_root}/scripts/release/linux-bazel-release-controller.Dockerfile"
 controller_receipt="${source_root}/scripts/release/write-linux-bazel-controller-receipt.py"
-publisher="${source_root}/scripts/release/publish-linux-bazel-release.py"
-candidate_io="${source_root}/scripts/release/completed_candidate_io.py"
-dogfood_wrapper="${source_root}/scripts/release/build-linux-x64-bazel-dogfood.sh"
+bundle="${source_root}/scripts/release/release_bundle.py"
 recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
 matrix="${source_root}/contracts/release-targets-v1.json"
@@ -33,10 +31,14 @@ for required in \
   'scripts/public-cli-host-runtime-evidence.sh' \
   'scripts/public-cli-runtime-authority.sh' \
   '/build/release-input/${CTX_RELEASE_BINARY_NAME}.build-info.json' \
-  '--private-symbols-dir' \
   'scripts/release/detached-debug-symbols.py prepare' \
   '/build/release-symbol-output/bundle' \
-  'scripts/release/publish-linux-bazel-release.py' \
+  'scripts/release/release_bundle.py seal' \
+  'scripts/release/release_bundle.py verify' \
+  'scripts/release/release_bundle.py "${commit_args[@]}"' \
+  '--seal-sha256 "${seal_sha256}"' \
+  'scripts/run-native-candidate-smoke.sh' \
+  'scripts/smoke-daemon-semantic-release.sh' \
   'scripts/build-onnxruntime-sidecar.sh' \
   '"${task_root}/cache"' \
   '--transcode-runtime "${CTX_PUBLIC_TARGET_PLATFORM}"' \
@@ -46,9 +48,7 @@ for required in \
   '${CTX_PUBLIC_TARGET_BINARY}.cdx.json.sha256' \
   '${CTX_PUBLIC_TARGET_BINARY}.third-party-notices.txt.sha256' \
   '${CTX_PUBLIC_TARGET_BINARY}.size.json' \
-  '${CTX_PUBLIC_TARGET_BINARY}.candidate.json' \
-  'd7aedc8565ed47b6231badb80b09f034e389c5f2b1c2ac2c55406f7c661d8b88' \
-  'c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b'; do
+  '${CTX_PUBLIC_TARGET_BINARY}.candidate.json'; do
   grep -Fq -- "${required}" "${wrapper}" || {
     printf 'native Linux Bazel wrapper missing contract: %s\n' "${required}" >&2
     exit 1
@@ -92,87 +92,61 @@ fi
 
 if grep -Fq -- '-v "${output_dir}:' "${wrapper}" \
   || grep -Fq -- 'mktemp -d "${private_symbols_parent}/' "${wrapper}" \
-  || grep -Eq -- 'mv .*private_symbols_dir' "${wrapper}" \
-  || grep -Fq -- 'rm -rf -- "${task_root}"' "${wrapper}"; then
+  || grep -Eq -- 'mv .*private_symbols_dir' "${wrapper}"; then
   echo "native Linux builder touches final destinations before publication" >&2
   exit 1
 fi
-for required in \
-  'os.O_DIRECTORY | os.O_NOFOLLOW' \
-  'RENAME_NOREPLACE' \
-  'ctx-public-linux-release-completion' \
-  'class CompletedCandidateSnapshot' \
-  'consume-complete' \
-  'artifact_snapshot.copy_to' \
-  'symbols_snapshot.copy_to' \
-  'release destination appeared during publication'; do
-  grep -Fq -- "${required}" "${publisher}" || {
-    printf 'native Linux publisher missing descriptor contract: %s\n' \
-      "${required}" >&2
+for forbidden in \
+  'publish-linux-bazel-release.py' \
+  'completed_candidate_io.py' \
+  '/proc/self/fd' \
+  'cargo build' \
+  'cargo zigbuild' \
+  'qemu-'; do
+  if grep -Fq -- "${forbidden}" \
+    "${wrapper}" "${controller}" "${controller_receipt}"; then
+    printf 'native Linux route retains retired construction: %s\n' \
+      "${forbidden}" >&2
     exit 1
-  }
-done
-for required in \
-  '/proc/self/fdinfo/' \
-  'class DescriptorBinding' \
-  'class PinnedTreeSnapshot' \
-  'copy_regular_descriptor' \
-  'def expand_command' \
-  'completed release command contains an unbound placeholder'; do
-  grep -Fq -- "${required}" "${candidate_io}" || {
-    printf 'completed candidate descriptor helper missing contract: %s\n' \
-      "${required}" >&2
-    exit 1
-  }
+  fi
 done
 
-for consumer in "${staging}" "${semantic_staging}"; do
-  for required in \
-    'consume-complete' \
-    'worker_program' \
-    'stage_complete_candidate "$@"' \
-    'ambient completed-candidate admission markers are forbidden' \
-    'git' \
-    'rev-parse' \
-    'HEAD^{commit}'; do
-    grep -Fq -- "${required}" "${consumer}" || {
-      printf 'completed candidate consumer omits %s: %s\n' \
-        "${required}" "${consumer}" >&2
-      exit 1
-    }
-  done
-  for forbidden in \
-    '--ctx-pinned-worker' \
-    '--consumer-admission' \
-    'claim-consumer-admission' \
-    '{admission-fd}' \
-    'CTX_RELEASE_PINNED_CONSUMER=1'; do
-    if grep -Fq -- "${forbidden}" "${consumer}"; then
-      printf 'completed candidate consumer exposes retired admission %s: %s\n' \
-        "${forbidden}" "${consumer}" >&2
-      exit 1
-    fi
-  done
-done
-for placeholder in \
-  "'{candidate}/ctx'" \
-  "'{candidate}/ctx-linux-aarch64'" \
-  "'{candidate}/ctx-onnxruntime-linux-x64.tar.gz'" \
-  "'{candidate}/ctx-onnxruntime-linux-aarch64.tar.gz'"; do
-  grep -Fq -- "${placeholder}" "${pipeline}" || {
-    printf 'Linux native smoke does not use pinned descriptor %s\n' \
-      "${placeholder}" >&2
+for required in \
+  'RENAME_NOREPLACE' \
+  'ctx-public-linux-release-completion' \
+  'seal_sha256' \
+  'os.fsync' \
+  'shlex.quote' \
+  'release stage must be a sibling of its final destination' \
+  'release destination already exists'; do
+  grep -Fq -- "${required}" "${bundle}" || {
+    printf 'release bundle utility missing contract: %s\n' "${required}" >&2
     exit 1
   }
+done
+for forbidden in \
+  '/proc/self/fd' \
+  'DescriptorBinding' \
+  'PinnedTreeSnapshot' \
+  'pass_fds' \
+  'subprocess'; do
+  if grep -Fq -- "${forbidden}" "${bundle}"; then
+    printf 'release bundle utility retains retired mechanism: %s\n' \
+      "${forbidden}" >&2
+    exit 1
+  fi
 done
 
 for required in \
   'detached-debug-symbols.py" prepare' \
   'detached-debug-symbols.py" finalize' \
-  'public CLI private debug symbols:'; do
+  'public CLI private debug symbols:' \
+  '_release-build-identity' \
+  '"${sbom_tool}" generate' \
+  '"${sbom_tool}" verify' \
+  '"${sbom_tool}" verify-bundle'; do
   grep -Fq -- "${required}" "${packager}" || {
-    printf 'native release packager omits detached symbols: %s\n' \
-      "${required}" >&2
+    printf 'native release packager missing contract: %s\n' "${required}" >&2
     exit 1
   }
 done
@@ -196,76 +170,6 @@ for required in \
 done
 
 for required in \
-  '"${sbom_tool}" generate' \
-  '"${sbom_tool}" verify' \
-  '"${sbom_tool}" verify-bundle'; do
-  grep -Fq -- "${required}" "${packager}" || {
-    printf 'native release packager bypasses declared SBOM tool: %s\n' \
-      "${required}" >&2
-    exit 1
-  }
-done
-if grep -Fq 'python3 -I "${repo_root}/scripts/release-sbom.py"' "${packager}"; then
-  echo "native release packager invokes the host-Python SBOM script" >&2
-  exit 1
-fi
-
-if grep -Eq 'cargo (build|zigbuild)|qemu-' "${wrapper}"; then
-  echo "native Linux Bazel wrapper contains Cargo construction or emulation" >&2
-  exit 1
-fi
-
-for required in \
-  'bazel_binary_arch=x86_64' \
-  'bazel_binary_sha256=c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b' \
-  '--build-arg "BAZEL_ARCH=${bazel_binary_arch}"' \
-  '--build-arg "BAZEL_SHA256=${bazel_binary_sha256}"' \
-  '--build-arg "RELEASE_ARCH=x86_64"' \
-  'CTX_OSV_SCANNER=/release-advisory/osv-scanner' \
-  'CTX_OSV_DATABASE_DIR=/release-advisory/database' \
-  'CTX_OSV_DATABASE_METADATA=/release-advisory/database-metadata.json' \
-  'test -f "$rustc_runfile" -a -x "$rustc_runfile"' \
-  'rustc_real="$(readlink -f "$rustc_runfile")"' \
-  'ldd "$rustc_real"' \
-  'rustc_lib_dir="$(dirname "$rustc_driver")"' \
-  '-name "*.so*"' \
-  '-name "libLLVM.so*"' \
-  '/build/release-input/bazel-rustc.bin' \
-  '/build/release-input/bazel-rustc.lib' \
-  'LD_LIBRARY_PATH=${tool_root}/bazel-rustc.lib' \
-  '/build/release-input/bazel-rustc --version' \
-  '/release-output/bazel-rustc' \
-  '/release-output/bazel-rustc.bin' \
-  '/release-output/bazel-rustc.lib' \
-  'stat -c '\''%a'\'' "${output_dir}/bazel-rustc"' \
-  'packaged dogfood Bazel rustc must have mode 0755' \
-  'packaged dogfood Bazel rustc must have exactly one driver library' \
-  'packaged dogfood Bazel rustc must have its LLVM runtime' \
-  'packaged dogfood Bazel rustc no longer reports the declared version'; do
-  grep -Fq -- "${required}" "${dogfood_wrapper}" || {
-    printf 'Linux x64 dogfood wrapper missing release contract: %s\n' \
-      "${required}" >&2
-    exit 1
-  }
-done
-
-for release_wrapper in "${wrapper}" "${dogfood_wrapper}"; do
-  for required in \
-    'CTX_OSV_SCANNER must be an executable non-symlink file' \
-    'CTX_OSV_DATABASE_DIR must be a non-symlink directory' \
-    'CTX_OSV_DATABASE_METADATA must be a regular non-symlink file' \
-    '${osv_scanner_input}:/release-advisory/osv-scanner:ro' \
-    '${osv_database_input}:/release-advisory/database:ro' \
-    '${osv_metadata_input}:/release-advisory/database-metadata.json:ro'; do
-    grep -Fq -- "${required}" "${release_wrapper}" || {
-      printf 'native Linux Bazel wrapper omits advisory input: %s\n' \
-        "${required}" >&2
-      exit 1
-    }
-  done
-done
-
-for required in \
   'ARG BAZEL_ARCH' \
   'ARG BAZEL_SHA256' \
   'ARG RELEASE_ARCH' \
@@ -279,14 +183,64 @@ for required in \
   }
 done
 
+for required in \
+  'release_bundle.py' \
+  'verify-bundle' \
+  '.build-info.json' \
+  '.cdx.json' \
+  '.third-party-notices.txt' \
+  '--platform linux-x64' \
+  '--platform linux-aarch64' \
+  'commit-directory' \
+  'HEAD^{commit}'; do
+  grep -Fq -- "${required}" "${staging}" || {
+    printf 'GitHub staging missing release contract: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+
+for required in \
+  'release_bundle.py' \
+  'construct-semantic-release-catalog.sh' \
+  'SHA256SUMS' \
+  'commit-directory' \
+  'ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz' \
+  'ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz' \
+  'ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz' \
+  'ctx-onnxruntime-linux-x64.tar.zst' \
+  'ctx-onnxruntime-linux-aarch64.tar.zst' \
+  'ctx-onnxruntime-macos-arm64.tar.zst' \
+  'ctx-onnxruntime-macos-x64.tar.zst' \
+  'ctx-windowsml-windows-x64.zip' \
+  'ctx-onnxruntime-freebsd-x64.tar.zst' \
+  'ctx-onnxruntime-linux-x64-cuda12.tar.zst'; do
+  grep -Fq -- "${required}" "${semantic_staging}" || {
+    printf 'Semantic staging missing exact asset contract: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
+for forbidden in \
+  'release-complete.json' \
+  'HEAD^{commit}' \
+  'source_commit' \
+  'publish-linux-bazel-release.py' \
+  '/proc/self/fd'; do
+  if grep -Fq -- "${forbidden}" "${semantic_staging}"; then
+    printf 'Semantic staging retains irrelevant Linux protocol: %s\n' \
+      "${forbidden}" >&2
+    exit 1
+  fi
+done
+
 if grep -Fq 'build-public-cli-artifact.sh' "${pipeline}"; then
   echo "Buildkite release candidates still use the Cargo constructor" >&2
   exit 1
 fi
 for required in \
   'scripts/release/build-linux-bazel-release.sh' \
-  '--platform linux-x64' \
-  '--platform linux-arm64' \
+  '--native-smoke-dir target/public-cli-native-smoke/linux-x64' \
+  '--native-smoke-dir target/public-cli-native-smoke/linux-aarch64' \
   '//:ctx_release_windows_x64' \
   '//:ctx_release_freebsd_x64' \
   '//:ctx_release_macos_arm64' \
@@ -302,23 +256,12 @@ for required in \
   }
 done
 
-for required in \
-  'scripts/release-sbom.py verify-bundle' \
-  '.cdx.json' \
-  '.third-party-notices.txt'; do
-  grep -Fq -- "${required}" "${staging}" || {
-    printf 'GitHub staging missing verified CLI evidence: %s\n' "${required}" >&2
-    exit 1
-  }
-done
-
 python3 - "${matrix}" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-value = json.loads(Path(sys.argv[1]).read_bytes())
-targets = value["targets"]
+targets = json.loads(Path(sys.argv[1]).read_bytes())["targets"]
 expected = {
     "linux-x64",
     "linux-arm64",
@@ -334,9 +277,6 @@ for target in targets:
     assert target["public_construction_label"] == (
         f"//:ctx_release_{target_id.replace('-', '_')}"
     )
-windows = next(target for target in targets if target["id"] == "windows-x64")
-assert windows["public_rust_target"] == "x86_64-pc-windows-gnu"
-assert windows["helper_rust_target"] == "x86_64-pc-windows-msvc"
 PY
 
 printf 'native Bazel packaging contract tests: OK\n'

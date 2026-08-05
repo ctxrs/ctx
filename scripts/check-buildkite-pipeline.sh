@@ -6,7 +6,7 @@ public_ci_script="scripts/buildkite-public-ci.sh"
 sdk_check_script="scripts/check-sdks.sh"
 sdk_pipeline_check_script="scripts/check-sdk-ci-pipeline.py"
 sdk_required_groups_test="scripts/tests/check-sdks-required-groups-test.sh"
-artifact_script="scripts/build-public-cli-artifact.sh"
+packager_script="scripts/package-public-cli-bazel-release.sh"
 artifact_check_script="scripts/check-public-cli-artifact.sh"
 compat_check_script="scripts/check-release-binary-compat.sh"
 macos_sign_script="scripts/sign-notarize-macos-release-artifact.sh"
@@ -27,7 +27,7 @@ test -f "${public_ci_script}"
 test -f "${sdk_check_script}"
 test -f "${sdk_pipeline_check_script}"
 test -f "${sdk_required_groups_test}"
-test -f "${artifact_script}"
+test -f "${packager_script}"
 test -f "${artifact_check_script}"
 test -f "${compat_check_script}"
 test -f "${macos_sign_script}"
@@ -447,9 +447,13 @@ if command -v ruby >/dev/null 2>&1; then
     inline_native_smokes.each do |key, platform|
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
       command = step["command"].to_s
-      abort "#{key} must gate packaged ONNX smoke" unless command.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") && command.include?("--runtime-archive")
-      abort "#{key} must run the native package smoke" unless command.include?("scripts/run-native-candidate-smoke.sh")
-      abort "#{key} must require authoritative execution" unless command.include?("--require-authoritative")
+      if key.start_with?("public-cli-linux-")
+        abort "#{key} must gate builder-owned final-byte smoke" unless command.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") && command.include?("--native-smoke-dir target/public-cli-native-smoke/#{platform}")
+      else
+        abort "#{key} must gate packaged ONNX smoke" unless command.include?("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") && command.include?("--runtime-archive")
+        abort "#{key} must run the native package smoke" unless command.include?("scripts/run-native-candidate-smoke.sh")
+        abort "#{key} must require authoritative execution" unless command.include?("--require-authoritative")
+      end
       smoke_path = "target/public-cli-native-smoke/#{platform}/candidate-smoke.json"
       abort "#{key} must publish #{smoke_path}" unless Array(step["artifact_paths"]).include?(smoke_path)
     end
@@ -523,12 +527,9 @@ if command -v ruby >/dev/null 2>&1; then
       if key.start_with?("public-cli-linux-")
         abort "#{key} must use the complete Linux release transaction" unless command.include?("scripts/release/build-linux-bazel-release.sh")
         abort "#{key} must not write runtime leaves after public commit" if command.include?("scripts/build-onnxruntime-sidecar.sh") || command.include?("--transcode-runtime")
-        abort "#{key} native smoke must use the completed candidate handoff" unless command.include?("publish-linux-bazel-release.py run-complete")
+        abort "#{key} must request the builder-owned final-byte smoke" unless command.include?("--native-smoke-dir target/public-cli-native-smoke/#{platform}")
+        abort "#{key} must not expose the retired completed-candidate process protocol" if command.include?("publish-linux-bazel-release.py") || command.include?("/proc/self/fd")
         binary = key == "public-cli-linux-x64" ? "ctx" : "ctx-linux-aarch64"
-        cli_leaf = "'{candidate}/#{binary}'"
-        abort "#{key} native smoke must execute the pinned named CLI leaf" unless command.include?(cli_leaf)
-        runtime_leaf = "'{candidate}/ctx-onnxruntime-#{platform}.tar.gz'"
-        abort "#{key} native smoke must consume the pinned named runtime leaf" unless command.include?(runtime_leaf)
         marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
         abort "#{key} must upload #{marker}" unless Array(step["artifact_paths"]).include?(marker)
         advisory = "target/public-cli-artifacts/#{binary}.dependency-advisory.json"
@@ -612,7 +613,6 @@ if command -v ruby >/dev/null 2>&1; then
     end
     gather = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == "semantic-release-handoff" }
     expected_dependencies = %w[
-      github-release-candidate
       public-cli-linux-x64
       public-cli-linux-aarch64
       public-cli-freebsd-x64
@@ -630,11 +630,8 @@ if command -v ruby >/dev/null 2>&1; then
       stem = artifact.sub(/\.(tar\.xz|tar\.zst|zip)\z/, "")
       abort "Semantic gather does not download #{artifact}" unless gather_command.include?(stem)
     end
-    %w[linux-x64 linux-aarch64].each do |platform|
-      marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
-      abort "Semantic gather does not download exact completion identity #{marker}" unless gather_command.include?(marker)
-    end
-    abort "Semantic gather must bind the public source commit" unless gather_command.include?("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") && gather_command.include?("git rev-parse --verify HEAD^{commit}")
+    abort "Semantic gather must not download Linux completion identities" if gather_command.include?("release-complete.json")
+    abort "Semantic gather must not bind unrelated CLI source state" if gather_command.include?("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") || gather_command.include?("git rev-parse --verify HEAD^{commit}")
     abort "Semantic gather must construct and stage the unsigned handoff" unless gather_command.include?("scripts/stage-semantic-release-handoff.sh")
     abort "public Semantic gather must not sign release metadata" if gather_command.match?(/sign|private/i)
   ' "${pipeline}"
@@ -717,19 +714,9 @@ for required in \
   'NOTARY_ISSUER' \
   'NOTARY_KEY_ID' \
   'NOTARY_KEY_P8_B64' \
-  'cargo zigbuild -p ctx --release --target "${build_target}" --locked' \
-  'LINUX_GLIBC_BASELINE="2.35"' \
-  'LINUX_RELEASE_IMAGE_UBUNTU="22.04"' \
   'scripts/check-release-binary-compat.sh' \
   'check_symbol_ceiling GLIBC 2.35' \
-  '.build-info.json' \
-  'scripts/docker/linux-release.Dockerfile' \
-  'scripts/build-linux-release-offline.sh "${platform}" "${target}"' \
-  'scripts/check-linux-release-environment.sh' \
-  'MACOS_DEPLOYMENT_TARGET="13.0"' \
-  'CARGO_ZIGBUILD_VERSION' \
-  'ZIG_LINUX_X64_SHA256' \
-  'ZIG_LINUX_AARCH64_SHA256'; do
+  '.build-info.json'; do
   found=0
   for checked_file in \
     "${pipeline}" \
@@ -737,7 +724,7 @@ for required in \
     "${sdk_check_script}" \
     "${sdk_pipeline_check_script}" \
     "${sdk_required_groups_test}" \
-    "${artifact_script}" \
+    "${packager_script}" \
     "${artifact_check_script}" \
     "${compat_check_script}" \
     "${macos_sign_script}" \
@@ -769,7 +756,7 @@ if grep -Fq 'build-public-cli-artifact.sh' "${pipeline}"; then
 fi
 
 python3 - \
-  "${artifact_script}" \
+  "${packager_script}" \
   "scripts/build-onnxruntime-sidecar.sh" \
   "scripts/stage-github-release-assets.sh" \
   "${semantic_handoff_script}" \
@@ -797,10 +784,10 @@ require_order(
     cli,
     'scripts/run-macos-release-signing.sh',
     'scripts/verify-macos-signed-cli.sh',
-    'sha_file="${staged}.sha256"',
+    'packaged_sha="$(sha256_file "${staged}")"',
     'scripts/run-native-candidate-smoke.sh',
-    'python3 scripts/write-public-cli-build-info.py',
     'scripts/check-macos-release-signing.sh',
+    'scripts/write-public-cli-build-info.py',
 )
 require_order(
     "macOS runtime signing/archive/checksum evidence",
@@ -853,29 +840,28 @@ for artifact in semantic_artifacts:
         raise SystemExit(f"Semantic handoff/publication contract is missing {artifact}")
 if "construct-semantic-release-catalog.sh" not in handoff:
     raise SystemExit("Semantic handoff must construct the six public metadata fields")
-if "publish-linux-bazel-release.py" not in handoff or "consume-complete" not in handoff:
-    raise SystemExit("Semantic handoff must consume an FD-pinned completed candidate")
+for required in ("release_bundle.py", "commit-directory", "SHA256SUMS"):
+    if required not in handoff:
+        raise SystemExit(f"Semantic handoff is missing direct asset contract {required}")
+for required in ("release_bundle.py", "commit-directory", "HEAD^{commit}"):
+    if required not in staging:
+        raise SystemExit(f"GitHub staging is missing release bundle contract {required}")
 for source, label in ((staging, "GitHub"), (handoff, "Semantic")):
-    for required in (
-        "consume-complete",
-        'worker_program+=$\'\\nstage_complete_candidate "$@"\'',
-        "ambient completed-candidate admission markers are forbidden",
-        "HEAD^{commit}",
-    ):
-        if required not in source:
-            raise SystemExit(f"{label} staging admission is missing {required}")
     for forbidden in (
+        "publish-linux-bazel-release.py",
+        "consume-complete",
+        "worker_program",
         "--ctx-pinned-worker",
-        "--consumer-admission",
-        "claim-consumer-admission",
-        "{admission-fd}",
-        "CTX_RELEASE_PINNED_CONSUMER=1",
+        "/proc/self/fd",
+        "CTX_RELEASE_PINNED_CONSUMER",
     ):
         if forbidden in source:
-            raise SystemExit(f"{label} staging exposes retired admission path {forbidden}")
+            raise SystemExit(f"{label} staging retains retired protocol {forbidden}")
 for platform in ("linux-x64", "linux-aarch64"):
-    if f"--platform {platform}" not in handoff:
-        raise SystemExit(f"Semantic handoff must require {platform} completion identity")
+    if f"--platform {platform}" not in staging:
+        raise SystemExit(f"GitHub staging must verify {platform} completion identity")
+    if f"ctx-{platform}.release-complete.json" in handoff:
+        raise SystemExit(f"Semantic handoff must not depend on {platform} completion identity")
 if "--with-semantic" not in staging:
     raise SystemExit("release staging must have an explicit additive Semantic mode")
 for platform in (
