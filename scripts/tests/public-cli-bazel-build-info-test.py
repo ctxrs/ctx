@@ -100,6 +100,24 @@ class BuildInfoProducerTests(unittest.TestCase):
             "runtime_image_id": "sha256:" + "b" * 64,
             "inspector_image_id": "sha256:" + "c" * 64,
         }
+        self.docker_config = inputs / "docker-config"
+        self.docker_config.mkdir()
+        self.docker_home = inputs / "docker-home"
+        self.docker_home.mkdir()
+        self.docker_command = [
+            "/usr/bin/env",
+            *(
+                value
+                for selector in PRODUCER.AMBIENT_DOCKER_SELECTORS
+                for value in ("-u", selector)
+            ),
+            f"HOME={self.docker_home}",
+            "/usr/bin/docker",
+            "--host",
+            "unix:///run/ctx-release/docker.sock",
+            "--config",
+            str(self.docker_config),
+        ]
 
     def write_artifact(self, target: str, cargo_lock_sha256: str) -> None:
         self.artifact.write_text(
@@ -127,6 +145,9 @@ esac
             **self.common,
             **self.images,
             "docker": "/usr/bin/docker",
+            "docker_config": self.docker_config,
+            "docker_home": self.docker_home,
+            "docker_host": "unix:///run/ctx-release/docker.sock",
             "output": output,
             "rust_version": "rustc 1.97.1 (8bab26f4f 2026-07-10)",
         }
@@ -219,24 +240,51 @@ esac
         ):
             with (
                 self.subTest(platform=platform),
-                mock.patch.object(PRODUCER, "run_checked", return_value="") as checked,
+                mock.patch.object(
+                    PRODUCER,
+                    "run_checked",
+                    side_effect=("authoritative", "", ""),
+                ) as checked,
             ):
                 PRODUCER.run_container_gates(
-                    docker="/usr/bin/docker",
+                    docker_command=self.docker_command,
                     source_repo=ROOT,
                     artifact=self.artifact,
                     version="0.26.0",
                     platform=platform,
+                    builder_image_id=self.images["builder_image_id"],
                     runtime_image_id=self.images["runtime_image_id"],
                     inspector_image_id=self.images["inspector_image_id"],
                 )
-                self.assertEqual(len(checked.call_args_list), 2)
+                self.assertEqual(len(checked.call_args_list), 3)
                 for call in checked.call_args_list:
                     command = call.args[0]
+                    self.assertEqual(
+                        command[: len(self.docker_command)], self.docker_command
+                    )
                     self.assertEqual(
                         command[command.index("--platform") + 1],
                         docker_platform,
                     )
+
+    def test_container_gates_reject_wrong_builder_authority(self) -> None:
+        with mock.patch.object(
+            PRODUCER, "run_checked", return_value="non_authoritative"
+        ):
+            with self.assertRaisesRegex(
+                PRODUCER.BuildInfoError,
+                "pinned builder authority gate returned non_authoritative",
+            ):
+                PRODUCER.run_container_gates(
+                    docker_command=self.docker_command,
+                    source_repo=ROOT,
+                    artifact=self.artifact,
+                    version="0.26.0",
+                    platform="linux-x64",
+                    builder_image_id=self.images["builder_image_id"],
+                    runtime_image_id=self.images["runtime_image_id"],
+                    inspector_image_id=self.images["inspector_image_id"],
+                )
 
     def test_verify_rejects_changed_bazel_binding(self) -> None:
         accepted = self.repo / "inputs/accepted.json"
@@ -278,7 +326,8 @@ esac
         self.assertIn("docker_platform=linux/arm64", builder)
         self.assertIn("requires a native ${expected_host_arch} host", builder)
         self.assertIn("host_authority", builder)
-        self.assertIn("emulation is diagnostic only", builder)
+        self.assertIn("use the pinned Ubuntu 22 controller route", builder)
+        self.assertNotIn("--construction-host", builder)
         self.assertIn("requires a native ${expected_host_arch} Docker daemon", builder)
         self.assertIn(
             "d7aedc8565ed47b6231badb80b09f034"
@@ -374,24 +423,34 @@ esac
             for relative_path, expected_mode in PRODUCER.CONTAINER_GATE_INPUTS:
                 staged_file = staged / relative_path
                 self.assertEqual(staged_file.stat().st_mode & 0o777, expected_mode)
-            return ""
+            return "authoritative" if label == "pinned builder authority gate" else ""
 
         with mock.patch.object(PRODUCER, "run_checked", side_effect=capture):
             PRODUCER.run_container_gates(
-                docker="/usr/bin/docker",
+                docker_command=self.docker_command,
                 source_repo=ROOT,
                 artifact=self.artifact,
                 version="0.26.0",
                 platform="linux-x64",
+                builder_image_id=self.images["builder_image_id"],
                 runtime_image_id=self.images["runtime_image_id"],
                 inspector_image_id=self.images["inspector_image_id"],
             )
 
         self.assertEqual(
             [label for _, label in calls],
-            ["pinned inspector static ABI gate", "pinned native runtime gate"],
+            [
+                "pinned builder authority gate",
+                "pinned inspector static ABI gate",
+                "pinned native runtime gate",
+            ],
         )
-        runtime_call = calls[1][0]
+        authority_call = calls[0][0]
+        self.assertIn(self.images["builder_image_id"], authority_call)
+        authority_command = authority_call[authority_call.index("-c") + 1]
+        self.assertIn("public-cli-host-runtime-evidence.sh", authority_command)
+        self.assertIn("public-cli-runtime-authority.sh", authority_command)
+        runtime_call = calls[2][0]
         self.assertIn("/tmp:rw,nosuid,nodev,exec", runtime_call)
         runtime_command = runtime_call[runtime_call.index("-c") + 1]
         self.assertIn(

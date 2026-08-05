@@ -701,4 +701,7 @@ if grep -Fq 'param([string[]]$Args)' scripts/smoke-daemon-semantic-release.ps1; 
   exit 1
 fi
 
+bash scripts/tests/linux-bazel-release-controller-test.sh
+python3 scripts/tests/linux-bazel-controller-receipt-test.py
+
 printf 'Linux release construction self-test passed\n'

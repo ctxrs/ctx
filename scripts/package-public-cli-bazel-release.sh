@@ -480,13 +480,7 @@ case "${macos_signing_mode}" in
 esac
 if [[ "${CTX_PUBLIC_TARGET_OS}" == "macos" \
   && "${macos_signing_mode}" == "required" ]]; then
-  macos_signing_authority="${CTX_MACOS_SIGNING_AUTHORITY:-}"
-  case "${macos_signing_authority}" in
-    staging|dev) ;;
-    *) die "required macOS signing needs CTX_MACOS_SIGNING_AUTHORITY=staging or dev" ;;
-  esac
   "${repo_root}/scripts/run-macos-release-signing.sh" \
-    --authority "${macos_signing_authority}" \
     "${CTX_PUBLIC_TARGET_PLATFORM}" cli "${staged}" "${stage_dir}"
   "${repo_root}/scripts/verify-macos-signed-cli.sh" \
     "${CTX_PUBLIC_TARGET_PLATFORM}" "${staged}" "${version}" \

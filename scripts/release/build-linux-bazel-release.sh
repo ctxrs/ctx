@@ -22,7 +22,7 @@ die() {
   exit 1
 }
 
-platform=""
+target_id=""
 source_commit=""
 output_dir=""
 private_symbols_dir=""
@@ -30,7 +30,7 @@ while (( $# > 0 )); do
   case "$1" in
     --platform)
       shift
-      platform="${1:-}"
+      target_id="${1:-}"
       ;;
     --source-commit)
       shift
@@ -57,8 +57,9 @@ while (( $# > 0 )); do
   shift
 done
 
-case "${platform}" in
+case "${target_id}" in
   linux-x64)
+    platform=linux-x64
     expected_host_arch=x86_64
     docker_platform=linux/amd64
     bazel_binary_arch=x86_64
@@ -67,6 +68,7 @@ case "${platform}" in
     route_binary=ctx_release_linux_x64
     ;;
   linux-arm64)
+    platform=linux-aarch64
     expected_host_arch=aarch64
     docker_platform=linux/arm64
     bazel_binary_arch=arm64
@@ -138,9 +140,11 @@ version="$(
 
 target_values="$(
   python3 scripts/public-cli-release-targets.py \
-    --matrix contracts/release-targets-v1.json shell "${platform}"
+    --matrix contracts/release-targets-v1.json shell "${target_id}"
 )" || exit $?
 eval "${target_values}"
+[[ "${CTX_PUBLIC_TARGET_PLATFORM}" == "${platform}" ]] \
+  || die "release-target matrix platform is not canonical"
 [[ "${CTX_PUBLIC_TARGET_OS}:${CTX_PUBLIC_TARGET_ARCH}" \
   == "linux:${expected_host_arch}" ]] \
   || die "release-target matrix does not select the requested native Linux graph"
@@ -214,96 +218,13 @@ release_work_root="$(cd "${release_work_root}" && pwd -P)"
 [[ "${release_work_root}" != / ]] \
   || die "Linux release work root must not be the filesystem root"
 
-bazel_version="$(tr -d '[:space:]' <.bazelversion)"
-base_image="${CTX_PUBLIC_TARGET_LINUX_BUILDER_IMAGE}"
-ubuntu_snapshot="${CTX_PUBLIC_TARGET_LINUX_UBUNTU_SNAPSHOT}"
-glibc_max="${CTX_PUBLIC_TARGET_GLIBC_MAX}"
-rust_toolchain="${CTX_PUBLIC_TARGET_LINUX_RUST_TOOLCHAIN}"
-rust_commit="${CTX_PUBLIC_TARGET_LINUX_RUST_COMMIT}"
-expected_base_digest="${base_image##*@}"
-
-IFS=$'\t' read -r \
-  host_system host_arch host_native_arch process_translated _native_arch_probe \
-  hardware_identity emulation hypervisor evidence_complete \
-  < <(scripts/public-cli-host-runtime-evidence.sh)
-host_authority="$(
-  scripts/public-cli-runtime-authority.sh \
-    "${CTX_PUBLIC_TARGET_PLATFORM}" "${host_system}" "${host_arch}" passed \
-    "${host_native_arch}" "${process_translated}" "${hardware_identity}" \
-    "${emulation}" "${hypervisor}" "${evidence_complete}"
-)"
-[[ "${host_authority}" == "authoritative" ]] \
-  || die "${platform} host evidence is not authoritative; emulation is diagnostic only"
-
-daemon_arch="$(docker info --format '{{.Architecture}}')"
-case "${daemon_arch}" in
-  amd64|x86_64) daemon_arch=x86_64 ;;
-  arm64|aarch64) daemon_arch=aarch64 ;;
-esac
-[[ "${daemon_arch}" == "${expected_host_arch}" ]] \
-  || die "${platform} requires a native ${expected_host_arch} Docker daemon"
-
-builder_image="ctx-public-cli-bazel:${platform}-builder-bazel-${bazel_version}"
-runtime_image="ctx-public-cli-bazel:${platform}-runtime-ubuntu-22.04"
-inspector_image="ctx-public-cli-bazel:${platform}-inspector-ubuntu-22.04"
-builder_recipe="scripts/release/linux-bazel-release.Dockerfile"
-
-docker pull --platform "${docker_platform}" "${base_image}" >/dev/null
-actual_base_digest="$(
-  docker image inspect "${base_image}" \
-    --format '{{range .RepoDigests}}{{println .}}{{end}}' \
-    | sed -n 's/^.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' \
-    | sort -u
-)"
-[[ "${actual_base_digest}" == "${expected_base_digest}" ]] || {
-  printf 'error: resolved Ubuntu base mismatch: expected %s, got %s\n' \
-    "${expected_base_digest}" "${actual_base_digest:-missing}" >&2
-  exit 1
-}
-
-docker build \
-  --platform "${docker_platform}" \
-  --target builder \
-  --provenance=false \
-  --build-arg "UBUNTU_IMAGE=${base_image}" \
-  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
-  --build-arg "GLIBC_BASELINE=${glibc_max}" \
-  --build-arg "BAZEL_VERSION=${bazel_version}" \
-  --build-arg "BAZEL_ARCH=${bazel_binary_arch}" \
-  --build-arg "BAZEL_SHA256=${bazel_binary_sha256}" \
-  --build-arg "RELEASE_ARCH=${CTX_PUBLIC_TARGET_ARCH}" \
-  --build-arg "RUST_TOOLCHAIN=${rust_toolchain}" \
-  --build-arg "RUST_COMMIT=${rust_commit}" \
-  -t "${builder_image}" \
-  -f "${builder_recipe}" \
-  scripts/release
-docker build \
-  --platform "${docker_platform}" \
-  --target runtime \
-  --provenance=false \
-  --build-arg "UBUNTU_IMAGE=${base_image}" \
-  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
-  --build-arg "RELEASE_ARCH=${CTX_PUBLIC_TARGET_ARCH}" \
-  -t "${runtime_image}" \
-  -f "${builder_recipe}" \
-  scripts/release
-docker build \
-  --platform "${docker_platform}" \
-  --target inspector \
-  --provenance=false \
-  --build-arg "UBUNTU_IMAGE=${base_image}" \
-  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
-  --build-arg "RELEASE_ARCH=${CTX_PUBLIC_TARGET_ARCH}" \
-  -t "${inspector_image}" \
-  -f "${builder_recipe}" \
-  scripts/release
-
-builder_image_id="$(docker image inspect "${builder_image}" --format '{{.Id}}')"
-runtime_image_id="$(docker image inspect "${runtime_image}" --format '{{.Id}}')"
-inspector_image_id="$(docker image inspect "${inspector_image}" --format '{{.Id}}')"
-for value in "${builder_image_id}" "${runtime_image_id}" "${inspector_image_id}"; do
-  [[ "${value}" =~ ^sha256:[0-9a-f]{64}$ ]] \
-    || die "release image did not resolve to an immutable image ID"
+docker_ambient_selectors=(
+  DOCKER_CONTEXT DOCKER_CERT_PATH DOCKER_TLS DOCKER_TLS_VERIFY \
+  DOCKER_DEFAULT_PLATFORM DOCKER_API_VERSION BUILDX_BUILDER BUILDKIT_HOST
+)
+for selector in "${docker_ambient_selectors[@]}"; do
+  [[ -z "${!selector+x}" ]] \
+    || die "ambient Docker selector is forbidden: ${selector}"
 done
 
 lock_file="/tmp/ctx-public-${platform}-bazel-release.lock"
@@ -311,19 +232,13 @@ exec 9>"${lock_file}"
 flock -x 9
 cache_root="${CTX_LINUX_RELEASE_CACHE_ROOT:-}"
 if [[ -n "${cache_root}" ]]; then
-  [[ "${cache_root}" == /* ]] || {
-    echo "error: CTX_LINUX_RELEASE_CACHE_ROOT must be an absolute path" >&2
-    exit 1
-  }
-  [[ -d "${cache_root}" && ! -L "${cache_root}" && -w "${cache_root}" ]] || {
-    echo "error: Linux release cache root must be a writable non-symlink directory" >&2
-    exit 1
-  }
+  [[ "${cache_root}" == /* ]] \
+    || die "CTX_LINUX_RELEASE_CACHE_ROOT must be an absolute path"
+  [[ -d "${cache_root}" && ! -L "${cache_root}" && -w "${cache_root}" ]] \
+    || die "Linux release cache root must be a writable non-symlink directory"
   cache_root="$(cd "${cache_root}" && pwd -P)"
-  [[ "${cache_root}" != / ]] || {
-    echo "error: Linux release cache root must not be the filesystem root" >&2
-    exit 1
-  }
+  [[ "${cache_root}" != / ]] \
+    || die "Linux release cache root must not be the filesystem root"
 fi
 task_prefix="${release_work_root}/ctx-public-${platform}-bazel-release."
 task_root="$(mktemp -d "${task_prefix}XXXXXX")"
@@ -346,7 +261,153 @@ install -d -m 0700 \
   "${task_root}/release-input" \
   "${task_root}/release-output" \
   "${task_root}/release-symbol-output" \
+  "${task_root}/docker-home" \
+  "${task_root}/cache" \
   "${cache_root}"
+
+docker_socket="${CTX_LINUX_RELEASE_DOCKER_SOCKET:-/var/run/docker.sock}"
+[[ "${docker_socket}" == /* && -S "${docker_socket}" && ! -L "${docker_socket}" ]] \
+  || die "validated Docker Unix socket is unavailable: ${docker_socket}"
+docker_host="unix://${docker_socket}"
+controller_docker_config="${CTX_LINUX_RELEASE_DOCKER_CONFIG:-}"
+if [[ -n "${controller_docker_config}" ]]; then
+  [[ "${controller_docker_config}" == /* \
+    && -d "${controller_docker_config}" \
+    && ! -L "${controller_docker_config}" ]] \
+    || die "controller Docker config must be an absolute non-symlink directory"
+  [[ "${DOCKER_HOST:-}" == "${docker_host}" \
+    && "${DOCKER_CONFIG:-}" == "${controller_docker_config}" ]] \
+    || die "controller Docker selectors do not match the validated handoff"
+  docker_config="${controller_docker_config}"
+else
+  [[ -z "${DOCKER_HOST+x}" && -z "${DOCKER_CONFIG+x}" ]] \
+    || die "ambient DOCKER_HOST and DOCKER_CONFIG are forbidden"
+  docker_config="${task_root}/docker-config"
+  install -d -m 0700 "${docker_config}"
+fi
+docker_cli=(env -u DOCKER_HOST -u DOCKER_CONFIG)
+for selector in "${docker_ambient_selectors[@]}"; do
+  docker_cli+=(-u "${selector}")
+done
+docker_cli+=(
+  "HOME=${task_root}/docker-home"
+  docker
+  --host "${docker_host}"
+  --config "${docker_config}"
+)
+docker_daemon_identity() {
+  local raw arch version daemon_id
+  raw="$(
+    "${docker_cli[@]}" info --format \
+      '{{printf "%s\t%s\t%s" .Architecture .ServerVersion .ID}}'
+  )"
+  IFS=$'\t' read -r arch version daemon_id <<<"${raw}"
+  case "${arch}" in
+    amd64|x86_64) arch=x86_64 ;;
+    arm64|aarch64) arch=aarch64 ;;
+    *) die "Docker daemon architecture is unsupported: ${arch:-missing}" ;;
+  esac
+  [[ -n "${version}" && -n "${daemon_id}" ]] \
+    || die "Docker daemon identity is incomplete"
+  printf '%s\t%s\t%s\n' "${arch}" "${version}" "${daemon_id}"
+}
+read -r docker_socket_device docker_socket_inode docker_socket_mode \
+  < <(stat -c '%d %i %f' -- "${docker_socket}")
+docker_daemon_before="$(docker_daemon_identity)"
+IFS=$'\t' read -r daemon_arch daemon_version daemon_id \
+  <<<"${docker_daemon_before}"
+case "${daemon_arch}" in
+  amd64|x86_64) daemon_arch=x86_64 ;;
+  arm64|aarch64) daemon_arch=aarch64 ;;
+esac
+[[ "${daemon_arch}" == "${expected_host_arch}" \
+  && -n "${daemon_version}" && -n "${daemon_id}" ]] \
+  || die "${platform} requires a native ${expected_host_arch} Docker daemon with complete identity"
+docker_daemon_before="${daemon_arch}"$'\t'"${daemon_version}"$'\t'"${daemon_id}"
+
+bazel_version="$(tr -d '[:space:]' <.bazelversion)"
+base_image="${CTX_PUBLIC_TARGET_LINUX_BUILDER_IMAGE}"
+ubuntu_snapshot="${CTX_PUBLIC_TARGET_LINUX_UBUNTU_SNAPSHOT}"
+glibc_max="${CTX_PUBLIC_TARGET_GLIBC_MAX}"
+rust_toolchain="${CTX_PUBLIC_TARGET_LINUX_RUST_TOOLCHAIN}"
+rust_commit="${CTX_PUBLIC_TARGET_LINUX_RUST_COMMIT}"
+expected_base_digest="${base_image##*@}"
+
+IFS=$'\t' read -r \
+  host_system host_arch host_native_arch process_translated _native_arch_probe \
+  hardware_identity emulation hypervisor evidence_complete \
+  < <(scripts/public-cli-host-runtime-evidence.sh)
+host_authority="$(
+  scripts/public-cli-runtime-authority.sh \
+    "${CTX_PUBLIC_TARGET_PLATFORM}" "${host_system}" "${host_arch}" passed \
+    "${host_native_arch}" "${process_translated}" "${hardware_identity}" \
+    "${emulation}" "${hypervisor}" "${evidence_complete}"
+)"
+[[ "${host_authority}" == "authoritative" ]] \
+  || die "${platform} host evidence is not authoritative; use the pinned Ubuntu 22 controller route from other Linux hosts"
+
+builder_image="ctx-public-cli-bazel:${platform}-builder-bazel-${bazel_version}"
+runtime_image="ctx-public-cli-bazel:${platform}-runtime-ubuntu-22.04"
+inspector_image="ctx-public-cli-bazel:${platform}-inspector-ubuntu-22.04"
+builder_recipe="scripts/release/linux-bazel-release.Dockerfile"
+
+"${docker_cli[@]}" pull --platform "${docker_platform}" "${base_image}" >/dev/null
+actual_base_digest="$(
+  "${docker_cli[@]}" image inspect "${base_image}" \
+    --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+    | sed -n 's/^.*@\(sha256:[0-9a-f]\{64\}\)$/\1/p' \
+    | sort -u
+)"
+[[ "${actual_base_digest}" == "${expected_base_digest}" ]] || {
+  printf 'error: resolved Ubuntu base mismatch: expected %s, got %s\n' \
+    "${expected_base_digest}" "${actual_base_digest:-missing}" >&2
+  exit 1
+}
+
+"${docker_cli[@]}" build \
+  --platform "${docker_platform}" \
+  --target builder \
+  --provenance=false \
+  --build-arg "UBUNTU_IMAGE=${base_image}" \
+  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  --build-arg "GLIBC_BASELINE=${glibc_max}" \
+  --build-arg "BAZEL_VERSION=${bazel_version}" \
+  --build-arg "BAZEL_ARCH=${bazel_binary_arch}" \
+  --build-arg "BAZEL_SHA256=${bazel_binary_sha256}" \
+  --build-arg "RELEASE_ARCH=${CTX_PUBLIC_TARGET_ARCH}" \
+  --build-arg "RUST_TOOLCHAIN=${rust_toolchain}" \
+  --build-arg "RUST_COMMIT=${rust_commit}" \
+  -t "${builder_image}" \
+  -f "${builder_recipe}" \
+  scripts/release
+"${docker_cli[@]}" build \
+  --platform "${docker_platform}" \
+  --target runtime \
+  --provenance=false \
+  --build-arg "UBUNTU_IMAGE=${base_image}" \
+  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  --build-arg "RELEASE_ARCH=${CTX_PUBLIC_TARGET_ARCH}" \
+  -t "${runtime_image}" \
+  -f "${builder_recipe}" \
+  scripts/release
+"${docker_cli[@]}" build \
+  --platform "${docker_platform}" \
+  --target inspector \
+  --provenance=false \
+  --build-arg "UBUNTU_IMAGE=${base_image}" \
+  --build-arg "UBUNTU_SNAPSHOT=${ubuntu_snapshot}" \
+  --build-arg "RELEASE_ARCH=${CTX_PUBLIC_TARGET_ARCH}" \
+  -t "${inspector_image}" \
+  -f "${builder_recipe}" \
+  scripts/release
+
+builder_image_id="$("${docker_cli[@]}" image inspect "${builder_image}" --format '{{.Id}}')"
+runtime_image_id="$("${docker_cli[@]}" image inspect "${runtime_image}" --format '{{.Id}}')"
+inspector_image_id="$("${docker_cli[@]}" image inspect "${inspector_image}" --format '{{.Id}}')"
+for value in "${builder_image_id}" "${runtime_image_id}" "${inspector_image_id}"; do
+  [[ "${value}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || die "release image did not resolve to an immutable image ID"
+done
 
 docker_run_args=(
   --rm
@@ -385,7 +446,7 @@ case "${git_common_dir}/" in
   *) docker_run_args+=(-v "${git_common_dir}:${git_common_dir}:ro") ;;
 esac
 
-docker run "${docker_run_args[@]}" \
+"${docker_cli[@]}" run "${docker_run_args[@]}" \
   "${builder_image_id}" \
   bash -ceu '
     install -d -m 0700 "$HOME"
@@ -396,7 +457,7 @@ docker run "${docker_run_args[@]}" \
       --symlink_prefix=/build/bazel-links/
   '
 
-docker run "${docker_run_args[@]}" \
+"${docker_cli[@]}" run "${docker_run_args[@]}" \
   --network none \
   "${builder_image_id}" \
   bash -ceu '
@@ -464,6 +525,9 @@ python3 -I scripts/release/public-cli-bazel-build-info.py create \
   --cargo-lock Cargo.lock \
   --cargo-toml crates/ctx-cli/Cargo.toml \
   --docker "$(command -v docker)" \
+  --docker-config "${docker_config}" \
+  --docker-home "${task_root}/docker-home" \
+  --docker-host "${docker_host}" \
   --inspector-image-id "${inspector_image_id}" \
   --matrix contracts/release-targets-v1.json \
   --module-file MODULE.bazel \
@@ -476,7 +540,7 @@ python3 -I scripts/release/public-cli-bazel-build-info.py create \
   --source-repo "${repo_root}" \
   --version "${version}"
 
-docker run "${docker_run_args[@]}" \
+"${docker_cli[@]}" run "${docker_run_args[@]}" \
   --network none \
   "${builder_image_id}" \
   bash -ceu '
@@ -517,6 +581,16 @@ for leaf in "${release_leaves[@]}"; do
   [[ -s "${task_root}/release-output/${leaf}" ]] \
     || die "packaged release output is missing: ${leaf}"
 done
+
+read -r docker_socket_device_after docker_socket_inode_after \
+  docker_socket_mode_after \
+  < <(stat -c '%d %i %f' -- "${docker_socket}")
+[[ "${docker_socket_device_after}:${docker_socket_inode_after}:${docker_socket_mode_after}" \
+  == "${docker_socket_device}:${docker_socket_inode}:${docker_socket_mode}" ]] \
+  || die "Docker Unix socket authority changed during construction"
+docker_daemon_after="$(docker_daemon_identity)"
+[[ "${docker_daemon_after}" == "${docker_daemon_before}" ]] \
+  || die "Docker daemon authority changed during construction"
 
 publish_args=(
   publish

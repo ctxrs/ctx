@@ -696,4 +696,13 @@ if CTX_FAKE_MUTATE_SOURCE=1 package \
 fi
 git -C "${repo}" restore -- tracked.txt
 
+if grep -Fq 'CTX_MACOS_SIGNING_AUTHORITY' \
+  "${source_root}/scripts/package-public-cli-bazel-release.sh" \
+  || sed -n '/run-macos-release-signing.sh/,+3p' \
+    "${source_root}/scripts/package-public-cli-bazel-release.sh" \
+    | grep -Fq -- '--authority'; then
+  echo "Bazel packager retains a second macOS signing authority path" >&2
+  exit 1
+fi
+
 printf 'public CLI Bazel release packaging tests: OK\n'

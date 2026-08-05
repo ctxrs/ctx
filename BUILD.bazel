@@ -745,6 +745,8 @@ py_test(
         "MODULE.bazel",
         "MODULE.bazel.lock",
         "contracts/release-targets-v1.json",
+        "scripts/public-cli-host-runtime-evidence.sh",
+        "scripts/public-cli-runtime-authority.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
     ],
     tags = ["release-gate"],
@@ -765,6 +767,23 @@ py_test(
     target_compatible_with = ["@platforms//os:linux"],
 )
 
+py_test(
+    name = "linux_bazel_controller_receipt_tests",
+    srcs = [
+        "scripts/release/completed_candidate_io.py",
+        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/release/write-linux-bazel-controller-receipt.py",
+        "scripts/tests/linux-bazel-controller-receipt-test.py",
+    ],
+    data = ["scripts/release/linux-bazel-release-controller.Dockerfile"],
+    main = "scripts/tests/linux-bazel-controller-receipt-test.py",
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
 sh_test(
     name = "native_bazel_packaging_contract_tests",
     srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
@@ -773,9 +792,12 @@ sh_test(
         "contracts/release-targets-v1.json",
         "scripts/release/build-linux-bazel-release.sh",
         "scripts/release/build-linux-x64-bazel-dogfood.sh",
+        "scripts/release/linux-bazel-release-controller.Dockerfile",
         "scripts/release/linux-bazel-release.Dockerfile",
         "scripts/release/completed_candidate_io.py",
         "scripts/release/publish-linux-bazel-release.py",
+        "scripts/release/run-linux-bazel-release-controller.sh",
+        "scripts/release/write-linux-bazel-controller-receipt.py",
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/stage-github-release-assets.sh",
         "scripts/stage-semantic-release-handoff.sh",
