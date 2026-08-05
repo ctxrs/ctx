@@ -85,19 +85,12 @@ pub(crate) enum BlameDiagnosticReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct BlameDiagnosticFreshness {
     pub(crate) state: BlameFreshnessState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) served_generation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) active_generation: Option<String>,
-    pub(crate) catch_up_active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // The protocol-details seam does not populate freshness on this base.
 pub(crate) enum BlameFreshnessState {
     Current,
-    CatchingUp,
     StaleCommitted,
 }
 
@@ -156,10 +149,16 @@ impl BlameDiagnostic {
 
     pub(crate) fn for_stable_error_code(code: &'static str) -> Option<Self> {
         let mapping = stable_code_mapping(code)?;
+        let freshness = (code == "stale_source").then_some(BlameDiagnosticFreshness {
+            state: BlameFreshnessState::StaleCommitted,
+        });
         Some(Self::from_mapping(
             mapping,
             legacy_retryable(code),
-            ProtocolDiagnosticDetails::default(),
+            ProtocolDiagnosticDetails {
+                freshness,
+                ..ProtocolDiagnosticDetails::default()
+            },
         ))
     }
 
@@ -200,7 +199,7 @@ impl BlameDiagnostic {
             reason: details.reason.unwrap_or(mapping.reason),
             message: details.message.unwrap_or(mapping.message),
             retryable,
-            freshness: details.freshness.map(sanitize_freshness),
+            freshness: details.freshness,
             next_action: details
                 .next_action
                 .or(mapping.next_action)
@@ -694,23 +693,6 @@ fn looks_like_private_local_path(value: &str) -> bool {
         || lower.contains("\\users\\")
 }
 
-fn sanitize_freshness(mut freshness: BlameDiagnosticFreshness) -> BlameDiagnosticFreshness {
-    freshness.served_generation = freshness
-        .served_generation
-        .as_deref()
-        .and_then(sanitize_generation_id);
-    freshness.active_generation = freshness
-        .active_generation
-        .as_deref()
-        .and_then(sanitize_generation_id);
-    freshness
-}
-
-fn sanitize_generation_id(value: &str) -> Option<String> {
-    (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| value.to_ascii_lowercase())
-}
-
 const fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -789,25 +771,16 @@ mod tests {
     }
 
     #[test]
-    fn freshness_drops_unvalidated_generation_values() {
-        let details = ProtocolDiagnosticDetails {
-            freshness: Some(BlameDiagnosticFreshness {
-                state: BlameFreshnessState::StaleCommitted,
-                served_generation: Some("/secret/graph/generation".to_owned()),
-                active_generation: Some("A".repeat(64)),
-                catch_up_active: true,
-            }),
-            ..ProtocolDiagnosticDetails::default()
-        };
-        let diagnostic = BlameDiagnostic::from_mapping(
-            protocol_class_mapping(ErrorClass::ResourceNotFound),
-            true,
-            details,
+    fn stale_source_exposes_only_the_bounded_freshness_state() {
+        let diagnostic = BlameDiagnostic::for_stable_error_code("stale_source").unwrap();
+        let value = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(
+            value["freshness"],
+            serde_json::json!({"state": "stale_committed"})
         );
-        let freshness = diagnostic.freshness.unwrap();
-        assert_eq!(freshness.served_generation, None);
-        assert_eq!(freshness.active_generation, Some("a".repeat(64)));
-        assert!(freshness.catch_up_active);
+        assert!(value.get("served_generation").is_none());
+        assert!(value.get("active_generation").is_none());
+        assert!(value.get("catch_up_active").is_none());
     }
 
     fn repository(selector: &str) -> BlameDiagnosticCandidate {
