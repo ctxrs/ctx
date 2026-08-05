@@ -8,7 +8,7 @@
     {
       "package": "ctx",
       "manifest": "crates/ctx-cli/Cargo.toml",
-      "code_baseline": 120251
+      "code_baseline": 119246
     },
     {
       "package": "ctx-history-capture",

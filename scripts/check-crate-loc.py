@@ -270,7 +270,12 @@ def revision_inventory(root: Path, revision: str, package_root: str) -> set[str]
 def is_test_only_source(relative: PurePosixPath) -> bool:
     parts = relative.parts
     base = relative.name
-    if any(part in {"test", "tests", "test_support"} for part in parts[:-1]):
+    if any(
+        part in {"test", "tests", "test_support"}
+        or part.endswith("_tests")
+        or part.startswith("test_support")
+        for part in parts[:-1]
+    ):
         return True
     return base == "tests.rs" or base.endswith("_tests.rs") or base.startswith("test_support")
 
@@ -386,6 +391,11 @@ def main() -> int:
     failures: list[str] = []
     for package in packages:
         paths = package_sources(root, package, inventory)
+        source_prefix = f"{package['root']}/src/"
+        if not any(path.startswith(source_prefix) for path in paths):
+            raise GateError(
+                f"workspace package has no declared production Rust sources: {package['package']}"
+            )
         code, _ = run_scc(scc, root, paths)
         entry = ledger_by_package.get(package["package"])
         status = "pass"

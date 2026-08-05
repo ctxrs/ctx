@@ -139,6 +139,7 @@ make_code "${current_case}/crates/exact/src/generated.rs" 2
 make_code "${current_case}/crates/exact/build.rs" 2
 make_code "${current_case}/crates/exact/src/tests.rs" 500
 make_code "${current_case}/crates/exact/src/nested/tests/fixture.rs" 500
+make_code "${current_case}/crates/exact/src/transport_tests/fixture.rs" 500
 make_code "${current_case}/crates/exact/src/ignored_tests.rs" 500
 make_code "${current_case}/crates/exact/src/test_support.rs" 500
 commit_snapshot

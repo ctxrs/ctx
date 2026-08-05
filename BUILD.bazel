@@ -88,17 +88,6 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-sdk:cargo_package_data",
 ]
 
-CARGO_WORKSPACE_MANIFESTS = [
-    "//crates/ctx-cli:Cargo.toml",
-    "//crates/ctx-history-capture:Cargo.toml",
-    "//crates/ctx-history-core:Cargo.toml",
-    "//crates/ctx-history-index:Cargo.toml",
-    "//crates/ctx-history-refresh:Cargo.toml",
-    "//crates/ctx-pro-host-protocol:Cargo.toml",
-    "//crates/ctx-protocol:Cargo.toml",
-    "//crates/ctx-sdk:Cargo.toml",
-]
-
 LOC_CHECK_SOURCE_DATA = [
     ":loc_check_inputs",
     "Cargo.toml",
@@ -117,7 +106,7 @@ LOC_CHECK_SOURCE_DATA = [
     "//tools/bazel/mingw:loc_check_inputs",
     "//tools/bazel/patches:loc_check_inputs",
     "//tools/bazel/platforms:loc_check_inputs",
-] + CARGO_WORKSPACE_MANIFESTS
+]
 
 loc_check_manifest(
     name = "loc_check_source_manifest",
