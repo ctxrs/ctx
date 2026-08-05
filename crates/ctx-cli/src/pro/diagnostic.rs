@@ -90,7 +90,6 @@ pub(crate) struct BlameDiagnosticFreshness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BlameFreshnessState {
-    Current,
     StaleCommitted,
 }
 
@@ -102,17 +101,12 @@ pub(crate) struct BlameNextAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // Request-specific actions are populated by the integration/output lane.
 pub(crate) enum BlameNextActionKind {
     SetupPro,
     ManagePro,
     RepairPro,
     CheckStatus,
-    Retry,
     SearchCore,
-    SpecifyRepository,
-    SelectCommit,
-    RetryFromCheckout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
