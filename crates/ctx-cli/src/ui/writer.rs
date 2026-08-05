@@ -27,9 +27,6 @@ impl Ui {
             stdout_auto_color,
             term_is_dumb(),
         );
-        let stdout_writer: BoxedWriter =
-            Box::new(MeasuredWriter::current(stdout, StreamKind::Stdout));
-
         let stderr = io::stderr();
         let stderr_terminal = stderr.is_terminal();
         let stderr_auto_color = auto_color_enabled(&stderr);
@@ -42,12 +39,9 @@ impl Ui {
             stderr_auto_color,
             term_is_dumb(),
         );
-        let stderr_writer: BoxedWriter =
-            Box::new(MeasuredWriter::current(stderr, StreamKind::Stderr));
-
         Self {
-            stdout: Destination::new(stdout_context, stdout_writer),
-            stderr: Destination::new(stderr_context, stderr_writer),
+            stdout: Destination::adapted(stdout_context, stdout),
+            stderr: Destination::adapted(stderr_context, stderr),
         }
     }
 
@@ -220,7 +214,21 @@ impl Destination {
     where
         W: Write + Send + 'static,
     {
-        let measured: BoxedWriter = Box::new(MeasuredWriter::current(writer, context.stream()));
+        let writer: BoxedWriter = Box::new(writer);
+        Self::adapted(context, writer)
+    }
+
+    /// Keeps platform terminal adaptation at the final shared writer boundary.
+    /// Measurement remains outside the adapter so every caller follows the
+    /// same stdout/stderr accounting path.
+    fn adapted<W>(context: RenderContext, writer: W) -> Self
+    where
+        W: anstream::stream::RawStream + anstream::stream::AsLockedWrite + Send + 'static,
+    {
+        let adapted = terminal_adapter(writer, context);
+        let context = context
+            .with_terminal_control_support(terminal_controls_supported(adapted.current_choice()));
+        let measured: BoxedWriter = Box::new(MeasuredWriter::current(adapted, context.stream()));
         Self::new(context, measured)
     }
 
@@ -240,6 +248,27 @@ impl Destination {
     fn flush(&mut self) -> io::Result<()> {
         self.writer.flush()
     }
+}
+
+fn terminal_adapter<W>(writer: W, context: RenderContext) -> anstream::AutoStream<W>
+where
+    W: anstream::stream::RawStream,
+{
+    anstream::AutoStream::new(writer, terminal_adapter_choice(context))
+}
+
+const fn terminal_adapter_choice(context: RenderContext) -> anstream::ColorChoice {
+    if context.live_output_capable() || context.color_enabled() {
+        // `Always` asks anstream to enable ANSI support or use its native
+        // Windows console fallback. It does not add styling to plain bytes.
+        anstream::ColorChoice::Always
+    } else {
+        anstream::ColorChoice::Never
+    }
+}
+
+const fn terminal_controls_supported(active_choice: anstream::ColorChoice) -> bool {
+    matches!(active_choice, anstream::ColorChoice::AlwaysAnsi)
 }
 
 fn auto_color_enabled<S>(stream: &S) -> bool
@@ -374,6 +403,75 @@ mod tests {
                 "styling must remain disabled"
             );
         }
+    }
+
+    #[test]
+    fn terminal_adapter_capability_is_independent_of_styling() {
+        let live_without_style = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Never),
+        );
+        assert!(!live_without_style.color_enabled());
+        assert!(live_without_style.live_output_capable());
+        assert_eq!(
+            terminal_adapter_choice(live_without_style),
+            anstream::ColorChoice::Always
+        );
+        let adapted = terminal_adapter(Vec::new(), live_without_style);
+        assert_ne!(adapted.current_choice(), anstream::ColorChoice::Never);
+        let destination = Destination::adapted(live_without_style, Vec::new());
+        assert!(destination.context().live_output_capable());
+
+        let styled_pipe =
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always));
+        assert!(!styled_pipe.live_output_capable());
+        assert_eq!(
+            terminal_adapter_choice(styled_pipe),
+            anstream::ColorChoice::Always
+        );
+
+        for unadapted in [
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+            RenderContext::for_test(
+                TestContext::tty(StreamKind::Stdout, 80)
+                    .term_dumb(true)
+                    .color(ColorMode::Never),
+            ),
+        ] {
+            assert!(!unadapted.live_output_capable());
+            assert!(!unadapted.color_enabled());
+            assert_eq!(
+                terminal_adapter_choice(unadapted),
+                anstream::ColorChoice::Never
+            );
+            let adapted = terminal_adapter(Vec::new(), unadapted);
+            assert_eq!(adapted.current_choice(), anstream::ColorChoice::Never);
+        }
+    }
+
+    #[test]
+    fn active_adapter_capability_gates_live_cursor_output() {
+        assert!(terminal_controls_supported(
+            anstream::ColorChoice::AlwaysAnsi
+        ));
+        assert!(!terminal_controls_supported(anstream::ColorChoice::Always));
+        assert!(!terminal_controls_supported(anstream::ColorChoice::Never));
+
+        let live = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Never),
+        );
+        assert!(live
+            .with_terminal_control_support(true)
+            .live_output_capable());
+        assert!(!live
+            .with_terminal_control_support(false)
+            .live_output_capable());
+
+        let pipe =
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always));
+        assert!(pipe.color_enabled());
+        assert!(!pipe
+            .with_terminal_control_support(true)
+            .live_output_capable());
     }
 
     #[test]

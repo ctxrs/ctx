@@ -146,6 +146,11 @@ impl RenderContext {
         self.live_output_capable
     }
 
+    pub(super) const fn with_terminal_control_support(mut self, supported: bool) -> Self {
+        self.live_output_capable = self.live_output_capable && supported;
+        self
+    }
+
     pub(crate) const fn terminal_width(self) -> Option<usize> {
         self.terminal_width
     }
