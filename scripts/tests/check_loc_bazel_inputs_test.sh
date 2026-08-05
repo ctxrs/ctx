@@ -27,6 +27,8 @@ assert_reaches_gate crates/ctx-history-capture/src/provider/source_backed/driver
 assert_reaches_gate tools/bazel/release_routes_test.bzl
 assert_reaches_gate scripts/check-loc.py
 assert_reaches_gate scripts/check-loc-policy-v2.json
+assert_reaches_gate scripts/check-crate-loc.py
+assert_reaches_gate scripts/check-crate-loc-policy-v1.json
 
 [[ -n "${scc_bin}" && -x "${scc_bin}" ]] || {
   printf 'LOC Bazel input contract failed: pinned scc runfile is unavailable: %s\n' "${scc_bin:-<unset>}" >&2
@@ -45,7 +47,8 @@ for path in \
   scripts/source-backed-recovery/fault_shim.c \
   scripts/source-backed-recovery/run-bazel-linux-fault-test.sh \
   tools/bazel/release_routes_test.bzl \
-  scripts/check-loc.py; do
+  scripts/check-loc.py \
+  scripts/check-crate-loc.py; do
   grep -Fxq "${path}" "${manifest}" || {
     printf 'LOC Bazel input contract failed: declared-source manifest omits %s\n' "${path}" >&2
     exit 1

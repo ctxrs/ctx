@@ -17,6 +17,8 @@ load(
     "configured_dependency_inventory",
     "configured_license_materials",
 )
+load("//tools/bazel:rust_crate_gate.bzl", "rust_crate_gate")
+load("//tools/bazel:rust-target-inventory.bzl", "CARGO_WORKSPACE_PACKAGE_DATA")
 load(
     "//tools/bazel:test_tiers.bzl",
     "CI_TESTS",
@@ -77,16 +79,22 @@ NON_RUST_GATE_DATA = glob([
     "//sdks/go/examples/dogfood:repository_gate_data",
 ]
 
-CARGO_WORKSPACE_PACKAGE_DATA = [
-    "//crates/ctx-cli:cargo_package_data",
-    "//crates/ctx-history-capture:cargo_package_data",
-    "//crates/ctx-history-core:cargo_package_data",
-    "//crates/ctx-history-index:cargo_package_data",
-    "//crates/ctx-history-refresh:cargo_package_data",
-    "//crates/ctx-pro-host-protocol:cargo_package_data",
-    "//crates/ctx-protocol:cargo_package_data",
-    "//crates/ctx-sdk:cargo_package_data",
-]
+RUST_CRATE_GATE_RECORDS = rust_crate_gate(
+    name = "rust_crate_gate_records",
+    roots = [
+        "//crates/ctx-cli:ctx",
+        "//crates/ctx-sdk:lib",
+    ],
+)
+
+# Unlike the repository-wide LOC manifest, this source surface is deliberately
+# crate-specific and therefore retains checked-in Rust under fixture/data/test-
+# named paths. Cargo target reachability, not a generic path exclusion, decides
+# whether any such file contributes production CLOC.
+loc_check_manifest(
+    name = "crate_gate_source_manifest",
+    srcs = ["Cargo.toml"] + CARGO_WORKSPACE_PACKAGE_DATA,
+)
 
 LOC_CHECK_SOURCE_DATA = [
     ":loc_check_inputs",
@@ -115,9 +123,14 @@ loc_check_manifest(
 
 LOC_CHECK_DATA = LOC_CHECK_SOURCE_DATA + [
     ":loc_check_source_manifest",
+    ":crate_gate_source_manifest",
+    "contracts/release-targets-v1.json",
+    "scripts/check-crate-loc-policy-v1.json",
+    "scripts/check-crate-loc-snapshot-v1.json",
     "scripts/check-loc-policy-v2.json",
+    "//tools/bazel:rust-target-inventory.json",
     "@ctx_scc_linux_x86_64//:scc",
-]
+] + RUST_CRATE_GATE_RECORDS
 
 # Keep the direct-checkout and Bazel package audits on the exact same source
 # surface. The checker owns the path list; these filegroups make those paths
@@ -233,9 +246,41 @@ py_test(
         "$(rootpath Cargo.toml)",
     ],
     data = [
-        "Cargo.toml",
+        "scripts/check-crate-loc.py",
+        "scripts/check_crate_gate_graph.py",
+        "scripts/check_crate_gate_policy.py",
         "//tools/bazel:rust-target-inventory.json",
-    ] + CARGO_WORKSPACE_PACKAGE_DATA,
+        "//tools/bazel:rust-target-inventory.bzl",
+    ] + CARGO_WORKSPACE_PACKAGE_DATA + LOC_CHECK_SOURCE_DATA,
+)
+
+# Static parsing is intentionally paired with a no-cache live query. The live
+# half sees macro-generated and disconnected Rust rules anywhere in //..., and
+# query --output=build preserves unresolved select() expressions for fail-closed
+# production source/root/dependency/feature validation.
+sh_test(
+    name = "rust_target_inventory_live_check",
+    srcs = ["scripts/tests/rust-target-inventory-live-test.sh"],
+    args = [
+        "$(rootpath BUILD.bazel)",
+        "$(rootpath //tools/bazel:rust-target-inventory.json)",
+        "$(rootpath //tools/bazel:check_rust_target_inventory.py)",
+    ],
+    data = [
+        "BUILD.bazel",
+        "scripts/bazelw",
+        "scripts/check-crate-loc.py",
+        "scripts/check_crate_gate_graph.py",
+        "scripts/check_crate_gate_policy.py",
+        "//tools/bazel:check_rust_target_inventory.py",
+        "//tools/bazel:rust-target-inventory.json",
+        "//tools/bazel:rust-target-inventory.bzl",
+    ] + CARGO_WORKSPACE_PACKAGE_DATA + LOC_CHECK_SOURCE_DATA,
+    tags = [
+        "build-graph",
+        "no-cache",
+        "no-sandbox",
+    ],
 )
 
 py_test(
@@ -888,7 +933,8 @@ non_rust_gate(
     args = [
         "$(rootpath @ctx_scc_linux_x86_64//:scc)",
         "$(rootpath :loc_check_source_manifest)",
-    ],
+        "$(rootpath :crate_gate_source_manifest)",
+    ] + ["$(rootpath %s)" % label for label in RUST_CRATE_GATE_RECORDS],
     data = LOC_CHECK_DATA,
 )
 non_rust_gate(

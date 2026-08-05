@@ -10,6 +10,7 @@ exports_files([
     "check_freebsd_ort_exit_contract.py",
     "check_freebsd_ort_exit_contract_test.py",
     "check_rust_target_inventory.py",
+    "check_rust_target_inventory_test.py",
     "check_rust_toolchain_pins.py",
     "check_rust_toolchain_pins_test.py",
     "check_test_tier_inventory.py",
@@ -17,6 +18,7 @@ exports_files([
     "select_affected_tests.py",
     "select_affected_tests_test.py",
     "rust-target-inventory.json",
+    "rust-target-inventory.bzl",
 ])
 
 package(default_visibility = ["//visibility:public"])
@@ -39,6 +41,16 @@ config_setting(
 )
 
 release_route_analysis_test_suite(name = "release_route_analysis_tests")
+
+py_test(
+    name = "rust_target_inventory_tests",
+    srcs = [
+        "check_rust_target_inventory.py",
+        "check_rust_target_inventory_test.py",
+    ],
+    imports = ["."],
+    main = "check_rust_target_inventory_test.py",
+)
 
 py_test(
     name = "test_tier_inventory_tests",

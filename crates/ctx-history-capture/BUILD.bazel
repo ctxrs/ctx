@@ -141,6 +141,26 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
+ctx_rust_test(
+    name = "source_backed_route_contract_tests",
+    srcs = ["tests/source_backed_route_contract.rs"],
+    crate_name = "source_backed_route_contract",
+    crate_root = "tests/source_backed_route_contract.rs",
+    compile_data = [
+        "//:provider_support_matrix",
+        "tests/goldens/source-backed-route-registry-v1.json",
+    ],
+    edition = crate_edition(),
+    aliases = aliases(normal = True),
+    deps = all_crate_deps(normal = True) + [":lib"] + CTX_HISTORY_CAPTURE_DEPS,
+    rustc_env = COMMON_RUSTC_ENV,
+    tags = [
+        "provider-conformance",
+        "safe-presubmit",
+        "source-backed",
+    ],
+)
+
 py_test(
     name = "mcp_attribution_conformance_tests",
     srcs = [

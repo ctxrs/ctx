@@ -124,10 +124,23 @@ case "${mode}" in
   loc_check)
     loc_scc="${2:-}"
     loc_manifest="${3:-}"
+    crate_manifest="${4:-}"
+    shift 4 || true
+    crate_records=("$@")
     [[ -n "${loc_scc}" ]] || fail 'loc_check requires the pinned scc runfile'
     [[ -n "${loc_manifest}" && -f "${loc_manifest}" ]] || \
       fail 'loc_check requires the declared source manifest'
+    [[ -n "${crate_manifest}" && -f "${crate_manifest}" ]] || \
+      fail 'loc_check requires the crate-specific source manifest'
+    [[ "${#crate_records[@]}" -gt 0 ]] || \
+      fail 'loc_check requires configured Rust crate records'
     loc_manifest="$(cd "$(dirname "${loc_manifest}")" && pwd -P)/$(basename "${loc_manifest}")"
+    crate_manifest="$(cd "$(dirname "${crate_manifest}")" && pwd -P)/$(basename "${crate_manifest}")"
+    for index in "${!crate_records[@]}"; do
+      [[ -f "${crate_records[index]}" ]] || fail "configured Rust crate record is missing: ${crate_records[index]}"
+      crate_records[index]="$(cd "$(dirname "${crate_records[index]}")" && pwd -P)/$(basename "${crate_records[index]}")"
+    done
+    crate_records_value="$(IFS=:; printf '%s' "${crate_records[*]}")"
     [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]] || \
       fail 'loc_check requires the Bazel runfiles repository root'
     loc_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
@@ -138,6 +151,18 @@ case "${mode}" in
       CTX_LOC_ROOT="${loc_root}" \
       CTX_LOC_SCC="${loc_scc}" \
       bash scripts/check-loc.sh
+    run env \
+      CTX_CRATE_LOC_BAZEL_RECORDS="${crate_records_value}" \
+      CTX_CRATE_LOC_PATHS_MANIFEST="${crate_manifest}" \
+      CTX_CRATE_LOC_ROOT="${loc_root}" \
+      CTX_CRATE_LOC_SCC="${loc_scc}" \
+      bash scripts/tests/check_crate_loc_test.sh
+    run env \
+      CTX_CRATE_LOC_BAZEL_RECORDS="${crate_records_value}" \
+      CTX_CRATE_LOC_PATHS_MANIFEST="${crate_manifest}" \
+      CTX_CRATE_LOC_ROOT="${loc_root}" \
+      CTX_CRATE_LOC_SCC="${loc_scc}" \
+      bash scripts/check-crate-loc.sh
     ;;
   public_control_surface_check)
     run bash scripts/tests/check-public-control-surface-test.sh

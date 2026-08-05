@@ -45,6 +45,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-history-capture:codex_direct_result_tests",
     "//crates/ctx-history-capture:repository_shell_outcomes_tests",
     "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
+    "//crates/ctx-history-capture:source_backed_route_contract_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:mcp_attribution_search_tests",
@@ -75,6 +76,7 @@ _CI_PROVIDER_TESTS = [
     "//crates/ctx-history-capture:mcp_attribution_conformance_runner_tests",
     "//crates/ctx-history-capture:mcp_attribution_conformance_tests",
     "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
+    "//crates/ctx-history-capture:source_backed_route_contract_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-index:mcp_attribution_search_tests",
 ]
@@ -168,6 +170,7 @@ CI_TESTS = [
     ":release_target_matrix_check",
     ":release_target_matrix_tests",
     ":rust_target_inventory_check",
+    ":rust_target_inventory_live_check",
     ":rust_toolchain_pin_check",
     ":rust_toolchain_pin_mutation_tests",
     ":rustfmt_check",
@@ -184,6 +187,7 @@ CI_TESTS = [
     "//sdks/go:go_sdk_tests",
     "//sdks/go/examples/dogfood:dogfood_tests",
     "//tools/bazel:release_route_analysis_tests",
+    "//tools/bazel:rust_target_inventory_tests",
     "//tools/bazel:test_tier_inventory_tests",
 ] + _CI_RUST_TESTS + _CI_PROVIDER_TESTS
 

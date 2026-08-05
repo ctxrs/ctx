@@ -35,14 +35,10 @@ _LOC_CHECK_EXCLUDES = [
     "**/docs/**",
     "**/fixture/**",
     "**/fixtures/**",
-    "**/gen/**",
-    "**/generated/**",
     "data/**",
     "docs/**",
     "fixture/**",
     "fixtures/**",
-    "gen/**",
-    "generated/**",
     "bazel-*/**",
     "external/**",
     "target/**",
@@ -60,7 +56,7 @@ def loc_check_inputs(name):
     native.filegroup(
         name = name,
         srcs = ["BUILD.bazel"] + native.glob(
-            patterns,
+            ["Cargo.toml"] + patterns,
             exclude = _LOC_CHECK_EXCLUDES,
         ),
         visibility = ["//visibility:public"],
