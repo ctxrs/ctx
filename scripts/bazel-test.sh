@@ -138,6 +138,12 @@ case "${mode}" in
       CTX_LOC_ROOT="${loc_root}" \
       CTX_LOC_SCC="${loc_scc}" \
       bash scripts/check-loc.sh
+    run env CTX_CRATE_LOC_SCC="${loc_scc}" bash scripts/tests/check_crate_loc_test.sh
+    run env \
+      CTX_CRATE_LOC_PATHS_MANIFEST="${loc_manifest}" \
+      CTX_CRATE_LOC_ROOT="${loc_root}" \
+      CTX_CRATE_LOC_SCC="${loc_scc}" \
+      bash scripts/check-crate-loc.sh
     ;;
   public_control_surface_check)
     run bash scripts/tests/check-public-control-surface-test.sh

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "policy": "Every Rust crate has one hard 20,000 production-CLOC limit. The two pre-existing public offenders are frozen at exact current-head ceilings that must ratchet down on every reduction and disappear when their migrations complete.",
+  "metric_policy": "scripts/check-loc-policy-v2.json",
+  "hard_limit": 20000,
+  "grandfathered_at": "187c0c6533b5de56119cd2774ba90d29925cb1ac",
+  "grandfathered": [
+    {
+      "package": "ctx",
+      "manifest": "crates/ctx-cli/Cargo.toml",
+      "code_baseline": 120251
+    },
+    {
+      "package": "ctx-history-capture",
+      "manifest": "crates/ctx-history-capture/Cargo.toml",
+      "code_baseline": 151887
+    }
+  ]
+}
