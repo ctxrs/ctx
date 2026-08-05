@@ -27,24 +27,6 @@ sha256_file() {
   fi
 }
 
-require_plain_directory() {
-  local path="${1%/}"
-  local label="$2"
-  local parent
-
-  [[ -n "${path}" ]] || path="/"
-  [[ -d "${path}" && ! -L "${path}" ]] || {
-    printf '%s must be a non-symlink directory: %s\n' "${label}" "${path}" >&2
-    exit 1
-  }
-  parent="$(dirname "${path}")"
-  [[ -d "${parent}" && ! -L "${parent}" ]] || {
-    printf '%s parent must be a non-symlink directory: %s\n' \
-      "${label}" "${parent}" >&2
-    exit 1
-  }
-}
-
 require_regular_input() {
   local path="$1"
   local label="$2"
@@ -148,5 +130,5 @@ stage_semantic_assets() {
   printf 'staged unsigned Semantic release handoff %s\n' "${output_dir}"
 }
 
-require_plain_directory "${artifact_dir}" "Semantic artifact root"
+python3 -I "${bundle_tool}" require-directory --directory "${artifact_dir}"
 stage_semantic_assets "${artifact_dir}" "${output_dir}" "${script_dir}"

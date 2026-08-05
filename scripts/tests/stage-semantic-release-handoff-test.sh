@@ -161,6 +161,18 @@ for linked_suffix in .sha256 .asset.json; do
   test ! -e "${linked_sidecar}-output"
 done
 
+mkdir -p "${tmp_dir}/higher-real/nested"
+cp -a "${matrix}" "${tmp_dir}/higher-real/nested/candidate"
+ln -s "${tmp_dir}/higher-real" "${tmp_dir}/higher-link"
+if run_stage "${tmp_dir}/higher-link/nested/candidate" \
+  "${tmp_dir}/higher-link-output" \
+  >"${tmp_dir}/higher-link.out" 2>"${tmp_dir}/higher-link.err"; then
+  printf 'Semantic handoff followed a higher producer ancestor link\n' >&2
+  exit 1
+fi
+grep -Eqi 'symlink|non-directory' "${tmp_dir}/higher-link.err"
+test ! -e "${tmp_dir}/higher-link-output"
+
 collision="${tmp_dir}/collision"
 mkdir "${collision}"
 printf 'sentinel\n' >"${collision}/sentinel"

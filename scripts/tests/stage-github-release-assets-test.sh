@@ -61,6 +61,26 @@ case "$*" in
     ;;
 esac
 case "$*" in
+  *macos-release-signing-evidence.py\ verify-artifact*)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --artifact ]; then
+        artifact="$2"
+        break
+      fi
+      shift
+    done
+    case "${artifact:?}" in
+      */.github-release-assets.*/*) ;;
+      *)
+        printf 'fake signing did not inspect the staged artifact\n' >&2
+        exit 1
+        ;;
+    esac
+    if grep -Fq 'unsigned replacement' "${artifact:?}"; then
+      printf 'fake signing rejected unsigned staged artifact\n' >&2
+      exit 1
+    fi
+    ;;
   *release-sbom.py\ verify-bundle*)
     printf '%s\n' "$*" >> "${CTX_FAKE_SBOM_LOG:?}"
     ;;
@@ -99,6 +119,14 @@ if [ -n "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF:-}" ] \
   mv "${CTX_FAKE_INSTALL_SUBSTITUTE_FOREIGN:?}" \
     "${CTX_FAKE_INSTALL_SUBSTITUTE_LEAF}"
   : >"${CTX_FAKE_INSTALL_SUBSTITUTION_FLAG}"
+fi
+if [ -n "${CTX_FAKE_COHERENT_TRIGGER:-}" ] \
+  && [ "${3:-}" = "${CTX_FAKE_COHERENT_TRIGGER}" ] \
+  && [ ! -e "${CTX_FAKE_COHERENT_FLAG:?}" ]; then
+  cp "${CTX_FAKE_COHERENT_REPLACEMENT:?}" "${CTX_FAKE_COHERENT_TARGET:?}"
+  sha256sum "${CTX_FAKE_COHERENT_TARGET}" \
+    | awk '{print $1}' > "${CTX_FAKE_COHERENT_TARGET}.sha256"
+  : >"${CTX_FAKE_COHERENT_FLAG}"
 fi
 exec "${CTX_REAL_INSTALL:?}" "$@"
 SH
@@ -316,6 +344,14 @@ assert_exact_assets "${default_output}" 24 "${default_assets[@]}"
 test "$(wc -l < "${default_sbom_log}")" -eq 6
 test "$(wc -l < "${default_build_info_log}")" -eq 6
 test "$(grep -Fc -- "--source-commit ${source_commit}" "${default_build_info_log}")" -eq 6
+grep -Fq -- "--artifact ${tmp_dir}/.github-release-assets." \
+  "${default_build_info_log}"
+grep -Fq -- "--artifact ${tmp_dir}/.github-release-assets." \
+  "${default_sbom_log}"
+grep -Fq -- "--sbom ${tmp_dir}/.github-release-assets." \
+  "${default_sbom_log}"
+! grep -Fq -- "--artifact ${matrix}/" "${default_build_info_log}"
+! grep -Fq -- "--artifact ${matrix}/" "${default_sbom_log}"
 
 semantic_output="${tmp_dir}/semantic"
 CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" \
@@ -343,6 +379,27 @@ if CTX_FAKE_SBOM_LOG="${tmp_dir}/late-copy-sbom.log" \
 fi
 grep -Fq 'staged artifact checksum mismatch' "${tmp_dir}/late-copy.err"
 test ! -e "${tmp_dir}/late-copy-output"
+
+unsigned_candidate="${tmp_dir}/unsigned-candidate"
+cp -a "${matrix}" "${unsigned_candidate}"
+printf 'unsigned replacement CLI bytes\n' >"${tmp_dir}/unsigned-replacement"
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/unsigned-sbom.log" \
+  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/unsigned-build-info.log" \
+  CTX_FAKE_COHERENT_TRIGGER="${unsigned_candidate}/ctx-linux-aarch64" \
+  CTX_FAKE_COHERENT_TARGET="${unsigned_candidate}/ctx-macos-arm64" \
+  CTX_FAKE_COHERENT_REPLACEMENT="${tmp_dir}/unsigned-replacement" \
+  CTX_FAKE_COHERENT_FLAG="${tmp_dir}/unsigned.flag" \
+  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${unsigned_candidate}" \
+  "${tmp_dir}/unsigned-output" \
+  >"${tmp_dir}/unsigned.out" 2>"${tmp_dir}/unsigned.err"; then
+  printf 'GitHub stager committed coherently substituted unsigned macOS bytes\n' >&2
+  exit 1
+fi
+test -e "${tmp_dir}/unsigned.flag"
+grep -Fq 'fake signing rejected unsigned staged artifact' \
+  "${tmp_dir}/unsigned.err"
+test ! -e "${tmp_dir}/unsigned-output"
 
 printf 'retired proof payload\n' > "${matrix}/ctx-linux-x64.native-runtime-proof.txt"
 ignored_proof_output="${tmp_dir}/ignored-proof"
@@ -376,9 +433,9 @@ runtime_race_leaf="${runtime_race_candidate}/ctx-onnxruntime-linux-x64.tar.gz"
 printf 'foreign runtime bytes\n' >"${tmp_dir}/foreign-runtime"
 if CTX_FAKE_SBOM_LOG="${tmp_dir}/runtime-race-sbom.log" \
   CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/runtime-race-build-info.log" \
-  CTX_FAKE_SUBSTITUTE_LEAF="${runtime_race_leaf}" \
-  CTX_FAKE_SUBSTITUTE_FOREIGN="${tmp_dir}/foreign-runtime" \
-  CTX_FAKE_SUBSTITUTION_FLAG="${tmp_dir}/runtime-race.flag" \
+  CTX_FAKE_INSTALL_SUBSTITUTE_LEAF="${runtime_race_leaf}" \
+  CTX_FAKE_INSTALL_SUBSTITUTE_FOREIGN="${tmp_dir}/foreign-runtime" \
+  CTX_FAKE_INSTALL_SUBSTITUTION_FLAG="${tmp_dir}/runtime-race.flag" \
   CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${runtime_race_candidate}" \
   "${tmp_dir}/runtime-race-output" \
@@ -465,6 +522,19 @@ if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
   printf 'GitHub stager followed a candidate ancestor link\n' >&2
   exit 1
 fi
+
+mkdir -p "${tmp_dir}/higher-real/nested"
+cp -a "${matrix}" "${tmp_dir}/higher-real/nested/candidate"
+ln -s "${tmp_dir}/higher-real" "${tmp_dir}/higher-link"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${tmp_dir}/higher-link/nested/candidate" \
+  "${tmp_dir}/higher-link-output" \
+  >"${tmp_dir}/higher-link.out" 2>"${tmp_dir}/higher-link.err"; then
+  printf 'GitHub stager followed a higher candidate ancestor link\n' >&2
+  exit 1
+fi
+grep -Eqi 'symlink|non-directory' "${tmp_dir}/higher-link.err"
+test ! -e "${tmp_dir}/higher-link-output"
 
 # Restore the runtime mutation so a deterministic source-root substitution
 # reaches the validators after initial candidate verification.

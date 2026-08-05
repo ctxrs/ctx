@@ -249,6 +249,27 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertFalse((outside / "output").exists())
         self.assertTrue((outside / ".stage").is_dir())
 
+    def test_generic_commit_fails_if_bound_parent_is_detached_after_rename(self) -> None:
+        stage = self.output.parent / ".generic-stage"
+        stage.mkdir()
+        (stage / "asset").write_text("asset\n")
+        output = self.output.parent / "generic-output"
+        detached = self.root / "detached-generic-parent"
+        rename_noreplace = BUNDLE._rename_noreplace_at
+
+        def detach_after_rename(*args) -> None:
+            rename_noreplace(*args)
+            if args[-1] == output:
+                os.rename(output.parent, detached)
+                output.parent.mkdir()
+
+        with mock.patch.object(
+            BUNDLE, "_rename_noreplace_at", side_effect=detach_after_rename
+        ), self.assertRaisesRegex(BUNDLE.BundleError, "bound directory"):
+            BUNDLE.commit_directory(stage, output)
+        self.assertFalse(output.exists())
+        self.assertEqual((detached / "generic-output/asset").read_text(), "asset\n")
+
     def test_public_collision_leaves_exact_private_commit_for_retry(self) -> None:
         def collide(phase: str) -> None:
             if phase == "before-public-commit":
@@ -263,6 +284,27 @@ class ReleaseBundleTests(unittest.TestCase):
             BUNDLE._tree_records(self.symbols),
         )
         self.assertTrue(self.stage.is_dir())
+
+    def test_public_commit_fails_if_bound_parent_is_detached_after_rename(self) -> None:
+        detached = self.root / "detached-public-parent"
+        rename_noreplace = BUNDLE._rename_noreplace_at
+
+        def detach_after_public_rename(*args) -> None:
+            rename_noreplace(*args)
+            if args[-1] == self.output:
+                os.rename(self.output.parent, detached)
+                self.output.parent.mkdir()
+
+        with mock.patch.object(
+            BUNDLE, "_rename_noreplace_at", side_effect=detach_after_public_rename
+        ), self.assertRaisesRegex(BUNDLE.BundleError, "bound directory"):
+            self.commit()
+        self.assertFalse(self.output.exists())
+        self.assertTrue((detached / "candidate").is_dir())
+        self.assertEqual(
+            BUNDLE._tree_records(self.symbols_output),
+            BUNDLE._tree_records(self.symbols),
+        )
 
     def test_existing_exact_symbols_are_reused_but_mismatch_fails_closed(self) -> None:
         shutil.copytree(self.symbols, self.symbols_output)
@@ -438,6 +480,43 @@ class ReleaseBundleTests(unittest.TestCase):
             )
         self.assertFalse(self.output.exists())
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_symbol_commit_fails_if_bound_parent_is_detached_after_rename(self) -> None:
+        detached = self.root / "detached-symbol-parent"
+        rename_noreplace = BUNDLE._rename_noreplace_at
+
+        def detach_after_symbol_rename(*args) -> None:
+            rename_noreplace(*args)
+            if args[-1] == self.symbols_output:
+                os.rename(self.symbols_output.parent, detached)
+                self.symbols_output.parent.mkdir()
+
+        with mock.patch.object(
+            BUNDLE, "_rename_noreplace_at", side_effect=detach_after_symbol_rename
+        ), self.assertRaisesRegex(BUNDLE.BundleError, "bound directory"):
+            self.commit()
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.symbols_output.exists())
+        self.assertTrue((detached / "symbols").is_dir())
+
+    def test_require_directory_rejects_a_symlinked_higher_ancestor(self) -> None:
+        real = self.root / "real-ancestor/nested/artifacts"
+        real.mkdir(parents=True)
+        linked = self.root / "linked-ancestor"
+        linked.symlink_to(self.root / "real-ancestor", target_is_directory=True)
+        checked = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "require-directory",
+                "--directory",
+                str(linked / "nested/artifacts"),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertRegex(checked.stderr, "symlink|non-directory")
 
 
 if __name__ == "__main__":

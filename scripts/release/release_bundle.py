@@ -97,6 +97,16 @@ def _require_directory(path: Path, label: str) -> tuple[int, int, int, int, int,
     return binding
 
 
+def _require_bound_directory_identity(
+    descriptor: int, path: Path, label: str
+) -> tuple[int, int]:
+    opened = os.fstat(descriptor)
+    path_binding = _require_directory(path, label)
+    if (opened.st_dev, opened.st_ino) != path_binding[:2]:
+        raise BundleError(f"{label} no longer identifies the bound directory: {path}")
+    return path_binding[:2]
+
+
 def _names(path: Path) -> list[str]:
     return sorted(entry.name for entry in path.iterdir())
 
@@ -299,7 +309,7 @@ def _tree_records(root: Path) -> dict[str, tuple[str, int, str, int]]:
     return records
 
 
-def _durable_tree(root: Path, label: str) -> None:
+def _durable_tree(root: Path, label: str) -> tuple[int, int]:
     root_binding = _require_directory(root, label)
     directories: list[Path] = []
     for current, child_directories, files in os.walk(root, followlinks=False):
@@ -333,6 +343,7 @@ def _durable_tree(root: Path, label: str) -> None:
         _fsync_directory(directory)
     if _binding(root) != root_binding:
         raise BundleError(f"{label} changed while made durable")
+    return root_binding[:2]
 
 
 def _valid_leaf_name(name: str, label: str) -> str:
@@ -390,6 +401,30 @@ def _entry_binding(parent_descriptor: int, leaf: str) -> os.stat_result | None:
         return None
 
 
+def _require_bound_child(
+    parent_descriptor: int,
+    parent_path: Path,
+    path: Path,
+    expected: tuple[int, int],
+    label: str,
+) -> tuple[int, int]:
+    if path.parent != parent_path:
+        raise BundleError(f"{label} is not inside its bound parent: {path}")
+    _require_bound_directory_identity(parent_descriptor, parent_path, f"{label} parent")
+    bound = _entry_binding(
+        parent_descriptor, _valid_leaf_name(path.name, label)
+    )
+    path_binding = _require_directory(path, label)
+    if (
+        bound is None
+        or not stat.S_ISDIR(bound.st_mode)
+        or (bound.st_dev, bound.st_ino) != expected
+        or path_binding[:2] != expected
+    ):
+        raise BundleError(f"{label} no longer identifies the expected directory: {path}")
+    return expected
+
+
 def _rename_noreplace_at(
     source_parent: int,
     source_leaf: str,
@@ -426,6 +461,58 @@ def _rename_noreplace_at(
     raise OSError(number, f"could not commit release destination: {destination}")
 
 
+def _rename_bound_directory_noreplace(
+    parent_descriptor: int,
+    parent_path: Path,
+    source: Path,
+    destination: Path,
+    expected: tuple[int, int],
+    label: str,
+) -> tuple[int, int]:
+    _require_bound_child(
+        parent_descriptor, parent_path, source, expected, f"{label} stage"
+    )
+    _rename_noreplace_at(
+        parent_descriptor,
+        source.name,
+        parent_descriptor,
+        destination.name,
+        destination,
+    )
+    _require_bound_child(
+        parent_descriptor, parent_path, destination, expected, label
+    )
+    os.fsync(parent_descriptor)
+    return _require_bound_child(
+        parent_descriptor, parent_path, destination, expected, label
+    )
+
+
+def _reuse_exact_tree(
+    parent_descriptor: int,
+    parent_path: Path,
+    path: Path,
+    bound: os.stat_result | None,
+    records: dict[str, tuple[str, int, str, int]],
+) -> tuple[int, int]:
+    label = "private symbol destination"
+    if bound is None or not stat.S_ISDIR(bound.st_mode):
+        raise BundleError(f"{label} already exists and does not match this release: {path}")
+    identity = (bound.st_dev, bound.st_ino)
+    _require_bound_child(parent_descriptor, parent_path, path, identity, label)
+    if _tree_records(path) != records:
+        raise BundleError(f"{label} already exists and does not match this release: {path}")
+    if _durable_tree(path, "existing private symbol tree") != identity:
+        raise BundleError(f"{label} changed while reused: {path}")
+    if _tree_records(path) != records:
+        raise BundleError(f"{label} changed while reused: {path}")
+    _require_bound_child(parent_descriptor, parent_path, path, identity, label)
+    os.fsync(parent_descriptor)
+    return _require_bound_child(
+        parent_descriptor, parent_path, path, identity, label
+    )
+
+
 def _absolute(path: Path) -> Path:
     return Path(os.path.abspath(path))
 
@@ -456,7 +543,12 @@ def _ensure_parent(path: Path) -> None:
     descriptor = _open_bound_directory(
         path, "release destination parent", create=True
     )
-    os.close(descriptor)
+    try:
+        _require_bound_directory_identity(
+            descriptor, path, "release destination parent"
+        )
+    finally:
+        os.close(descriptor)
 
 
 def preflight_destinations(
@@ -495,16 +587,17 @@ def commit_directory(stage: Path, output: Path) -> None:
     _require_directory(stage, "release stage")
     if stage.parent != output.parent or stage == output:
         raise BundleError("release stage must be a sibling of its final destination")
-    stage_leaf = _valid_leaf_name(stage.name, "release stage")
-    output_leaf = _valid_leaf_name(output.name, "release destination")
     parent = _open_bound_directory(output.parent, "release destination parent")
     try:
-        _durable_tree(stage, "release staged tree")
-        bound_stage = _entry_binding(parent, stage_leaf)
-        if bound_stage is None or not stat.S_ISDIR(bound_stage.st_mode):
-            raise BundleError(f"release stage is not a bound directory: {stage}")
-        _rename_noreplace_at(parent, stage_leaf, parent, output_leaf, output)
-        os.fsync(parent)
+        stage_identity = _durable_tree(stage, "release staged tree")
+        _rename_bound_directory_noreplace(
+            parent,
+            output.parent,
+            stage,
+            output,
+            stage_identity,
+            "release output",
+        )
     finally:
         os.close(parent)
 
@@ -528,7 +621,6 @@ def commit_bundle(
         raise BundleError("release stage must be a sibling of its final destination")
     if stage == output or output == symbols_output:
         raise BundleError("release commit paths are invalid")
-    stage_leaf = _valid_leaf_name(stage.name, "release stage")
     output_leaf = _valid_leaf_name(output.name, "public release destination")
     symbols_leaf = _valid_leaf_name(
         symbols_output.name, "private symbol destination"
@@ -549,24 +641,16 @@ def commit_bundle(
             existing_symbols = _entry_binding(symbols_parent, symbols_leaf)
             symbols_stage: Path | None = None
             if existing_symbols is not None:
-                if not stat.S_ISDIR(existing_symbols.st_mode) or (
-                    _tree_records(symbols_output) != source_symbols
-                ):
-                    raise BundleError(
-                        f"private symbol destination does not match this release: {symbols_output}"
-                    )
-                _durable_tree(symbols_output, "existing private symbol tree")
-                if _tree_records(symbols_output) != source_symbols:
-                    raise BundleError(
-                        f"private symbol destination changed while reused: {symbols_output}"
-                    )
-                os.fsync(symbols_parent)
+                symbols_identity = _reuse_exact_tree(
+                    symbols_parent,
+                    symbols_output.parent,
+                    symbols_output,
+                    existing_symbols,
+                    source_symbols,
+                )
             else:
                 symbols_stage = symbols_output.parent / (
                     f".ctx-symbols.{secrets.token_hex(16)}"
-                )
-                symbols_stage_leaf = _valid_leaf_name(
-                    symbols_stage.name, "private symbol stage"
                 )
                 try:
                     shutil.copytree(symbols_source, symbols_stage, symlinks=False)
@@ -575,7 +659,9 @@ def commit_bundle(
                         or _tree_records(symbols_source) != source_symbols
                     ):
                         raise BundleError("private symbol bundle changed while staged")
-                    _durable_tree(symbols_stage, "private symbol staged tree")
+                    symbols_stage_identity = _durable_tree(
+                        symbols_stage, "private symbol staged tree"
+                    )
                     if _tree_records(symbols_stage) != source_symbols:
                         raise BundleError(
                             "private symbol bundle changed while made durable"
@@ -583,29 +669,26 @@ def commit_bundle(
                     if phase_hook is not None:
                         phase_hook("before-symbol-commit")
                     try:
-                        _rename_noreplace_at(
+                        symbols_identity = _rename_bound_directory_noreplace(
                             symbols_parent,
-                            symbols_stage_leaf,
-                            symbols_parent,
-                            symbols_leaf,
+                            symbols_output.parent,
+                            symbols_stage,
                             symbols_output,
+                            symbols_stage_identity,
+                            "private symbol destination",
                         )
                         symbols_stage = None
-                        os.fsync(symbols_parent)
                     except DestinationExists:
-                        if (
-                            _entry_binding(symbols_parent, symbols_leaf) is None
-                            or _tree_records(symbols_output) != source_symbols
-                        ):
-                            raise
-                        _durable_tree(
-                            symbols_output, "existing private symbol tree"
+                        collided_symbols = _entry_binding(
+                            symbols_parent, symbols_leaf
                         )
-                        if _tree_records(symbols_output) != source_symbols:
-                            raise BundleError(
-                                "private symbol destination changed while reused"
-                            )
-                        os.fsync(symbols_parent)
+                        symbols_identity = _reuse_exact_tree(
+                            symbols_parent,
+                            symbols_output.parent,
+                            symbols_output,
+                            collided_symbols,
+                            source_symbols,
+                        )
                 finally:
                     if (
                         symbols_stage is not None
@@ -616,16 +699,27 @@ def commit_bundle(
 
             if phase_hook is not None:
                 phase_hook("before-public-commit")
-            if (
-                _entry_binding(symbols_parent, symbols_leaf) is None
-                or _tree_records(symbols_output) != source_symbols
-            ):
+            _require_bound_child(
+                symbols_parent,
+                symbols_output.parent,
+                symbols_output,
+                symbols_identity,
+                "private symbol destination",
+            )
+            if _tree_records(symbols_output) != source_symbols:
                 raise BundleError("private symbol destination changed before publication")
             verify_bundle(stage, platform, source_commit, seal_sha256=seal_sha256)
-            _rename_noreplace_at(
-                output_parent, stage_leaf, output_parent, output_leaf, output
+            stage_identity = _require_directory(
+                stage, "verified public release stage"
+            )[:2]
+            _rename_bound_directory_noreplace(
+                output_parent,
+                output.parent,
+                stage,
+                output,
+                stage_identity,
+                "public release output",
             )
-            os.fsync(output_parent)
         finally:
             os.close(symbols_parent)
     finally:
@@ -655,6 +749,8 @@ def main() -> int:
     verify.add_argument("--seal-sha256")
     unsealed = commands.add_parser("require-unsealed")
     unsealed.add_argument("--candidate-dir", type=Path, required=True)
+    require_directory = commands.add_parser("require-directory")
+    require_directory.add_argument("--directory", type=Path, required=True)
     commit_dir = commands.add_parser("commit-directory")
     commit_dir.add_argument("--stage-dir", type=Path, required=True)
     commit_dir.add_argument("--output-dir", type=Path, required=True)
@@ -688,6 +784,17 @@ def main() -> int:
             )
         elif args.command == "require-unsealed":
             require_unsealed(args.candidate_dir)
+        elif args.command == "require-directory":
+            directory = _absolute(args.directory)
+            descriptor = _open_bound_directory(
+                directory, "required directory"
+            )
+            try:
+                _require_bound_directory_identity(
+                    descriptor, directory, "required directory"
+                )
+            finally:
+                os.close(descriptor)
         elif args.command == "commit-directory":
             commit_directory(args.stage_dir, args.output_dir)
         else:

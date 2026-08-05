@@ -114,24 +114,6 @@ sha256_file() {
   exit 127
 }
 
-require_plain_directory() {
-  local path="${1%/}"
-  local label="$2"
-  local parent
-
-  [[ -n "${path}" ]] || path="/"
-  [[ -d "${path}" && ! -L "${path}" ]] || {
-    printf '%s must be a non-symlink directory: %s\n' "${label}" "${path}" >&2
-    exit 1
-  }
-  parent="$(dirname "${path}")"
-  [[ -d "${parent}" && ! -L "${parent}" ]] || {
-    printf '%s parent must be a non-symlink directory: %s\n' \
-      "${label}" "${parent}" >&2
-    exit 1
-  }
-}
-
 require_regular_input() {
   local path="$1"
   local label="$2"
@@ -243,7 +225,8 @@ if [[ "${mode}" == "transcode" ]]; then
   if [[ "${transcode_candidate_dir}" != /* ]]; then
     transcode_candidate_dir="${repo_root}/${transcode_candidate_dir}"
   fi
-  require_plain_directory "${transcode_candidate_dir}" "runtime artifact root"
+  python3 -I "${bundle_tool}" require-directory \
+    --directory "${transcode_candidate_dir}"
   python3 -I "${bundle_tool}" require-unsealed \
     --candidate-dir "${transcode_candidate_dir}"
   artifact_dir="${transcode_candidate_dir}"
@@ -255,7 +238,8 @@ requested_artifact_dir="${artifact_dir}"
 if [[ "${requested_artifact_dir}" != /* ]]; then
   requested_artifact_dir="${repo_root}/${requested_artifact_dir}"
 fi
-require_plain_directory "${requested_artifact_dir}" "release artifact root"
+python3 -I "${bundle_tool}" require-directory \
+  --directory "${requested_artifact_dir}"
 
 stage_asset() {
   local source_name="$1"
@@ -295,10 +279,9 @@ stage_asset() {
   printf '%s  %s\n' "${staged_sha}" "${dest_name}" >> "${out_dir%/}/SHA256SUMS"
 }
 
-verify_and_stage_cli_evidence() {
+stage_cli_evidence() {
   local source_name="$1"
   local dest_name="$2"
-  local platform="$3"
   local source_path="${artifact_dir%/}/${source_name}"
   local evidence
 
@@ -315,19 +298,6 @@ verify_and_stage_cli_evidence() {
     require_regular_input "${evidence}" "public CLI producer input"
   done
 
-  python3 -I scripts/check-public-cli-build-info.py \
-    --artifact "${source_path}" \
-    --build-info "${source_path}.build-info.json" \
-    --matrix contracts/release-targets-v1.json \
-    --platform "${platform}" \
-    --source-commit "${source_commit}" >/dev/null
-  python3 -I scripts/release-sbom.py verify-bundle \
-    --artifact "${source_path}" \
-    --build-info "${source_path}.build-info.json" \
-    --sbom "${source_path}.cdx.json" \
-    --notices "${source_path}.third-party-notices.txt" \
-    --size-report "${source_path}.size.json" \
-    --candidate-manifest "${source_path}.candidate.json"
   stage_asset \
     "${source_name}.cdx.json" "${dest_name}.cdx.json" 0644
   stage_asset \
@@ -335,31 +305,69 @@ verify_and_stage_cli_evidence() {
     "${dest_name}.third-party-notices.txt" 0644
 }
 
-stage_runtime_asset() {
+validate_staged_cli_evidence() {
+  local source_name="$1"
+  local dest_name="$2"
+  local platform="$3"
+  local source_path="${artifact_dir%/}/${source_name}"
+  local staged_path="${out_dir%/}/${dest_name}"
+
+  python3 -I scripts/check-public-cli-build-info.py \
+    --artifact "${staged_path}" \
+    --build-info "${source_path}.build-info.json" \
+    --matrix contracts/release-targets-v1.json \
+    --platform "${platform}" \
+    --source-commit "${source_commit}" >/dev/null
+  python3 -I scripts/release-sbom.py verify-bundle \
+    --artifact "${staged_path}" \
+    --build-info "${source_path}.build-info.json" \
+    --sbom "${staged_path}.cdx.json" \
+    --notices "${staged_path}.third-party-notices.txt" \
+    --size-report "${source_path}.size.json" \
+    --candidate-manifest "${source_path}.candidate.json"
+}
+
+runtime_asset_name() {
   local platform="$1"
-  local asset_name
 
   case "${platform}" in
-    linux-x64) asset_name="ctx-onnxruntime-linux-x64.tar.gz" ;;
-    linux-aarch64) asset_name="ctx-onnxruntime-linux-aarch64.tar.gz" ;;
-    macos-arm64) asset_name="ctx-onnxruntime-macos-arm64.tar.gz" ;;
-    macos-x64) asset_name="ctx-onnxruntime-macos-x64.tar.gz" ;;
-    windows-x64) asset_name="ctx-onnxruntime-windows-x64.zip" ;;
-    freebsd-x64) asset_name="ctx-onnxruntime-freebsd-x64.tar.gz" ;;
+    linux-x64) printf 'ctx-onnxruntime-linux-x64.tar.gz\n' ;;
+    linux-aarch64) printf 'ctx-onnxruntime-linux-aarch64.tar.gz\n' ;;
+    macos-arm64) printf 'ctx-onnxruntime-macos-arm64.tar.gz\n' ;;
+    macos-x64) printf 'ctx-onnxruntime-macos-x64.tar.gz\n' ;;
+    windows-x64) printf 'ctx-onnxruntime-windows-x64.zip\n' ;;
+    freebsd-x64) printf 'ctx-onnxruntime-freebsd-x64.tar.gz\n' ;;
     *)
       printf 'unknown platform for ONNX Runtime staging: %s\n' "${platform}" >&2
       exit 2
       ;;
   esac
+}
+
+stage_runtime_asset() {
+  local platform="$1"
+  local asset_name
+
+  asset_name="$(runtime_asset_name "${platform}")"
 
   require_regular_input \
     "${artifact_dir%/}/${asset_name}" "required ONNX Runtime sidecar"
+  stage_asset "${asset_name}" "${asset_name}" 0644
+}
+
+validate_staged_runtime_asset() {
+  local platform="$1"
+  local asset_name archive
+
+  asset_name="$(runtime_asset_name "${platform}")"
+  archive="${out_dir%/}/${asset_name}"
+  require_regular_input "${archive}" "staged ONNX Runtime sidecar"
 
   if [[ "${platform}" == "windows-x64" ]]; then
     bash scripts/build-onnxruntime-sidecar.sh --validate \
-      "${platform}" "${artifact_dir%/}/${asset_name}"
+      "${platform}" "${archive}"
   else
-    python3 - "${artifact_dir%/}/${asset_name}" "${platform}" <<'PY'
+    python3 - "${archive}" "${platform}" <<'PY'
 import posixpath
 import stat
 import sys
@@ -405,7 +413,6 @@ with tarfile.open(archive, "r:gz") as bundle:
         raise SystemExit("runtime archive entries do not exactly match the expected layout")
 PY
   fi
-  stage_asset "${asset_name}" "${asset_name}" 0644
 }
 
 stage_complete_candidate() {
@@ -439,8 +446,10 @@ done
 validate_macos_signing_evidence() (
   set -euo pipefail
   local platform="$1"
-  local binary="${artifact_dir%/}/ctx-${platform}"
-  local runtime="${artifact_dir%/}/ctx-onnxruntime-${platform}.tar.gz"
+  local binary="${out_dir%/}/ctx-${platform}"
+  local runtime="${out_dir%/}/ctx-onnxruntime-${platform}.tar.gz"
+  local binary_checksum="${artifact_dir%/}/ctx-${platform}.sha256"
+  local runtime_checksum="${artifact_dir%/}/ctx-onnxruntime-${platform}.tar.gz.sha256"
   local cli_evidence="${artifact_dir%/}/ctx-${platform}.signing.json"
   local runtime_evidence="${artifact_dir%/}/ctx-onnxruntime-${platform}.signing.json"
   local cli_attestation="${artifact_dir%/}/ctx-${platform}.attestation.json"
@@ -455,7 +464,7 @@ validate_macos_signing_evidence() (
   # JSON records diagnostics and archive bindings. The Developer ID CMS
   # checks below are the cross-platform authorization for executable bytes.
   for producer_input in \
-    "${binary}" "${binary}.sha256" "${runtime}" "${runtime}.sha256" \
+    "${binary_checksum}" "${runtime_checksum}" \
     "${cli_evidence}" "${runtime_evidence}" "${build_info}" \
     "${cli_attestation}" "${cli_attestation_cms}" \
     "${runtime_attestation}" "${runtime_attestation_cms}" \
@@ -466,6 +475,8 @@ validate_macos_signing_evidence() (
       exit 1
     }
   done
+  require_regular_input "${binary}" "staged macOS CLI"
+  require_regular_input "${runtime}" "staged macOS runtime"
   source_commit="$(python3 - "${build_info}" "${platform}" <<'PY'
 import json
 import re
@@ -491,7 +502,7 @@ PY
     --platform "${platform}" \
     --kind cli \
     --artifact "${binary}" \
-    --checksum "${binary}.sha256"
+    --checksum "${binary_checksum}"
   CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
     scripts/verify-macos-release-attestation.sh \
     "${platform}" cli "${binary}" "${cli_attestation}" "${cli_attestation_cms}"
@@ -519,7 +530,7 @@ PY
     --evidence "${runtime_evidence}" \
     --platform "${platform}" \
     --archive "${runtime}" \
-    --checksum "${runtime}.sha256" \
+    --checksum "${runtime_checksum}" \
     --nested-artifact "${nested}" \
     --role release
   CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
@@ -531,9 +542,6 @@ PY
     "${platform}" "${runtime}" "${nested}" \
     "${release_attestation}" "${release_attestation_cms}"
 )
-
-validate_macos_signing_evidence macos-arm64
-validate_macos_signing_evidence macos-x64
 
 mkdir -p "${out_dir}"
 for cli_dest in \
@@ -573,17 +581,17 @@ rm -f \
   "${out_dir%/}/SHA256SUMS"
 
 stage_asset ctx ctx-linux-x64
-verify_and_stage_cli_evidence ctx ctx-linux-x64 linux-x64
+stage_cli_evidence ctx ctx-linux-x64
 stage_asset ctx-linux-aarch64 ctx-linux-aarch64
-verify_and_stage_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64 linux-aarch64
+stage_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64
 stage_asset ctx-macos-arm64 ctx-macos-arm64
-verify_and_stage_cli_evidence ctx-macos-arm64 ctx-macos-arm64 macos-arm64
+stage_cli_evidence ctx-macos-arm64 ctx-macos-arm64
 stage_asset ctx-macos-x64 ctx-macos-x64
-verify_and_stage_cli_evidence ctx-macos-x64 ctx-macos-x64 macos-x64
+stage_cli_evidence ctx-macos-x64 ctx-macos-x64
 stage_asset ctx.exe ctx-windows-x64.exe
-verify_and_stage_cli_evidence ctx.exe ctx-windows-x64.exe windows-x64
+stage_cli_evidence ctx.exe ctx-windows-x64.exe
 stage_asset ctx-freebsd-x64 ctx-freebsd-x64
-verify_and_stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64
+stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64
 stage_runtime_asset linux-x64
 stage_runtime_asset linux-aarch64
 stage_runtime_asset macos-arm64
@@ -620,6 +628,21 @@ if [[ "${include_semantic}" == "1" ]]; then
   done
   rm -f "${semantic_fields}"
 fi
+
+validate_staged_cli_evidence ctx ctx-linux-x64 linux-x64
+validate_staged_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64 linux-aarch64
+validate_staged_cli_evidence ctx-macos-arm64 ctx-macos-arm64 macos-arm64
+validate_staged_cli_evidence ctx-macos-x64 ctx-macos-x64 macos-x64
+validate_staged_cli_evidence ctx.exe ctx-windows-x64.exe windows-x64
+validate_staged_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64
+validate_staged_runtime_asset linux-x64
+validate_staged_runtime_asset linux-aarch64
+validate_staged_runtime_asset macos-arm64
+validate_staged_runtime_asset macos-x64
+validate_staged_runtime_asset windows-x64
+validate_staged_runtime_asset freebsd-x64
+validate_macos_signing_evidence macos-arm64
+validate_macos_signing_evidence macos-x64
 
 }
 
