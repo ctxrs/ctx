@@ -194,31 +194,25 @@ The route labels are `//:ctx_release_linux_x64`,
 `contracts/release-targets-v1.json`; the packager preserves the raw
 construction names consumed by `scripts/stage-github-release-assets.sh`.
 
-For the staging-only 0.26.0 Linux x64 dogfood candidate, use the tracked
-builder instead of hand-authoring the Linux `--build-info` input:
+Linux release lanes use the tracked native builder rather than hand-authoring
+the Linux `--build-info` input:
 
 ```bash
-SOURCE_COMMIT="$(git rev-parse --verify HEAD^{commit})"
-scripts/release/build-linux-x64-bazel-dogfood.sh \
-  --staging-dogfood \
-  --source-commit "${SOURCE_COMMIT}" \
-  --version 0.26.0 \
-  --output-dir /secure/build/ctx-v0.26.0-linux-x64
+source_commit="$(git rev-parse --verify HEAD^{commit})"
+scripts/release/build-linux-bazel-release.sh \
+  --platform linux-x64 \
+  --source-commit "${source_commit}" \
+  --output-dir /secure/build/ctx-linux-x64
 ```
 
-The command requires a clean checkout at exactly `SOURCE_COMMIT`, builds the
-target through `//:ctx_release_linux_x64 --config=release` with compilation
-network access disabled, and never signs, uploads, publishes, deploys, or
-updates a channel. It writes exactly these candidate leaves without replacing
-an existing leaf:
-
-```text
-/secure/build/ctx-v0.26.0-linux-x64/ctx
-/secure/build/ctx-v0.26.0-linux-x64/ctx.sha256
-/secure/build/ctx-v0.26.0-linux-x64/ctx.version
-/secure/build/ctx-v0.26.0-linux-x64/ctx.build-info.json
-/secure/build/ctx-v0.26.0-linux-x64/ctx.cdx.json
-```
+The command requires a clean checkout at exactly `source_commit`, native host
+and Docker architectures, and the pinned offline advisory inputs named in its
+usage. It builds the matching Bazel route with compilation networking
+disabled, stages the complete CLI/runtime/evidence bundle beside the final
+destination, seals it, smokes those final candidate bytes once, verifies the
+seal, and atomically commits the directory without replacement. Private debug
+symbols use the same no-replace publication rule when requested. The command
+never signs, uploads, deploys, or updates a release channel.
 
 `ctx.build-info.json` is canonical, timestamp-free JSON. It binds the exact
 artifact, clean source commit, 0.26.0 source and executable versions,
@@ -229,21 +223,15 @@ pinned static-ABI and native-runtime gates pass. The release packager
 reconstructs those source/version/target/toolchain bindings from its declared
 runfiles and rejects any changed or non-canonical build-info bytes.
 
-The staging helper has three closed release-set modes. With no mode flag it
-stages the six CLI binaries paired with the six legacy runtime transports.
-`--native-candidate` stages exactly six CLI/native-runtime pairs (12
-`SHA256SUMS` entries), preserving the five Unix `.tar.gz` runtime transports
-and selecting `ctx-windowsml-windows-x64.zip` for Windows. Its Windows runtime
-proof must identify the `windows-ml` backend, bind that exact archive digest,
-and record a passed Semantic contract canary.
-`--with-semantic` preserves the legacy pairs and adds the ten Semantic assets
-for 22 checksum entries. These modes are separate; mode flags cannot be
-combined.
+With no mode flag, the staging helper validates and stages the six CLI binaries
+paired with the six legacy runtime transports. `--with-semantic` preserves
+those pairs and adds the ten exact Semantic assets. Linux inputs must carry
+their sealed per-platform completion identities; Semantic assets are instead
+validated directly through their manifests, checksums, and canonical catalog.
 
-Linux must also pass `--build-info PATH` from the pinned Ubuntu 22.04 builder.
-For Linux x64 staging dogfood, the tracked builder above owns that producer and
-passes its output to the generic packager. Other Linux release lanes must
-provide equivalently validated builder-authored evidence. Set
+Linux must also pass `--build-info PATH` from the pinned Ubuntu 22.04 builder;
+the tracked builder above owns that producer and passes its output to the
+generic packager. Set
 `CTX_MACOS_RELEASE_SIGNING=required` on trusted macOS release workers; signing
 remains optional for unsigned local qualification candidates.
 

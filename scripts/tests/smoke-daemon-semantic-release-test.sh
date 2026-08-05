@@ -338,11 +338,11 @@ for leaf in "${candidate_leaves[@]}"; do
   esac
 done
 candidate_commit=0123456789abcdef0123456789abcdef01234567
-publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
-python3 -I "${publisher}" seal \
+bundle_tool="${repo_root}/scripts/release/release_bundle.py"
+seal_sha256="$(python3 -I "${bundle_tool}" seal \
   --candidate-dir "${candidate}" \
   --platform linux-x64 \
-  --source-commit "${candidate_commit}" >/dev/null
+  --source-commit "${candidate_commit}")"
 mkdir -p "${release_root}/tests/fixtures/custom-history-jsonl"
 printf '{}\n' > \
   "${release_root}/tests/fixtures/custom-history-jsonl/basic.jsonl"
@@ -360,11 +360,7 @@ EOF
 chmod 0755 "${release_root}/scripts/run-native-candidate-smoke.sh"
 nested_smoke_root="${tmp}/nested-native-smoke"
 mkdir -p "${nested_smoke_root}"
-if ! python3 -I "${publisher}" run-complete \
-  --candidate-dir "${candidate}" \
-  --platform linux-x64 \
-  --source-commit "${candidate_commit}" -- \
-  bash -ceu '
+if ! bash -ceu '
     ctx_path="$1"
     runtime="$2"
     version_file="$3"
@@ -385,14 +381,20 @@ if ! python3 -I "${publisher}" run-complete \
       --data-root "${smoke_root}" \
       --require-authoritative \
       --timeout-seconds 30
-  ' bash '{candidate}/ctx' \
-    '{candidate}/ctx-onnxruntime-linux-x64.tar.gz' \
-    '{candidate}/ctx.version' "${nested_smoke_root}" "${release_root}" \
+  ' bash \
+    "${candidate}/ctx" \
+    "${candidate}/ctx-onnxruntime-linux-x64.tar.gz" \
+    "${candidate}/ctx.version" "${nested_smoke_root}" "${release_root}" \
   > "${tmp}/nested-onnx.out" 2> "${tmp}/nested-onnx.err"; then
   cat "${tmp}/nested-onnx.out" >&2
   cat "${tmp}/nested-onnx.err" >&2
   exit 1
 fi
+python3 -I "${bundle_tool}" verify \
+  --candidate-dir "${candidate}" \
+  --platform linux-x64 \
+  --source-commit "${candidate_commit}" \
+  --seal-sha256 "${seal_sha256}"
 grep -Fq 'ctx semantic smoke ok:' "${tmp}/nested-onnx.out"
 grep -Fq '"status":"passed"' \
   "${nested_smoke_root}/candidate-smoke.json"

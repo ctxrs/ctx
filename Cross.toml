@@ -1,2 +1,0 @@
-[target.x86_64-unknown-freebsd]
-image = "ghcr.io/cross-rs/x86_64-unknown-freebsd:0.2.5@sha256:a10c9fb4c82409147bdbec768518765d59bd11ac8675e63d6b09c089e834f5ec"

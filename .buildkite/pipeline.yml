@@ -99,40 +99,15 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       source_commit="$(git rev-parse --verify HEAD^{commit})"
+      smoke_args=()
+      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        smoke_args+=(--native-smoke-dir target/public-cli-native-smoke/linux-x64)
+      fi
       scripts/release/build-linux-bazel-release.sh \
         --platform linux-x64 \
         --source-commit "${source_commit}" \
-        --output-dir target/public-cli-artifacts
-      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
-        smoke_root="target/public-cli-native-smoke/linux-x64"
-        mkdir -p "${smoke_root}"
-        python3 -I scripts/release/publish-linux-bazel-release.py run-complete \
-          --candidate-dir target/public-cli-artifacts \
-          --platform linux-x64 \
-          --source-commit "${source_commit}" -- \
-          bash -ceu '
-            ctx_path="$1"
-            runtime="$2"
-            version_file="$3"
-            smoke_root="$4"
-            expected_version="$(sed -n "s/^ctx //p" "${version_file}")"
-            [[ -n "${expected_version}" ]]
-            scripts/run-native-candidate-smoke.sh \
-              "${ctx_path}" \
-              tests/fixtures/custom-history-jsonl/basic.jsonl \
-              "${expected_version}" \
-              "${smoke_root}/candidate-smoke.json"
-            scripts/smoke-daemon-semantic-release.sh \
-              --runtime-archive "${runtime}" \
-              --runtime-platform linux-x64 \
-              --ctx "${ctx_path}" \
-              --data-root "${smoke_root}" \
-              --require-authoritative \
-              --keep-root >"${smoke_root}/smoke.log" 2>&1
-          ' bash '{candidate}/ctx' \
-            '{candidate}/ctx-onnxruntime-linux-x64.tar.gz' \
-            '{candidate}/ctx.version' "${smoke_root}"
-      fi
+        --output-dir target/public-cli-artifacts \
+        "${smoke_args[@]}"
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"
@@ -168,41 +143,15 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1"
     command: |
       source_commit="$(git rev-parse --verify HEAD^{commit})"
+      smoke_args=()
+      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
+        smoke_args+=(--native-smoke-dir target/public-cli-native-smoke/linux-aarch64)
+      fi
       scripts/release/build-linux-bazel-release.sh \
         --platform linux-arm64 \
         --source-commit "${source_commit}" \
-        --output-dir target/public-cli-artifacts
-      if [[ "${CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX:-0}" == "1" ]]; then
-        smoke_root="target/public-cli-native-smoke/linux-aarch64"
-        mkdir -p "${smoke_root}"
-        python3 -I scripts/release/publish-linux-bazel-release.py run-complete \
-          --candidate-dir target/public-cli-artifacts \
-          --platform linux-aarch64 \
-          --source-commit "${source_commit}" -- \
-          bash -ceu '
-            ctx_path="$1"
-            runtime="$2"
-            version_file="$3"
-            smoke_root="$4"
-            expected_version="$(sed -n "s/^ctx //p" \
-              "${version_file}")"
-            [[ -n "${expected_version}" ]]
-            scripts/run-native-candidate-smoke.sh \
-              "${ctx_path}" \
-              tests/fixtures/custom-history-jsonl/basic.jsonl \
-              "${expected_version}" \
-              "${smoke_root}/candidate-smoke.json"
-            scripts/smoke-daemon-semantic-release.sh \
-              --runtime-archive "${runtime}" \
-              --runtime-platform linux-aarch64 \
-              --ctx "${ctx_path}" \
-              --data-root "${smoke_root}" \
-              --require-authoritative \
-              --keep-root >"${smoke_root}/smoke.log" 2>&1
-          ' bash '{candidate}/ctx-linux-aarch64' \
-            '{candidate}/ctx-onnxruntime-linux-aarch64.tar.gz' \
-            '{candidate}/ctx-linux-aarch64.version' "${smoke_root}"
-      fi
+        --output-dir target/public-cli-artifacts \
+        "${smoke_args[@]}"
     agents:
       queue: "linux-arm64"
       os: "linux"
@@ -701,7 +650,6 @@ steps:
   - label: ":package: gather unsigned Semantic release handoff"
     key: "semantic-release-handoff"
     depends_on:
-      - "github-release-candidate"
       - "public-cli-linux-x64"
       - "public-cli-linux-aarch64"
       - "public-cli-freebsd-x64"
@@ -713,21 +661,13 @@ steps:
       - "semantic-runtime-macos-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
-      source_commit="$(git rev-parse --verify HEAD^{commit})"
       mkdir -p target/public-cli-artifacts
       buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx*" . \
+        "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst*" . \
         --step public-cli-linux-x64
-      buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx-linux-aarch64*" . \
-        --step public-cli-linux-aarch64
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64*" . \
         --step public-cli-linux-aarch64
-      test -s \
-        target/public-cli-artifacts/ctx-linux-x64.release-complete.json
-      test -s \
-        target/public-cli-artifacts/ctx-linux-aarch64.release-complete.json
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.zst*" . \
         --step public-cli-freebsd-x64
@@ -752,8 +692,7 @@ steps:
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst*" . \
         --step semantic-runtime-macos-x64
-      CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${source_commit}" \
-        scripts/stage-semantic-release-handoff.sh \
+      scripts/stage-semantic-release-handoff.sh \
         target/public-cli-artifacts target/semantic-release-handoff
     agents:
       queue: "release-linux-managed"

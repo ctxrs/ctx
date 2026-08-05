@@ -7,28 +7,17 @@ else
   source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-semantic-handoff-test.XXXXXX")"
-trap 'rm -rf "${tmp_dir}"' EXIT
-unset CTX_RELEASE_PINNED_CONSUMER CTX_PUBLIC_RELEASE_SOURCE_COMMIT
+trap 'rm -rf -- "${tmp_dir}"' EXIT
 
 repo_root="${tmp_dir}/repo"
 mkdir -p "${repo_root}/scripts/release"
 cp "${source_root}/scripts/stage-semantic-release-handoff.sh" \
   "${repo_root}/scripts/stage-semantic-release-handoff.sh"
-cp "${source_root}/scripts/release/publish-linux-bazel-release.py" \
-  "${repo_root}/scripts/release/publish-linux-bazel-release.py"
-cp "${source_root}/scripts/release/completed_candidate_io.py" \
-  "${repo_root}/scripts/release/completed_candidate_io.py"
+cp "${source_root}/scripts/release/release_bundle.py" \
+  "${repo_root}/scripts/release/release_bundle.py"
 ln -s "${source_root}/scripts/construct-semantic-release-catalog.sh" \
   "${repo_root}/scripts/construct-semantic-release-catalog.sh"
-git -C "${repo_root}" init -q
-git -C "${repo_root}" add .
-git -C "${repo_root}" \
-  -c user.name='ctx release test' \
-  -c user.email='ctx-release-test@example.invalid' \
-  commit -qm 'create Semantic staging fixture'
-source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
 stage="${repo_root}/scripts/stage-semantic-release-handoff.sh"
-publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
 
 fake_bin="${tmp_dir}/bin"
 matrix="${tmp_dir}/matrix"
@@ -43,7 +32,7 @@ if [ -n "${CTX_FAKE_SUBSTITUTE_LEAF:-}" ] \
 fi
 case "${1:-}" in
   *construct-semantic-release-catalog.sh)
-    : >"$3"
+    printf 'SEMANTIC_ASSET_COUNT=10\n' >"$3"
     exit 0
     ;;
 esac
@@ -70,222 +59,82 @@ for asset in "${semantic_assets[@]}"; do
   printf '{}\n' >"${matrix}/${asset}.asset.json"
 done
 
-seal_linux_fixture() {
-  local platform="$1"
-  local binary="$2"
-  local source_dir="$3"
-  local commit="$4"
-  local tag="$5"
-  local runtime="ctx-onnxruntime-${platform}"
-  local candidate="${tmp_dir}/candidate-${platform}-${tag}"
-  local leaf
-  local leaves=(
-    "${binary}"
-    "${binary}.build-info.json"
-    "${binary}.candidate.json"
-    "${binary}.cdx.json"
-    "${binary}.cdx.json.sha256"
-    "${binary}.dependency-advisory.json"
-    "${binary}.sha256"
-    "${binary}.size.json"
-    "${binary}.third-party-notices.txt"
-    "${binary}.third-party-notices.txt.sha256"
-    "${binary}.version"
-    "${runtime}.tar.gz"
-    "${runtime}.tar.gz.sha256"
-    "${runtime}.tar.zst"
-    "${runtime}.tar.zst.asset.json"
-    "${runtime}.tar.zst.sha256"
-  )
-  mkdir "${candidate}"
-  for leaf in "${leaves[@]}"; do
-    if [[ -f "${source_dir}/${leaf}" ]]; then
-      cp "${source_dir}/${leaf}" "${candidate}/${leaf}"
-    else
-      printf 'completed candidate leaf %s\n' "${leaf}" >"${candidate}/${leaf}"
-    fi
-    chmod 0755 "${candidate}/${leaf}"
-  done
-  python3 -I "${publisher}" seal \
-    --candidate-dir "${candidate}" \
-    --platform "${platform}" \
-    --source-commit "${commit}" >/dev/null
-  cp -a "${candidate}/." "${source_dir}/"
-}
-seal_linux_fixture linux-x64 ctx "${matrix}" "${source_commit}" head
-seal_linux_fixture \
-  linux-aarch64 ctx-linux-aarch64 "${matrix}" "${source_commit}" head
-
-forged_commit="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-forged_matrix="${tmp_dir}/forged-source"
-cp -a "${matrix}" "${forged_matrix}"
-rm "${forged_matrix}/ctx-linux-x64.release-complete.json" \
-  "${forged_matrix}/ctx-linux-aarch64.release-complete.json"
-seal_linux_fixture linux-x64 ctx \
-  "${forged_matrix}" "${forged_commit}" forged
-seal_linux_fixture linux-aarch64 ctx-linux-aarch64 \
-  "${forged_matrix}" "${forged_commit}" forged
-
 run_stage() {
-  local source="$1"
-  local output="$2"
-  local commit="${3:-}"
-  if [[ -n "${commit}" ]]; then
-    CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${commit}" \
-      PATH="${fake_bin}:${PATH}" \
-      /bin/bash "${stage}" "${source}" "${output}"
-  else
-    PATH="${fake_bin}:${PATH}" \
-      /bin/bash "${stage}" "${source}" "${output}"
-  fi
+  PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" "$1" "$2"
 }
 
 success_output="${tmp_dir}/success"
-run_stage "${matrix}" "${success_output}" "${source_commit}"
+CTX_RELEASE_PINNED_CONSUMER=irrelevant \
+  CTX_PUBLIC_RELEASE_SOURCE_COMMIT="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+  run_stage "${matrix}" "${success_output}"
 test "$(find "${success_output}" -maxdepth 1 -type f | wc -l)" -eq 32
 test "$(wc -l <"${success_output}/SHA256SUMS")" -eq 10
+grep -Fx 'SEMANTIC_ASSET_COUNT=10' "${success_output}/semantic-release.env"
 for asset in "${semantic_assets[@]}"; do
   cmp "${matrix}/${asset}" "${success_output}/${asset}"
   cmp "${matrix}/${asset}.sha256" "${success_output}/${asset}.sha256"
   cmp "${matrix}/${asset}.asset.json" "${success_output}/${asset}.asset.json"
 done
+test ! -e "${matrix}/ctx-linux-x64.release-complete.json"
+test ! -e "${matrix}/ctx-linux-aarch64.release-complete.json"
 
-missing="${tmp_dir}/missing-marker"
+missing="${tmp_dir}/missing"
 cp -a "${matrix}" "${missing}"
-rm "${missing}/ctx-linux-x64.release-complete.json"
-if run_stage "${missing}" "${tmp_dir}/missing-output" "${source_commit}" \
+rm "${missing}/${semantic_assets[0]}"
+if run_stage "${missing}" "${tmp_dir}/missing-output" \
   >"${tmp_dir}/missing.out" 2>"${tmp_dir}/missing.err"; then
-  printf 'Semantic handoff accepted a missing completion manifest\n' >&2
+  printf 'Semantic handoff accepted a missing asset\n' >&2
   exit 1
 fi
-grep -Fq 'completed release marker is missing' "${tmp_dir}/missing.err"
+grep -Eq 'incomplete|No such file' "${tmp_dir}/missing.err"
+test ! -e "${tmp_dir}/missing-output"
 
-if run_stage "${forged_matrix}" "${tmp_dir}/wrong-source-output" \
-  "${forged_commit}" \
-  >"${tmp_dir}/wrong-source.out" 2>"${tmp_dir}/wrong-source.err"; then
-  printf 'Semantic handoff accepted a self-consistent non-HEAD source\n' >&2
+bad_checksum="${tmp_dir}/bad-checksum"
+cp -a "${matrix}" "${bad_checksum}"
+printf 'mutated\n' >>"${bad_checksum}/${semantic_assets[1]}"
+if run_stage "${bad_checksum}" "${tmp_dir}/bad-checksum-output" \
+  >"${tmp_dir}/bad-checksum.out" 2>"${tmp_dir}/bad-checksum.err"; then
+  printf 'Semantic handoff accepted bytes that differ from their checksum\n' >&2
   exit 1
 fi
-grep -Fq 'ambient public source commit conflicts with checkout HEAD' \
-  "${tmp_dir}/wrong-source.err"
-test ! -e "${tmp_dir}/wrong-source-output"
+grep -Fq 'checksum mismatch' "${tmp_dir}/bad-checksum.err"
+test ! -e "${tmp_dir}/bad-checksum-output"
 
-if CTX_RELEASE_PINNED_CONSUMER=1 \
-  run_stage "${missing}" "${tmp_dir}/forged-admission-output" \
-  "${source_commit}" >"${tmp_dir}/forged-admission.out" \
-  2>"${tmp_dir}/forged-admission.err"; then
-  printf 'ambient marker bypassed Semantic completed-candidate admission\n' >&2
-  exit 1
-fi
-grep -Fq 'ambient completed-candidate admission markers are forbidden' \
-  "${tmp_dir}/forged-admission.err"
-test ! -e "${tmp_dir}/forged-admission-output"
-
-python3 - "${stage}" "${missing}" "${tmp_dir}/direct-worker-output" <<'PY'
-import json
-import os
-from pathlib import Path
-import subprocess
-import sys
-
-stage, candidate, output = sys.argv[1:]
-root = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY)
-base = {
-    "candidate_fd": root,
-    "consumer": "semantic",
-    "kind": "ctx-completed-candidate-consumer-admission",
-    "nonce": "1" * 64,
-    "root_binding": [1, 2, 3, 4, 5, 6, 7],
-    "schema_version": 1,
-    "source_commit": "a" * 40,
-}
-payloads = [base, base, {**base, "consumer": "github", "source_commit": "b" * 40}]
-try:
-    for payload in payloads:
-        read_fd, write_fd = os.pipe()
-        os.write(write_fd, (json.dumps(payload) + "\n").encode())
-        os.close(write_fd)
-        result = subprocess.run(
-            [
-                "/bin/bash",
-                stage,
-                "--ctx-pinned-worker",
-                str(read_fd),
-                f"/proc/self/fd/{root}",
-                output,
-            ],
-            pass_fds=(read_fd, root),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        os.close(read_fd)
-        if result.returncode == 0 or "usage:" not in result.stderr:
-            raise SystemExit(
-                "handcrafted or replayed pipe entered retired Semantic worker path"
-            )
-finally:
-    os.close(root)
-if Path(output).exists():
-    raise SystemExit("retired Semantic worker produced output without manifests")
-PY
-
-wrong_platform="${tmp_dir}/wrong-platform"
-cp -a "${matrix}" "${wrong_platform}"
-cp \
-  "${wrong_platform}/ctx-linux-aarch64.release-complete.json" \
-  "${wrong_platform}/ctx-linux-x64.release-complete.json"
-if run_stage "${wrong_platform}" "${tmp_dir}/wrong-platform-output" \
-  "${source_commit}" >"${tmp_dir}/wrong-platform.out" \
-  2>"${tmp_dir}/wrong-platform.err"; then
-  printf 'Semantic handoff accepted the wrong completion platform\n' >&2
-  exit 1
-fi
-grep -Fq 'completed release identity is invalid' "${tmp_dir}/wrong-platform.err"
-
-linked_parent="${tmp_dir}/linked-parent"
-mkdir "${linked_parent}"
-ln -s "${matrix}" "${linked_parent}/candidate"
-if run_stage "${linked_parent}/candidate" "${tmp_dir}/linked-parent-output" \
-  "${source_commit}" >/dev/null 2>&1; then
-  printf 'Semantic handoff followed a candidate ancestor symlink\n' >&2
-  exit 1
-fi
-
-linked_leaf="${tmp_dir}/linked-leaf"
-cp -a "${matrix}" "${linked_leaf}"
+linked="${tmp_dir}/linked"
+cp -a "${matrix}" "${linked}"
 sentinel="${tmp_dir}/sentinel"
 printf 'sentinel\n' >"${sentinel}"
-rm "${linked_leaf}/ctx-onnxruntime-linux-x64.tar.zst"
-ln -s "${sentinel}" "${linked_leaf}/ctx-onnxruntime-linux-x64.tar.zst"
-if run_stage "${linked_leaf}" "${tmp_dir}/linked-leaf-output" \
-  "${source_commit}" >/dev/null 2>&1; then
-  printf 'Semantic handoff followed a candidate leaf symlink\n' >&2
+rm "${linked}/${semantic_assets[2]}"
+ln -s "${sentinel}" "${linked}/${semantic_assets[2]}"
+if run_stage "${linked}" "${tmp_dir}/linked-output" >/dev/null 2>&1; then
+  printf 'Semantic handoff accepted a linked asset\n' >&2
   exit 1
 fi
-grep -Fqx sentinel "${sentinel}"
+grep -Fx sentinel "${sentinel}"
+test ! -e "${tmp_dir}/linked-output"
 
-runtime_race="${tmp_dir}/runtime-race"
-cp -a "${matrix}" "${runtime_race}"
-runtime_leaf="${runtime_race}/ctx-onnxruntime-linux-x64.tar.zst"
+race="${tmp_dir}/race"
+cp -a "${matrix}" "${race}"
+race_leaf="${race}/${semantic_assets[3]}"
 printf 'foreign runtime bytes\n' >"${tmp_dir}/foreign-runtime"
-if CTX_FAKE_SUBSTITUTE_LEAF="${runtime_leaf}" \
+if CTX_FAKE_SUBSTITUTE_LEAF="${race_leaf}" \
   CTX_FAKE_SUBSTITUTE_FOREIGN="${tmp_dir}/foreign-runtime" \
-  CTX_FAKE_SUBSTITUTION_FLAG="${tmp_dir}/runtime-race.flag" \
-  run_stage "${runtime_race}" "${tmp_dir}/runtime-race-output" \
-  "${source_commit}" >"${tmp_dir}/runtime-race.out" \
-  2>"${tmp_dir}/runtime-race.err"; then
-  printf 'Semantic handoff ignored a runtime source substitution\n' >&2
+  CTX_FAKE_SUBSTITUTION_FLAG="${tmp_dir}/race.flag" \
+  run_stage "${race}" "${tmp_dir}/race-output" \
+  >"${tmp_dir}/race.out" 2>"${tmp_dir}/race.err"; then
+  printf 'Semantic handoff ignored a source substitution\n' >&2
   exit 1
 fi
-grep -Eq 'changed|substituted' "${tmp_dir}/runtime-race.err"
-if [[ -e "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.zst" ]]; then
-  cmp \
-    "${runtime_leaf}.original" \
-    "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.zst"
-  ! grep -Fq 'foreign runtime bytes' \
-    "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.zst"
-fi
-grep -Fqx sentinel "${sentinel}"
+grep -Fq 'checksum mismatch' "${tmp_dir}/race.err"
+test ! -e "${tmp_dir}/race-output"
 
-printf 'Semantic release handoff snapshot contracts passed\n'
+collision="${tmp_dir}/collision"
+mkdir "${collision}"
+printf 'sentinel\n' >"${collision}/sentinel"
+if run_stage "${matrix}" "${collision}" >/dev/null 2>&1; then
+  printf 'Semantic handoff replaced an existing destination\n' >&2
+  exit 1
+fi
+grep -Fx sentinel "${collision}/sentinel"
+
+printf 'Semantic release handoff asset contracts passed\n'

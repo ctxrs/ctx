@@ -15,10 +15,8 @@ repo_root="${tmp_dir}/repo"
 mkdir -p "${repo_root}/contracts" "${repo_root}/scripts/release"
 cp "${source_root}/scripts/stage-github-release-assets.sh" \
   "${repo_root}/scripts/stage-github-release-assets.sh"
-cp "${source_root}/scripts/release/publish-linux-bazel-release.py" \
-  "${repo_root}/scripts/release/publish-linux-bazel-release.py"
-cp "${source_root}/scripts/release/completed_candidate_io.py" \
-  "${repo_root}/scripts/release/completed_candidate_io.py"
+cp "${source_root}/scripts/release/release_bundle.py" \
+  "${repo_root}/scripts/release/release_bundle.py"
 ln -s "${source_root}/contracts/release-targets-v1.json" \
   "${repo_root}/contracts/release-targets-v1.json"
 for dependency in \
@@ -43,7 +41,7 @@ git -C "${repo_root}" \
   commit -qm 'create release staging fixture'
 source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
 stage="${repo_root}/scripts/stage-github-release-assets.sh"
-publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
+bundle_tool="${repo_root}/scripts/release/release_bundle.py"
 
 fake_bin="${tmp_dir}/bin"
 matrix="${tmp_dir}/matrix"
@@ -56,7 +54,7 @@ SH
 cat > "${fake_bin}/python3" <<'SH'
 #!/bin/sh
 case "$*" in
-  *publish-linux-bazel-release.py*)
+  *release_bundle.py*)
     exec "${CTX_REAL_PYTHON3:?}" "$@"
     ;;
 esac
@@ -189,7 +187,7 @@ seal_linux_fixture() {
   for leaf in "${leaves[@]}"; do
     cp "${source_dir}/${leaf}" "${candidate}/${leaf}"
   done
-  "${real_python3}" -I "${publisher}" seal \
+  "${real_python3}" -I "${bundle_tool}" seal \
     --candidate-dir "${candidate}" \
     --platform "${platform}" \
     --source-commit "${commit}" >/dev/null
@@ -223,7 +221,7 @@ if /bin/bash "${stage}" --transcode-runtime linux-x64 \
   printf 'runtime transcode modified a completed public candidate\n' >&2
   exit 1
 fi
-grep -Fq 'completed public candidate cannot be modified' \
+grep -Fq 'sealed release bundle cannot be modified' \
   "${tmp_dir}/completed-transcode.err"
 test "${completed_before}" = "$(
   sha256sum \
@@ -327,7 +325,7 @@ then
   printf 'release staging accepted runtime bytes that differ from the checksum\n' >&2
   exit 1
 fi
-grep -Fq 'completed release leaf does not match marker' \
+grep -Fq 'release leaf does not match completion marker' \
   "${tmp_dir}/checksum-mutation.err"
 
 printf 'synthetic %s\n' ctx-onnxruntime-linux-x64.tar.gz \
@@ -349,7 +347,8 @@ then
   printf 'GitHub stager ignored a source runtime name substitution\n' >&2
   exit 1
 fi
-grep -Eq 'changed|substituted' "${tmp_dir}/runtime-race.err"
+grep -Eq 'checksum mismatch|does not match completion marker' \
+  "${tmp_dir}/runtime-race.err"
 if [[ -e "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.gz" ]]; then
   cmp \
     "${runtime_race_leaf}.original" \
@@ -367,21 +366,8 @@ if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
   printf 'GitHub stager accepted a candidate without completion identity\n' >&2
   exit 1
 fi
-grep -Fq 'completed release marker is missing or invalid' \
+grep -Fq 'release completion marker is invalid' \
   "${tmp_dir}/missing-marker.err"
-
-if CTX_RELEASE_PINNED_CONSUMER=1 \
-  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
-  /bin/bash "${stage}" "${tmp_dir}/missing-marker" \
-  "${tmp_dir}/forged-admission-output" \
-  >"${tmp_dir}/forged-admission.out" \
-  2>"${tmp_dir}/forged-admission.err"; then
-  printf 'ambient marker bypassed GitHub completed-candidate admission\n' >&2
-  exit 1
-fi
-grep -Fq 'ambient completed-candidate admission markers are forbidden' \
-  "${tmp_dir}/forged-admission.err"
-test ! -e "${tmp_dir}/forged-admission-output"
 
 if CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${forged_commit}" \
   CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
@@ -394,57 +380,6 @@ fi
 grep -Fq 'ambient public source commit conflicts with checkout HEAD' \
   "${tmp_dir}/forged-source.err"
 test ! -e "${tmp_dir}/forged-source-output"
-
-python3 - "${stage}" "${tmp_dir}/missing-marker" \
-  "${tmp_dir}/direct-worker-output" <<'PY'
-import json
-import os
-from pathlib import Path
-import subprocess
-import sys
-
-stage, candidate, output = sys.argv[1:]
-root = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY)
-base = {
-    "candidate_fd": root,
-    "consumer": "github",
-    "kind": "ctx-completed-candidate-consumer-admission",
-    "nonce": "1" * 64,
-    "root_binding": [1, 2, 3, 4, 5, 6, 7],
-    "schema_version": 1,
-    "source_commit": "a" * 40,
-}
-payloads = [base, base, {**base, "consumer": "semantic", "candidate_fd": 999999}]
-try:
-    for payload in payloads:
-        read_fd, write_fd = os.pipe()
-        os.write(write_fd, (json.dumps(payload) + "\n").encode())
-        os.close(write_fd)
-        result = subprocess.run(
-            [
-                "/bin/bash",
-                stage,
-                "--ctx-pinned-worker",
-                str(read_fd),
-                f"/proc/self/fd/{root}",
-                output,
-                "0",
-            ],
-            pass_fds=(read_fd, root),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        os.close(read_fd)
-        if result.returncode == 0 or "unknown staging mode" not in result.stderr:
-            raise SystemExit(
-                "handcrafted or replayed pipe entered retired GitHub worker path"
-            )
-finally:
-    os.close(root)
-if Path(output).exists():
-    raise SystemExit("retired GitHub worker produced output without manifests")
-PY
 
 cp -a "${matrix}" "${tmp_dir}/partial-candidate"
 rm "${tmp_dir}/partial-candidate/ctx.size.json"
@@ -497,7 +432,8 @@ if CTX_FAKE_SBOM_LOG="${tmp_dir}/substitution-sbom.log" \
   printf 'GitHub stager reported success after candidate parent substitution\n' >&2
   exit 1
 fi
-grep -Eq 'substituted|changed while pinned' "${tmp_dir}/substitution.err" || {
+grep -Eq 'missing public CLI artifact|checksum mismatch' \
+  "${tmp_dir}/substitution.err" || {
   cat "${tmp_dir}/substitution.err" >&2
   exit 1
 }

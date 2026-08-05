@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${CTX_RELEASE_PINNED_CONSUMER+x}" == "x" ]]; then
-  printf 'ambient completed-candidate admission markers are forbidden\n' >&2
-  exit 1
-fi
-
 usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/stage-github-release-assets.sh [ARTIFACT_DIR] [OUT_DIR]
@@ -78,7 +73,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
-publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
+bundle_tool="${repo_root}/scripts/release/release_bundle.py"
 resolve_checkout_commit() {
   env \
     -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
@@ -222,7 +217,7 @@ if [[ "${mode}" == "transcode" ]]; then
   if [[ "${transcode_candidate_dir}" != /* ]]; then
     transcode_candidate_dir="${repo_root}/${transcode_candidate_dir}"
   fi
-  python3 -I "${publisher}" require-unsealed \
+  python3 -I "${bundle_tool}" require-unsealed \
     --candidate-dir "${transcode_candidate_dir}"
   artifact_dir="${transcode_candidate_dir}"
   transcode_runtime_asset "${transcode_platform}"
@@ -571,23 +566,35 @@ if [[ "${include_semantic}" == "1" ]]; then
   rm -f "${semantic_fields}"
 fi
 
-printf 'staged GitHub release assets in %s\n' "${out_dir}"
 }
 
-worker_program="$(declare -f \
-  sha256_file \
-  stage_asset \
-  verify_and_stage_cli_evidence \
-  stage_runtime_asset \
-  stage_complete_candidate)"
-worker_program+=$'\nstage_complete_candidate "$@"'
-python3 -I "${publisher}" consume-complete \
+python3 -I "${bundle_tool}" verify \
   --candidate-dir "${requested_artifact_dir}" \
-  --snapshot-root "${TMPDIR:-/tmp}" \
   --platform linux-x64 \
+  --source-commit "${source_commit}" \
+  --allow-extra
+python3 -I "${bundle_tool}" verify \
+  --candidate-dir "${requested_artifact_dir}" \
   --platform linux-aarch64 \
   --source-commit "${source_commit}" \
-  --allow-extra -- \
-  /bin/bash -ceu "${worker_program}" bash \
-    "{candidate}" "${out_dir}" "${include_semantic}" \
-    "${source_commit}" "${repo_root}"
+  --allow-extra
+
+if [[ "${out_dir}" != /* ]]; then
+  out_dir="${repo_root}/${out_dir}"
+fi
+[[ ! -e "${out_dir}" && ! -L "${out_dir}" ]] || {
+  printf 'refusing to replace existing GitHub release staging: %s\n' "${out_dir}" >&2
+  exit 1
+}
+mkdir -p "$(dirname "${out_dir}")"
+staged_out="$(mktemp -d "$(dirname "${out_dir}")/.github-release-assets.XXXXXX")"
+trap 'rm -rf -- "${staged_out}"' EXIT
+artifact_dir="${requested_artifact_dir}"
+stage_complete_candidate \
+  "${artifact_dir}" "${staged_out}" "${include_semantic}" \
+  "${source_commit}" "${repo_root}"
+python3 -I "${bundle_tool}" commit-directory \
+  --stage-dir "${staged_out}" \
+  --output-dir "${out_dir}"
+trap - EXIT
+printf 'staged GitHub release assets in %s\n' "${out_dir}"

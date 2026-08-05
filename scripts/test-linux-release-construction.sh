@@ -16,9 +16,7 @@ install -m 0755 \
   scripts/check-public-cli-build-info.py \
   scripts/stage-github-release-assets.sh \
   "${release_contract_root}/scripts"
-install -m 0755 scripts/release/publish-linux-bazel-release.py \
-  "${release_contract_root}/scripts/release"
-install -m 0644 scripts/release/completed_candidate_io.py \
+install -m 0755 scripts/release/release_bundle.py \
   "${release_contract_root}/scripts/release"
 cp -L contracts/release-targets-v1.json \
   "${release_contract_root}/contracts/release-targets-v1.json"
@@ -429,277 +427,34 @@ if "${stage_release_assets}" \
   exit 1
 fi
 grep -Fq \
-  'completed release marker is missing or invalid:' \
-  "${tmp_dir}/partial-runtime.err"
-grep -Fq \
-  'ctx-linux-x64.release-complete.json' \
+  'release completion marker is invalid: ctx-linux-x64.release-complete.json' \
   "${tmp_dir}/partial-runtime.err"
 
-multiline_cross_output='cross 0.2.5
-rustup 1.28.2
-cargo 1.97.1'
-test "$(printf '%s\n' "${multiline_cross_output}" | sed -n '1p')" = 'cross 0.2.5'
-test "$(printf '%s\n' 'cross 0.2.4' 'rustup 1.28.2' | sed -n '1p')" != 'cross 0.2.5'
-bash scripts/tests/public-cli-freebsd-build-strategy-test.sh
-python3 scripts/tests/onnxruntime-sidecar-tools-test.py
-
-for platform in windows-x64 freebsd-x64; do
-  if env CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD=1 \
-    scripts/build-public-cli-artifact.sh "${platform}" \
-    >"${tmp_dir}/${platform}-dirty-override.out" \
-    2>"${tmp_dir}/${platform}-dirty-override.err"; then
-    printf '%s construction accepted the dirty-build override\n' "${platform}" >&2
-    exit 1
-  fi
-  grep -Fq \
-    'forbidden public release environment variable: CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD' \
-    "${tmp_dir}/${platform}-dirty-override.err"
-done
-
-mkdir -p "${tmp_dir}/dirty-path"
-cat > "${tmp_dir}/dirty-path/git" <<'EOF'
-#!/bin/sh
-case "${1:-}" in
-  rev-parse) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
-  status) printf '%s\n' '?? synthetic-dirty-file' ;;
-  *) exit 2 ;;
-esac
-EOF
-chmod +x "${tmp_dir}/dirty-path/git"
-dirty_out="target/ctx-release-dirty-test.$$"
-hostile_tool_out="target/ctx-release-tool-override-test.$$"
-trap 'rm -rf "${tmp_dir}" "${dirty_out}" "${hostile_tool_out}"' EXIT
-mkdir -p "${dirty_out}"
-printf 'stale evidence\n' > "${dirty_out}/ctx.exe.build-info.json"
-if PATH="${tmp_dir}/dirty-path:${PATH}" \
-  CTX_PUBLIC_CLI_ARTIFACT_DIR="${dirty_out}" \
-  scripts/build-public-cli-artifact.sh windows-x64 \
-  >"${tmp_dir}/dirty.out" 2>"${tmp_dir}/dirty.err"; then
-  echo "non-Linux construction accepted a dirty source tree" >&2
-  exit 1
-fi
-grep -Fq 'public release construction requires a clean checkout' "${tmp_dir}/dirty.err"
-grep -Fxq 'stale evidence' "${dirty_out}/ctx.exe.build-info.json"
-
-for override in CTX_LLVM_READOBJ CTX_LLVM_OBJDUMP; do
-  for platform in \
-    linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64 freebsd-x64; do
-    hostile_output="${hostile_tool_out}/${override}/${platform}"
-    if env \
-      "${override}=${tmp_dir}/forged-llvm-tool" \
-      CTX_PUBLIC_CLI_ARTIFACT_DIR="${hostile_output}" \
-      scripts/build-public-cli-artifact.sh "${platform}" \
-      >"${tmp_dir}/${override}-${platform}.out" \
-      2>"${tmp_dir}/${override}-${platform}.err"; then
-      printf '%s construction accepted %s\n' "${platform}" "${override}" >&2
-      exit 1
-    fi
-    grep -Fq \
-      "forbidden public release environment variable: ${override}" \
-      "${tmp_dir}/${override}-${platform}.err"
-    if [[ -e "${hostile_output}" ]]; then
-      printf '%s construction created output before rejecting %s\n' \
-        "${platform}" "${override}" >&2
-      exit 1
-    fi
-  done
-done
-
-inspector_parent="${tmp_dir}/mode-0700-parent"
-inspector_source="${inspector_parent}/source"
-inspector_artifacts="${inspector_source}/target/public-cli-artifacts"
-mkdir -p \
-  "${inspector_source}/contracts" \
-  "${inspector_source}/scripts" \
-  "${inspector_source}/tests/fixtures/custom-history-jsonl" \
-  "${inspector_artifacts}"
-chmod 0700 "${inspector_parent}" "${inspector_source}"
-for source in check-public-cli-artifact.sh check-release-binary-compat.sh run-native-candidate-smoke.sh; do
-  printf '#!/bin/sh\nexit 0\n' >"${inspector_source}/scripts/${source}"
-done
-printf '{}\n' >"${inspector_source}/contracts/public-control-surface-v1.json"
-printf '{}\n' >"${inspector_source}/tests/fixtures/custom-history-jsonl/basic.jsonl"
-printf 'candidate\n' >"${inspector_artifacts}/ctx"
-printf '%064d\n' 0 >"${inspector_artifacts}/ctx.sha256"
-printf 'ctx 1.0.0\n' >"${inspector_artifacts}/ctx.version"
-inspector_output="${tmp_dir}/inspector-output"
-mkdir "${inspector_output}"
-scripts/stage-public-cli-inspector-inputs.sh \
-  "${inspector_source}" "${inspector_artifacts}" ctx "${inspector_output}" >/dev/null
-test -x "${inspector_output}/artifacts/ctx"
-test "$(stat -c '%a' "${inspector_output}")" = 755
-test "$(stat -c '%a' "${inspector_output}/contracts/public-control-surface-v1.json")" = 444
-test "$(stat -c '%a' "${inspector_output}/tests/fixtures/custom-history-jsonl/basic.jsonl")" = 444
-
-mv "${inspector_artifacts}/ctx" "${inspector_artifacts}/real-ctx"
-ln -s real-ctx "${inspector_artifacts}/ctx"
-mkdir "${tmp_dir}/inspector-symlink-output"
-if scripts/stage-public-cli-inspector-inputs.sh \
-  "${inspector_source}" "${inspector_artifacts}" ctx "${tmp_dir}/inspector-symlink-output" \
-  >"${tmp_dir}/inspector-symlink.out" 2>"${tmp_dir}/inspector-symlink.err"; then
-  echo "inspector staging accepted a symlink artifact" >&2
-  exit 1
-fi
-grep -Fq 'non-symlink' "${tmp_dir}/inspector-symlink.err"
-rm "${inspector_artifacts}/ctx"
-mv "${inspector_artifacts}/real-ctx" "${inspector_artifacts}/ctx"
-
-mkdir -p "${tmp_dir}/outside-artifacts" "${tmp_dir}/inspector-escape-output"
-if scripts/stage-public-cli-inspector-inputs.sh \
-  "${inspector_source}" "${tmp_dir}/outside-artifacts" ctx "${tmp_dir}/inspector-escape-output" \
-  >"${tmp_dir}/inspector-escape.out" 2>"${tmp_dir}/inspector-escape.err"; then
-  echo "inspector staging accepted an artifact root escape" >&2
-  exit 1
-fi
-grep -Fq 'escapes the source snapshot' "${tmp_dir}/inspector-escape.err"
-
-ln -s "${tmp_dir}/outside-artifacts" "${tmp_dir}/inspector-output-link"
-if scripts/stage-public-cli-inspector-inputs.sh \
-  "${inspector_source}" "${inspector_artifacts}" ctx "${tmp_dir}/inspector-output-link" \
-  >"${tmp_dir}/inspector-output-link.out" 2>"${tmp_dir}/inspector-output-link.err"; then
-  echo "inspector staging accepted a symlink output root" >&2
-  exit 1
-fi
-grep -Fq 'empty non-symlink' "${tmp_dir}/inspector-output-link.err"
-
-grep -F '20260701T000000Z' scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F 'ubuntu:22.04@sha256:' scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F 'GLIBC_BASELINE="2.35"' scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F 'org.ctx.release.glibc-baseline="${GLIBC_BASELINE}"' \
-  scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F 'RUSTUP_VERSION="1.28.2"' scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F 'LINUX_GLIBC_BASELINE="2.35"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'LINUX_RELEASE_IMAGE_UBUNTU="22.04"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'LINUX_RELEASE_UBUNTU_DIGEST="sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982"' \
-  scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'LINUX_RELEASE_UBUNTU_SNAPSHOT="20260701T000000Z"' \
-  scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'RUST_TOOLCHAIN_VERSION="1.97.1"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'RUST_TOOLCHAIN_COMMIT="8bab26f4f68e0e26f0bb7960be334d5b520ea452"' \
-  scripts/build-public-cli-artifact.sh >/dev/null
-grep -A5 -F '[profile.release]' Cargo.toml | grep -F 'strip = "symbols"' >/dev/null
-grep -F 'rustup target add --toolchain "${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'cargo "+${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '-e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'public release construction requires a clean checkout' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'source commit changed during public release construction' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'linux-*' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--network none' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'scripts/run-native-candidate-smoke.sh' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'CTX_PRO_HELPER="${untrusted_helper}"' scripts/run-native-candidate-smoke.sh >/dev/null
-grep -F 'pro_helper_override_ignored' scripts/run-native-candidate-smoke.sh >/dev/null
-grep -F 'LINUX_X64_QEMU_CPU_PROFILE="qemu64"' scripts/build-public-cli-artifact.sh >/dev/null
-if grep -Fq 'CTX_TEST_ONLY_ALLOW_EMULATED_LINUX_BUILD' \
-  scripts/build-public-cli-artifact.sh; then
-  echo "production Linux builder still contains an emulation override" >&2
-  exit 1
-fi
-if sed -n '/^run_linux_container_build()/,/^}/p' \
-  scripts/build-public-cli-artifact.sh \
-  | grep -Fq 'CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD'; then
-  echo "production Linux builder still contains a dirty-source override" >&2
-  exit 1
-fi
-test "$(grep -Fc 'CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD' \
-  scripts/build-public-cli-artifact.sh)" = 2
-dirty_override_guard_line="$(grep -n \
-  'CTX_TEST_ONLY_ALLOW_DIRTY_RELEASE_BUILD+x' \
-  scripts/build-public-cli-artifact.sh | cut -d: -f1)"
-platform_dispatch_line="$(grep -n '^case "${platform}" in' \
-  scripts/build-public-cli-artifact.sh | head -n 1 | cut -d: -f1)"
-test "${dirty_override_guard_line}" -lt "${platform_dispatch_line}"
-for override in CTX_LLVM_READOBJ CTX_LLVM_OBJDUMP; do
-  override_guard_line="$(grep -n "${override}+x" \
-    scripts/build-public-cli-artifact.sh | cut -d: -f1)"
-  test "${override_guard_line}" -lt "${platform_dispatch_line}"
-done
-grep -F 'LLVM_TOOL_ROOT="$(authoritative_llvm_root)"' \
-  scripts/check-release-binary-compat.sh >/dev/null
-if grep -Eq 'CTX_LLVM_(READOBJ|OBJDUMP):-' \
-  scripts/check-release-binary-compat.sh; then
-  echo "production release compatibility checker retains a tool override" >&2
-  exit 1
-fi
-grep -F 'flock -n' scripts/build-public-cli-artifact.sh >/dev/null
+grep -F 'CTX_PRO_HELPER="${untrusted_helper}"' \
+  scripts/run-native-candidate-smoke.sh >/dev/null
+grep -F 'pro_helper_override_ignored' \
+  scripts/run-native-candidate-smoke.sh >/dev/null
 grep -F 'local_runtime_authority' scripts/write-public-cli-build-info.py >/dev/null
-grep -F 'linux-*|freebsd-x64)' scripts/smoke-daemon-semantic-release.sh >/dev/null
-grep -F 'require_authoritative=1' scripts/smoke-daemon-semantic-release.sh >/dev/null
-grep -F 'semantic smoke requires authoritative native' \
+grep -F 'linux-*|freebsd-x64)' \
+  scripts/smoke-daemon-semantic-release.sh >/dev/null
+grep -F 'require_authoritative=1' \
   scripts/smoke-daemon-semantic-release.sh >/dev/null
 grep -F -- '--source-commit "${source_commit}"' \
   scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'verify_and_stage_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64' \
   scripts/stage-github-release-assets.sh >/dev/null
-grep -F 'required ONNX Runtime sidecar missing' scripts/stage-github-release-assets.sh >/dev/null
-grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
-grep -F 'ctx-onnxruntime-macos-x64.tar.gz' scripts/check-github-release-assets.sh >/dev/null
-test "$(grep -Fc -- '--skip_tests --skip_submodule_sync' \
-  scripts/onnxruntime-sidecar/build_macos_x64.sh)" = 1
-grep -F -- '--expected-builder-base "${LINUX_RELEASE_UBUNTU_DIGEST}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--actual-builder-base "${actual_base_digest}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--runtime-image-id "${runtime_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--inspector-image-id "${inspector_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--inspector-image-id "${artifact_inspector_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'build-info.json' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--locked --offline' scripts/build-linux-release-offline.sh >/dev/null
-grep -F 'bash scripts/check-linux-release-environment.sh' \
-  scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'bash scripts/check-linux-release-environment.sh' \
-  scripts/build-linux-release-offline.sh >/dev/null
-grep -F 'bash scripts/check-linux-release-builder.sh "${target}"' \
-  scripts/build-linux-release-offline.sh >/dev/null
-grep -F '/usr/bin/python3 -I scripts/check-linux-release-network-isolation.py' \
-  scripts/build-linux-release-offline.sh >/dev/null
-grep -F 'bash scripts/build-linux-release-offline.sh "${platform}" "${target}"' \
-  scripts/build-public-cli-artifact.sh >/dev/null
-bash scripts/tests/check-linux-release-builder-test.sh
-python3 scripts/tests/check-linux-release-network-isolation-test.py \
-  scripts/check-linux-release-network-isolation.py \
-  scripts/tests/fixtures/linux-release-network-isolation.json
-grep -F "cross --version | sed -n '1p'" scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'native-freebsd)' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'release_cargo build -p ctx --release --target "${target}" --locked' \
-  scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'linux-cross)' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'RUSTUP_TOOLCHAIN="${RUST_TOOLCHAIN_VERSION}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F "cargo-zigbuild --version | sed -n '1p'" scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'run_host_artifact_check' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'stage-public-cli-inspector-inputs.sh' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--target runtime' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F -- '--target inspector' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'org.ctx.release.role="runtime"' scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F 'runtime tool missing' scripts/docker/linux-release.Dockerfile >/dev/null
-grep -F '"${runtime_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F '"${inspector_image_id}"' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'timeout --signal=KILL 120s' scripts/build-public-cli-artifact.sh >/dev/null
-grep -F 'x86_64-unknown-freebsd:0.2.5@sha256:' Cross.toml >/dev/null
-grep -F '[System.IO.File]::WriteAllText(' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
+grep -F 'required ONNX Runtime sidecar missing' \
+  scripts/stage-github-release-assets.sh >/dev/null
+grep -F 'ctx-onnxruntime-freebsd-x64.tar.gz' \
+  scripts/check-github-release-assets.sh >/dev/null
+grep -F '[System.IO.File]::WriteAllText(' \
+  scripts/smoke-daemon-semantic-release.ps1 >/dev/null
 grep -F 'function Get-BoundWindowsBuildInfoSha256' \
   scripts/smoke-daemon-semantic-release.ps1 >/dev/null
-grep -F 'if ($RequireAuthoritative -and $runtimeAuthority -cne "authoritative")' \
-  scripts/smoke-daemon-semantic-release.ps1 >/dev/null
-if grep -Eq 'ProofOutput|native-runtime-proof|packaged-runtime-proof' \
-  scripts/smoke-daemon-semantic-release.ps1 \
-  scripts/smoke-daemon-semantic-release.sh \
-  scripts/stage-github-release-assets.sh; then
-  echo 'retired proof output remains in native release scripts' >&2
-  exit 1
-fi
-grep -F 'param([string[]]$CommandArgs)' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
-grep -F '@CommandArgs' scripts/smoke-daemon-semantic-release.ps1 >/dev/null
-grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' .buildkite/pipeline.yml >/dev/null
-grep -F 'scripts/test-windows-runtime-upgrade-extractor.ps1' .buildkite/pipeline.yml >/dev/null
-grep -F 'scripts/tests/run-native-candidate-smoke-test.ps1' .buildkite/pipeline.yml >/dev/null
-grep -F 'scripts/buildkite-public-ci.sh --mode=ci' .buildkite/pipeline.yml >/dev/null
-sed -n '/key: "public-cli-windows-x64-native-smoke"/,/timeout_in_minutes:/p' \
-  .buildkite/pipeline.yml \
-  | grep -F 'queue: "windows-x64"' >/dev/null
-test -f scripts/test-windows-semantic-smoke-contract.ps1
-test -f scripts/test-windows-runtime-upgrade-extractor.ps1
-if grep -Fq 'param([string[]]$Args)' scripts/smoke-daemon-semantic-release.ps1; then
-  echo 'Windows semantic smoke reused the reserved PowerShell $Args variable' >&2
-  exit 1
-fi
+grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' \
+  .buildkite/pipeline.yml >/dev/null
+grep -F 'scripts/buildkite-public-ci.sh --mode=ci' \
+  .buildkite/pipeline.yml >/dev/null
 
 bash scripts/tests/linux-bazel-release-controller-test.sh
 python3 scripts/tests/linux-bazel-controller-receipt-test.py

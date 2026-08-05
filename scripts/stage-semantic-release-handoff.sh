@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${CTX_RELEASE_PINNED_CONSUMER+x}" == "x" ]]; then
-  printf 'ambient completed-candidate admission markers are forbidden\n' >&2
-  exit 1
-fi
 if [[ $# -ne 2 ]]; then
   printf 'usage: %s ARTIFACT_DIR OUTPUT_DIR\n' "$0" >&2
   exit 2
@@ -12,34 +8,15 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
-publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
-resolve_checkout_commit() {
-  env \
-    -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
-    -u GIT_CEILING_DIRECTORIES \
-    -u GIT_COMMON_DIR \
-    -u GIT_DIR \
-    -u GIT_DISCOVERY_ACROSS_FILESYSTEM \
-    -u GIT_INDEX_FILE \
-    -u GIT_NAMESPACE \
-    -u GIT_OBJECT_DIRECTORY \
-    -u GIT_WORK_TREE \
-    git -C "${repo_root}" rev-parse --verify HEAD^{commit}
-}
+bundle_tool="${repo_root}/scripts/release/release_bundle.py"
 
 artifact_dir="$1"
 output_dir="$2"
-source_commit="$(resolve_checkout_commit)"
-if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" == "0000000000000000000000000000000000000000" ]]; then
-  printf 'could not resolve the exact public source commit\n' >&2
-  exit 1
-fi
-if [[ -n "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}" && "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" != "${source_commit}" ]]; then
-  printf 'ambient public source commit conflicts with checkout HEAD\n' >&2
-  exit 1
-fi
 if [[ "${artifact_dir}" != /* ]]; then
-  artifact_dir="${PWD}/${artifact_dir}"
+  artifact_dir="${repo_root}/${artifact_dir}"
+fi
+if [[ "${output_dir}" != /* ]]; then
+  output_dir="${repo_root}/${output_dir}"
 fi
 
 sha256_file() {
@@ -50,18 +27,13 @@ sha256_file() {
   fi
 }
 
-stage_complete_candidate() {
+stage_semantic_assets() {
   local artifact_dir="$1"
   local output_dir="$2"
-  local source_commit="$3"
-  local script_dir="$4"
+  local script_dir="$3"
   local temporary artifact source checksum record expected actual
   local artifacts
 
-  [[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || {
-    printf 'completed Semantic handoff source commit is invalid\n' >&2
-    exit 1
-  }
   [[ ! -e "${output_dir}" && ! -L "${output_dir}" ]] || {
     printf 'refusing to replace existing Semantic handoff: %s\n' "${output_dir}" >&2
     exit 1
@@ -106,19 +78,11 @@ stage_complete_candidate() {
     printf '%s  %s\n' "${actual}" "${artifact}" >> "${temporary}/SHA256SUMS"
   done
 
-  mv "${temporary}" "${output_dir}"
+  python3 -I "${bundle_tool}" commit-directory \
+    --stage-dir "${temporary}" \
+    --output-dir "${output_dir}"
   trap - EXIT
   printf 'staged unsigned Semantic release handoff %s\n' "${output_dir}"
 }
 
-worker_program="$(declare -f sha256_file stage_complete_candidate)"
-worker_program+=$'\nstage_complete_candidate "$@"'
-python3 -I "${publisher}" consume-complete \
-  --candidate-dir "${artifact_dir}" \
-  --snapshot-root "${TMPDIR:-/tmp}" \
-  --platform linux-x64 \
-  --platform linux-aarch64 \
-  --source-commit "${source_commit}" \
-  --allow-extra -- \
-  /bin/bash -ceu "${worker_program}" bash \
-    "{candidate}" "${output_dir}" "${source_commit}" "${script_dir}"
+stage_semantic_assets "${artifact_dir}" "${output_dir}" "${script_dir}"

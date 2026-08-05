@@ -1,24 +1,8 @@
 #!/usr/bin/env python3
 
 import unittest
-from typing import Any
 
 from check_test_tier_inventory import InventoryError, validate_inventory
-
-
-def inventory(*labels: str) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "aggregate": "//:release",
-        "intentional_exclusions": [
-            {
-                "label": label,
-                "classification": "test-fixture",
-                "reason": "Synthetic fixture for the inventory checker.",
-            }
-            for label in sorted(labels)
-        ],
-    }
 
 
 class TestTierInventoryTest(unittest.TestCase):
@@ -28,7 +12,6 @@ class TestTierInventoryTest(unittest.TestCase):
                 {"//:routed", "//:fixture"},
                 {"//:routed"},
                 {"//:fixture"},
-                inventory("//:fixture"),
             ),
             (1, 1),
         )
@@ -39,36 +22,22 @@ class TestTierInventoryTest(unittest.TestCase):
                 {"//:routed", "//:new_test"},
                 {"//:routed"},
                 set(),
-                inventory(),
             )
 
-    def test_exclusion_without_manual_tag_fails_closed(self) -> None:
-        with self.assertRaisesRegex(InventoryError, "manual tag"):
+    def test_manual_test_must_not_be_routed(self) -> None:
+        with self.assertRaisesRegex(InventoryError, "manual tests"):
             validate_inventory(
-                {"//:routed", "//:fixture"},
                 {"//:routed"},
+                {"//:routed"},
+                {"//:routed"},
+            )
+
+    def test_release_aggregate_must_expand_only_to_tests(self) -> None:
+        with self.assertRaisesRegex(InventoryError, "non-test labels"):
+            validate_inventory(
+                {"//:routed"},
+                {"//:routed", "//:not-a-test"},
                 set(),
-                inventory("//:fixture"),
-            )
-
-    def test_routed_exclusion_must_be_removed(self) -> None:
-        with self.assertRaisesRegex(InventoryError, "stale or routed"):
-            validate_inventory(
-                {"//:routed"},
-                {"//:routed"},
-                {"//:routed"},
-                inventory("//:routed"),
-            )
-
-    def test_exclusions_require_a_reason(self) -> None:
-        document = inventory("//:fixture")
-        document["intentional_exclusions"][0]["reason"] = ""
-        with self.assertRaisesRegex(InventoryError, "lacks.*reason"):
-            validate_inventory(
-                {"//:fixture"},
-                set(),
-                {"//:fixture"},
-                document,
             )
 
 

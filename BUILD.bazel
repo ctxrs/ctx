@@ -60,7 +60,6 @@ NON_RUST_GATE_DATA = glob([
     "BUILD.bazel",
     "Cargo.lock",
     "Cargo.toml",
-    "Cross.toml",
     "LICENSE",
     "MODULE.bazel",
     "README.md",
@@ -275,14 +274,10 @@ py_test(
         "$(rootpath MODULE.bazel)",
         "$(rootpath Cargo.toml)",
         "$(rootpath //tools/bazel/patches:ort-freebsd-release-env-order.patch)",
-        "$(rootpath scripts/build-public-cli-artifact.sh)",
-        "$(rootpath scripts/prepare-freebsd-ort-release-source.sh)",
     ],
     data = [
         "Cargo.toml",
         "MODULE.bazel",
-        "scripts/build-public-cli-artifact.sh",
-        "scripts/prepare-freebsd-ort-release-source.sh",
         "//tools/bazel/patches:ort-freebsd-release-env-order.patch",
     ],
 )
@@ -296,8 +291,6 @@ py_test(
     data = [
         "Cargo.toml",
         "MODULE.bazel",
-        "scripts/build-public-cli-artifact.sh",
-        "scripts/prepare-freebsd-ort-release-source.sh",
         "//tools/bazel/patches:ort-freebsd-release-env-order.patch",
     ],
     imports = ["tools/bazel"],
@@ -408,8 +401,7 @@ sh_test(
         "scripts/check-public-cli-build-info.py",
         "scripts/macos-release-signing-evidence.py",
         "scripts/macos-release-publisher-policy.sh",
-        "scripts/release/completed_candidate_io.py",
-        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/release/release_bundle.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
         "scripts/release_sbom/dependency_materials.py",
@@ -424,8 +416,7 @@ sh_test(
     srcs = ["scripts/tests/stage-semantic-release-handoff-test.sh"],
     data = [
         "scripts/construct-semantic-release-catalog.sh",
-        "scripts/release/completed_candidate_io.py",
-        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/release/release_bundle.py",
         "scripts/stage-semantic-release-handoff.sh",
     ],
     tags = [
@@ -755,11 +746,10 @@ py_test(
 py_test(
     name = "linux_bazel_release_publication_tests",
     srcs = [
-        "scripts/release/completed_candidate_io.py",
-        "scripts/release/publish-linux-bazel-release.py",
-        "scripts/tests/publish-linux-bazel-release-test.py",
+        "scripts/release/release_bundle.py",
+        "scripts/tests/release-bundle-test.py",
     ],
-    main = "scripts/tests/publish-linux-bazel-release-test.py",
+    main = "scripts/tests/release-bundle-test.py",
     tags = [
         "release-gate",
         "security",
@@ -770,8 +760,7 @@ py_test(
 py_test(
     name = "linux_bazel_controller_receipt_tests",
     srcs = [
-        "scripts/release/completed_candidate_io.py",
-        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/release/release_bundle.py",
         "scripts/release/write-linux-bazel-controller-receipt.py",
         "scripts/tests/linux-bazel-controller-receipt-test.py",
     ],
@@ -791,11 +780,9 @@ sh_test(
         ".buildkite/pipeline.yml",
         "contracts/release-targets-v1.json",
         "scripts/release/build-linux-bazel-release.sh",
-        "scripts/release/build-linux-x64-bazel-dogfood.sh",
         "scripts/release/linux-bazel-release-controller.Dockerfile",
         "scripts/release/linux-bazel-release.Dockerfile",
-        "scripts/release/completed_candidate_io.py",
-        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/release/release_bundle.py",
         "scripts/release/run-linux-bazel-release-controller.sh",
         "scripts/release/write-linux-bazel-controller-receipt.py",
         "scripts/package-public-cli-bazel-release.sh",
@@ -835,14 +822,12 @@ sh_test(
     srcs = ["scripts/tests/test-tier-inventory-test.sh"],
     args = [
         "$(rootpath BUILD.bazel)",
-        "$(rootpath //tools/bazel:test-tier-inventory.json)",
         "$(rootpath //tools/bazel:check_test_tier_inventory.py)",
     ],
     data = [
         "BUILD.bazel",
         "scripts/bazelw",
         "//tools/bazel:check_test_tier_inventory.py",
-        "//tools/bazel:test-tier-inventory.json",
     ],
     tags = [
         "build-graph",
@@ -878,12 +863,6 @@ non_rust_gate(name = "release_binary_compat_tests", mode = "release_binary_compa
 non_rust_gate(name = "native_candidate_smoke_tests", mode = "native_candidate_smoke_tests", data = NON_RUST_GATE_DATA)
 non_rust_gate(name = "linux_release_construction_tests", mode = "linux_release_construction_tests", data = NON_RUST_GATE_DATA)
 non_rust_gate(name = "macos_release_signing_tests", mode = "macos_release_signing_tests", data = NON_RUST_GATE_DATA)
-sh_test(
-    name = "public_cli_artifact_cleanup_tests",
-    srcs = ["scripts/tests/build-public-cli-artifact-cleanup-test.sh"],
-    data = ["scripts/build-public-cli-artifact.sh"],
-    tags = ["release-gate"],
-)
 non_rust_gate(
     name = "loc_check",
     mode = "loc_check",

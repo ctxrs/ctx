@@ -156,7 +156,6 @@ CI_TESTS = [
     ":onnxruntime_sidecar_tools_tests",
     ":package_audit_fast",
     ":package_audit_release",
-    ":public_cli_artifact_cleanup_tests",
     ":public_cli_bazel_build_info_tests",
     ":public_cli_bazel_release_contract",
     ":public_cli_release_targets_tests",

@@ -16,7 +16,6 @@ exports_files([
     "release_inventory.bzl",
     "select_affected_tests.py",
     "select_affected_tests_test.py",
-    "test-tier-inventory.json",
     "rust-target-inventory.json",
 ])
 

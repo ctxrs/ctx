@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: test-tier-inventory-test.sh ROOT_BUILD INVENTORY CHECKER" >&2
+if [[ $# -ne 2 ]]; then
+  echo "usage: test-tier-inventory-test.sh ROOT_BUILD CHECKER" >&2
   exit 64
 fi
 
 root_build="$(readlink -f "$1")"
-inventory="$(readlink -f "$2")"
-checker="$(readlink -f "$3")"
+checker="$(readlink -f "$2")"
 repo_root="$(dirname "$root_build")"
 tmp="$(mktemp -d "${TEST_TMPDIR:-/tmp}/ctx-test-tier-inventory.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
@@ -32,5 +31,4 @@ query 'attr("tags", "manual", kind(".*_test rule", //...))' \
 python3 "$checker" \
   --all-tests "$tmp/all-tests.txt" \
   --release-tests "$tmp/release-tests.txt" \
-  --manual-tests "$tmp/manual-tests.txt" \
-  --inventory "$inventory"
+  --manual-tests "$tmp/manual-tests.txt"

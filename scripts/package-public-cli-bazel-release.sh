@@ -540,7 +540,10 @@ fi
 printf '%s\n' "${version_output}" >"${staged}.version"
 
 smoke_result="${stage_dir}/.candidate-smoke.json"
-if [[ "${CTX_PUBLIC_TARGET_OS}" == "windows" ]]; then
+if [[ "${CTX_PUBLIC_TARGET_OS}" == "linux" ]]; then
+  # Linux adds its runtime sidecar before one final-byte smoke and atomic commit.
+  :
+elif [[ "${CTX_PUBLIC_TARGET_OS}" == "windows" ]]; then
   powershell_bin="$(command -v powershell.exe 2>/dev/null || command -v pwsh 2>/dev/null || true)"
   [[ -n "${powershell_bin}" ]] || die "native Windows candidate smoke requires PowerShell"
   "${powershell_bin}" -NoLogo -NoProfile -NonInteractive \
@@ -557,8 +560,10 @@ else
     "${version}" \
     "${smoke_result}"
 fi
-grep -Fq '"status":"passed"' "${smoke_result}" \
-  || die "native candidate smoke did not record a pass"
+if [[ "${CTX_PUBLIC_TARGET_OS}" != "linux" ]]; then
+  grep -Fq '"status":"passed"' "${smoke_result}" \
+    || die "native candidate smoke did not record a pass"
+fi
 
 if [[ -n "${llvm_readobj}" ]]; then
   CTX_PUBLIC_CLI_EXPECTED_VERSION="${version}" \
