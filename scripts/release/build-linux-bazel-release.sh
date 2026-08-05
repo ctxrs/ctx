@@ -86,16 +86,6 @@ esac
   echo "error: --output-dir is required" >&2
   exit 64
 }
-if [[ -z "${private_symbols_dir}" ]]; then
-  private_symbols_dir="${output_dir}.private-debug-symbols"
-fi
-[[ "${private_symbols_dir}" == /* ]] \
-  || die "--private-symbols-dir must be absolute"
-[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
-  || die "private symbol output must not already exist"
-private_symbols_parent="$(dirname "${private_symbols_dir}")"
-mkdir -p "${private_symbols_parent}"
-symbols_stage_parent=""
 [[ "$(uname -s)" == "Linux" ]] \
   || die "native Linux Bazel release construction requires Linux"
 [[ "$(uname -m)" == "${expected_host_arch}" ]] \
@@ -170,6 +160,16 @@ import sys
 print(os.path.abspath(sys.argv[1]))
 PY
 )"
+if [[ -z "${private_symbols_dir}" ]]; then
+  private_symbols_dir="${output_dir}.private-debug-symbols"
+fi
+[[ "${private_symbols_dir}" == /* ]] \
+  || die "--private-symbols-dir must be absolute"
+[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
+  || die "private symbol output must not already exist"
+private_symbols_parent="$(dirname "${private_symbols_dir}")"
+mkdir -p "${private_symbols_parent}"
+symbols_stage_parent=""
 case "${output_dir}/" in
   "${repo_root}/"*)
     git check-ignore -q -- "${output_dir}/.ctx-release-output" \
