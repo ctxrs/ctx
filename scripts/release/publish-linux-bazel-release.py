@@ -7,6 +7,7 @@ import argparse
 import ctypes
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,25 @@ import shlex
 import stat
 import subprocess
 import sys
-from typing import Callable, NamedTuple, Sequence
+from typing import Callable, Sequence
+
+
+_ADMISSION_PATH = Path(__file__).with_name("completed_candidate_admission.py")
+_ADMISSION_SPEC = importlib.util.spec_from_file_location(
+    "ctx_completed_candidate_admission", _ADMISSION_PATH
+)
+if _ADMISSION_SPEC is None or _ADMISSION_SPEC.loader is None:
+    raise RuntimeError("could not load completed candidate admission helper")
+_ADMISSION = importlib.util.module_from_spec(_ADMISSION_SPEC)
+_ADMISSION_SPEC.loader.exec_module(_ADMISSION)
+ADMISSION_CONSUMERS = _ADMISSION.ADMISSION_CONSUMERS
+AdmissionError = _ADMISSION.AdmissionError
+DescriptorBinding = _ADMISSION.DescriptorBinding
+claim_admission = _ADMISSION.claim_admission
+_descriptor_binding = _ADMISSION.descriptor_binding
+expand_command = _ADMISSION.expand_command
+issue_admission = _ADMISSION.issue_admission
+_mount_id = _ADMISSION.mount_id
 
 
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -205,24 +224,6 @@ def _require_named_directory_identity(
         opened.st_ino,
     ):
         raise PublicationError(f"{label} changed during publication: {name}")
-
-
-def _mount_id(descriptor: int) -> int:
-    """Return the authoritative Linux mount ID for an open descriptor."""
-    try:
-        with open(f"/proc/self/fdinfo/{descriptor}", encoding="ascii") as source:
-            for line in source:
-                if line.startswith("mnt_id:"):
-                    value = line.partition(":")[2].strip()
-                    if value.isdecimal():
-                        return int(value)
-    except OSError as error:
-        raise PublicationError(
-            "Linux /proc fdinfo mount IDs are required for release cleanup"
-        ) from error
-    raise PublicationError(
-        "Linux /proc fdinfo did not report a mount ID for release cleanup"
-    )
 
 
 def _descriptor_identity(descriptor: int) -> tuple[int, int, int]:
@@ -649,29 +650,6 @@ def _valid_commit(value: str) -> bool:
         len(value) == 40
         and value != "0" * 40
         and all(character in "0123456789abcdef" for character in value)
-    )
-
-
-class DescriptorBinding(NamedTuple):
-    device: int
-    inode: int
-    mount_id: int
-    mode: int
-    size: int
-    mtime_ns: int
-    ctime_ns: int
-
-
-def _descriptor_binding(descriptor: int) -> DescriptorBinding:
-    metadata = os.fstat(descriptor)
-    return DescriptorBinding(
-        device=metadata.st_dev,
-        inode=metadata.st_ino,
-        mount_id=_mount_id(descriptor),
-        mode=metadata.st_mode,
-        size=metadata.st_size,
-        mtime_ns=metadata.st_mtime_ns,
-        ctime_ns=metadata.st_ctime_ns,
     )
 
 
@@ -1360,39 +1338,6 @@ def publish(
         os.close(artifact_source_descriptor)
 
 
-def _expanded_snapshot_command(
-    snapshot: MaterializedCandidateSnapshot,
-    platforms: Sequence[str],
-    command: Sequence[str],
-) -> list[str]:
-    if not command:
-        raise PublicationError("completed release command is empty")
-    replacements = {
-        "{candidate}": snapshot.candidate_argument(),
-    }
-    if len(platforms) == 1:
-        replacements["{ctx}"] = snapshot.leaf_argument(
-            release_binary_leaf(platforms[0])
-        )
-    for name in snapshot.descriptors:
-        replacements[f"{{leaf:{name}}}"] = snapshot.leaf_argument(name)
-    result: list[str] = []
-    for value in command:
-        expanded = value
-        for placeholder, replacement in replacements.items():
-            expanded = expanded.replace(placeholder, replacement)
-        if (
-            "{candidate}" in expanded
-            or "{ctx}" in expanded
-            or "{leaf:" in expanded
-        ):
-            raise PublicationError(
-                f"completed release command contains an unbound placeholder: {value}"
-            )
-        result.append(expanded)
-    return result
-
-
 def consume_complete_candidate(
     candidate: Path,
     snapshot_root: Path,
@@ -1401,6 +1346,7 @@ def consume_complete_candidate(
     command: Sequence[str],
     *,
     allow_extra: bool,
+    consumer_admission: str | None = None,
     before_consume: Callable[[], None] | None = None,
 ) -> int:
     source = CompletedCandidateSnapshot.open(
@@ -1410,20 +1356,49 @@ def consume_complete_candidate(
         allow_extra=allow_extra,
     )
     snapshot: MaterializedCandidateSnapshot | None = None
+    admission_descriptor = -1
     try:
         snapshot = source.materialize(snapshot_root)
+        if consumer_admission is not None:
+            if not any("{admission-fd}" in value for value in command):
+                raise PublicationError(
+                    "completed candidate consumer command omitted its admission FD"
+                )
+            admission_descriptor = issue_admission(
+                snapshot.descriptor,
+                snapshot.root_binding,
+                consumer_admission,
+                source_commit,
+            )
         if before_consume is not None:
             before_consume()
-        argv = _expanded_snapshot_command(snapshot, platforms, command)
+        ctx_argument = None
+        if len(platforms) == 1:
+            ctx_argument = snapshot.leaf_argument(release_binary_leaf(platforms[0]))
+        argv = expand_command(
+            snapshot.candidate_argument(),
+            ctx_argument,
+            {
+                name: snapshot.leaf_argument(name)
+                for name in snapshot.descriptors
+            },
+            command,
+            admission_descriptor if admission_descriptor >= 0 else None,
+        )
+        pass_fds = snapshot.pass_fds()
+        if admission_descriptor >= 0:
+            pass_fds = (*pass_fds, admission_descriptor)
         result = subprocess.run(
             argv,
             check=False,
-            pass_fds=snapshot.pass_fds(),
+            pass_fds=pass_fds,
         )
         snapshot.revalidate()
         source.revalidate()
         return result.returncode
     finally:
+        if admission_descriptor >= 0:
+            os.close(admission_descriptor)
         if snapshot is not None:
             snapshot.close()
         source.close()
@@ -1496,7 +1471,16 @@ def main() -> int:
     consume_parser.add_argument("--platform", action="append", default=[])
     consume_parser.add_argument("--source-commit", required=True)
     consume_parser.add_argument("--allow-extra", action="store_true")
+    consume_parser.add_argument(
+        "--consumer-admission", choices=sorted(ADMISSION_CONSUMERS)
+    )
     consume_parser.add_argument("remainder", nargs=argparse.REMAINDER)
+    claim_parser = commands.add_parser("claim-consumer-admission")
+    claim_parser.add_argument("--admission-fd", type=int, required=True)
+    claim_parser.add_argument("--candidate-dir", required=True)
+    claim_parser.add_argument(
+        "--consumer", choices=sorted(ADMISSION_CONSUMERS), required=True
+    )
     run_parser = commands.add_parser("run-complete")
     run_parser.add_argument("--candidate-dir", type=Path, required=True)
     run_parser.add_argument("--platform", required=True)
@@ -1553,6 +1537,15 @@ def main() -> int:
                 args.source_commit,
                 remainder,
                 allow_extra=args.allow_extra,
+                consumer_admission=args.consumer_admission,
+            )
+        elif args.command == "claim-consumer-admission":
+            print(
+                claim_admission(
+                    args.admission_fd,
+                    args.candidate_dir,
+                    args.consumer,
+                )
             )
         elif args.command == "run-complete":
             remainder = args.remainder
@@ -1571,7 +1564,7 @@ def main() -> int:
                 args.expected_device,
                 args.expected_inode,
             )
-    except (PublicationError, OSError) as error:
+    except (AdmissionError, PublicationError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

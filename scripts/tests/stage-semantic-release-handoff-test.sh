@@ -2,15 +2,33 @@
 set -euo pipefail
 
 if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]]; then
-  repo_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
+  source_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
 else
-  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
-stage="${repo_root}/scripts/stage-semantic-release-handoff.sh"
-publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
-source_commit="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-semantic-handoff-test.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
+unset CTX_RELEASE_PINNED_CONSUMER CTX_PUBLIC_RELEASE_SOURCE_COMMIT
+
+repo_root="${tmp_dir}/repo"
+mkdir -p "${repo_root}/scripts/release"
+cp "${source_root}/scripts/stage-semantic-release-handoff.sh" \
+  "${repo_root}/scripts/stage-semantic-release-handoff.sh"
+cp "${source_root}/scripts/release/publish-linux-bazel-release.py" \
+  "${repo_root}/scripts/release/publish-linux-bazel-release.py"
+cp "${source_root}/scripts/release/completed_candidate_admission.py" \
+  "${repo_root}/scripts/release/completed_candidate_admission.py"
+ln -s "${source_root}/scripts/construct-semantic-release-catalog.sh" \
+  "${repo_root}/scripts/construct-semantic-release-catalog.sh"
+git -C "${repo_root}" init -q
+git -C "${repo_root}" add .
+git -C "${repo_root}" \
+  -c user.name='ctx release test' \
+  -c user.email='ctx-release-test@example.invalid' \
+  commit -qm 'create Semantic staging fixture'
+source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
+stage="${repo_root}/scripts/stage-semantic-release-handoff.sh"
+publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
 
 fake_bin="${tmp_dir}/bin"
 matrix="${tmp_dir}/matrix"
@@ -55,8 +73,11 @@ done
 seal_linux_fixture() {
   local platform="$1"
   local binary="$2"
+  local source_dir="$3"
+  local commit="$4"
+  local tag="$5"
   local runtime="ctx-onnxruntime-${platform}"
-  local candidate="${tmp_dir}/candidate-${platform}"
+  local candidate="${tmp_dir}/candidate-${platform}-${tag}"
   local leaf
   local leaves=(
     "${binary}"
@@ -78,8 +99,8 @@ seal_linux_fixture() {
   )
   mkdir "${candidate}"
   for leaf in "${leaves[@]}"; do
-    if [[ -f "${matrix}/${leaf}" ]]; then
-      cp "${matrix}/${leaf}" "${candidate}/${leaf}"
+    if [[ -f "${source_dir}/${leaf}" ]]; then
+      cp "${source_dir}/${leaf}" "${candidate}/${leaf}"
     else
       printf 'completed candidate leaf %s\n' "${leaf}" >"${candidate}/${leaf}"
     fi
@@ -88,19 +109,35 @@ seal_linux_fixture() {
   python3 -I "${publisher}" seal \
     --candidate-dir "${candidate}" \
     --platform "${platform}" \
-    --source-commit "${source_commit}" >/dev/null
-  cp -a "${candidate}/." "${matrix}/"
+    --source-commit "${commit}" >/dev/null
+  cp -a "${candidate}/." "${source_dir}/"
 }
-seal_linux_fixture linux-x64 ctx
-seal_linux_fixture linux-aarch64 ctx-linux-aarch64
+seal_linux_fixture linux-x64 ctx "${matrix}" "${source_commit}" head
+seal_linux_fixture \
+  linux-aarch64 ctx-linux-aarch64 "${matrix}" "${source_commit}" head
+
+forged_commit="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+forged_matrix="${tmp_dir}/forged-source"
+cp -a "${matrix}" "${forged_matrix}"
+rm "${forged_matrix}/ctx-linux-x64.release-complete.json" \
+  "${forged_matrix}/ctx-linux-aarch64.release-complete.json"
+seal_linux_fixture linux-x64 ctx \
+  "${forged_matrix}" "${forged_commit}" forged
+seal_linux_fixture linux-aarch64 ctx-linux-aarch64 \
+  "${forged_matrix}" "${forged_commit}" forged
 
 run_stage() {
   local source="$1"
   local output="$2"
-  local commit="$3"
-  CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${commit}" \
+  local commit="${3:-}"
+  if [[ -n "${commit}" ]]; then
+    CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${commit}" \
+      PATH="${fake_bin}:${PATH}" \
+      /bin/bash "${stage}" "${source}" "${output}"
+  else
     PATH="${fake_bin}:${PATH}" \
-    /bin/bash "${stage}" "${source}" "${output}"
+      /bin/bash "${stage}" "${source}" "${output}"
+  fi
 }
 
 success_output="${tmp_dir}/success"
@@ -123,13 +160,35 @@ if run_stage "${missing}" "${tmp_dir}/missing-output" "${source_commit}" \
 fi
 grep -Fq 'completed release marker is missing' "${tmp_dir}/missing.err"
 
-if run_stage "${matrix}" "${tmp_dir}/wrong-source-output" \
-  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+if run_stage "${forged_matrix}" "${tmp_dir}/wrong-source-output" \
+  "${forged_commit}" \
   >"${tmp_dir}/wrong-source.out" 2>"${tmp_dir}/wrong-source.err"; then
-  printf 'Semantic handoff accepted the wrong source commit\n' >&2
+  printf 'Semantic handoff accepted a self-consistent non-HEAD source\n' >&2
   exit 1
 fi
-grep -Fq 'completed release identity is invalid' "${tmp_dir}/wrong-source.err"
+grep -Fq 'ambient public source commit conflicts with checkout HEAD' \
+  "${tmp_dir}/wrong-source.err"
+test ! -e "${tmp_dir}/wrong-source-output"
+
+if CTX_RELEASE_PINNED_CONSUMER=1 \
+  run_stage "${missing}" "${tmp_dir}/forged-admission-output" \
+  "${source_commit}" >"${tmp_dir}/forged-admission.out" \
+  2>"${tmp_dir}/forged-admission.err"; then
+  printf 'ambient marker bypassed Semantic completed-candidate admission\n' >&2
+  exit 1
+fi
+grep -Fq 'ambient completed-candidate admission markers are forbidden' \
+  "${tmp_dir}/forged-admission.err"
+test ! -e "${tmp_dir}/forged-admission-output"
+
+if /bin/bash "${stage}" --ctx-pinned-worker 9 \
+  /proc/self/fd/8 "${tmp_dir}/direct-worker-output" \
+  >"${tmp_dir}/direct-worker.out" 2>"${tmp_dir}/direct-worker.err"; then
+  printf 'Semantic worker accepted a non-inherited admission descriptor\n' >&2
+  exit 1
+fi
+grep -Fq 'admission descriptor was not inherited' \
+  "${tmp_dir}/direct-worker.err"
 
 wrong_platform="${tmp_dir}/wrong-platform"
 cp -a "${matrix}" "${wrong_platform}"

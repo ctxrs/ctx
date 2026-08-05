@@ -9,6 +9,7 @@ fi
 
 wrapper="${source_root}/scripts/release/build-linux-bazel-release.sh"
 publisher="${source_root}/scripts/release/publish-linux-bazel-release.py"
+admission="${source_root}/scripts/release/completed_candidate_admission.py"
 dogfood_wrapper="${source_root}/scripts/release/build-linux-x64-bazel-dogfood.sh"
 recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
@@ -63,7 +64,7 @@ for required in \
   'ctx-public-linux-release-completion' \
   'class CompletedCandidateSnapshot' \
   'consume-complete' \
-  '/proc/self/fdinfo/' \
+  'claim-consumer-admission' \
   'release destination appeared during publication'; do
   grep -Fq -- "${required}" "${publisher}" || {
     printf 'native Linux publisher missing descriptor contract: %s\n' \
@@ -71,13 +72,41 @@ for required in \
     exit 1
   }
 done
+for required in \
+  'ctx-completed-candidate-consumer-admission' \
+  'os.pipe2(os.O_CLOEXEC)' \
+  '/proc/self/fdinfo/' \
+  'candidate != f"/proc/self/fd/{candidate_descriptor}"' \
+  'stat.S_ISFIFO' \
+  'root_binding'; do
+  grep -Fq -- "${required}" "${admission}" || {
+    printf 'completed candidate admission helper missing contract: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
 
 for consumer in "${staging}" "${semantic_staging}"; do
-  grep -Fq 'consume-complete' "${consumer}" || {
+  for required in \
+    'consume-complete' \
+    '--consumer-admission' \
+    'claim-consumer-admission' \
+    '{admission-fd}' \
+    'ambient completed-candidate admission markers are forbidden' \
+    'git' \
+    'rev-parse' \
+    'HEAD^{commit}'; do
+    grep -Fq -- "${required}" "${consumer}" || {
+      printf 'completed candidate consumer omits %s: %s\n' \
+        "${required}" "${consumer}" >&2
+      exit 1
+    }
+  done
+  if grep -Fq 'CTX_RELEASE_PINNED_CONSUMER=1' "${consumer}"; then
     printf 'completed candidate consumer bypasses the pinned snapshot: %s\n' \
       "${consumer}" >&2
     exit 1
-  }
+  fi
 done
 for placeholder in \
   "'{ctx}'" \

@@ -544,6 +544,7 @@ steps:
       - "public-cli-windows-x64-native-smoke"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
+      source_commit="$(git rev-parse --verify HEAD^{commit})"
       mkdir -p target/public-cli-artifacts
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx*" . \
@@ -575,8 +576,9 @@ steps:
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-windows-x64.zip*" . \
         --step public-cli-windows-x64
-      scripts/stage-github-release-assets.sh \
-        target/public-cli-artifacts target/github-release-assets
+      CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${source_commit}" \
+        scripts/stage-github-release-assets.sh \
+          target/public-cli-artifacts target/github-release-assets
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"

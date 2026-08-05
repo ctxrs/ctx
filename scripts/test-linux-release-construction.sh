@@ -3,8 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
-export CTX_PUBLIC_RELEASE_SOURCE_COMMIT
-CTX_PUBLIC_RELEASE_SOURCE_COMMIT="ffffffffffffffffffffffffffffffffffffffff"
+mismatched_source_commit="ffffffffffffffffffffffffffffffffffffffff"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
@@ -19,8 +18,16 @@ install -m 0755 \
   "${release_contract_root}/scripts"
 install -m 0755 scripts/release/publish-linux-bazel-release.py \
   "${release_contract_root}/scripts/release"
+install -m 0644 scripts/release/completed_candidate_admission.py \
+  "${release_contract_root}/scripts/release"
 cp -L contracts/release-targets-v1.json \
   "${release_contract_root}/contracts/release-targets-v1.json"
+git -C "${release_contract_root}" init -q
+git -C "${release_contract_root}" add .
+git -C "${release_contract_root}" \
+  -c user.name='ctx release test' \
+  -c user.email='ctx-release-test@example.invalid' \
+  commit -qm 'create release construction fixture'
 release_target_matrix="${release_contract_root}/contracts/release-targets-v1.json"
 stage_release_assets="${release_contract_root}/scripts/stage-github-release-assets.sh"
 test -f "${release_target_matrix}"
@@ -87,7 +94,7 @@ if python3 -I scripts/check-public-cli-build-info.py \
   --build-info "${tmp_dir}/artifact.build-info.json" \
   --matrix "${release_target_matrix}" \
   --platform linux-x64 \
-  --source-commit "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" \
+  --source-commit "${mismatched_source_commit}" \
   >"${tmp_dir}/source-mismatch.out" 2>"${tmp_dir}/source-mismatch.err"; then
   echo "build-info validator accepted an artifact from another source commit" >&2
   exit 1

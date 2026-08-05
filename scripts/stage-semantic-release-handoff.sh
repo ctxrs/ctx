@@ -1,22 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  printf 'usage: %s ARTIFACT_DIR OUTPUT_DIR\n' "$0" >&2
-  exit 2
+if [[ "${CTX_RELEASE_PINNED_CONSUMER+x}" == "x" ]]; then
+  printf 'ambient completed-candidate admission markers are forbidden\n' >&2
+  exit 1
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
-artifact_dir="$1"
-output_dir="$2"
-source_commit="${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}"
-if [[ -z "${source_commit}" ]]; then
-  source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
+resolve_checkout_commit() {
+  env \
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    -u GIT_CEILING_DIRECTORIES \
+    -u GIT_COMMON_DIR \
+    -u GIT_DIR \
+    -u GIT_DISCOVERY_ACROSS_FILESYSTEM \
+    -u GIT_INDEX_FILE \
+    -u GIT_NAMESPACE \
+    -u GIT_OBJECT_DIRECTORY \
+    -u GIT_WORK_TREE \
+    git -C "${repo_root}" rev-parse --verify HEAD^{commit}
+}
+worker_mode=0
+admission_descriptor=""
+if [[ "${1:-}" == "--ctx-pinned-worker" ]]; then
+  [[ $# -eq 4 && "${2:-}" =~ ^[0-9]+$ ]] || {
+    printf 'invalid completed-candidate worker admission\n' >&2
+    exit 2
+  }
+  worker_mode=1
+  admission_descriptor="$2"
+  artifact_dir="$3"
+  output_dir="$4"
+  source_commit="$(
+    python3 -I "${publisher}" claim-consumer-admission \
+      --admission-fd "${admission_descriptor}" \
+      --candidate-dir "${artifact_dir}" \
+      --consumer semantic
+  )"
+else
+  if [[ $# -ne 2 ]]; then
+    printf 'usage: %s ARTIFACT_DIR OUTPUT_DIR\n' "$0" >&2
+    exit 2
+  fi
+  artifact_dir="$1"
+  output_dir="$2"
+  source_commit="$(resolve_checkout_commit)"
 fi
 if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" == "0000000000000000000000000000000000000000" ]]; then
   printf 'could not resolve the exact public source commit\n' >&2
+  exit 1
+fi
+if [[ -n "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}" && "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" != "${source_commit}" ]]; then
+  printf 'ambient public source commit conflicts with checkout HEAD\n' >&2
   exit 1
 fi
 
@@ -24,16 +61,17 @@ requested_artifact_dir="${artifact_dir}"
 if [[ "${requested_artifact_dir}" != /* ]]; then
   requested_artifact_dir="${PWD}/${requested_artifact_dir}"
 fi
-if [[ "${CTX_RELEASE_PINNED_CONSUMER:-0}" != "1" ]]; then
+if [[ "${worker_mode}" == "0" ]]; then
   python3 -I "${publisher}" consume-complete \
     --candidate-dir "${requested_artifact_dir}" \
     --snapshot-root "${TMPDIR:-/tmp}" \
     --platform linux-x64 \
     --platform linux-aarch64 \
     --source-commit "${source_commit}" \
-    --allow-extra -- \
-    env CTX_RELEASE_PINNED_CONSUMER=1 \
-    /bin/bash "${BASH_SOURCE[0]}" "{candidate}" "${output_dir}"
+    --allow-extra \
+    --consumer-admission semantic -- \
+    /bin/bash "${BASH_SOURCE[0]}" \
+      --ctx-pinned-worker "{admission-fd}" "{candidate}" "${output_dir}"
   exit $?
 fi
 artifact_dir="${requested_artifact_dir}"

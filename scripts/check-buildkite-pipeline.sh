@@ -575,6 +575,7 @@ if command -v ruby >/dev/null 2>&1; then
       abort "release candidate staging does not bind artifacts from #{producer}" unless candidate_command.include?("--step #{producer}")
     end
     abort "release candidate staging must run exact-byte public assembly" unless candidate_command.include?("scripts/stage-github-release-assets.sh") && candidate_command.include?("target/github-release-assets")
+    abort "GitHub staging must bind the public source commit to checkout HEAD" unless candidate_command.include?("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") && candidate_command.include?("git rev-parse --verify HEAD^{commit}")
     abort "release candidate staging must upload the immutable manifest" unless Array(candidate["artifact_paths"]).include?("target/github-release-assets/*")
     semantic_assets = %w[
       ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
@@ -853,6 +854,18 @@ if "construct-semantic-release-catalog.sh" not in handoff:
     raise SystemExit("Semantic handoff must construct the six public metadata fields")
 if "publish-linux-bazel-release.py" not in handoff or "consume-complete" not in handoff:
     raise SystemExit("Semantic handoff must consume an FD-pinned completed candidate")
+for source, label in ((staging, "GitHub"), (handoff, "Semantic")):
+    for required in (
+        "--consumer-admission",
+        "claim-consumer-admission",
+        "{admission-fd}",
+        "ambient completed-candidate admission markers are forbidden",
+        "HEAD^{commit}",
+    ):
+        if required not in source:
+            raise SystemExit(f"{label} staging admission is missing {required}")
+    if "CTX_RELEASE_PINNED_CONSUMER=1" in source:
+        raise SystemExit(f"{label} staging still trusts an ambient worker marker")
 for platform in ("linux-x64", "linux-aarch64"):
     if f"--platform {platform}" not in handoff:
         raise SystemExit(f"Semantic handoff must require {platform} completion identity")

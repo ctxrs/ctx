@@ -2,15 +2,47 @@
 set -euo pipefail
 
 if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]]; then
-  repo_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
+  source_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
 else
-  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
-stage="${repo_root}/scripts/stage-github-release-assets.sh"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-stage-assets-test.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
-export CTX_PUBLIC_RELEASE_SOURCE_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+unset CTX_RELEASE_PINNED_CONSUMER CTX_PUBLIC_RELEASE_SOURCE_COMMIT
 real_python3="$(command -v python3)"
+
+repo_root="${tmp_dir}/repo"
+mkdir -p "${repo_root}/contracts" "${repo_root}/scripts/release"
+cp "${source_root}/scripts/stage-github-release-assets.sh" \
+  "${repo_root}/scripts/stage-github-release-assets.sh"
+cp "${source_root}/scripts/release/publish-linux-bazel-release.py" \
+  "${repo_root}/scripts/release/publish-linux-bazel-release.py"
+cp "${source_root}/scripts/release/completed_candidate_admission.py" \
+  "${repo_root}/scripts/release/completed_candidate_admission.py"
+ln -s "${source_root}/contracts/release-targets-v1.json" \
+  "${repo_root}/contracts/release-targets-v1.json"
+for dependency in \
+  apple-developer-id-g2-ca.pem \
+  build-onnxruntime-sidecar.sh \
+  check-macos-release-signing.sh \
+  check-public-cli-build-info.py \
+  macos-release-signing-evidence.py \
+  macos-release-publisher-policy.sh \
+  release-sbom.py \
+  verify-macos-release-attestation.sh; do
+  ln -s "${source_root}/scripts/${dependency}" \
+    "${repo_root}/scripts/${dependency}"
+done
+ln -s "${source_root}/scripts/release_sbom" \
+  "${repo_root}/scripts/release_sbom"
+git -C "${repo_root}" init -q
+git -C "${repo_root}" add .
+git -C "${repo_root}" \
+  -c user.name='ctx release test' \
+  -c user.email='ctx-release-test@example.invalid' \
+  commit -qm 'create release staging fixture'
+source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
+stage="${repo_root}/scripts/stage-github-release-assets.sh"
 publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
 
 fake_bin="${tmp_dir}/bin"
@@ -129,8 +161,11 @@ done
 seal_linux_fixture() {
   local platform="$1"
   local binary="$2"
+  local source_dir="$3"
+  local commit="$4"
+  local tag="$5"
   local runtime="ctx-onnxruntime-${platform}"
-  local candidate="${tmp_dir}/candidate-${platform}"
+  local candidate="${tmp_dir}/candidate-${platform}-${tag}"
   local leaf
   local leaves=(
     "${binary}"
@@ -152,18 +187,29 @@ seal_linux_fixture() {
   )
   mkdir -p "${candidate}"
   for leaf in "${leaves[@]}"; do
-    cp "${matrix}/${leaf}" "${candidate}/${leaf}"
+    cp "${source_dir}/${leaf}" "${candidate}/${leaf}"
   done
   "${real_python3}" -I "${publisher}" seal \
     --candidate-dir "${candidate}" \
     --platform "${platform}" \
-    --source-commit "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" >/dev/null
-  cp "${candidate}/ctx-${platform}.release-complete.json" "${matrix}/"
+    --source-commit "${commit}" >/dev/null
+  cp "${candidate}/ctx-${platform}.release-complete.json" "${source_dir}/"
 }
-seal_linux_fixture linux-x64 ctx
-seal_linux_fixture linux-aarch64 ctx-linux-aarch64
+seal_linux_fixture linux-x64 ctx "${matrix}" "${source_commit}" head
+seal_linux_fixture \
+  linux-aarch64 ctx-linux-aarch64 "${matrix}" "${source_commit}" head
 
-completed_fixture="${tmp_dir}/candidate-linux-x64"
+forged_commit="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+forged_matrix="${tmp_dir}/forged-source"
+cp -a "${matrix}" "${forged_matrix}"
+rm "${forged_matrix}/ctx-linux-x64.release-complete.json" \
+  "${forged_matrix}/ctx-linux-aarch64.release-complete.json"
+seal_linux_fixture linux-x64 ctx \
+  "${forged_matrix}" "${forged_commit}" forged
+seal_linux_fixture linux-aarch64 ctx-linux-aarch64 \
+  "${forged_matrix}" "${forged_commit}" forged
+
+completed_fixture="${tmp_dir}/candidate-linux-x64-head"
 completed_before="$(
   sha256sum \
     "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.gz" \
@@ -242,13 +288,14 @@ default_sbom_log="${tmp_dir}/default-sbom.log"
 default_build_info_log="${tmp_dir}/default-build-info.log"
 CTX_FAKE_SBOM_LOG="${default_sbom_log}" \
   CTX_FAKE_BUILD_INFO_LOG="${default_build_info_log}" \
+  CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${source_commit}" \
   CTX_REAL_PYTHON3="${real_python3}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${matrix}" "${default_output}"
 assert_exact_assets "${default_output}" 24 "${default_assets[@]}"
 test "$(wc -l < "${default_sbom_log}")" -eq 6
 test "$(wc -l < "${default_build_info_log}")" -eq 6
-test "$(grep -Fc -- "--source-commit ${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" "${default_build_info_log}")" -eq 6
+test "$(grep -Fc -- "--source-commit ${source_commit}" "${default_build_info_log}")" -eq 6
 
 semantic_output="${tmp_dir}/semantic"
 CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" \
@@ -322,6 +369,40 @@ if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
 fi
 grep -Fq 'completed release marker is missing or invalid' \
   "${tmp_dir}/missing-marker.err"
+
+if CTX_RELEASE_PINNED_CONSUMER=1 \
+  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${tmp_dir}/missing-marker" \
+  "${tmp_dir}/forged-admission-output" \
+  >"${tmp_dir}/forged-admission.out" \
+  2>"${tmp_dir}/forged-admission.err"; then
+  printf 'ambient marker bypassed GitHub completed-candidate admission\n' >&2
+  exit 1
+fi
+grep -Fq 'ambient completed-candidate admission markers are forbidden' \
+  "${tmp_dir}/forged-admission.err"
+test ! -e "${tmp_dir}/forged-admission-output"
+
+if CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${forged_commit}" \
+  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${forged_matrix}" \
+  "${tmp_dir}/forged-source-output" \
+  >"${tmp_dir}/forged-source.out" 2>"${tmp_dir}/forged-source.err"; then
+  printf 'ambient source commit admitted a non-HEAD GitHub candidate\n' >&2
+  exit 1
+fi
+grep -Fq 'ambient public source commit conflicts with checkout HEAD' \
+  "${tmp_dir}/forged-source.err"
+test ! -e "${tmp_dir}/forged-source-output"
+
+if /bin/bash "${stage}" --ctx-pinned-worker 9 \
+  /proc/self/fd/8 "${tmp_dir}/direct-worker-output" 0 \
+  >"${tmp_dir}/direct-worker.out" 2>"${tmp_dir}/direct-worker.err"; then
+  printf 'GitHub worker accepted a non-inherited admission descriptor\n' >&2
+  exit 1
+fi
+grep -Fq 'admission descriptor was not inherited' \
+  "${tmp_dir}/direct-worker.err"
 
 cp -a "${matrix}" "${tmp_dir}/partial-candidate"
 rm "${tmp_dir}/partial-candidate/ctx.size.json"

@@ -15,6 +15,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts/release/publish-linux-bazel-release.py"
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("publish_linux_bazel_release", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("could not load Linux release publisher")
@@ -392,6 +393,70 @@ class LinuxReleasePublicationTests(unittest.TestCase):
                 for path in self.root.iterdir()
             )
         )
+
+    def test_consumer_admission_is_inherited_and_one_shot(self) -> None:
+        source = PUBLISHER.CompletedCandidateSnapshot.open(
+            self.artifact_source,
+            [self.platform],
+            self.source_commit,
+            allow_extra=False,
+        )
+        snapshot = source.materialize(self.root)
+        admission = PUBLISHER.issue_admission(
+            snapshot.descriptor, snapshot.root_binding, "github", self.source_commit
+        )
+        try:
+            self.assertEqual(
+                PUBLISHER.claim_admission(
+                    admission, snapshot.candidate_argument(), "github"
+                ),
+                self.source_commit,
+            )
+            with self.assertRaisesRegex(PUBLISHER.AdmissionError, "invalid"):
+                PUBLISHER.claim_admission(
+                    admission, snapshot.candidate_argument(), "github"
+                )
+        finally:
+            os.close(admission)
+            snapshot.close()
+            source.close()
+
+    def test_consumer_admission_binds_consumer_and_root_descriptor(self) -> None:
+        source = PUBLISHER.CompletedCandidateSnapshot.open(
+            self.artifact_source,
+            [self.platform],
+            self.source_commit,
+            allow_extra=False,
+        )
+        snapshot = source.materialize(self.root)
+        admissions = [
+            PUBLISHER.issue_admission(
+                snapshot.descriptor,
+                snapshot.root_binding,
+                "github",
+                self.source_commit,
+            ),
+            PUBLISHER.issue_admission(
+                snapshot.descriptor,
+                snapshot.root_binding,
+                "github",
+                self.source_commit,
+            ),
+        ]
+        try:
+            with self.assertRaisesRegex(PUBLISHER.AdmissionError, "invalid"):
+                PUBLISHER.claim_admission(
+                    admissions[0], snapshot.candidate_argument(), "semantic"
+                )
+            with self.assertRaisesRegex(PUBLISHER.AdmissionError, "invalid"):
+                PUBLISHER.claim_admission(
+                    admissions[1], "/proc/self/fd/999999", "github"
+                )
+        finally:
+            for admission in admissions:
+                os.close(admission)
+            snapshot.close()
+            source.close()
 
     def test_run_handoff_executes_pinned_ctx_not_restored_foreign_path(self) -> None:
         marker = self.artifact_source / PUBLISHER.completion_leaf(self.platform)

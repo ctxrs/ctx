@@ -408,6 +408,7 @@ sh_test(
         "scripts/check-public-cli-build-info.py",
         "scripts/macos-release-signing-evidence.py",
         "scripts/macos-release-publisher-policy.sh",
+        "scripts/release/completed_candidate_admission.py",
         "scripts/release/publish-linux-bazel-release.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
@@ -423,6 +424,7 @@ sh_test(
     srcs = ["scripts/tests/stage-semantic-release-handoff-test.sh"],
     data = [
         "scripts/construct-semantic-release-catalog.sh",
+        "scripts/release/completed_candidate_admission.py",
         "scripts/release/publish-linux-bazel-release.py",
         "scripts/stage-semantic-release-handoff.sh",
     ],
@@ -751,6 +753,7 @@ py_test(
 py_test(
     name = "linux_bazel_release_publication_tests",
     srcs = [
+        "scripts/release/completed_candidate_admission.py",
         "scripts/release/publish-linux-bazel-release.py",
         "scripts/tests/publish-linux-bazel-release-test.py",
     ],
@@ -771,6 +774,7 @@ sh_test(
         "scripts/release/build-linux-bazel-release.sh",
         "scripts/release/build-linux-x64-bazel-dogfood.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
+        "scripts/release/completed_candidate_admission.py",
         "scripts/release/publish-linux-bazel-release.py",
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/stage-github-release-assets.sh",
