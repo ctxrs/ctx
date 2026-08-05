@@ -1,4 +1,7 @@
-use crate::SourceKey;
+use crate::{
+    CommitLineageBounds, CommitLineageOmission, ExactCommitRef, GitObjectFormat, SourceKey,
+    MAX_COMMIT_LINEAGE_EXAMINED_EVENTS, MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+};
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
     SessionIdentityInput, SourceAnchor, TypedKey,
@@ -123,6 +126,7 @@ fn file_result(result_snapshot: QuerySnapshotExpectation, generations: &[String]
         })],
         evidence,
         next: None,
+        lineage: None,
     }
 }
 
@@ -156,6 +160,7 @@ fn empty_file_result(result_snapshot: QuerySnapshotExpectation) -> BlameResult {
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     }
 }
 
@@ -346,6 +351,37 @@ fn pull_request_result(matches: Vec<BlameMatch>, outcome: BlameOutcome) -> Blame
         }],
         next: None,
     }
+}
+
+#[test]
+fn non_commit_blame_result_rejects_commit_lineage() {
+    let mut result = empty_file_result(snapshot('a', "materializer-v1"));
+    let oid = "1".repeat(40);
+    result.lineage = Some(CommitLineage {
+        requested: ExactCommitRef {
+            resource: resource("commit:one", ResourceKind::Commit, &oid),
+            object_format: GitObjectFormat::Sha1,
+            oid,
+        },
+        edges: Vec::new(),
+        yielded_by: Vec::new(),
+        origin: None,
+        endpoint: None,
+        complete: true,
+        ambiguous: false,
+        bounds: CommitLineageBounds {
+            returned_events: 0,
+            returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+            examined_events: 0,
+            examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+            omission: CommitLineageOmission::Exact(0),
+            truncation_reason: None,
+        },
+    });
+
+    let error = result.validate().unwrap_err();
+    assert_eq!(error.class, ErrorClass::Corrupt);
+    assert!(error.message.contains("only valid for commit blame"));
 }
 
 #[test]

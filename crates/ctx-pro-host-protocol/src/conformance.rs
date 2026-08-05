@@ -518,7 +518,7 @@ fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
 }
 
 #[test]
-fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract() {
+fn inventory_freezes_blame_outcome_diagnostics_and_commit_lineage() {
     let value = inventory();
     let canonical = &value["canonical_inventory"];
     assert_eq!(canonical["protocol_version"], serde_json::json!(2));
@@ -531,10 +531,33 @@ fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract()
     let HelperMessage::Blame(result) = envelope.message else {
         panic!("blame response kind");
     };
+    let actual = serde_json::to_value(result).expect("blame response JSON");
+    assert_inventory_fields_match_actual(canonical, "BlameResult", &actual);
+    let lineage = &actual["lineage"];
+    assert_inventory_fields_match_actual(canonical, "CommitLineage", lineage);
+    assert_inventory_fields_match_actual(canonical, "ExactCommitRef", &lineage["requested"]);
+    assert_inventory_fields_match_actual(canonical, "CommitLineageEdge", &lineage["edges"][0]);
+    assert_inventory_fields_match_actual(canonical, "CommitLineageBounds", &lineage["bounds"]);
     assert_inventory_fields_match_actual(
         canonical,
-        "BlameResult",
-        &serde_json::to_value(result).expect("blame response JSON"),
+        "ScopedCommitEndpoint.current_at_ref",
+        &lineage["endpoint"],
+    );
+    assert_eq!(
+        canonical["commit_lineage_contract"],
+        serde_json::json!({
+            "operation_kinds": ["amend", "rebase", "cherry_pick"],
+            "relation_classes": ["replacement", "derivation"],
+            "proof_classes": ["record_exact", "repository_verified", "forge_verified"],
+            "states": ["asserted", "ambiguous", "contradicted"],
+            "omission_kinds": ["exact", "at_least", "unknown"],
+            "endpoint_kinds": ["current_at_ref", "current_for_pr"],
+            "stable_edge_order": [
+                "operation_kind", "source_object_format", "source_oid",
+                "result_object_format", "result_oid", "operation_id"
+            ],
+            "match_pagination": "independent"
+        })
     );
     assert_eq!(
         canonical["dto_fields"]["BlameResult"]["required"],
@@ -545,7 +568,8 @@ fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract()
             "outcome",
             "matches",
             "evidence",
-            "next"
+            "next",
+            "lineage"
         ])
     );
     assert_eq!(

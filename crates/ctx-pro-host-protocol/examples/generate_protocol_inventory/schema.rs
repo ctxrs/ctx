@@ -82,8 +82,23 @@ pub(super) fn inventory() -> Value {
             "blame_diagnostic_candidates": MAX_BLAME_DIAGNOSTIC_CANDIDATES,
             "citations_per_fact": MAX_CITATIONS_PER_FACT,
             "blame_target_bytes": MAX_BLAME_TARGET_BYTES,
+            "commit_lineage_returned_events": MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+            "commit_lineage_examined_events": MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
             "mcp_tool_call_attribution_component_bytes":
                 MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
+        },
+        "commit_lineage_contract": {
+            "operation_kinds": ["amend", "rebase", "cherry_pick"],
+            "relation_classes": ["replacement", "derivation"],
+            "proof_classes": ["record_exact", "repository_verified", "forge_verified"],
+            "states": ["asserted", "ambiguous", "contradicted"],
+            "omission_kinds": ["exact", "at_least", "unknown"],
+            "endpoint_kinds": ["current_at_ref", "current_for_pr"],
+            "stable_edge_order": [
+                "operation_kind", "source_object_format", "source_oid",
+                "result_object_format", "result_oid", "operation_id"
+            ],
+            "match_pagination": "independent"
         },
         "host_message_kinds": [
             "hello", "authorize", "prepare_graph_key_deletion",
@@ -249,8 +264,34 @@ pub(super) fn inventory() -> Value {
                 "unit", "evaluated", "proven", "possible", "conflicting", "none"
             ], &[]),
             "BlameResult": fields(&[
-                "snapshot", "target", "git_snapshot", "outcome", "matches", "evidence", "next"
+                "snapshot", "target", "git_snapshot", "outcome", "matches", "evidence", "next",
+                "lineage"
+             ], &[]),
+            "ExactCommitRef": fields(&["resource", "object_format", "oid"], &[]),
+            "CommitLineage": fields(&[
+                "requested", "edges", "yielded_by", "origin", "endpoint", "complete",
+                "ambiguous", "bounds"
             ], &[]),
+            "CommitLineageEdge": fields(&[
+                "operation_id", "kind", "relation_class", "source", "result", "actor",
+                "proof_class", "state", "observed_at_ms", "evidence_numbers"
+            ], &[]),
+            "CommitLineageYield": fields(&[
+                "yield_id", "actor", "proof_class", "state", "observed_at_ms",
+                "evidence_numbers"
+            ], &[]),
+            "CommitLineageBounds": fields(&[
+                "returned_events", "returned_event_limit", "examined_events",
+                "examined_event_limit", "omission", "truncation_reason"
+            ], &[]),
+            "ScopedCommitEndpoint.current_at_ref": fields(&[
+                "kind", "commit", "scope", "observation_id", "observed_at_ms",
+                "evidence_numbers"
+            ], &[]),
+            "ScopedCommitEndpoint.current_for_pr": fields(&[
+                "kind", "commit", "scope", "observation_id", "observed_at_ms",
+                "evidence_numbers"
+             ], &[]),
             "EvidenceCitation": fields(&[
                 "core_generation_id", "source", "session_id", "event_id", "event_sequence",
                 "byte_range", "evidence_sha256"
