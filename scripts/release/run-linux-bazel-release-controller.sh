@@ -179,17 +179,10 @@ osv_database="$(cd "${osv_database}" && pwd -P)"
 osv_metadata="$(cd "$(dirname "${osv_metadata}")" && pwd -P)/$(basename "${osv_metadata}")"
 controller_task_prefix="${work_root}/ctx-linux-release-controller."
 controller_task_root="$(mktemp -d "${controller_task_prefix}XXXXXX")"
-read -r controller_task_device controller_task_inode \
-  < <(stat -c '%d %i' -- "${controller_task_root}")
 cleanup_controller_task() {
   if [[ "${controller_task_root:-}" == "${controller_task_prefix}"* \
     && -d "${controller_task_root}" && ! -L "${controller_task_root}" ]]; then
-    python3 -I scripts/release/publish-linux-bazel-release.py \
-      cleanup-task-root \
-      --work-root "${work_root}" \
-      --task-root "${controller_task_root}" \
-      --expected-device "${controller_task_device}" \
-      --expected-inode "${controller_task_inode}"
+    rm -rf -- "${controller_task_root}"
   fi
 }
 trap cleanup_controller_task EXIT

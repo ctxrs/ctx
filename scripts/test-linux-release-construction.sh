@@ -456,7 +456,4 @@ grep -F 'scripts/test-windows-semantic-smoke-contract.ps1' \
 grep -F 'scripts/buildkite-public-ci.sh --mode=ci' \
   .buildkite/pipeline.yml >/dev/null
 
-bash scripts/tests/linux-bazel-release-controller-test.sh
-python3 scripts/tests/linux-bazel-controller-receipt-test.py
-
 printf 'Linux release construction self-test passed\n'

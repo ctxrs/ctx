@@ -35,11 +35,10 @@ install -m 0755 \
   "${fixture}/scripts"
 install -m 0755 \
   "${source_root}/scripts/release/run-linux-bazel-release-controller.sh" \
-  "${source_root}/scripts/release/publish-linux-bazel-release.py" \
+  "${source_root}/scripts/release/release_bundle.py" \
   "${source_root}/scripts/release/write-linux-bazel-controller-receipt.py" \
   "${fixture}/scripts/release"
 install -m 0644 \
-  "${source_root}/scripts/release/completed_candidate_io.py" \
   "${source_root}/scripts/release/linux-bazel-release-controller.Dockerfile" \
   "${fixture}/scripts/release"
 cat >"${fixture}/scripts/release/build-linux-bazel-release.sh" <<'EOF'

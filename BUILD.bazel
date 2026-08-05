@@ -774,6 +774,25 @@ py_test(
 )
 
 sh_test(
+    name = "linux_bazel_release_controller_tests",
+    srcs = ["scripts/tests/linux-bazel-release-controller-test.sh"],
+    data = [
+        "scripts/public-cli-host-runtime-evidence.sh",
+        "scripts/public-cli-runtime-authority.sh",
+        "scripts/release/linux-bazel-release-controller.Dockerfile",
+        "scripts/release/release_bundle.py",
+        "scripts/release/run-linux-bazel-release-controller.sh",
+        "scripts/release/write-linux-bazel-controller-receipt.py",
+        "scripts/tests/linux-bazel-controller-receipt-test.py",
+    ],
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+sh_test(
     name = "native_bazel_packaging_contract_tests",
     srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
     data = [
