@@ -90,7 +90,7 @@ esac
   || die "native Linux Bazel release construction requires Linux"
 [[ "$(uname -m)" == "${expected_host_arch}" ]] \
   || die "${platform} construction requires a native ${expected_host_arch} host"
-for command in docker flock git python3 sha256sum; do
+for command in docker flock git python3 sha256sum stat; do
   command -v "${command}" >/dev/null 2>&1 \
     || die "required builder command is unavailable: ${command}"
 done
@@ -149,37 +149,52 @@ eval "${target_values}"
   && -n "${CTX_PUBLIC_TARGET_LINUX_RUST_COMMIT}" ]] \
   || die "release-target matrix lacks the pinned Linux build contract"
 
-if [[ "${output_dir}" != /* ]]; then
-  output_dir="${repo_root}/${output_dir}"
+release_leaves=(
+  "${CTX_PUBLIC_TARGET_BINARY}"
+  "${CTX_PUBLIC_TARGET_BINARY}.build-info.json"
+  "${CTX_PUBLIC_TARGET_BINARY}.candidate.json"
+  "${CTX_PUBLIC_TARGET_BINARY}.cdx.json"
+  "${CTX_PUBLIC_TARGET_BINARY}.cdx.json.sha256"
+  "${CTX_PUBLIC_TARGET_BINARY}.dependency-advisory.json"
+  "${CTX_PUBLIC_TARGET_BINARY}.sha256"
+  "${CTX_PUBLIC_TARGET_BINARY}.size.json"
+  "${CTX_PUBLIC_TARGET_BINARY}.third-party-notices.txt"
+  "${CTX_PUBLIC_TARGET_BINARY}.third-party-notices.txt.sha256"
+  "${CTX_PUBLIC_TARGET_BINARY}.version"
+)
+destination_args=(
+  resolve
+  --repo-root "${repo_root}"
+  --output-dir "${output_dir}"
+)
+if [[ -n "${private_symbols_dir}" ]]; then
+  destination_args+=(--private-symbols-dir "${private_symbols_dir}")
 fi
-output_dir="$(
-  python3 - "${output_dir}" <<'PY'
-import os
-import sys
-
-print(os.path.abspath(sys.argv[1]))
-PY
-)"
-if [[ -z "${private_symbols_dir}" ]]; then
-  private_symbols_dir="${output_dir}.private-debug-symbols"
-fi
-[[ "${private_symbols_dir}" == /* ]] \
-  || die "--private-symbols-dir must be absolute"
-[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
-  || die "private symbol output must not already exist"
-private_symbols_parent="$(dirname "${private_symbols_dir}")"
-mkdir -p "${private_symbols_parent}"
-symbols_stage_parent=""
+destination_values="$(
+  python3 -I scripts/release/publish-linux-bazel-release.py \
+    "${destination_args[@]}"
+)" || exit $?
+eval "${destination_values}"
+output_dir="${CTX_LINUX_RELEASE_OUTPUT_DIR}"
+private_symbols_dir="${CTX_LINUX_RELEASE_PRIVATE_SYMBOLS_DIR}"
+unset CTX_LINUX_RELEASE_OUTPUT_DIR CTX_LINUX_RELEASE_PRIVATE_SYMBOLS_DIR
 case "${output_dir}/" in
   "${repo_root}/"*)
     git check-ignore -q -- "${output_dir}/.ctx-release-output" \
       || die "release output inside the checkout must be ignored by Git"
     ;;
 esac
-[[ ! -L "${output_dir}" ]] || die "release output directory is a symlink"
-mkdir -p "${output_dir}"
-[[ -d "${output_dir}" && -w "${output_dir}" ]] \
-  || die "release output directory is not writable"
+preflight_args=(
+  preflight
+  --repo-root "${repo_root}"
+  --output-dir "${output_dir}"
+  --private-symbols-dir "${private_symbols_dir}"
+)
+for leaf in "${release_leaves[@]}"; do
+  preflight_args+=(--artifact-leaf "${leaf}")
+done
+python3 -I scripts/release/publish-linux-bazel-release.py \
+  "${preflight_args[@]}" >/dev/null
 
 release_work_root="${CTX_LINUX_RELEASE_WORK_ROOT:-/tmp}"
 [[ "${release_work_root}" == /* ]] \
@@ -304,23 +319,25 @@ if [[ -n "${cache_root}" ]]; then
 fi
 task_prefix="${release_work_root}/ctx-public-${platform}-bazel-release."
 task_root="$(mktemp -d "${task_prefix}XXXXXX")"
+read -r task_device task_inode \
+  < <(stat -c '%d %i' -- "${task_root}")
 cache_root="${cache_root:-${task_root}/cache}"
 cleanup() {
   if [[ "${task_root:-}" == "${task_prefix}"* \
     && -d "${task_root}" && ! -L "${task_root}" ]]; then
-    chmod -R u+w -- "${task_root}" 2>/dev/null || true
-    rm -rf -- "${task_root}"
-  fi
-  if [[ -n "${symbols_stage_parent:-}" \
-    && "${symbols_stage_parent}" == "${private_symbols_parent}/.ctx-symbol-stage."* \
-    && -d "${symbols_stage_parent}" && ! -L "${symbols_stage_parent}" ]]; then
-    rm -rf -- "${symbols_stage_parent}"
+    python3 -I scripts/release/publish-linux-bazel-release.py \
+      cleanup-task-root \
+      --work-root "${release_work_root}" \
+      --task-root "${task_root}" \
+      --expected-device "${task_device}" \
+      --expected-inode "${task_inode}"
   fi
 }
 trap cleanup EXIT
-symbols_stage_parent="$(mktemp -d "${private_symbols_parent}/.ctx-symbol-stage.XXXXXX")"
 install -d -m 0700 \
   "${task_root}/release-input" \
+  "${task_root}/release-output" \
+  "${task_root}/release-symbol-output" \
   "${cache_root}"
 
 docker_run_args=(
@@ -349,7 +366,6 @@ docker_run_args=(
   -v "${osv_scanner_input}:/release-advisory/osv-scanner:ro"
   -v "${osv_database_input}:/release-advisory/database:ro"
   -v "${osv_metadata_input}:/release-advisory/database-metadata.json:ro"
-  -v "${symbols_stage_parent}:/release-symbol-output:rw"
   -w "${repo_root}"
 )
 if [[ "${cache_root}" != "${task_root}/cache" ]]; then
@@ -454,7 +470,6 @@ python3 -I scripts/release/public-cli-bazel-build-info.py create \
 
 docker run "${docker_run_args[@]}" \
   --network none \
-  -v "${output_dir}:/release-output:rw" \
   "${builder_image_id}" \
   bash -ceu '
     install -d -m 0700 "$HOME"
@@ -466,34 +481,33 @@ docker run "${docker_run_args[@]}" \
     TEST_WORKSPACE=_main \
     "$route" \
       --build-info "/build/release-input/${CTX_RELEASE_BINARY_NAME}.build-info.json" \
-      --output-dir /release-output \
-      --private-symbols-dir /release-symbol-output/bundle
+      --output-dir /build/release-output \
+      --private-symbols-dir /build/release-symbol-output/bundle
   '
 
-[[ -d "${symbols_stage_parent}/bundle" ]] \
+[[ -d "${task_root}/release-symbol-output/bundle" ]] \
   || die "packaged release output is missing private debug symbols"
-[[ ! -e "${private_symbols_dir}" && ! -L "${private_symbols_dir}" ]] \
-  || die "private symbol output appeared during construction"
-mv "${symbols_stage_parent}/bundle" "${private_symbols_dir}"
-
 [[ "$(git rev-parse --verify HEAD^{commit})" == "${source_commit}" ]] \
   || die "source commit changed during native Linux Bazel construction"
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
   || die "source checkout changed during native Linux Bazel construction"
-for leaf in \
-  "${CTX_PUBLIC_TARGET_BINARY}" \
-  "${CTX_PUBLIC_TARGET_BINARY}.sha256" \
-  "${CTX_PUBLIC_TARGET_BINARY}.version" \
-  "${CTX_PUBLIC_TARGET_BINARY}.build-info.json" \
-  "${CTX_PUBLIC_TARGET_BINARY}.cdx.json" \
-  "${CTX_PUBLIC_TARGET_BINARY}.cdx.json.sha256" \
-  "${CTX_PUBLIC_TARGET_BINARY}.third-party-notices.txt" \
-  "${CTX_PUBLIC_TARGET_BINARY}.third-party-notices.txt.sha256" \
-  "${CTX_PUBLIC_TARGET_BINARY}.size.json" \
-  "${CTX_PUBLIC_TARGET_BINARY}.candidate.json"; do
-  [[ -s "${output_dir}/${leaf}" ]] \
-    || die "packaged release output is missing: ${output_dir}/${leaf}"
+for leaf in "${release_leaves[@]}"; do
+  [[ -s "${task_root}/release-output/${leaf}" ]] \
+    || die "packaged release output is missing: ${leaf}"
 done
+
+publish_args=(
+  publish
+  --artifact-source-dir "${task_root}/release-output"
+  --output-dir "${output_dir}"
+  --private-symbols-source-dir "${task_root}/release-symbol-output/bundle"
+  --private-symbols-dir "${private_symbols_dir}"
+)
+for leaf in "${release_leaves[@]}"; do
+  publish_args+=(--artifact-leaf "${leaf}")
+done
+python3 -I scripts/release/publish-linux-bazel-release.py \
+  "${publish_args[@]}"
 
 trap - EXIT
 cleanup

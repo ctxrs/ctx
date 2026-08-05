@@ -8,6 +8,7 @@ else
 fi
 
 wrapper="${source_root}/scripts/release/build-linux-bazel-release.sh"
+publisher="${source_root}/scripts/release/publish-linux-bazel-release.py"
 dogfood_wrapper="${source_root}/scripts/release/build-linux-x64-bazel-dogfood.sh"
 recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
@@ -29,7 +30,8 @@ for required in \
   '/build/release-input/${CTX_RELEASE_BINARY_NAME}.build-info.json' \
   '--private-symbols-dir' \
   'scripts/release/detached-debug-symbols.py prepare' \
-  '/release-symbol-output/bundle' \
+  '/build/release-symbol-output/bundle' \
+  'scripts/release/publish-linux-bazel-release.py' \
   '--network none' \
   '--lockfile_mode=error' \
   '${CTX_PUBLIC_TARGET_BINARY}.cdx.json.sha256' \
@@ -40,6 +42,25 @@ for required in \
   'c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b'; do
   grep -Fq -- "${required}" "${wrapper}" || {
     printf 'native Linux Bazel wrapper missing contract: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+
+if grep -Fq -- '-v "${output_dir}:' "${wrapper}" \
+  || grep -Fq -- 'mktemp -d "${private_symbols_parent}/' "${wrapper}" \
+  || grep -Eq -- 'mv .*private_symbols_dir' "${wrapper}" \
+  || grep -Fq -- 'rm -rf -- "${task_root}"' "${wrapper}"; then
+  echo "native Linux builder touches final destinations before publication" >&2
+  exit 1
+fi
+for required in \
+  'os.O_DIRECTORY | os.O_NOFOLLOW' \
+  'RENAME_NOREPLACE' \
+  'dir_fd=parent_descriptor' \
+  'release destination appeared during publication'; do
+  grep -Fq -- "${required}" "${publisher}" || {
+    printf 'native Linux publisher missing descriptor contract: %s\n' \
+      "${required}" >&2
     exit 1
   }
 done

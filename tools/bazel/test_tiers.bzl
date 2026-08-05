@@ -146,6 +146,7 @@ CI_TESTS = [
     ":freebsd_ort_exit_contract",
     ":freebsd_ort_exit_contract_mutation_tests",
     ":installer_path_smoke",
+    ":linux_bazel_release_publication_tests",
     ":linux_release_construction_tests",
     ":loc_check",
     ":macos_release_signing_tests",

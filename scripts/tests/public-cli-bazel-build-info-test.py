@@ -301,15 +301,6 @@ esac
             'docker_run_args+=(-v "${cache_root}:/build/cache:rw")',
             builder,
         )
-        output_normalization = "print(os.path.abspath(sys.argv[1]))"
-        default_symbols = (
-            'private_symbols_dir="${output_dir}.private-debug-symbols"'
-        )
-        self.assertIn(output_normalization, builder)
-        self.assertIn(default_symbols, builder)
-        self.assertLess(
-            builder.index(output_normalization), builder.index(default_symbols)
-        )
         self.assertNotIn(
             'mktemp -d "/tmp/ctx-public-${platform}-bazel-release.',
             builder,

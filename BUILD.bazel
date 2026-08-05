@@ -732,6 +732,20 @@ py_test(
     tags = ["release-gate"],
 )
 
+py_test(
+    name = "linux_bazel_release_publication_tests",
+    srcs = [
+        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/tests/publish-linux-bazel-release-test.py",
+    ],
+    main = "scripts/tests/publish-linux-bazel-release-test.py",
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
 sh_test(
     name = "native_bazel_packaging_contract_tests",
     srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
@@ -741,6 +755,7 @@ sh_test(
         "scripts/release/build-linux-bazel-release.sh",
         "scripts/release/build-linux-x64-bazel-dogfood.sh",
         "scripts/release/linux-bazel-release.Dockerfile",
+        "scripts/release/publish-linux-bazel-release.py",
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/stage-github-release-assets.sh",
         "//tools/bazel:release_routes.bzl",
