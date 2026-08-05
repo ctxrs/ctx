@@ -32,6 +32,9 @@ for required in \
   'scripts/release/detached-debug-symbols.py prepare' \
   '/build/release-symbol-output/bundle' \
   'scripts/release/publish-linux-bazel-release.py' \
+  'scripts/build-onnxruntime-sidecar.sh' \
+  '--transcode-runtime "${CTX_PUBLIC_TARGET_PLATFORM}"' \
+  'ctx-${CTX_PUBLIC_TARGET_PLATFORM}.release-complete.json' \
   '--network none' \
   '--lockfile_mode=error' \
   '${CTX_PUBLIC_TARGET_BINARY}.cdx.json.sha256' \
@@ -56,7 +59,8 @@ fi
 for required in \
   'os.O_DIRECTORY | os.O_NOFOLLOW' \
   'RENAME_NOREPLACE' \
-  'dir_fd=parent_descriptor' \
+  'ctx-public-linux-release-completion' \
+  '/proc/self/fdinfo/' \
   'release destination appeared during publication'; do
   grep -Fq -- "${required}" "${publisher}" || {
     printf 'native Linux publisher missing descriptor contract: %s\n' \

@@ -19,7 +19,8 @@ The additive --with-semantic mode validates and stages the ten signed Semantic
 assets after preserving the six legacy runtime assets.
 
 The transcode mode converts a validated builder-owned Unix .tar.zst sidecar
-to the deterministic .tar.gz transport consumed by release installers.
+to the deterministic .tar.gz transport consumed by release installers. It is
+only valid in private builder staging before a completion marker is created.
 USAGE
 }
 
@@ -72,6 +73,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
+publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
 source_commit="${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}"
 if [[ -z "${source_commit}" ]]; then
   source_commit="$(git rev-parse --verify HEAD^{commit})"
@@ -197,9 +199,65 @@ if [[ "${mode}" == "transcode" ]]; then
     usage
     exit 2
   }
+  transcode_candidate_dir="${artifact_dir}"
+  if [[ "${transcode_candidate_dir}" != /* ]]; then
+    transcode_candidate_dir="${repo_root}/${transcode_candidate_dir}"
+  fi
+  python3 -I "${publisher}" require-unsealed \
+    --candidate-dir "${transcode_candidate_dir}"
+  artifact_dir="${transcode_candidate_dir}"
   transcode_runtime_asset "${transcode_platform}"
   exit 0
 fi
+
+# GitHub staging never reads the requested aggregate through ordinary
+# pathnames. Snapshot both completed Linux candidates through a no-follow
+# descriptor, then use only that uniquely owned immutable handoff. The final
+# binding check makes a concurrent requested-parent substitution fail closed.
+requested_artifact_dir="${artifact_dir}"
+if [[ "${requested_artifact_dir}" != /* ]]; then
+  requested_artifact_dir="${repo_root}/${requested_artifact_dir}"
+fi
+snapshot_root="${TMPDIR:-/tmp}"
+[[ "${snapshot_root}" == /* ]] || {
+  printf 'release snapshot root must be absolute: %s\n' "${snapshot_root}" >&2
+  exit 1
+}
+snapshot_values="$(
+  python3 -I "${publisher}" snapshot \
+    --candidate-dir "${requested_artifact_dir}" \
+    --snapshot-root "${snapshot_root}" \
+    --platform linux-x64 \
+    --platform linux-aarch64 \
+    --source-commit "${source_commit}"
+)" || exit $?
+eval "${snapshot_values}"
+artifact_dir="${CTX_RELEASE_SNAPSHOT_DIR}"
+snapshot_device="${CTX_RELEASE_SNAPSHOT_DEVICE}"
+snapshot_inode="${CTX_RELEASE_SNAPSHOT_INODE}"
+candidate_device="${CTX_RELEASE_CANDIDATE_DEVICE}"
+candidate_inode="${CTX_RELEASE_CANDIDATE_INODE}"
+candidate_mount_id="${CTX_RELEASE_CANDIDATE_MOUNT_ID}"
+unset \
+  CTX_RELEASE_SNAPSHOT_DIR \
+  CTX_RELEASE_SNAPSHOT_DEVICE \
+  CTX_RELEASE_SNAPSHOT_INODE \
+  CTX_RELEASE_CANDIDATE_DEVICE \
+  CTX_RELEASE_CANDIDATE_INODE \
+  CTX_RELEASE_CANDIDATE_MOUNT_ID
+cleanup_snapshot() {
+  local status=$?
+  trap - EXIT
+  if ! python3 -I "${publisher}" cleanup-task-root \
+    --work-root "${snapshot_root}" \
+    --task-root "${artifact_dir}" \
+    --expected-device "${snapshot_device}" \
+    --expected-inode "${snapshot_inode}"; then
+    status=1
+  fi
+  exit "${status}"
+}
+trap cleanup_snapshot EXIT
 
 stage_asset() {
   local source_name="$1"
@@ -504,7 +562,6 @@ stage_runtime_asset freebsd-x64
 
 if [[ "${include_semantic}" == "1" ]]; then
   semantic_fields="$(mktemp "${TMPDIR:-/tmp}/ctx-semantic-release.XXXXXX")"
-  trap 'rm -f "${semantic_fields}"' EXIT
   bash scripts/construct-semantic-release-catalog.sh \
     "${artifact_dir}" "${semantic_fields}"
   semantic_assets=(
@@ -523,7 +580,12 @@ if [[ "${include_semantic}" == "1" ]]; then
     stage_asset "${semantic_asset}" "${semantic_asset}" 0644
   done
   rm -f "${semantic_fields}"
-  trap - EXIT
 fi
+
+python3 -I "${publisher}" verify-binding \
+  --path "${requested_artifact_dir}" \
+  --expected-device "${candidate_device}" \
+  --expected-inode "${candidate_inode}" \
+  --expected-mount-id "${candidate_mount_id}"
 
 printf 'staged GitHub release assets in %s\n' "${out_dir}"

@@ -10,11 +10,15 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 release_contract_root="${tmp_dir}/release-contract-root"
-mkdir -p "${release_contract_root}/contracts" "${release_contract_root}/scripts"
+mkdir -p \
+  "${release_contract_root}/contracts" \
+  "${release_contract_root}/scripts/release"
 install -m 0755 \
   scripts/check-public-cli-build-info.py \
   scripts/stage-github-release-assets.sh \
   "${release_contract_root}/scripts"
+install -m 0755 scripts/release/publish-linux-bazel-release.py \
+  "${release_contract_root}/scripts/release"
 cp -L contracts/release-targets-v1.json \
   "${release_contract_root}/contracts/release-targets-v1.json"
 release_target_matrix="${release_contract_root}/contracts/release-targets-v1.json"
@@ -418,10 +422,10 @@ if "${stage_release_assets}" \
   exit 1
 fi
 grep -Fq \
-  'required ONNX Runtime sidecar missing:' \
+  'completed release marker is missing or invalid:' \
   "${tmp_dir}/partial-runtime.err"
 grep -Fq \
-  'ctx-onnxruntime-macos-x64.tar.gz' \
+  'ctx-linux-x64.release-complete.json' \
   "${tmp_dir}/partial-runtime.err"
 
 multiline_cross_output='cross 0.2.5

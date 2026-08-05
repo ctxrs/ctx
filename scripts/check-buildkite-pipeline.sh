@@ -520,7 +520,18 @@ if command -v ruby >/dev/null 2>&1; then
       step = steps.find { |candidate| candidate.is_a?(Hash) && candidate["key"] == key }
       abort "missing runtime-producing artifact step #{key}" unless step
       command = step["command"].to_s
-      abort "#{key} must build its ONNX Runtime sidecar" unless command.include?("scripts/build-onnxruntime-sidecar.sh #{platform}")
+      if key.start_with?("public-cli-linux-")
+        abort "#{key} must use the complete Linux release transaction" unless command.include?("scripts/release/build-linux-bazel-release.sh")
+        abort "#{key} must not write runtime leaves after public commit" if command.include?("scripts/build-onnxruntime-sidecar.sh") || command.include?("--transcode-runtime")
+        abort "#{key} native smoke must use the completed candidate handoff" unless command.include?("publish-linux-bazel-release.py run-complete")
+        marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
+        abort "#{key} must upload #{marker}" unless Array(step["artifact_paths"]).include?(marker)
+        binary = key == "public-cli-linux-x64" ? "ctx" : "ctx-linux-aarch64"
+        advisory = "target/public-cli-artifacts/#{binary}.dependency-advisory.json"
+        abort "#{key} must upload #{advisory}" unless Array(step["artifact_paths"]).include?(advisory)
+      else
+        abort "#{key} must build its ONNX Runtime sidecar" unless command.include?("scripts/build-onnxruntime-sidecar.sh #{platform}")
+      end
       archive = platform == "windows-x64" ? "ctx-onnxruntime-windows-x64.zip" : "ctx-onnxruntime-#{platform}.tar.gz"
       abort "#{key} must upload #{archive}" unless Array(step["artifact_paths"]).include?("target/public-cli-artifacts/#{archive}")
       abort "#{key} must upload #{archive}.sha256" unless Array(step["artifact_paths"]).include?("target/public-cli-artifacts/#{archive}.sha256")

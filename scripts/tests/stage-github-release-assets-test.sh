@@ -10,6 +10,8 @@ stage="${repo_root}/scripts/stage-github-release-assets.sh"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-stage-assets-test.XXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
 export CTX_PUBLIC_RELEASE_SOURCE_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+real_python3="$(command -v python3)"
+publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
 
 fake_bin="${tmp_dir}/bin"
 matrix="${tmp_dir}/matrix"
@@ -22,10 +24,23 @@ SH
 cat > "${fake_bin}/python3" <<'SH'
 #!/bin/sh
 case "$*" in
+  *publish-linux-bazel-release.py*)
+    exec "${CTX_REAL_PYTHON3:?}" "$@"
+    ;;
+esac
+case "$*" in
   *release-sbom.py\ verify-bundle*)
     printf '%s\n' "$*" >> "${CTX_FAKE_SBOM_LOG:?}"
     ;;
   *check-public-cli-build-info.py*)
+    if [ -n "${CTX_FAKE_SUBSTITUTE_CANDIDATE:-}" ] \
+      && [ ! -e "${CTX_FAKE_SUBSTITUTION_FLAG:?}" ]; then
+      mv "${CTX_FAKE_SUBSTITUTE_CANDIDATE}" \
+        "${CTX_FAKE_SUBSTITUTE_CANDIDATE}.verified"
+      ln -s "${CTX_FAKE_SUBSTITUTE_EXTERNAL:?}" \
+        "${CTX_FAKE_SUBSTITUTE_CANDIDATE}"
+      : >"${CTX_FAKE_SUBSTITUTION_FLAG}"
+    fi
     printf '%s\n' "$*" >> "${CTX_FAKE_BUILD_INFO_LOG:?}"
     printf '%064d\n' 0
     ;;
@@ -89,10 +104,79 @@ for binary in "${cli_sources[@]}"; do
   printf '{}\n' > "${matrix}/${binary}.size.json"
   printf '{}\n' > "${matrix}/${binary}.candidate.json"
 done
+for binary in ctx ctx-linux-aarch64; do
+  printf 'ctx 1.0.0\n' > "${matrix}/${binary}.version"
+  printf '{"status":"clean"}\n' \
+    > "${matrix}/${binary}.dependency-advisory.json"
+done
+for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 freebsd-x64; do
+  printf '{}\n' \
+    > "${matrix}/ctx-onnxruntime-${platform}.tar.zst.asset.json"
+done
 for platform in macos-arm64 macos-x64; do
   printf '{}\n' > "${matrix}/ctx-${platform}.signing.json"
   printf '{}\n' > "${matrix}/ctx-onnxruntime-${platform}.signing.json"
 done
+
+seal_linux_fixture() {
+  local platform="$1"
+  local binary="$2"
+  local runtime="ctx-onnxruntime-${platform}"
+  local candidate="${tmp_dir}/candidate-${platform}"
+  local leaf
+  local leaves=(
+    "${binary}"
+    "${binary}.build-info.json"
+    "${binary}.candidate.json"
+    "${binary}.cdx.json"
+    "${binary}.cdx.json.sha256"
+    "${binary}.dependency-advisory.json"
+    "${binary}.sha256"
+    "${binary}.size.json"
+    "${binary}.third-party-notices.txt"
+    "${binary}.third-party-notices.txt.sha256"
+    "${binary}.version"
+    "${runtime}.tar.gz"
+    "${runtime}.tar.gz.sha256"
+    "${runtime}.tar.zst"
+    "${runtime}.tar.zst.asset.json"
+    "${runtime}.tar.zst.sha256"
+  )
+  mkdir -p "${candidate}"
+  for leaf in "${leaves[@]}"; do
+    cp "${matrix}/${leaf}" "${candidate}/${leaf}"
+  done
+  "${real_python3}" -I "${publisher}" seal \
+    --candidate-dir "${candidate}" \
+    --platform "${platform}" \
+    --source-commit "${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" >/dev/null
+  cp "${candidate}/ctx-${platform}.release-complete.json" "${matrix}/"
+}
+seal_linux_fixture linux-x64 ctx
+seal_linux_fixture linux-aarch64 ctx-linux-aarch64
+
+completed_fixture="${tmp_dir}/candidate-linux-x64"
+completed_before="$(
+  sha256sum \
+    "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.gz" \
+    "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.zst" \
+    "${completed_fixture}/ctx-linux-x64.release-complete.json"
+)"
+if /bin/bash "${stage}" --transcode-runtime linux-x64 \
+  "${completed_fixture}" \
+  >"${tmp_dir}/completed-transcode.out" \
+  2>"${tmp_dir}/completed-transcode.err"; then
+  printf 'runtime transcode modified a completed public candidate\n' >&2
+  exit 1
+fi
+grep -Fq 'completed public candidate cannot be modified' \
+  "${tmp_dir}/completed-transcode.err"
+test "${completed_before}" = "$(
+  sha256sum \
+    "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.gz" \
+    "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.zst" \
+    "${completed_fixture}/ctx-linux-x64.release-complete.json"
+)"
 
 default_assets=(
   ctx-freebsd-x64
@@ -150,6 +234,7 @@ default_sbom_log="${tmp_dir}/default-sbom.log"
 default_build_info_log="${tmp_dir}/default-build-info.log"
 CTX_FAKE_SBOM_LOG="${default_sbom_log}" \
   CTX_FAKE_BUILD_INFO_LOG="${default_build_info_log}" \
+  CTX_REAL_PYTHON3="${real_python3}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${matrix}" "${default_output}"
 assert_exact_assets "${default_output}" 24 "${default_assets[@]}"
@@ -160,6 +245,7 @@ test "$(grep -Fc -- "--source-commit ${CTX_PUBLIC_RELEASE_SOURCE_COMMIT}" "${def
 semantic_output="${tmp_dir}/semantic"
 CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" \
   CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/semantic-build-info.log" \
+  CTX_REAL_PYTHON3="${real_python3}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" \
   --with-semantic "${matrix}" "${semantic_output}"
@@ -169,6 +255,7 @@ printf 'retired proof payload\n' > "${matrix}/ctx-linux-x64.native-runtime-proof
 ignored_proof_output="${tmp_dir}/ignored-proof"
 CTX_FAKE_SBOM_LOG="${tmp_dir}/ignored-proof-sbom.log" \
   CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/ignored-proof-build-info.log" \
+  CTX_REAL_PYTHON3="${real_python3}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${matrix}" "${ignored_proof_output}"
 assert_exact_assets "${ignored_proof_output}" 24 "${default_assets[@]}"
@@ -177,6 +264,7 @@ test ! -e "${ignored_proof_output}/ctx-linux-x64.native-runtime-proof.txt"
 printf 'mutated runtime bytes\n' >> "${matrix}/ctx-onnxruntime-linux-x64.tar.gz"
 if CTX_FAKE_SBOM_LOG="${tmp_dir}/checksum-mutation-sbom.log" \
   CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/checksum-mutation-build-info.log" \
+  CTX_REAL_PYTHON3="${real_python3}" \
   PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
   "${matrix}" "${tmp_dir}/checksum-mutation" \
   >"${tmp_dir}/checksum-mutation.out" 2>"${tmp_dir}/checksum-mutation.err"
@@ -184,7 +272,76 @@ then
   printf 'release staging accepted runtime bytes that differ from the checksum\n' >&2
   exit 1
 fi
-grep -Fq 'public artifact checksum mismatch' "${tmp_dir}/checksum-mutation.err"
+grep -Fq 'completed release leaf does not match marker' \
+  "${tmp_dir}/checksum-mutation.err"
+
+cp -a "${matrix}" "${tmp_dir}/missing-marker"
+rm "${tmp_dir}/missing-marker/ctx-linux-x64.release-complete.json"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${tmp_dir}/missing-marker" \
+  "${tmp_dir}/missing-marker-output" \
+  >"${tmp_dir}/missing-marker.out" 2>"${tmp_dir}/missing-marker.err"; then
+  printf 'GitHub stager accepted a candidate without completion identity\n' >&2
+  exit 1
+fi
+grep -Fq 'completed release marker is missing or invalid' \
+  "${tmp_dir}/missing-marker.err"
+
+cp -a "${matrix}" "${tmp_dir}/partial-candidate"
+rm "${tmp_dir}/partial-candidate/ctx.size.json"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${tmp_dir}/partial-candidate" \
+  "${tmp_dir}/partial-output" \
+  >"${tmp_dir}/partial.out" 2>"${tmp_dir}/partial.err"; then
+  printf 'GitHub stager accepted a partial completed candidate\n' >&2
+  exit 1
+fi
+grep -Eq 'No such file|completed release' "${tmp_dir}/partial.err"
+
+cp -a "${matrix}" "${tmp_dir}/linked-leaf"
+printf 'sentinel\n' >"${tmp_dir}/leaf-sentinel"
+rm "${tmp_dir}/linked-leaf/ctx.sha256"
+ln -s "${tmp_dir}/leaf-sentinel" "${tmp_dir}/linked-leaf/ctx.sha256"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${tmp_dir}/linked-leaf" \
+  "${tmp_dir}/linked-output" >/dev/null 2>&1; then
+  printf 'GitHub stager followed a completed candidate leaf link\n' >&2
+  exit 1
+fi
+grep -Fqx sentinel "${tmp_dir}/leaf-sentinel"
+
+mkdir "${tmp_dir}/linked-parent"
+ln -s "${matrix}" "${tmp_dir}/linked-parent/candidate"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${tmp_dir}/linked-parent/candidate" \
+  "${tmp_dir}/linked-parent-output" >/dev/null 2>&1; then
+  printf 'GitHub stager followed a candidate ancestor link\n' >&2
+  exit 1
+fi
+
+# Restore the runtime mutation so a deterministic substitution reaches the
+# validators after the descriptor-anchored snapshot has completed.
+printf 'synthetic %s\n' ctx-onnxruntime-linux-x64.tar.gz \
+  > "${matrix}/ctx-onnxruntime-linux-x64.tar.gz"
+substitution_external="${tmp_dir}/substitution-external"
+mkdir "${substitution_external}"
+printf 'sentinel\n' >"${substitution_external}/sentinel"
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/substitution-sbom.log" \
+  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/substitution-build-info.log" \
+  CTX_FAKE_SUBSTITUTE_CANDIDATE="${matrix}" \
+  CTX_FAKE_SUBSTITUTE_EXTERNAL="${substitution_external}" \
+  CTX_FAKE_SUBSTITUTION_FLAG="${tmp_dir}/substitution.flag" \
+  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${matrix}" "${tmp_dir}/substitution-output" \
+  >"${tmp_dir}/substitution.out" 2>"${tmp_dir}/substitution.err"; then
+  printf 'GitHub stager reported success after candidate parent substitution\n' >&2
+  exit 1
+fi
+grep -Fq 'substituted' "${tmp_dir}/substitution.err" || {
+  cat "${tmp_dir}/substitution.err" >&2
+  exit 1
+}
+grep -Fqx sentinel "${substitution_external}/sentinel"
 
 if PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
   --native-candidate "${tmp_dir}/invalid" \

@@ -6,10 +6,12 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: build-linux-bazel-release.sh --platform <linux-x64|linux-arm64> --source-commit SHA --output-dir PATH [--private-symbols-dir PATH]
 
-Builds and packages one native Linux Core candidate through the matching
+Builds and packages one complete native Linux candidate through the matching
 //:ctx_release_<target> --config=release route. The package version and output
-name come from the tracked source and release-target contract. This command
-requires absolute CTX_OSV_SCANNER, CTX_OSV_DATABASE_DIR, and
+name come from the tracked source and release-target contract. The final
+output directory must not exist: core files, runtime sidecars, and completion
+identity are staged before the whole directory is atomically published. This
+command requires absolute CTX_OSV_SCANNER, CTX_OSV_DATABASE_DIR, and
 CTX_OSV_DATABASE_METADATA inputs for its offline advisory gate. It does not
 sign, upload, publish, deploy, or update a release channel.
 USAGE
@@ -162,6 +164,15 @@ release_leaves=(
   "${CTX_PUBLIC_TARGET_BINARY}.third-party-notices.txt.sha256"
   "${CTX_PUBLIC_TARGET_BINARY}.version"
 )
+runtime_base="ctx-onnxruntime-${CTX_PUBLIC_TARGET_PLATFORM}"
+release_leaves+=(
+  "${runtime_base}.tar.gz"
+  "${runtime_base}.tar.gz.sha256"
+  "${runtime_base}.tar.zst"
+  "${runtime_base}.tar.zst.asset.json"
+  "${runtime_base}.tar.zst.sha256"
+  "ctx-${CTX_PUBLIC_TARGET_PLATFORM}.release-complete.json"
+)
 destination_args=(
   resolve
   --repo-root "${repo_root}"
@@ -190,9 +201,6 @@ preflight_args=(
   --output-dir "${output_dir}"
   --private-symbols-dir "${private_symbols_dir}"
 )
-for leaf in "${release_leaves[@]}"; do
-  preflight_args+=(--artifact-leaf "${leaf}")
-done
 python3 -I scripts/release/publish-linux-bazel-release.py \
   "${preflight_args[@]}" >/dev/null
 
@@ -487,6 +495,20 @@ docker run "${docker_run_args[@]}" \
 
 [[ -d "${task_root}/release-symbol-output/bundle" ]] \
   || die "packaged release output is missing private debug symbols"
+
+# The runtime source archive, installer transport, and their sidecars are part
+# of the same public commit unit as the CLI. No public candidate pathname is
+# writable after the directory transaction below.
+scripts/build-onnxruntime-sidecar.sh \
+  "${CTX_PUBLIC_TARGET_PLATFORM}" "${task_root}/release-output"
+scripts/stage-github-release-assets.sh \
+  --transcode-runtime "${CTX_PUBLIC_TARGET_PLATFORM}" \
+  "${task_root}/release-output"
+python3 -I scripts/release/publish-linux-bazel-release.py seal \
+  --candidate-dir "${task_root}/release-output" \
+  --platform "${CTX_PUBLIC_TARGET_PLATFORM}" \
+  --source-commit "${source_commit}" >/dev/null
+
 [[ "$(git rev-parse --verify HEAD^{commit})" == "${source_commit}" ]] \
   || die "source commit changed during native Linux Bazel construction"
 [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
@@ -502,10 +524,9 @@ publish_args=(
   --output-dir "${output_dir}"
   --private-symbols-source-dir "${task_root}/release-symbol-output/bundle"
   --private-symbols-dir "${private_symbols_dir}"
+  --platform "${CTX_PUBLIC_TARGET_PLATFORM}"
+  --source-commit "${source_commit}"
 )
-for leaf in "${release_leaves[@]}"; do
-  publish_args+=(--artifact-leaf "${leaf}")
-done
 python3 -I scripts/release/publish-linux-bazel-release.py \
   "${publish_args[@]}"
 

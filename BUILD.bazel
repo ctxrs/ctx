@@ -408,6 +408,7 @@ sh_test(
         "scripts/check-public-cli-build-info.py",
         "scripts/macos-release-signing-evidence.py",
         "scripts/macos-release-publisher-policy.sh",
+        "scripts/release/publish-linux-bazel-release.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
         "scripts/release_sbom/dependency_materials.py",
