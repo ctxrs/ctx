@@ -45,6 +45,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-history-capture:codex_direct_result_tests",
     "//crates/ctx-history-capture:repository_shell_outcomes_tests",
     "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
+    "//crates/ctx-history-capture:source_backed_route_contract_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-core:unit_tests",
     "//crates/ctx-history-index:mcp_attribution_search_tests",
@@ -75,6 +76,7 @@ _CI_PROVIDER_TESTS = [
     "//crates/ctx-history-capture:mcp_attribution_conformance_runner_tests",
     "//crates/ctx-history-capture:mcp_attribution_conformance_tests",
     "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
+    "//crates/ctx-history-capture:source_backed_route_contract_tests",
     "//crates/ctx-history-capture:unit_tests",
     "//crates/ctx-history-index:mcp_attribution_search_tests",
 ]

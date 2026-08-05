@@ -58,7 +58,8 @@
         "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
         "test:codex_direct_result": "//crates/ctx-history-capture:codex_direct_result_tests",
         "test:repository_shell_outcomes": "//crates/ctx-history-capture:repository_shell_outcomes_tests",
-        "test:self_contained_core_final_locator_removal": "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests"
+        "test:self_contained_core_final_locator_removal": "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
+        "test:source_backed_route_contract": "//crates/ctx-history-capture:source_backed_route_contract_tests"
       },
       "native_unit": "//crates/ctx-history-capture:unit_tests"
     },
