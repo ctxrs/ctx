@@ -9,6 +9,7 @@ mod commercial_lifecycle;
 mod commercial_production_record;
 mod core_worker_budget;
 mod credential_vault;
+pub(crate) mod diagnostic;
 pub(crate) mod evidence_preview;
 mod graph_key_deletion;
 mod helper_command;
@@ -28,8 +29,9 @@ use std::io;
 
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
-    blame, preflight_core_materialization, selected_helper_artifact_sha256, stable_error_code,
-    stable_error_diagnostic, sync_core_materialization, RESOURCE_NOT_FOUND_DIAGNOSTIC,
+    blame, blame_diagnostic, preflight_core_materialization, selected_helper_artifact_sha256,
+    stable_error_code, stable_error_diagnostic, sync_core_materialization,
+    RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
 #[cfg(test)]
 pub(crate) use lifecycle::count_lifecycle_status_queries;
@@ -58,7 +60,12 @@ pub(crate) fn write_stable_error_json(
     output: &mut impl io::Write,
     error: &anyhow::Error,
 ) -> Result<bool> {
-    let Some(code) = stable_error_code(error) else {
+    let diagnostic = blame_diagnostic(error);
+    let Some(code) = diagnostic
+        .as_ref()
+        .map(|value| value.error_code)
+        .or_else(|| stable_error_code(error))
+    else {
         return Ok(false);
     };
     serde_json::to_writer(
@@ -73,6 +80,12 @@ pub(crate) fn write_stable_error_json(
 }
 
 pub(crate) fn actionable_error(error: anyhow::Error) -> anyhow::Error {
+    // Preserve protocol-originated diagnostics as typed errors. Their Display
+    // value is already the legacy stable code, while renderers can downcast to
+    // the trusted structured contract.
+    if client::typed_blame_diagnostic(&error).is_some() {
+        return error;
+    }
     let Some(code) = stable_error_code(&error) else {
         return error;
     };

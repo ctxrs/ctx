@@ -1,35 +1,31 @@
-use anyhow::anyhow;
-use ctx_pro_host_protocol::{ErrorClass, ProtocolError};
+use ctx_pro_host_protocol::ProtocolError;
 
-pub(crate) const RESOURCE_NOT_FOUND_DIAGNOSTIC: &str =
-    "No indexed Pro resource matches the requested blame target.";
+#[cfg(test)]
+use ctx_pro_host_protocol::ErrorClass;
+
+use super::super::diagnostic::BlameDiagnostic;
+pub(crate) use super::super::diagnostic::RESOURCE_NOT_FOUND_DIAGNOSTIC;
 
 pub(super) fn protocol_error(error: ProtocolError) -> anyhow::Error {
-    let code = match error.class {
-        ErrorClass::EntitlementExpired => "entitlement_expired",
-        ErrorClass::KeyStoreUnavailable => "key_store_unavailable",
-        ErrorClass::KeyStoreLocked => "key_store_locked",
-        ErrorClass::NotMaterialized => "not_materialized",
-        ErrorClass::ProtocolMismatch => "protocol_mismatch",
-        ErrorClass::MissingSource => "source_unavailable",
-        ErrorClass::MissingRepository => "repository_unavailable",
-        ErrorClass::ResourceNotFound => "resource_not_found",
-        ErrorClass::StaleFact => "stale_fact",
-        ErrorClass::LineOutOfRange => "line_out_of_range",
-        ErrorClass::StaleSnapshot => "stale_snapshot",
-        ErrorClass::Ambiguous => "ambiguous",
-        ErrorClass::Corrupt => "corrupt_graph",
-        ErrorClass::InvalidRequest | ErrorClass::Bounds => "invalid_request",
-        ErrorClass::RebuildRequired => "needs_rebuild",
-        ErrorClass::Sequence => "invalid_response",
-        ErrorClass::Internal => "helper_crashed",
-    };
-    // Helper error details are untrusted and can contain local paths or key-store diagnostics.
-    // The typed class is the complete stable public error contract.
-    anyhow!(code)
+    anyhow::Error::new(BlameDiagnostic::from_protocol_error(error))
+}
+
+pub(crate) fn blame_diagnostic(error: &anyhow::Error) -> Option<BlameDiagnostic> {
+    typed_blame_diagnostic(error)
+        .cloned()
+        .or_else(|| stable_error_code(error).and_then(BlameDiagnostic::for_stable_error_code))
+}
+
+pub(crate) fn typed_blame_diagnostic(error: &anyhow::Error) -> Option<&BlameDiagnostic> {
+    error.downcast_ref::<BlameDiagnostic>()
 }
 
 pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
+    if let Some(diagnostic) = typed_blame_diagnostic(error) {
+        return Some(diagnostic.error_code);
+    }
+    // Legacy host-side errors predate the typed diagnostic. Protocol errors
+    // never reach this parser: `protocol_error` drops helper prose first.
     error
         .chain()
         .find_map(|cause| stable_error_code_from_text(&cause.to_string()))
@@ -37,7 +33,9 @@ pub(crate) fn stable_error_code(error: &anyhow::Error) -> Option<&'static str> {
 
 pub(crate) fn stable_error_diagnostic(error: &anyhow::Error) -> Option<&'static str> {
     match stable_error_code(error)? {
-        "resource_not_found" => Some(RESOURCE_NOT_FOUND_DIAGNOSTIC),
+        // Preserve the existing renderer contract until the output lane adopts
+        // `blame_diagnostic` as one structured object on every surface.
+        "resource_not_found" => blame_diagnostic(error).map(|value| value.message),
         _ => None,
     }
 }
@@ -55,7 +53,9 @@ fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
         "anonymous_trial_identity_ambiguous" => Some("anonymous_trial_identity_ambiguous"),
         "anonymous_trial_installation_limit" => Some("anonymous_trial_installation_limit"),
         "helper_upgrade_required" => Some("helper_upgrade_required"),
+        "entitlement_required" => Some("entitlement_required"),
         "entitlement_expired" => Some("entitlement_expired"),
+        "entitlement_invalid" => Some("entitlement_invalid"),
         "key_store_unavailable" => Some("key_store_unavailable"),
         "key_store_locked" => Some("key_store_locked"),
         "not_materialized" => Some("not_materialized"),
@@ -67,6 +67,7 @@ fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
         "stale_source" => Some("stale_source"),
         "repository_unavailable" => Some("repository_unavailable"),
         "resource_not_found" => Some("resource_not_found"),
+        "operation_unavailable" => Some("operation_unavailable"),
         "stale_fact" => Some("stale_fact"),
         "line_out_of_range" => Some("line_out_of_range"),
         "stale_snapshot" => Some("stale_snapshot"),
@@ -94,10 +95,15 @@ fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
 
     #[test]
     fn generic_protocol_failures_map_to_stable_public_codes() {
         for (class, expected) in [
+            (ErrorClass::EntitlementExpired, "entitlement_expired"),
+            (ErrorClass::KeyStoreUnavailable, "key_store_unavailable"),
+            (ErrorClass::KeyStoreLocked, "key_store_locked"),
+            (ErrorClass::NotMaterialized, "not_materialized"),
             (ErrorClass::ProtocolMismatch, "protocol_mismatch"),
             (ErrorClass::MissingSource, "source_unavailable"),
             (ErrorClass::MissingRepository, "repository_unavailable"),
@@ -105,6 +111,10 @@ mod tests {
             (ErrorClass::StaleFact, "stale_fact"),
             (ErrorClass::LineOutOfRange, "line_out_of_range"),
             (ErrorClass::StaleSnapshot, "stale_snapshot"),
+            (ErrorClass::Ambiguous, "ambiguous"),
+            (ErrorClass::Corrupt, "corrupt_graph"),
+            (ErrorClass::InvalidRequest, "invalid_request"),
+            (ErrorClass::Bounds, "invalid_request"),
             (ErrorClass::RebuildRequired, "needs_rebuild"),
             (ErrorClass::Sequence, "invalid_response"),
             (ErrorClass::Internal, "helper_crashed"),
@@ -113,6 +123,53 @@ mod tests {
             assert_eq!(mapped.to_string(), expected);
             assert_eq!(stable_error_code(&mapped), Some(expected));
             assert!(!mapped.to_string().contains("untrusted helper detail"));
+            assert_eq!(blame_diagnostic(&mapped).unwrap().error_code, expected);
+        }
+    }
+
+    #[test]
+    fn protocol_error_never_retains_malicious_helper_detail_or_source_chain() {
+        let mut helper_error = ProtocolError::new(
+            ErrorClass::MissingRepository,
+            "key-store failed at /home/alice/.ctx/pro: token=secret",
+        );
+        helper_error.retryable = true;
+
+        let error = protocol_error(helper_error).context("caller context");
+        let diagnostic = blame_diagnostic(&error).unwrap();
+        let serialized = serde_json::to_string(&diagnostic).unwrap();
+
+        assert_eq!(diagnostic.error, "repository_unavailable");
+        assert_eq!(diagnostic.error_code, diagnostic.error);
+        assert!(diagnostic.retryable);
+        assert!(!format!("{error:#}").contains("alice"));
+        assert!(!format!("{error:?}").contains("token=secret"));
+        assert!(!serialized.contains("/home/"));
+        assert!(!serialized.contains("token=secret"));
+    }
+
+    #[test]
+    fn operation_and_entitlement_codes_have_stable_typed_diagnostics() {
+        for (code, reason) in [
+            (
+                "operation_unavailable",
+                super::super::super::diagnostic::BlameDiagnosticReason::OperationNotCovered,
+            ),
+            (
+                "entitlement_required",
+                super::super::super::diagnostic::BlameDiagnosticReason::EntitlementRequired,
+            ),
+            (
+                "entitlement_invalid",
+                super::super::super::diagnostic::BlameDiagnosticReason::EntitlementInvalid,
+            ),
+        ] {
+            let error = anyhow!("{code}: ignored legacy host detail");
+            assert_eq!(stable_error_code(&error), Some(code));
+            let diagnostic = blame_diagnostic(&error).unwrap();
+            assert_eq!(diagnostic.error_code, code);
+            assert_eq!(diagnostic.reason, reason);
+            assert!(!diagnostic.message.contains("ignored legacy host detail"));
         }
     }
 
