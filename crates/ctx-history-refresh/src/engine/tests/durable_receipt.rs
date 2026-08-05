@@ -33,7 +33,7 @@ fn publication_pin_test_publication(
 }
 
 #[test]
-fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
+fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -143,6 +143,15 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
     let exact_no_op_response = second.status(&no_op_request_id).unwrap();
     drop(second);
 
+    let status_path = daemon_source_backed_refresh_job_path(&data_root);
+    let mut pre_fix_job = read_daemon_job_status(&status_path)
+        .expect("exact terminal status before compatibility migration");
+    assert_eq!(pre_fix_job["source_count"], 0);
+    assert_eq!(pre_fix_job["certified_source_count"], 1);
+    // Pre-fix schema v1 projected this global count as `source_count`.
+    pre_fix_job["source_count"] = pre_fix_job["certified_source_count"].clone();
+    write_daemon_job_status(&status_path, &pre_fix_job).unwrap();
+
     let restarted = CoreRefreshEngine::new();
     assert!(!restarted
         .recover_interrupted_publication(&data_root)
@@ -160,9 +169,11 @@ fn exact_no_op_status_reuses_the_exact_durable_receipt_across_restart() {
         exact_no_op_response
     );
     assert!(restarted.status(&initial_request_id).is_none());
-    let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("stable no-op terminal after restart");
+    let recovered =
+        read_daemon_job_status(&status_path).expect("migrated no-op terminal after restart");
     assert_eq!(recovered["request_id"], no_op_request_id);
+    assert_eq!(recovered["source_count"], 0);
+    assert_eq!(recovered["certified_source_count"], 1);
 }
 
 #[test]

@@ -287,6 +287,7 @@ fn recover_exact_published_attempt(
     };
     validate_terminal_receipt_fields(job, &request_receipt)?;
     let mut attempt = recover_terminal_attempt(job, SourceBackedRefreshState::Published)?;
+    attempt.request_source_count = Some(request_receipt.source_count(verified));
     attempt.previous_generation = request_receipt.previous_generation.clone();
     attempt.published_generation = Some(request_receipt.published_generation.clone());
     attempt.receipt = Some(request_receipt);
