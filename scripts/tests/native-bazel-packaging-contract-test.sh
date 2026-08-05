@@ -14,6 +14,7 @@ recipe="${source_root}/scripts/release/linux-bazel-release.Dockerfile"
 pipeline="${source_root}/.buildkite/pipeline.yml"
 matrix="${source_root}/contracts/release-targets-v1.json"
 staging="${source_root}/scripts/stage-github-release-assets.sh"
+semantic_staging="${source_root}/scripts/stage-semantic-release-handoff.sh"
 packager="${source_root}/scripts/package-public-cli-bazel-release.sh"
 release_routes="${source_root}/tools/bazel/release_routes.bzl"
 
@@ -60,11 +61,31 @@ for required in \
   'os.O_DIRECTORY | os.O_NOFOLLOW' \
   'RENAME_NOREPLACE' \
   'ctx-public-linux-release-completion' \
+  'class CompletedCandidateSnapshot' \
+  'consume-complete' \
   '/proc/self/fdinfo/' \
   'release destination appeared during publication'; do
   grep -Fq -- "${required}" "${publisher}" || {
     printf 'native Linux publisher missing descriptor contract: %s\n' \
       "${required}" >&2
+    exit 1
+  }
+done
+
+for consumer in "${staging}" "${semantic_staging}"; do
+  grep -Fq 'consume-complete' "${consumer}" || {
+    printf 'completed candidate consumer bypasses the pinned snapshot: %s\n' \
+      "${consumer}" >&2
+    exit 1
+  }
+done
+for placeholder in \
+  "'{ctx}'" \
+  "'{leaf:ctx-onnxruntime-linux-x64.tar.gz}'" \
+  "'{leaf:ctx-onnxruntime-linux-aarch64.tar.gz}'"; do
+  grep -Fq -- "${placeholder}" "${pipeline}" || {
+    printf 'Linux native smoke does not use pinned descriptor %s\n' \
+      "${placeholder}" >&2
     exit 1
   }
 done

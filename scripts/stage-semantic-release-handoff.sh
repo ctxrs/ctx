@@ -7,8 +7,37 @@ if [[ $# -ne 2 ]]; then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+publisher="${repo_root}/scripts/release/publish-linux-bazel-release.py"
 artifact_dir="$1"
 output_dir="$2"
+source_commit="${CTX_PUBLIC_RELEASE_SOURCE_COMMIT:-}"
+if [[ -z "${source_commit}" ]]; then
+  source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
+fi
+if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ || "${source_commit}" == "0000000000000000000000000000000000000000" ]]; then
+  printf 'could not resolve the exact public source commit\n' >&2
+  exit 1
+fi
+
+requested_artifact_dir="${artifact_dir}"
+if [[ "${requested_artifact_dir}" != /* ]]; then
+  requested_artifact_dir="${PWD}/${requested_artifact_dir}"
+fi
+if [[ "${CTX_RELEASE_PINNED_CONSUMER:-0}" != "1" ]]; then
+  python3 -I "${publisher}" consume-complete \
+    --candidate-dir "${requested_artifact_dir}" \
+    --snapshot-root "${TMPDIR:-/tmp}" \
+    --platform linux-x64 \
+    --platform linux-aarch64 \
+    --source-commit "${source_commit}" \
+    --allow-extra -- \
+    env CTX_RELEASE_PINNED_CONSUMER=1 \
+    /bin/bash "${BASH_SOURCE[0]}" "{candidate}" "${output_dir}"
+  exit $?
+fi
+artifact_dir="${requested_artifact_dir}"
+
 [[ ! -e "${output_dir}" && ! -L "${output_dir}" ]] || {
   printf 'refusing to replace existing Semantic handoff: %s\n' "${output_dir}" >&2
   exit 1

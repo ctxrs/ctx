@@ -175,6 +175,7 @@ CI_TESTS = [
     ":sdk_package_dry_run",
     ":source_diff_check",
     ":stage_github_release_assets_tests",
+    ":stage_semantic_release_handoff_tests",
     ":test_tier_inventory_check",
     "//crates/ctx-cli:daemon_config_reload_tests",
     "//crates/ctx-cli:search_source_identity_filters_tests",

@@ -210,54 +210,29 @@ if [[ "${mode}" == "transcode" ]]; then
   exit 0
 fi
 
-# GitHub staging never reads the requested aggregate through ordinary
-# pathnames. Snapshot both completed Linux candidates through a no-follow
-# descriptor, then use only that uniquely owned immutable handoff. The final
-# binding check makes a concurrent requested-parent substitution fail closed.
 requested_artifact_dir="${artifact_dir}"
 if [[ "${requested_artifact_dir}" != /* ]]; then
   requested_artifact_dir="${repo_root}/${requested_artifact_dir}"
 fi
-snapshot_root="${TMPDIR:-/tmp}"
-[[ "${snapshot_root}" == /* ]] || {
-  printf 'release snapshot root must be absolute: %s\n' "${snapshot_root}" >&2
-  exit 1
-}
-snapshot_values="$(
-  python3 -I "${publisher}" snapshot \
+if [[ "${CTX_RELEASE_PINNED_CONSUMER:-0}" != "1" ]]; then
+  consumer_command=(
+    env CTX_RELEASE_PINNED_CONSUMER=1
+    /bin/bash "${BASH_SOURCE[0]}"
+  )
+  if [[ "${include_semantic}" == "1" ]]; then
+    consumer_command+=(--with-semantic)
+  fi
+  consumer_command+=("{candidate}" "${out_dir}")
+  python3 -I "${publisher}" consume-complete \
     --candidate-dir "${requested_artifact_dir}" \
-    --snapshot-root "${snapshot_root}" \
+    --snapshot-root "${TMPDIR:-/tmp}" \
     --platform linux-x64 \
     --platform linux-aarch64 \
-    --source-commit "${source_commit}"
-)" || exit $?
-eval "${snapshot_values}"
-artifact_dir="${CTX_RELEASE_SNAPSHOT_DIR}"
-snapshot_device="${CTX_RELEASE_SNAPSHOT_DEVICE}"
-snapshot_inode="${CTX_RELEASE_SNAPSHOT_INODE}"
-candidate_device="${CTX_RELEASE_CANDIDATE_DEVICE}"
-candidate_inode="${CTX_RELEASE_CANDIDATE_INODE}"
-candidate_mount_id="${CTX_RELEASE_CANDIDATE_MOUNT_ID}"
-unset \
-  CTX_RELEASE_SNAPSHOT_DIR \
-  CTX_RELEASE_SNAPSHOT_DEVICE \
-  CTX_RELEASE_SNAPSHOT_INODE \
-  CTX_RELEASE_CANDIDATE_DEVICE \
-  CTX_RELEASE_CANDIDATE_INODE \
-  CTX_RELEASE_CANDIDATE_MOUNT_ID
-cleanup_snapshot() {
-  local status=$?
-  trap - EXIT
-  if ! python3 -I "${publisher}" cleanup-task-root \
-    --work-root "${snapshot_root}" \
-    --task-root "${artifact_dir}" \
-    --expected-device "${snapshot_device}" \
-    --expected-inode "${snapshot_inode}"; then
-    status=1
-  fi
-  exit "${status}"
-}
-trap cleanup_snapshot EXIT
+    --source-commit "${source_commit}" \
+    --allow-extra -- "${consumer_command[@]}"
+  exit $?
+fi
+artifact_dir="${requested_artifact_dir}"
 
 stage_asset() {
   local source_name="$1"
@@ -581,11 +556,5 @@ if [[ "${include_semantic}" == "1" ]]; then
   done
   rm -f "${semantic_fields}"
 fi
-
-python3 -I "${publisher}" verify-binding \
-  --path "${requested_artifact_dir}" \
-  --expected-device "${candidate_device}" \
-  --expected-inode "${candidate_inode}" \
-  --expected-mount-id "${candidate_mount_id}"
 
 printf 'staged GitHub release assets in %s\n' "${out_dir}"

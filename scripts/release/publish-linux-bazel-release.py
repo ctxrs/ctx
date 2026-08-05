@@ -15,7 +15,7 @@ import shlex
 import stat
 import subprocess
 import sys
-from typing import Callable, Sequence
+from typing import Callable, NamedTuple, Sequence
 
 
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -74,6 +74,19 @@ def expected_release_leaves(platform: str) -> list[str]:
             f"{runtime}.tar.zst.sha256",
         ]
     )
+
+
+def release_binary_leaf(platform: str) -> str:
+    binaries = {
+        "linux-x64": "ctx",
+        "linux-aarch64": "ctx-linux-aarch64",
+    }
+    try:
+        return binaries[platform]
+    except KeyError as error:
+        raise PublicationError(
+            f"unsupported completed Linux platform: {platform}"
+        ) from error
 
 
 def resolve_destinations(
@@ -290,7 +303,10 @@ def _write_all(descriptor: int, value: bytes) -> None:
         offset += written
 
 
-def _sha256_descriptor(descriptor: int) -> tuple[str, int]:
+def _sha256_descriptor(
+    descriptor: int,
+    chunk_hook: Callable[[int], None] | None = None,
+) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
     os.lseek(descriptor, 0, os.SEEK_SET)
@@ -300,6 +316,8 @@ def _sha256_descriptor(descriptor: int) -> tuple[str, int]:
             break
         digest.update(chunk)
         size += len(chunk)
+        if chunk_hook is not None:
+            chunk_hook(size)
     os.lseek(descriptor, 0, os.SEEK_SET)
     return digest.hexdigest(), size
 
@@ -545,28 +563,6 @@ def _rename_noreplace(
     )
 
 
-def _read_regular_file(parent_descriptor: int, name: str, maximum: int) -> bytes:
-    descriptor = os.open(name, FILE_FLAGS, dir_fd=parent_descriptor)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
-            raise PublicationError(f"release completion file is invalid: {name}")
-        chunks: list[bytes] = []
-        remaining = maximum + 1
-        while remaining:
-            chunk = os.read(descriptor, min(remaining, 64 * 1024))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        value = b"".join(chunks)
-        if len(value) > maximum:
-            raise PublicationError(f"release completion file is too large: {name}")
-        return value
-    finally:
-        os.close(descriptor)
-
-
 def _file_record(parent_descriptor: int, name: str) -> dict[str, object]:
     descriptor = os.open(name, FILE_FLAGS, dir_fd=parent_descriptor)
     try:
@@ -656,6 +652,474 @@ def _valid_commit(value: str) -> bool:
     )
 
 
+class DescriptorBinding(NamedTuple):
+    device: int
+    inode: int
+    mount_id: int
+    mode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+def _descriptor_binding(descriptor: int) -> DescriptorBinding:
+    metadata = os.fstat(descriptor)
+    return DescriptorBinding(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        mount_id=_mount_id(descriptor),
+        mode=metadata.st_mode,
+        size=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+        ctime_ns=metadata.st_ctime_ns,
+    )
+
+
+def _read_descriptor(descriptor: int, name: str, maximum: int) -> bytes:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+        raise PublicationError(f"release completion file is invalid: {name}")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = maximum + 1
+    while remaining:
+        chunk = os.read(descriptor, min(remaining, 64 * 1024))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    value = b"".join(chunks)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    if len(value) > maximum:
+        raise PublicationError(f"release completion file is too large: {name}")
+    return value
+
+
+class CompletedCandidateSnapshot:
+    """Pinned source FDs and identities for one completed candidate root."""
+
+    def __init__(
+        self,
+        descriptor: int,
+        candidate: Path | None,
+        platforms: Sequence[str],
+        source_commit: str,
+        *,
+        allow_extra: bool,
+        owns_descriptor: bool,
+        hash_hook: Callable[[str, int], None] | None = None,
+    ) -> None:
+        if (
+            not platforms
+            or len(set(platforms)) != len(platforms)
+            or not _valid_commit(source_commit)
+        ):
+            raise PublicationError("completed release snapshot identity is invalid")
+        self.descriptor = descriptor
+        self.candidate = candidate
+        self.platforms = tuple(platforms)
+        self.source_commit = source_commit
+        self.allow_extra = allow_extra
+        self.owns_descriptor = owns_descriptor
+        self.descriptors: dict[str, int] = {}
+        self.bindings: dict[str, DescriptorBinding] = {}
+        self.records: dict[str, dict[str, object]] = {}
+        self.root_binding = _descriptor_binding(descriptor)
+        self.names: tuple[str, ...] = ()
+        try:
+            self._open_and_hash(hash_hook)
+        except BaseException:
+            self.close()
+            raise
+
+    @classmethod
+    def open(
+        cls,
+        candidate: Path,
+        platforms: Sequence[str],
+        source_commit: str,
+        *,
+        allow_extra: bool,
+        hash_hook: Callable[[str, int], None] | None = None,
+    ) -> CompletedCandidateSnapshot:
+        descriptor = _open_directory(candidate, create=False)
+        return cls(
+            descriptor,
+            candidate,
+            platforms,
+            source_commit,
+            allow_extra=allow_extra,
+            owns_descriptor=True,
+            hash_hook=hash_hook,
+        )
+
+    def _open_name(self, name: str) -> int:
+        existing = self.descriptors.get(name)
+        if existing is not None:
+            return existing
+        release_leaf(name)
+        descriptor = os.open(name, FILE_FLAGS, dir_fd=self.descriptor)
+        binding = _descriptor_binding(descriptor)
+        try:
+            named = os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        if (
+            not stat.S_ISREG(binding.mode)
+            or not stat.S_ISREG(named.st_mode)
+            or (named.st_dev, named.st_ino) != (binding.device, binding.inode)
+        ):
+            os.close(descriptor)
+            raise PublicationError(
+                f"completed release leaf is not a pinned regular file: {name}"
+            )
+        self.descriptors[name] = descriptor
+        self.bindings[name] = binding
+        return descriptor
+
+    def _manifest_records(self, platform: str) -> dict[str, dict[str, object]]:
+        marker = completion_leaf(platform)
+        descriptor = self._open_name(marker)
+        try:
+            payload = json.loads(
+                _read_descriptor(descriptor, marker, MAX_COMPLETION_BYTES)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise PublicationError(
+                f"completed release marker is missing or invalid: {marker}"
+            ) from error
+        if not isinstance(payload, dict) or {
+            "schema_version": payload.get("schema_version"),
+            "kind": payload.get("kind"),
+            "platform": payload.get("platform"),
+            "source_commit": payload.get("source_commit"),
+        } != {
+            "schema_version": COMPLETION_SCHEMA_VERSION,
+            "kind": COMPLETION_KIND,
+            "platform": platform,
+            "source_commit": self.source_commit,
+        }:
+            raise PublicationError(f"completed release identity is invalid: {marker}")
+        expected_names = expected_release_leaves(platform)
+        records = payload.get("files")
+        if not isinstance(records, list) or len(records) != len(expected_names):
+            raise PublicationError(
+                f"completed release file manifest is invalid: {marker}"
+            )
+        result: dict[str, dict[str, object]] = {}
+        for index, name in enumerate(expected_names):
+            record = records[index]
+            if (
+                not isinstance(record, dict)
+                or set(record) != {"mode", "name", "sha256", "size"}
+                or record.get("name") != name
+            ):
+                raise PublicationError(
+                    f"completed release file manifest is invalid: {marker}"
+                )
+            result[name] = record
+        return result
+
+    def _open_and_hash(
+        self,
+        hash_hook: Callable[[str, int], None] | None,
+    ) -> None:
+        initial_names = _directory_names(self.descriptor)
+        marker_names = sorted(completion_leaf(platform) for platform in self.platforms)
+        unexpected_markers = sorted(
+            name
+            for name in initial_names
+            if name.endswith(".release-complete.json") and name not in marker_names
+        )
+        if unexpected_markers:
+            raise PublicationError(
+                "completed release directory has unexpected completion markers: "
+                + ", ".join(unexpected_markers)
+            )
+        expected_records: dict[str, dict[str, object]] = {}
+        for platform in self.platforms:
+            try:
+                records = self._manifest_records(platform)
+            except FileNotFoundError as error:
+                raise PublicationError(
+                    "completed release marker is missing or invalid: "
+                    f"{completion_leaf(platform)}"
+                ) from error
+            for name, record in records.items():
+                previous = expected_records.get(name)
+                if previous is not None and previous != record:
+                    raise PublicationError(
+                        f"completed release manifests disagree about leaf: {name}"
+                    )
+                expected_records[name] = record
+
+        expected_names = sorted([*marker_names, *expected_records])
+        missing_names = sorted(set(expected_names) - set(initial_names))
+        if missing_names:
+            raise PublicationError(
+                "completed release directory is missing declared leaves: "
+                + ", ".join(missing_names)
+            )
+        if not self.allow_extra and initial_names != expected_names:
+            raise PublicationError(
+                "completed release directory has unexpected leaves; "
+                f"expected {expected_names}, got {initial_names}"
+            )
+        names = initial_names if self.allow_extra else expected_names
+        for name in names:
+            self._open_name(name)
+        self.names = tuple(names)
+
+        for name in self.names:
+            descriptor = self.descriptors[name]
+            hook = None
+            if hash_hook is not None:
+                hook = lambda size, leaf=name: hash_hook(leaf, size)
+            digest, size = _sha256_descriptor(descriptor, hook)
+            binding = self.bindings[name]
+            record = {
+                "mode": f"{stat.S_IMODE(binding.mode):04o}",
+                "name": name,
+                "sha256": digest,
+                "size": size,
+            }
+            self.records[name] = record
+            expected = expected_records.get(name)
+            if expected is not None and record != expected:
+                raise PublicationError(
+                    f"completed release leaf does not match marker: {name}"
+                )
+        self.revalidate()
+
+    def revalidate(self) -> None:
+        if _directory_names(self.descriptor) != list(self.names):
+            raise PublicationError("completed release candidate names changed")
+        for name in self.names:
+            descriptor = self.descriptors[name]
+            if _descriptor_binding(descriptor) != self.bindings[name]:
+                raise PublicationError(
+                    f"completed release leaf changed while pinned: {name}"
+                )
+            try:
+                named = os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+                current = os.open(name, FILE_FLAGS, dir_fd=self.descriptor)
+            except (OSError, PublicationError) as error:
+                raise PublicationError(
+                    f"completed release leaf name changed while pinned: {name}"
+                ) from error
+            try:
+                binding = self.bindings[name]
+                if (
+                    not stat.S_ISREG(named.st_mode)
+                    or (named.st_dev, named.st_ino)
+                    != (binding.device, binding.inode)
+                    or _descriptor_binding(current) != binding
+                ):
+                    raise PublicationError(
+                        f"completed release leaf name changed while pinned: {name}"
+                    )
+            finally:
+                os.close(current)
+        if _descriptor_binding(self.descriptor) != self.root_binding:
+            raise PublicationError("completed release candidate changed while pinned")
+        if self.candidate is not None:
+            _verify_directory_binding(
+                self.candidate, self.descriptor, "completed release candidate"
+            )
+
+    def materialize(self, snapshot_root: Path) -> MaterializedCandidateSnapshot:
+        return MaterializedCandidateSnapshot.create(self, snapshot_root)
+
+    def close(self) -> None:
+        for descriptor in self.descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        self.descriptors.clear()
+        if self.owns_descriptor and self.descriptor >= 0:
+            try:
+                os.close(self.descriptor)
+            except OSError:
+                pass
+            self.descriptor = -1
+
+
+class MaterializedCandidateSnapshot:
+    """A private read-only copy made only from a completed snapshot's FDs."""
+
+    def __init__(
+        self,
+        snapshot_root: Path,
+        parent_descriptor: int,
+        name: str,
+        descriptor: int,
+        descriptors: dict[str, int],
+        bindings: dict[str, DescriptorBinding],
+        root_binding: DescriptorBinding,
+    ) -> None:
+        self.snapshot_root = snapshot_root
+        self.parent_descriptor = parent_descriptor
+        self.name = name
+        self.descriptor = descriptor
+        self.descriptors = descriptors
+        self.bindings = bindings
+        self.root_binding = root_binding
+
+    @classmethod
+    def create(
+        cls,
+        source: CompletedCandidateSnapshot,
+        snapshot_root: Path,
+    ) -> MaterializedCandidateSnapshot:
+        parent_descriptor = _open_directory(snapshot_root, create=False)
+        name = ""
+        descriptor = -1
+        descriptors: dict[str, int] = {}
+        try:
+            name, descriptor = _new_stage_container(
+                parent_descriptor, "completed-candidate"
+            )
+            for leaf in source.names:
+                source_descriptor = source.descriptors[leaf]
+                source_binding = source.bindings[leaf]
+                destination = os.open(
+                    leaf,
+                    os.O_WRONLY
+                    | os.O_CLOEXEC
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=descriptor,
+                )
+                try:
+                    os.lseek(source_descriptor, 0, os.SEEK_SET)
+                    digest = hashlib.sha256()
+                    size = 0
+                    while True:
+                        chunk = os.read(source_descriptor, 1024 * 1024)
+                        if not chunk:
+                            break
+                        _write_all(destination, chunk)
+                        digest.update(chunk)
+                        size += len(chunk)
+                    os.lseek(source_descriptor, 0, os.SEEK_SET)
+                    if _descriptor_binding(source_descriptor) != source_binding:
+                        raise PublicationError(
+                            f"completed release leaf changed while copied: {leaf}"
+                        )
+                    expected = source.records[leaf]
+                    if (
+                        digest.hexdigest() != expected["sha256"]
+                        or size != expected["size"]
+                    ):
+                        raise PublicationError(
+                            f"completed release snapshot copy changed: {leaf}"
+                        )
+                    read_only_mode = stat.S_IMODE(source_binding.mode) & ~0o222
+                    os.fchmod(destination, read_only_mode)
+                    os.fsync(destination)
+                finally:
+                    os.close(destination)
+                copied = os.open(leaf, FILE_FLAGS, dir_fd=descriptor)
+                copied_digest, copied_size = _sha256_descriptor(copied)
+                if (
+                    copied_digest != source.records[leaf]["sha256"]
+                    or copied_size != source.records[leaf]["size"]
+                ):
+                    os.close(copied)
+                    raise PublicationError(
+                        f"completed release snapshot digest mismatch: {leaf}"
+                    )
+                descriptors[leaf] = copied
+            os.fchmod(descriptor, 0o500)
+            os.fsync(descriptor)
+            bindings = {
+                leaf: _descriptor_binding(leaf_descriptor)
+                for leaf, leaf_descriptor in descriptors.items()
+            }
+            result = cls(
+                snapshot_root,
+                parent_descriptor,
+                name,
+                descriptor,
+                descriptors,
+                bindings,
+                _descriptor_binding(descriptor),
+            )
+            result.revalidate()
+            return result
+        except BaseException:
+            for copied in descriptors.values():
+                os.close(copied)
+            if descriptor >= 0:
+                try:
+                    _remove_stage_container(parent_descriptor, name, descriptor)
+                finally:
+                    os.close(descriptor)
+            os.close(parent_descriptor)
+            raise
+
+    def candidate_argument(self) -> str:
+        return f"/proc/self/fd/{self.descriptor}"
+
+    def leaf_argument(self, name: str) -> str:
+        try:
+            descriptor = self.descriptors[name]
+        except KeyError as error:
+            raise PublicationError(
+                f"completed release command requested an unpinned leaf: {name}"
+            ) from error
+        return f"/proc/self/fd/{descriptor}"
+
+    def pass_fds(self) -> tuple[int, ...]:
+        return (self.descriptor, *self.descriptors.values())
+
+    def revalidate(self) -> None:
+        if _directory_names(self.descriptor) != sorted(self.descriptors):
+            raise PublicationError("materialized completed candidate names changed")
+        for name, descriptor in self.descriptors.items():
+            binding = self.bindings[name]
+            if _descriptor_binding(descriptor) != binding:
+                raise PublicationError(
+                    f"materialized completed candidate leaf changed: {name}"
+                )
+            named = os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(named.st_mode)
+                or (named.st_dev, named.st_ino) != (binding.device, binding.inode)
+            ):
+                raise PublicationError(
+                    f"materialized completed candidate leaf changed: {name}"
+                )
+        if _descriptor_binding(self.descriptor) != self.root_binding:
+            raise PublicationError("materialized completed candidate changed")
+        _verify_directory_binding(
+            self.snapshot_root / self.name,
+            self.descriptor,
+            "materialized completed candidate",
+        )
+
+    def close(self) -> None:
+        for descriptor in self.descriptors.values():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        self.descriptors.clear()
+        try:
+            _remove_stage_container(
+                self.parent_descriptor, self.name, self.descriptor
+            )
+        finally:
+            try:
+                os.close(self.descriptor)
+            finally:
+                os.close(self.parent_descriptor)
+
+
 def _verify_complete_descriptor(
     descriptor: int,
     platform: str,
@@ -663,51 +1127,22 @@ def _verify_complete_descriptor(
     *,
     allow_extra: bool,
 ) -> dict[str, object]:
-    if not _valid_commit(source_commit):
-        raise PublicationError("completed release source commit is invalid")
-    marker = completion_leaf(platform)
+    snapshot = CompletedCandidateSnapshot(
+        descriptor,
+        None,
+        [platform],
+        source_commit,
+        allow_extra=allow_extra,
+        owns_descriptor=False,
+    )
     try:
-        payload = json.loads(
-            _read_regular_file(descriptor, marker, MAX_COMPLETION_BYTES)
+        snapshot.revalidate()
+        marker = completion_leaf(platform)
+        return json.loads(
+            _read_descriptor(snapshot.descriptors[marker], marker, MAX_COMPLETION_BYTES)
         )
-    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise PublicationError(
-            f"completed release marker is missing or invalid: {marker}"
-        ) from error
-    expected_names = expected_release_leaves(platform)
-    if not isinstance(payload, dict) or {
-        "schema_version": payload.get("schema_version"),
-        "kind": payload.get("kind"),
-        "platform": payload.get("platform"),
-        "source_commit": payload.get("source_commit"),
-    } != {
-        "schema_version": COMPLETION_SCHEMA_VERSION,
-        "kind": COMPLETION_KIND,
-        "platform": platform,
-        "source_commit": source_commit,
-    }:
-        raise PublicationError(f"completed release identity is invalid: {marker}")
-    records = payload.get("files")
-    if not isinstance(records, list) or len(records) != len(expected_names):
-        raise PublicationError(f"completed release file manifest is invalid: {marker}")
-    actual_records: list[dict[str, object]] = []
-    for index, name in enumerate(expected_names):
-        expected_record = records[index]
-        if not isinstance(expected_record, dict) or expected_record.get("name") != name:
-            raise PublicationError(f"completed release file manifest is invalid: {marker}")
-        actual_record = _file_record(descriptor, name)
-        if actual_record != expected_record:
-            raise PublicationError(f"completed release leaf does not match marker: {name}")
-        actual_records.append(actual_record)
-    if not allow_extra:
-        expected_directory = sorted([marker, *expected_names])
-        actual_directory = _directory_names(descriptor)
-        if actual_directory != expected_directory:
-            raise PublicationError(
-                "completed release directory has unexpected leaves; "
-                f"expected {expected_directory}, got {actual_directory}"
-            )
-    return payload
+    finally:
+        snapshot.close()
 
 
 def verify_candidate(
@@ -716,16 +1151,20 @@ def verify_candidate(
     source_commit: str,
     *,
     allow_extra: bool = False,
+    hash_hook: Callable[[str, int], None] | None = None,
 ) -> tuple[int, int, int]:
-    descriptor = _open_directory(candidate, create=False)
+    snapshot = CompletedCandidateSnapshot.open(
+        candidate,
+        [platform],
+        source_commit,
+        allow_extra=allow_extra,
+        hash_hook=hash_hook,
+    )
     try:
-        _verify_complete_descriptor(
-            descriptor, platform, source_commit, allow_extra=allow_extra
-        )
-        _verify_directory_binding(candidate, descriptor, "completed release candidate")
-        return _descriptor_identity(descriptor)
+        snapshot.revalidate()
+        return _descriptor_identity(snapshot.descriptor)
     finally:
-        os.close(descriptor)
+        snapshot.close()
 
 
 def publish(
@@ -921,82 +1360,73 @@ def publish(
         os.close(artifact_source_descriptor)
 
 
-def snapshot_candidates(
+def _expanded_snapshot_command(
+    snapshot: MaterializedCandidateSnapshot,
+    platforms: Sequence[str],
+    command: Sequence[str],
+) -> list[str]:
+    if not command:
+        raise PublicationError("completed release command is empty")
+    replacements = {
+        "{candidate}": snapshot.candidate_argument(),
+    }
+    if len(platforms) == 1:
+        replacements["{ctx}"] = snapshot.leaf_argument(
+            release_binary_leaf(platforms[0])
+        )
+    for name in snapshot.descriptors:
+        replacements[f"{{leaf:{name}}}"] = snapshot.leaf_argument(name)
+    result: list[str] = []
+    for value in command:
+        expanded = value
+        for placeholder, replacement in replacements.items():
+            expanded = expanded.replace(placeholder, replacement)
+        if (
+            "{candidate}" in expanded
+            or "{ctx}" in expanded
+            or "{leaf:" in expanded
+        ):
+            raise PublicationError(
+                f"completed release command contains an unbound placeholder: {value}"
+            )
+        result.append(expanded)
+    return result
+
+
+def consume_complete_candidate(
     candidate: Path,
     snapshot_root: Path,
     platforms: Sequence[str],
     source_commit: str,
-    before_finish: Callable[[], None] | None = None,
-) -> tuple[Path, tuple[int, int, int], tuple[int, int]]:
-    if not platforms or len(set(platforms)) != len(platforms):
-        raise PublicationError("completed release snapshot platforms are invalid")
-    candidate_descriptor = _open_directory(candidate, create=False)
-    snapshot_parent = _open_directory(snapshot_root, create=False)
-    snapshot_name = ""
-    snapshot_descriptor = -1
+    command: Sequence[str],
+    *,
+    allow_extra: bool,
+    before_consume: Callable[[], None] | None = None,
+) -> int:
+    source = CompletedCandidateSnapshot.open(
+        candidate,
+        platforms,
+        source_commit,
+        allow_extra=allow_extra,
+    )
+    snapshot: MaterializedCandidateSnapshot | None = None
     try:
-        for platform in platforms:
-            _verify_complete_descriptor(
-                candidate_descriptor,
-                platform,
-                source_commit,
-                allow_extra=True,
-            )
-        candidate_identity = _descriptor_identity(candidate_descriptor)
-        snapshot_name, snapshot_descriptor = _new_stage_container(
-            snapshot_parent, "release-snapshot"
+        snapshot = source.materialize(snapshot_root)
+        if before_consume is not None:
+            before_consume()
+        argv = _expanded_snapshot_command(snapshot, platforms, command)
+        result = subprocess.run(
+            argv,
+            check=False,
+            pass_fds=snapshot.pass_fds(),
         )
-        _copy_flat_directory(candidate_descriptor, snapshot_descriptor)
-        for platform in platforms:
-            _verify_complete_descriptor(
-                snapshot_descriptor,
-                platform,
-                source_commit,
-                allow_extra=True,
-            )
-        os.fsync(snapshot_descriptor)
-        if before_finish is not None:
-            before_finish()
-        _verify_directory_binding(
-            candidate, candidate_descriptor, "completed release candidate"
-        )
-        _verify_directory_binding(
-            snapshot_root / snapshot_name,
-            snapshot_descriptor,
-            "completed release snapshot",
-        )
-        snapshot_identity = os.fstat(snapshot_descriptor)
-        result = (
-            snapshot_root / snapshot_name,
-            candidate_identity,
-            (snapshot_identity.st_dev, snapshot_identity.st_ino),
-        )
-        snapshot_name = ""
-        return result
+        snapshot.revalidate()
+        source.revalidate()
+        return result.returncode
     finally:
-        if snapshot_descriptor >= 0:
-            try:
-                _remove_stage_container(
-                    snapshot_parent, snapshot_name, snapshot_descriptor
-                )
-            finally:
-                os.close(snapshot_descriptor)
-        os.close(snapshot_parent)
-        os.close(candidate_descriptor)
-
-
-def verify_binding(path: Path, expected: tuple[int, int, int]) -> None:
-    try:
-        descriptor = _open_directory(path, create=False)
-    except (OSError, PublicationError) as error:
-        raise PublicationError(
-            f"completed release pathname was substituted: {path}"
-        ) from error
-    try:
-        if _descriptor_identity(descriptor) != expected:
-            raise PublicationError(f"completed release pathname was substituted: {path}")
-    finally:
-        os.close(descriptor)
+        if snapshot is not None:
+            snapshot.close()
+        source.close()
 
 
 def run_complete_candidate(
@@ -1004,24 +1434,17 @@ def run_complete_candidate(
     platform: str,
     source_commit: str,
     command: Sequence[str],
+    before_consume: Callable[[], None] | None = None,
 ) -> int:
-    if not command:
-        raise PublicationError("completed release command is empty")
-    descriptor = _open_directory(candidate, create=False)
-    try:
-        _verify_complete_descriptor(
-            descriptor, platform, source_commit, allow_extra=False
-        )
-        candidate_argument = f"/proc/self/fd/{descriptor}"
-        argv = [value.replace("{candidate}", candidate_argument) for value in command]
-        result = subprocess.run(argv, check=False, pass_fds=(descriptor,))
-        _verify_directory_binding(candidate, descriptor, "completed release candidate")
-        _verify_complete_descriptor(
-            descriptor, platform, source_commit, allow_extra=False
-        )
-        return result.returncode
-    finally:
-        os.close(descriptor)
+    return consume_complete_candidate(
+        candidate,
+        Path(os.environ.get("TMPDIR", "/tmp")),
+        [platform],
+        source_commit,
+        command,
+        allow_extra=False,
+        before_consume=before_consume,
+    )
 
 
 def _print_destinations(output: Path, private_symbols: Path) -> None:
@@ -1063,16 +1486,17 @@ def main() -> int:
     verify_parser.add_argument("--platform", required=True)
     verify_parser.add_argument("--source-commit", required=True)
     verify_parser.add_argument("--allow-extra", action="store_true")
-    snapshot_parser = commands.add_parser("snapshot")
-    snapshot_parser.add_argument("--candidate-dir", type=Path, required=True)
-    snapshot_parser.add_argument("--snapshot-root", type=Path, required=True)
-    snapshot_parser.add_argument("--platform", action="append", default=[])
-    snapshot_parser.add_argument("--source-commit", required=True)
-    binding_parser = commands.add_parser("verify-binding")
-    binding_parser.add_argument("--path", type=Path, required=True)
-    binding_parser.add_argument("--expected-device", type=int, required=True)
-    binding_parser.add_argument("--expected-inode", type=int, required=True)
-    binding_parser.add_argument("--expected-mount-id", type=int, required=True)
+    consume_parser = commands.add_parser("consume-complete")
+    consume_parser.add_argument("--candidate-dir", type=Path, required=True)
+    consume_parser.add_argument(
+        "--snapshot-root",
+        type=Path,
+        default=Path(os.environ.get("TMPDIR", "/tmp")),
+    )
+    consume_parser.add_argument("--platform", action="append", default=[])
+    consume_parser.add_argument("--source-commit", required=True)
+    consume_parser.add_argument("--allow-extra", action="store_true")
+    consume_parser.add_argument("remainder", nargs=argparse.REMAINDER)
     run_parser = commands.add_parser("run-complete")
     run_parser.add_argument("--candidate-dir", type=Path, required=True)
     run_parser.add_argument("--platform", required=True)
@@ -1118,27 +1542,17 @@ def main() -> int:
                 args.source_commit,
                 allow_extra=args.allow_extra,
             )
-        elif args.command == "snapshot":
-            snapshot, candidate_identity, snapshot_identity = snapshot_candidates(
+        elif args.command == "consume-complete":
+            remainder = args.remainder
+            if remainder[:1] == ["--"]:
+                remainder = remainder[1:]
+            return consume_complete_candidate(
                 args.candidate_dir,
                 args.snapshot_root,
                 args.platform,
                 args.source_commit,
-            )
-            print(f"CTX_RELEASE_SNAPSHOT_DIR={shlex.quote(str(snapshot))}")
-            print(f"CTX_RELEASE_CANDIDATE_DEVICE={candidate_identity[0]}")
-            print(f"CTX_RELEASE_CANDIDATE_INODE={candidate_identity[1]}")
-            print(f"CTX_RELEASE_CANDIDATE_MOUNT_ID={candidate_identity[2]}")
-            print(f"CTX_RELEASE_SNAPSHOT_DEVICE={snapshot_identity[0]}")
-            print(f"CTX_RELEASE_SNAPSHOT_INODE={snapshot_identity[1]}")
-        elif args.command == "verify-binding":
-            verify_binding(
-                args.path,
-                (
-                    args.expected_device,
-                    args.expected_inode,
-                    args.expected_mount_id,
-                ),
+                remainder,
+                allow_extra=args.allow_extra,
             )
         elif args.command == "run-complete":
             remainder = args.remainder

@@ -418,6 +418,21 @@ sh_test(
     tags = ["release-gate"],
 )
 
+sh_test(
+    name = "stage_semantic_release_handoff_tests",
+    srcs = ["scripts/tests/stage-semantic-release-handoff-test.sh"],
+    data = [
+        "scripts/construct-semantic-release-catalog.sh",
+        "scripts/release/publish-linux-bazel-release.py",
+        "scripts/stage-semantic-release-handoff.sh",
+    ],
+    tags = [
+        "release-gate",
+        "security",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
 py_test(
     name = "release_target_matrix_check",
     srcs = ["scripts/check-release-target-matrix.py"],
@@ -759,6 +774,7 @@ sh_test(
         "scripts/release/publish-linux-bazel-release.py",
         "scripts/package-public-cli-bazel-release.sh",
         "scripts/stage-github-release-assets.sh",
+        "scripts/stage-semantic-release-handoff.sh",
         "//tools/bazel:release_routes.bzl",
     ],
     tags = ["release-gate"],

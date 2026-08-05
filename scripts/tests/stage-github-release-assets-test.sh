@@ -33,6 +33,14 @@ case "$*" in
     printf '%s\n' "$*" >> "${CTX_FAKE_SBOM_LOG:?}"
     ;;
   *check-public-cli-build-info.py*)
+    if [ -n "${CTX_FAKE_SUBSTITUTE_LEAF:-}" ] \
+      && [ ! -e "${CTX_FAKE_SUBSTITUTION_FLAG:?}" ]; then
+      mv "${CTX_FAKE_SUBSTITUTE_LEAF}" \
+        "${CTX_FAKE_SUBSTITUTE_LEAF}.original"
+      mv "${CTX_FAKE_SUBSTITUTE_FOREIGN:?}" \
+        "${CTX_FAKE_SUBSTITUTE_LEAF}"
+      : >"${CTX_FAKE_SUBSTITUTION_FLAG}"
+    fi
     if [ -n "${CTX_FAKE_SUBSTITUTE_CANDIDATE:-}" ] \
       && [ ! -e "${CTX_FAKE_SUBSTITUTION_FLAG:?}" ]; then
       mv "${CTX_FAKE_SUBSTITUTE_CANDIDATE}" \
@@ -275,6 +283,34 @@ fi
 grep -Fq 'completed release leaf does not match marker' \
   "${tmp_dir}/checksum-mutation.err"
 
+printf 'synthetic %s\n' ctx-onnxruntime-linux-x64.tar.gz \
+  > "${matrix}/ctx-onnxruntime-linux-x64.tar.gz"
+cp -a "${matrix}" "${tmp_dir}/runtime-race"
+runtime_race_candidate="${tmp_dir}/runtime-race"
+runtime_race_leaf="${runtime_race_candidate}/ctx-onnxruntime-linux-x64.tar.gz"
+printf 'foreign runtime bytes\n' >"${tmp_dir}/foreign-runtime"
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/runtime-race-sbom.log" \
+  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/runtime-race-build-info.log" \
+  CTX_FAKE_SUBSTITUTE_LEAF="${runtime_race_leaf}" \
+  CTX_FAKE_SUBSTITUTE_FOREIGN="${tmp_dir}/foreign-runtime" \
+  CTX_FAKE_SUBSTITUTION_FLAG="${tmp_dir}/runtime-race.flag" \
+  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${runtime_race_candidate}" \
+  "${tmp_dir}/runtime-race-output" \
+  >"${tmp_dir}/runtime-race.out" 2>"${tmp_dir}/runtime-race.err"
+then
+  printf 'GitHub stager ignored a source runtime name substitution\n' >&2
+  exit 1
+fi
+grep -Eq 'changed|substituted' "${tmp_dir}/runtime-race.err"
+if [[ -e "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.gz" ]]; then
+  cmp \
+    "${runtime_race_leaf}.original" \
+    "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.gz"
+  ! grep -Fq 'foreign runtime bytes' \
+    "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.gz"
+fi
+
 cp -a "${matrix}" "${tmp_dir}/missing-marker"
 rm "${tmp_dir}/missing-marker/ctx-linux-x64.release-complete.json"
 if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
@@ -296,7 +332,8 @@ if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
   printf 'GitHub stager accepted a partial completed candidate\n' >&2
   exit 1
 fi
-grep -Eq 'No such file|completed release' "${tmp_dir}/partial.err"
+test -s "${tmp_dir}/partial.err"
+test ! -e "${tmp_dir}/partial-output"
 
 cp -a "${matrix}" "${tmp_dir}/linked-leaf"
 printf 'sentinel\n' >"${tmp_dir}/leaf-sentinel"
@@ -337,7 +374,7 @@ if CTX_FAKE_SBOM_LOG="${tmp_dir}/substitution-sbom.log" \
   printf 'GitHub stager reported success after candidate parent substitution\n' >&2
   exit 1
 fi
-grep -Fq 'substituted' "${tmp_dir}/substitution.err" || {
+grep -Eq 'substituted|changed while pinned' "${tmp_dir}/substitution.err" || {
   cat "${tmp_dir}/substitution.err" >&2
   exit 1
 }

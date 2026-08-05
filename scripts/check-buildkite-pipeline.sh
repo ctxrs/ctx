@@ -524,6 +524,9 @@ if command -v ruby >/dev/null 2>&1; then
         abort "#{key} must use the complete Linux release transaction" unless command.include?("scripts/release/build-linux-bazel-release.sh")
         abort "#{key} must not write runtime leaves after public commit" if command.include?("scripts/build-onnxruntime-sidecar.sh") || command.include?("--transcode-runtime")
         abort "#{key} native smoke must use the completed candidate handoff" unless command.include?("publish-linux-bazel-release.py run-complete")
+        abort "#{key} native smoke must execute the pinned CLI descriptor" unless command.include?("'{ctx}'")
+        runtime_leaf = "'{leaf:ctx-onnxruntime-#{platform}.tar.gz}'"
+        abort "#{key} native smoke must consume the pinned runtime descriptor" unless command.include?(runtime_leaf)
         marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
         abort "#{key} must upload #{marker}" unless Array(step["artifact_paths"]).include?(marker)
         binary = key == "public-cli-linux-x64" ? "ctx" : "ctx-linux-aarch64"
@@ -625,6 +628,11 @@ if command -v ruby >/dev/null 2>&1; then
       stem = artifact.sub(/\.(tar\.xz|tar\.zst|zip)\z/, "")
       abort "Semantic gather does not download #{artifact}" unless gather_command.include?(stem)
     end
+    %w[linux-x64 linux-aarch64].each do |platform|
+      marker = "target/public-cli-artifacts/ctx-#{platform}.release-complete.json"
+      abort "Semantic gather does not download exact completion identity #{marker}" unless gather_command.include?(marker)
+    end
+    abort "Semantic gather must bind the public source commit" unless gather_command.include?("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") && gather_command.include?("git rev-parse --verify HEAD^{commit}")
     abort "Semantic gather must construct and stage the unsigned handoff" unless gather_command.include?("scripts/stage-semantic-release-handoff.sh")
     abort "public Semantic gather must not sign release metadata" if gather_command.match?(/sign|private/i)
   ' "${pipeline}"
@@ -843,6 +851,11 @@ for artifact in semantic_artifacts:
         raise SystemExit(f"Semantic handoff/publication contract is missing {artifact}")
 if "construct-semantic-release-catalog.sh" not in handoff:
     raise SystemExit("Semantic handoff must construct the six public metadata fields")
+if "publish-linux-bazel-release.py" not in handoff or "consume-complete" not in handoff:
+    raise SystemExit("Semantic handoff must consume an FD-pinned completed candidate")
+for platform in ("linux-x64", "linux-aarch64"):
+    if f"--platform {platform}" not in handoff:
+        raise SystemExit(f"Semantic handoff must require {platform} completion identity")
 if "--with-semantic" not in staging:
     raise SystemExit("release staging must have an explicit additive Semantic mode")
 for platform in (

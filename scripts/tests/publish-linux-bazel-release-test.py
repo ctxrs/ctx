@@ -332,7 +332,35 @@ class LinuxReleasePublicationTests(unittest.TestCase):
         )
         PUBLISHER.verify_candidate(output, self.platform, self.source_commit)
 
-    def test_snapshot_rejects_parent_substitution_and_preserves_external(self) -> None:
+    def test_verifier_rejects_early_leaf_replaced_while_later_leaf_hashes(self) -> None:
+        candidate = self.root / "large-candidate"
+        self._make_artifact_source(candidate)
+        marker = candidate / PUBLISHER.completion_leaf(self.platform)
+        marker.unlink()
+        (candidate / "ctx.version").write_bytes(b"v" * (3 * 1024 * 1024))
+        PUBLISHER.seal_candidate(candidate, self.platform, self.source_commit)
+        foreign = self.root / "foreign-ctx"
+        foreign.write_bytes(b"foreign candidate bytes\n")
+        foreign.chmod(0o755)
+        replaced = False
+
+        def replace_early_leaf(name: str, size: int) -> None:
+            nonlocal replaced
+            if name == "ctx.version" and size >= 1024 * 1024 and not replaced:
+                os.replace(foreign, candidate / "ctx")
+                replaced = True
+
+        with self.assertRaisesRegex(PUBLISHER.PublicationError, "changed"):
+            PUBLISHER.verify_candidate(
+                candidate,
+                self.platform,
+                self.source_commit,
+                hash_hook=replace_early_leaf,
+            )
+        self.assertTrue(replaced)
+        self.assertEqual((candidate / "ctx").read_bytes(), b"foreign candidate bytes\n")
+
+    def test_consumer_rejects_parent_substitution_and_preserves_external(self) -> None:
         output, symbols = self.preflight(
             str(self.root / "public/candidate"), str(self.root / "private/symbols")
         )
@@ -348,15 +376,67 @@ class LinuxReleasePublicationTests(unittest.TestCase):
             output.parent.symlink_to(external, target_is_directory=True)
 
         with self.assertRaisesRegex(PUBLISHER.PublicationError, "substituted"):
-            PUBLISHER.snapshot_candidates(
+            PUBLISHER.consume_complete_candidate(
                 output,
                 self.root,
                 [self.platform],
                 self.source_commit,
-                before_finish=substitute,
+                [sys.executable, "-c", "raise SystemExit(0)"],
+                allow_extra=False,
+                before_consume=substitute,
             )
         self.assert_sentinel(sentinel)
-        self.assertFalse(any(path.name.startswith(".ctx-release-snapshot") for path in self.root.iterdir()))
+        self.assertFalse(
+            any(
+                path.name.startswith(".ctx-completed-candidate")
+                for path in self.root.iterdir()
+            )
+        )
+
+    def test_run_handoff_executes_pinned_ctx_not_restored_foreign_path(self) -> None:
+        marker = self.artifact_source / PUBLISHER.completion_leaf(self.platform)
+        marker.unlink()
+        ctx = self.artifact_source / "ctx"
+        ctx.write_bytes(b"#!/bin/sh\nprintf 'original\\n' >\"$1\"\n")
+        ctx.chmod(0o755)
+        PUBLISHER.seal_candidate(
+            self.artifact_source, self.platform, self.source_commit
+        )
+        output, symbols = self.preflight(
+            str(self.root / "public/candidate"), str(self.root / "private/symbols")
+        )
+        self.publish(output, symbols)
+        candidate_ctx = output / "ctx"
+        original = self.root / "original-ctx"
+        foreign = self.root / "foreign-ctx"
+        foreign.write_bytes(b"#!/bin/sh\nprintf 'foreign\\n' >\"$1\"\n")
+        foreign.chmod(0o755)
+        result = self.root / "executed.txt"
+
+        def substitute() -> None:
+            os.rename(candidate_ctx, original)
+            os.rename(foreign, candidate_ctx)
+
+        command = [
+            "/bin/sh",
+            "-ceu",
+            '"$1" "$2"; rm "$3"; mv "$4" "$3"',
+            "sh",
+            "{ctx}",
+            str(result),
+            str(candidate_ctx),
+            str(original),
+        ]
+        with self.assertRaisesRegex(PUBLISHER.PublicationError, "changed"):
+            PUBLISHER.run_complete_candidate(
+                output,
+                self.platform,
+                self.source_commit,
+                command,
+                before_consume=substitute,
+            )
+        self.assertEqual(result.read_bytes(), b"original\n")
+        self.assertIn(b"original", candidate_ctx.read_bytes())
 
     def test_run_handoff_uses_verified_descriptor_and_fails_on_substitution(self) -> None:
         output, symbols = self.preflight(

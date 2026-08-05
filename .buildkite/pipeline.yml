@@ -111,23 +111,27 @@ steps:
           --platform linux-x64 \
           --source-commit "${source_commit}" -- \
           bash -ceu '
-            candidate="$1"
-            smoke_root="$2"
-            expected_version="$(sed -n "s/^ctx //p" "${candidate}/ctx.version")"
+            ctx="$1"
+            runtime="$2"
+            version_file="$3"
+            smoke_root="$4"
+            expected_version="$(sed -n "s/^ctx //p" "${version_file}")"
             [[ -n "${expected_version}" ]]
             scripts/run-native-candidate-smoke.sh \
-              "${candidate}/ctx" \
+              "${ctx}" \
               tests/fixtures/custom-history-jsonl/basic.jsonl \
               "${expected_version}" \
               "${smoke_root}/candidate-smoke.json"
             scripts/smoke-daemon-semantic-release.sh \
-              --runtime-archive "${candidate}/ctx-onnxruntime-linux-x64.tar.gz" \
+              --runtime-archive "${runtime}" \
               --runtime-platform linux-x64 \
-              --ctx "${candidate}/ctx" \
+              --ctx "${ctx}" \
               --data-root "${smoke_root}" \
               --require-authoritative \
               --keep-root >"${smoke_root}/smoke.log" 2>&1
-          ' bash '{candidate}' "${smoke_root}"
+          ' bash '{ctx}' \
+            '{leaf:ctx-onnxruntime-linux-x64.tar.gz}' \
+            '{leaf:ctx.version}' "${smoke_root}"
       fi
     agents:
       queue: "release-linux-managed"
@@ -176,25 +180,28 @@ steps:
           --platform linux-aarch64 \
           --source-commit "${source_commit}" -- \
           bash -ceu '
-            candidate="$1"
-            smoke_root="$2"
+            ctx="$1"
+            runtime="$2"
+            version_file="$3"
+            smoke_root="$4"
             expected_version="$(sed -n "s/^ctx //p" \
-              "${candidate}/ctx-linux-aarch64.version")"
+              "${version_file}")"
             [[ -n "${expected_version}" ]]
             scripts/run-native-candidate-smoke.sh \
-              "${candidate}/ctx-linux-aarch64" \
+              "${ctx}" \
               tests/fixtures/custom-history-jsonl/basic.jsonl \
               "${expected_version}" \
               "${smoke_root}/candidate-smoke.json"
             scripts/smoke-daemon-semantic-release.sh \
-              --runtime-archive \
-                "${candidate}/ctx-onnxruntime-linux-aarch64.tar.gz" \
+              --runtime-archive "${runtime}" \
               --runtime-platform linux-aarch64 \
-              --ctx "${candidate}/ctx-linux-aarch64" \
+              --ctx "${ctx}" \
               --data-root "${smoke_root}" \
               --require-authoritative \
               --keep-root >"${smoke_root}/smoke.log" 2>&1
-          ' bash '{candidate}' "${smoke_root}"
+          ' bash '{ctx}' \
+            '{leaf:ctx-onnxruntime-linux-aarch64.tar.gz}' \
+            '{leaf:ctx-linux-aarch64.version}' "${smoke_root}"
       fi
     agents:
       queue: "linux-arm64"
@@ -704,13 +711,21 @@ steps:
       - "semantic-runtime-macos-x64"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
+      source_commit="$(git rev-parse --verify HEAD^{commit})"
       mkdir -p target/public-cli-artifacts
       buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst*" . \
+        "target/public-cli-artifacts/ctx*" . \
         --step public-cli-linux-x64
       buildkite-agent artifact download \
-        "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.zst*" . \
+        "target/public-cli-artifacts/ctx-linux-aarch64*" . \
         --step public-cli-linux-aarch64
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64*" . \
+        --step public-cli-linux-aarch64
+      test -s \
+        target/public-cli-artifacts/ctx-linux-x64.release-complete.json
+      test -s \
+        target/public-cli-artifacts/ctx-linux-aarch64.release-complete.json
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-freebsd-x64.tar.zst*" . \
         --step public-cli-freebsd-x64
@@ -735,7 +750,8 @@ steps:
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.zst*" . \
         --step semantic-runtime-macos-x64
-      scripts/stage-semantic-release-handoff.sh \
+      CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${source_commit}" \
+        scripts/stage-semantic-release-handoff.sh \
         target/public-cli-artifacts target/semantic-release-handoff
     agents:
       queue: "release-linux-managed"
