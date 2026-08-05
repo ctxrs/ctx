@@ -1,19 +1,102 @@
 {
-  "schema_version": 1,
-  "policy": "Every Rust crate has one hard 20,000 production-CLOC limit. The two pre-existing public offenders are frozen at exact current-head ceilings that must ratchet down on every reduction and disappear when their migrations complete.",
+  "schema_version": 2,
+  "policy": "Every Rust workspace package is measured from its exact production Cargo targets across every public release cfg/feature variant and must remain at or below 20,000 CLOC. Snapshot-proven migration exceptions can only shrink; the exact direct workspace graph is closed by default.",
   "metric_policy": "scripts/check-loc-policy-v2.json",
   "hard_limit": 20000,
   "grandfathered_at": "187c0c6533b5de56119cd2774ba90d29925cb1ac",
   "grandfathered": [
     {
+      "exception_id": "public-ctx-cli-v1",
+      "package": "ctx",
+      "code_baseline": 119013
+    },
+    {
+      "exception_id": "public-history-capture-v1",
+      "package": "ctx-history-capture",
+      "code_baseline": 149843
+    }
+  ],
+  "packages": [
+    {
       "package": "ctx",
       "manifest": "crates/ctx-cli/Cargo.toml",
-      "code_baseline": 119246
+      "production_targets": ["bin:ctx", "custom-build:build-script-build"],
+      "source_digest": "24f504292a801af5eec8b008f3534a2ea7e2eebb2b11f9060875cc829a305fc7"
     },
     {
       "package": "ctx-history-capture",
       "manifest": "crates/ctx-history-capture/Cargo.toml",
-      "code_baseline": 151887
+      "production_targets": ["lib:ctx_history_capture"],
+      "source_digest": "0027ef4e4cddbcfab35a9473b600deba31978174f2aea4afaf8818b59eaf8f34"
+    },
+    {
+      "package": "ctx-history-core",
+      "manifest": "crates/ctx-history-core/Cargo.toml",
+      "production_targets": ["lib:ctx_history_core"],
+      "source_digest": "c84b3c754f5c7121b0c41e2cde9951afa300ae19b0f74279ce16ff7f6c7e7934"
+    },
+    {
+      "package": "ctx-history-index",
+      "manifest": "crates/ctx-history-index/Cargo.toml",
+      "production_targets": ["lib:ctx_history_index"],
+      "source_digest": "6d8b4f48ad8e40c38a95c7cf6b696b7e7485eafaa7d17754e972ac380f74b0e8"
+    },
+    {
+      "package": "ctx-history-refresh",
+      "manifest": "crates/ctx-history-refresh/Cargo.toml",
+      "production_targets": ["lib:ctx_history_refresh"],
+      "source_digest": "c4825e16f474814a85efffce72411b2979bbb1b8f202afd5d14d506623982f89"
+    },
+    {
+      "package": "ctx-pro-host-protocol",
+      "manifest": "crates/ctx-pro-host-protocol/Cargo.toml",
+      "production_targets": ["lib:ctx_pro_host_protocol"],
+      "source_digest": "02d58d1cef74eaa7a8e721799de36e4f4a5ae9fdfcb98467e903fde4f17bfafc"
+    },
+    {
+      "package": "ctx-protocol",
+      "manifest": "crates/ctx-protocol/Cargo.toml",
+      "production_targets": ["lib:ctx_protocol"],
+      "source_digest": "9de1f7b7d30abdb0ec3e88d1ebc287cfd150ee416276c9f8c6f6f7e931bb3a9b"
+    },
+    {
+      "package": "ctx-sdk",
+      "manifest": "crates/ctx-sdk/Cargo.toml",
+      "production_targets": ["lib:ctx_sdk"],
+      "source_digest": "2808c2287f7c4719ce34bf802d5478444d90a78ff2929c2679bb871e364ffab2"
     }
-  ]
+  ],
+  "expected_edges": [
+    {"from": "ctx", "to": "ctx-history-capture", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx", "to": "ctx-history-core", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx", "to": "ctx-history-index", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx", "to": "ctx-history-refresh", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx", "to": "ctx-pro-host-protocol", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-history-capture", "to": "ctx-history-core", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-history-capture", "to": "ctx-history-index", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-history-capture", "to": "ctx-pro-host-protocol", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-history-index", "to": "ctx-history-core", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-history-refresh", "to": "ctx-history-capture", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-history-refresh", "to": "ctx-history-core", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-history-refresh", "to": "ctx-history-index", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-pro-host-protocol", "to": "ctx-history-core", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]},
+    {"from": "ctx-sdk", "to": "ctx-protocol", "platforms": ["freebsd-x64", "linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"]}
+  ],
+  "temporary_edges": [
+    {
+      "exception_id": "capture-to-index-v1",
+      "from": "ctx-history-capture",
+      "to": "ctx-history-index",
+      "introduced_at": "187c0c6533b5de56119cd2774ba90d29925cb1ac"
+    },
+    {
+      "exception_id": "capture-to-pro-host-protocol-v1",
+      "from": "ctx-history-capture",
+      "to": "ctx-pro-host-protocol",
+      "introduced_at": "187c0c6533b5de56119cd2774ba90d29925cb1ac"
+    }
+  ],
+  "target_inventory": "tools/bazel/rust-target-inventory.json",
+  "release_targets": "contracts/release-targets-v1.json",
+  "snapshot_inventory": "scripts/check-crate-loc-snapshot-v1.json"
 }

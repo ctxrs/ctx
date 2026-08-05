@@ -170,6 +170,7 @@ CI_TESTS = [
     ":release_target_matrix_check",
     ":release_target_matrix_tests",
     ":rust_target_inventory_check",
+    ":rust_target_inventory_live_check",
     ":rust_toolchain_pin_check",
     ":rust_toolchain_pin_mutation_tests",
     ":rustfmt_check",
@@ -186,6 +187,7 @@ CI_TESTS = [
     "//sdks/go:go_sdk_tests",
     "//sdks/go/examples/dogfood:dogfood_tests",
     "//tools/bazel:release_route_analysis_tests",
+    "//tools/bazel:rust_target_inventory_tests",
     "//tools/bazel:test_tier_inventory_tests",
 ] + _CI_RUST_TESTS + _CI_PROVIDER_TESTS
 

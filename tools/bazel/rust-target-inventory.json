@@ -1,10 +1,15 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "bazel_roots": [
+    "//crates/ctx-cli:ctx",
+    "//crates/ctx-sdk:lib"
+  ],
   "packages": {
     "ctx": {
       "manifest": "crates/ctx-cli/Cargo.toml",
       "targets": {
         "bin:ctx": "//crates/ctx-cli:ctx",
+        "custom-build:build-script-build": "//:cli_build_cfg_parity_check",
         "test:analytics": "//crates/ctx-cli:analytics_tests",
         "test:analytics_identity": "//crates/ctx-cli:analytics_identity_tests",
         "test:analytics_policy": "//crates/ctx-cli:analytics_policy_tests",
@@ -40,17 +45,46 @@
         "test:search_refresh": "//crates/ctx-cli:search_refresh_tests",
         "test:search_show": "//crates/ctx-cli:search_show_tests",
         "test:search_source_identity_filters": "//crates/ctx-cli:search_source_identity_filters_tests",
+        "test:self_contained_core_content": "//crates/ctx-cli:self_contained_core_content_tests",
         "test:setup_sources_import": "//crates/ctx-cli:setup_sources_import_tests",
         "test:skill": "//crates/ctx-cli:skill_tests",
         "test:slash_command_e2e": "//crates/ctx-cli:slash_command_e2e_tests",
-        "test:self_contained_core_content": "//crates/ctx-cli:self_contained_core_content_tests",
         "test:status_store_cutover": "//crates/ctx-cli:status_store_cutover_tests",
         "test:stats": "//crates/ctx-cli:stats_tests",
         "test:upgrade": "//crates/ctx-cli:upgrade_tests",
-        "test:upgrade_analytics": "//crates/ctx-cli:upgrade_analytics_tests",
-        "custom-build:build-script-build": "//:cli_build_cfg_parity_check"
+        "test:upgrade_analytics": "//crates/ctx-cli:upgrade_analytics_tests"
       },
-      "native_unit": "//crates/ctx-cli:unit_tests"
+      "production_targets": {
+        "bin:ctx": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-cli:ctx"
+          }
+        ],
+        "custom-build:build-script-build": [
+          {
+            "features": [],
+            "kind": "build-script-contract",
+            "label": "//:cli_build_cfg_parity_check"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [],
+      "test_only_features": [],
+      "test_only_feature_targets": {},
+      "out_dir_sources": {},
+      "native_unit": "//crates/ctx-cli:unit_tests",
+      "focused_tests": [],
+      "bazel_only_targets": [
+        "//crates/ctx-cli:ctx_auto_upgrade_acceptance_fixture",
+        "//crates/ctx-cli:ctx_pro_test_host",
+        "//crates/ctx-cli:ctx_upgrade_test_harness",
+        "//crates/ctx-cli:ctx_v025_upgrade_fixture",
+        "//crates/ctx-cli:test_targets_capabilities_fixture",
+        "//crates/ctx-cli:test_targets_minimal_fixture"
+      ]
     },
     "ctx-history-capture": {
       "manifest": "crates/ctx-history-capture/Cargo.toml",
@@ -61,12 +95,46 @@
         "test:self_contained_core_final_locator_removal": "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
         "test:source_backed_route_contract": "//crates/ctx-history-capture:source_backed_route_contract_tests"
       },
-      "native_unit": "//crates/ctx-history-capture:unit_tests"
+      "production_targets": {
+        "lib:ctx_history_capture": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-history-capture:lib"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [],
+      "test_only_features": [],
+      "test_only_feature_targets": {},
+      "out_dir_sources": {},
+      "native_unit": "//crates/ctx-history-capture:unit_tests",
+      "focused_tests": [],
+      "bazel_only_targets": []
     },
     "ctx-history-core": {
       "manifest": "crates/ctx-history-core/Cargo.toml",
-      "targets": {"lib:ctx_history_core": "//crates/ctx-history-core:lib"},
-      "native_unit": "//crates/ctx-history-core:unit_tests"
+      "targets": {
+        "lib:ctx_history_core": "//crates/ctx-history-core:lib"
+      },
+      "production_targets": {
+        "lib:ctx_history_core": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-history-core:lib"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [],
+      "test_only_features": [],
+      "test_only_feature_targets": {},
+      "out_dir_sources": {},
+      "native_unit": "//crates/ctx-history-core:unit_tests",
+      "focused_tests": [],
+      "bazel_only_targets": []
     },
     "ctx-history-index": {
       "manifest": "crates/ctx-history-index/Cargo.toml",
@@ -75,12 +143,60 @@
         "test:mcp_attribution_search": "//crates/ctx-history-index:mcp_attribution_search_tests",
         "test:source_backed_recovery": "//crates/ctx-history-index:source_backed_recovery_tests"
       },
-      "native_unit": "//crates/ctx-history-index:unit_tests"
+      "production_targets": {
+        "lib:ctx_history_index": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-history-index:lib"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [],
+      "test_only_features": [],
+      "test_only_feature_targets": {},
+      "out_dir_sources": {},
+      "native_unit": "//crates/ctx-history-index:unit_tests",
+      "focused_tests": [],
+      "bazel_only_targets": [
+        "//crates/ctx-history-index:migration_disk_qualification_tests",
+        "//crates/ctx-history-index:migration_fault_tests",
+        "//crates/ctx-history-index:migration_release_benchmark"
+      ]
     },
     "ctx-history-refresh": {
       "manifest": "crates/ctx-history-refresh/Cargo.toml",
-      "targets": {"lib:ctx_history_refresh": "//crates/ctx-history-refresh:lib"},
-      "native_unit": "//crates/ctx-history-refresh:unit_tests"
+      "targets": {
+        "lib:ctx_history_refresh": "//crates/ctx-history-refresh:lib"
+      },
+      "production_targets": {
+        "lib:ctx_history_refresh": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-history-refresh:lib"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [
+        "default"
+      ],
+      "test_only_features": [
+        "test-support"
+      ],
+      "test_only_feature_targets": {
+        "test-support": [
+          "//crates/ctx-history-refresh:test_support_lib"
+        ]
+      },
+      "out_dir_sources": {},
+      "native_unit": "//crates/ctx-history-refresh:unit_tests",
+      "focused_tests": [],
+      "bazel_only_targets": [
+        "//crates/ctx-history-refresh:test_support_lib"
+      ]
     },
     "ctx-pro-host-protocol": {
       "manifest": "crates/ctx-pro-host-protocol/Cargo.toml",
@@ -88,18 +204,71 @@
         "example:generate_protocol_inventory": "//crates/ctx-pro-host-protocol:generate_protocol_inventory",
         "lib:ctx_pro_host_protocol": "//crates/ctx-pro-host-protocol:lib"
       },
+      "production_targets": {
+        "lib:ctx_pro_host_protocol": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-pro-host-protocol:lib"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [],
+      "test_only_features": [],
+      "test_only_feature_targets": {},
+      "out_dir_sources": {},
       "native_unit": "//crates/ctx-pro-host-protocol:unit_tests",
-      "focused_tests": ["//crates/ctx-pro-host-protocol:conformance_tests"]
+      "focused_tests": [
+        "//crates/ctx-pro-host-protocol:conformance_tests"
+      ],
+      "bazel_only_targets": []
     },
     "ctx-protocol": {
       "manifest": "crates/ctx-protocol/Cargo.toml",
-      "targets": {"lib:ctx_protocol": "//crates/ctx-protocol:lib"},
-      "native_unit": "//crates/ctx-protocol:unit_tests"
+      "targets": {
+        "lib:ctx_protocol": "//crates/ctx-protocol:lib"
+      },
+      "production_targets": {
+        "lib:ctx_protocol": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-protocol:lib"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [],
+      "test_only_features": [],
+      "test_only_feature_targets": {},
+      "out_dir_sources": {},
+      "native_unit": "//crates/ctx-protocol:unit_tests",
+      "focused_tests": [],
+      "bazel_only_targets": []
     },
     "ctx-sdk": {
       "manifest": "crates/ctx-sdk/Cargo.toml",
-      "targets": {"lib:ctx_sdk": "//crates/ctx-sdk:lib"},
-      "native_unit": "//crates/ctx-sdk:unit_tests"
+      "targets": {
+        "lib:ctx_sdk": "//crates/ctx-sdk:lib"
+      },
+      "production_targets": {
+        "lib:ctx_sdk": [
+          {
+            "features": [],
+            "kind": "rust",
+            "label": "//crates/ctx-sdk:lib"
+          }
+        ]
+      },
+      "test_only_targets": [],
+      "production_features": [],
+      "test_only_features": [],
+      "test_only_feature_targets": {},
+      "out_dir_sources": {},
+      "native_unit": "//crates/ctx-sdk:unit_tests",
+      "focused_tests": [],
+      "bazel_only_targets": []
     }
   }
 }
