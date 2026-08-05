@@ -187,6 +187,30 @@ mod unix {
         command.output().unwrap()
     }
 
+    fn v025_staged_binaries(target: &Path) -> Vec<PathBuf> {
+        let mut staged = fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_prefix(".ctx-upgrade-"))
+                    .and_then(|name| name.strip_suffix(".new"))
+                    .is_some_and(|identity| {
+                        let mut parts = identity.split('.');
+                        parts.next().is_some_and(|pid| pid.parse::<u32>().is_ok())
+                            && parts
+                                .next()
+                                .is_some_and(|nonce| nonce.parse::<u64>().is_ok())
+                            && parts.next().is_none()
+                    })
+            })
+            .collect::<Vec<_>>();
+        staged.sort();
+        staged
+    }
+
     fn managed_hook_candidate(temp: &tempfile::TempDir, install_attempt_id: &str) -> PathBuf {
         managed_candidate_from_binary(temp, &configured_hook_fixture(), install_attempt_id)
     }
@@ -1084,6 +1108,12 @@ mod unix {
             running_daemon_pid(&data_root(&temp), Some(old_pid)).is_none(),
             "the interrupted fix-forward helper relaunched v0.25"
         );
+        let interrupted_stages = v025_staged_binaries(&target);
+        assert_eq!(interrupted_stages.len(), 1, "{interrupted_stages:?}");
+        let interrupted_stage = interrupted_stages[0].clone();
+        let active_stage =
+            target.with_file_name(format!(".ctx-upgrade-{}.2.new", std::process::id()));
+        fs::copy(v1_v025_candidate(&temp), &active_stage).unwrap();
 
         let retried = run_v025_upgrade(&temp, &target, false);
         assert!(retried.status.success(), "{retried:?}");
@@ -1094,6 +1124,15 @@ mod unix {
             replacement_pid.is_some()
         });
         assert!(!root.join("upgrade.lock").exists());
+        wait_for(
+            "abandoned v0.25 stage cleanup",
+            Duration::from_secs(5),
+            || !interrupted_stage.exists(),
+        );
+        assert!(
+            active_stage.exists(),
+            "cleanup deleted a stage owned by a live process"
+        );
         stop_daemon(replacement_pid.unwrap());
     }
 
