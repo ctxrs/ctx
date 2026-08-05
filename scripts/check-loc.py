@@ -85,6 +85,16 @@ def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 def repo_context() -> tuple[Path, bool]:
+    configured = os.environ.get("CTX_LOC_ROOT")
+    if configured:
+        root = Path(configured)
+        if not root.is_absolute():
+            raise GateError("CTX_LOC_ROOT must be an absolute path")
+        root = root.absolute()
+        if not (root / "Cargo.toml").is_file():
+            raise GateError("CTX_LOC_ROOT does not contain the repository Cargo.toml")
+        return root, False
+
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         stdout=subprocess.PIPE,
@@ -118,7 +128,12 @@ def classify(path: str) -> str | None:
     parts = pure.parts
     base = pure.name
 
-    if any(part in EXCLUDED_COMPONENTS for part in parts[:-1]):
+    if any(
+        part in EXCLUDED_COMPONENTS
+        or part in {"external", "target"}
+        or part.startswith("bazel-")
+        for part in parts[:-1]
+    ):
         return None
     if base in {"Cargo.lock", "MODULE.bazel.lock", "package-lock.json"} or base.endswith(".lock"):
         return None
@@ -288,6 +303,14 @@ def inventory(root: Path, has_git: bool) -> list[str]:
     if has_git:
         result = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
         raw_paths = result.stdout.split(b"\x00")
+    elif manifest_value := os.environ.get("CTX_LOC_PATHS_MANIFEST"):
+        manifest = Path(manifest_value)
+        if not manifest.is_absolute() or not manifest.is_file():
+            raise GateError("CTX_LOC_PATHS_MANIFEST must be an absolute declared-source manifest")
+        try:
+            raw_paths = manifest.read_bytes().splitlines()
+        except OSError as error:
+            raise GateError(f"cannot read declared-source manifest: {error}") from error
     else:
         raw_paths = [
             path.relative_to(root).as_posix().encode("utf-8")

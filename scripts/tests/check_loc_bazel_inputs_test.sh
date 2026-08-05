@@ -7,6 +7,7 @@ else
   input_root="$(git rev-parse --show-toplevel)"
 fi
 scc_bin="${1:-${CTX_LOC_SCC:-}}"
+manifest="${2:-${CTX_LOC_PATHS_MANIFEST:-}}"
 
 assert_reaches_gate() {
   local path="$1"
@@ -31,6 +32,23 @@ assert_reaches_gate scripts/check-loc-policy-v2.json
   printf 'LOC Bazel input contract failed: pinned scc runfile is unavailable: %s\n' "${scc_bin:-<unset>}" >&2
   exit 1
 }
+[[ -n "${manifest}" && -f "${manifest}" ]] || {
+  printf 'LOC Bazel input contract failed: declared-source manifest is unavailable\n' >&2
+  exit 1
+}
+if grep -Eq '^(bazel-[^/]*/|external/|target/)' "${manifest}"; then
+  printf 'LOC Bazel input contract failed: generated output entered source runfiles\n' >&2
+  exit 1
+fi
+for path in \
+  crates/ctx-history-capture/src/provider/source_backed/driver.rs \
+  tools/bazel/release_routes_test.bzl \
+  scripts/check-loc.py; do
+  grep -Fxq "${path}" "${manifest}" || {
+    printf 'LOC Bazel input contract failed: declared-source manifest omits %s\n' "${path}" >&2
+    exit 1
+  }
+done
 
 IFS=$'\t' read -r version archive_sha binary_sha < <(
   python3 - "${input_root}/scripts/check-loc-policy-v2.json" <<'PY'

@@ -123,10 +123,21 @@ case "${mode}" in
     ;;
   loc_check)
     loc_scc="${2:-}"
+    loc_manifest="${3:-}"
     [[ -n "${loc_scc}" ]] || fail 'loc_check requires the pinned scc runfile'
-    run bash scripts/tests/check_loc_bazel_inputs_test.sh "${loc_scc}"
+    [[ -n "${loc_manifest}" && -f "${loc_manifest}" ]] || \
+      fail 'loc_check requires the declared source manifest'
+    loc_manifest="$(cd "$(dirname "${loc_manifest}")" && pwd -P)/$(basename "${loc_manifest}")"
+    [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]] || \
+      fail 'loc_check requires the Bazel runfiles repository root'
+    loc_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
+    run bash scripts/tests/check_loc_bazel_inputs_test.sh "${loc_scc}" "${loc_manifest}"
     run env CTX_LOC_SCC="${loc_scc}" bash scripts/tests/check_loc_test.sh
-    run env CTX_LOC_SCC="${loc_scc}" bash scripts/check-loc.sh
+    run env \
+      CTX_LOC_PATHS_MANIFEST="${loc_manifest}" \
+      CTX_LOC_ROOT="${loc_root}" \
+      CTX_LOC_SCC="${loc_scc}" \
+      bash scripts/check-loc.sh
     ;;
   public_control_surface_check)
     run bash scripts/tests/check-public-control-surface-test.sh
