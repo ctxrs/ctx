@@ -67,6 +67,8 @@ pub(crate) struct EvidencePreview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) prior_path: Option<String>,
     pub(crate) tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) event_occurred_at_ms: Option<i64>,
     pub(crate) excerpt: String,
 }
 
@@ -110,6 +112,9 @@ pub(crate) fn project_evidence_previews(
             .iter_mut()
             .find(|existing| same_item(existing, &preview))
         {
+            if existing.event_occurred_at_ms != preview.event_occurred_at_ms {
+                existing.event_occurred_at_ms = None;
+            }
             existing.citation_numbers.push(numbered.number);
             continue;
         }
@@ -237,6 +242,7 @@ fn project_one(
         path: invocation.relative_path.clone(),
         prior_path: invocation.prior_relative_path.clone(),
         tool_name: tool_name.to_owned(),
+        event_occurred_at_ms: record.core_record.occurred_at_unix_ms,
         excerpt: excerpt.to_owned(),
     })
 }

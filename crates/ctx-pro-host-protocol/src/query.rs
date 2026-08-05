@@ -223,6 +223,7 @@ pub struct AgentAttribution {
     pub parent_session: Option<ResourceRef>,
     pub direct_actor: Option<ResourceRef>,
     pub owning_root: Option<ResourceRef>,
+    pub fact_occurred_at_ms: Option<i64>,
     pub confidence: FactConfidence,
     pub state: FactState,
     pub evidence_numbers: Vec<u32>,
@@ -328,6 +329,7 @@ pub struct PullRequestCommit {
     pub fact_id: String,
     pub relationship: PullRequestCommitRelationship,
     pub commit: ResourceRef,
+    pub fact_occurred_at_ms: Option<i64>,
     pub production: Vec<AgentAttribution>,
     pub evidence_numbers: Vec<u32>,
 }

@@ -29,9 +29,11 @@ use super::search::{
 };
 
 mod human;
+mod locate;
 mod search;
 mod show;
 
+pub(super) use locate::render_locate_document;
 pub(super) use search::{render_search_document, render_search_not_ready_document};
 pub(super) use show::render_show_document;
 

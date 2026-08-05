@@ -504,6 +504,9 @@ File blame automatically attempts one bounded read of up to the first three
 exact cited Core records. Human output adds an
 `Evidence context (local history content)` section only when at least one
 record verifies and projects safely; otherwise the entire section is omitted.
+Each rendered item keeps the typed path separate from its exact excerpt, shows
+`old → new` for a rename, and shows `Event time` only when the authenticated
+Core event carries an exact timestamp.
 JSON and MCP always include the same status-bearing
 `evidence_context` object described in the JSON contract. Missing, stale,
 unsupported, oversized, or ambiguous evidence does not change attribution,
@@ -540,6 +543,12 @@ Commit output groups assertions as `Produced by`, `Possible producers`, and
 PR activity is separate from code production. A PR-to-commit relationship is
 shown only when structured forge evidence binds the canonical PR identity and
 exact Git object ID; otherwise output says `associated commits not proven`.
+When a returned relationship or production attribution carries an exact
+supporting-fact timestamp, human output labels it `Observed` and renders RFC
+3339 UTC milliseconds. This is history/provenance fact time, not Git author or
+committer time, PR creation or merge time, materialization time, or proof of
+completion. Missing fact times remain quiet, and timestamps never change the
+existing semantic ordering, cursors, or pagination.
 
 Stable Pro failure codes include `pro_not_installed`, `commercial_unavailable`,
 `entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
@@ -752,6 +761,11 @@ accepts `text` or `json`.
 The result identifies the Core source with `ctx_source_id`, `source_format`,
 `schema_variant`, and `provider_identity_version`. It does not expose a provider
 path, reopen provider history, or recreate provider-native locator state.
+Human event output also identifies the owning ctx session, exact event time,
+and stored event sequence. Human session output labels its timestamp `First
+event`: this is the first stored event in the indexed session, not a claimed
+provider-session start. A missing supported timestamp is shown as `time
+unavailable`.
 
 ## Search
 
@@ -831,6 +845,12 @@ search uses a non-default data root. Each result's `rank` is its one-based
 position in the final shaped window. `retrieval_score` preserves the backend's
 diagnostic score, which can be non-monotonic after query-coverage and
 session-diversity shaping.
+Human output states `relevance order` and its primary-session or
+primary-plus-subagent scope in the result heading. Its compact `Event` row pairs
+the short event ID with the exact matched-event UTC RFC 3339 millisecond time;
+timestamps never re-sort results. `--verbose` additionally renders the stored
+event sequence and available workspace/working-directory, branch, agent, and
+parent/root lineage without repeating equal values.
 Custom history imports can be filtered by canonical
 `--history-source provider_key/source_id`, or by exact `--provider-key`,
 `--source-id`, and `--source-format` values. The plugin/source alias is for

@@ -7,8 +7,8 @@ use crate::ui::{sanitize_untrusted_history_body_for_terminal, ColorMode, StreamK
 use crate::ui::{Document, Line, RenderContext, Span, Token};
 
 use super::layout::{
-    display_width, enum_heading, line_range_text, push_atomic, push_authored, push_heading,
-    FIELD_GAP,
+    display_width, enum_heading, line_range_text, push_atomic, push_authored, push_field,
+    push_heading, timestamp_text, FIELD_GAP,
 };
 use crate::pro::evidence_preview::{
     EvidencePreview, EvidencePreviewModel, MAX_EVIDENCE_PREVIEW_CITATIONS,
@@ -104,10 +104,10 @@ fn preview_item(
         return None;
     }
     let mut document = Document::new();
-    let tool_name = sanitize_untrusted_history_body_for_terminal(&preview.tool_name);
     let kind = format!(
-        "{} file request via {tool_name}",
-        enum_heading(preview.operation)
+        "{} file request via {}",
+        enum_heading(preview.operation),
+        preview.tool_name,
     );
     let references_width = preview
         .citation_numbers
@@ -130,6 +130,32 @@ fn preview_item(
     } else {
         document.push_line(references);
         push_atomic(&mut document, 4, &kind, Token::Label);
+    }
+    let path = preview.prior_path.as_ref().map_or_else(
+        || preview.path.clone(),
+        |prior_path| format!("{prior_path} → {}", preview.path),
+    );
+    push_field(
+        &mut document,
+        context,
+        4,
+        "Path",
+        10,
+        &path,
+        Token::Text,
+        true,
+    );
+    if let Some(event_occurred_at_ms) = preview.event_occurred_at_ms {
+        push_field(
+            &mut document,
+            context,
+            4,
+            "Event time",
+            10,
+            &timestamp_text(event_occurred_at_ms),
+            Token::Text,
+            true,
+        );
     }
     for line in excerpt_lines {
         push_literal_excerpt_line(&mut document, context, 4, line, Token::Text);

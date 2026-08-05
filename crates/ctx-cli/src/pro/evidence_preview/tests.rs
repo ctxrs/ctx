@@ -459,6 +459,34 @@ fn every_typed_operation_preserves_request_metadata_without_claiming_effect_succ
 }
 
 #[test]
+fn preview_copies_only_the_exact_verified_core_event_time() {
+    let mut timed = file_record(
+        "provider",
+        21,
+        1,
+        "modify src/lib.rs",
+        Some("modify src/lib.rs"),
+        "src/lib.rs",
+        None,
+        RepositoryFileInvocationKind::Modify,
+        Some("edit_file"),
+    );
+    timed.event.occurred_at_unix_ms = Some(1_721_000_000_123);
+    timed.core_record.occurred_at_unix_ms = Some(1_721_000_000_123);
+    assert_eq!(
+        one_file_preview("src/lib.rs", &timed).previews[0].event_occurred_at_ms,
+        Some(1_721_000_000_123)
+    );
+
+    timed.event.occurred_at_unix_ms = None;
+    timed.core_record.occurred_at_unix_ms = None;
+    assert_eq!(
+        one_file_preview("src/lib.rs", &timed).previews[0].event_occurred_at_ms,
+        None
+    );
+}
+
+#[test]
 fn typed_range_and_binding_are_authority_while_ordinary_observations_do_not_gate() {
     let valid = file_record(
         "provider",
@@ -1171,7 +1199,7 @@ fn current_core_contract_accepts_new_descriptors_and_rejects_stale_revisions() {
 
 #[test]
 fn evidence_is_number_ordered_limited_and_grouped_by_the_complete_exact_item() {
-    let shared = file_record(
+    let mut shared = file_record(
         "codex",
         90,
         1,
@@ -1182,7 +1210,7 @@ fn evidence_is_number_ordered_limited_and_grouped_by_the_complete_exact_item() {
         RepositoryFileInvocationKind::Modify,
         Some("edit_file"),
     );
-    let replay = file_record(
+    let mut replay = file_record(
         "claude",
         91,
         2,
@@ -1193,6 +1221,10 @@ fn evidence_is_number_ordered_limited_and_grouped_by_the_complete_exact_item() {
         RepositoryFileInvocationKind::Modify,
         Some("edit_file"),
     );
+    shared.event.occurred_at_unix_ms = Some(1_721_000_000_000);
+    shared.core_record.occurred_at_unix_ms = Some(1_721_000_000_000);
+    replay.event.occurred_at_unix_ms = Some(1_721_000_000_001);
+    replay.core_record.occurred_at_unix_ms = Some(1_721_000_000_001);
     let deleted = file_record(
         "gemini",
         92,
@@ -1231,6 +1263,7 @@ fn evidence_is_number_ordered_limited_and_grouped_by_the_complete_exact_item() {
     assert_eq!(MAX_EVIDENCE_PREVIEW_CITATIONS, 3);
     assert_eq!(model.previews.len(), 2);
     assert_eq!(model.previews[0].citation_numbers, vec![1, 2]);
+    assert_eq!(model.previews[0].event_occurred_at_ms, None);
     assert_eq!(model.previews[1].citation_numbers, vec![3]);
     assert!(model
         .previews

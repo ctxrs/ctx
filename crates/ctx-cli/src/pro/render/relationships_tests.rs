@@ -153,6 +153,7 @@ fn same_display_lineage_leaves_machine_json_bytes_and_schema_unchanged() {
                 parent_session: Some(parent.clone()),
                 direct_actor: None,
                 owning_root: Some(root.clone()),
+                fact_occurred_at_ms: Some(1_721_000_000_000),
                 confidence: FactConfidence::Explicit,
                 state: FactState::Asserted,
                 evidence_numbers: Vec::new(),

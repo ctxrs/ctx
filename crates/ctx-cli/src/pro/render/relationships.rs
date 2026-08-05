@@ -1,10 +1,10 @@
 use ctx_pro_host_protocol::{AgentAttribution, ProductionRelationship};
 
-use crate::ui::{Document, RenderContext};
+use crate::ui::{Document, RenderContext, Token};
 
 use super::layout::{
-    confidence_token, push_enum_field, push_heading, push_references, push_resource_primary,
-    push_role_resource, state_token, METADATA_LABEL_WIDTH,
+    confidence_token, push_enum_field, push_field, push_heading, push_references,
+    push_resource_primary, push_role_resource, state_token, timestamp_text, METADATA_LABEL_WIDTH,
 };
 
 pub(super) fn render_attribution_groups(
@@ -60,6 +60,18 @@ fn render_attribution(
         value.parent_session.as_ref(),
         value.owning_root.as_ref(),
     );
+    if let Some(time) = value.fact_occurred_at_ms {
+        push_field(
+            document,
+            context,
+            indent + 2,
+            "Observed",
+            METADATA_LABEL_WIDTH,
+            &timestamp_text(time),
+            Token::Text,
+            true,
+        );
+    }
     push_enum_field(
         document,
         context,
