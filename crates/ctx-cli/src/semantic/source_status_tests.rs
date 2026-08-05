@@ -361,7 +361,7 @@ fn refresh_report_keeps_published_sources_distinct_from_route_inventory() {
         Some(&json!({
             "request_state": "published",
             "published_generation": "generation-1",
-            "source_count": 38,
+            "source_count": 1,
             "scanned_routes": 38,
             "unsupported_routes": 37,
             "progress": {
@@ -372,7 +372,7 @@ fn refresh_report_keeps_published_sources_distinct_from_route_inventory() {
             },
             "receipt": {
                 "outcome": "completed",
-                "current": {"current_source_count": 1},
+                "current": {"current_source_count": 2},
             },
         })),
         Some("generation-1"),
@@ -380,6 +380,7 @@ fn refresh_report_keeps_published_sources_distinct_from_route_inventory() {
     );
 
     assert_eq!(report["source_count"], 1);
+    assert_eq!(report["current"]["current_source_count"], 2);
     assert_eq!(report["scanned_routes"], 38);
     assert_eq!(report["unsupported_routes"], 37);
     assert_eq!(report["progress"]["total_sources"], 38);

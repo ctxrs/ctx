@@ -119,10 +119,13 @@ impl CoreRefreshEngine {
             .clone()
             .or_else(|| predecessor.receipt.clone())?;
         let published_generation = publication_receipt.published_generation.clone();
-        let publication_metadata = state
+        let publication_authority = state
             .pinned_core_publication
             .as_ref()
             .filter(|authority| authority.generation_id() == published_generation)
+            .cloned();
+        let publication_metadata = publication_authority
+            .as_ref()
             .and_then(|authority| {
                 SourceBackedPublicationMetadata::decode(authority.verified_index_ref()).ok()
             })
@@ -192,6 +195,15 @@ impl CoreRefreshEngine {
                 routes,
             }
         });
+        let request_source_count = publication_authority.as_ref().map(|authority| {
+            let mut covered_receipt = publication_receipt.clone();
+            covered_receipt.route_results = continuation
+                .covered_route_results
+                .values()
+                .cloned()
+                .collect();
+            covered_receipt.source_count(authority.verified_index_ref())
+        });
         let now = utc_now().timestamp_millis();
         let request_receipt = {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -215,6 +227,7 @@ impl CoreRefreshEngine {
                     .filter(|result| result.outcome.failure_class() == Some("incompatible"))
                     .count(),
             );
+            attempt.request_source_count = request_source_count;
             attempt.certified_source_count = Some(receipt.current.source_count);
             attempt.certified_source_bytes = Some(receipt.current.certified_source_bytes);
             attempt.receipt = Some(receipt.clone());

@@ -715,7 +715,8 @@ fn wait_for_published_generation_inner(
                 let publication_receipt = published_refresh_receipt(&response, &pin)?;
                 validate_status_publication_authority(&publication_receipt, &pin)?;
                 let receipt = published_request_outcome(&response, &pin)?;
-                let source_count = published_source_count(&response, &publication_receipt)?;
+                let source_count =
+                    published_source_count(&response, &receipt, pin.verified_index())?;
                 if let Some(expected_catalog) = expected_catalog {
                     if !explicit_catalog_request_is_accounted_for(
                         expected_catalog,
@@ -1057,7 +1058,8 @@ fn response_source_count(response: &Value) -> usize {
 
 fn published_source_count(
     response: &Value,
-    publication_receipt: &SourceBackedRefreshReceipt,
+    request_receipt: &SourceBackedRefreshReceipt,
+    verified: &ctx_history_index::VerifiedIndex,
 ) -> Result<usize> {
     let _scanned_routes = response
         .get("scanned_routes")
@@ -1069,12 +1071,63 @@ fn published_source_count(
         .and_then(Value::as_u64)
         .and_then(|count| usize::try_from(count).ok())
         .ok_or_else(|| anyhow!("published daemon source refresh has no unsupported route count"))?;
-    Ok(publication_receipt.current.source_count)
+    Ok(request_receipt.source_count(verified))
 }
 
 #[cfg(test)]
 mod progress_poll_tests {
     use super::*;
+    use ctx_history_core::{
+        CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation,
+    };
+    use ctx_history_index::{
+        GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
+    };
+
+    fn source_count_route(byte: u8) -> SourceRouteIdentity {
+        SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
+    }
+
+    fn verified_source_count_routes(route_bytes: &[u8]) -> (tempfile::TempDir, VerifiedIndex) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        let mut routes = Vec::new();
+        for byte in route_bytes {
+            let route = source_count_route(*byte);
+            let source = SourceKey::derive(
+                "codex",
+                "codex_session_jsonl",
+                "session",
+                1,
+                SourceAnchor::CatalogLineage([*byte; 32]),
+            )
+            .unwrap();
+            let observation =
+                SourceObservation::new(source.clone(), "source-count-test-v1", vec![*byte])
+                    .unwrap();
+            writer.begin_source(source.clone()).unwrap();
+            writer
+                .certify_source(
+                    CertifiedSource::certify(
+                        observation.clone(),
+                        observation,
+                        "source-count-test-v1",
+                        [*byte; 32],
+                        ScannedSourceCounts::default(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            routes.push(SourceRouteSnapshot::present(route, vec![source]).unwrap());
+        }
+        writer.set_present_source_routes(routes).unwrap();
+        writer.commit(|_| true).unwrap();
+        let verified = VerifiedIndex::open(temp.path()).unwrap();
+        (temp, verified)
+    }
 
     fn typed_terminal_status() -> Value {
         let request_id = Uuid::from_u128(0x294_0100).to_string();
@@ -1109,24 +1162,70 @@ mod progress_poll_tests {
     }
 
     #[test]
-    fn published_source_count_uses_receipt_current_and_keeps_route_diagnostics_disjoint() {
-        for (name, scanned_routes, unsupported_routes, receipt_routes, published_sources) in [
-            ("unsupported only", 0, 1, 0, 0),
-            ("mixed executable and unsupported", 1, 1, 1, 1),
-            ("inherited and covered diagnostics", 0, 3, 1, 1),
+    fn published_source_count_uses_request_routes_not_global_or_diagnostic_counts() {
+        let (_temp, verified) = verified_source_count_routes(&[1, 2, 3, 4]);
+        for (name, scanned_routes, unsupported_routes, route_results, global_sources, expected) in [
+            ("unsupported only", 0, 1, vec![], 4, 0),
+            (
+                "mixed executable and unsupported",
+                1,
+                1,
+                vec![SourceBackedRefreshRouteResult::succeeded(
+                    source_count_route(1).as_str().to_owned(),
+                    false,
+                )],
+                4,
+                1,
+            ),
+            (
+                "covered executable route",
+                0,
+                3,
+                vec![SourceBackedRefreshRouteResult::succeeded(
+                    source_count_route(2).as_str().to_owned(),
+                    false,
+                )],
+                4,
+                1,
+            ),
+            (
+                "failed carried source remains global only",
+                1,
+                3,
+                vec![SourceBackedRefreshRouteResult::failed(
+                    source_count_route(2).as_str().to_owned(),
+                    "unavailable".to_owned(),
+                    true,
+                )],
+                4,
+                0,
+            ),
+            (
+                "global publication contains unrelated sources",
+                38,
+                37,
+                vec![
+                    SourceBackedRefreshRouteResult::succeeded(
+                        source_count_route(3).as_str().to_owned(),
+                        true,
+                    ),
+                    SourceBackedRefreshRouteResult::failed(
+                        source_count_route(30).as_str().to_owned(),
+                        "unavailable".to_owned(),
+                        false,
+                    ),
+                ],
+                4,
+                1,
+            ),
         ] {
-            let route_results = (0..receipt_routes)
-                .map(|index| {
-                    SourceBackedRefreshRouteResult::succeeded(format!("{index:064x}"), false)
-                })
-                .collect::<Vec<_>>();
             let receipt = SourceBackedRefreshReceipt {
                 previous_generation: None,
-                published_generation: "published-generation".to_owned(),
+                published_generation: verified.generation_id().to_owned(),
                 generation_changed: true,
                 published_explicit_source_catalog: None,
                 current: SourceBackedRefreshCurrent {
-                    source_count: published_sources,
+                    source_count: global_sources,
                     ..SourceBackedRefreshCurrent::default()
                 },
                 route_results,
@@ -1137,11 +1236,41 @@ mod progress_poll_tests {
                 "unsupported_routes": unsupported_routes,
             });
             assert_eq!(
-                published_source_count(&response, &receipt).unwrap(),
-                published_sources,
+                published_source_count(&response, &receipt, &verified).unwrap(),
+                expected,
                 "{name}"
             );
         }
+
+        let receipt = SourceBackedRefreshReceipt {
+            previous_generation: None,
+            published_generation: verified.generation_id().to_owned(),
+            generation_changed: true,
+            published_explicit_source_catalog: None,
+            current: SourceBackedRefreshCurrent::default(),
+            route_results: vec![
+                SourceBackedRefreshRouteResult::succeeded(
+                    source_count_route(4).as_str().to_owned(),
+                    false,
+                ),
+                SourceBackedRefreshRouteResult::failed(
+                    source_count_route(5).as_str().to_owned(),
+                    "incompatible".to_owned(),
+                    false,
+                ),
+            ],
+            catalog_route_bindings: Vec::new(),
+        };
+        assert_eq!(
+            published_source_count(
+                &json!({"scanned_routes": 2, "unsupported_routes": 1}),
+                &receipt,
+                &verified,
+            )
+            .unwrap(),
+            1,
+            "an exact incompatible route outcome is not a published source route"
+        );
     }
 
     #[test]

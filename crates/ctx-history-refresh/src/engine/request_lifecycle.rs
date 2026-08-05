@@ -763,6 +763,7 @@ impl CoreRefreshEngine {
         let (failed_run, did_work) = match verified {
             Ok((observed, publication, receipt, terminal)) => {
                 let publication_receipt = terminal.publication_receipt().cloned();
+                let request_source_count = terminal.request_source_count(&receipt);
                 let did_work = {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
                     attempt.finished_at_ms = Some(utc_now().timestamp_millis());
@@ -777,6 +778,7 @@ impl CoreRefreshEngine {
                     attempt.progress_total_sources_known = true;
                     attempt.scanned_routes = Some(publication.route_results.len());
                     attempt.unsupported_routes = Some(publication.unsupported_routes);
+                    attempt.request_source_count = Some(request_source_count);
                     attempt.certified_source_count = Some(publication.certified_source_count);
                     attempt.certified_source_bytes = Some(publication.certified_source_bytes);
                     attempt.receipt = Some(receipt.clone());

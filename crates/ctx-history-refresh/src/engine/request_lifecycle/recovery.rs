@@ -111,7 +111,8 @@ impl CoreRefreshEngine {
             if receipt.published_generation != active_generation {
                 bail!("active Core refresh metadata names a different generation");
             }
-            let attempt = recover_committed_attempt(&job, &metadata, receipt.clone())?;
+            let attempt =
+                recover_committed_attempt(&job, &metadata, receipt.clone(), verified.as_ref())?;
             let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
             let has_successors = !queued_successors.is_empty();
             self.install_published_recovery(
@@ -301,6 +302,7 @@ fn recover_committed_attempt(
     job: &Value,
     metadata: &SourceBackedPublicationMetadata,
     receipt: SourceBackedRefreshReceipt,
+    verified: &VerifiedIndex,
 ) -> Result<SourceBackedRefreshAttempt> {
     let mut attempt = recover_terminal_attempt(job, SourceBackedRefreshState::Published)?;
     let now = utc_now().timestamp_millis();
@@ -324,6 +326,7 @@ fn recover_committed_attempt(
             .filter(|result| result.outcome.failure_class() == Some("incompatible"))
             .count(),
     );
+    attempt.request_source_count = Some(receipt.source_count(verified));
     attempt.certified_source_count = Some(receipt.current.source_count);
     attempt.certified_source_bytes = Some(receipt.current.certified_source_bytes);
     attempt.receipt = Some(receipt.clone());
@@ -424,6 +427,7 @@ fn recover_terminal_attempt(
     attempt.progress_total_sources_known = status_progress_total_sources_known(job);
     attempt.scanned_routes = optional_usize(job, "scanned_routes")?;
     attempt.unsupported_routes = optional_usize(job, "unsupported_routes")?;
+    attempt.request_source_count = optional_usize(job, "source_count")?;
     attempt.certified_source_count = optional_usize(job, "certified_source_count")?;
     attempt.certified_source_bytes = optional_u64(job, "certified_source_bytes")?;
     let (timings, publication_probe_us) = recover_timings(job)?;

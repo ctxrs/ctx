@@ -50,7 +50,7 @@ use harness::{
 };
 
 #[test]
-fn read_model_source_count_keeps_unsupported_and_covered_inventory_disjoint() {
+fn read_model_source_count_uses_request_routes_not_global_or_diagnostic_counts() {
     let mut attempt = new_refresh_attempt(
         None,
         SourceRefreshRuntimeMetadata::default(),
@@ -59,22 +59,104 @@ fn read_model_source_count_keeps_unsupported_and_covered_inventory_disjoint() {
     );
     attempt.state = SourceBackedRefreshState::Published;
 
-    for (name, scanned_routes, unsupported_routes, route_inventory, published_sources) in [
-        ("unsupported only", 0, 1, 1, 0),
-        ("mixed executable and unsupported", 1, 1, 2, 1),
-        ("inherited and covered diagnostics", 1, 3, 4, 1),
+    for (
+        name,
+        scanned_routes,
+        unsupported_routes,
+        route_inventory,
+        request_sources,
+        global_sources,
+    ) in [
+        ("unsupported only", 0, 1, 1, 0, 0),
+        ("mixed executable and unsupported", 1, 1, 2, 1, 1),
+        ("covered executable route", 0, 3, 3, 1, 1),
+        ("failed carried source remains global only", 1, 3, 4, 0, 1),
+        (
+            "global publication contains unrelated sources",
+            38,
+            37,
+            75,
+            1,
+            2,
+        ),
     ] {
         attempt.scanned_routes = Some(scanned_routes);
         attempt.unsupported_routes = Some(unsupported_routes);
-        attempt.certified_source_count = Some(published_sources);
+        attempt.request_source_count = Some(request_sources);
+        attempt.certified_source_count = Some(global_sources);
         attempt.progress.total_sources = route_inventory;
         attempt.progress_total_sources_known = true;
         let job = attempt.job_json();
-        assert_eq!(job["source_count"], published_sources, "{name}");
+        assert_eq!(job["source_count"], request_sources, "{name}");
         assert_eq!(job["scanned_routes"], scanned_routes, "{name}");
         assert_eq!(job["unsupported_routes"], unsupported_routes, "{name}");
+        assert_eq!(job["certified_source_count"], global_sources, "{name}");
         assert_eq!(job["progress"]["total_sources"], route_inventory, "{name}");
     }
+}
+
+#[test]
+fn receipt_source_count_intersects_request_routes_with_certified_generation_routes() {
+    let temp = tempfile::tempdir().unwrap();
+    let requested_route = SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap();
+    let unrelated_route = SourceRouteIdentity::from_sha256("a2".repeat(32)).unwrap();
+    let absent_route = SourceRouteIdentity::from_sha256("a3".repeat(32)).unwrap();
+    let requested_source = publication_pin_source_with_anchor(0xa1);
+    let unrelated_source = publication_pin_source_with_anchor(0xa2);
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+    for source in [&requested_source, &unrelated_source] {
+        writer.begin_source(source.clone()).unwrap();
+        writer
+            .add_core_record(publication_pin_record(source))
+            .unwrap();
+        writer
+            .certify_source(publication_pin_certificate(source))
+            .unwrap();
+    }
+    writer
+        .set_present_source_routes(vec![
+            ctx_history_index::SourceRouteSnapshot::present(
+                requested_route.clone(),
+                vec![requested_source],
+            )
+            .unwrap(),
+            ctx_history_index::SourceRouteSnapshot::present(
+                unrelated_route,
+                vec![unrelated_source],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+    let generation = writer.commit(|_| true).unwrap().generation_id;
+    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    let receipt = SourceBackedRefreshReceipt {
+        previous_generation: None,
+        published_generation: generation,
+        generation_changed: true,
+        published_explicit_source_catalog: None,
+        current: SourceBackedRefreshCurrent {
+            source_count: 2,
+            ..SourceBackedRefreshCurrent::default()
+        },
+        route_results: vec![
+            SourceBackedRefreshRouteResult::succeeded(requested_route.as_str().to_owned(), true),
+            SourceBackedRefreshRouteResult::succeeded(absent_route.as_str().to_owned(), false),
+        ],
+        catalog_route_bindings: Vec::new(),
+    };
+
+    assert_eq!(receipt.source_count(&verified), 1);
+    let mut failed_carried = receipt;
+    failed_carried.route_results = vec![SourceBackedRefreshRouteResult::failed(
+        requested_route.as_str().to_owned(),
+        "unavailable".to_owned(),
+        true,
+    )];
+    assert_eq!(failed_carried.source_count(&verified), 0);
 }
 
 #[path = "tests/registry_policy.rs"]

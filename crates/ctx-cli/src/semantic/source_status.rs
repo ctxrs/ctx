@@ -166,10 +166,6 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     let published_generation = job.get("published_generation").and_then(Value::as_str);
     let generation_matches = generation_id.is_some() && generation_id == published_generation;
     let request_outcome = job.get("request_outcome").or_else(|| job.get("receipt"));
-    let published_source_count = request_outcome
-        .and_then(|receipt| receipt.get("current"))
-        .and_then(|current| current.get("current_source_count"))
-        .or_else(|| job.get("source_count"));
     let outcome = request_outcome
         .and_then(|receipt| receipt.get("outcome"))
         .or_else(|| job.get("outcome"))
@@ -216,7 +212,7 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "generation_id": generation_id,
         "generation_matches": generation_matches,
         "outcome": outcome,
-        "source_count": published_source_count,
+        "source_count": job.get("source_count"),
         "certified_source_count": job.get("certified_source_count"),
         "certified_source_bytes": job.get("certified_source_bytes"),
         "scanned_routes": job.get("scanned_routes"),

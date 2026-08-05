@@ -90,6 +90,14 @@ impl CoreRefreshTerminalSuccess {
         }
     }
 
+    pub(super) fn request_source_count(&self, receipt: &SourceBackedRefreshReceipt) -> usize {
+        match self {
+            Self::Verified(authority) => receipt.source_count(authority.verified_index_ref()),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::StateOnly(_) => receipt.state_only_source_count(),
+        }
+    }
+
     /// Installs retained authority before returning the receipt that may be
     /// exposed as Published/current under the same state lock.
     pub(super) fn install(self, state: &mut CoreRefreshEngineState) -> SourceBackedRefreshReceipt {

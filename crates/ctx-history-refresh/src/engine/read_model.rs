@@ -133,6 +133,40 @@ impl SourceBackedRefreshReceipt {
         }
     }
 
+    /// Request-scoped source-route contribution in the exact retained
+    /// generation.
+    ///
+    /// `current.source_count` is the cardinality of every certified source in
+    /// the generation. It can include multiple sources per route and sources
+    /// published by unrelated providers. Receipt route outcomes are request
+    /// scoped, while the verified manifest decides whether each successful
+    /// route has a present certified source contribution. Failed or missing
+    /// routes do not become request contributions merely because an older
+    /// source was carried forward.
+    pub fn source_count(&self, verified: &VerifiedIndex) -> usize {
+        debug_assert_eq!(self.published_generation, verified.generation_id());
+        self.route_results
+            .iter()
+            .filter(|result| {
+                result.outcome.is_success()
+                    && SourceRouteIdentity::from_sha256(result.route_identity.clone())
+                        .ok()
+                        .and_then(|route| verified.manifest().source_route(&route))
+                        .is_some_and(|route| {
+                            route.missing_state().is_none() && !route.sources().is_empty()
+                        })
+            })
+            .count()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn state_only_source_count(&self) -> usize {
+        self.route_results
+            .iter()
+            .filter(|result| result.outcome.is_success())
+            .count()
+    }
+
     pub fn source_failure_total(&self) -> usize {
         self.route_results
             .iter()
@@ -793,6 +827,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) physical_attempt_id: Option<String>,
     pub(super) scanned_routes: Option<usize>,
     pub(super) unsupported_routes: Option<usize>,
+    pub(super) request_source_count: Option<usize>,
     pub(super) certified_source_count: Option<usize>,
     pub(super) certified_source_bytes: Option<u64>,
     /// Request-scoped route/result/rejection facts. This is mutable daemon
@@ -813,17 +848,7 @@ pub(super) struct SourceBackedRefreshAttempt {
 
 impl SourceBackedRefreshAttempt {
     fn source_count(&self) -> usize {
-        self.certified_source_count
-            .or_else(|| {
-                self.publication_receipt
-                    .as_ref()
-                    .map(|receipt| receipt.current.source_count)
-            })
-            .or_else(|| {
-                self.receipt
-                    .as_ref()
-                    .map(|receipt| receipt.current.source_count)
-            })
+        self.request_source_count
             .or(self.scanned_routes)
             .unwrap_or(self.progress.total_sources)
     }

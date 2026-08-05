@@ -421,6 +421,7 @@ pub(super) fn new_refresh_attempt(
         physical_attempt_id: Some(request_id),
         scanned_routes: None,
         unsupported_routes: None,
+        request_source_count: None,
         certified_source_count: None,
         certified_source_bytes: None,
         receipt: None,
