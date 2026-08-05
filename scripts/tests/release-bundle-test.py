@@ -134,6 +134,28 @@ class ReleaseBundleTests(unittest.TestCase):
             [str(self.repo / output), str(symbols)],
         )
 
+    def test_publication_preflight_requires_fresh_distinct_non_nested_outputs(
+        self,
+    ) -> None:
+        assets = self.root / "publication/assets"
+        authority = self.root / "publication/authority"
+        BUNDLE.preflight_publication_directories(
+            self.stage, [assets, authority]
+        )
+        authority.mkdir()
+        with self.assertRaisesRegex(BUNDLE.BundleError, "already exists"):
+            BUNDLE.preflight_publication_directories(
+                self.stage, [assets, authority]
+            )
+        with self.assertRaisesRegex(BUNDLE.BundleError, "invalid"):
+            BUNDLE.preflight_publication_directories(
+                self.stage, [assets, assets]
+            )
+        with self.assertRaisesRegex(BUNDLE.BundleError, "must not be nested"):
+            BUNDLE.preflight_publication_directories(
+                self.stage, [assets, assets / "authority"]
+            )
+
     def test_verifier_rejects_missing_extra_link_and_changed_bytes(self) -> None:
         cases = []
         missing = self.root / "missing"

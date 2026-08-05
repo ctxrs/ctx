@@ -3,8 +3,8 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: scripts/stage-github-release-assets.sh [ARTIFACT_DIR] [OUT_DIR]
-       scripts/stage-github-release-assets.sh --with-semantic [ARTIFACT_DIR] [OUT_DIR]
+Usage: scripts/stage-github-release-assets.sh [ARTIFACT_DIR] [OUT_DIR] [AUTHORITY_DIR]
+       scripts/stage-github-release-assets.sh --with-semantic [ARTIFACT_DIR] [OUT_DIR] [AUTHORITY_DIR]
        scripts/stage-github-release-assets.sh --transcode-runtime PLATFORM [ARTIFACT_DIR]
 
 Stages public GitHub Release assets from built public CLI artifacts.
@@ -36,15 +36,17 @@ case "${1:-}" in
     transcode_platform="${2:-}"
     artifact_dir="${3:-target/public-cli-artifacts}"
     out_dir=""
+    authority_dir=""
     ;;
   --with-semantic)
-    [[ "$#" -le 3 ]] || {
+    [[ "$#" -le 4 ]] || {
       usage
       exit 2
     }
     include_semantic="1"
     artifact_dir="${2:-target/public-cli-artifacts}"
     out_dir="${3:-target/github-release-assets}"
+    authority_dir="${4:-${out_dir}.authority}"
     ;;
   -h|--help)
     usage
@@ -56,16 +58,17 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    [[ "$#" -le 2 ]] || {
+    [[ "$#" -le 3 ]] || {
       usage
       exit 2
     }
     artifact_dir="${1:-target/public-cli-artifacts}"
     out_dir="${2:-target/github-release-assets}"
+    authority_dir="${3:-${out_dir}.authority}"
     ;;
 esac
 
-if [[ "${artifact_dir}" == -* || "${out_dir}" == -* ]]; then
+if [[ "${artifact_dir}" == -* || "${out_dir}" == -* || "${authority_dir}" == -* ]]; then
   printf 'staging modes cannot be combined\n' >&2
   usage
   exit 2
@@ -309,22 +312,34 @@ validate_staged_cli_evidence() {
   local source_name="$1"
   local dest_name="$2"
   local platform="$3"
+  local candidate_manifest="$4"
+  local verification_name="${5:-${dest_name}}"
+  local verification_dir="${6:-${out_dir}}"
   local source_path="${artifact_dir%/}/${source_name}"
-  local staged_path="${out_dir%/}/${dest_name}"
+  local staged_path="${verification_dir%/}/${verification_name}"
+  local build_info_path="${source_path}.build-info.json"
+  local sbom_path="${verification_dir%/}/${verification_name}.cdx.json"
+  local notices_path="${verification_dir%/}/${verification_name}.third-party-notices.txt"
+  local size_report_path="${source_path}.size.json"
+
+  if [[ "${verification_dir}" == "${authority_dir}" ]]; then
+    build_info_path="${verification_dir%/}/${verification_name}.build-info.json"
+    size_report_path="${verification_dir%/}/${verification_name}.size.json"
+  fi
 
   python3 -I scripts/check-public-cli-build-info.py \
     --artifact "${staged_path}" \
-    --build-info "${source_path}.build-info.json" \
+    --build-info "${build_info_path}" \
     --matrix contracts/release-targets-v1.json \
     --platform "${platform}" \
     --source-commit "${source_commit}" >/dev/null
   python3 -I scripts/release-sbom.py verify-bundle \
     --artifact "${staged_path}" \
-    --build-info "${source_path}.build-info.json" \
-    --sbom "${staged_path}.cdx.json" \
-    --notices "${staged_path}.third-party-notices.txt" \
-    --size-report "${source_path}.size.json" \
-    --candidate-manifest "${source_path}.candidate.json"
+    --build-info "${build_info_path}" \
+    --sbom "${sbom_path}" \
+    --notices "${notices_path}" \
+    --size-report "${size_report_path}" \
+    --candidate-manifest "${candidate_manifest}"
 }
 
 runtime_asset_name() {
@@ -421,14 +436,34 @@ local out_dir="$2"
 local include_semantic="$3"
 local source_commit="$4"
 local repo_root="$5"
-local required_runtime_asset cli_dest semantic_fields semantic_asset
-local required_runtime_assets semantic_assets
+local authority_dir="$6"
+local authority_candidate required_runtime_asset cli_dest semantic_fields semantic_asset
+local authority_candidates required_runtime_assets semantic_assets
 
 [[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || {
   printf 'completed GitHub staging source commit is invalid\n' >&2
   exit 1
 }
 cd "${repo_root}"
+
+stage_authority_leaf() {
+  local source_path="$1"
+  local destination_name="$2"
+  local destination_path="${authority_dir%/}/${destination_name}"
+  local before staged after
+
+  require_regular_input "${source_path}" "candidate authority input"
+  before="$(sha256_file "${source_path}")"
+  install -m 0644 "${source_path}" "${destination_path}"
+  staged="$(sha256_file "${destination_path}")"
+  after="$(sha256_file "${source_path}")"
+  if [[ "${before}" != "${staged}" || "${before}" != "${after}" ]]; then
+    printf 'candidate authority input changed while staged: %s\n' \
+      "${source_path}" >&2
+    exit 1
+  fi
+}
+
 required_runtime_assets=(
   ctx-onnxruntime-linux-x64.tar.gz
   ctx-onnxruntime-linux-aarch64.tar.gz
@@ -629,12 +664,60 @@ if [[ "${include_semantic}" == "1" ]]; then
   rm -f "${semantic_fields}"
 fi
 
-validate_staged_cli_evidence ctx ctx-linux-x64 linux-x64
-validate_staged_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64 linux-aarch64
-validate_staged_cli_evidence ctx-macos-arm64 ctx-macos-arm64 macos-arm64
-validate_staged_cli_evidence ctx-macos-x64 ctx-macos-x64 macos-x64
-validate_staged_cli_evidence ctx.exe ctx-windows-x64.exe windows-x64
-validate_staged_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64
+authority_candidates=(
+  ctx.candidate.json
+  ctx-linux-aarch64.candidate.json
+  ctx-macos-arm64.candidate.json
+  ctx-macos-x64.candidate.json
+  ctx.exe.candidate.json
+  ctx-freebsd-x64.candidate.json
+)
+for authority_candidate in "${authority_candidates[@]}"; do
+  authority_source="${artifact_dir%/}/${authority_candidate}"
+  authority_destination="${authority_dir%/}/${authority_candidate}"
+  if [[ "${authority_candidate}" == "ctx.exe.candidate.json" ]]; then
+    authority_destination="${authority_dir%/}/.ctx.exe.candidate.base.json"
+  fi
+  stage_authority_leaf "${authority_source}" "$(basename "${authority_destination}")"
+done
+
+# The authority handoff retains the exact Windows construction names. The
+# public release executable remains ctx-windows-x64.exe in SHA256SUMS; equality
+# of its bytes with handoff/ctx.exe is checked by bind-release below.
+stage_authority_leaf "${out_dir%/}/ctx-windows-x64.exe" ctx.exe
+stage_authority_leaf \
+  "${artifact_dir%/}/ctx.exe.build-info.json" ctx.exe.build-info.json
+stage_authority_leaf \
+  "${out_dir%/}/ctx-windows-x64.exe.cdx.json" ctx.exe.cdx.json
+stage_authority_leaf \
+  "${artifact_dir%/}/ctx.exe.size.json" ctx.exe.size.json
+stage_authority_leaf \
+  "${out_dir%/}/ctx-windows-x64.exe.third-party-notices.txt" \
+  ctx.exe.third-party-notices.txt
+stage_authority_leaf "${out_dir%/}/SHA256SUMS" SHA256SUMS
+stage_authority_leaf \
+  "${out_dir%/}/ctx-onnxruntime-windows-x64.zip" \
+  ctx-onnxruntime-windows-x64.zip
+
+validate_staged_cli_evidence \
+  ctx ctx-linux-x64 linux-x64 \
+  "${authority_dir%/}/ctx.candidate.json"
+validate_staged_cli_evidence \
+  ctx-linux-aarch64 ctx-linux-aarch64 linux-aarch64 \
+  "${authority_dir%/}/ctx-linux-aarch64.candidate.json"
+validate_staged_cli_evidence \
+  ctx-macos-arm64 ctx-macos-arm64 macos-arm64 \
+  "${authority_dir%/}/ctx-macos-arm64.candidate.json"
+validate_staged_cli_evidence \
+  ctx-macos-x64 ctx-macos-x64 macos-x64 \
+  "${authority_dir%/}/ctx-macos-x64.candidate.json"
+validate_staged_cli_evidence \
+  ctx.exe ctx-windows-x64.exe windows-x64 \
+  "${authority_dir%/}/.ctx.exe.candidate.base.json" \
+  ctx.exe "${authority_dir}"
+validate_staged_cli_evidence \
+  ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64 \
+  "${authority_dir%/}/ctx-freebsd-x64.candidate.json"
 validate_staged_runtime_asset linux-x64
 validate_staged_runtime_asset linux-aarch64
 validate_staged_runtime_asset macos-arm64
@@ -644,6 +727,49 @@ validate_staged_runtime_asset freebsd-x64
 validate_macos_signing_evidence macos-arm64
 validate_macos_signing_evidence macos-x64
 
+python3 -I scripts/release-sbom.py bind-release \
+  --artifact "${authority_dir%/}/ctx.exe" \
+  --build-info "${authority_dir%/}/ctx.exe.build-info.json" \
+  --sbom "${authority_dir%/}/ctx.exe.cdx.json" \
+  --notices "${authority_dir%/}/ctx.exe.third-party-notices.txt" \
+  --size-report "${authority_dir%/}/ctx.exe.size.json" \
+  --candidate-manifest \
+    "${authority_dir%/}/.ctx.exe.candidate.base.json" \
+  --release-sums "${authority_dir%/}/SHA256SUMS" \
+  --runtime-archive \
+    "${authority_dir%/}/ctx-onnxruntime-windows-x64.zip" \
+  --output-manifest "${authority_dir%/}/ctx.exe.candidate.json" \
+  --manifest-sha256-output \
+    "${authority_dir%/}/ctx.exe.candidate.json.sha256" >/dev/null
+rm "${authority_dir%/}/.ctx.exe.candidate.base.json"
+
+for authority_candidate in "${authority_candidates[@]}"; do
+  if [[ "${authority_candidate}" != "ctx.exe.candidate.json" ]]; then
+    printf '%s\n' \
+      "$(sha256_file "${authority_dir%/}/${authority_candidate}")" \
+      >"${authority_dir%/}/${authority_candidate}.sha256"
+  fi
+done
+authority_expected="$({
+  for authority_candidate in "${authority_candidates[@]}"; do
+    printf '%s\n%s.sha256\n' \
+      "${authority_candidate}" "${authority_candidate}"
+  done
+  printf '%s\n' \
+    SHA256SUMS \
+    ctx.exe \
+    ctx.exe.build-info.json \
+    ctx.exe.cdx.json \
+    ctx.exe.size.json \
+    ctx.exe.third-party-notices.txt \
+    ctx-onnxruntime-windows-x64.zip
+} | LC_ALL=C sort)"
+authority_actual="$(find "${authority_dir}" -mindepth 1 -maxdepth 1 \
+  -printf '%f\n' | LC_ALL=C sort)"
+if [[ "${authority_actual}" != "${authority_expected}" ]]; then
+  printf 'candidate authority handoff inventory is not exact\n' >&2
+  exit 1
+fi
 }
 
 python3 -I "${bundle_tool}" verify \
@@ -660,19 +786,27 @@ python3 -I "${bundle_tool}" verify \
 if [[ "${out_dir}" != /* ]]; then
   out_dir="${repo_root}/${out_dir}"
 fi
-[[ ! -e "${out_dir}" && ! -L "${out_dir}" ]] || {
-  printf 'refusing to replace existing GitHub release staging: %s\n' "${out_dir}" >&2
-  exit 1
-}
-mkdir -p "$(dirname "${out_dir}")"
+if [[ "${authority_dir}" != /* ]]; then
+  authority_dir="${repo_root}/${authority_dir}"
+fi
+python3 -I "${bundle_tool}" preflight-publication \
+  --input-dir "${requested_artifact_dir}" \
+  --output-dir "${out_dir}" \
+  --output-dir "${authority_dir}"
 staged_out="$(mktemp -d "$(dirname "${out_dir}")/.github-release-assets.XXXXXX")"
-trap 'rm -rf -- "${staged_out}"' EXIT
+staged_authority="$(mktemp -d \
+  "$(dirname "${authority_dir}")/.github-release-authority.XXXXXX")"
+trap 'rm -rf -- "${staged_out}" "${staged_authority}"' EXIT
 artifact_dir="${requested_artifact_dir}"
 stage_complete_candidate \
   "${artifact_dir}" "${staged_out}" "${include_semantic}" \
-  "${source_commit}" "${repo_root}"
+  "${source_commit}" "${repo_root}" "${staged_authority}"
 python3 -I "${bundle_tool}" commit-directory \
   --stage-dir "${staged_out}" \
   --output-dir "${out_dir}"
+python3 -I "${bundle_tool}" commit-directory \
+  --stage-dir "${staged_authority}" \
+  --output-dir "${authority_dir}"
 trap - EXIT
-printf 'staged GitHub release assets in %s\n' "${out_dir}"
+printf 'staged GitHub release assets in %s; candidate authority handoff in %s\n' \
+  "${out_dir}" "${authority_dir}"

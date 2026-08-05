@@ -527,7 +527,9 @@ steps:
         --step public-cli-windows-x64
       CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${source_commit}" \
         scripts/stage-github-release-assets.sh \
-          target/public-cli-artifacts target/github-release-assets
+          target/public-cli-artifacts \
+          target/github-release-assets \
+          target/github-release-authority
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"
@@ -536,6 +538,7 @@ steps:
     timeout_in_minutes: 30
     artifact_paths:
       - "target/github-release-assets/*"
+      - "target/github-release-authority/*"
 
   - label: ":package: Semantic ONNX models"
     key: "semantic-model-archives"

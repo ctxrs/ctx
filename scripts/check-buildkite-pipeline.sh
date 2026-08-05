@@ -576,9 +576,10 @@ if command -v ruby >/dev/null 2>&1; then
     ].each do |producer|
       abort "release candidate staging does not bind artifacts from #{producer}" unless candidate_command.include?("--step #{producer}")
     end
-    abort "release candidate staging must run exact-byte public assembly" unless candidate_command.include?("scripts/stage-github-release-assets.sh") && candidate_command.include?("target/github-release-assets")
+    abort "release candidate staging must run exact-byte public assembly" unless candidate_command.include?("scripts/stage-github-release-assets.sh") && candidate_command.include?("target/github-release-assets") && candidate_command.include?("target/github-release-authority")
     abort "GitHub staging must bind the public source commit to checkout HEAD" unless candidate_command.include?("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") && candidate_command.include?("git rev-parse --verify HEAD^{commit}")
     abort "release candidate staging must upload the immutable manifest" unless Array(candidate["artifact_paths"]).include?("target/github-release-assets/*")
+    abort "release candidate staging must upload the manifest-authority handoff" unless Array(candidate["artifact_paths"]).include?("target/github-release-authority/*")
     semantic_assets = %w[
       ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
       ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz
@@ -683,6 +684,7 @@ for required in \
   'scripts/build-onnxruntime-sidecar.sh linux-x64-cuda12' \
   'key: "github-release-candidate"' \
   'target/github-release-assets/*' \
+  'target/github-release-authority/*' \
   'scripts/stage-semantic-release-handoff.sh' \
   'target/semantic-release-handoff/*' \
   'CTX_MACOS_RELEASE_SIGNING=required' \

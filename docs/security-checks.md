@@ -41,6 +41,11 @@ the local retrieval product.
   public key, and artifact-origin prefix are binary constants; ambient config
   and environment cannot replace them, and release-related child processes
   remove inherited release-authority variables before execution.
+- Public release construction emits one atomic authority handoff. Its aggregate
+  Windows candidate manifest binds the exact construction executable, release
+  checksum file, runtime archive, and runtime DLL. The public verifier accepts
+  that exact handoff plus an independently supplied expected manifest digest;
+  it does not sign, attest, or treat a matching handoff sidecar as authority.
 - Automatic upgrade defaults on for managed installs, but the enabled daemon is
   its only scheduler. A disabled daemon performs no automatic check, download,
   or apply. Signed policy and explicit opt-outs remain mandatory, and upgrade

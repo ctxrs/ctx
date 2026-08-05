@@ -81,6 +81,70 @@ case "$*" in
       exit 1
     fi
     ;;
+  *release-sbom.py\ bind-release*)
+    output_manifest=""
+    digest_output=""
+    artifact=""
+    build_info=""
+    sbom=""
+    notices=""
+    size_report=""
+    candidate_manifest=""
+    release_sums=""
+    runtime_archive=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --artifact|--build-info|--sbom|--notices|--size-report|--candidate-manifest|--release-sums|--runtime-archive)
+          option="$1"
+          shift
+          case "$option" in
+            --artifact) artifact="$1" ;;
+            --build-info) build_info="$1" ;;
+            --sbom) sbom="$1" ;;
+            --notices) notices="$1" ;;
+            --size-report) size_report="$1" ;;
+            --candidate-manifest) candidate_manifest="$1" ;;
+            --release-sums) release_sums="$1" ;;
+            --runtime-archive) runtime_archive="$1" ;;
+          esac
+          ;;
+        --output-manifest)
+          shift
+          output_manifest="$1"
+          ;;
+        --manifest-sha256-output)
+          shift
+          digest_output="$1"
+          ;;
+      esac
+      shift
+    done
+    [ -n "$output_manifest" ] && [ -n "$digest_output" ]
+    authority_root="$(dirname "${artifact:?}")"
+    case "$authority_root" in
+      */.github-release-authority.*) ;;
+      *)
+        printf 'release binder did not use the fresh authority handoff\n' >&2
+        exit 1
+        ;;
+    esac
+    [ "$(basename "$artifact")" = ctx.exe ]
+    [ "$(basename "$build_info")" = ctx.exe.build-info.json ]
+    [ "$(basename "$sbom")" = ctx.exe.cdx.json ]
+    [ "$(basename "$notices")" = ctx.exe.third-party-notices.txt ]
+    [ "$(basename "$size_report")" = ctx.exe.size.json ]
+    [ "$(basename "$candidate_manifest")" = .ctx.exe.candidate.base.json ]
+    [ "$(basename "$release_sums")" = SHA256SUMS ]
+    [ "$(basename "$runtime_archive")" = ctx-onnxruntime-windows-x64.zip ]
+    for handoff_input in \
+      "$build_info" "$sbom" "$notices" "$size_report" \
+      "$candidate_manifest" "$release_sums" "$runtime_archive"; do
+      [ "$(dirname "$handoff_input")" = "$authority_root" ]
+    done
+    printf '{"kind":"ctx-public-cli-candidate","release_sums":{},"runtime":{}}\n' \
+      >"$output_manifest"
+    sha256sum "$output_manifest" | awk '{print $1}' >"$digest_output"
+    ;;
   *release-sbom.py\ verify-bundle*)
     printf '%s\n' "$*" >> "${CTX_FAKE_SBOM_LOG:?}"
     ;;
@@ -341,12 +405,47 @@ CTX_FAKE_SBOM_LOG="${default_sbom_log}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${matrix}" "${default_output}"
 assert_exact_assets "${default_output}" 24 "${default_assets[@]}"
+default_authority="${default_output}.authority"
+test "$(find "${default_authority}" -maxdepth 1 -type f | wc -l)" -eq 19
+for candidate in \
+  ctx.candidate.json \
+  ctx-linux-aarch64.candidate.json \
+  ctx-macos-arm64.candidate.json \
+  ctx-macos-x64.candidate.json \
+  ctx.exe.candidate.json \
+  ctx-freebsd-x64.candidate.json; do
+  test -s "${default_authority}/${candidate}"
+  test -s "${default_authority}/${candidate}.sha256"
+  test "$(sha256sum "${default_authority}/${candidate}" | awk '{print $1}')" = \
+    "$(cat "${default_authority}/${candidate}.sha256")"
+done
+grep -Fq '"release_sums"' "${default_authority}/ctx.exe.candidate.json"
+grep -Fq '"runtime"' "${default_authority}/ctx.exe.candidate.json"
+for handoff_input in \
+  ctx.exe \
+  ctx.exe.build-info.json \
+  ctx.exe.cdx.json \
+  ctx.exe.size.json \
+  ctx.exe.third-party-notices.txt \
+  SHA256SUMS \
+  ctx-onnxruntime-windows-x64.zip; do
+  test -s "${default_authority}/${handoff_input}"
+done
+test ! -e "${default_authority}/ctx-windows-x64.exe"
+cmp "${default_authority}/ctx.exe" "${default_output}/ctx-windows-x64.exe"
+cmp "${default_authority}/SHA256SUMS" "${default_output}/SHA256SUMS"
+cmp "${default_authority}/ctx-onnxruntime-windows-x64.zip" \
+  "${default_output}/ctx-onnxruntime-windows-x64.zip"
 test "$(wc -l < "${default_sbom_log}")" -eq 6
 test "$(wc -l < "${default_build_info_log}")" -eq 6
 test "$(grep -Fc -- "--source-commit ${source_commit}" "${default_build_info_log}")" -eq 6
 grep -Fq -- "--artifact ${tmp_dir}/.github-release-assets." \
   "${default_build_info_log}"
 grep -Fq -- "--artifact ${tmp_dir}/.github-release-assets." \
+  "${default_sbom_log}"
+grep -Fq -- "--artifact ${tmp_dir}/.github-release-authority." \
+  "${default_sbom_log}"
+grep -Fq -- "/ctx.exe --build-info ${tmp_dir}/.github-release-authority." \
   "${default_sbom_log}"
 grep -Fq -- "--sbom ${tmp_dir}/.github-release-assets." \
   "${default_sbom_log}"
@@ -361,6 +460,33 @@ CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" \
   /bin/bash "${stage}" \
   --with-semantic "${matrix}" "${semantic_output}"
 assert_exact_assets "${semantic_output}" 34 "${semantic_assets[@]}"
+test "$(find "${semantic_output}.authority" -maxdepth 1 -type f | wc -l)" -eq 19
+
+stale_authority="${tmp_dir}/stale-authority"
+mkdir "${stale_authority}"
+printf 'stale\n' >"${stale_authority}/unexpected"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${matrix}" "${tmp_dir}/stale-output" \
+  "${stale_authority}" \
+  >"${tmp_dir}/stale.out" 2>"${tmp_dir}/stale.err"; then
+  printf 'GitHub stager reused a stale candidate authority directory\n' >&2
+  exit 1
+fi
+grep -Fq 'release publication destination already exists' \
+  "${tmp_dir}/stale.err"
+test ! -e "${tmp_dir}/stale-output"
+grep -Fqx stale "${stale_authority}/unexpected"
+
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${matrix}" "${tmp_dir}/aliased-output" \
+  "${tmp_dir}/aliased-output" \
+  >"${tmp_dir}/aliased.out" 2>"${tmp_dir}/aliased.err"; then
+  printf 'GitHub stager aliased release assets and candidate authority\n' >&2
+  exit 1
+fi
+grep -Fq 'release publication directories are invalid' \
+  "${tmp_dir}/aliased.err"
+test ! -e "${tmp_dir}/aliased-output"
 
 late_copy="${tmp_dir}/late-copy"
 cp -a "${matrix}" "${late_copy}"

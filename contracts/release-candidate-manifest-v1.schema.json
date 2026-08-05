@@ -53,6 +53,36 @@
       }
     },
     "artifact": { "$ref": "#/$defs/artifact" },
+    "release_sums": {
+      "allOf": [
+        { "$ref": "#/$defs/artifact" },
+        {
+          "properties": {
+            "file": { "const": "SHA256SUMS" }
+          }
+        }
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "size_bytes", "dll"],
+      "properties": {
+        "file": { "const": "ctx-onnxruntime-windows-x64.zip" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "dll": {
+          "allOf": [
+            { "$ref": "#/$defs/artifact" },
+            {
+              "properties": {
+                "file": { "const": "lib/onnxruntime.dll" }
+              }
+            }
+          ]
+        }
+      }
+    },
     "evidence": {
       "type": "object",
       "required": [
@@ -136,6 +166,30 @@
       }
     }
   },
+  "dependentRequired": {
+    "release_sums": ["runtime"],
+    "runtime": ["release_sums"]
+  },
+  "allOf": [
+    {
+      "if": { "required": ["release_sums"] },
+      "then": {
+        "properties": {
+          "target": {
+            "properties": {
+              "id": { "const": "windows-x64" },
+              "platform": { "const": "windows-x64" }
+            }
+          },
+          "artifact": {
+            "properties": {
+              "file": { "const": "ctx.exe" }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "artifact": {
       "type": "object",

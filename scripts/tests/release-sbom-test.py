@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "release-sbom.py"
@@ -38,6 +40,52 @@ EXTERNAL_PACKAGES = (
     ("tempfile", "3.0.0"),
     ("zstd", "0.13.0"),
 )
+LEGACY_RELEASE_ASSETS = (
+    "ctx-linux-x64",
+    "ctx-linux-x64.cdx.json",
+    "ctx-linux-x64.third-party-notices.txt",
+    "ctx-linux-aarch64",
+    "ctx-linux-aarch64.cdx.json",
+    "ctx-linux-aarch64.third-party-notices.txt",
+    "ctx-macos-arm64",
+    "ctx-macos-arm64.cdx.json",
+    "ctx-macos-arm64.third-party-notices.txt",
+    "ctx-macos-x64",
+    "ctx-macos-x64.cdx.json",
+    "ctx-macos-x64.third-party-notices.txt",
+    "ctx-windows-x64.exe",
+    "ctx-windows-x64.exe.cdx.json",
+    "ctx-windows-x64.exe.third-party-notices.txt",
+    "ctx-freebsd-x64",
+    "ctx-freebsd-x64.cdx.json",
+    "ctx-freebsd-x64.third-party-notices.txt",
+    "ctx-onnxruntime-linux-x64.tar.gz",
+    "ctx-onnxruntime-linux-aarch64.tar.gz",
+    "ctx-onnxruntime-macos-arm64.tar.gz",
+    "ctx-onnxruntime-macos-x64.tar.gz",
+    "ctx-onnxruntime-windows-x64.zip",
+    "ctx-onnxruntime-freebsd-x64.tar.gz",
+)
+WINDOWS_RUNTIME_FILES = (
+    "LICENSE",
+    "ThirdPartyNotices.txt",
+    "VERSION_NUMBER",
+    "GIT_COMMIT_ID",
+    "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
+    "lib/onnxruntime.dll",
+    "lib/msvcp140.dll",
+    "lib/msvcp140_1.dll",
+    "lib/vcruntime140.dll",
+    "lib/vcruntime140_1.dll",
+)
+RELEASE_AUTHORITY_CANDIDATES = (
+    "ctx.candidate.json",
+    "ctx-linux-aarch64.candidate.json",
+    "ctx-macos-arm64.candidate.json",
+    "ctx-macos-x64.candidate.json",
+    "ctx.exe.candidate.json",
+    "ctx-freebsd-x64.candidate.json",
+)
 
 
 class ReleaseSbomTest(unittest.TestCase):
@@ -47,6 +95,8 @@ class ReleaseSbomTest(unittest.TestCase):
         self.runfiles = self.root / "runfiles"
         self.main_runfiles = self.runfiles / "_main"
         self.main_runfiles.mkdir(parents=True)
+        self.target_id = "linux-x64"
+        self.platform = "linux-x64"
 
         self.artifact = self.root / "ctx"
         self.artifact.write_bytes(b"exact release artifact\n")
@@ -189,6 +239,12 @@ repository = "https://example.invalid/{name}"
         self.notices = self.root / "ctx.third-party-notices.txt"
         self.size_report = self.root / "ctx.size.json"
         self.candidate = self.root / "ctx.candidate.json"
+        self.release_sums = self.root / "SHA256SUMS"
+        self.runtime = self.root / "ctx-onnxruntime-windows-x64.zip"
+        self.bound_candidate = self.root / "ctx.release-candidate.json"
+        self.bound_digest = self.root / "ctx.release-candidate.json.sha256"
+        self.handoff = self.root / "release-authority-handoff"
+        self.expected_digest: str | None = None
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -250,7 +306,11 @@ repository = "https://example.invalid/{name}"
         ]
         return "version = 4\n\n" + "\n\n".join(packages) + "\n"
 
-    def write_build_info(self) -> None:
+    def write_build_info(
+        self,
+        platform: str = "linux-x64",
+        target: str = "x86_64-unknown-linux-gnu",
+    ) -> None:
         self.build_info.write_text(
             json.dumps(
                 {
@@ -261,8 +321,8 @@ repository = "https://example.invalid/{name}"
                     "cargo_lock_sha256": hashlib.sha256(
                         self.cargo_lock.read_bytes()
                     ).hexdigest(),
-                    "platform": "linux-x64",
-                    "target": "x86_64-unknown-linux-gnu",
+                    "platform": platform,
+                    "target": target,
                     "source": {"commit": COMMIT, "clean": True},
                     "rust_version": "rustc 1.97.1 (test 2026-07-14)",
                     "builder": {
@@ -278,7 +338,130 @@ repository = "https://example.invalid/{name}"
             encoding="utf-8",
         )
 
+    def configure_windows_release(self) -> None:
+        self.target_id = "windows-x64"
+        self.platform = "windows-x64"
+        windows_artifact = self.root / "ctx.exe"
+        self.artifact.rename(windows_artifact)
+        self.artifact = windows_artifact
+        self.build_info = self.root / "ctx.exe.build-info.json"
+        self.sbom = self.root / "ctx.exe.cdx.json"
+        self.notices = self.root / "ctx.exe.third-party-notices.txt"
+        self.size_report = self.root / "ctx.exe.size.json"
+        self.candidate = self.root / "ctx.exe.candidate.json"
+        self.target_matrix.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "targets": [
+                        {
+                            "id": "windows-x64",
+                            "public_rust_target": "x86_64-pc-windows-gnu",
+                            "public_construction_authority": "bazel-release-route-v1",
+                            "public_construction_label": "//:ctx_release_windows_x64",
+                        }
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.write_build_info("windows-x64", "x86_64-pc-windows-gnu")
+        self.write_runtime()
+        self.write_release_sums()
+
+    def write_release_handoff(self) -> None:
+        self.handoff.mkdir()
+        copies = {
+            "ctx.exe": self.artifact,
+            "ctx.exe.build-info.json": self.build_info,
+            "ctx.exe.cdx.json": self.sbom,
+            "ctx.exe.size.json": self.size_report,
+            "ctx.exe.third-party-notices.txt": self.notices,
+            "SHA256SUMS": self.release_sums,
+            "ctx-onnxruntime-windows-x64.zip": self.runtime,
+            "ctx.exe.candidate.json": self.bound_candidate,
+            "ctx.exe.candidate.json.sha256": self.bound_digest,
+        }
+        for name, source in copies.items():
+            shutil.copyfile(source, self.handoff / name)
+        for name in RELEASE_AUTHORITY_CANDIDATES:
+            if name == "ctx.exe.candidate.json":
+                continue
+            payload = b"{}\n"
+            (self.handoff / name).write_bytes(payload)
+            (self.handoff / f"{name}.sha256").write_text(
+                hashlib.sha256(payload).hexdigest() + "\n", encoding="ascii"
+            )
+
+    def write_runtime(
+        self,
+        dll: bytes = b"exact Windows runtime DLL\n",
+        dll_name: str = "lib/onnxruntime.dll",
+        omit: str | None = None,
+        extra: str | None = None,
+    ) -> None:
+        with zipfile.ZipFile(
+            self.runtime, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as archive:
+            directory = zipfile.ZipInfo(
+                "lib/", date_time=(1980, 1, 1, 0, 0, 0)
+            )
+            directory.compress_type = zipfile.ZIP_DEFLATED
+            directory.external_attr = 0o40755 << 16
+            archive.writestr(directory, b"")
+            for name in WINDOWS_RUNTIME_FILES:
+                emitted_name = dll_name if name == "lib/onnxruntime.dll" else name
+                if emitted_name == omit:
+                    continue
+                record = zipfile.ZipInfo(
+                    emitted_name, date_time=(1980, 1, 1, 0, 0, 0)
+                )
+                record.compress_type = zipfile.ZIP_DEFLATED
+                record.external_attr = 0o100644 << 16
+                payload = dll if name == "lib/onnxruntime.dll" else f"{name}\n".encode()
+                archive.writestr(record, payload)
+            if extra is not None:
+                record = zipfile.ZipInfo(
+                    extra, date_time=(1980, 1, 1, 0, 0, 0)
+                )
+                record.compress_type = zipfile.ZIP_DEFLATED
+                record.external_attr = 0o100644 << 16
+                archive.writestr(record, b"unexpected\n")
+
+    def write_release_sums(self) -> None:
+        values = {
+            name: hashlib.sha256(f"synthetic {name}\n".encode()).hexdigest()
+            for name in LEGACY_RELEASE_ASSETS
+        }
+        values["ctx-windows-x64.exe"] = hashlib.sha256(
+            self.artifact.read_bytes()
+        ).hexdigest()
+        values["ctx-onnxruntime-windows-x64.zip"] = hashlib.sha256(
+            self.runtime.read_bytes()
+        ).hexdigest()
+        self.release_sums.write_text(
+            "".join(f"{values[name]}  {name}\n" for name in LEGACY_RELEASE_ASSETS),
+            encoding="ascii",
+        )
+
     def command(self, mode: str) -> list[str]:
+        if mode == "verify-release":
+            expected = self.expected_digest or self.bound_digest.read_text(
+                encoding="ascii"
+            ).strip()
+            return [
+                sys.executable,
+                "-I",
+                str(SCRIPT),
+                mode,
+                "--handoff-dir",
+                str(self.handoff),
+                "--expected-manifest-sha256",
+                expected,
+            ]
         command = [
             sys.executable,
             "-I",
@@ -289,17 +472,39 @@ repository = "https://example.invalid/{name}"
             "--build-info",
             str(self.build_info),
         ]
-        if mode == "verify-bundle":
-            return command + [
-                "--sbom",
-                str(self.sbom),
-                "--notices",
-                str(self.notices),
-                "--size-report",
-                str(self.size_report),
-                "--candidate-manifest",
-                str(self.candidate),
-            ]
+        if mode in ("verify-bundle", "bind-release"):
+            candidate = self.candidate
+            command.extend(
+                [
+                    "--sbom",
+                    str(self.sbom),
+                    "--notices",
+                    str(self.notices),
+                    "--size-report",
+                    str(self.size_report),
+                    "--candidate-manifest",
+                    str(candidate),
+                ]
+            )
+            if mode == "bind-release":
+                command.extend(
+                    [
+                        "--release-sums",
+                        str(self.release_sums),
+                        "--runtime-archive",
+                        str(self.runtime),
+                    ]
+                )
+            if mode == "bind-release":
+                command.extend(
+                    [
+                        "--output-manifest",
+                        str(self.bound_candidate),
+                        "--manifest-sha256-output",
+                        str(self.bound_digest),
+                    ]
+                )
+            return command
         command.extend(
             [
                 "--product",
@@ -307,9 +512,9 @@ repository = "https://example.invalid/{name}"
                 "--version",
                 "0.26.0",
                 "--target-id",
-                "linux-x64",
+                self.target_id,
                 "--platform",
-                "linux-x64",
+                self.platform,
                 "--cargo-lock",
                 str(self.cargo_lock),
                 "--module-lock",
@@ -519,6 +724,161 @@ repository = "https://example.invalid/{name}"
         rejected = self.run_command("verify-bundle", check=False)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("does not bind third_party_notices", rejected.stderr)
+
+    def test_windows_release_manifest_binds_sums_runtime_dll_and_authority(
+        self,
+    ) -> None:
+        self.configure_windows_release()
+        self.generate()
+        authority = self.run_command("bind-release").stdout.strip()
+        self.write_release_handoff()
+        self.assertEqual(authority, self.bound_digest.read_text().strip())
+        self.assertEqual(self.run_command("verify-release").stdout.strip(), authority)
+
+        candidate = json.loads(self.bound_candidate.read_bytes())
+        self.assertEqual(
+            candidate["release_sums"],
+            {
+                "file": "SHA256SUMS",
+                "sha256": hashlib.sha256(self.release_sums.read_bytes()).hexdigest(),
+                "size_bytes": self.release_sums.stat().st_size,
+            },
+        )
+        with zipfile.ZipFile(self.runtime) as archive:
+            dll = archive.read("lib/onnxruntime.dll")
+        self.assertEqual(
+            candidate["runtime"],
+            {
+                "file": "ctx-onnxruntime-windows-x64.zip",
+                "sha256": hashlib.sha256(self.runtime.read_bytes()).hexdigest(),
+                "size_bytes": self.runtime.stat().st_size,
+                "dll": {
+                    "file": "lib/onnxruntime.dll",
+                    "sha256": hashlib.sha256(dll).hexdigest(),
+                    "size_bytes": len(dll),
+                },
+            },
+        )
+
+        handoff_sums = self.handoff / "SHA256SUMS"
+        original_sums = handoff_sums.read_bytes()
+        lines = original_sums.decode("ascii").splitlines()
+        replacement = "0" if lines[0][0] != "0" else "1"
+        lines[0] = replacement + lines[0][1:]
+        handoff_sums.write_text("\n".join(lines) + "\n", encoding="ascii")
+        rejected = self.run_command("verify-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("does not bind exact release SHA256SUMS", rejected.stderr)
+        handoff_sums.write_bytes(original_sums)
+
+        self.write_runtime(b"X" * len(dll))
+        shutil.copyfile(
+            self.runtime, self.handoff / "ctx-onnxruntime-windows-x64.zip"
+        )
+        rejected = self.run_command("verify-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("does not bind exact Windows runtime and DLL", rejected.stderr)
+
+        # A complete caller-coordinated replacement remains unauthorized: even
+        # canonical regenerated manifest/sums/archive/DLL records cannot change
+        # the digest already committed by signed or attested release metadata.
+        original_authority = authority
+        self.write_release_sums()
+        self.bound_candidate.unlink()
+        self.bound_digest.unlink()
+        self.run_command("bind-release")
+        shutil.rmtree(self.handoff)
+        self.write_release_handoff()
+        self.expected_digest = original_authority
+        rejected = self.run_command("verify-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("independently supplied expected digest", rejected.stderr)
+
+    def test_verify_release_handoff_requires_exact_construction_names(self) -> None:
+        self.configure_windows_release()
+        self.generate()
+        authority = self.run_command("bind-release").stdout.strip()
+        self.write_release_handoff()
+
+        self.assertTrue((self.handoff / "ctx.exe").is_file())
+        self.assertFalse((self.handoff / "ctx-windows-x64.exe").exists())
+        self.assertIn(
+            "  ctx-windows-x64.exe\n",
+            (self.handoff / "SHA256SUMS").read_text(encoding="ascii"),
+        )
+        self.assertEqual(self.run_command("verify-release").stdout.strip(), authority)
+
+        (self.handoff / "ctx.exe").rename(
+            self.handoff / "ctx-windows-x64.exe"
+        )
+        rejected = self.run_command("verify-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("exact production inventory", rejected.stderr)
+
+    def test_verify_release_accepts_only_the_handoff_interface(self) -> None:
+        self.configure_windows_release()
+        self.generate()
+        self.run_command("bind-release")
+        self.write_release_handoff()
+        command = self.command("verify-release")
+        command.extend(("--artifact", str(self.artifact)))
+        rejected = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("only through --handoff-dir", rejected.stderr)
+
+    def test_windows_release_binding_requires_literal_outer_and_dll_names(self) -> None:
+        self.configure_windows_release()
+        self.generate()
+
+        renamed_sums = self.root / "OTHER_SUMS"
+        renamed_sums.write_bytes(self.release_sums.read_bytes())
+        command = self.command("bind-release")
+        command[command.index(str(self.release_sums))] = str(renamed_sums)
+        rejected = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("must be named SHA256SUMS", rejected.stderr)
+
+        renamed_runtime = self.root / "other-runtime.zip"
+        renamed_runtime.write_bytes(self.runtime.read_bytes())
+        command = self.command("bind-release")
+        command[command.index(str(self.runtime))] = str(renamed_runtime)
+        rejected = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("must be named ctx-onnxruntime-windows-x64.zip", rejected.stderr)
+
+        self.write_runtime(dll_name="lib/other.dll")
+        self.write_release_sums()
+        rejected = self.run_command("bind-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("unexpected entry lib/other.dll", rejected.stderr)
+
+    def test_windows_release_binding_requires_exact_runtime_and_sums_inventories(
+        self,
+    ) -> None:
+        self.configure_windows_release()
+        self.generate()
+
+        self.write_runtime(omit="lib/vcruntime140_1.dll")
+        self.write_release_sums()
+        rejected = self.run_command("bind-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("do not exactly match the legacy sidecar layout", rejected.stderr)
+
+        self.write_runtime(extra="lib/extra.dll")
+        self.write_release_sums()
+        rejected = self.run_command("bind-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("unexpected entry lib/extra.dll", rejected.stderr)
+
+        self.write_runtime()
+        self.write_release_sums()
+        lines = self.release_sums.read_text(encoding="ascii").splitlines()
+        self.release_sums.write_text(
+            "\n".join(reversed(lines)) + "\n", encoding="ascii"
+        )
+        rejected = self.run_command("bind-release", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("exact canonical 24- or 34-entry", rejected.stderr)
 
 
 if __name__ == "__main__":

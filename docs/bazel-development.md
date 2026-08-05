@@ -229,9 +229,49 @@ those pairs and adds the ten exact Semantic assets. Linux inputs must carry
 their sealed per-platform completion identities; Semantic assets are instead
 validated directly through their manifests, checksums, and canonical catalog.
 
-Linux must also pass `--build-info PATH` from the pinned Ubuntu 22.04 builder;
-the tracked builder above owns that producer and passes its output to the
-generic packager. Set
+Aggregate staging also writes a separate release-authority handoff directory;
+it does not add those files to the GitHub Release asset set or `SHA256SUMS`.
+The handoff retains all six canonical per-target candidate manifests and their
+digest sidecars. It also retains the Windows executable and candidate evidence
+under their exact construction names (`ctx.exe`, `ctx.exe.build-info.json`,
+`ctx.exe.cdx.json`, `ctx.exe.size.json`, and
+`ctx.exe.third-party-notices.txt`), plus exact copies of `SHA256SUMS` and the
+Windows runtime archive. `release_bundle.py` publishes this fresh, exact
+19-file directory atomically without replacement.
+
+After the final `SHA256SUMS` exists, the Windows manifest is finalized to bind
+the literal `SHA256SUMS` and
+`ctx-onnxruntime-windows-x64.zip` names, their exact bytes and SHA-256 values,
+and the exact `lib/onnxruntime.dll` name, size, and SHA-256 value. Its digest
+sidecar is convenience input and is not authority. The production verifier
+accepts only the complete handoff and an independently obtained expected
+manifest digest:
+
+```bash
+python3 -I scripts/release-sbom.py verify-release \
+  --handoff-dir target/github-release-authority \
+  --expected-manifest-sha256 HEX_DIGEST
+```
+
+The command requires the exact handoff inventory, verifies the release-bound
+manifest and every Windows input it names, and prints the verified digest. It
+does not sign, attest, authenticate, or select the expected digest. The
+authority integrating this interface must supply that digest independently of
+the handoff and its sidecars.
+
+Pass an explicit third directory when staging for a release build:
+
+```bash
+scripts/stage-github-release-assets.sh \
+  target/public-cli-artifacts \
+  target/github-release-assets \
+  target/github-release-authority
+```
+
+Linux must also pass `--build-info PATH` from the pinned Ubuntu 22.04 builder.
+For Linux x64 staging dogfood, the tracked builder above owns that producer and
+passes its output to the generic packager. Other Linux release lanes must
+provide equivalently validated builder-authored evidence. Set
 `CTX_MACOS_RELEASE_SIGNING=required` on trusted macOS release workers; signing
 remains optional for unsigned local qualification candidates.
 

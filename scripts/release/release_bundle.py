@@ -581,6 +581,45 @@ def preflight_destinations(
     return output, symbols
 
 
+def preflight_publication_directories(
+    input_directory: Path, output_directories: list[Path]
+) -> None:
+    source = _absolute(input_directory)
+    source_descriptor = _open_bound_directory(
+        source, "release publication input"
+    )
+    try:
+        _require_bound_directory_identity(
+            source_descriptor, source, "release publication input"
+        )
+    finally:
+        os.close(source_descriptor)
+    outputs = [_absolute(path) for path in output_directories]
+    paths = [source, *outputs]
+    if len(outputs) < 1 or len(set(paths)) != len(paths) or Path("/") in paths:
+        raise BundleError("release publication directories are invalid")
+    for index, path in enumerate(paths):
+        for other in paths[index + 1 :]:
+            if path in other.parents or other in path.parents:
+                raise BundleError(
+                    "release publication directories must not be nested"
+                )
+    for output in outputs:
+        _ensure_parent(output.parent)
+        parent = _open_bound_directory(
+            output.parent, "release publication destination parent"
+        )
+        try:
+            if _entry_binding(
+                parent, _valid_leaf_name(output.name, "release publication output")
+            ) is not None:
+                raise BundleError(
+                    f"release publication destination already exists: {output}"
+                )
+        finally:
+            os.close(parent)
+
+
 def commit_directory(stage: Path, output: Path) -> None:
     stage = _absolute(stage)
     output = _absolute(output)
@@ -737,6 +776,11 @@ def main() -> int:
     preflight.add_argument("--repo-root", type=Path, required=True)
     preflight.add_argument("--output-dir", required=True)
     preflight.add_argument("--private-symbols-dir")
+    publication = commands.add_parser("preflight-publication")
+    publication.add_argument("--input-dir", type=Path, required=True)
+    publication.add_argument(
+        "--output-dir", type=Path, action="append", required=True
+    )
     seal = commands.add_parser("seal")
     seal.add_argument("--candidate-dir", type=Path, required=True)
     seal.add_argument("--platform", required=True)
@@ -772,6 +816,8 @@ def main() -> int:
                 "CTX_LINUX_RELEASE_PRIVATE_SYMBOLS_DIR="
                 f"{shlex.quote(str(symbols))}"
             )
+        elif args.command == "preflight-publication":
+            preflight_publication_directories(args.input_dir, args.output_dir)
         elif args.command == "seal":
             print(seal_bundle(args.candidate_dir, args.platform, args.source_commit))
         elif args.command == "verify":

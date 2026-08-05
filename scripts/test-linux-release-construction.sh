@@ -441,7 +441,7 @@ grep -F 'require_authoritative=1' \
   scripts/smoke-daemon-semantic-release.sh >/dev/null
 grep -F -- '--source-commit "${source_commit}"' \
   scripts/stage-github-release-assets.sh >/dev/null
-grep -F 'validate_staged_cli_evidence ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64' \
+grep -F 'ctx-freebsd-x64 ctx-freebsd-x64 freebsd-x64' \
   scripts/stage-github-release-assets.sh >/dev/null
 grep -F 'required ONNX Runtime sidecar' \
   scripts/stage-github-release-assets.sh >/dev/null
