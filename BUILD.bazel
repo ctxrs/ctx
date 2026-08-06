@@ -429,6 +429,23 @@ sh_test(
     target_compatible_with = ["@platforms//os:linux"],
 )
 
+sh_test(
+    name = "semantic_release_smoke_tests",
+    srcs = ["scripts/tests/smoke-daemon-semantic-release-test.sh"],
+    data = [
+        "contracts/release-targets-v1.json",
+        "scripts/check-public-cli-build-info.py",
+        "scripts/dev-install-from-metadata.sh",
+        "scripts/public-cli-host-runtime-evidence.sh",
+        "scripts/public-cli-runtime-authority.sh",
+        "scripts/release/release_bundle.py",
+        "scripts/smoke-daemon-semantic-release.sh",
+        "scripts/write-public-cli-build-info.py",
+    ],
+    tags = ["release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
 py_test(
     name = "release_target_matrix_check",
     srcs = ["scripts/check-release-target-matrix.py"],
