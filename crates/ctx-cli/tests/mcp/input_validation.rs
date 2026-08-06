@@ -229,11 +229,30 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
 
     let responses = mcp_roundtrip(&temp, &requests);
 
-    for (offset, (id, _, _, detail)) in cases.iter().enumerate() {
+    for (offset, (id, name, _, detail)) in cases.iter().enumerate() {
         let result = &responses[offset + 1]["result"];
         assert_eq!(responses[offset + 1]["id"], *id);
         assert_eq!(result["isError"], true);
         assert_eq!(result["structuredContent"]["error_code"], "invalid_request");
+        if *name == "blame" {
+            assert_eq!(
+                result["structuredContent"],
+                json!({
+                    "error": "invalid_request",
+                    "error_code": "invalid_request",
+                    "reason": "request_invalid",
+                    "message": "The blame request is invalid.",
+                    "retryable": false,
+                }),
+                "{id}: {result:#?}"
+            );
+            assert_eq!(
+                mcp_content_text(result),
+                "The blame request is invalid.",
+                "{id}: {result:#?}"
+            );
+            continue;
+        }
         assert!(
             result["structuredContent"]["error"]
                 .as_str()

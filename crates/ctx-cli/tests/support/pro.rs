@@ -332,11 +332,13 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
         "uuid": "d863cb84-6bd3-8071-abdb-5326c44c896a",
     });
     let record: ctx_pro_host_protocol::CoreRecord = serde_json::from_value(serde_json::json!({
-        "record_version": 1,
+        "record_version": ctx_history_core::CORE_RECORD_VERSION,
         "event_id": event_id,
         "session_id": session_id,
         "parent_session_id": null,
         "root_session_id": session_id,
+        "session_relationship": "root",
+        "event_origin": {"kind": "unknown"},
         "source": source,
         "provider_session_id": "golden-session",
         "native_event_id": null,
@@ -352,7 +354,7 @@ fn initialize_provider_neutral_core_projection(data_root: &Path) -> String {
         "parser_revision": "golden-parser-v1",
         "normalization_revision": 1,
         "content": {
-            "policy_revision": 2,
+            "policy_revision": ctx_history_core::CORE_CONTENT_POLICY_REVISION,
             "policy_status": "selected",
             "normalized_body": "provider-neutral Pro query fixture",
             "structured_content": null,

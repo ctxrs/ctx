@@ -77,13 +77,22 @@ fn fresh_home_search_mvp_flow() {
             "record_id",
             "history_record_id",
             "raw_source_path",
-            "kind",
             "external_session_id",
         ],
+    );
+    assert!(
+        search["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| result.get("kind").is_none()),
+        "search results must not regain the obsolete top-level kind field: {search:#}"
     );
     let first_result = &search["results"][0];
     assert_eq!(first_result["result_type"], "session_result");
     assert_eq!(first_result["result_scope"], "session");
+    assert_eq!(first_result["session_relationship"], "root");
+    assert_eq!(first_result["event_origin"]["kind"], "unknown");
     let ctx_event_id = first_result["ctx_event_id"].as_str().unwrap().to_owned();
     let ctx_session_id = first_result["ctx_session_id"].as_str().unwrap().to_owned();
     let provider_session_id = first_result["provider_session_id"]
