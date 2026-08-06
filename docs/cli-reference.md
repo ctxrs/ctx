@@ -549,7 +549,8 @@ bound to the request and graph state.
 JSON and MCP always include freshness. Human output hides routine currentness
 and warns when the result uses stale committed
 history. A stale positive attribution may succeed; a stale no-attribution result
-fails because the miss would not be definitive.
+fails because the miss would not be definitive. Mixed stale coverage also fails
+when even one evaluated unit is `none`.
 
 Commit output groups assertions as `Produced by`, `Possible producers`, and
 `Also recorded`; inspection or reference evidence never appears as production.

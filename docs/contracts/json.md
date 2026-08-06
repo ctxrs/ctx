@@ -1031,8 +1031,9 @@ commit-rewrite ambiguity remain failures.
 CLI JSON and MCP `structuredContent` both include the same top-level
 `freshness` object with `state` (`current` or `stale_committed`). Human output
 hides routine `current` freshness and warns for `stale_committed`. A stale
-positive result may succeed, but a stale `none` would be inconclusive and is a
-typed failure instead.
+result may succeed only when every evaluated unit is `proven`, `possible`, or
+`conflicting`. Any stale page with a `none` unit fails as `stale_source`
+because even one missing attribution would be inconclusive.
 
 CLI JSON and MCP serialize the identical `evidence_context` object without
 changing the private helper `BlameResult` or protocol version:

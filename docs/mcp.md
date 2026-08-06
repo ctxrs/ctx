@@ -179,7 +179,7 @@ coverage.
 MCP and CLI JSON include the same `freshness` object. Routine `current`
 freshness stays out of human CLI
 output; `stale_committed` is warned. A stale miss fails rather than claiming
-`none`.
+`none`; mixed stale coverage also fails when any evaluated unit is `none`.
 
 `pro_status` is read-only. `blame` advertises `readOnlyHint: false` because its
 bounded maintenance wake can cause the daemon to advance the encrypted derived
