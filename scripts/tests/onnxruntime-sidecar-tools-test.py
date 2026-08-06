@@ -306,6 +306,8 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("run-macos-release-signing.sh", coordinator)
         self.assertIn("macos-release-signing-evidence.py", coordinator)
         self.assertIn('mv "${temporary_output}"', coordinator)
+        self.assertIn('"${archive_command[@]}"', coordinator)
+        self.assertNotIn("mapfile", coordinator)
         for path in TOOLS.iterdir():
             if not path.is_file():
                 continue
