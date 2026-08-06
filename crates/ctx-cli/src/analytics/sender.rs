@@ -1,4 +1,4 @@
-use std::{env, path::Path};
+use std::{cell::Cell, env, path::Path};
 
 use anyhow::Result;
 use chrono::Timelike;
@@ -16,6 +16,29 @@ use super::*;
 
 const MAX_EVENTS_PER_REQUEST: usize = 50;
 
+thread_local! {
+    static DELIVERY_FAILURE_OUTPUT_QUIET: Cell<bool> = const { Cell::new(false) };
+}
+
+struct DeliveryFailureOutputGuard {
+    previous: bool,
+}
+
+pub(crate) fn quiet_delivery_failure_output(quiet: bool) -> impl Drop {
+    let previous = DELIVERY_FAILURE_OUTPUT_QUIET.replace(quiet);
+    DeliveryFailureOutputGuard { previous }
+}
+
+impl Drop for DeliveryFailureOutputGuard {
+    fn drop(&mut self) {
+        DELIVERY_FAILURE_OUTPUT_QUIET.set(self.previous);
+    }
+}
+
+fn delivery_failure_output_allowed() -> bool {
+    !DELIVERY_FAILURE_OUTPUT_QUIET.get()
+}
+
 pub(crate) fn send_batch(data_root: &Path, config: &AppConfig, events: &[PublicEventV1]) {
     if events.is_empty()
         || !config.analytics.enabled
@@ -24,6 +47,9 @@ pub(crate) fn send_batch(data_root: &Path, config: &AppConfig, events: &[PublicE
         return;
     }
     if let Err(err) = send_batch_inner(data_root, config, events) {
+        if !delivery_failure_output_allowed() {
+            return;
+        }
         if env::var_os("CTX_ANALYTICS_DEBUG").is_some() {
             eprintln!("ctx analytics delivery failed: {err:#}");
         }
@@ -764,6 +790,30 @@ fn insert_optional_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_scope_blocks_debug_output_without_muting_human_or_daemon_callers() {
+        assert!(delivery_failure_output_allowed());
+        {
+            let _machine = quiet_delivery_failure_output(true);
+            assert!(
+                !delivery_failure_output_allowed(),
+                "an explicit debug request must stop at this gate in machine mode"
+            );
+            {
+                let _nested_human = quiet_delivery_failure_output(false);
+                assert!(delivery_failure_output_allowed());
+            }
+            assert!(!delivery_failure_output_allowed());
+        }
+        assert!(delivery_failure_output_allowed());
+        assert!(
+            std::thread::spawn(delivery_failure_output_allowed)
+                .join()
+                .unwrap(),
+            "daemon and other sender threads retain debug output by default"
+        );
+    }
 
     fn numbered_events(count: usize) -> Vec<Value> {
         (0..count).map(|index| json!({ "index": index })).collect()

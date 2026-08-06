@@ -161,6 +161,8 @@ pub(crate) fn run_cli() -> Result<()> {
     let json_output = command_json_output(&cli.command);
     let machine_output = command_machine_readable_output(&cli.command, json_output);
     let stable_pro_error_json = command_uses_stable_pro_error_json(&cli.command, json_output);
+    let _analytics_delivery_failure_output =
+        analytics::quiet_delivery_failure_output(machine_output);
     if let CommandRoot::Referral(args) = &cli.command {
         let validation = args.validate_invocation();
         if stable_pro_error_json {
@@ -772,6 +774,34 @@ mod tests {
             let json_output = command_json_output(&cli.command);
             assert!(
                 !command_uses_stable_pro_error_json(&cli.command, json_output),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_debug_quiet_scope_tracks_blame_machine_output() {
+        for (args, expected_machine_output) in [
+            (&["blame", "file", "src/main.rs", "--format=json"][..], true),
+            (
+                &[
+                    "--color=always",
+                    "blame",
+                    "commit",
+                    "abc1234",
+                    "--format",
+                    "json",
+                ],
+                true,
+            ),
+            (&["blame", "file", "src/main.rs"], false),
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let json_output = command_json_output(&cli.command);
+            assert_eq!(
+                command_machine_readable_output(&cli.command, json_output),
+                expected_machine_output,
                 "{args:?}"
             );
         }

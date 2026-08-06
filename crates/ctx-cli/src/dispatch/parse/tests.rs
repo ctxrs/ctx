@@ -199,6 +199,139 @@ fn machine_parse_errors_remain_raw_clap_bytes() {
 }
 
 #[test]
+fn raw_argv_classifier_requires_unambiguous_blame_json() {
+    let arguments = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+
+    for values in [
+        &["ctx", "blame", "file", "src/lib.rs", "--format=json"][..],
+        &[
+            "ctx",
+            "--data-root",
+            "/tmp/ctx-test",
+            "blame",
+            "file",
+            "src/lib.rs",
+            "--format",
+            "json",
+        ],
+        &[
+            "ctx",
+            "--color=always",
+            "--quiet",
+            "blame",
+            "--data-root",
+            "/tmp/ctx-test",
+            "file",
+            "src/lib.rs",
+            "--format=json",
+        ],
+        &[
+            "ctx",
+            "blame",
+            "--color",
+            "never",
+            "--format=json",
+            "file",
+            "src/lib.rs",
+        ],
+    ] {
+        assert!(
+            raw_argv_selects_blame_json(&arguments(values)),
+            "{values:?}"
+        );
+    }
+
+    for values in [
+        &["ctx", "blame", "file", "src/lib.rs"][..],
+        &["ctx", "search", "blame", "--format=json"],
+        &["ctx", "--data-root", "blame", "status", "--format=json"],
+        &["ctx", "--format=json", "blame", "file", "src/lib.rs"],
+        &["ctx", "blame", "file", "src/lib.rs", "--", "--format=json"],
+        &[
+            "ctx",
+            "blame",
+            "file",
+            "src/lib.rs",
+            "--format=json",
+            "--format=text",
+        ],
+        &[
+            "ctx",
+            "--help",
+            "blame",
+            "file",
+            "src/lib.rs",
+            "--format=json",
+        ],
+    ] {
+        assert!(
+            !raw_argv_selects_blame_json(&arguments(values)),
+            "{values:?}"
+        );
+    }
+}
+
+#[test]
+fn blame_json_parse_failure_is_one_exact_trusted_diagnostic() {
+    let unsafe_value = "\u{1b}[31msecret\u{202e}";
+    let values = [
+        "ctx",
+        "--color=always",
+        "blame",
+        "src/lib.rs",
+        "--type",
+        unsafe_value,
+        "--format=json",
+        "--data-root",
+        "/tmp/ctx-test",
+    ];
+    let (error, arguments) = error_and_arguments(&values);
+    assert!(error.to_string().contains("secret"));
+
+    let stdout = SharedBytes::default();
+    let stdout_copy = stdout.clone();
+    let stderr = SharedBytes::default();
+    let stderr_copy = stderr.clone();
+    let mut ui = Ui::with_writers(
+        stdout,
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
+        stderr,
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
+    );
+    write_adapted_clap_output(&error, &arguments, true, &mut ui).unwrap();
+    ui.flush().unwrap();
+
+    assert!(stdout_copy.bytes().is_empty());
+    assert_eq!(
+        String::from_utf8(stderr_copy.bytes()).unwrap(),
+        "{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\",\"reason\":\"request_invalid\",\"message\":\"The blame request is invalid.\",\"retryable\":false}\n"
+    );
+}
+
+#[test]
+fn human_blame_parse_failures_keep_the_styled_clap_recovery() {
+    let (error, arguments) =
+        error_and_arguments(&["ctx", "blame", "file", "src/lib.rs", "--limit", "0"]);
+    let stderr = SharedBytes::default();
+    let stderr_copy = stderr.clone();
+    let mut ui = Ui::with_writers(
+        SharedBytes::default(),
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
+        stderr,
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
+    );
+    write_adapted_clap_output(&error, &arguments, false, &mut ui).unwrap();
+    ui.flush().unwrap();
+
+    let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+    assert!(rendered.contains('\u{1b}'), "{rendered:?}");
+    let plain = anstream::adapter::strip_str(&rendered).to_string();
+    assert!(plain.contains("invalid value '0' for '--limit'"), "{plain}");
+    assert!(plain.contains("ctx blame file [OPTIONS] <PATH>"), "{plain}");
+    assert!(!plain.contains("\"error_code\""), "{plain}");
+}
+
+#[test]
 fn human_parse_errors_use_the_selected_styled_stderr() {
     let (error, arguments) = error_and_arguments(&["ctx", "sources", "--provider", "unknown"]);
     let stderr = SharedBytes::default();
