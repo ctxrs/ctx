@@ -222,7 +222,7 @@ def target_package_identities(
             workspace_by_name.setdefault(name, []).append(identity)
 
     for label in labels:
-        repository_match = re.search(r"(?:^|~)(crates__[^/]+)//", label)
+        repository_match = re.search(r"(?:^|[~+])(crates__[^/]+)//", label)
         if repository_match is not None:
             candidates = by_crate_repository.get(repository_match.group(1), [])
             if len(candidates) != 1:

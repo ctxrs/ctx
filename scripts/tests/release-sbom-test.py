@@ -16,6 +16,7 @@ import zipfile
 SCRIPT = Path(__file__).resolve().parents[1] / "release-sbom.py"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+CRATE_REPOSITORY_PREFIX = "rules_rust++crate+"
 TANTIVY_FEATURES = (
     "columnar-zstd-compression",
     "fs4",
@@ -185,7 +186,7 @@ repository.workspace = true
         )
 
         for name, version in EXTERNAL_PACKAGES:
-            repository = f"rules_rust~~crate~crates__{name}-{version}"
+            repository = f"{CRATE_REPOSITORY_PREFIX}crates__{name}-{version}"
             manifest = self.runfiles / repository / "Cargo.toml"
             manifest.parent.mkdir(parents=True)
             manifest.write_text(
@@ -209,7 +210,7 @@ repository = "https://example.invalid/{name}"
             "@@//crates/ctx-semantic-model:ctx_semantic_model",
         ]
         inventory_labels.extend(
-            f"@@rules_rust~~crate~crates__{name}-{version}//:{name}"
+            f"@@{CRATE_REPOSITORY_PREFIX}crates__{name}-{version}//:{name}"
             for name, version in EXTERNAL_PACKAGES
         )
         self.target_inventory = self.root / "target-dependency-inventory.txt"
@@ -225,7 +226,7 @@ repository = "https://example.invalid/{name}"
             f"main\t{directory}/Cargo.toml" for _, directory in WORKSPACE_PACKAGES
         )
         for name, version in EXTERNAL_PACKAGES:
-            repository = f"rules_rust~~crate~crates__{name}-{version}"
+            repository = f"{CRATE_REPOSITORY_PREFIX}crates__{name}-{version}"
             material_lines.extend(
                 (
                     f"external\t{repository}/Cargo.toml",
@@ -233,7 +234,7 @@ repository = "https://example.invalid/{name}"
                 )
             )
         tantivy_label = (
-            "@@rules_rust~~crate~crates__tantivy-0.26.1//:tantivy"
+            f"@@{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.26.1//:tantivy"
         )
         material_lines.extend(
             f"feature\t{tantivy_label}\t{feature}"
@@ -691,7 +692,7 @@ repository = "https://example.invalid/{name}"
     def test_missing_license_expression_is_rejected(self) -> None:
         manifest = (
             self.runfiles
-            / "rules_rust~~crate~crates__tantivy-0.26.1/Cargo.toml"
+            / f"{CRATE_REPOSITORY_PREFIX}crates__tantivy-0.26.1/Cargo.toml"
         )
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
