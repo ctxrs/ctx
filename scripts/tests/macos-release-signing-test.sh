@@ -31,7 +31,7 @@ case "${1:-}" in
     ;;
   dgst)
     if [[ -e "${TMPDIR}/fake-production-team-digest" ]]; then
-      printf '%s *stdin\n' '913603530eb11be6c4e501c7a8190bee4192f3536ac195add60716e3e372594a'
+      printf '%s *stdin\n' '013a2701d0f3400afe5257f41fce0e2d4276ef37981e443b1d3aeb442a95763c'
     else
       sha256sum | awk '{print $1 " *stdin"}'
     fi
