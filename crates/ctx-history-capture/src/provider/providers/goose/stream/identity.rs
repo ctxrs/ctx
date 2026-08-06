@@ -56,12 +56,16 @@ pub(in super::super) fn goose_message_identity_counts_sql(
     let candidate = goose_normalized_message_id_sql(&schema.message_id_expression(candidate_alias));
     format!(
         "select
+             case when typeof({candidate_alias}.session_id) = 'text'
+                  then {candidate_alias}.session_id
+             end as native_session_id,
              {candidate} as native_message_id,
              count(*) as message_id_uses
          from messages {candidate_alias}
          join {selected_relation} selected_identity
-           on selected_identity.native_message_id = {candidate}
-         group by {candidate}"
+           on selected_identity.native_session_id = {candidate_alias}.session_id
+          and selected_identity.native_message_id = {candidate}
+         group by {candidate_alias}.session_id, {candidate}"
     )
 }
 
@@ -71,13 +75,7 @@ pub(in super::super) fn goose_native_message_identity(
     native_order: i64,
 ) -> GooseNativeMessageIdentity {
     let identity_degraded = native_message_id.is_none() || message_id_uses != 1;
-    let provider_message_identity = if identity_degraded {
-        format!("row-{native_order}")
-    } else {
-        native_message_id
-            .clone()
-            .unwrap_or_else(|| format!("row-{native_order}"))
-    };
+    let provider_message_identity = native_message_id.clone();
     let native_identity = if identity_degraded {
         goose_tagged_fallback_message_identity(native_order)
     } else {

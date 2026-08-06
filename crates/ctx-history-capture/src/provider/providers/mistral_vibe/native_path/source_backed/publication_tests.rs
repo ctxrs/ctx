@@ -1,6 +1,8 @@
 use std::{fs, path::Path};
 
-use ctx_history_core::{CoreRecord, EventIdentityInput, NativeItemKey, TypedKey};
+use ctx_history_core::{
+    CoreRecord, EventIdentityInput, EventOrigin, NativeItemKey, SessionRelationshipKind, TypedKey,
+};
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::Value;
 
@@ -49,12 +51,23 @@ fn terminal(id: &str, composite_name: &str, tool: &str, transport: &str, content
 }
 
 fn write_session(root: &Path, messages: &str) {
-    let session = root.join("session");
+    write_named_session(root, "session", SESSION_ID, None, messages);
+}
+
+fn write_named_session(
+    root: &Path,
+    directory: &str,
+    session_id: &str,
+    parent_session_id: Option<&str>,
+    messages: &str,
+) {
+    let session = root.join(directory);
     fs::create_dir_all(&session).unwrap();
     fs::write(
         session.join("meta.json"),
         serde_json::json!({
-            "session_id": SESSION_ID,
+            "session_id": session_id,
+            "parent_session_id": parent_session_id,
             "start_time": "2026-01-02T03:04:05Z",
             "environment": {"working_directory": "/tmp/mistral"},
         })
@@ -95,7 +108,11 @@ fn publish(root: &Path, index: &Path) -> Vec<CoreRecord> {
         },
     )
     .unwrap();
-    let source = source_key(SESSION_ID).unwrap();
+    published_session(index, SESSION_ID)
+}
+
+fn published_session(index: &Path, provider_session_id: &str) -> Vec<CoreRecord> {
+    let source = source_key(provider_session_id).unwrap();
     let mut records = VerifiedIndex::open(index)
         .unwrap()
         .core_source_event_page(&source, None, 64)
@@ -106,6 +123,62 @@ fn publish(root: &Path, index: &Path) -> Vec<CoreRecord> {
         .collect::<Vec<_>>();
     records.sort_by_key(|record| record.event_sequence);
     records
+}
+
+#[test]
+fn exact_parent_metadata_publishes_forked_relationship_with_unknown_copy_origin() {
+    let parent_messages = serde_json::json!({
+        "role": "user",
+        "message_id": "copied-message",
+        "content": "parent retained message",
+    })
+    .to_string()
+        + "\n";
+    let child_messages = serde_json::json!({
+        "role": "user",
+        "message_id": "copied-message",
+        "content": "child retained message",
+    })
+    .to_string()
+        + "\n";
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    write_named_session(
+        temp.path(),
+        "parent",
+        "mistral-parent",
+        None,
+        &parent_messages,
+    );
+    write_named_session(
+        temp.path(),
+        "child",
+        "mistral-child",
+        Some("mistral-parent"),
+        &child_messages,
+    );
+    let index = temp.path().join("index");
+    refresh_source_backed_generation(
+        &index,
+        &registry(temp.path()),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+
+    let parent = published_session(&index, "mistral-parent").remove(0);
+    let child = published_session(&index, "mistral-child").remove(0);
+    assert_eq!(parent.session_relationship, SessionRelationshipKind::Root);
+    assert_eq!(parent.event_origin, EventOrigin::Unknown);
+    assert_eq!(child.session_relationship, SessionRelationshipKind::Forked);
+    assert_eq!(child.parent_session_id, Some(parent.session_id));
+    assert_eq!(child.root_session_id, parent.session_id);
+    assert!(child.is_primary);
+    assert_eq!(child.agent_type, AgentType::Primary.as_str());
+    assert_eq!(child.event_origin, EventOrigin::Unknown);
+    assert_eq!(parent.native_event_id, child.native_event_id);
+    assert_ne!(parent.event_id, child.event_id);
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     io,
     path::{Path, PathBuf},
@@ -10,7 +10,8 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
     EventIdentityInput, EventType, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    ScannedSourceCounts, SessionIdentityInput, SessionRelationshipKind, SourceAnchor, SourceKey,
+    StableEntityId, TypedKey,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -18,8 +19,8 @@ use thiserror::Error;
 
 use super::{
     normalization::{
-        goose_timestamp, normalize_goose_native_message, normalize_goose_native_output,
-        GooseNativeEvent, GooseNativeEventKind,
+        goose_native_tool_call_ids, goose_timestamp, normalize_goose_native_message,
+        normalize_goose_native_output, GooseNativeEvent, GooseNativeEventKind,
     },
     position::goose_message_locator,
     schema::GooseNativeSchema,
@@ -56,7 +57,7 @@ use fingerprint::GooseLogicalFingerprint;
 const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
 const GOOSE_SOURCE_ANCHOR_KEY: &str = "selected-platform-sessions-db";
 const GOOSE_SOURCE_SCHEMA_VARIANT: &str = "goose-sessions-sqlite-v0";
-const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v5";
+const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v6";
 const GOOSE_NATIVE_SESSION_NAMESPACE: &str = "goose.session";
 const GOOSE_NATIVE_EVENT_NAMESPACE: &str = "goose.message";
 const GOOSE_LOGICAL_SESSION_KIND: &str = "goose-session";
@@ -410,6 +411,9 @@ fn observe_goose_logical_fingerprint(
 #[derive(Clone)]
 struct GooseSessionProjection {
     session_id: StableEntityId,
+    parent_session_id: Option<StableEntityId>,
+    root_session_id: StableEntityId,
+    parent_provider_session_id: Option<String>,
     cwd: Option<String>,
 }
 
@@ -454,11 +458,15 @@ fn scan_goose_logical_snapshot(
                 row.id,
                 GooseSessionProjection {
                     session_id,
+                    parent_session_id: None,
+                    root_session_id: session_id,
+                    parent_provider_session_id: row.parent_session_id,
                     cwd: row.working_dir,
                 },
             );
         }
     }
+    resolve_goose_session_lineage(source, &mut sessions)?;
 
     let mut message_keyset = GooseNativeRowKeyset::Unstarted;
     loop {
@@ -542,7 +550,7 @@ fn scan_goose_logical_snapshot(
     })
 }
 
-fn goose_source_key() -> GooseSourceBackedResultV0<SourceKey> {
+pub(super) fn goose_source_key() -> GooseSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         GOOSE_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(GOOSE_SOURCE_ANCHOR_KEY)?,
@@ -571,6 +579,54 @@ fn goose_session_id(
     })?)
 }
 
+fn resolve_goose_session_lineage(
+    source: &SourceKey,
+    sessions: &mut BTreeMap<String, GooseSessionProjection>,
+) -> GooseSourceBackedResultV0<()> {
+    let session_ids = sessions.keys().cloned().collect::<Vec<_>>();
+    for session_identity in session_ids {
+        let parent_identity = sessions
+            .get(&session_identity)
+            .and_then(|session| session.parent_provider_session_id.clone());
+        let parent_session_id = parent_identity
+            .as_deref()
+            .map(|parent| goose_session_id(source, parent))
+            .transpose()?;
+        let mut current = session_identity.as_str();
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert(current.to_owned()) {
+                return Err(CaptureError::InvalidPayload(
+                    "Goose delegated session lineage contains a cycle".to_owned(),
+                )
+                .into());
+            }
+            let Some(parent) = sessions
+                .get(current)
+                .and_then(|session| session.parent_provider_session_id.as_deref())
+            else {
+                break;
+            };
+            if !sessions.contains_key(parent) {
+                return Err(CaptureError::InvalidPayload(format!(
+                    "Goose delegated session {current} names missing parent {parent}"
+                ))
+                .into());
+            }
+            current = parent;
+        }
+        let root_session_id = goose_session_id(source, current)?;
+        let session = sessions
+            .get_mut(&session_identity)
+            .ok_or(CaptureError::SystemInvariant(
+                "Goose session lineage lost a discovered session",
+            ))?;
+        session.parent_session_id = parent_session_id;
+        session.root_session_id = root_session_id;
+    }
+    Ok(())
+}
+
 fn goose_core_record(
     source: &SourceKey,
     session: &GooseSessionProjection,
@@ -588,9 +644,13 @@ fn goose_core_record(
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
-    let (relation, primary_key) = goose_message_locator(event.native_order);
+    let (relation, _) = goose_message_locator(event.native_order);
     debug_assert_eq!(relation, GOOSE_LOGICAL_RELATION);
-    let native_event_id = TypedKey::bytes(primary_key)?;
+    let native_event_id = event
+        .provider_message_identity
+        .as_deref()
+        .map(TypedKey::utf8)
+        .transpose()?;
     let normalized_event_type = event_type(&event);
     let normalized_role = provider_role(Some(&event.role));
     let body = if event.searchable_text.is_empty() {
@@ -616,6 +676,11 @@ fn goose_core_record(
     );
     let native_file_touches =
         (!event.file_touches.is_empty()).then(|| serde_json::json!(&event.file_touches));
+    let agent_type = if session.parent_session_id.is_some() {
+        AgentType::Subagent
+    } else {
+        AgentType::Primary
+    };
     let mut record = CoreRecord::new_selected(
         event_id,
         session.session_id,
@@ -623,13 +688,20 @@ fn goose_core_record(
         source.clone(),
         event_sequence,
         normalized_event_type.as_str(),
-        AgentType::Primary.as_str(),
+        agent_type.as_str(),
         true,
         GOOSE_PARSER_REVISION,
         body,
     )?;
+    if let Some(parent_session_id) = session.parent_session_id {
+        record.set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(parent_session_id),
+            session.root_session_id,
+        )?;
+    }
     record.provider_session_id = Some(event.session_identity);
-    record.native_event_id = Some(native_event_id);
+    record.native_event_id = native_event_id;
     record.occurred_at_unix_ms = occurred_at_unix_ms;
     record.role = Some(normalized_role.as_str().to_owned());
     record.cwd = session.cwd.clone();
@@ -643,6 +715,13 @@ fn goose_core_record(
         record.content.structured_content = Some(serde_json::json!({
             "provider_native_result": event.content,
         }));
+    } else if event.kind == GooseNativeEventKind::ToolCall {
+        let tool_call_ids = goose_native_tool_call_ids(&event.content);
+        if !tool_call_ids.is_empty() {
+            record.content.structured_content = Some(serde_json::json!({
+                "provider_native_tool_call_ids": tool_call_ids,
+            }));
+        }
     }
     record.validate_contract()?;
     Ok(record)

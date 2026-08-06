@@ -91,7 +91,7 @@ pub(super) struct GooseScannedMessage {
     pub(super) sqlite_rowid: i64,
     pub(super) native_order: i64,
     pub(super) native_identity: String,
-    pub(super) provider_message_identity: String,
+    pub(super) provider_message_identity: Option<String>,
     pub(super) identity_degraded: bool,
     pub(super) session_identity: String,
     pub(super) role: String,
@@ -112,7 +112,7 @@ pub(super) struct GooseRetainedMessage {
     pub(super) sqlite_rowid: i64,
     pub(super) native_order: i64,
     pub(super) native_identity: String,
-    pub(super) provider_message_identity: String,
+    pub(super) provider_message_identity: Option<String>,
     pub(super) identity_degraded: bool,
     pub(super) session_identity: String,
     pub(super) role: String,
@@ -129,7 +129,7 @@ pub(super) struct GooseRetainedMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct GooseNativeMessageIdentity {
     pub(super) native_identity: String,
-    pub(super) provider_message_identity: String,
+    pub(super) provider_message_identity: Option<String>,
     pub(super) identity_degraded: bool,
 }
 
@@ -310,6 +310,7 @@ pub(super) fn goose_fetch_native_session_page(
                     goose_mode: row.get(23)?,
                     archived_at: row.get(24)?,
                     project_id: row.get(25)?,
+                    parent_session_id: row.get(26)?,
                 })
             } else {
                 None
@@ -377,16 +378,18 @@ pub(super) fn goose_fetch_native_message_page(
              select
                  m.rowid as sqlite_rowid,
                  case when typeof(m.id) = 'integer' then m.id end as native_order,
-                 {normalized_message_id} as native_message_id
+                 {normalized_message_id} as native_message_id,
+                 case when typeof(m.session_id) = 'text' then m.session_id end
+                     as native_session_id
              from messages m
              {key_predicate}
              order by m.id
              limit {limit_parameter}
          ),
          page_message_ids as (
-             select distinct native_message_id
+             select distinct native_session_id, native_message_id
              from page_keys
-             where native_message_id is not null
+             where native_session_id is not null and native_message_id is not null
          ),
          identity_counts as (
              {identity_counts}
@@ -443,7 +446,8 @@ pub(super) fn goose_fetch_native_message_page(
              from page_keys
              join messages m on m.rowid = page_keys.sqlite_rowid
              left join identity_counts
-               on identity_counts.native_message_id = page_keys.native_message_id
+               on identity_counts.native_session_id = page_keys.native_session_id
+              and identity_counts.native_message_id = page_keys.native_message_id
              left join accepted_sessions
                on accepted_sessions.session_identity = m.session_id
          ),

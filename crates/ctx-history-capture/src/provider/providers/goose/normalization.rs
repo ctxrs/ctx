@@ -69,6 +69,51 @@ pub(crate) fn goose_message_text(content: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
+pub(super) fn goose_native_tool_call_ids(content: &Value) -> Vec<String> {
+    const MAX_TOOL_CALL_ID_BYTES: usize = 16 * 1024;
+    let mut ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    goose_visit_tool_requests(content, &mut |object| {
+        let call = object.get("toolCall").and_then(Value::as_object);
+        let id = call
+            .and_then(|call| call.get("id"))
+            .or_else(|| object.get("toolCallId"))
+            .or_else(|| object.get("tool_call_id"))
+            .or_else(|| object.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && id.len() <= MAX_TOOL_CALL_ID_BYTES);
+        if let Some(id) = id {
+            if seen.insert(id.to_owned()) {
+                ids.push(id.to_owned());
+            }
+        }
+    });
+    ids
+}
+
+fn goose_visit_tool_requests(
+    value: &Value,
+    visitor: &mut impl FnMut(&serde_json::Map<String, Value>),
+) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                goose_visit_tool_requests(item, visitor);
+            }
+        }
+        Value::Object(object)
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("toolRequest" | "frontendToolRequest")
+            ) =>
+        {
+            visitor(object);
+        }
+        _ => {}
+    }
+}
+
 fn goose_collect_complete_text(value: &Value, parts: &mut Vec<String>) {
     match value {
         Value::Array(items) => {
@@ -370,7 +415,7 @@ pub(super) struct GooseNativeEvent {
     pub(super) sqlite_rowid: i64,
     pub(super) native_order: i64,
     pub(super) native_identity: String,
-    pub(super) provider_message_identity: String,
+    pub(super) provider_message_identity: Option<String>,
     pub(super) identity_degraded: bool,
     pub(super) session_identity: String,
     pub(super) kind: GooseNativeEventKind,

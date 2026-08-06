@@ -33,6 +33,7 @@ pub(super) struct GooseSessionRow {
     pub(super) goose_mode: Option<String>,
     pub(super) archived_at: Option<String>,
     pub(super) project_id: Option<String>,
+    pub(super) parent_session_id: Option<String>,
 }
 
 pub(super) fn goose_session_columns(conn: &Connection) -> Result<BTreeSet<String>> {
@@ -143,6 +144,7 @@ pub(super) fn goose_session_expressions(
         goose_optional_field(columns, alias, "goose_mode", "NULL"),
         goose_optional_field(columns, alias, "archived_at", "NULL"),
         goose_optional_field(columns, alias, "project_id", "NULL"),
+        goose_optional_field(columns, alias, "parent_session_id", "NULL"),
     ])
 }
 
@@ -163,7 +165,7 @@ pub(super) fn goose_schema_version(conn: &Connection) -> Result<Option<i64>> {
         .map_err(CaptureError::from)
 }
 
-const GOOSE_NATIVE_SCHEMA_VERSION: i64 = 14;
+const GOOSE_NATIVE_SCHEMA_VERSION: i64 = 15;
 const GOOSE_CAPABILITY_DIGEST_DOMAIN: &[u8] = b"ctx-goose-nativepath-capability-v1\0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +260,7 @@ impl GooseNativeSchema {
             "goose_mode",
             "archived_at",
             "project_id",
+            "parent_session_id",
         ] {
             if self.session_columns.contains(column) {
                 predicates.push(format!("typeof({alias}.{column}) in ('null', 'text')"));

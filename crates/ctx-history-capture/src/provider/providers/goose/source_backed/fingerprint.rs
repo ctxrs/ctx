@@ -80,6 +80,7 @@ fn hash_session_row(digest: &mut Sha256, row: &GooseSessionRow) {
         row.goose_mode.as_deref(),
         row.archived_at.as_deref(),
         row.project_id.as_deref(),
+        row.parent_session_id.as_deref(),
     ] {
         hash_optional_text(digest, value);
     }
