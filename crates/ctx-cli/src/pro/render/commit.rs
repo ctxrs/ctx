@@ -84,6 +84,43 @@ pub(super) fn render(
     }
 }
 
+pub(super) fn has_observations(target: &ResourceRef, matches: &[BlameMatch]) -> bool {
+    matches.iter().any(|value| match value {
+        BlameMatch::Commit(value) => {
+            !matches!(
+                value.predicate,
+                CommitPredicate::ProducedBy | CommitPredicate::PossiblyProducedBy
+            ) || !same_resource(&value.subject, target)
+        }
+        BlameMatch::File(_) | BlameMatch::PullRequest(_) => false,
+    })
+}
+
+/// Typed lineage owns yield attribution. Legacy production matches remain in
+/// machine output, while the human view retains only independent observations.
+pub(super) fn render_observations(
+    document: &mut Document,
+    context: &RenderContext,
+    target: &ResourceRef,
+    matches: &[BlameMatch],
+) {
+    let observations = matches.iter().filter_map(|value| match value {
+        BlameMatch::Commit(value)
+            if !matches!(
+                value.predicate,
+                CommitPredicate::ProducedBy | CommitPredicate::PossiblyProducedBy
+            ) || !same_resource(&value.subject, target) =>
+        {
+            Some(value)
+        }
+        BlameMatch::Commit(_) | BlameMatch::File(_) | BlameMatch::PullRequest(_) => None,
+    });
+    push_heading(document, 0, "Also recorded");
+    for value in observations {
+        render_match(document, context, target, value, true);
+    }
+}
+
 fn render_match(
     document: &mut Document,
     context: &RenderContext,

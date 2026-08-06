@@ -343,6 +343,7 @@ fn file_result(path: &str, evidence: Vec<NumberedEvidence>) -> BlameResult {
         matches: Vec::new(),
         evidence,
         next: None,
+        lineage: None,
     }
 }
 
@@ -1340,6 +1341,7 @@ fn duplicate_verifiers_unverified_records_and_non_file_targets_omit() {
             matches: Vec::new(),
             evidence: vec![evidence.clone()],
             next: None,
+            lineage: None,
         };
         assert!(project_evidence_previews(&result, &[proof])
             .previews

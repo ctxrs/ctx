@@ -1,0 +1,39 @@
+Commit      3333333333333333333333333333333333333333
+Repository  ctxrs/ctx
+
+Lineage · complete
+  Rebase · replacement
+    source        commit 1111111111111111111111111111111111111111 (sha1)
+    result        commit 3333333333333333333333333333333333333333 (sha1)
+    outcome       operation yielded this commit
+    actor         session rebaser
+    proof         repository verified
+    observed      2024-07-14T23:33:20.000Z
+    operation id  operation:rebase-1
+    evidence      [1]
+
+  Origin
+    commit        1111111111111111111111111111111111111111 (sha1)
+
+  Current at ref
+    commit        3333333333333333333333333333333333333333 (sha1)
+    scope         branch refs/heads/main
+    observation   observation:main-1
+    observed      2024-07-14T23:33:21.000Z
+    evidence      [2]
+
+  implementation  commit lineage does not establish who implemented the code
+
+Also recorded
+  Referenced by
+    subject       commit 3333333333333333333333333333333333333333
+    object        session observer
+    confidence    explicit
+    state         asserted
+    evidence      [2]
+
+Evidence
+  [1]
+    ctx show event 8cd765ac-68a3-8a2c-ae04-669a08be6370 · Core aaaaaaaaaaaa · source 0f989cc2-fb1b-8eaf-8403-078d7622424b · sequence 1
+  [2]
+    ctx show event 418791d0-baa1-8a8b-9e54-e8686506684d · Core aaaaaaaaaaaa · source f250f0f2-6daa-873c-a205-37e400c29be1 · sequence 2

@@ -9,11 +9,16 @@ use ctx_history_core::{
 };
 use ctx_pro_host_protocol::{
     AgentAttribution, BlameAttribution, BlameContinuation, BlameCoverage, BlameCoverageUnit,
-    BlameMatch, BlameOutcome, BlameResult, CommitBlameMatch, CommitFactType, CommitPredicate,
-    ContinuationReason, EvidenceCitation, FactConfidence, FactState, FileBlameMatch, GitSnapshot,
-    LineRange, NumberedEvidence, ProductionRelationship, PullRequestAction, PullRequestActivity,
-    PullRequestBlameMatch, PullRequestBlameRelationship, PullRequestCommit,
-    PullRequestCommitRelationship, ResolvedBlameTarget, ResourceKind, ResourceRef, WorktreeStatus,
+    BlameMatch, BlameOutcome, BlameResult, CommitBlameMatch, CommitFactType, CommitLineage,
+    CommitLineageBounds, CommitLineageEdge, CommitLineageOmission, CommitLineageOperationKind,
+    CommitLineageProofClass, CommitLineageRelationClass, CommitLineageState,
+    CommitLineageTruncationReason, CommitLineageYield, CommitPredicate, ContinuationReason,
+    EvidenceCitation, ExactCommitRef, FactConfidence, FactState, FileBlameMatch, GitObjectFormat,
+    GitSnapshot, LineRange, NumberedEvidence, ProductionRelationship, PullRequestAction,
+    PullRequestActivity, PullRequestBlameMatch, PullRequestBlameRelationship, PullRequestCommit,
+    PullRequestCommitRelationship, ResolvedBlameTarget, ResourceKind, ResourceRef,
+    ScopedCommitEndpoint, WorktreeStatus, MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+    MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -163,6 +168,7 @@ fn file_preview_result(evidence_count: u32) -> BlameResult {
         matches: Vec::new(),
         evidence,
         next: None,
+        lineage: None,
     }
 }
 
@@ -182,6 +188,7 @@ fn commit_blame_result(evidence_count: u32) -> BlameResult {
         matches: Vec::new(),
         evidence: (1..=evidence_count).map(event_evidence).collect(),
         next: None,
+        lineage: None,
     }
 }
 
@@ -387,6 +394,7 @@ fn direct_commit_blame_shows_its_parent_session() {
         matches: vec![item],
         evidence: vec![event_evidence(1)],
         next: None,
+        lineage: None,
     };
 
     let rendered = render_plain(&result, 80);
@@ -424,6 +432,138 @@ fn commit_match(
         owning_root: None,
         evidence_numbers: vec![evidence_number],
     })
+}
+
+fn exact_commit(digit: char) -> ExactCommitRef {
+    let oid = digit.to_string().repeat(40);
+    ExactCommitRef {
+        resource: resource(&format!("commit:{oid}"), ResourceKind::Commit, &oid),
+        object_format: GitObjectFormat::Sha1,
+        oid,
+    }
+}
+
+fn lineage_edge(
+    source: ExactCommitRef,
+    result: ExactCommitRef,
+    state: CommitLineageState,
+) -> CommitLineageEdge {
+    CommitLineageEdge {
+        operation_id: "operation:rebase-1".to_owned(),
+        kind: CommitLineageOperationKind::Rebase,
+        relation_class: CommitLineageRelationClass::Replacement,
+        source,
+        result,
+        actor: resource("session:rebaser", ResourceKind::Session, "rebaser"),
+        proof_class: CommitLineageProofClass::RepositoryVerified,
+        state,
+        observed_at_ms: Some(1_721_000_000_000),
+        evidence_numbers: vec![1],
+    }
+}
+
+fn complete_lineage_result() -> BlameResult {
+    let requested = exact_commit('3');
+    let source = exact_commit('1');
+    let commit = requested.resource.clone();
+    BlameResult {
+        snapshot: protocol_snapshot(),
+        target: ResolvedBlameTarget::Commit {
+            commit: commit.clone(),
+            repository: repository(),
+        },
+        git_snapshot: None,
+        matches: vec![
+            commit_match(
+                &commit,
+                CommitFactType::Produced,
+                CommitPredicate::ProducedBy,
+                "rebaser",
+                FactConfidence::Explicit,
+                FactState::Asserted,
+                1,
+            ),
+            commit_match(
+                &commit,
+                CommitFactType::Referenced,
+                CommitPredicate::ReferencedBy,
+                "observer",
+                FactConfidence::Explicit,
+                FactState::Asserted,
+                2,
+            ),
+        ],
+        evidence: (1..=2).map(event_evidence).collect(),
+        next: None,
+        lineage: Some(CommitLineage {
+            requested: requested.clone(),
+            edges: vec![lineage_edge(
+                source.clone(),
+                requested.clone(),
+                CommitLineageState::Asserted,
+            )],
+            yielded_by: Vec::new(),
+            origin: Some(source),
+            endpoint: Some(ScopedCommitEndpoint::CurrentAtRef {
+                commit: requested,
+                scope: resource(
+                    "branch:refs/heads/main",
+                    ResourceKind::Branch,
+                    "refs/heads/main",
+                ),
+                observation_id: "observation:main-1".to_owned(),
+                observed_at_ms: 1_721_000_001_000,
+                evidence_numbers: vec![2],
+            }),
+            complete: true,
+            ambiguous: false,
+            bounds: CommitLineageBounds {
+                returned_events: 1,
+                returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+                examined_events: 2,
+                examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+                omission: CommitLineageOmission::Exact(0),
+                truncation_reason: None,
+            },
+        }),
+    }
+}
+
+fn partial_lineage_result(omission: CommitLineageOmission) -> BlameResult {
+    let requested = exact_commit('3');
+    let source = exact_commit('1');
+    BlameResult {
+        snapshot: protocol_snapshot(),
+        target: ResolvedBlameTarget::Commit {
+            commit: requested.resource.clone(),
+            repository: repository(),
+        },
+        git_snapshot: None,
+        matches: Vec::new(),
+        evidence: vec![event_evidence(1)],
+        next: None,
+        lineage: Some(CommitLineage {
+            requested: requested.clone(),
+            edges: vec![lineage_edge(
+                source,
+                requested,
+                CommitLineageState::Ambiguous,
+            )],
+            yielded_by: Vec::new(),
+            origin: None,
+            endpoint: None,
+            complete: false,
+            ambiguous: true,
+            bounds: CommitLineageBounds {
+                returned_events: 1,
+                returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+                examined_events: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+                examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+                omission,
+                truncation_reason: Some(CommitLineageTruncationReason::ExaminedEventLimit),
+            },
+        }),
+    }
 }
 
 #[test]
@@ -468,12 +608,119 @@ fn commit_renderer_keeps_production_grouping_golden() {
         ],
         evidence: (1..=3).map(event_evidence).collect(),
         next: None,
+        lineage: None,
     };
     result.validate().unwrap();
     assert_eq!(
         render_plain(&result, 80),
         include_str!("../../../testdata/pro/blame_commit.golden.txt")
     );
+}
+
+#[test]
+fn commit_lineage_complete_human_output_is_exact_and_deduplicates_yield_actor() {
+    let result = complete_lineage_result();
+    result.validate().unwrap();
+    let rendered = render_plain(&result, 80);
+    assert_eq!(
+        rendered,
+        include_str!("../../../testdata/pro/blame_commit_lineage_complete.golden.txt")
+    );
+    assert_eq!(rendered.matches("session rebaser").count(), 1, "{rendered}");
+    assert!(!rendered.contains("Produced by"), "{rendered}");
+    assert!(!rendered.contains("created"), "{rendered}");
+    assert!(!rendered.contains("implemented by"), "{rendered}");
+}
+
+#[test]
+fn commit_lineage_partial_human_output_is_exact_and_abstains() {
+    let result = partial_lineage_result(CommitLineageOmission::AtLeast(2));
+    result.validate().unwrap();
+    assert_eq!(
+        render_plain(&result, 80),
+        include_str!("../../../testdata/pro/blame_commit_lineage_partial.golden.txt")
+    );
+}
+
+#[test]
+fn commit_lineage_omission_counts_are_only_shown_when_supported() {
+    for (omission, expected, rejected) in [
+        (
+            CommitLineageOmission::Exact(2),
+            "More proven lineage may be omitted: 2 events.",
+            "at least 2",
+        ),
+        (
+            CommitLineageOmission::AtLeast(2),
+            "More proven lineage may be omitted: at least 2 events.",
+            "omitted: 2 events",
+        ),
+        (
+            CommitLineageOmission::Unknown,
+            "More proven lineage may be omitted.",
+            "omitted:",
+        ),
+    ] {
+        let result = partial_lineage_result(omission);
+        result.validate().unwrap();
+        let rendered = render_plain(&result, 80);
+        assert!(rendered.contains(expected), "{rendered}");
+        assert!(!rendered.contains(rejected), "{rendered}");
+    }
+}
+
+#[test]
+fn commit_lineage_json_is_the_unmodified_protocol_value() {
+    let result = complete_lineage_result();
+    let rendered = super::blame_result_json(&result, None);
+    assert_eq!(
+        rendered["lineage"],
+        serde_json::to_value(result.lineage.as_ref().unwrap()).unwrap()
+    );
+    assert_eq!(rendered["matches"].as_array().map(Vec::len), Some(2));
+    assert_eq!(rendered["next"], serde_json::Value::Null);
+}
+
+#[test]
+fn commit_lineage_keeps_paginated_production_for_a_different_exact_object() {
+    let mut result = complete_lineage_result();
+    let source = exact_commit('1').resource;
+    result.matches.push(commit_match(
+        &source,
+        CommitFactType::Produced,
+        CommitPredicate::ProducedBy,
+        "source-producer",
+        FactConfidence::Explicit,
+        FactState::Asserted,
+        1,
+    ));
+    result.validate().unwrap();
+    let rendered = render_plain(&result, 80);
+    assert!(rendered.contains("Also recorded"), "{rendered}");
+    assert!(rendered.contains("  Produced by"), "{rendered}");
+    assert!(rendered.contains("session source-producer"), "{rendered}");
+}
+
+#[test]
+fn standalone_yield_is_rendered_only_as_a_yield_record() {
+    let mut result = complete_lineage_result();
+    let lineage = result.lineage.as_mut().unwrap();
+    lineage.edges.clear();
+    lineage.yielded_by = vec![CommitLineageYield {
+        yield_id: "yield:requested".to_owned(),
+        actor: resource("session:rebaser", ResourceKind::Session, "rebaser"),
+        proof_class: CommitLineageProofClass::RecordExact,
+        state: CommitLineageState::Asserted,
+        observed_at_ms: Some(1_721_000_000_000),
+        evidence_numbers: vec![1],
+    }];
+    lineage.origin = Some(lineage.requested.clone());
+    lineage.bounds.examined_events = 1;
+    result.validate().unwrap();
+    let rendered = render_plain(&result, 80);
+    assert!(rendered.contains("Yield record"), "{rendered}");
+    assert!(!rendered.contains("Rebase · replacement"), "{rendered}");
+    assert_eq!(rendered.matches("session rebaser").count(), 1, "{rendered}");
 }
 
 #[test]
@@ -548,6 +795,7 @@ fn pull_request_renderer_preserves_proof_edges_and_continuation_golden() {
             cursor: "next-page".to_owned(),
             reason: ContinuationReason::MoreMatches,
         }),
+        lineage: None,
     };
     result.validate().unwrap();
     assert_eq!(
@@ -610,6 +858,7 @@ fn paginated_pr_result(commit_page: bool) -> BlameResult {
             },
             reason: ContinuationReason::MoreMatches,
         }),
+        lineage: None,
     }
 }
 
@@ -658,6 +907,7 @@ fn paginated_file_result() -> BlameResult {
             cursor: "more-lines".to_owned(),
             reason: ContinuationReason::MoreCommittedLines,
         }),
+        lineage: None,
     }
 }
 
@@ -700,6 +950,7 @@ fn empty_commit_page_has_a_concise_golden() {
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     };
     result.validate().unwrap();
     assert_eq!(
@@ -730,6 +981,7 @@ fn ambiguous_commit_never_implies_an_asserted_producer_golden() {
         )],
         evidence: vec![event_evidence(1)],
         next: None,
+        lineage: None,
     };
     result.validate().unwrap();
     assert_eq!(
@@ -771,6 +1023,7 @@ fn narrow_commit_uses_label_children_without_truncating_ids_golden() {
         matches: vec![produced],
         evidence: vec![evidence],
         next: None,
+        lineage: None,
     };
     result.validate().unwrap();
     let rendered = render_plain(&result, 32);
@@ -822,6 +1075,7 @@ fn many_attributions_keep_two_space_ancestry_at_reference_widths() {
             cursor: "next-attribution-page".to_owned(),
             reason: ContinuationReason::MoreCommittedLines,
         }),
+        lineage: None,
     };
     result.validate().unwrap();
 
@@ -916,6 +1170,7 @@ fn core_evidence_keeps_generation_event_source_and_sequence() {
         )],
         evidence: vec![evidence],
         next: None,
+        lineage: None,
     };
     result.validate().unwrap();
     let rendered = render_plain(&result, 120);
@@ -944,6 +1199,7 @@ fn styled_output_strips_to_plain_and_plain_bytes_ignore_color() {
         )],
         evidence: vec![event_evidence(1)],
         next: None,
+        lineage: None,
     };
     let styled_context =
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Always));

@@ -766,9 +766,12 @@ if __OVERSIZED_BLAME__:
     } for number in range(1, 8 * 32 + 1)]
 evidence_numbers = [item['number'] for item in evidence]
 kind = target['kind']
+lineage = None
 if kind == 'commit':
     oid = target['oid']
-    commit = {'id':'commit:' + oid, 'kind':'commit', 'display':oid}
+    full_oid = oid if __OVERSIZED_BLAME__ or len(oid) in (40, 64) else oid + ('0' * (40 - len(oid)))
+    object_format = 'sha256' if len(full_oid) == 64 else 'sha1'
+    commit = {'id':'commit:' + full_oid, 'kind':'commit', 'display':full_oid}
     resolved = {'kind':'commit', 'commit':commit, 'repository':repository_ref}
     match_count = 8 if __OVERSIZED_BLAME__ else 1
     matches = [{
@@ -794,6 +797,72 @@ if kind == 'commit':
         )
       }
     } for index in range(match_count)]
+    if not __OVERSIZED_BLAME__:
+        source_oid = 'f' * len(full_oid)
+        exact_requested = {
+          'resource':commit,
+          'object_format':object_format,
+          'oid':full_oid
+        }
+        lineage = {
+          'requested':exact_requested,
+          'edges':[{
+            'operation_id':'operation:fixture-rebase',
+            'kind':'rebase',
+            'relation_class':'replacement',
+            'source':{
+              'resource':{
+                'id':'commit:' + source_oid,
+                'kind':'commit',
+                'display':source_oid
+              },
+              'object_format':object_format,
+              'oid':source_oid
+            },
+            'result':exact_requested,
+            'actor':{
+              'id':'session:producer',
+              'kind':'session',
+              'display':'session-producer'
+            },
+            'proof_class':'repository_verified',
+            'state':'asserted',
+            'observed_at_ms':1721000000000,
+            'evidence_numbers':[1]
+          }],
+          'yielded_by':[],
+          'origin':{
+            'resource':{
+              'id':'commit:' + source_oid,
+              'kind':'commit',
+              'display':source_oid
+            },
+            'object_format':object_format,
+            'oid':source_oid
+          },
+          'endpoint':{
+            'kind':'current_at_ref',
+            'commit':exact_requested,
+            'scope':{
+              'id':'branch:refs/heads/main',
+              'kind':'branch',
+              'display':'refs/heads/main'
+            },
+            'observation_id':'observation:fixture-main',
+            'observed_at_ms':1721000001000,
+            'evidence_numbers':[1]
+          },
+          'complete':True,
+          'ambiguous':False,
+          'bounds':{
+            'returned_events':1,
+            'returned_event_limit':__LINEAGE_RETURNED_EVENT_LIMIT__,
+            'examined_events':1,
+            'examined_event_limit':__LINEAGE_EXAMINED_EVENT_LIMIT__,
+            'omission':{'kind':'exact', 'count':0},
+            'truncation_reason':None
+          }
+        }
     snapshot = None
     outcome = {
       'attribution':'proven',
@@ -894,7 +963,8 @@ send({
     'outcome':outcome,
     'matches':matches,
     'evidence':evidence,
-    'next':None
+    'next':None,
+    'lineage':lineage
   }}
 })
 request = receive()
@@ -933,7 +1003,15 @@ send({
         .replace("__EVIDENCE_SOURCE__", &evidence_source)
         .replace("__EVIDENCE_SESSION_ID__", &evidence_session_id)
         .replace("__EVIDENCE_EVENT_ID__", &evidence_event_id)
-        .replace("__EVIDENCE_EVENT_SEQUENCE__", &evidence_event_sequence);
+        .replace("__EVIDENCE_EVENT_SEQUENCE__", &evidence_event_sequence)
+        .replace(
+            "__LINEAGE_RETURNED_EVENT_LIMIT__",
+            &ctx_pro_host_protocol::MAX_COMMIT_LINEAGE_RETURNED_EVENTS.to_string(),
+        )
+        .replace(
+            "__LINEAGE_EXAMINED_EVENT_LIMIT__",
+            &ctx_pro_host_protocol::MAX_COMMIT_LINEAGE_EXAMINED_EVENTS.to_string(),
+        );
     write_python_helper(path, &helper);
 }
 
