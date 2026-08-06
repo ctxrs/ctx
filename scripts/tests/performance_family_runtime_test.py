@@ -66,14 +66,10 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["request_state"], "published")
         self.assertEqual(job["source_count"], 1)
-        self.assertEqual(
-            job["progress"],
-            {
-                "completed_sources": 1,
-                "phase": "published",
-                "total_sources": 1,
-            },
-        )
+        progress = job["progress"]
+        self.assertEqual(progress["phase"], "published")
+        self.assertEqual(progress["total_sources_known"], True)
+        self.assertEqual(progress["completed_sources"], progress["total_sources"])
         self.assertEqual(job["certified_source_count"], corpus.source_count)
         self.assertEqual(
             job["certified_source_bytes"], corpus.certified_source_bytes

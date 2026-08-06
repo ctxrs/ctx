@@ -99,6 +99,7 @@ fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
             status["daemon"]["running"] == true
                 && status["daemon"]["pid"] == daemon_pid
                 && status["daemon"]["core_refresh_endpoint"]["available"] == true
+                && status["daemon"]["core_refresh_endpoint"]["owner_pid"] == daemon_pid
         }) {
             return daemon;
         }

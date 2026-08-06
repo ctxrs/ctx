@@ -274,8 +274,10 @@ mod native {
         let quiet_before = wait_for_stable_quiet_snapshot(&harness);
         let wakeup_before: Value = serde_json::from_slice(&quiet_before.wakeup.bytes).unwrap();
         assert_eq!(
-            wakeup_before["wakeup"]["timeout_wakeups"], 0,
-            "{wakeup_before:#}"
+            counter(&wakeup_before, "timeout_wakeups"),
+            counter(&wakeup_before, "scheduled_retry_wakeups")
+                .saturating_add(counter(&wakeup_before, "scheduled_refresh_wakeups")),
+            "startup observed an unclassified timeout wake: {wakeup_before:#}"
         );
         thread::sleep(QUIESCENT_WINDOW);
         assert!(

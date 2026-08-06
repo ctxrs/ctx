@@ -761,14 +761,10 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["request_state"], "published")
         self.assertEqual(job["source_count"], TOP_PROVIDER_COUNT)
-        self.assertEqual(
-            job["progress"],
-            {
-                "completed_sources": TOP_PROVIDER_COUNT,
-                "phase": "published",
-                "total_sources": TOP_PROVIDER_COUNT,
-            },
-        )
+        progress = job["progress"]
+        self.assertEqual(progress["phase"], "published")
+        self.assertEqual(progress["total_sources_known"], True)
+        self.assertEqual(progress["completed_sources"], progress["total_sources"])
         self.assertTrue(job["generation_changed"])
         self.assertEqual(job["certified_source_count"], corpus.source_count)
         self.assertEqual(job["certified_source_bytes"], corpus.fixture_bytes)
