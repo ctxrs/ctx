@@ -25,7 +25,6 @@ clap.workspace = true
 clap_mangen.workspace = true
 ed25519-dalek.workspace = true
 jsonc-parser = { version = "0.33", features = ["serde", "serde_json"] }
-memmap2.workspace = true
 notify.workspace = true
 quick-xml.workspace = true
 ring.workspace = true
@@ -54,6 +53,7 @@ ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-refresh = { path = "../ctx-history-refresh" }
 ctx-pro-host-protocol = { path = "../ctx-pro-host-protocol" }
+ctx-semantic-index = { path = "../ctx-semantic-index" }
 ctx-semantic-model = { path = "../ctx-semantic-model" }
 
 [target.'cfg(unix)'.dependencies]
@@ -78,6 +78,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 assert_cmd.workspace = true
 ctx-history-refresh = { path = "../ctx-history-refresh", features = ["test-support"] }
+ctx-semantic-index = { path = "../ctx-semantic-index", features = ["test-support"] }
 ctx-semantic-model = { path = "../ctx-semantic-model", features = ["test-support"] }
 predicates.workspace = true
 proptest.workspace = true

@@ -24,12 +24,9 @@ use anyhow::Context;
 #[cfg(test)]
 use anyhow::{anyhow, Result};
 #[cfg(test)]
-use serde_json::{json, Value};
-#[cfg(test)]
-use uuid::Uuid;
-
-#[cfg(test)]
 use ctx_history_core::utc_now;
+#[cfg(test)]
+use serde_json::{json, Value};
 
 #[cfg(test)]
 fn committed_generation_recovery_error(
@@ -71,15 +68,9 @@ pub(crate) use model_config::{
 };
 mod resource_policy;
 mod runtime_limits;
+pub(crate) use ctx_semantic_index::SemanticNotReady;
 #[allow(unused_imports)]
 pub(crate) use runtime_limits::{DAEMON_IDLE_EXIT_SECONDS_CAP, SEMANTIC_WORKER_BATCH_MAX};
-mod document;
-pub(in crate::semantic) use document::SemanticEventDocument;
-mod vector_store;
-#[cfg(test)]
-use vector_store::*;
-mod query_index;
-pub(crate) use query_index::SemanticNotReady;
 mod query_adapter;
 pub(crate) use query_adapter::SemanticQueryAdapter;
 mod query_service;
@@ -89,12 +80,7 @@ use query_service::*;
 mod paths_status;
 #[cfg(test)]
 use paths_status::*;
-mod vector_store_schema;
-#[cfg(test)]
-use vector_store_schema::{SemanticVectorStoreError, SEMANTIC_VECTOR_SCHEMA_VERSION};
 mod daemon;
-mod vector_store_search;
-mod vector_store_state;
 pub(crate) use daemon::run_daemon_command;
 #[cfg(test)]
 use daemon::*;
@@ -142,7 +128,6 @@ pub(crate) use daemon_autostart::{
 mod health_search;
 #[cfg(test)]
 use health_search::*;
-mod indexing;
 #[cfg(test)]
 mod query_service_transport_tests;
 #[cfg(all(

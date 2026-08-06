@@ -21,7 +21,7 @@ use super::flat_segments::{
     FlatSourceStageResume, PinnedFlatGeneration,
 };
 use super::{SemanticChunkDocument, SemanticVectorStore};
-use crate::semantic::{
+use crate::{
     indexing::{semantic_chunks_for_document, semantic_document_hash, semantic_source_text},
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
     SemanticEventDocument,
@@ -45,7 +45,7 @@ use state::{
 const SEARCH_DIRECTORY: &str = "search";
 const SEMANTIC_DIRECTORY: &str = "semantic";
 
-pub(in crate::semantic) fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
+pub fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
     data_root.join(SEARCH_DIRECTORY).join(SEMANTIC_DIRECTORY)
 }
 
@@ -175,33 +175,83 @@ pub(super) struct SourceBackedSemanticPage {
     pub(super) terminal: bool,
 }
 
-pub(in crate::semantic) trait SemanticDocumentBuilder {
+pub trait SemanticDocumentBuilder {
     /// Builds one semantic document exclusively from complete records in the
     /// same pinned Core generation. `None` is an intentional policy filter.
     fn build_document(&mut self, record: &CoreEventRecord)
         -> Result<Option<SemanticEventDocument>>;
 }
 
-pub(in crate::semantic) trait SemanticBatchEmbedder {
+pub trait SemanticBatchEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>>;
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(in crate::semantic) struct SourceBackedSemanticOutcome {
+pub struct SourceBackedSemanticOutcome {
     /// Exact number of complete Core records decoded from changed-source pages.
-    pub(in crate::semantic) records_decoded: usize,
+    pub(crate) records_decoded: usize,
     /// Exact stored Core JSON bytes decoded from changed-source pages.
-    pub(in crate::semantic) record_bytes_decoded: u64,
-    pub(in crate::semantic) records_embedded: usize,
-    pub(in crate::semantic) records_reused: usize,
-    pub(in crate::semantic) records_filtered: usize,
-    pub(in crate::semantic) invalidated_chunks: usize,
-    pub(in crate::semantic) deleted_chunks: usize,
-    pub(in crate::semantic) vectors_touched: u64,
-    pub(in crate::semantic) vector_bytes_touched: u64,
-    pub(in crate::semantic) metadata_records_touched: u64,
-    pub(in crate::semantic) ready: bool,
-    pub(in crate::semantic) work_remaining: bool,
+    pub(crate) record_bytes_decoded: u64,
+    pub(crate) records_embedded: usize,
+    pub(crate) records_reused: usize,
+    pub(crate) records_filtered: usize,
+    pub(crate) invalidated_chunks: usize,
+    pub(crate) deleted_chunks: usize,
+    pub(crate) vectors_touched: u64,
+    pub(crate) vector_bytes_touched: u64,
+    pub(crate) metadata_records_touched: u64,
+    pub(crate) ready: bool,
+    pub(crate) work_remaining: bool,
+}
+
+impl SourceBackedSemanticOutcome {
+    pub fn records_decoded(&self) -> usize {
+        self.records_decoded
+    }
+
+    pub fn record_bytes_decoded(&self) -> u64 {
+        self.record_bytes_decoded
+    }
+
+    pub fn records_embedded(&self) -> usize {
+        self.records_embedded
+    }
+
+    pub fn records_reused(&self) -> usize {
+        self.records_reused
+    }
+
+    pub fn records_filtered(&self) -> usize {
+        self.records_filtered
+    }
+
+    pub fn invalidated_chunks(&self) -> usize {
+        self.invalidated_chunks
+    }
+
+    pub fn deleted_chunks(&self) -> usize {
+        self.deleted_chunks
+    }
+
+    pub fn vectors_touched(&self) -> u64 {
+        self.vectors_touched
+    }
+
+    pub fn vector_bytes_touched(&self) -> u64 {
+        self.vector_bytes_touched
+    }
+
+    pub fn metadata_records_touched(&self) -> u64 {
+        self.metadata_records_touched
+    }
+
+    pub fn ready(&self) -> bool {
+        self.ready
+    }
+
+    pub fn work_remaining(&self) -> bool {
+        self.work_remaining
+    }
 }
 
 fn merge_outcome(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutcome) {
@@ -227,7 +277,7 @@ fn merge_outcome(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSema
     total.work_remaining |= next.work_remaining;
 }
 
-pub(in crate::semantic) enum SourceBackedGenerationPin {
+pub enum SourceBackedGenerationPin {
     NotReady,
     ReadyEmpty,
     Ready(PinnedFlatGeneration),
@@ -242,7 +292,7 @@ struct ResolvedSourceDocument {
 }
 
 impl SemanticVectorStore {
-    pub(in crate::semantic) fn reconcile_source_backed_index(
+    pub fn reconcile_source_backed_index(
         &mut self,
         index: &VerifiedIndex,
         builder: &mut dyn SemanticDocumentBuilder,
@@ -878,7 +928,7 @@ impl SemanticVectorStore {
 }
 /// Control-message exclusion is applied only after complete normalized Core
 /// content has crossed the generation pin.
-pub(in crate::semantic) fn semantic_core_content_is_control(text: &str) -> bool {
+pub fn semantic_core_content_is_control(text: &str) -> bool {
     let user = text
         .strip_prefix("user:\n")
         .unwrap_or(text)

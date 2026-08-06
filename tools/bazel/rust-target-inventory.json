@@ -81,6 +81,12 @@
       "targets": {"lib:ctx_history_refresh": "//crates/ctx-history-refresh:lib"},
       "native_unit": "//crates/ctx-history-refresh:unit_tests"
     },
+    "ctx-semantic-index": {
+      "manifest": "crates/ctx-semantic-index/Cargo.toml",
+      "targets": {"lib:ctx_semantic_index": "//crates/ctx-semantic-index:lib"},
+      "native_unit": "//crates/ctx-semantic-index:unit_tests",
+      "feature_variants": ["//crates/ctx-semantic-index:test_support_lib"]
+    },
     "ctx-semantic-model": {
       "manifest": "crates/ctx-semantic-model/Cargo.toml",
       "targets": {

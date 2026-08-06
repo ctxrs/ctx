@@ -1,7 +1,7 @@
 use super::*;
 
 impl FlatSegmentStore {
-    pub(in crate::semantic) fn active_event_lookup(&self) -> FlatResult<FlatActiveEventLookup> {
+    pub(crate) fn active_event_lookup(&self) -> FlatResult<FlatActiveEventLookup> {
         if let Some(lookup) = self.reconciliation_lookup()? {
             return Ok(lookup);
         }
@@ -23,7 +23,7 @@ impl FlatSegmentStore {
         Ok(FlatActiveEventLookup { events })
     }
 
-    pub(in crate::semantic) fn source_reconciliation_events(
+    pub(crate) fn source_reconciliation_events(
         &self,
         event_ids: &[Uuid],
     ) -> FlatResult<Vec<Option<FlatActiveEvent>>> {
@@ -31,11 +31,11 @@ impl FlatSegmentStore {
     }
 
     /// Retains one source-local Flat view across every bounded Core page.
-    pub(in crate::semantic) fn begin_reconciliation_view(&self, id: &str) -> FlatResult<()> {
+    pub(crate) fn begin_reconciliation_view(&self, id: &str) -> FlatResult<()> {
         self.begin_reconciliation_view_inner(id, None)
     }
 
-    pub(in crate::semantic) fn begin_source_reconciliation_view(
+    pub(crate) fn begin_source_reconciliation_view(
         &self,
         source_identity_digest: &str,
         source_reconciliation_id: &str,
@@ -118,11 +118,7 @@ impl FlatSegmentStore {
         Ok(())
     }
 
-    pub(in crate::semantic) fn reconciliation_event_ids(
-        &self,
-        id: &str,
-        limit: usize,
-    ) -> FlatResult<Vec<Uuid>> {
+    pub(crate) fn reconciliation_event_ids(&self, id: &str, limit: usize) -> FlatResult<Vec<Uuid>> {
         if limit == 0 {
             return Err(FlatStoreError::InvalidInput(
                 "flat reconciliation event page limit cannot be zero".to_owned(),
@@ -177,7 +173,7 @@ impl FlatSegmentStore {
         Ok(event_ids)
     }
 
-    pub(in crate::semantic) fn finish_reconciliation_view(&self) -> FlatResult<()> {
+    pub(crate) fn finish_reconciliation_view(&self) -> FlatResult<()> {
         let retained = {
             let mut current = self.reconciliation_view.lock().map_err(|_| {
                 FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
@@ -199,14 +195,14 @@ impl FlatSegmentStore {
         Ok(())
     }
 
-    pub(in crate::semantic) fn finish_source_reconciliation_view(
+    pub(crate) fn finish_source_reconciliation_view(
         &self,
         receipt_input: Option<FlatSourceReceiptInput>,
     ) -> FlatResult<FlatSourceFinalization> {
         self.finish_source_staging(receipt_input.as_ref())
     }
 
-    pub(in crate::semantic) fn compact_if_needed(&self) -> FlatResult<()> {
+    pub(crate) fn compact_if_needed(&self) -> FlatResult<()> {
         let stats = self.active_stats()?;
         if stats.segment_count >= COMPACT_SEGMENT_THRESHOLD
             || (stats.active_chunks > 0
@@ -217,7 +213,7 @@ impl FlatSegmentStore {
         Ok(())
     }
 
-    pub(in crate::semantic) fn source_receipts_match_active_authority(&self) -> FlatResult<bool> {
+    pub(crate) fn source_receipts_match_active_authority(&self) -> FlatResult<bool> {
         let _guard = self.lock_shared()?;
         let Some(selected) = select_manifest(&self.root, &self.contract)? else {
             return Ok(false);
@@ -265,7 +261,7 @@ impl FlatSegmentStore {
         }))
     }
 
-    pub(in crate::semantic) fn reconciliation_active(&self) -> FlatResult<bool> {
+    pub(crate) fn reconciliation_active(&self) -> FlatResult<bool> {
         let view = self.reconciliation_view.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
         })?;
@@ -303,7 +299,7 @@ impl FlatSegmentStore {
 
 impl FlatSegmentStore {
     /// Appends one bounded source page to the private durable staging log.
-    pub(in crate::semantic) fn publish_source_event_page(
+    pub(crate) fn publish_source_event_page(
         &self,
         replacements: &[FlatEventReplacement],
         authority_updates: &[FlatEventMetadataUpdate],

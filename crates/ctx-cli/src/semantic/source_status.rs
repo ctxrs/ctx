@@ -4,20 +4,18 @@ use anyhow::Result;
 use ctx_history_index::{
     current_source_generation_policy, current_source_generation_policy_hash, VerifiedIndex,
 };
+use ctx_semantic_index::{
+    source_backed_semantic_vector_path, SemanticVectorStore, SourceBackedGenerationPin,
+};
 use serde_json::{json, Value};
 
 #[cfg(test)]
 use crate::commands::import::load_explicit_source_catalog_authority;
 use crate::{compact_json, config::AppConfig};
 
-use super::{
-    paths_status::{
-        daemon_core_refresh_job_path, daemon_jobs_path, daemon_report_with_disabled_status,
-        daemon_semantic_job_path, read_daemon_job_status,
-    },
-    vector_store::{
-        source_backed_semantic_vector_path, SemanticVectorStore, SourceBackedGenerationPin,
-    },
+use super::paths_status::{
+    daemon_core_refresh_job_path, daemon_jobs_path, daemon_report_with_disabled_status,
+    daemon_semantic_job_path, read_daemon_job_status,
 };
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -412,21 +410,18 @@ fn semantic_report(data_root: &Path, config: &AppConfig, index: Option<&Verified
             Ok(semantic_documents) => match store
                 .source_backed_generation_pin_exact(index.generation_id(), semantic_documents)
             {
-                Ok(SourceBackedGenerationPin::Ready(pin)) => {
-                    let stats = pin.stats();
-                    compact_json(json!({
-                        "status": "ready",
-                        "reason": Value::Null,
-                        "path": path,
-                        "core_generation_id": index.generation_id(),
-                        "semantic_documents": semantic_documents,
-                        "flat_generation": pin.generation(),
-                        "flat_generation_hash": pin.generation_hash(),
-                        "active_events": stats.active_events,
-                        "active_chunks": stats.active_chunks,
-                        "active_vector_bytes": stats.active_vector_bytes,
-                    }))
-                }
+                Ok(SourceBackedGenerationPin::Ready(pin)) => compact_json(json!({
+                    "status": "ready",
+                    "reason": Value::Null,
+                    "path": path,
+                    "core_generation_id": index.generation_id(),
+                    "semantic_documents": semantic_documents,
+                    "flat_generation": pin.generation(),
+                    "flat_generation_hash": pin.generation_hash(),
+                    "active_events": pin.active_event_count(),
+                    "active_chunks": pin.active_chunk_count(),
+                    "active_vector_bytes": pin.active_vector_bytes(),
+                })),
                 Ok(SourceBackedGenerationPin::ReadyEmpty) => compact_json(json!({
                     "status": "ready",
                     "reason": Value::Null,

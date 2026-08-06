@@ -7,7 +7,7 @@ use ctx_history_index::{
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::compact_json;
+use crate::json::compact_json;
 
 use super::{
     vector_store::{
@@ -21,28 +21,28 @@ const MAX_SEMANTIC_CORE_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 #[error("source-backed semantic search is not ready ({code}): {detail}")]
-pub(crate) struct SemanticNotReady {
+pub struct SemanticNotReady {
     code: &'static str,
     detail: String,
 }
 
 impl SemanticNotReady {
-    pub(crate) fn new(code: &'static str, detail: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             code,
             detail: detail.into(),
         }
     }
 
-    pub(crate) fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         self.code
     }
 
-    pub(crate) fn detail(&self) -> &str {
+    pub fn detail(&self) -> &str {
         &self.detail
     }
 
-    pub(crate) fn retryable(&self) -> bool {
+    pub fn retryable(&self) -> bool {
         matches!(
             self.code,
             "semantic_store_unavailable"
@@ -55,7 +55,7 @@ impl SemanticNotReady {
         )
     }
 
-    pub(crate) fn structured(&self) -> Value {
+    pub fn structured(&self) -> Value {
         json!({
             "error": self.to_string(),
             "error_code": self.code,
@@ -65,14 +65,14 @@ impl SemanticNotReady {
     }
 }
 
-pub(in crate::semantic) struct SemanticQueryPin {
+pub struct SemanticQueryPin {
     core_generation_id: String,
     pinned: Option<PinnedFlatGeneration>,
     filter_projection: Option<(EventSearchFilters, SemanticFilterProjection)>,
 }
 
 impl SemanticQueryPin {
-    pub(in crate::semantic) fn preflight(index: &VerifiedIndex, data_root: &Path) -> Result<Self> {
+    pub fn preflight(index: &VerifiedIndex, data_root: &Path) -> Result<Self> {
         let vector_root = source_backed_semantic_vector_path(data_root);
         let vector_store = SemanticVectorStore::open_read_only(&vector_root)
             .map_err(|error| {
@@ -101,12 +101,12 @@ impl SemanticQueryPin {
         semantic_query_pin_from_readiness(index.generation_id(), readiness)
     }
 
-    pub(in crate::semantic) fn requires_embedding(&self, index: &VerifiedIndex) -> Result<bool> {
+    pub fn requires_embedding(&self, index: &VerifiedIndex) -> Result<bool> {
         validate_semantic_query_generation(index.generation_id(), self)?;
         Ok(self.pinned.is_some())
     }
 
-    pub(in crate::semantic) fn search(
+    pub fn search(
         &mut self,
         index: &VerifiedIndex,
         filters: &EventSearchFilters,
@@ -157,16 +157,16 @@ impl SemanticQueryPin {
         )
     }
 
-    #[cfg(test)]
-    pub(in crate::semantic) fn from_readiness_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_readiness_for_test(
         core_generation_id: &str,
         readiness: SourceBackedGenerationPin,
     ) -> Result<Self> {
         semantic_query_pin_from_readiness(core_generation_id, readiness)
     }
 
-    #[cfg(test)]
-    pub(in crate::semantic) fn filter_projection_identity_for_test(&self) -> Option<usize> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn filter_projection_identity_for_test(&self) -> Option<usize> {
         self.filter_projection
             .as_ref()
             .map(|(_, projection)| projection as *const SemanticFilterProjection as usize)

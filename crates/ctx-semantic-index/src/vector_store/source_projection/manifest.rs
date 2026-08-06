@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
-use crate::semantic::{
+use crate::{
     vector_store::flat_segments::{
         FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
     },

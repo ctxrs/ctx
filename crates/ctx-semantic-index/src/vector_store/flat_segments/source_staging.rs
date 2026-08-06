@@ -34,7 +34,7 @@ struct SourceMutationCursor {
 }
 
 impl FlatSegmentStore {
-    pub(in crate::semantic) fn begin_source_staging(
+    pub(crate) fn begin_source_staging(
         &self,
         source_identity_digest: &str,
         source_reconciliation_id: &str,
@@ -153,7 +153,7 @@ impl FlatSegmentStore {
         Ok(FlatSourceStageResume::Ready)
     }
 
-    pub(in crate::semantic) fn source_staging_events(
+    pub(crate) fn source_staging_events(
         &self,
         event_ids: &[Uuid],
     ) -> FlatResult<Vec<Option<FlatActiveEvent>>> {
@@ -177,7 +177,7 @@ impl FlatSegmentStore {
         Ok(events)
     }
 
-    pub(in crate::semantic) fn stage_source_event_page(
+    pub(crate) fn stage_source_event_page(
         &self,
         replacements: &[FlatEventReplacement],
         authority_updates: &[FlatEventMetadataUpdate],
@@ -313,7 +313,7 @@ impl FlatSegmentStore {
         })
     }
 
-    pub(in crate::semantic) fn finish_source_staging(
+    pub(crate) fn finish_source_staging(
         &self,
         receipt_input: Option<&FlatSourceReceiptInput>,
     ) -> FlatResult<FlatSourceFinalization> {
@@ -524,7 +524,7 @@ impl FlatSegmentStore {
         finalized.outcome()
     }
 
-    pub(in crate::semantic) fn acknowledge_source_staging(
+    pub(crate) fn acknowledge_source_staging(
         &self,
         publication: &FlatPublicationToken,
     ) -> FlatResult<()> {
@@ -588,18 +588,18 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn fail_after_source_publication_commit_once(&self) {
+    pub(crate) fn fail_after_source_publication_commit_once(&self) {
         self.fail_after_source_publication_commit
             .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn take_source_publication_commit_failure(&self) -> bool {
+    pub(crate) fn take_source_publication_commit_failure(&self) -> bool {
         self.fail_after_source_publication_commit
             .swap(false, Ordering::Relaxed)
     }
 
-    pub(in crate::semantic) fn retained_source_candidate(
+    pub(crate) fn retained_source_candidate(
         &self,
         source_identity_digest: &str,
         baseline: &FlatPublicationToken,
@@ -622,7 +622,7 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn corrupt_retained_source_candidate_hash(&self) -> FlatResult<()> {
+    pub(crate) fn corrupt_retained_source_candidate_hash(&self) -> FlatResult<()> {
         corrupt_source_stage_candidate_hash(&self.root)
     }
 

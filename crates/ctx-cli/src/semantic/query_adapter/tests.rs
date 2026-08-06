@@ -6,17 +6,15 @@ use ctx_history_core::{
     SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{CoreEventRecord, GenerationWriter, WriterOptions};
+use ctx_semantic_index::{
+    source_backed_semantic_vector_path,
+    test_support::{pinned_flat_generation, publish_chunk_replacements, semantic_chunk_document},
+    SemanticBatchEmbedder, SemanticChunkDocument, SemanticDocumentBuilder, SemanticEventDocument,
+    SemanticQueryPin, SemanticVectorStore, SourceBackedGenerationPin,
+};
 use uuid::Uuid;
 
 use super::*;
-use crate::semantic::{
-    query_index::SemanticQueryPin,
-    vector_store::{
-        source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
-        SemanticDocumentBuilder, SemanticVectorStore, SourceBackedGenerationPin,
-    },
-    SemanticEventDocument,
-};
 
 fn semantic_index(root: &Path) -> Result<(VerifiedIndex, Uuid)> {
     semantic_index_revision(root, 1, true)
@@ -122,7 +120,7 @@ fn acknowledge_empty_generation(
     for _ in 0..32 {
         if store
             .reconcile_source_backed_index(index, &mut builder, &mut embedder)?
-            .ready
+            .ready()
         {
             return Ok(());
         }
@@ -142,24 +140,15 @@ fn ready_adapter(
     vector_root: &Path,
 ) -> Result<SemanticQueryAdapter> {
     let mut store = SemanticVectorStore::open(vector_root)?;
-    store.publish_chunk_replacements(
+    publish_chunk_replacements(
+        &mut store,
         &[(
-            SemanticChunkDocument {
-                event_id,
-                seq: 1,
-                chunk_index: 0,
-                source_text_hash: "1".repeat(64),
-                text: String::new(),
-                start_char: 0,
-                end_char: 1,
-            },
+            semantic_chunk_document(event_id, 1, 0, "1".repeat(64), String::new(), 0, 1),
             embedding(),
         )],
         &[],
     )?;
-    let pinned = store
-        .flat_pin_generation()?
-        .expect("ready adapter fixture must publish one flat generation");
+    let pinned = pinned_flat_generation(&store)?;
     Ok(SemanticQueryAdapter::from_pin(
         SemanticQueryPin::from_readiness_for_test(
             index.generation_id(),

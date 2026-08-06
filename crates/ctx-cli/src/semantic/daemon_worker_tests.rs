@@ -157,11 +157,11 @@ fn core_builder_combines_complete_lite_turn_with_provider_source_absent() {
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
-    assert_eq!(document.event_id, anchor.event_id.as_uuid());
-    assert_eq!(document.provider, Some(CaptureProvider::Gemini));
-    assert_eq!(document.occurred_at_ms, 3);
+    assert_eq!(document.event_id(), anchor.event_id.as_uuid());
+    assert_eq!(document.provider(), Some(CaptureProvider::Gemini));
+    assert_eq!(document.occurred_at_ms(), 3);
     assert_eq!(
-        document.text,
+        document.text(),
         "user:\nexact Gemini question\n\nassistant:\nfinal exact Gemini answer"
     );
 }
@@ -180,8 +180,8 @@ fn core_builder_preserves_semantic_tail_beyond_sixteen_kib() {
     let document = builder.build_document(record).unwrap().unwrap();
 
     assert!(record.core_record.content.meaningful_text().ends_with(TAIL));
-    assert!(document.text.ends_with(TAIL));
-    assert!(document.text.len() > 16 * 1024);
+    assert!(document.text().ends_with(TAIL));
+    assert!(document.text().len() > 16 * 1024);
 }
 
 #[test]
@@ -205,11 +205,11 @@ fn core_builder_pairs_multiple_lite_turns_with_bounded_forward_queries() {
     let second = builder.build_document(&anchors[1]).unwrap().unwrap();
 
     assert_eq!(
-        first.text,
+        first.text(),
         "user:\nfirst question\n\nassistant:\nfirst answer"
     );
     assert_eq!(
-        second.text,
+        second.text(),
         "user:\nsecond question\n\nassistant:\nsecond answer"
     );
 }
@@ -237,10 +237,10 @@ fn core_builder_streams_multiple_pairing_pages_to_the_final_assistant() {
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
     assert_eq!(
-        document.text,
+        document.text(),
         "user:\nbounded question\n\nassistant:\nlate bounded answer"
     );
-    assert_eq!(document.occurred_at_ms, 3);
+    assert_eq!(document.occurred_at_ms(), 3);
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn core_builder_pairs_many_sessions_without_retaining_a_session_cache() {
         let session = (anchor.event_sequence - 1) / 2;
         let document = builder.build_document(anchor).unwrap().unwrap();
         assert_eq!(
-            document.text,
+            document.text(),
             format!("user:\nquestion {session}\n\nassistant:\nanswer {session}")
         );
     }
@@ -301,8 +301,8 @@ fn core_builder_returns_user_only_when_pairing_byte_budget_is_exhausted() {
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
-    assert_eq!(document.text, "user:\nbyte bounded question");
-    assert_eq!(document.occurred_at_ms, 1);
+    assert_eq!(document.text(), "user:\nbyte bounded question");
+    assert_eq!(document.occurred_at_ms(), 1);
 }
 
 #[test]
@@ -333,8 +333,8 @@ fn core_builder_preserves_assistant_after_more_than_sixty_four_tool_events() {
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
     assert_eq!(
-        document.text,
+        document.text(),
         "user:\ntool-heavy question\n\nassistant:\nanswer beyond the old window"
     );
-    assert_eq!(document.occurred_at_ms, (TOOL_EVENTS + 2) as i64);
+    assert_eq!(document.occurred_at_ms(), (TOOL_EVENTS + 2) as i64);
 }

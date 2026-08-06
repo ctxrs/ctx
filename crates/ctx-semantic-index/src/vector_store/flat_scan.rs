@@ -30,18 +30,18 @@ use scoring::validate_and_dot_le_bytes;
 use scoring::ExactDotProductKernel;
 use validation::{validate_config, validate_normalized_f32};
 
-pub(in crate::semantic) const DEFAULT_NORMALIZATION_TOLERANCE: f64 = 1.0e-3;
+pub(crate) const DEFAULT_NORMALIZATION_TOLERANCE: f64 = 1.0e-3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::semantic) struct FlatScanConfig {
-    pub(in crate::semantic) dimensions: usize,
-    pub(in crate::semantic) top_k: usize,
+pub(crate) struct FlatScanConfig {
+    pub(crate) dimensions: usize,
+    pub(crate) top_k: usize,
     /// Maximum absolute error accepted for `sum(value²)` relative to `1.0`.
-    pub(in crate::semantic) normalization_tolerance: f64,
+    pub(crate) normalization_tolerance: f64,
 }
 
 impl FlatScanConfig {
-    pub(in crate::semantic) const fn new(dimensions: usize, top_k: usize) -> Self {
+    pub(crate) const fn new(dimensions: usize, top_k: usize) -> Self {
         Self {
             dimensions,
             top_k,
@@ -50,10 +50,7 @@ impl FlatScanConfig {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) const fn with_normalization_tolerance(
-        mut self,
-        tolerance: f64,
-    ) -> Self {
+    pub(crate) const fn with_normalization_tolerance(mut self, tolerance: f64) -> Self {
         self.normalization_tolerance = tolerance;
         self
     }
@@ -64,21 +61,21 @@ impl FlatScanConfig {
 /// The caller can retain richer metadata separately and resolve a returned hit
 /// directly through its optional pinned-generation location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatScanLocation {
-    pub(in crate::semantic) segment_index: usize,
-    pub(in crate::semantic) segment_ordinal: usize,
+pub(crate) struct FlatScanLocation {
+    pub(crate) segment_index: usize,
+    pub(crate) segment_ordinal: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::semantic) struct ActiveChunk {
-    pub(in crate::semantic) event_id: Uuid,
-    pub(in crate::semantic) chunk_ordinal: u32,
+pub(crate) struct ActiveChunk {
+    pub(crate) event_id: Uuid,
+    pub(crate) chunk_ordinal: u32,
     location: Option<FlatScanLocation>,
 }
 
 impl ActiveChunk {
     #[cfg(test)]
-    pub(in crate::semantic) const fn new(event_id: Uuid, chunk_ordinal: u32) -> Self {
+    pub(crate) const fn new(event_id: Uuid, chunk_ordinal: u32) -> Self {
         Self {
             event_id,
             chunk_ordinal,
@@ -86,7 +83,7 @@ impl ActiveChunk {
         }
     }
 
-    pub(in crate::semantic) const fn at_location(
+    pub(crate) const fn at_location(
         event_id: Uuid,
         chunk_ordinal: u32,
         location: FlatScanLocation,
@@ -100,7 +97,7 @@ impl ActiveChunk {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::semantic) enum FlatScanSkipReason {
+pub(crate) enum FlatScanSkipReason {
     Filtered,
     #[cfg(test)]
     Tombstoned,
@@ -109,42 +106,42 @@ pub(in crate::semantic) enum FlatScanSkipReason {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatScanCounters {
+pub(crate) struct FlatScanCounters {
     /// Active and skipped logical events observed at the adapter boundary.
-    pub(in crate::semantic) events_seen: usize,
+    pub(crate) events_seen: usize,
     /// Active logical events for which at least one vector was scored.
-    pub(in crate::semantic) events_scored: usize,
+    pub(crate) events_scored: usize,
     /// Active and skipped chunks observed at the adapter boundary.
-    pub(in crate::semantic) chunks_seen: usize,
+    pub(crate) chunks_seen: usize,
     /// Chunks whose vectors were validated and scored.
-    pub(in crate::semantic) chunks_scanned: usize,
+    pub(crate) chunks_scanned: usize,
     /// Chunks omitted before touching vector bytes.
-    pub(in crate::semantic) chunks_skipped: usize,
+    pub(crate) chunks_skipped: usize,
     /// F32 vector bytes read; checked scan paths also validate these bytes.
-    pub(in crate::semantic) vector_bytes_read: usize,
-    pub(in crate::semantic) dot_products: usize,
-    pub(in crate::semantic) filtered_events: usize,
-    pub(in crate::semantic) tombstoned_events: usize,
-    pub(in crate::semantic) superseded_events: usize,
-    pub(in crate::semantic) heap_pushes: usize,
-    pub(in crate::semantic) heap_replacements: usize,
-    pub(in crate::semantic) heap_rejections: usize,
-    pub(in crate::semantic) peak_heap_len: usize,
+    pub(crate) vector_bytes_read: usize,
+    pub(crate) dot_products: usize,
+    pub(crate) filtered_events: usize,
+    pub(crate) tombstoned_events: usize,
+    pub(crate) superseded_events: usize,
+    pub(crate) heap_pushes: usize,
+    pub(crate) heap_replacements: usize,
+    pub(crate) heap_rejections: usize,
+    pub(crate) peak_heap_len: usize,
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::semantic) struct FlatScanResult {
+pub(crate) struct FlatScanResult {
     /// Similarity descending, then event UUID ascending.
-    pub(in crate::semantic) hits: Vec<FlatScanHit>,
-    pub(in crate::semantic) counters: FlatScanCounters,
+    pub(crate) hits: Vec<FlatScanHit>,
+    pub(crate) counters: FlatScanCounters,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::semantic) struct FlatScanHit {
-    pub(in crate::semantic) event_id: Uuid,
-    pub(in crate::semantic) chunk_ordinal: u32,
-    pub(in crate::semantic) similarity: f32,
-    pub(in crate::semantic) location: Option<FlatScanLocation>,
+pub(crate) struct FlatScanHit {
+    pub(crate) event_id: Uuid,
+    pub(crate) chunk_ordinal: u32,
+    pub(crate) similarity: f32,
+    pub(crate) location: Option<FlatScanLocation>,
 }
 
 impl PartialEq for FlatScanHit {
@@ -177,13 +174,13 @@ impl Ord for FlatScanHit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::semantic) enum FlatScanInput {
+pub(crate) enum FlatScanInput {
     Query,
     Vector,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(in crate::semantic) enum FlatScanError {
+pub(crate) enum FlatScanError {
     ZeroDimensions,
     DimensionByteSizeOverflow {
         dimensions: usize,
@@ -323,7 +320,7 @@ fn chunk_suffix(chunk_ordinal: Option<u32>) -> String {
 /// byte constructor owns exactly one `dimensions * 4` decoded query buffer.
 /// During scanning, retained state is one event candidate plus at most `top_k`
 /// heap entries.
-pub(in crate::semantic) struct ExactFlatF32Scan<'query> {
+pub(crate) struct ExactFlatF32Scan<'query> {
     query: Cow<'query, [f32]>,
     config: FlatScanConfig,
     vector_bytes: usize,
@@ -335,10 +332,7 @@ pub(in crate::semantic) struct ExactFlatF32Scan<'query> {
 }
 
 impl<'query> ExactFlatF32Scan<'query> {
-    pub(in crate::semantic) fn new(
-        query: &'query [f32],
-        config: FlatScanConfig,
-    ) -> Result<Self, FlatScanError> {
+    pub(crate) fn new(query: &'query [f32], config: FlatScanConfig) -> Result<Self, FlatScanError> {
         Self::from_query(Cow::Borrowed(query), config)
     }
 
@@ -378,10 +372,7 @@ impl<'query> ExactFlatF32Scan<'query> {
     /// The iterator may span segments, but all chunks for an event must be
     /// contiguous and already resolved against newer records and tombstones.
     #[cfg(test)]
-    pub(in crate::semantic) fn scan_f32<'vector, I>(
-        &mut self,
-        chunks: I,
-    ) -> Result<(), FlatScanError>
+    pub(crate) fn scan_f32<'vector, I>(&mut self, chunks: I) -> Result<(), FlatScanError>
     where
         I: IntoIterator<Item = (ActiveChunk, &'vector [f32])>,
     {
@@ -401,7 +392,7 @@ impl<'query> ExactFlatF32Scan<'query> {
     /// Dimensions and the resulting dot product are still checked per query.
     /// Pinned mmap readers should use this path after their checksum and vector
     /// payload validation; callers without that proof must use `scan_f32`.
-    pub(in crate::semantic) fn scan_prevalidated_f32<'vector, I>(
+    pub(crate) fn scan_prevalidated_f32<'vector, I>(
         &mut self,
         chunks: I,
     ) -> Result<(), FlatScanError>
@@ -423,10 +414,7 @@ impl<'query> ExactFlatF32Scan<'query> {
     /// This path decodes directly from an mmap-compatible byte slice without a
     /// per-vector allocation.
     #[cfg(test)]
-    pub(in crate::semantic) fn scan_le_bytes<'vector, I>(
-        &mut self,
-        chunks: I,
-    ) -> Result<(), FlatScanError>
+    pub(crate) fn scan_le_bytes<'vector, I>(&mut self, chunks: I) -> Result<(), FlatScanError>
     where
         I: IntoIterator<Item = (ActiveChunk, &'vector [u8])>,
     {
@@ -444,7 +432,7 @@ impl<'query> ExactFlatF32Scan<'query> {
     ///
     /// No vector bytes are touched. Calling this method is also an explicit
     /// event boundary for the active chunk stream.
-    pub(in crate::semantic) fn skip_event(
+    pub(crate) fn skip_event(
         &mut self,
         chunk_count: usize,
         reason: FlatScanSkipReason,
@@ -471,11 +459,11 @@ impl<'query> ExactFlatF32Scan<'query> {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) const fn counters(&self) -> &FlatScanCounters {
+    pub(crate) const fn counters(&self) -> &FlatScanCounters {
         &self.counters
     }
 
-    pub(in crate::semantic) fn finish(mut self) -> Result<FlatScanResult, FlatScanError> {
+    pub(crate) fn finish(mut self) -> Result<FlatScanResult, FlatScanError> {
         self.ensure_usable()?;
         self.flush_pending();
         let mut hits = self
@@ -657,7 +645,7 @@ impl<'query> ExactFlatF32Scan<'query> {
 impl ExactFlatF32Scan<'static> {
     /// Decode a little-endian F32 query once, then scan without query-sized
     /// allocation growth.
-    pub(in crate::semantic) fn from_query_le_bytes(
+    pub(crate) fn from_query_le_bytes(
         query: &[u8],
         config: FlatScanConfig,
     ) -> Result<Self, FlatScanError> {

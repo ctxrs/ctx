@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
-use crate::semantic::{
-    health_search::{
+use crate::{
+    private_fs::{
         create_private_dir_all, secure_private_file_permissions, secure_semantic_vector_permissions,
     },
     vector_store_schema::SemanticVectorStoreError,
@@ -20,7 +20,7 @@ const CONTROL_APPLICATION_ID: i64 = 0x4354_584D; // "CTXM"
 const CONTROL_SCHEMA_VERSION: i64 = 5;
 pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
-pub(in crate::semantic) fn open_writable(root: &Path) -> Result<Connection> {
+pub(crate) fn open_writable(root: &Path) -> Result<Connection> {
     validate_root(root, true)?;
     let path = control_path(root);
     validate_control_file(&path)?;
@@ -45,7 +45,7 @@ pub(in crate::semantic) fn open_writable(root: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-pub(in crate::semantic) fn open_read_only(root: &Path) -> Result<Option<Connection>> {
+pub(crate) fn open_read_only(root: &Path) -> Result<Option<Connection>> {
     if !root.exists() {
         return Ok(None);
     }

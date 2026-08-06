@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone)]
-pub(in crate::semantic) struct PinnedFlatGeneration {
+pub struct PinnedFlatGeneration {
     inner: Arc<PinnedGenerationInner>,
 }
 
@@ -16,34 +16,46 @@ struct PinnedGenerationInner {
 }
 
 impl PinnedFlatGeneration {
-    pub(in crate::semantic) fn generation(&self) -> u64 {
+    pub fn generation(&self) -> u64 {
         self.inner.generation
     }
 
-    pub(in crate::semantic) fn generation_hash(&self) -> &str {
+    pub fn generation_hash(&self) -> &str {
         &self.inner.generation_hash
     }
 
-    pub(in crate::semantic) fn model_contract(&self) -> &FlatModelContract {
+    pub(crate) fn model_contract(&self) -> &FlatModelContract {
         &self.inner.contract
     }
 
-    pub(in crate::semantic) fn scan_segments(&self) -> &[PinnedScanSegment] {
+    pub(crate) fn scan_segments(&self) -> &[PinnedScanSegment] {
         &self.inner.scan_segments
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn active_events(&self) -> &[FlatActiveEvent] {
+    pub(crate) fn active_events(&self) -> &[FlatActiveEvent] {
         &self.inner.active_events
     }
 
-    pub(in crate::semantic) fn stats(&self) -> &FlatActiveStats {
+    pub(crate) fn stats(&self) -> &FlatActiveStats {
         &self.inner.stats
+    }
+
+    pub fn active_event_count(&self) -> usize {
+        self.inner.stats.active_events
+    }
+
+    pub fn active_chunk_count(&self) -> usize {
+        self.inner.stats.active_chunks
+    }
+
+    pub fn active_vector_bytes(&self) -> u64 {
+        self.inner.stats.active_vector_bytes
     }
 }
 
 #[derive(Clone)]
-pub(in crate::semantic) struct PinnedScanSegment {
+pub(crate) struct PinnedScanSegment {
     inner: Arc<PinnedScanSegmentInner>,
 }
 
@@ -67,12 +79,12 @@ struct FlatScoringChunk {
 
 impl PinnedScanSegment {
     #[cfg(test)]
-    pub(in crate::semantic) fn active_chunk_count(&self) -> usize {
+    pub(crate) fn active_chunk_count(&self) -> usize {
         self.inner.scoring_chunks.len()
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn chunks(&self) -> FlatScanChunkIter<'_> {
+    pub(crate) fn chunks(&self) -> FlatScanChunkIter<'_> {
         FlatScanChunkIter {
             segment: self,
             chunks: self.inner.scoring_chunks.iter(),
@@ -84,14 +96,14 @@ impl PinnedScanSegment {
     /// Generation pinning builds this compact projection while validating
     /// metadata, so steady queries neither decode full metadata records nor
     /// test the active bitmap for every stored ordinal.
-    pub(in crate::semantic) fn scoring_chunks(&self) -> FlatScoringChunkIter<'_> {
+    pub(crate) fn scoring_chunks(&self) -> FlatScoringChunkIter<'_> {
         FlatScoringChunkIter {
             segment: self,
             chunks: self.inner.scoring_chunks.iter(),
         }
     }
 
-    pub(in crate::semantic) fn chunk_at(&self, ordinal: usize) -> Option<FlatScanChunkRef<'_>> {
+    pub(crate) fn chunk_at(&self, ordinal: usize) -> Option<FlatScanChunkRef<'_>> {
         let index = self
             .inner
             .scoring_chunks
@@ -122,7 +134,7 @@ impl PinnedScanSegment {
     }
 }
 
-pub(in crate::semantic) struct FlatScoringChunkIter<'a> {
+pub(crate) struct FlatScoringChunkIter<'a> {
     segment: &'a PinnedScanSegment,
     chunks: std::slice::Iter<'a, FlatScoringChunk>,
 }
@@ -147,15 +159,15 @@ impl<'a> Iterator for FlatScoringChunkIter<'a> {
 
 impl ExactSizeIterator for FlatScoringChunkIter<'_> {}
 
-pub(in crate::semantic) struct FlatScoringChunkRef<'a> {
-    pub(in crate::semantic) ordinal: usize,
-    pub(in crate::semantic) event_id: Uuid,
-    pub(in crate::semantic) chunk_index: u32,
-    pub(in crate::semantic) vector: &'a [f32],
+pub(crate) struct FlatScoringChunkRef<'a> {
+    pub(crate) ordinal: usize,
+    pub(crate) event_id: Uuid,
+    pub(crate) chunk_index: u32,
+    pub(crate) vector: &'a [f32],
 }
 
 #[cfg(test)]
-pub(in crate::semantic) struct FlatScanChunkIter<'a> {
+pub(crate) struct FlatScanChunkIter<'a> {
     segment: &'a PinnedScanSegment,
     chunks: std::slice::Iter<'a, FlatScoringChunk>,
 }
@@ -171,16 +183,16 @@ impl<'a> Iterator for FlatScanChunkIter<'a> {
     }
 }
 
-pub(in crate::semantic) struct FlatScanChunkRef<'a> {
-    pub(in crate::semantic) event_id: Uuid,
+pub(crate) struct FlatScanChunkRef<'a> {
+    pub(crate) event_id: Uuid,
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(in crate::semantic) seq: u64,
-    pub(in crate::semantic) source_text_hash: FlatSourceHash,
-    pub(in crate::semantic) chunk_index: u32,
-    pub(in crate::semantic) start_char: u32,
-    pub(in crate::semantic) end_char: u32,
+    pub(crate) seq: u64,
+    pub(crate) source_text_hash: FlatSourceHash,
+    pub(crate) chunk_index: u32,
+    pub(crate) start_char: u32,
+    pub(crate) end_char: u32,
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(in crate::semantic) vector: &'a [f32],
+    pub(crate) vector: &'a [f32],
 }
 
 pub(super) fn load_pinned_generation(

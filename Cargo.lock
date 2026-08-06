@@ -742,13 +742,13 @@ dependencies = [
  "ctx-history-index",
  "ctx-history-refresh",
  "ctx-pro-host-protocol",
+ "ctx-semantic-index",
  "ctx-semantic-model",
  "ed25519-dalek",
  "flate2",
  "fs2",
  "jsonc-parser",
  "libc",
- "memmap2",
  "notify",
  "objc2-foundation",
  "predicates",
@@ -898,6 +898,25 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ctx-semantic-index"
+version = "0.26.0"
+dependencies = [
+ "anyhow",
+ "ctx-history-core",
+ "ctx-history-index",
+ "ctx-semantic-model",
+ "fs2",
+ "memmap2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
