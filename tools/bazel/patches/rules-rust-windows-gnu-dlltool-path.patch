@@ -1,0 +1,32 @@
+diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
+index da151a3..d8c0ec8 100644
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -14,6 +14,7 @@
+ 
+ """Functionality for constructing actions that invoke the Rust compiler"""
+ 
++load("@bazel_skylib//lib:paths.bzl", "paths")
+ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
+ load(
+     "@bazel_tools//tools/build_defs/cc:action_names.bzl",
+@@ -1764,6 +1765,19 @@ def rustc_compile_action(
+ 
+     # this is the final list of env vars
+     env.update(env_from_args)
++
++    # Raw-dylib declarations make rustc invoke dlltool while compiling an
++    # rlib, before rules_rust enters its normal linker setup. The selected
++    # Windows-GNU C++ toolchain already contributes its checksum-pinned tools
++    # to compile_inputs; expose that same declared directory for discovery.
++    if toolchain.target_os == "windows" and toolchain.target_abi == "gnu" and cc_toolchain:
++        linker = cc_common.get_tool_for_action(
++            action_name = CPP_LINK_EXECUTABLE_ACTION_NAME,
++            feature_configuration = feature_configuration,
++        )
++        tool_dir = paths.dirname(linker)
++        inherited_path = env.get("PATH", "")
++        env["PATH"] = tool_dir + (";" + inherited_path if inherited_path else "")
+ 
+     if hasattr(attr, "version") and attr.version != "0.0.0":
+         formatted_version = " v{}".format(attr.version)

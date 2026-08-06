@@ -6,6 +6,7 @@ exports_files(
     [
         "ort-freebsd-release-env-order.patch",
         "rules-rust-freebsd-host.patch",
+        "rules-rust-windows-gnu-dlltool-path.patch",
     ],
     visibility = ["//visibility:public"],
 )
