@@ -660,13 +660,12 @@ impl IncrementalProjectionVerifier {
                 .get(segment_ord)
                 .ok_or(IndexError::InvalidStoredDocumentField("query_projection"))?;
             for doc_id in 0..segment.max_doc() {
-                if !segment.is_deleted(doc_id) {
-                    if !self
+                if !segment.is_deleted(doc_id)
+                    && !self
                         .deltas
                         .is_complete(DocAddress::new(segment_ord as u32, doc_id))?
-                    {
-                        return Err(IndexError::InvalidStoredDocumentField("query_projection"));
-                    }
+                {
+                    return Err(IndexError::InvalidStoredDocumentField("query_projection"));
                 }
             }
         }
