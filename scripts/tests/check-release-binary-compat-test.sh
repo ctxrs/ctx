@@ -372,6 +372,7 @@ DynamicSection [
 NeededLibraries [
   libc.so.7
   libgcc_s.so.1
+  liblzma.so.5
   libm.so.5
   libthr.so.3
 ]
@@ -570,6 +571,10 @@ mutate_and_fail freebsd_missing_bind_now freebsd-x64 "${freebsd}" \
   '/FLAGS[[:space:]]*BIND_NOW/d' 'missing BIND_NOW dynamic flag'
 mutate_and_fail freebsd_missing_pie freebsd-x64 "${freebsd}" \
   's/FLAGS_1      NOW PIE/FLAGS_1      NOW/' 'missing PIE dynamic flag'
+mutate_and_fail freebsd_missing_liblzma freebsd-x64 "${freebsd}" \
+  '/liblzma.so.5/d' 'unexpected DT_NEEDED libraries'
+mutate_and_fail freebsd_liblzma_major freebsd-x64 "${freebsd}" \
+  's/liblzma.so.5/liblzma.so.6/' 'unexpected DT_NEEDED libraries'
 mutate_and_fail freebsd_needed freebsd-x64 "${freebsd}" 's/libthr.so.3/libutil.so.9/'
 mutate_and_fail freebsd_rpath freebsd-x64 "${freebsd}" 's/NeededLibraries \[/RUNPATH: \/tmp\nNeededLibraries [/'
 
