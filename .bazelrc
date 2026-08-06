@@ -52,6 +52,7 @@ test:ci --test_timeout=300,900,1800,3600
 
 build:release --compilation_mode=opt
 build:release --stamp=true
+build:release --lockfile_mode=error
 # Release packaging extracts private detached symbols and strips the exact same
 # linked artifact before signing. Keep the Bazel intermediate symbol-bearing.
 build:release --strip=never

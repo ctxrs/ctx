@@ -829,7 +829,10 @@ sh_test(
     name = "native_bazel_packaging_contract_tests",
     srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
     data = [
+        ".bazelrc",
         ".buildkite/pipeline.yml",
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
         "contracts/release-targets-v1.json",
         "scripts/release/build-linux-bazel-release.sh",
         "scripts/release/linux-bazel-release-controller.Dockerfile",
@@ -841,6 +844,7 @@ sh_test(
         "scripts/stage-github-release-assets.sh",
         "scripts/stage-semantic-release-handoff.sh",
         "//tools/bazel:release_routes.bzl",
+        "//tools/bazel/patches:rules-rust-freebsd-host.patch",
     ],
     tags = ["release-gate"],
 )

@@ -19,6 +19,61 @@ staging="${source_root}/scripts/stage-github-release-assets.sh"
 semantic_staging="${source_root}/scripts/stage-semantic-release-handoff.sh"
 packager="${source_root}/scripts/package-public-cli-bazel-release.sh"
 release_routes="${source_root}/tools/bazel/release_routes.bzl"
+release_config="${source_root}/.bazelrc"
+module_definition="${source_root}/MODULE.bazel"
+module_lock="${source_root}/MODULE.bazel.lock"
+rules_rust_patch="${source_root}/tools/bazel/patches/rules-rust-freebsd-host.patch"
+
+grep -Fxq 'build:release --lockfile_mode=error' "${release_config}" || {
+  echo 'release config must fail closed on incomplete module lock data' >&2
+  exit 1
+}
+
+python3 - "${module_lock}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+lock = json.loads(Path(sys.argv[1]).read_bytes())
+extension = lock["moduleExtensions"]["@@rules_go~//go:extensions.bzl%go_sdk"]
+expected = {
+    "os:linux,arch:amd64",
+    "os:linux,arch:aarch64",
+    "os:freebsd,arch:amd64",
+    "os:osx,arch:x86_64",
+    "os:osx,arch:aarch64",
+    "os:windows,arch:amd64",
+}
+if set(extension) != expected:
+    raise SystemExit(
+        "rules_go host lock factors differ: "
+        f"expected {sorted(expected)}, observed {sorted(extension)}"
+    )
+for digest_field in ("bzlTransitiveDigest", "usagesDigest"):
+    digests = {entry[digest_field] for entry in extension.values()}
+    if len(digests) != 1:
+        raise SystemExit(
+            f"host factors disagree on {digest_field}: {sorted(digests)}"
+        )
+for factor, entry in extension.items():
+    if not entry["generatedRepoSpecs"]:
+        raise SystemExit(f"{factor} has no generated repository specs")
+PY
+
+grep -Fq 'patches = ["//tools/bazel/patches:rules-rust-freebsd-host.patch"]' \
+  "${module_definition}" || {
+  echo 'rules_rust must retain the pinned FreeBSD host patch' >&2
+  exit 1
+}
+for required_patch_line in \
+  '+        "freebsd": ["x86_64"],' \
+  '+    if "freebsd" in repository_ctx.os.name:' \
+  '+        return triple("{}-unknown-freebsd".format(arch))'; do
+  grep -Fq -- "${required_patch_line}" "${rules_rust_patch}" || {
+    echo "rules_rust FreeBSD host patch is missing: ${required_patch_line}" >&2
+    exit 1
+  }
+done
 
 for required in \
   'route_target=//:ctx_release_linux_x64' \
