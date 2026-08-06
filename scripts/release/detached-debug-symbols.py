@@ -720,7 +720,12 @@ def prepare_macho(
         fail("dsymutil did not produce one nonempty DWARF image")
     if macho_uuid(dwarf_files[0]) != identifier:
         fail("dSYM UUID differs from the release intermediate")
-    run([str(tools["strip"]), "-S", "-x", str(artifact)])
+    # Rust's Mach-O link can leave an N_OPT `radr://...` entry after the
+    # conventional debug/local-symbol strip.  It is an nlist marker rather
+    # than a runtime export, and the shipping CLI does not expose an nlist
+    # interface.  Remove the nlist/string table as well so the detached dSYM
+    # is the only symbol authority carried by the release.
+    run([str(tools["strip"]), "-S", "-x", "-N", str(artifact)])
     if macho_uuid(artifact) != identifier:
         fail("Mach-O UUID changed while detaching symbols")
     return "mach-o-uuid", identifier
