@@ -38,7 +38,7 @@ case "${command_name}" in
     ;;
   *)
     if (( host_build_governor_active == 0 )); then
-      if [[ -v CTX_HOST_BUILD_GOVERNOR ]]; then
+      if [[ "${CTX_HOST_BUILD_GOVERNOR+x}" == "x" ]]; then
         host_build_governor="${CTX_HOST_BUILD_GOVERNOR}"
       else
         config_home="${XDG_CONFIG_HOME:-${HOME:-}/.config}"
@@ -47,7 +47,7 @@ case "${command_name}" in
           host_build_governor="${governor_hook}"
         fi
       fi
-      if [[ -v CTX_HOST_BUILD_GOVERNOR && -z "${host_build_governor}" ]]; then
+      if [[ "${CTX_HOST_BUILD_GOVERNOR+x}" == "x" && -z "${host_build_governor}" ]]; then
         printf 'configured CTX host build governor must not be empty\n' >&2
         exit 125
       fi
