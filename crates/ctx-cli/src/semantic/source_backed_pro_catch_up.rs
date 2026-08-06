@@ -7,14 +7,22 @@ use std::{
 use anyhow::{Context, Result};
 use ctx_history_core::utc_now;
 use ctx_history_index::VerifiedIndex;
-use ctx_pro_host_protocol::CoreMaterializationReceipt;
+#[cfg(test)]
+use ctx_pro_host_protocol::CoreMaterializationFinalizationPhase;
+use ctx_pro_host_protocol::{
+    CoreMaterializationFinalizationPending, CoreMaterializationFinalizationProgress,
+    CoreMaterializationReceipt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
     compact_json,
-    pro::{preflight_core_materialization, stable_error_code, sync_core_materialization},
+    pro::{
+        preflight_core_materialization, stable_error_code, sync_core_materialization,
+        CoreMaterializationSyncOutcome,
+    },
 };
 
 use super::{
@@ -65,6 +73,8 @@ struct SourceBackedProCatchUpStatus {
     retryable: bool,
     core_generation_id: String,
     receipt_core_generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finalization_progress: Option<CoreMaterializationFinalizationProgress>,
     attempts: u64,
     last_attempt_at_ms: i64,
     #[serde(default)]
@@ -92,6 +102,7 @@ impl SourceBackedProCatchUpStatus {
             retryable: true,
             core_generation_id: core_generation_id.to_owned(),
             receipt_core_generation_id: None,
+            finalization_progress: None,
             attempts,
             last_attempt_at_ms: utc_now().timestamp_millis(),
             last_attempt_duration_us: 0,
@@ -113,6 +124,22 @@ impl SourceBackedProCatchUpStatus {
         }
         self.error_code = Some(error.code().to_owned());
         self.last_error = Some(error.to_string());
+        self.finalization_progress = None;
+        self
+    }
+
+    fn finalizing(mut self, progress: CoreMaterializationFinalizationProgress) -> Self {
+        self.status = SourceBackedProCatchUpState::Pending;
+        self.pending = true;
+        self.retryable = false;
+        self.receipt_core_generation_id = None;
+        self.finalization_progress = Some(progress);
+        self.error_code = None;
+        self.last_error = None;
+        self.reason = Some("finalizing".to_owned());
+        self.consecutive_failures = 0;
+        self.retry_after_ms = None;
+        self.retry_not_before_at_ms = None;
         self
     }
 
@@ -121,6 +148,7 @@ impl SourceBackedProCatchUpStatus {
         self.pending = false;
         self.retryable = false;
         self.receipt_core_generation_id = Some(receipt_generation);
+        self.finalization_progress = None;
         self.error_code = None;
         self.last_error = None;
         self.reason = None;
@@ -192,6 +220,7 @@ impl SourceBackedProCatchUpError {
 pub(super) struct SourceBackedProCatchUpRun {
     pub(super) status: Value,
     pub(super) did_work: bool,
+    pub(super) continuation_pending: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -248,11 +277,19 @@ pub(super) fn run_after_core_publication(
         },
         preflight_core_materialization,
         |data_root, index| {
-            let outcome = sync_core_materialization(data_root, index)?;
-            Ok(ProCatchUpSyncOutcome {
-                receipt: outcome.receipt,
-                did_work: outcome.did_work,
-                helper_artifact_sha256: outcome.helper_artifact_sha256,
+            Ok(match sync_core_materialization(data_root, index)? {
+                CoreMaterializationSyncOutcome::Finished {
+                    receipt,
+                    did_work,
+                    helper_artifact_sha256,
+                } => ProCatchUpSyncOutcome::Finished {
+                    receipt,
+                    did_work,
+                    helper_artifact_sha256,
+                },
+                CoreMaterializationSyncOutcome::FinalizationPending { pending } => {
+                    ProCatchUpSyncOutcome::FinalizationPending { pending }
+                }
             })
         },
     )
@@ -263,10 +300,15 @@ struct ProCatchUpAuthority<'a> {
     verified_index: Option<&'a VerifiedIndex>,
 }
 
-struct ProCatchUpSyncOutcome {
-    receipt: CoreMaterializationReceipt,
-    did_work: bool,
-    helper_artifact_sha256: String,
+enum ProCatchUpSyncOutcome {
+    Finished {
+        receipt: CoreMaterializationReceipt,
+        did_work: bool,
+        helper_artifact_sha256: String,
+    },
+    FinalizationPending {
+        pending: CoreMaterializationFinalizationPending,
+    },
 }
 
 fn run_with<Preflight, Sync>(
@@ -313,28 +355,54 @@ where
             "pinned VerifiedIndex",
         )?;
         let outcome = sync(data_root, index).map_err(SourceBackedProCatchUpError::projection)?;
-        require_generation(
-            core_generation_id,
-            &outcome.receipt.core_generation_id,
-            "Pro Core materialization receipt",
-        )?;
+        match &outcome {
+            ProCatchUpSyncOutcome::Finished { receipt, .. } => require_generation(
+                core_generation_id,
+                &receipt.core_generation_id,
+                "Pro Core materialization receipt",
+            )?,
+            ProCatchUpSyncOutcome::FinalizationPending { pending } => require_generation(
+                core_generation_id,
+                &pending.progress.core_generation_id,
+                "Pro Core finalization progress",
+            )?,
+        }
         Ok(outcome)
     })();
 
     match result {
-        Ok(outcome) => {
+        Ok(ProCatchUpSyncOutcome::Finished {
+            receipt,
+            did_work,
+            helper_artifact_sha256,
+        }) => {
             let completed = pending
-                .completed(outcome.receipt.core_generation_id)
+                .completed(receipt.core_generation_id)
                 .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
             persist_status(data_root, &completed)?;
             complete_observed_recheck(
                 data_root,
                 observed_recheck.as_ref(),
-                &outcome.helper_artifact_sha256,
+                &helper_artifact_sha256,
             )?;
             Ok(SourceBackedProCatchUpRun {
                 status: completed.to_json()?,
-                did_work: outcome.did_work,
+                did_work,
+                continuation_pending: false,
+            })
+        }
+        Ok(ProCatchUpSyncOutcome::FinalizationPending {
+            pending: finalization,
+        }) => {
+            let did_work = !finalization.replayed;
+            let finalizing = pending
+                .finalizing(finalization.progress)
+                .with_duration(nonzero_duration_micros(attempt_started.elapsed()));
+            persist_status(data_root, &finalizing)?;
+            Ok(SourceBackedProCatchUpRun {
+                status: finalizing.to_json()?,
+                did_work,
+                continuation_pending: true,
             })
         }
         Err(error) => {
@@ -345,6 +413,7 @@ where
             Ok(SourceBackedProCatchUpRun {
                 status: failed.to_json()?,
                 did_work: false,
+                continuation_pending: false,
             })
         }
     }
@@ -362,6 +431,7 @@ fn record_preflight_error(
     Ok(SourceBackedProCatchUpRun {
         status: failed.to_json()?,
         did_work: false,
+        continuation_pending: false,
     })
 }
 
@@ -425,6 +495,20 @@ pub(super) fn persist_status_json(data_root: &Path, status: &Value) -> Result<()
 
 pub(super) fn status_generation(data_root: &Path) -> Option<String> {
     read_status(data_root).map(|status| status.core_generation_id)
+}
+
+pub(super) fn status_has_finalization_pending(data_root: &Path, core_generation_id: &str) -> bool {
+    read_status(data_root).is_some_and(|status| {
+        status.status == SourceBackedProCatchUpState::Pending
+            && status.pending
+            && !status.retryable
+            && status.reason.as_deref() == Some("finalizing")
+            && status.core_generation_id == core_generation_id
+            && status
+                .finalization_progress
+                .as_ref()
+                .is_some_and(|progress| progress.core_generation_id == core_generation_id)
+    })
 }
 
 /// Waits for the daemon-owned Pro projection of one exact Core generation.
@@ -527,10 +611,29 @@ mod tests {
         materializer_revision: &str,
         did_work: bool,
     ) -> ProCatchUpSyncOutcome {
-        ProCatchUpSyncOutcome {
+        ProCatchUpSyncOutcome::Finished {
             receipt: receipt_with_revision(index, materializer_revision),
             did_work,
             helper_artifact_sha256: "a".repeat(64),
+        }
+    }
+
+    fn finalization_outcome(
+        index: &VerifiedIndex,
+        phase: CoreMaterializationFinalizationPhase,
+        cursor: char,
+        replayed: bool,
+    ) -> ProCatchUpSyncOutcome {
+        ProCatchUpSyncOutcome::FinalizationPending {
+            pending: CoreMaterializationFinalizationPending {
+                progress: CoreMaterializationFinalizationProgress {
+                    materialization_id: "b".repeat(64),
+                    core_generation_id: index.generation_id().to_owned(),
+                    phase,
+                    cursor_sha256: cursor.to_string().repeat(64),
+                },
+                replayed,
+            },
         }
     }
 
@@ -571,6 +674,44 @@ mod tests {
         assert!(run.did_work);
         assert_eq!(run.status["status"], "completed");
         assert_eq!(run.status["receipt_core_generation_id"], generation);
+    }
+
+    #[test]
+    fn finalization_pending_is_a_successful_non_backoff_yield() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        let run = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| Ok(()),
+            |_, supplied| {
+                Ok(finalization_outcome(
+                    supplied,
+                    CoreMaterializationFinalizationPhase::EmitReplay,
+                    'c',
+                    false,
+                ))
+            },
+        )
+        .unwrap();
+
+        assert!(run.did_work);
+        assert!(run.continuation_pending);
+        assert_eq!(run.status["status"], "pending");
+        assert_eq!(run.status["pending"], true);
+        assert_eq!(run.status["retryable"], false);
+        assert_eq!(run.status["reason"], "finalizing");
+        assert!(run.status["error_code"].is_null());
+        assert_eq!(
+            run.status["finalization_progress"]["core_generation_id"],
+            generation
+        );
+        assert!(status_has_finalization_pending(temp.path(), &generation));
     }
 
     #[test]

@@ -976,14 +976,79 @@ fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
 }
 
 #[test]
-fn pro_catch_up_requests_immediate_drain_only_after_materializer_work() {
-    let replay = super::core_pro_catch_up_iteration(false);
+fn pro_catch_up_requests_immediate_drain_after_work_or_a_successful_yield() {
+    let replay = super::core_pro_catch_up_iteration(false, false);
     assert!(!replay.did_work);
     assert!(!replay.continue_immediately);
 
-    let materialized = super::core_pro_catch_up_iteration(true);
+    let materialized = super::core_pro_catch_up_iteration(true, false);
     assert!(materialized.did_work);
     assert!(materialized.continue_immediately);
+
+    let pending = super::core_pro_catch_up_iteration(false, true);
+    assert!(!pending.did_work);
+    assert!(pending.continue_immediately);
+
+    let status = json!({
+        "status": "pending",
+        "pending": true,
+        "retryable": false,
+        "reason": "finalizing",
+    });
+    assert!(!daemon_job_should_backoff(&status));
+    let mut backoff = DaemonRetryBackoff::default();
+    let recorded = record_daemon_job_retry(&mut backoff, status);
+    assert_eq!(recorded["reason"], "finalizing");
+    assert_eq!(backoff.consecutive_failures, 0);
+}
+
+#[test]
+fn durable_finalization_pending_bypasses_same_generation_attempt_guard() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "pending",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "finalization_progress": {
+                "materialization_id": "a".repeat(64),
+                "core_generation_id": generation,
+                "phase": "emit_replay",
+                "cursor_sha256": "b".repeat(64),
+            },
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+            "reason": "finalizing",
+            "consecutive_failures": 0,
+            "retry_after_ms": null,
+            "retry_not_before_at_ms": null,
+        }),
+    )
+    .unwrap();
+    let mut runtime = DaemonRuntime::default();
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+
+    let scheduled = run_pending_core_pro_catch_up(temp.path(), &mut runtime, None).unwrap();
+
+    assert!(
+        scheduled.is_some(),
+        "durable finalization must retain and reuse the stable Core pin"
+    );
+    assert_eq!(
+        runtime.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
+    assert_eq!(pinned_generation(temp.path()), generation);
 }
 
 #[test]

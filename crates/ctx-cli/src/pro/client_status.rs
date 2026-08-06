@@ -360,6 +360,7 @@ pub(super) fn status_outcome(
         CoreProjectionCurrentness::NotMaterialized => Some("not_materialized"),
         CoreProjectionCurrentness::NeedsRebuild => Some("needs_rebuild"),
         CoreProjectionCurrentness::Partial => Some("partial"),
+        CoreProjectionCurrentness::Finalizing => Some("finalizing"),
         CoreProjectionCurrentness::Stale => Some("stale_source"),
         CoreProjectionCurrentness::Current => None,
     };

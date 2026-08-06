@@ -248,10 +248,16 @@ fn run_pending_core_pro_catch_up(
         || (retained_authority.is_none()
             && runtime.sidecar_drain.pro_attempted_generation.is_some()
             && pro_installation_requires_recheck(data_root));
+    let durable_finalization_pending = runtime
+        .sidecar_drain
+        .pro_attempted_generation
+        .as_deref()
+        .is_some_and(|generation| status_has_finalization_pending(data_root, generation));
     let durable_check_required = retained_authority.is_none()
         && (runtime.sidecar_drain.pro_attempted_generation.is_none()
             || retry_due
-            || installation_requires_recheck);
+            || installation_requires_recheck
+            || durable_finalization_pending);
     let durable_authority = if durable_check_required {
         pin_published_generation(data_root)?
     } else {
@@ -269,9 +275,11 @@ fn run_pending_core_pro_catch_up(
         return Ok(None);
     };
     let generation = authority.generation_id();
+    let continuation_pending = status_has_finalization_pending(data_root, generation);
     if runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
         && !retry_due
         && !installation_requires_recheck
+        && !continuation_pending
     {
         return Ok(None);
     }
@@ -284,7 +292,10 @@ fn run_pending_core_pro_catch_up(
     runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
     runtime.sidecar_drain.pro_attempted_recheck = helper_recheck_request;
     runtime.sidecar_drain.generation = Some(generation.to_owned());
-    Ok(Some(core_pro_catch_up_iteration(run.did_work)))
+    Ok(Some(core_pro_catch_up_iteration(
+        run.did_work,
+        run.continuation_pending,
+    )))
 }
 
 fn pro_installation_requires_recheck(data_root: &Path) -> bool {
@@ -294,9 +305,9 @@ fn pro_installation_requires_recheck(data_root: &Path) -> bool {
     })
 }
 
-fn core_pro_catch_up_iteration(did_work: bool) -> DaemonIteration {
+fn core_pro_catch_up_iteration(did_work: bool, continuation_pending: bool) -> DaemonIteration {
     let iteration = DaemonIteration::new(did_work, false, DaemonCycleStateV1::unknown());
-    if did_work {
+    if did_work || continuation_pending {
         immediate_follow_up(iteration)
     } else {
         iteration
@@ -489,6 +500,7 @@ fn run_pro_catch_up_with_retry(
         return Ok(SourceBackedProCatchUpRun {
             status,
             did_work: false,
+            continuation_pending: false,
         });
     }
     let run = run_after_core_publication(data_root, core_generation_id, authority)?;
@@ -497,6 +509,7 @@ fn run_pro_catch_up_with_retry(
     Ok(SourceBackedProCatchUpRun {
         status,
         did_work: run.did_work,
+        continuation_pending: run.continuation_pending,
     })
 }
 
@@ -932,8 +945,8 @@ use super::{
     source_backed_pro_catch_up::{
         helper_recheck_schedule, persist_status_json as persist_pro_status,
         read_status_json as read_pro_status, run_after_core_publication,
-        status_generation as pro_status_generation, SourceBackedProCatchUpRun,
-        SourceBackedProCoreAuthority,
+        status_generation as pro_status_generation, status_has_finalization_pending,
+        SourceBackedProCatchUpRun, SourceBackedProCoreAuthority,
     },
     source_backed_refresh_coordinator::{pin_published_generation, CoreRefreshEngine},
 };
