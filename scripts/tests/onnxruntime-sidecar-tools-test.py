@@ -316,6 +316,10 @@ class ManifestTests(unittest.TestCase):
             self.assertNotIn("macos-release-signing-evidence.py", text, path.name)
             self.assertNotIn("temporary_output", text, path.name)
 
+    def test_archive_tool_defers_annotations_for_macos_python(self) -> None:
+        source = (TOOLS / "archive_tool.py").read_text().splitlines()
+        self.assertIn("from __future__ import annotations", source[:6])
+
 
 class ArchiveTests(unittest.TestCase):
     def test_cuda_archive_shape_is_exactly_eighteen_files(self) -> None:
