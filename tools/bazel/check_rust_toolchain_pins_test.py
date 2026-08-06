@@ -11,6 +11,7 @@ from check_rust_toolchain_pins import (
     PinContractError,
     validate_module_text,
     validate_release_matrix_text,
+    validate_windows_cargo_runfiles_patch_text,
     validate_windows_gnu_dlltool_patch_text,
 )
 
@@ -26,8 +27,14 @@ FREEBSD_CRATE_UNIVERSE_LINE = '        "x86_64-unknown-freebsd",\n'
 WINDOWS_GNU_PATCH_LINE = (
     '        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",\n'
 )
+WINDOWS_CARGO_RUNFILES_PATCH_LINE = (
+    '        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",\n'
+)
 WINDOWS_GNU_PATCH = (
     ROOT / "tools/bazel/patches/rules-rust-windows-gnu-dlltool-path.patch"
+).read_text(encoding="utf-8")
+WINDOWS_CARGO_RUNFILES_PATCH = (
+    ROOT / "tools/bazel/patches/rules-rust-windows-cargo-runfiles.patch"
 ).read_text(encoding="utf-8")
 
 
@@ -35,6 +42,7 @@ class RustToolchainPinContractTest(unittest.TestCase):
     def test_repository_contract_is_complete(self) -> None:
         validate_module_text(MODULE_TEXT)
         validate_release_matrix_text(MATRIX_TEXT)
+        validate_windows_cargo_runfiles_patch_text(WINDOWS_CARGO_RUNFILES_PATCH)
         validate_windows_gnu_dlltool_patch_text(WINDOWS_GNU_PATCH)
 
     def test_missing_windows_gnu_override_patch_is_rejected(self) -> None:
@@ -52,6 +60,22 @@ class RustToolchainPinContractTest(unittest.TestCase):
         self.assertNotEqual(mutated, WINDOWS_GNU_PATCH)
         with self.assertRaisesRegex(PinContractError, "dlltool discovery patch is missing"):
             validate_windows_gnu_dlltool_patch_text(mutated)
+
+    def test_missing_windows_cargo_runfiles_patch_is_rejected(self) -> None:
+        mutated = MODULE_TEXT.replace(WINDOWS_CARGO_RUNFILES_PATCH_LINE, "", 1)
+        self.assertNotEqual(mutated, MODULE_TEXT)
+        with self.assertRaisesRegex(PinContractError, "incomplete release patches"):
+            validate_module_text(mutated)
+
+    def test_incomplete_windows_cargo_runfiles_patch_is_rejected(self) -> None:
+        mutated = WINDOWS_CARGO_RUNFILES_PATCH.replace(
+            "+            if self\n",
+            "+            if !self\n",
+            1,
+        )
+        self.assertNotEqual(mutated, WINDOWS_CARGO_RUNFILES_PATCH)
+        with self.assertRaisesRegex(PinContractError, "retention patch is missing"):
+            validate_windows_cargo_runfiles_patch_text(mutated)
 
     def test_missing_arm_checksum_is_rejected(self) -> None:
         line = f'        "{ARM_ARCHIVE}": "{ARM_CHECKSUM}",\n'

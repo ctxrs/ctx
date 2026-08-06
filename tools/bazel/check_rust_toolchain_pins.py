@@ -13,8 +13,14 @@ VERSION = "1.97.1"
 RULES_RUST_VERSION = "0.71.3"
 RULES_RUST_PATCHES = [
     "//tools/bazel/patches:rules-rust-freebsd-host.patch",
+    "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
     "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
 ]
+WINDOWS_CARGO_RUNFILES_PATCH_LINES = (
+    "diff --git a/cargo/private/cargo_build_script_runner/cargo_manifest_dir.rs ",
+    "-            if !self",
+    "+            if self",
+)
 WINDOWS_GNU_DLLTOOL_PATCH_LINES = (
     'diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl',
     '+load("@bazel_skylib//lib:paths.bzl", "paths")',
@@ -226,6 +232,14 @@ def validate_windows_gnu_dlltool_patch_text(patch_text: str) -> None:
             )
 
 
+def validate_windows_cargo_runfiles_patch_text(patch_text: str) -> None:
+    for line in WINDOWS_CARGO_RUNFILES_PATCH_LINES:
+        if line not in patch_text:
+            raise PinContractError(
+                "Windows Cargo runfiles retention patch is missing: " + line
+            )
+
+
 def validate_release_matrix_text(matrix_text: str) -> None:
     try:
         matrix = json.loads(matrix_text)
@@ -252,10 +266,11 @@ def validate_release_matrix_text(matrix_text: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
+    if len(sys.argv) != 5:
         print(
             "usage: check_rust_toolchain_pins.py MODULE.bazel "
-            "release-targets.json rules-rust-windows-gnu-dlltool-path.patch",
+            "release-targets.json rules-rust-windows-gnu-dlltool-path.patch "
+            "rules-rust-windows-cargo-runfiles.patch",
             file=sys.stderr,
         )
         return 2
@@ -264,6 +279,9 @@ def main() -> int:
         validate_release_matrix_text(Path(sys.argv[2]).read_text(encoding="utf-8"))
         validate_windows_gnu_dlltool_patch_text(
             Path(sys.argv[3]).read_text(encoding="utf-8")
+        )
+        validate_windows_cargo_runfiles_patch_text(
+            Path(sys.argv[4]).read_text(encoding="utf-8")
         )
     except (OSError, SyntaxError, PinContractError) as error:
         print(f"Rust toolchain pin contract failed: {error}", file=sys.stderr)

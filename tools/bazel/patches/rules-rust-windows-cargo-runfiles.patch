@@ -1,0 +1,13 @@
+diff --git a/cargo/private/cargo_build_script_runner/cargo_manifest_dir.rs b/cargo/private/cargo_build_script_runner/cargo_manifest_dir.rs
+index a6f54cc..d11e762 100644
+--- a/cargo/private/cargo_build_script_runner/cargo_manifest_dir.rs
++++ b/cargo/private/cargo_build_script_runner/cargo_manifest_dir.rs
+@@ -457,7 +457,7 @@ impl RunfilesMaker {
+-            if !self
++            if self
+                 .filename_suffixes_to_retain
+                 .iter()
+                 .any(|suffix| dest.ends_with(suffix))
+             {
+                 continue;
+             }

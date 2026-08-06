@@ -15,6 +15,10 @@ ReleaseRouteInfo = provider(
 def _route_transition_impl(_settings, attr):
     route = PUBLIC_RELEASE_ROUTES[attr.target_id]
     return {
+        "@rules_rust//cargo/settings:cargo_manifest_dir_filename_suffixes_to_retain": [
+            ".lib",
+            ".so",
+        ] + ([".a"] if attr.target_id == "windows-x64" else []),
         "//command_line_option:platforms": route[0],
         "//tools/bazel:windows_gnu_release": attr.target_id == "windows-x64",
     }
@@ -23,6 +27,7 @@ _route_transition = transition(
     implementation = _route_transition_impl,
     inputs = [],
     outputs = [
+        "@rules_rust//cargo/settings:cargo_manifest_dir_filename_suffixes_to_retain",
         "//command_line_option:platforms",
         "//tools/bazel:windows_gnu_release",
     ],

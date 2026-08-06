@@ -11,16 +11,11 @@ def _llvm_mingw_repository_impl(ctx):
     # Rust's windows-gnu standard library asks the compiler driver for these
     # GCC compatibility archives. LLVM-MinGW provides compiler-rt instead; an
     # empty archive is the established compatibility bridge because no libgcc
-    # symbols are referenced by the shipped graph.
-    ctx.file("compat-libgcc/libgcc.a", "!<arch>\n")
-    ctx.file("compat-libgcc/libgcc_eh.a", "!<arch>\n")
-    ctx.file(
-        "bin/ctx-x86_64-w64-mingw32-clang.cmd",
-        """@echo off
-"%~dp0x86_64-w64-mingw32-clang.exe" -L"%~dp0..\\compat-libgcc" %*
-""",
-        executable = True,
-    )
+    # symbols are referenced by the shipped graph. Put the bridge in clang's
+    # target-library directory so every direct compiler-driver link resolves it
+    # without an ambient search path or an unused shell wrapper.
+    ctx.file("x86_64-w64-mingw32/lib/libgcc.a", "!<arch>\n")
+    ctx.file("x86_64-w64-mingw32/lib/libgcc_eh.a", "!<arch>\n")
     ctx.file(
         "BUILD.bazel",
         """
