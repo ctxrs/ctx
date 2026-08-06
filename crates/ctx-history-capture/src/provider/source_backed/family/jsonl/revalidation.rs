@@ -211,7 +211,7 @@ fn verify_prefix_digest(
     prefix_hasher: Sha256,
 ) -> Result<()> {
     let observed = hash_prefix(
-        &mut source_file.file().try_clone()?,
+        &mut source_file.reopen_same_object()?,
         prefix_length,
         prefix_hasher,
     )?;

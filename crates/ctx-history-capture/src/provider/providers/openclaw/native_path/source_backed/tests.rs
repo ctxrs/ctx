@@ -1,17 +1,167 @@
 use super::*;
-use crate::repository_attribution::RepositoryAttributor;
+use crate::{
+    provider::source_backed::{
+        refresh_source_backed_generation, register_landed_source_backed_route,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+    },
+    repository_attribution::RepositoryAttributor,
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus,
+};
 use ctx_history_core::{
     CertifiedSource, EventOrigin, RepositoryFileInvocationKind, ScannedSourceCounts,
     SourceObservation,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
 #[cfg(unix)]
 use std::process::Command;
+use std::{fs::OpenOptions, io::Write};
 
 const HISTORY: &str =
     include_str!("../../../../../../tests/fixtures/repository_attribution/openclaw-native.jsonl");
 const SESSIONS: &str =
     include_str!("../../../../../../tests/fixtures/repository_attribution/openclaw-sessions.json");
+
+fn openclaw_lifecycle_transcript(root: &Path) -> PathBuf {
+    root.join("agents/main/sessions/lifecycle.jsonl")
+}
+
+fn write_openclaw_lifecycle_transcript(path: &Path, records: &[Value]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut bytes, record).unwrap();
+        bytes.push(b'\n');
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+fn append_openclaw_lifecycle_transcript(path: &Path, record: &Value) {
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    serde_json::to_writer(&mut file, record).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.sync_all().unwrap();
+}
+
+fn openclaw_lifecycle_registry(root: &Path) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        ProviderSource {
+            provider: CaptureProvider::OpenClaw,
+            path: root.to_path_buf(),
+            exists: true,
+            source_format: OPENCLAW_SOURCE_FORMAT,
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        },
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    registry
+}
+
+fn openclaw_lifecycle_writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
+}
+
+fn indexed_openclaw_lifecycle_records(index: &Path, transcript: &Path) -> Vec<CoreRecord> {
+    let source = source_key(&native_session_id(transcript)).unwrap();
+    VerifiedIndex::open(index)
+        .unwrap()
+        .core_source_event_page(&source, None, 64)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.core_record)
+        .collect()
+}
+
+#[test]
+fn openclaw_cold_noop_and_append_refreshes_preserve_the_source() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("openclaw");
+    let transcript = openclaw_lifecycle_transcript(&root);
+    let first = serde_json::json!({
+        "type": "message",
+        "id": "lifecycle-first",
+        "timestamp": "2026-08-06T12:00:00Z",
+        "message": {"role": "user", "content": "OpenClaw cold record"}
+    });
+    let second = serde_json::json!({
+        "type": "message",
+        "id": "lifecycle-second",
+        "timestamp": "2026-08-06T12:00:01Z",
+        "message": {"role": "assistant", "content": "OpenClaw appended record"}
+    });
+    write_openclaw_lifecycle_transcript(&transcript, &[first]);
+    let registry = openclaw_lifecycle_registry(&root);
+    let index = temp.path().join("index");
+
+    let cold =
+        refresh_source_backed_generation(&index, &registry, openclaw_lifecycle_writer_options())
+            .unwrap();
+    assert_eq!(cold.sources.len(), 1);
+    assert_eq!(cold.sources[0].counts().complete_records, 1);
+    let cold_records = indexed_openclaw_lifecycle_records(&index, &transcript);
+    assert_eq!(cold_records.len(), 1);
+
+    let noop =
+        refresh_source_backed_generation(&index, &registry, openclaw_lifecycle_writer_options())
+            .unwrap();
+    assert_eq!(noop.sources.len(), 1);
+    assert_eq!(noop.sources[0].counts().complete_records, 1);
+    assert_eq!(
+        indexed_openclaw_lifecycle_records(&index, &transcript),
+        cold_records
+    );
+
+    append_openclaw_lifecycle_transcript(&transcript, &second);
+    let appended =
+        refresh_source_backed_generation(&index, &registry, openclaw_lifecycle_writer_options())
+            .unwrap();
+    assert_eq!(appended.sources.len(), 1);
+    assert_eq!(appended.sources[0].counts().complete_records, 2);
+    let appended_records = indexed_openclaw_lifecycle_records(&index, &transcript);
+    assert_eq!(appended_records.len(), 2);
+    assert!(appended_records.iter().any(|record| {
+        record.content.normalized_body.as_deref() == Some("OpenClaw appended record")
+    }));
+}
+
+#[test]
+fn openclaw_discovered_leaf_rejects_mutation_before_scan() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("openclaw");
+    let transcript = openclaw_lifecycle_transcript(&root);
+    let original = serde_json::json!({
+        "type": "message",
+        "id": "mutation-original",
+        "message": {"role": "user", "content": "original"}
+    });
+    let mutated = serde_json::json!({
+        "type": "message",
+        "id": "mutation-replacement",
+        "message": {"role": "user", "content": "mutated after discovery"}
+    });
+    write_openclaw_lifecycle_transcript(&transcript, &[original]);
+    let adapter = openclaw_source_backed_adapter_v0();
+    let inventory = adapter.discover(&root).unwrap();
+    let leaf = inventory.leaves().first().unwrap();
+
+    write_openclaw_lifecycle_transcript(&transcript, &[mutated]);
+
+    assert!(matches!(
+        leaf.open_verified(),
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
+}
 
 fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
     let temp = tempfile::tempdir().unwrap();
