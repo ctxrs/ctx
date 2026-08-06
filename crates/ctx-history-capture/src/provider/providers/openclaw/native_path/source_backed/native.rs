@@ -165,7 +165,7 @@ pub(super) struct SessionState {
     pub(super) cwd: Option<String>,
     pub(super) branch: Option<String>,
     pub(super) agent_type: AgentType,
-    pub(super) is_primary: bool,
+    pub(super) relationship: SessionRelationshipKind,
 }
 
 impl SessionState {
@@ -181,14 +181,25 @@ impl SessionState {
         let agent_id = super::super::super::openclaw_agent_id(path)
             .map(|value| super::super::capped_text(&value));
         let provider_session_id = native_session_id.to_owned();
-        let parent_provider_session_id =
-            native_parent_session_id.map(str::to_owned).or_else(|| {
-                related_session_id(
-                    index,
-                    agent_id.as_deref(),
-                    &["parentSessionId", "parent_session_id"],
+        let generic_parent_provider_session_id = related_session_id(
+            index,
+            agent_id.as_deref(),
+            &["parentSessionId", "parent_session_id"],
+        );
+        let (parent_provider_session_id, relationship) =
+            if let Some(spawned_parent) = native_parent_session_id {
+                (
+                    Some(spawned_parent.to_owned()),
+                    SessionRelationshipKind::Delegated,
                 )
-            });
+            } else if let Some(generic_parent) = generic_parent_provider_session_id {
+                (
+                    Some(generic_parent),
+                    SessionRelationshipKind::RelatedUnknown,
+                )
+            } else {
+                (None, SessionRelationshipKind::Root)
+            };
         let root_provider_session_id = native_root_session_id
             .map(str::to_owned)
             .or_else(|| {
@@ -222,7 +233,7 @@ impl SessionState {
             } else {
                 AgentType::Primary
             },
-            is_primary: parent_session_id.is_none(),
+            relationship,
         })
     }
 

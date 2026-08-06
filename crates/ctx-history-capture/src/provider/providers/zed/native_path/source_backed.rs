@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, PositionStability,
+    EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey, PositionStability,
     ProjectionContractError, SessionIdentityInput, SessionRelationshipKind, SourceAnchor,
     SourceObservation, StableEntityId, TypedKey,
 };
@@ -38,7 +38,7 @@ const ZED_LOGICAL_SESSION_KIND: &str = "zed-thread";
 const ZED_LOGICAL_EVENT_KIND: &str = "zed-thread-event";
 const ZED_SOURCE_SCHEMA_VARIANT: &str = "zed-nativepath-sqlite-v0";
 const ZED_SOURCE_REVISION_KIND: &str = "zed-logical-rows-v1";
-pub(crate) const ZED_PARSER_REVISION: &str = "zed-nativepath-source-backed-v0";
+pub(crate) const ZED_PARSER_REVISION: &str = "zed-nativepath-source-backed-v1-session-lineage";
 
 #[derive(Debug, Error)]
 pub(crate) enum ZedSourceBackedErrorV0 {
@@ -298,6 +298,7 @@ fn zed_core_record(
             Some(parent_session_id),
             context.root_session_id,
         )?;
+        record.event_origin = EventOrigin::UniqueToSession;
     }
     record.provider_session_id = Some(session.thread_id.clone());
     record.native_event_id = Some(native_event_id);

@@ -1,7 +1,8 @@
 use super::*;
 use crate::repository_attribution::RepositoryAttributor;
 use ctx_history_core::{
-    CertifiedSource, RepositoryFileInvocationKind, ScannedSourceCounts, SourceObservation,
+    CertifiedSource, EventOrigin, RepositoryFileInvocationKind, ScannedSourceCounts,
+    SourceObservation,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
 #[cfg(unix)]
@@ -43,6 +44,62 @@ fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
             fallback_identities: FallbackEventIdentityState::default(),
         },
     )
+}
+
+fn project_session_event(
+    path: &Path,
+    native_session_id: &str,
+    index: &Value,
+    native_parent_session_id: Option<&str>,
+    native_root_session_id: Option<&str>,
+) -> CoreRecord {
+    let temp = tempfile::tempdir().unwrap();
+    let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+    let source = source_key(native_session_id).unwrap();
+    let session_id = session_identity(&source, native_session_id).unwrap();
+    let session = SessionState::new(
+        path,
+        native_session_id,
+        index,
+        native_parent_session_id,
+        native_root_session_id,
+        DateTime::<Utc>::UNIX_EPOCH,
+        session_id,
+    )
+    .unwrap();
+    let mut projector = OpenClawProjector {
+        source,
+        native_session_id: native_session_id.to_owned(),
+        session_id,
+        session,
+        index_file: None,
+        authority,
+        pending_calls: HashMap::new(),
+        running_processes: HashMap::new(),
+        linkage_capacity_exceeded: false,
+        fallback_identities: FallbackEventIdentityState::default(),
+    };
+    let value = serde_json::json!({
+        "type": "message",
+        "id": "child-event",
+        "timestamp": "2026-08-05T12:00:00Z",
+        "message": {"role": "user", "content": "exact child-owned OpenClaw event"}
+    });
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let mut emitted = Vec::new();
+    projector
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(emitted.len(), 1);
+    emitted.pop().unwrap()
 }
 
 #[cfg(unix)]
@@ -218,6 +275,78 @@ fn native_tool_call_result_and_spawned_family_are_exact() {
             Some("main/parent-session".to_owned())
         )
     );
+}
+
+#[test]
+fn spawned_children_are_delegated_unique_while_generic_parents_stay_unknown() {
+    let spawned_index = serde_json::from_str::<Value>(SESSIONS).unwrap();
+    let spawned_path = Path::new("/agents/worker/sessions/child-session.jsonl");
+    let (spawned_parent, spawned_root) = native_session_family(spawned_path, &spawned_index);
+    let spawned = project_session_event(
+        spawned_path,
+        "worker/child-session",
+        &Value::Null,
+        spawned_parent.as_deref(),
+        spawned_root.as_deref(),
+    );
+    assert_eq!(
+        spawned.session_relationship,
+        SessionRelationshipKind::Delegated
+    );
+    assert_eq!(spawned.event_origin, EventOrigin::UniqueToSession);
+    assert!(!spawned.is_primary);
+    assert_eq!(
+        spawned.content.meaningful_text(),
+        "exact child-owned OpenClaw event"
+    );
+    assert_eq!(
+        spawned.native_event_id,
+        Some(TypedKey::utf8("child-event").unwrap())
+    );
+
+    let generic = project_session_event(
+        Path::new("/agents/worker/sessions/generic-child.jsonl"),
+        "worker/generic-child",
+        &serde_json::json!({
+            "parentSessionId": "generic-parent",
+            "rootSessionId": "generic-root"
+        }),
+        None,
+        None,
+    );
+    assert_eq!(
+        generic.session_relationship,
+        SessionRelationshipKind::RelatedUnknown
+    );
+    assert_eq!(generic.event_origin, EventOrigin::Unknown);
+    assert!(generic.is_primary);
+    assert_eq!(
+        generic.content.meaningful_text(),
+        "exact child-owned OpenClaw event"
+    );
+    assert_eq!(
+        generic.native_event_id,
+        Some(TypedKey::utf8("child-event").unwrap())
+    );
+
+    let unsupported_fork_source = project_session_event(
+        Path::new("/agents/worker/sessions/sqlite-fork-lookalike.jsonl"),
+        "worker/sqlite-fork-lookalike",
+        &serde_json::json!({
+            "forkSource": {
+                "sessionId": "unsupported-sqlite-parent",
+                "entryId": "unsupported-sqlite-entry"
+            }
+        }),
+        None,
+        None,
+    );
+    assert_eq!(
+        unsupported_fork_source.session_relationship,
+        SessionRelationshipKind::Root
+    );
+    assert_eq!(unsupported_fork_source.event_origin, EventOrigin::Unknown);
+    assert!(unsupported_fork_source.parent_session_id.is_none());
 }
 
 #[test]

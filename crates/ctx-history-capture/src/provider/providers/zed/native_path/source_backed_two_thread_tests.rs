@@ -170,6 +170,28 @@ fn source_backed_zed_two_threads_project_distinct_sessions_with_complete_core() 
         "c0b6d44d-f2ec-8655-8b9c-1dbf4df37d9f"
     );
     assert_ne!(sessions["zed-root"], sessions["zed-child"]);
+    let child_records = page
+        .items
+        .iter()
+        .filter(|event| event.provider_session_id.as_deref() == Some("zed-child"))
+        .collect::<Vec<_>>();
+    assert!(!child_records.is_empty());
+    assert!(child_records.iter().all(|event| {
+        event.core_record.session_relationship == SessionRelationshipKind::Delegated
+            && event.core_record.event_origin == EventOrigin::UniqueToSession
+            && !event.core_record.is_primary
+    }));
+    let root_records = page
+        .items
+        .iter()
+        .filter(|event| event.provider_session_id.as_deref() == Some("zed-root"))
+        .collect::<Vec<_>>();
+    assert!(!root_records.is_empty());
+    assert!(root_records.iter().all(|event| {
+        event.core_record.session_relationship == SessionRelationshipKind::Root
+            && event.core_record.event_origin == EventOrigin::Unknown
+            && event.core_record.is_primary
+    }));
     let event_ids = page
         .items
         .iter()

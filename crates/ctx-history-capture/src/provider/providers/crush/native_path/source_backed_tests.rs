@@ -353,6 +353,11 @@ fn source_backed_multi_db_root_guards_and_complete_core() {
     assert_eq!(alpha_event.branch, None);
     assert_eq!(alpha_event.agent_type, AgentType::Subagent.as_str());
     assert!(!alpha_event.is_primary);
+    assert_eq!(
+        alpha_event.session_relationship,
+        SessionRelationshipKind::Delegated
+    );
+    assert_eq!(alpha_event.event_origin, EventOrigin::UniqueToSession);
     assert_eq!(alpha_event.content.meaningful_text(), "alpha exact body");
     assert_eq!(
         alpha_event.native_event_id,
@@ -376,6 +381,11 @@ fn source_backed_multi_db_root_guards_and_complete_core() {
     assert_eq!(beta_event.root_session_id, beta_event.session_id);
     assert_eq!(beta_event.agent_type, AgentType::Primary.as_str());
     assert!(beta_event.is_primary);
+    assert_eq!(
+        beta_event.session_relationship,
+        SessionRelationshipKind::Root
+    );
+    assert_eq!(beta_event.event_origin, EventOrigin::Unknown);
     assert_eq!(beta_event.content.meaningful_text(), "beta exact body");
     assert!(finish_opened_source(second_source).unwrap());
 }

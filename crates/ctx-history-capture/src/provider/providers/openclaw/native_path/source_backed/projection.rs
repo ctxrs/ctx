@@ -1,6 +1,6 @@
 use super::*;
 use crate::provider::providers::openclaw::OpenClawOutputMetadata;
-use ctx_history_core::{SessionRelationshipKind, SubrecordSelector};
+use ctx_history_core::{EventOrigin, SessionRelationshipKind, SubrecordSelector};
 
 const TOOL_CALL_SELECTOR_NAMESPACE: &str = "openclaw.tool-call-block";
 const TOOL_CALL_POSITION_KIND: &str = "openclaw.tool-call-block-position";
@@ -133,18 +133,16 @@ impl OpenClawProjector {
         )
         .map_err(contract)?;
         if let Some(parent_session_id) = self.session.parent_session_id {
-            let kind = if self.session.is_primary {
-                SessionRelationshipKind::RelatedUnknown
-            } else {
-                SessionRelationshipKind::Delegated
-            };
             record
                 .set_session_relationship(
-                    kind,
+                    self.session.relationship,
                     Some(parent_session_id),
                     self.session.root_session_id,
                 )
                 .map_err(contract)?;
+            if self.session.relationship == SessionRelationshipKind::Delegated {
+                record.event_origin = EventOrigin::UniqueToSession;
+            }
         }
         record.provider_session_id = Some(self.session.provider_session_id.clone());
         record.native_event_id = Some(native_event_key);
