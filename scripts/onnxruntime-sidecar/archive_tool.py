@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Create and safely extract the fixed ONNX Runtime sidecar archive shape."""
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import posixpath
