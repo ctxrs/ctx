@@ -152,8 +152,8 @@ fn codex_lineage_evidence_authority_overrides_null_and_reordered_timestamps() {
     assert_eq!(
         copied_result.event_origin,
         EventOrigin::CopiedFromAncestor {
-            ancestor_session_id: parent_session,
-            ancestor_event_id: parent_result.event_id,
+            ancestor_session_id: Box::new(parent_session),
+            ancestor_event_id: Box::new(parent_result.event_id),
             proof: EventCopyProofKind::NativeCallResultIdentity,
         }
     );
