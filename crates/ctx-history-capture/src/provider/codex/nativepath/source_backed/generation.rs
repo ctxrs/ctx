@@ -87,6 +87,7 @@ struct CodexPendingRouteV0 {
 
 struct CodexPreparedGenerationV0 {
     routes: HashMap<usize, CodexPreparedRouteV0>,
+    revalidation_sources: Vec<CodexCatalogSource>,
     sources_revalidated: bool,
     #[cfg(test)]
     worker_start_latch: CodexWorkerStartLatchV0,
@@ -338,9 +339,19 @@ impl CodexGenerationNormalizationCoordinatorV0 {
         let _ = lineage_fact_source_scans;
         // Preparation may have consumed an explicit route's retained opening
         // capability. Route discovery must reopen and bind the current path
-        // entry after the generation-wide replacement fence below.
-        for (source, _, _) in &mut normalized.sources {
+        // entry after the generation-wide replacement fence below. That fence
+        // covers only the selected sources and their transitive ancestors;
+        // unrelated carried components remain certified writer authority and
+        // must not broaden an exact refresh's replacement scope.
+        let mut revalidation_sources = Vec::new();
+        for (source, _, native_session_id) in &mut normalized.sources {
+            let participates = normalized
+                .authority
+                .generation_participates(native_session_id)?;
             source.opened = None;
+            if participates {
+                revalidation_sources.push(source.clone());
+            }
         }
         let authority = Arc::new(normalized.authority);
         #[cfg(test)]
@@ -399,6 +410,7 @@ impl CodexGenerationNormalizationCoordinatorV0 {
         let worker_start_latch = CodexWorkerStartLatchV0::default();
         let prepared = CodexPreparedGenerationV0 {
             routes,
+            revalidation_sources,
             sources_revalidated: false,
             #[cfg(test)]
             worker_start_latch: worker_start_latch.clone(),
@@ -427,13 +439,11 @@ impl CodexGenerationNormalizationCoordinatorV0 {
             .as_mut()
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
         if !prepared.sources_revalidated {
-            for route in prepared.routes.values() {
-                for (source, _, _) in &route.sources {
-                    let opened = reopen_codex_source_capability(source)
-                        .map_err(map_lineage_capture_error)?;
-                    revalidate_codex_catalog_source_capability(source, &opened)
-                        .map_err(map_lineage_capture_error)?;
-                }
+            for source in &prepared.revalidation_sources {
+                let opened =
+                    reopen_codex_source_capability(source).map_err(map_lineage_capture_error)?;
+                revalidate_codex_catalog_source_capability(source, &opened)
+                    .map_err(map_lineage_capture_error)?;
             }
             prepared.sources_revalidated = true;
         }

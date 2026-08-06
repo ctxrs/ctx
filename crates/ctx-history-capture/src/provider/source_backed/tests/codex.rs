@@ -558,6 +558,228 @@ fn codex_exact_route_composes_carried_parent_authority_without_reparsing_it() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn codex_exact_route_ignores_unrelated_carried_replacement_after_preparation() {
+    let temp = tempdir().unwrap();
+    let parent_path = temp.path().join("parent.jsonl");
+    let child_path = temp.path().join("child.jsonl");
+    let unrelated_path = temp.path().join("unrelated.jsonl");
+    let replacement_path = temp.path().join("unrelated-replacement");
+    let moved_path = temp.path().join("unrelated-prepared");
+    let index = temp.path().join("index");
+    let parent = "019fa000-0000-7000-8000-000000003320";
+    let child = "019fa000-0000-7000-8000-000000003321";
+    let unrelated = "019fa000-0000-7000-8000-000000003322";
+    let call = codex_lineage_call("exact-scope-parent", "git rev-parse --verify HEAD");
+    let result = codex_lineage_result("exact-scope-parent", "exact scope parent output");
+    fs::write(
+        &parent_path,
+        codex_lineage_rollout_with_events(
+            parent,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            &[call.clone(), result.clone()],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &child_path,
+        codex_lineage_rollout_with_events(
+            child,
+            Some(parent),
+            SessionRelationshipKind::Forked,
+            Some(parent),
+            &[call, result],
+        ),
+    )
+    .unwrap();
+    let unrelated_old = codex_lineage_rollout(
+        unrelated,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        "unrelated carried old aa",
+    );
+    let unrelated_new = codex_lineage_rollout(
+        unrelated,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        "unrelated carried new bb",
+    );
+    assert_eq!(unrelated_old.len(), unrelated_new.len());
+    fs::write(&unrelated_path, unrelated_old).unwrap();
+    fs::write(&replacement_path, unrelated_new).unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    for path in [&unrelated_path, &parent_path, &child_path] {
+        register_codex_route(
+            &mut registry,
+            path,
+            "codex_session_jsonl",
+            ProviderImportSupport::Explicit,
+            SourceBackedRouteSelection::ExplicitManual,
+        );
+    }
+    let cold =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert!(cold.failed_routes.is_empty());
+    let child_route = route_identity_for_path(&registry, &child_path);
+    append_codex_lineage_message(&child_path, child, "selected child exact suffix");
+
+    let unrelated_from_hook = unrelated_path.clone();
+    install_after_codex_lineage_normalization_hook_v0(move |_| {
+        fs::rename(&unrelated_from_hook, moved_path).unwrap();
+        fs::rename(replacement_path, unrelated_from_hook).unwrap();
+    });
+    let refreshed = refresh_source_backed_generation_for_routes(
+        &index,
+        &registry,
+        WriterOptions::default(),
+        [child_route.clone()],
+    )
+    .unwrap();
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(refreshed.successful_route_ids, vec![child_route]);
+    assert_ne!(refreshed.commit.generation_id, cold.commit.generation_id);
+
+    let records = core_records(&VerifiedIndex::open(&index).unwrap());
+    assert!(records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(child)
+            && record.content.normalized_body.as_deref() == Some("selected child exact suffix")
+    }));
+    assert!(records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(unrelated)
+            && record.content.normalized_body.as_deref() == Some("unrelated carried old aa")
+    }));
+    assert!(!records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(unrelated)
+            && record.content.normalized_body.as_deref() == Some("unrelated carried new bb")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_exact_route_rejects_participating_replacement_after_preparation() {
+    for replace_parent in [true, false] {
+        let temp = tempdir().unwrap();
+        let parent_path = temp.path().join("parent.jsonl");
+        let child_path = temp.path().join("child.jsonl");
+        let replacement_path = temp.path().join("replacement");
+        let moved_path = temp.path().join("prepared");
+        let index = temp.path().join("index");
+        let parent = "019fa000-0000-7000-8000-000000003323";
+        let child = "019fa000-0000-7000-8000-000000003324";
+        let call_id = format!("exact-participant-parent-{replace_parent}");
+        let call = codex_lineage_call(&call_id, "git rev-parse --verify HEAD");
+        let result = codex_lineage_result(&call_id, "exact participant parent output");
+        fs::write(
+            &parent_path,
+            codex_lineage_rollout_with_events(
+                parent,
+                None,
+                SessionRelationshipKind::Root,
+                None,
+                &[call.clone(), result.clone()],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &child_path,
+            codex_lineage_rollout_with_events(
+                child,
+                Some(parent),
+                SessionRelationshipKind::Forked,
+                Some(parent),
+                &[call, result],
+            ),
+        )
+        .unwrap();
+
+        let mut registry = SourceBackedProviderRegistry::new();
+        for path in [&parent_path, &child_path] {
+            register_codex_route(
+                &mut registry,
+                path,
+                "codex_session_jsonl",
+                ProviderImportSupport::Explicit,
+                SourceBackedRouteSelection::ExplicitManual,
+            );
+        }
+        let cold =
+            refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+        assert!(cold.failed_routes.is_empty());
+        let parent_route = route_identity_for_path(&registry, &parent_path);
+        let child_route = route_identity_for_path(&registry, &child_path);
+        append_codex_lineage_message(&child_path, child, "dirty selected participant suffix");
+
+        let target = if replace_parent {
+            &parent_path
+        } else {
+            &child_path
+        };
+        fs::write(&replacement_path, fs::read(target).unwrap()).unwrap();
+        let target_from_hook = target.clone();
+        install_after_codex_lineage_normalization_hook_v0(move |_| {
+            fs::rename(&target_from_hook, moved_path).unwrap();
+            fs::rename(replacement_path, target_from_hook).unwrap();
+        });
+        let rejected = refresh_source_backed_generation_for_routes(
+            &index,
+            &registry,
+            WriterOptions::default(),
+            [child_route.clone()],
+        )
+        .unwrap();
+        assert_eq!(rejected.failed_routes.len(), 1);
+        assert_eq!(
+            rejected.failed_routes[0].class,
+            SourceBackedSourceFailureClass::SourceChanged
+        );
+        assert_eq!(
+            VerifiedIndex::open(&index).unwrap().generation_id(),
+            cold.commit.generation_id
+        );
+
+        if replace_parent {
+            let ancestor_retried = refresh_source_backed_generation_for_routes(
+                &index,
+                &registry,
+                WriterOptions::default(),
+                [parent_route.clone()],
+            )
+            .unwrap();
+            assert!(ancestor_retried.failed_routes.is_empty());
+            assert_eq!(ancestor_retried.successful_route_ids, vec![parent_route]);
+            assert!(!core_records(&VerifiedIndex::open(&index).unwrap())
+                .iter()
+                .any(|record| {
+                    record.provider_session_id.as_deref() == Some(child)
+                        && record.content.normalized_body.as_deref()
+                            == Some("dirty selected participant suffix")
+                }));
+        }
+        let retried = refresh_source_backed_generation_for_routes(
+            &index,
+            &registry,
+            WriterOptions::default(),
+            [child_route.clone()],
+        )
+        .unwrap();
+        assert!(retried.failed_routes.is_empty());
+        assert_eq!(retried.successful_route_ids, vec![child_route]);
+        assert!(core_records(&VerifiedIndex::open(&index).unwrap())
+            .iter()
+            .any(|record| {
+                record.provider_session_id.as_deref() == Some(child)
+                    && record.content.normalized_body.as_deref()
+                        == Some("dirty selected participant suffix")
+            }));
+    }
+}
+
 fn register_three_level_codex_routes(
     registry: &mut SourceBackedProviderRegistry,
     automatic: &Path,
