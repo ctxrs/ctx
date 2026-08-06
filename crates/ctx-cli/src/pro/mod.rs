@@ -29,9 +29,9 @@ use std::io;
 
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
-    blame, blame_diagnostic, preflight_core_materialization, selected_helper_artifact_sha256,
-    stable_error_code, sync_core_materialization, BlameResultFreshness, HostedBlameResult,
-    RESOURCE_NOT_FOUND_DIAGNOSTIC,
+    blame, blame_boundary_error, blame_diagnostic, preflight_core_materialization,
+    selected_helper_artifact_sha256, stable_error_code, sync_core_materialization,
+    BlameResultFreshness, HostedBlameResult, RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
 #[cfg(test)]
 pub(crate) use lifecycle::count_lifecycle_status_queries;
@@ -60,7 +60,7 @@ pub(crate) fn write_stable_error_json(
     output: &mut impl io::Write,
     error: &anyhow::Error,
 ) -> Result<bool> {
-    let diagnostic = blame_diagnostic(error);
+    let diagnostic = client::typed_blame_diagnostic(error).cloned();
     let Some(code) = diagnostic
         .as_ref()
         .map(|value| value.error_code)
@@ -81,6 +81,19 @@ pub(crate) fn write_stable_error_json(
     }
     writeln!(output)?;
     Ok(true)
+}
+
+pub(crate) fn write_blame_error_json(
+    output: &mut impl io::Write,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let diagnostic = blame_diagnostic(error).unwrap_or_else(|| {
+        diagnostic::BlameDiagnostic::for_stable_error_code("invalid_response")
+            .expect("invalid_response has a trusted blame diagnostic")
+    });
+    serde_json::to_writer(&mut *output, &diagnostic)?;
+    writeln!(output)?;
+    Ok(())
 }
 
 pub(crate) fn actionable_error(error: anyhow::Error) -> anyhow::Error {

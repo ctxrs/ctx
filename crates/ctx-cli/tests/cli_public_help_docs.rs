@@ -392,8 +392,12 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
             repository,
             "--format=json",
         ]));
-        assert!(stderr.starts_with("Error: invalid_request:"), "{stderr}");
-        assert!(stderr.contains("repository selector"), "{stderr}");
+        let diagnostic: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+        assert_eq!(diagnostic["error"], "invalid_request");
+        assert_eq!(diagnostic["error_code"], "invalid_request");
+        assert_eq!(diagnostic["reason"], "request_invalid");
+        assert_eq!(diagnostic["retryable"], false);
+        assert!(!stderr.contains("repository selector"), "{stderr}");
     }
 
     for args in [
@@ -403,10 +407,12 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
         let stderr = failure_stderr(ctx(&temp).args(args));
         assert!(stderr.contains("invalid_request"), "{stderr}");
         if args.contains(&"--format=json") {
-            assert_eq!(
-                stderr,
-                "Error: invalid_request: blame target type is ambiguous; use --type file, --type commit, or --type pr\n"
-            );
+            let diagnostic: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+            assert_eq!(diagnostic["error"], "invalid_request");
+            assert_eq!(diagnostic["reason"], "request_invalid");
+            assert_eq!(diagnostic["retryable"], false);
+            assert!(!stderr.contains("target type is ambiguous"), "{stderr}");
+            continue;
         }
         assert!(stderr.contains("target type is ambiguous"), "{stderr}");
         assert!(stderr.contains("--type file"), "{stderr}");
@@ -422,9 +428,31 @@ fn cli_rejects_invalid_blame_selectors_before_local_pro_access() {
         "unknown",
         "--format=json",
     ]));
-    assert!(stderr.contains("invalid value 'unknown'"), "{stderr}");
-    assert!(stderr.contains("file, commit, pr"), "{stderr}");
+    let diagnostic: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(diagnostic["error"], "invalid_request");
+    assert_eq!(diagnostic["reason"], "request_invalid");
+    assert!(!stderr.contains("unknown"), "{stderr}");
     assert!(!stderr.contains("pro_not_installed"), "{stderr}");
+}
+
+#[test]
+fn blame_json_sanitizes_malformed_config_before_pro_access() {
+    let temp = tempdir();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "private malformed config at /home/alice/repository",
+    )
+    .unwrap();
+
+    let stderr = failure_stderr(ctx(&temp).args(["blame", "commit", "abc1234", "--format=json"]));
+    let diagnostic: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(diagnostic["error"], "invalid_response");
+    assert_eq!(diagnostic["reason"], "helper_response_invalid");
+    assert_eq!(diagnostic["retryable"], false);
+    assert!(!stderr.contains("alice"), "{stderr}");
+    assert!(!stderr.contains("repository"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr}");
 }
 
 #[test]

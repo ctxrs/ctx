@@ -6,6 +6,7 @@ pub(crate) fn blame(
     limit: u32,
     cursor: Option<String>,
 ) -> Result<HostedBlameResult> {
+    let diagnostic_target = target.clone();
     blame_with_policy(
         data_root,
         target,
@@ -13,6 +14,7 @@ pub(crate) fn blame(
         cursor,
         DEFAULT_BLAME_FRESHNESS_POLICY,
     )
+    .map_err(|error| errors::blame_boundary_error(error, &diagnostic_target))
 }
 
 pub(super) fn blame_with_policy(

@@ -1029,28 +1029,39 @@ impl AgentAttribution {
         if let Some(resource) = &self.owning_root {
             resource.validate()?;
         }
-        match self.relationship {
-            ProductionRelationship::ProducedBy
-                if self.state != FactState::Asserted
-                    || self.confidence == FactConfidence::Ambiguous =>
-            {
-                return Err(ProtocolError::new(
-                    ErrorClass::Corrupt,
-                    "asserted production has inconsistent state or confidence",
-                ));
-            }
-            ProductionRelationship::PossiblyProducedBy
-                if self.state != FactState::Ambiguous
-                    || self.confidence != FactConfidence::Ambiguous =>
-            {
-                return Err(ProtocolError::new(
-                    ErrorClass::Corrupt,
-                    "possible production must preserve ambiguous state and confidence",
-                ));
-            }
-            _ => {}
-        }
+        validate_production_semantics(self.relationship, self.state, self.confidence)?;
         validate_evidence_numbers(&self.evidence_numbers, available, referenced)
+    }
+}
+
+fn validate_production_semantics(
+    relationship: ProductionRelationship,
+    state: FactState,
+    confidence: FactConfidence,
+) -> Result<(), ProtocolError> {
+    match (relationship, state, confidence) {
+        (
+            ProductionRelationship::ProducedBy,
+            FactState::Asserted,
+            FactConfidence::Explicit
+            | FactConfidence::High
+            | FactConfidence::Medium
+            | FactConfidence::Low
+            | FactConfidence::Unknown,
+        )
+        | (
+            ProductionRelationship::PossiblyProducedBy,
+            FactState::Ambiguous,
+            FactConfidence::Ambiguous,
+        ) => Ok(()),
+        (ProductionRelationship::ProducedBy, _, _) => Err(ProtocolError::new(
+            ErrorClass::Corrupt,
+            "asserted production has inconsistent state or confidence",
+        )),
+        (ProductionRelationship::PossiblyProducedBy, _, _) => Err(ProtocolError::new(
+            ErrorClass::Corrupt,
+            "possible production must preserve ambiguous state and confidence",
+        )),
     }
 }
 
@@ -1100,6 +1111,22 @@ impl CommitBlameMatch {
                 ErrorClass::Corrupt,
                 "commit fact is missing a required object",
             ));
+        }
+        let production_relationship = match self.predicate {
+            CommitPredicate::ProducedBy => Some(ProductionRelationship::ProducedBy),
+            CommitPredicate::PossiblyProducedBy => Some(ProductionRelationship::PossiblyProducedBy),
+            CommitPredicate::AmendedBy
+            | CommitPredicate::CherryPickedFrom
+            | CommitPredicate::Reverts
+            | CommitPredicate::PushedBy
+            | CommitPredicate::InspectedBy
+            | CommitPredicate::ReferencedBy => None,
+        };
+        if let (Some(relationship), Some(producing_session)) =
+            (production_relationship, self.object.as_ref())
+        {
+            validate_resource_kind(producing_session, ResourceKind::Session)?;
+            validate_production_semantics(relationship, self.state, self.confidence)?;
         }
         validate_evidence_numbers(&self.evidence_numbers, available, referenced)
     }

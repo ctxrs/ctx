@@ -123,12 +123,14 @@ fn tool_pro_blame_with(
             )));
         }
         let cursor = optional_cursor(arguments)?;
+        let diagnostic_target = target.clone();
         let result = blame(
             data_root,
             target,
             u32::try_from(limit).map_err(|_| invalid_tool_request("limit is too large"))?,
             cursor,
-        )?;
+        )
+        .map_err(|error| crate::pro::blame_boundary_error(error, &diagnostic_target))?;
         telemetry.complete(result.matches.len(), result.next.is_some());
         let previews = matches!(
             &result.target,

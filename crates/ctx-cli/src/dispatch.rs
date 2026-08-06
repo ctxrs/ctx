@@ -160,6 +160,7 @@ pub(crate) fn run_cli() -> Result<()> {
     let mut ui = Ui::stdio(cli.color);
     let json_output = command_json_output(&cli.command);
     let machine_output = command_machine_readable_output(&cli.command, json_output);
+    let blame_error_json = command_uses_blame_error_json(&cli.command, json_output);
     let stable_pro_error_json = command_uses_stable_pro_error_json(&cli.command, json_output);
     let _analytics_delivery_failure_output =
         analytics::quiet_delivery_failure_output(machine_output);
@@ -208,7 +209,15 @@ pub(crate) fn run_cli() -> Result<()> {
         .clone()
         .map(Ok)
         .unwrap_or_else(default_data_root)
-        .context("resolve ctx data root")?;
+        .context("resolve ctx data root");
+    let data_root = match data_root {
+        Ok(data_root) => data_root,
+        Err(error) if blame_error_json => {
+            render_blame_error_json(&error)?;
+            return Err(RenderedJsonError.into());
+        }
+        Err(error) => return Err(error),
+    };
     if usage_control_action {
         let CommandRoot::Status(args) = cli.command else {
             unreachable!("usage controls are status commands");
@@ -246,6 +255,10 @@ pub(crate) fn run_cli() -> Result<()> {
                 fallback.local_usage.enabled =
                     crate::config::resolve_local_usage_control(&data_root).effective_on_startup();
                 fallback
+            }
+            Err(error) if blame_error_json => {
+                render_blame_error_json(&error)?;
+                return Err(RenderedJsonError.into());
             }
             Err(error) => return Err(error),
         };
@@ -411,7 +424,10 @@ pub(crate) fn run_cli() -> Result<()> {
         if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
             Some(RenderedCliError.into())
         } else if json_output {
-            if stable_pro_error_json && render_stable_pro_error_json(error)? {
+            if blame_error_json {
+                render_blame_error_json(error)?;
+                Some(RenderedJsonError.into())
+            } else if stable_pro_error_json && render_stable_pro_error_json(error)? {
                 Some(RenderedJsonError.into())
             } else if let Some(error) =
                 error.downcast_ref::<presentation_limit::PresentationOutputLimitError>()
@@ -508,6 +524,10 @@ fn render_stable_pro_error_json(error: &anyhow::Error) -> Result<bool> {
     pro::write_stable_error_json(&mut crate::output::stderr_writer(), error)
 }
 
+fn render_blame_error_json(error: &anyhow::Error) -> Result<()> {
+    pro::write_blame_error_json(&mut crate::output::stderr_writer(), error)
+}
+
 fn write_clap_output(error: &clap::Error, ui: &mut Ui) -> Result<()> {
     write_clap_output_with_line_ends(error, ui, false)
 }
@@ -582,11 +602,11 @@ fn command_json_output(command: &CommandRoot) -> bool {
 }
 
 fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) -> bool {
-    json_output
-        && matches!(
-            command,
-            CommandRoot::Pro(_) | CommandRoot::Referral(_) | CommandRoot::Blame(_)
-        )
+    json_output && matches!(command, CommandRoot::Pro(_) | CommandRoot::Referral(_))
+}
+
+fn command_uses_blame_error_json(command: &CommandRoot, json_output: bool) -> bool {
+    json_output && matches!(command, CommandRoot::Blame(_))
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {
@@ -751,8 +771,6 @@ mod tests {
             &["referral", "create", "agent-smith", "--format=json"][..],
             &["referral", "status", "--format=json"][..],
             &["referral", "payout", "--format=json"][..],
-            &["blame", "file", "src/main.rs", "--format=json"][..],
-            &["blame", "commit", "abc1234", "--format=json"][..],
         ] {
             let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
                 .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
@@ -766,6 +784,8 @@ mod tests {
         for args in [
             &["pro"][..],
             &["referral", "status"][..],
+            &["blame", "file", "src/main.rs", "--format=json"][..],
+            &["blame", "commit", "abc1234", "--format=json"][..],
             &["blame", "file", "src/main.rs"][..],
             &["status", "--format=json"][..],
         ] {
@@ -774,6 +794,26 @@ mod tests {
             let json_output = command_json_output(&cli.command);
             assert!(
                 !command_uses_stable_pro_error_json(&cli.command, json_output),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blame_error_json_is_scoped_to_blame_machine_output() {
+        for (args, expected) in [
+            (&["blame", "file", "src/main.rs", "--format=json"][..], true),
+            (&["blame", "commit", "abc1234", "--format=json"][..], true),
+            (&["blame", "file", "src/main.rs"][..], false),
+            (&["pro", "--format=json"][..], false),
+            (&["referral", "status", "--format=json"][..], false),
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+                .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+            let json_output = command_json_output(&cli.command);
+            assert_eq!(
+                command_uses_blame_error_json(&cli.command, json_output),
+                expected,
                 "{args:?}"
             );
         }

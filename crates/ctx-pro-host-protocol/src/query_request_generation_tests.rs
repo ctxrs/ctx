@@ -664,6 +664,78 @@ fn commit_coverage_detects_page_wide_producer_conflicts_and_duplicate_fact_units
 }
 
 #[test]
+fn commit_producer_facts_require_session_objects_and_exact_semantics() {
+    let invalid_cases = [
+        (
+            "produced repository object",
+            CommitFactType::Produced,
+            FactState::Asserted,
+            FactConfidence::Explicit,
+            ResourceKind::Repository,
+            "resource reference has an unexpected kind",
+        ),
+        (
+            "produced ambiguous state",
+            CommitFactType::Produced,
+            FactState::Ambiguous,
+            FactConfidence::Explicit,
+            ResourceKind::Session,
+            "asserted production has inconsistent state or confidence",
+        ),
+        (
+            "produced ambiguous confidence",
+            CommitFactType::Produced,
+            FactState::Asserted,
+            FactConfidence::Ambiguous,
+            ResourceKind::Session,
+            "asserted production has inconsistent state or confidence",
+        ),
+        (
+            "possible commit object",
+            CommitFactType::Ambiguous,
+            FactState::Ambiguous,
+            FactConfidence::Ambiguous,
+            ResourceKind::Commit,
+            "resource reference has an unexpected kind",
+        ),
+        (
+            "possible asserted state",
+            CommitFactType::Ambiguous,
+            FactState::Asserted,
+            FactConfidence::Ambiguous,
+            ResourceKind::Session,
+            "possible production must preserve ambiguous state and confidence",
+        ),
+        (
+            "possible explicit confidence",
+            CommitFactType::Ambiguous,
+            FactState::Ambiguous,
+            FactConfidence::Explicit,
+            ResourceKind::Session,
+            "possible production must preserve ambiguous state and confidence",
+        ),
+    ];
+
+    for (name, fact_type, state, confidence, object_kind, expected_message) in invalid_cases {
+        let mut blame_match = commit_match(name, fact_type, state, "session:producer");
+        let BlameMatch::Commit(fact) = &mut blame_match else {
+            panic!("commit fixture must contain a commit match");
+        };
+        fact.confidence = confidence;
+        fact.object.as_mut().expect("commit producer object").kind = object_kind;
+        let invalid = commit_result(
+            vec![blame_match],
+            outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
+        );
+        assert_eq!(
+            invalid.validate().unwrap_err().message,
+            expected_message,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn pull_request_coverage_derives_activity_and_commit_production_without_duplicate_units() {
     let valid = pull_request_result(
         vec![

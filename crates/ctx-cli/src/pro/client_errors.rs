@@ -14,6 +14,17 @@ pub(super) fn protocol_blame_error(error: ProtocolError, target: &BlameTarget) -
     anyhow::Error::new(BlameDiagnostic::from_protocol_error(error).with_core_search_for(target))
 }
 
+pub(crate) fn blame_boundary_error(error: anyhow::Error, target: &BlameTarget) -> anyhow::Error {
+    if typed_blame_diagnostic(&error).is_some() {
+        return error;
+    }
+    let diagnostic = blame_diagnostic(&error).unwrap_or_else(|| {
+        BlameDiagnostic::for_stable_error_code("invalid_response")
+            .expect("invalid_response has a trusted blame diagnostic")
+    });
+    anyhow::Error::new(diagnostic.with_core_search_for(target))
+}
+
 pub(crate) fn blame_diagnostic(error: &anyhow::Error) -> Option<BlameDiagnostic> {
     typed_blame_diagnostic(error)
         .cloned()
@@ -142,6 +153,31 @@ mod tests {
         assert!(!format!("{error:?}").contains("token=secret"));
         assert!(!serialized.contains("/home/"));
         assert!(!serialized.contains("token=secret"));
+    }
+
+    #[test]
+    fn blame_boundary_types_and_sanitizes_every_runtime_failure() {
+        let target = BlameTarget::Commit {
+            oid: "abcd".to_owned(),
+            repository: None,
+        };
+        for (error, expected) in [
+            (
+                anyhow!("pro_not_installed: private helper at /home/alice/ctx-pro"),
+                "pro_not_installed",
+            ),
+            (
+                anyhow!("unclassified private failure at /home/alice/repository"),
+                "invalid_response",
+            ),
+        ] {
+            let error = blame_boundary_error(error, &target);
+            let diagnostic = typed_blame_diagnostic(&error).unwrap();
+            let encoded = serde_json::to_string(diagnostic).unwrap();
+            assert_eq!(diagnostic.error_code, expected);
+            assert!(!encoded.contains("alice"));
+            assert!(!encoded.contains("/home/"));
+        }
     }
 
     #[test]

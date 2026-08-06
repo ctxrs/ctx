@@ -115,13 +115,12 @@ pub(super) fn inventory() -> Value {
             ],
             "blame_diagnostic_reason": [
                 "target_not_indexed", "repository_selector_not_indexed",
-                "repository_not_bound", "repository_ambiguous", "target_ambiguous",
-                "commit_rewrite_ambiguous", "file_blame_not_covered",
+                "repository_not_bound", "checkout_unavailable", "git_unavailable",
+                "repository_ambiguous", "target_ambiguous", "commit_rewrite_ambiguous",
+                "file_blame_not_covered",
                 "commit_blame_not_covered", "pull_request_blame_not_covered"
             ],
-            "blame_diagnostic_candidate_kind": [
-                "repository", "file", "commit", "pull_request"
-            ],
+            "blame_diagnostic_candidate_kind": ["repository", "commit"],
             "core_projection_currentness": [
                 "not_materialized", "partial", "stale", "needs_rebuild", "current"
             ],

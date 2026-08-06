@@ -496,6 +496,40 @@ fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract()
         canonical["enums"]["blame_attribution"],
         serde_json::json!(["proven", "possible", "conflicting", "none"])
     );
+    let diagnostic_reasons = [
+        BlameDiagnosticReason::TargetNotIndexed,
+        BlameDiagnosticReason::RepositorySelectorNotIndexed,
+        BlameDiagnosticReason::RepositoryNotBound,
+        BlameDiagnosticReason::CheckoutUnavailable,
+        BlameDiagnosticReason::GitUnavailable,
+        BlameDiagnosticReason::RepositoryAmbiguous,
+        BlameDiagnosticReason::TargetAmbiguous,
+        BlameDiagnosticReason::CommitRewriteAmbiguous,
+        BlameDiagnosticReason::FileBlameNotCovered,
+        BlameDiagnosticReason::CommitBlameNotCovered,
+        BlameDiagnosticReason::PullRequestBlameNotCovered,
+    ]
+    .map(|reason| serde_json::to_value(reason).expect("blame diagnostic reason JSON"));
+    assert_eq!(
+        canonical["enums"]["blame_diagnostic_reason"],
+        serde_json::json!(diagnostic_reasons)
+    );
+    let diagnostic_candidate_kinds = [
+        BlameDiagnosticCandidate::Repository {
+            selector: "workspace:ctx".to_owned(),
+        },
+        BlameDiagnosticCandidate::Commit {
+            repository: "workspace:ctx".to_owned(),
+            oid: "a".repeat(40),
+        },
+    ]
+    .map(|candidate| {
+        serde_json::to_value(candidate).expect("blame diagnostic candidate JSON")["kind"].clone()
+    });
+    assert_eq!(
+        canonical["enums"]["blame_diagnostic_candidate_kind"],
+        serde_json::json!(diagnostic_candidate_kinds)
+    );
     assert_eq!(
         canonical["bounds"]["blame_diagnostic_candidates"],
         serde_json::json!(5)

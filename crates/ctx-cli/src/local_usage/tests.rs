@@ -4,14 +4,51 @@ use clap::Parser as _;
 use ctx_history_core::platform_security::restrict_private_directory;
 
 use super::{
-    read_report, CliUsage, CompletedOperation, ContextCoverage, McpInvocation,
-    ResultObservationAction, SearchContextObservation, ValueClass,
+    classify_blame_json, pro_outcome_from_attribution, read_report, CliUsage, CompletedOperation,
+    ContextCoverage, McpInvocation, ProOutcome, ResultObservationAction, SearchContextObservation,
+    ValueClass,
 };
 
 mod mcp_tests;
 mod migration_tests;
 mod persistence_tests;
 mod schema_tests;
+
+#[test]
+fn blame_usage_consumes_authoritative_outcome_for_cli_and_mcp() {
+    for (attribution, expected) in [
+        (
+            ctx_pro_host_protocol::BlameAttribution::Proven,
+            ProOutcome::Produced,
+        ),
+        (
+            ctx_pro_host_protocol::BlameAttribution::Possible,
+            ProOutcome::Possible,
+        ),
+        (
+            ctx_pro_host_protocol::BlameAttribution::Conflicting,
+            ProOutcome::Possible,
+        ),
+        (
+            ctx_pro_host_protocol::BlameAttribution::None,
+            ProOutcome::None,
+        ),
+    ] {
+        assert_eq!(pro_outcome_from_attribution(attribution), expected);
+        let structured = serde_json::json!({
+            "outcome": {
+                "attribution": match attribution {
+                    ctx_pro_host_protocol::BlameAttribution::Proven => "proven",
+                    ctx_pro_host_protocol::BlameAttribution::Possible => "possible",
+                    ctx_pro_host_protocol::BlameAttribution::Conflicting => "conflicting",
+                    ctx_pro_host_protocol::BlameAttribution::None => "none",
+                }
+            },
+            "matches": []
+        });
+        assert_eq!(classify_blame_json(Some(&structured)), expected);
+    }
+}
 
 pub(super) fn private_tempdir() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();

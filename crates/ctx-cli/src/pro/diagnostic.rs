@@ -175,7 +175,11 @@ impl BlameDiagnostic {
         }
         if matches!(
             self.reason,
-            BlameDiagnosticReason::TargetNotIndexed | BlameDiagnosticReason::OperationNotCovered
+            BlameDiagnosticReason::TargetNotIndexed
+                | BlameDiagnosticReason::OperationNotCovered
+                | BlameDiagnosticReason::FileBlameNotCovered
+                | BlameDiagnosticReason::CommitBlameNotCovered
+                | BlameDiagnosticReason::PullRequestBlameNotCovered
         ) {
             self.next_action = BlameNextAction::core_search_for(target);
         }

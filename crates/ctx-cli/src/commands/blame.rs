@@ -340,7 +340,13 @@ fn run_with(
     let target_kind = ProBlameTargetV1::from_protocol(&target);
     let mut telemetry = ProBlameTelemetryV1::new(Some(target_kind), ProSurfaceV1::Cli);
     let result = (|| {
-        let result = present_blame_result(blame(&data_root, target, limit, cursor), json, ui)?;
+        let diagnostic_target = target.clone();
+        let result = present_blame_result(
+            blame(&data_root, target, limit, cursor)
+                .map_err(|error| crate::pro::blame_boundary_error(error, &diagnostic_target)),
+            json,
+            ui,
+        )?;
         telemetry.complete(result.matches.len(), result.next.is_some());
         if matches!(
             &result.target,
