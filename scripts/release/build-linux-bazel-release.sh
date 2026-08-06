@@ -68,7 +68,7 @@ case "${target_id}" in
     expected_host_arch=x86_64
     docker_platform=linux/amd64
     bazel_binary_arch=x86_64
-    bazel_binary_sha256=c97f02133adce63f0c28678ac1f21d65fa8255c80429b588aeeba8a1fac6202b
+    bazel_binary_sha256=115a1b62be95f29e5821d4dddffba1b058905a48019b499919c285e7f708d5e2
     route_target=//:ctx_release_linux_x64
     route_binary=ctx_release_linux_x64
     ;;
@@ -77,7 +77,7 @@ case "${target_id}" in
     expected_host_arch=aarch64
     docker_platform=linux/arm64
     bazel_binary_arch=arm64
-    bazel_binary_sha256=d7aedc8565ed47b6231badb80b09f034e389c5f2b1c2ac2c55406f7c661d8b88
+    bazel_binary_sha256=71df04ec724f1b577f1f47ec9a6b81d13f39683f6c3215cacf45fdaf40b2c5c1
     route_target=//:ctx_release_linux_arm64
     route_binary=ctx_release_linux_arm64
     ;;

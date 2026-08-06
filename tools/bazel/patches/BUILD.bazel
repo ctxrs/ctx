@@ -3,6 +3,9 @@ load("//tools/bazel:gates.bzl", "loc_check_inputs")
 loc_check_inputs(name = "loc_check_inputs")
 
 exports_files(
-    ["ort-freebsd-release-env-order.patch"],
+    [
+        "ort-freebsd-release-env-order.patch",
+        "rules-rust-freebsd-host.patch",
+    ],
     visibility = ["//visibility:public"],
 )

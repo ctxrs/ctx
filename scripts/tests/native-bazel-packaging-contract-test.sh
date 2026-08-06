@@ -19,6 +19,61 @@ staging="${source_root}/scripts/stage-github-release-assets.sh"
 semantic_staging="${source_root}/scripts/stage-semantic-release-handoff.sh"
 packager="${source_root}/scripts/package-public-cli-bazel-release.sh"
 release_routes="${source_root}/tools/bazel/release_routes.bzl"
+release_config="${source_root}/.bazelrc"
+module_definition="${source_root}/MODULE.bazel"
+module_lock="${source_root}/MODULE.bazel.lock"
+rules_rust_patch="${source_root}/tools/bazel/patches/rules-rust-freebsd-host.patch"
+
+grep -Fxq 'build:release --lockfile_mode=error' "${release_config}" || {
+  echo 'release config must fail closed on incomplete module lock data' >&2
+  exit 1
+}
+
+python3 - "${module_lock}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+lock = json.loads(Path(sys.argv[1]).read_bytes())
+extension = lock["moduleExtensions"]["@@rules_go~//go:extensions.bzl%go_sdk"]
+expected = {
+    "os:linux,arch:amd64",
+    "os:linux,arch:aarch64",
+    "os:freebsd,arch:amd64",
+    "os:osx,arch:x86_64",
+    "os:osx,arch:aarch64",
+    "os:windows,arch:amd64",
+}
+if set(extension) != expected:
+    raise SystemExit(
+        "rules_go host lock factors differ: "
+        f"expected {sorted(expected)}, observed {sorted(extension)}"
+    )
+for digest_field in ("bzlTransitiveDigest", "usagesDigest"):
+    digests = {entry[digest_field] for entry in extension.values()}
+    if len(digests) != 1:
+        raise SystemExit(
+            f"host factors disagree on {digest_field}: {sorted(digests)}"
+        )
+for factor, entry in extension.items():
+    if not entry["generatedRepoSpecs"]:
+        raise SystemExit(f"{factor} has no generated repository specs")
+PY
+
+grep -Fq 'patches = ["//tools/bazel/patches:rules-rust-freebsd-host.patch"]' \
+  "${module_definition}" || {
+  echo 'rules_rust must retain the pinned FreeBSD host patch' >&2
+  exit 1
+}
+for required_patch_line in \
+  '+        "freebsd": ["x86_64"],' \
+  '+    if "freebsd" in repository_ctx.os.name:' \
+  '+        return triple("{}-unknown-freebsd".format(arch))'; do
+  grep -Fq -- "${required_patch_line}" "${rules_rust_patch}" || {
+    echo "rules_rust FreeBSD host patch is missing: ${required_patch_line}" >&2
+    exit 1
+  }
+done
 
 for required in \
   'route_target=//:ctx_release_linux_x64' \
@@ -178,6 +233,20 @@ for required in \
   '"${BAZEL_SHA256}"'; do
   grep -Fq -- "${required}" "${recipe}" || {
     printf 'native Linux Bazel recipe missing architecture pin: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
+
+[[ "$(tr -d '[:space:]' <"${source_root}/.bazelversion")" == "7.7.1" ]] || {
+  echo 'native release checksum contract expects Bazel 7.7.1' >&2
+  exit 1
+}
+for required in \
+  'bazel_binary_sha256=115a1b62be95f29e5821d4dddffba1b058905a48019b499919c285e7f708d5e2' \
+  'bazel_binary_sha256=71df04ec724f1b577f1f47ec9a6b81d13f39683f6c3215cacf45fdaf40b2c5c1'; do
+  grep -Fq -- "${required}" "${wrapper}" || {
+    printf 'native Linux release wrapper has a stale Bazel checksum: %s\n' \
       "${required}" >&2
     exit 1
   }

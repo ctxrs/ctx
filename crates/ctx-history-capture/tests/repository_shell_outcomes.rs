@@ -2,6 +2,13 @@
 
 pub(crate) use ctx_history_capture::OutputOutcome;
 
+#[path = "../src/common/json.rs"]
+pub(crate) mod common_json;
+
+pub(crate) mod common {
+    pub(crate) use crate::common_json as json;
+}
+
 #[path = "../src/repository_attribution/shell.rs"]
 mod shell;
 

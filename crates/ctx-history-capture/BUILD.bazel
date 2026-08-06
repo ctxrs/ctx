@@ -217,7 +217,7 @@ py_test(
 ctx_rust_test(
     name = "repository_shell_outcomes_tests",
     srcs = [
-        "tests/repository_shell_outcomes.rs",
+        "src/common/json.rs",
         "src/repository_attribution/association.rs",
         "src/repository_attribution/outcome.rs",
         "src/repository_attribution/outcome/pull_request.rs",
@@ -225,6 +225,7 @@ ctx_rust_test(
         "src/repository_attribution/shell/outcome_tests.rs",
         "src/repository_attribution/shell/outcome_plan.rs",
         "src/repository_attribution/shell/pull_request.rs",
+        "tests/repository_shell_outcomes.rs",
     ],
     crate_name = "repository_shell_outcomes",
     crate_root = "tests/repository_shell_outcomes.rs",
