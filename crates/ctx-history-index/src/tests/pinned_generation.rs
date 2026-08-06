@@ -201,6 +201,42 @@ fn pinned_generation_retries_once_when_the_publication_pointer_changes() {
 }
 
 #[test]
+fn retained_peer_retry_pairs_a_pinned_generation_with_the_new_active_generation() {
+    let temp = tempdir().unwrap();
+    let source = source("retained-peer-pointer-race.jsonl");
+    let pinned = publish_pinned_test_generation(temp.path(), &source, 1, "pinned evidence");
+    let before_publication = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let published =
+        publish_pinned_test_generation(temp.path(), &source, 2, "published peer evidence");
+    let after_publication = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let mut pointer_reads = 0;
+
+    let peer = VerifiedIndex::open_retained_generation_peer_with_pointer_loader(
+        temp.path(),
+        &pinned.generation_id,
+        |_| {
+            pointer_reads += 1;
+            Ok(Some(if pointer_reads == 1 {
+                before_publication.clone()
+            } else {
+                after_publication.clone()
+            }))
+        },
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(pointer_reads, 3, "peer resolution did not retry once");
+    assert_eq!(peer.generation_id(), published.generation_id);
+    assert_eq!(peer.count_term("published").unwrap(), 1);
+    assert_eq!(peer.count_term("pinned").unwrap(), 0);
+}
+
+#[test]
 fn pinned_generation_fails_closed_after_a_second_pointer_change() {
     let temp = tempdir().unwrap();
     let source = source("pinned-second-pointer-race.jsonl");

@@ -344,6 +344,49 @@ fn active_and_retained_generation_expose_their_own_opaque_metadata() {
 }
 
 #[test]
+fn retained_generation_peer_is_limited_to_the_current_pointer_pair() {
+    let temp = tempdir().unwrap();
+    let source = source("retained-generation-peer.jsonl");
+    let first = publish_with_metadata(temp.path(), &source, 1, "first peer", b"first");
+    assert!(VerifiedIndex::open_retained_generation_peer(
+        temp.path(),
+        &first.receipt().generation_id,
+    )
+    .unwrap()
+    .is_none());
+
+    let second = publish_with_metadata(temp.path(), &source, 2, "second peer", b"second");
+    let previous =
+        VerifiedIndex::open_retained_generation_peer(temp.path(), &second.receipt().generation_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(previous.generation_id(), first.receipt().generation_id);
+    let active =
+        VerifiedIndex::open_retained_generation_peer(temp.path(), &first.receipt().generation_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(active.generation_id(), second.receipt().generation_id);
+
+    let third = publish_with_metadata(temp.path(), &source, 3, "third peer", b"third");
+    let error = match VerifiedIndex::open_retained_generation_peer(
+        temp.path(),
+        &first.receipt().generation_id,
+    ) {
+        Ok(_) => panic!("expired generation unexpectedly retained a peer"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        IndexError::PinnedGenerationNotRetained { .. }
+    ));
+    let active =
+        VerifiedIndex::open_retained_generation_peer(temp.path(), &second.receipt().generation_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(active.generation_id(), third.receipt().generation_id);
+}
+
+#[test]
 fn metadata_does_not_change_logical_generation_identity() {
     let first_root = tempdir().unwrap();
     let second_root = tempdir().unwrap();

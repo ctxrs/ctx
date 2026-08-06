@@ -81,18 +81,22 @@ pub(crate) use publication::{
     GenerationSlot, PhysicalIntegrityAudit, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
-    AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
-    CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters, CoreEventRangePage,
-    CoreEventRangeScope, CoreEventRangeSelection, CoreEventRecord, CoreSemanticEventPage,
-    CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan, EventRecord,
-    EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits,
+    AgentScope, CopiedEventLineage, CopiedEventLineageOccurrence, CopiedEventLineagePolicy,
+    CopiedEventLineageRelationshipCount, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor,
+    CoreEventRangeDirection, CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters,
+    CoreEventRangePage, CoreEventRangeScope, CoreEventRangeSelection, CoreEventRecord,
+    CoreSemanticEventPage, CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan,
+    EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits,
     SearchContentScope, SemanticEligibility, SemanticEventCursor, SemanticEventPage,
     SemanticFilterProjection, SessionEventCoordinate, SessionEventCursor, SessionRecord,
     SourceEventCursor, SourceEventPage, StoredCoreEventRecord, StoredCoreRecordJson,
     StoredCoreSourceEventPage, DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS,
+    MAX_COPIED_EVENT_LINEAGE_DEPTH, MAX_COPIED_EVENT_LINEAGE_EXACT_IDENTITY_POSTING_VISITS,
+    MAX_COPIED_EVENT_LINEAGE_OCCURRENCES, MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS,
     MAX_CORE_EVENT_RANGE_PAGE_ITEMS, MAX_LEXICAL_QUERY_RESULTS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
     MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
-    MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS, SEARCH_COPIED_EVENT_LINEAGE_POLICY,
+    SHOW_COPIED_EVENT_LINEAGE_POLICY,
 };
 pub use reader::VerifiedIndex;
 #[cfg(test)]
