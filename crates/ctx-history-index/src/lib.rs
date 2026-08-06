@@ -26,6 +26,11 @@ mod writer_support;
 
 pub use durable_directory::durable_atomic_replace_file;
 
+pub use publication::{
+    acquire_generation_retention_lease, load_generation_retention_lease,
+    release_generation_retention_lease, GenerationRetentionLease,
+};
+
 pub use commit_contract::{
     CommitReceipt, PublicationDisposition, PublicationMetadataContext, PublishedGeneration,
     RevalidationTarget,
@@ -78,7 +83,8 @@ pub(crate) use publication::{
     searcher_generation, sync_directory, sync_generation, verify_or_certify_physical_integrity,
     verify_physical_integrity, verify_publication_candidate, verify_searcher,
     verify_searcher_structure, write_manifest, ActiveGenerationPointer, CurrentRepublishOutcome,
-    GenerationSlot, PhysicalIntegrityAudit, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
+    GenerationSlot, PhysicalIntegrityAudit, PointerPublicationOutcome, GENERATION_WRITER_LOCK_FILE,
+    INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
     AgentScope, CopiedEventLineage, CopiedEventLineageOccurrence, CopiedEventLineagePolicy,
@@ -340,7 +346,7 @@ impl GenerationWriter {
         let root = directory.root_path().to_path_buf();
         fs::create_dir_all(root.join(MANIFEST_DIRECTORY))?;
         let generation_writer_lock = Lock {
-            filepath: PathBuf::from(".ctx-generation-writer.lock"),
+            filepath: PathBuf::from(GENERATION_WRITER_LOCK_FILE),
             is_blocking: false,
         };
         let preflight_lock =
@@ -371,14 +377,28 @@ impl GenerationWriter {
             }
         }
         if !pointer_requires_rebuild {
-            reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
-            let retained_generation_ids = active_pointer
+            let retention_lease = load_generation_retention_lease(&root)?;
+            reclaim_inactive_generation_directories(
+                &root,
+                active_pointer.as_ref(),
+                retention_lease.as_ref(),
+            )?;
+            let mut retained_generation_ids = active_pointer
                 .iter()
                 .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
                 .map(|slot| slot.generation_id().to_owned())
                 .collect::<Vec<_>>();
+            retained_generation_ids.extend(
+                retention_lease
+                    .as_ref()
+                    .map(|lease| lease.generation_id().to_owned()),
+            );
             reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
-            reclaim_unreferenced_certifications(&root, active_pointer.as_ref())?;
+            reclaim_unreferenced_certifications(
+                &root,
+                active_pointer.as_ref(),
+                retention_lease.as_ref(),
+            )?;
         }
 
         let writer = (|| -> Result<Self> {

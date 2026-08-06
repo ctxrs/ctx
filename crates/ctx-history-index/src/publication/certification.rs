@@ -989,6 +989,7 @@ pub(crate) fn certification_path(root: &Path, slot: &GenerationSlot) -> PathBuf 
 pub(crate) fn reclaim_unreferenced_certifications(
     root: &Path,
     pointer: Option<&ActiveGenerationPointer>,
+    lease: Option<&super::GenerationRetentionLease>,
 ) -> Result<()> {
     let directory = root.join(CERTIFICATION_DIRECTORY);
     fs::create_dir_all(&directory)?;
@@ -996,6 +997,7 @@ pub(crate) fn reclaim_unreferenced_certifications(
         .into_iter()
         .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
         .map(GenerationSlot::directory)
+        .chain(lease.map(|lease| lease.target().directory()))
         .collect::<std::collections::HashSet<_>>();
     let mut removed = false;
     for entry in fs::read_dir(&directory)? {

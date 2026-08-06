@@ -465,18 +465,35 @@ impl GenerationWriter {
         if let Some(hook) = self.after_pointer_switch.take() {
             hook(&candidate_path);
         }
-        let retained_generation_ids = std::iter::once(next_pointer.active())
-            .chain(next_pointer.previous())
-            .map(|slot| slot.generation_id().to_owned())
-            .collect::<Vec<_>>();
         // The durable pointer is authoritative now. Writer open retries every
         // cleanup below, so treat each attempt independently and never turn a
         // published generation into a failed refresh because reclamation was
-        // temporarily obstructed.
+        // temporarily obstructed. A malformed lease suppresses every reclaim:
+        // treating it as absent could delete the one target it was meant to
+        // preserve before the next strict writer open reports it.
         let _ = clear_active_generation_rebuild_marker(&root);
-        let _ = reclaim_inactive_generation_directories(&root, Some(&next_pointer));
-        let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
-        let _ = reclaim_unreferenced_certifications(&root, Some(&next_pointer));
+        if let Ok(retention_lease) = load_generation_retention_lease(&root) {
+            let mut retained_generation_ids = std::iter::once(next_pointer.active())
+                .chain(next_pointer.previous())
+                .map(|slot| slot.generation_id().to_owned())
+                .collect::<Vec<_>>();
+            retained_generation_ids.extend(
+                retention_lease
+                    .as_ref()
+                    .map(|lease| lease.generation_id().to_owned()),
+            );
+            let _ = reclaim_inactive_generation_directories(
+                &root,
+                Some(&next_pointer),
+                retention_lease.as_ref(),
+            );
+            let _ = reclaim_unreferenced_manifests(&root, &retained_generation_ids);
+            let _ = reclaim_unreferenced_certifications(
+                &root,
+                Some(&next_pointer),
+                retention_lease.as_ref(),
+            );
+        }
         let _ = publication::certify_activated_generation(
             &root,
             &next_pointer,

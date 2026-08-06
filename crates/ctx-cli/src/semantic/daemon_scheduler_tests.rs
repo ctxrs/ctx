@@ -49,7 +49,8 @@ use super::{
     daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path,
     newer_active_pro_generation_is_pending, persist_pro_status, pin_scheduled_pro_target,
     prepare_pro_retry_for_generation, preserve_daemon_background_refresh_recovery_provenance,
-    read_daemon_job_status, read_pro_status, record_daemon_job_retry, record_source_refresh_retry,
+    read_daemon_job_status, read_pro_status, reconcile_core_finalization_generation_lease,
+    record_daemon_job_retry, record_source_refresh_retry,
     restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
     run_pending_core_pro_catch_up_with, run_pending_core_refresh, run_pro_catch_up_with_retry,
@@ -1091,7 +1092,11 @@ fn fresh_restart_pins_durable_finalizing_target_before_newer_active_core() {
         }),
     )
     .unwrap();
-    let active_generation = publish_semantic_catch_up_generation(temp.path(), 2);
+    reconcile_core_finalization_generation_lease(temp.path()).unwrap();
+    let mut active_generation = String::new();
+    for revision in 2..=4 {
+        active_generation = publish_semantic_catch_up_generation(temp.path(), revision);
+    }
     assert_ne!(active_generation, finalizing_generation);
 
     let (scheduled_generation, scheduled_pin) = pin_scheduled_pro_target(temp.path())

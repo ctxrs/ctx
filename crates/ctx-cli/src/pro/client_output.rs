@@ -37,3 +37,7 @@ pub(crate) fn sync_core_materialization(
 
 #[path = "client_output/core_materialization_feed.rs"]
 mod core_materialization_feed;
+pub(crate) use core_materialization_feed::{
+    core_finalization_generation_lease, reconstruct_core_finalization_generation_lease,
+    release_core_finalization_generation_lease, validate_core_finalization_generation_lease,
+};

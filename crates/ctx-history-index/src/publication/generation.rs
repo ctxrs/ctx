@@ -91,7 +91,7 @@ impl GenerationSlot {
         is_generation_id(generation_id) && is_generation_directory_name(directory)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if !Self::names_are_valid(&self.generation_id, &self.directory)
             || !is_generation_id(&self.physical_integrity_digest)
         {
@@ -256,6 +256,7 @@ pub(crate) fn sync_generation(path: &Path) -> Result<()> {
 pub(crate) fn reclaim_inactive_generation_directories(
     root: &Path,
     pointer: Option<&ActiveGenerationPointer>,
+    lease: Option<&super::GenerationRetentionLease>,
 ) -> Result<()> {
     let generations = root.join(INDEX_GENERATIONS_DIRECTORY);
     fs::create_dir_all(&generations)?;
@@ -263,6 +264,7 @@ pub(crate) fn reclaim_inactive_generation_directories(
         .into_iter()
         .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
         .map(|slot| slot.directory().to_owned())
+        .chain(lease.map(|lease| lease.target().directory().to_owned()))
         .collect::<HashSet<_>>();
     let mut removed = false;
     for entry in fs::read_dir(&generations)? {

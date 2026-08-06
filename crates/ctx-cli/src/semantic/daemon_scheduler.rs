@@ -63,6 +63,10 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     let source_refresh_requested =
         source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
+        cancel_core_finalization_generation_lease(
+            data_root,
+            "daemon mode disabled Pro finalization",
+        )?;
         runtime.consumer_retry_deferral.reset();
         if let Some(activity) = query_activity {
             activity.cancel_idle_wakeup();
@@ -244,8 +248,13 @@ where
     ) -> Result<SourceBackedProCatchUpRun>,
 {
     if !daemon_mode_runs_core_pro_catch_up(runtime.config.daemon.mode) {
+        cancel_core_finalization_generation_lease(
+            data_root,
+            "daemon mode disabled Pro finalization",
+        )?;
         return Ok(None);
     }
+    reconcile_core_finalization_generation_lease(data_root)?;
     let retry_due = runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready();
     let scheduled = pin_scheduled_pro_target(data_root)?;
     let scheduled_target = scheduled
@@ -1011,8 +1020,9 @@ use super::{
     query_service::DaemonQueryActivity,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
     source_backed_pro_catch_up::{
-        helper_recheck_schedule, persist_status_json as persist_pro_status,
-        read_status_json as read_pro_status, run_after_core_publication,
+        cancel_core_finalization_generation_lease, helper_recheck_schedule,
+        persist_status_json as persist_pro_status, read_status_json as read_pro_status,
+        reconcile_core_finalization_generation_lease, run_after_core_publication,
         scheduled_target_generation, status_generation as pro_status_generation,
         status_has_finalization_pending, SourceBackedProCatchUpRun, SourceBackedProCoreAuthority,
     },

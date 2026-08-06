@@ -70,6 +70,25 @@ pub enum IndexError {
     UnsupportedActiveGenerationPointer(u32),
     #[error("the active generation pointer is malformed or non-canonical")]
     InvalidActiveGenerationPointer,
+    #[error("the durable generation-retention lease is malformed, non-canonical, or not owner-private; resolve the unfinished lease owner before publishing Core")]
+    InvalidGenerationRetentionLease,
+    #[error("unsupported durable generation-retention lease version {0}")]
+    UnsupportedGenerationRetentionLease(u32),
+    #[error("generation-retention lease owner kind or identity is invalid")]
+    InvalidGenerationRetentionLeaseOwner,
+    #[error(
+        "generation {requested_generation_id} cannot be leased because it is not the active or previous retained generation"
+    )]
+    GenerationRetentionLeaseTargetNotRetained { requested_generation_id: String },
+    #[error(
+        "generation {retained_generation_id} is already retained by unfinished owner kind {owner_kind}; only one durable generation-retention lease is allowed"
+    )]
+    GenerationRetentionLeaseConflict {
+        retained_generation_id: String,
+        owner_kind: String,
+    },
+    #[error("generation-retention lease changed ownership before release")]
+    GenerationRetentionLeaseOwnerMismatch,
     #[error("unsupported commit payload version {0}")]
     UnsupportedCommitPayload(u32),
     #[error("the lexical commit payload is not in canonical ctx JSON encoding")]
@@ -131,7 +150,8 @@ pub enum IndexError {
     ConcurrentGenerationChange,
     #[error(
         "requested lexical generation {expected_generation_id} is not retained: \
-         active generation is {active_generation_id}, previous generation is {previous_generation_id:?}"
+         active generation is {active_generation_id}, previous generation is {previous_generation_id:?}, \
+         and no durable generation-retention lease matches"
     )]
     PinnedGenerationNotRetained {
         expected_generation_id: String,

@@ -2,6 +2,7 @@ mod certification;
 mod generation;
 mod manifest;
 mod republish;
+mod retention;
 mod verification;
 
 pub(crate) use certification::{
@@ -37,6 +38,11 @@ pub(crate) use republish::{CloneMetrics, CloneStage, CloneTestHookGuard, CloneTe
 #[cfg(test)]
 pub(crate) use republish::{
     PortableCloneMetrics, PortableCloneStage, PortableCloneTestGuard, PortableCloneTestOptions,
+};
+pub(crate) use retention::GENERATION_WRITER_LOCK_FILE;
+pub use retention::{
+    acquire_generation_retention_lease, load_generation_retention_lease,
+    release_generation_retention_lease, GenerationRetentionLease,
 };
 pub(crate) use verification::{
     physical_integrity_audit, physical_integrity_digest, verify_complete_searcher,

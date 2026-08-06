@@ -44,6 +44,7 @@ pub(super) fn run_uninstall(
         return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output, ui);
     };
     let state = inspect_local_pro_uninstall_state(data_root)?;
+    crate::semantic::cancel_core_finalization_generation_lease(data_root, "Pro was uninstalled")?;
     pending_materialization::clear(data_root)?;
     if !delete_data && state.cleanup_phase {
         bail!(

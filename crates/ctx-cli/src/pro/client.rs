@@ -45,7 +45,11 @@ use errors::{protocol_blame_error, protocol_error};
 
 #[path = "client_output.rs"]
 mod core_materialization;
-pub(crate) use core_materialization::{sync_core_materialization, CoreMaterializationSyncOutcome};
+pub(crate) use core_materialization::{
+    core_finalization_generation_lease, reconstruct_core_finalization_generation_lease,
+    release_core_finalization_generation_lease, sync_core_materialization,
+    validate_core_finalization_generation_lease, CoreMaterializationSyncOutcome,
+};
 
 /// Verifies that this installation has a selectable Pro helper before callers
 /// perform expensive Core index admission work. The eventual connection still

@@ -38,6 +38,34 @@ fn progress_for(
 }
 
 #[test]
+fn finish_target_lease_is_durable_before_the_finalization_exchange() {
+    let data_root = tempdir().unwrap();
+    let index_root = ctx_history_refresh::source_backed_index_root(data_root.path());
+    let source = source("finalization-crash-ordering.jsonl");
+    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    add_source(&mut writer, &source, 1, vec!["body".to_owned()]);
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    let finish = finish_for(&index, "test-core-materializer-v1");
+
+    let acquired =
+        acquire_finish_generation_lease(data_root.path(), &finish, "test-core-materializer-v1")
+            .unwrap();
+
+    // `ProtocolCoreMaterializationConsumer::finish` performs this acquisition
+    // before calling exchange. A crash or lost response after this point can
+    // therefore leave at most a safe extra hold on the exact target.
+    let durable = core_finalization_generation_lease(data_root.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable, acquired);
+    assert_eq!(durable.generation_id(), index.generation_id());
+}
+
+#[test]
 fn continuation_completion_rejects_changed_finish_digest_and_revision() {
     let (_temp, index) =
         single_source_index("finalization-terminal-cas.jsonl", vec!["body".to_owned()]);

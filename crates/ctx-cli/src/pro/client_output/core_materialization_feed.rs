@@ -11,8 +11,10 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use ctx_history_index::{
-    CoreEventPageBudget, CoreSourceEventPagePlan, GenerationManifest, SourceEventCursor,
-    StoredCoreRecordJson, VerifiedIndex,
+    acquire_generation_retention_lease, load_generation_retention_lease,
+    release_generation_retention_lease, CoreEventPageBudget, CoreSourceEventPagePlan,
+    GenerationManifest, GenerationRetentionLease, SourceEventCursor, StoredCoreRecordJson,
+    VerifiedIndex,
 };
 use ctx_pro_host_protocol::{
     core_record_digests_from_encoded, ApplyCoreEventDeltaPagesRequest,
@@ -35,6 +37,7 @@ use ctx_pro_host_protocol::{
     CoreMaterializationFinalizationProgress, CoreSourceRemoval,
 };
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 
 use super::*;
 #[cfg(test)]
@@ -55,6 +58,7 @@ const CORE_RECORD_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget::new(
     MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES,
     MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
 );
+const PRO_CORE_FINALIZATION_LEASE_OWNER_KIND: &str = "pro_core_finalization";
 #[path = "core_materialization_feed/batching.rs"]
 mod batching;
 #[path = "core_materialization_feed/ordered_prefetch.rs"]
@@ -136,6 +140,9 @@ trait CoreMaterializationConsumer {
 
 struct ProtocolCoreMaterializationConsumer {
     client: ProClient,
+    data_root: std::path::PathBuf,
+    core_generation_id: String,
+    materializer_revision: Option<String>,
 }
 
 impl ProtocolCoreMaterializationConsumer {
@@ -187,7 +194,10 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
         request: BeginCoreMaterializationRequest,
     ) -> Result<CoreMaterializationBegan> {
         match self.exchange(HostMessage::BeginCoreMaterialization(request))? {
-            HelperMessage::CoreMaterializationBegan(response) => Ok(response),
+            HelperMessage::CoreMaterializationBegan(response) => {
+                self.materializer_revision = Some(response.materializer_revision.clone());
+                Ok(response)
+            }
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => bail!("invalid_response: helper returned a non-Core-begin response"),
         }
@@ -232,6 +242,10 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
         &mut self,
         request: FinishCoreMaterializationRequest,
     ) -> Result<CoreMaterializationFinalizationStep> {
+        let materializer_revision = self.materializer_revision.as_deref().ok_or_else(|| {
+            anyhow!("invalid_response: Pro Finish has no acknowledged materializer revision")
+        })?;
+        acquire_finish_generation_lease(&self.data_root, &request, materializer_revision)?;
         map_core_finalization_response(
             self.exchange(HostMessage::FinishCoreMaterialization(request))?,
         )
@@ -241,6 +255,10 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
         &mut self,
         request: ContinueCoreMaterializationRequest,
     ) -> Result<CoreMaterializationFinalizationStep> {
+        if request.expected_progress.core_generation_id != self.core_generation_id {
+            bail!("invalid_response: Pro finalization target changed before lease acquisition");
+        }
+        acquire_progress_generation_lease(&self.data_root, &request.expected_progress)?;
         map_core_finalization_response(
             self.exchange(HostMessage::ContinueCoreMaterialization(request))?,
         )
@@ -255,7 +273,12 @@ pub(super) fn sync_generation_pinned_core(
     let required = BTreeSet::from([Capability::Status, Capability::CoreMaterialization]);
     let client = ProClient::connect(data_root, &required)?;
     let helper_artifact_sha256 = client.helper_artifact_sha256()?.to_owned();
-    let mut consumer = ProtocolCoreMaterializationConsumer { client };
+    let mut consumer = ProtocolCoreMaterializationConsumer {
+        client,
+        data_root: data_root.to_path_buf(),
+        core_generation_id: index.generation_id().to_owned(),
+        materializer_revision: None,
+    };
     let status = consumer.status(StatusRequest {
         requested_core_generation_id: Some(index.generation_id().to_owned()),
     })?;
@@ -276,6 +299,149 @@ pub(super) fn sync_generation_pinned_core(
         report.helper_artifact_sha256 = helper_artifact_sha256;
     }
     Ok(progress)
+}
+
+fn acquire_finish_generation_lease(
+    data_root: &Path,
+    finish: &FinishCoreMaterializationRequest,
+    materializer_revision: &str,
+) -> Result<GenerationRetentionLease> {
+    let finish_request_digest = finish
+        .canonical_digest()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    acquire_finalization_generation_lease(
+        data_root,
+        &finish.head.core_generation_id,
+        &finish.materialization_id,
+        &finish_request_digest,
+        materializer_revision,
+    )
+}
+
+fn acquire_progress_generation_lease(
+    data_root: &Path,
+    progress: &ctx_pro_host_protocol::CoreMaterializationFinalizationProgress,
+) -> Result<GenerationRetentionLease> {
+    progress
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+    acquire_finalization_generation_lease(
+        data_root,
+        &progress.core_generation_id,
+        &progress.materialization_id,
+        &progress.finish_request_digest,
+        &progress.materializer_revision,
+    )
+}
+
+fn acquire_finalization_generation_lease(
+    data_root: &Path,
+    core_generation_id: &str,
+    materialization_id: &str,
+    finish_request_digest: &str,
+    materializer_revision: &str,
+) -> Result<GenerationRetentionLease> {
+    let owner_id = finalization_job_id(
+        materialization_id,
+        finish_request_digest,
+        materializer_revision,
+    );
+    acquire_generation_retention_lease(
+        ctx_history_refresh::source_backed_index_root(data_root),
+        core_generation_id,
+        PRO_CORE_FINALIZATION_LEASE_OWNER_KIND,
+        &owner_id,
+    )
+    .map_err(|error| {
+        anyhow!(
+            "invalid_response: cannot retain exact Core generation before Pro finalization: {error}"
+        )
+    })
+}
+
+pub(crate) fn validate_core_finalization_generation_lease(
+    data_root: &Path,
+    progress: &ctx_pro_host_protocol::CoreMaterializationFinalizationProgress,
+) -> Result<()> {
+    progress
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+    let expected_owner_id = finalization_job_id(
+        &progress.materialization_id,
+        &progress.finish_request_digest,
+        &progress.materializer_revision,
+    );
+    let lease =
+        load_generation_retention_lease(ctx_history_refresh::source_backed_index_root(data_root))
+            .map_err(|error| {
+                anyhow!("invalid_response: durable Core generation lease is invalid: {error}")
+            })?
+            .ok_or_else(|| {
+                anyhow!("invalid_response: durable Pro finalization omitted its Core lease")
+            })?;
+    if lease.owner_kind() != PRO_CORE_FINALIZATION_LEASE_OWNER_KIND
+        || lease.owner_id() != expected_owner_id
+        || lease.generation_id() != progress.core_generation_id
+    {
+        bail!("invalid_response: durable Pro finalization lease belongs to a different job");
+    }
+    Ok(())
+}
+
+pub(crate) fn reconstruct_core_finalization_generation_lease(
+    data_root: &Path,
+    progress: &ctx_pro_host_protocol::CoreMaterializationFinalizationProgress,
+) -> Result<()> {
+    acquire_progress_generation_lease(data_root, progress)?;
+    validate_core_finalization_generation_lease(data_root, progress)
+}
+
+pub(crate) fn core_finalization_generation_lease(
+    data_root: &Path,
+) -> Result<Option<GenerationRetentionLease>> {
+    load_generation_retention_lease(ctx_history_refresh::source_backed_index_root(data_root))
+        .map_err(|error| {
+            anyhow!("invalid_response: durable Core generation lease is invalid: {error}")
+        })
+}
+
+pub(crate) fn release_core_finalization_generation_lease(
+    data_root: &Path,
+    expected_generation_id: Option<&str>,
+) -> Result<bool> {
+    let index_root = ctx_history_refresh::source_backed_index_root(data_root);
+    let Some(lease) = load_generation_retention_lease(&index_root).map_err(|error| {
+        anyhow!("invalid_response: durable Core generation lease is invalid: {error}")
+    })?
+    else {
+        return Ok(false);
+    };
+    if lease.owner_kind() != PRO_CORE_FINALIZATION_LEASE_OWNER_KIND
+        || expected_generation_id.is_some_and(|expected| lease.generation_id() != expected)
+    {
+        bail!("invalid_response: durable Core generation lease belongs to a different owner");
+    }
+    release_generation_retention_lease(index_root, &lease).map_err(|error| {
+        anyhow!("invalid_response: durable Core generation lease changed: {error}")
+    })
+}
+
+fn finalization_job_id(
+    materialization_id: &str,
+    finish_request_digest: &str,
+    materializer_revision: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-pro-core-finalization-retention-v1\0");
+    digest.update(materialization_id.as_bytes());
+    digest.update(finish_request_digest.as_bytes());
+    digest.update(
+        u64::try_from(materializer_revision.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(materializer_revision.as_bytes());
+    format!("{:x}", digest.finalize())
 }
 
 #[cfg(test)]

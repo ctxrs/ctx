@@ -387,6 +387,127 @@ fn retained_generation_peer_is_limited_to_the_current_pointer_pair() {
 }
 
 #[test]
+fn one_durable_lease_retains_an_exact_old_generation_without_changing_peer_slots() {
+    let temp = tempdir().unwrap();
+    let source = source("generation-retention-lease.jsonl");
+    let first = publish_with_metadata(temp.path(), &source, 1, "leased first", b"first");
+    let lease = acquire_generation_retention_lease(
+        temp.path(),
+        &first.receipt().generation_id,
+        "pro_core_finalization",
+        &"a".repeat(64),
+    )
+    .unwrap();
+
+    let second = publish_with_metadata(temp.path(), &source, 2, "second", b"second");
+    let third = publish_with_metadata(temp.path(), &source, 3, "third", b"third");
+    let fourth = publish_with_metadata(temp.path(), &source, 4, "fourth", b"fourth");
+
+    assert_eq!(lease.generation_id(), first.receipt().generation_id);
+    assert_eq!(
+        load_generation_retention_lease(temp.path()).unwrap(),
+        Some(lease.clone())
+    );
+    let leased =
+        VerifiedIndex::open_pinned_generation(temp.path(), &first.receipt().generation_id).unwrap();
+    assert_eq!(leased.count_term("leased").unwrap(), 1);
+    assert_eq!(leased.count_term("fourth").unwrap(), 0);
+    let peer =
+        VerifiedIndex::open_retained_generation_peer(temp.path(), &fourth.receipt().generation_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(peer.generation_id(), third.receipt().generation_id);
+    assert!(matches!(
+        VerifiedIndex::open_retained_generation_peer(temp.path(), &first.receipt().generation_id,),
+        Err(IndexError::PinnedGenerationNotRetained { .. })
+    ));
+    assert_eq!(generation_directories(temp.path()).len(), 3);
+    assert_ne!(
+        second.receipt().generation_id,
+        third.receipt().generation_id
+    );
+
+    assert!(release_generation_retention_lease(temp.path(), &lease).unwrap());
+    let fifth = publish_with_metadata(temp.path(), &source, 5, "fifth", b"fifth");
+    assert_ne!(
+        fifth.receipt().generation_id,
+        fourth.receipt().generation_id
+    );
+    assert!(matches!(
+        VerifiedIndex::open_pinned_generation(temp.path(), &first.receipt().generation_id),
+        Err(IndexError::PinnedGenerationNotRetained { .. })
+    ));
+    assert_eq!(generation_directories(temp.path()).len(), 2);
+}
+
+#[test]
+fn generation_retention_lease_is_single_owner_private_and_fail_closed() {
+    let temp = tempdir().unwrap();
+    let source = source("generation-retention-lease-bound.jsonl");
+    let first = publish_with_metadata(temp.path(), &source, 1, "first", b"first");
+    let lease = acquire_generation_retention_lease(
+        temp.path(),
+        &first.receipt().generation_id,
+        "pro_core_finalization",
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let replay = acquire_generation_retention_lease(
+        temp.path(),
+        &first.receipt().generation_id,
+        "pro_core_finalization",
+        &"a".repeat(64),
+    )
+    .unwrap();
+    assert_eq!(replay, lease);
+    assert!(matches!(
+        acquire_generation_retention_lease(
+            temp.path(),
+            &first.receipt().generation_id,
+            "foreign_consumer",
+            &"b".repeat(64),
+        ),
+        Err(IndexError::GenerationRetentionLeaseConflict { .. })
+    ));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(temp.path().join("generation-retention-lease.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o177, 0);
+    }
+
+    fs::write(
+        temp.path().join("generation-retention-lease.json"),
+        b"{not-canonical",
+    )
+    .unwrap();
+    assert!(matches!(
+        GenerationWriter::open(temp.path(), WriterOptions::default()),
+        Err(IndexError::InvalidGenerationRetentionLease)
+    ));
+    assert!(matches!(
+        VerifiedIndex::open_pinned_generation(temp.path(), &first.receipt().generation_id),
+        Err(IndexError::InvalidGenerationRetentionLease)
+    ));
+}
+
+fn generation_directories(root: &Path) -> Vec<PathBuf> {
+    let mut directories = fs::read_dir(root.join(INDEX_GENERATIONS_DIRECTORY))
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            entry.file_type().ok()?.is_dir().then(|| entry.path())
+        })
+        .collect::<Vec<_>>();
+    directories.sort();
+    directories
+}
+
+#[test]
 fn metadata_does_not_change_logical_generation_identity() {
     let first_root = tempdir().unwrap();
     let second_root = tempdir().unwrap();

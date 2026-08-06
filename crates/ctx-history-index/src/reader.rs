@@ -6,11 +6,11 @@ use std::{
 
 use crate::{
     analyzer::register_body_analyzer, durable_directory::DurableMmapDirectory, is_generation_id,
-    load_active_generation_pointer, load_publication_for_metas, meta_generation, open_slot_index,
-    payload_generation_id, scrub_and_certify_physical_integrity, searcher_generation,
-    validate_schema, verify_or_certify_physical_integrity, verify_searcher,
-    verify_searcher_structure, ActiveGenerationPointer, GenerationManifest, GenerationSlot,
-    IndexError, Result,
+    load_active_generation_pointer, load_generation_retention_lease, load_publication_for_metas,
+    meta_generation, open_slot_index, payload_generation_id, scrub_and_certify_physical_integrity,
+    searcher_generation, validate_schema, verify_or_certify_physical_integrity, verify_searcher,
+    verify_searcher_structure, ActiveGenerationPointer, GenerationManifest,
+    GenerationRetentionLease, GenerationSlot, IndexError, Result,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
@@ -173,19 +173,28 @@ impl VerifiedIndex {
         let root = control_directory.root_path().to_path_buf();
 
         let first_pointer = load_pointer(&root)?;
-        let first_result =
-            Self::open_expected_generation(&root, first_pointer.as_ref(), expected_generation_id);
+        let first_lease = load_generation_retention_lease(&root)?;
+        let first_result = Self::open_expected_generation(
+            &root,
+            first_pointer.as_ref(),
+            first_lease.as_ref(),
+            expected_generation_id,
+        );
         let observed_pointer = load_pointer(&root)?;
-        if observed_pointer == first_pointer {
+        let observed_lease = load_generation_retention_lease(&root)?;
+        if observed_pointer == first_pointer && observed_lease == first_lease {
             return first_result;
         }
 
         let retry_result = Self::open_expected_generation(
             &root,
             observed_pointer.as_ref(),
+            observed_lease.as_ref(),
             expected_generation_id,
         );
-        if load_pointer(&root)? != observed_pointer {
+        if load_pointer(&root)? != observed_pointer
+            || load_generation_retention_lease(&root)? != observed_lease
+        {
             return Err(IndexError::ConcurrentGenerationChange);
         }
         retry_result
@@ -263,6 +272,7 @@ impl VerifiedIndex {
     fn open_expected_generation(
         root: &Path,
         pointer: Option<&ActiveGenerationPointer>,
+        lease: Option<&GenerationRetentionLease>,
         expected_generation_id: &str,
     ) -> Result<Self> {
         let pointer = pointer.ok_or(IndexError::MissingActiveGenerationPointer)?;
@@ -273,6 +283,11 @@ impl VerifiedIndex {
             .filter(|slot| slot.generation_id() == expected_generation_id)
         {
             previous
+        } else if let Some(leased) = lease
+            .map(GenerationRetentionLease::target)
+            .filter(|slot| slot.generation_id() == expected_generation_id)
+        {
+            leased
         } else {
             return Err(IndexError::PinnedGenerationNotRetained {
                 expected_generation_id: expected_generation_id.to_owned(),
