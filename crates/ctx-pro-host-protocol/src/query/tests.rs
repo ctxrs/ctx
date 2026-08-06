@@ -38,6 +38,40 @@ fn repository_scope_distinguishes_omitted_empty_and_exact_identity() {
 }
 
 #[test]
+fn commit_selectors_are_four_to_sixty_four_ascii_hex_characters() {
+    for oid in ["abcd".to_owned(), "AbCdEf12".to_owned(), "F".repeat(64)] {
+        BlameTarget::Commit {
+            oid,
+            repository: None,
+        }
+        .validate()
+        .unwrap();
+    }
+
+    for oid in [
+        "abc".to_owned(),
+        "a".repeat(65),
+        "HEAD".to_owned(),
+        "abcg".to_owned(),
+        "deadbeef^".to_owned(),
+        "abcd\n".to_owned(),
+        "ａｂｃｄ".to_owned(),
+    ] {
+        let error = BlameTarget::Commit {
+            oid,
+            repository: None,
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(error.class, ErrorClass::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "commit selector must contain 4 to 64 ASCII hexadecimal characters"
+        );
+    }
+}
+
+#[test]
 fn logical_repository_canonicalization_only_lowercases_the_forge_host() {
     assert_eq!(
         canonical_logical_repository_id("forge:GitHub.COM/ctxrs/ctx?view=1#readme"),
