@@ -468,7 +468,7 @@ impl CommitLineage {
             ));
         }
 
-        let mut edge_operations = BTreeMap::new();
+        let mut edge_operations: BTreeMap<&str, &CommitLineageEdge> = BTreeMap::new();
         let mut operation_ids = BTreeSet::new();
         for edge in &self.edges {
             edge.validate(available, referenced)?;
@@ -500,7 +500,7 @@ impl CommitLineage {
             ));
         }
 
-        let mut yielded_operations = BTreeMap::new();
+        let mut yielded_operations: BTreeMap<&str, &CommitLineageYield> = BTreeMap::new();
         let mut yield_ids = BTreeSet::new();
         for yielded_by in &self.yielded_by {
             yielded_by.validate(available, referenced)?;
