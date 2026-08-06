@@ -112,7 +112,11 @@ fn preflight_mcp_terminal_authority(
         if !record_read.complete {
             break;
         }
-        if record_read.oversized || record_read.terminal_nul_padding {
+        if record_read.terminal_nul_padding {
+            continue;
+        }
+        if record_read.oversized {
+            authority.observe_ambiguous_result_terminal();
             continue;
         }
         let record = trim_jsonl_terminator(&record_buffer[..record_read.stored_len]);
