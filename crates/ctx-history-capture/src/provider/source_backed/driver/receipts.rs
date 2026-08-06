@@ -660,6 +660,7 @@ pub struct SourceBackedRoute {
     pub(in super::super) driver: Option<SourceBackedRouteDriver>,
     pub(in super::super) certified_missing_paths: Vec<PathBuf>,
     pub(in super::super) retire_after_success: Vec<SourceRouteIdentity>,
+    pub(in super::super) codex_generation_participant: Option<usize>,
 }
 
 impl SourceBackedRoute {
@@ -687,6 +688,7 @@ impl SourceBackedRoute {
             driver: Some(driver),
             certified_missing_paths: Vec::new(),
             retire_after_success: Vec::new(),
+            codex_generation_participant: None,
         })
     }
 
@@ -719,6 +721,7 @@ impl SourceBackedRoute {
             driver: Some(driver),
             certified_missing_paths: Vec::new(),
             retire_after_success: Vec::new(),
+            codex_generation_participant: None,
         })
     }
 
@@ -746,6 +749,7 @@ impl SourceBackedRoute {
             driver: None,
             certified_missing_paths: vec![path],
             retire_after_success: Vec::new(),
+            codex_generation_participant: None,
         })
     }
 
@@ -765,6 +769,7 @@ impl SourceBackedRoute {
             driver: None,
             certified_missing_paths: Vec::new(),
             retire_after_success: Vec::new(),
+            codex_generation_participant: None,
         }
     }
 
@@ -776,6 +781,7 @@ impl SourceBackedRoute {
 #[derive(Debug, Clone, Default)]
 pub struct SourceBackedProviderRegistry {
     pub(in super::super) routes: Vec<SourceBackedRoute>,
+    pub(in super::super) codex_generation: Option<Arc<CodexGenerationNormalizationCoordinatorV0>>,
 }
 
 impl SourceBackedProviderRegistry {

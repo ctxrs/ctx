@@ -395,6 +395,7 @@ pub struct CodexSourceBackedIngestReceiptV0 {
 mod catalog;
 #[cfg(test)]
 mod cold;
+mod generation;
 mod identity;
 mod ingestion;
 mod jsonl_family;
@@ -424,6 +425,9 @@ use cold::{
 };
 #[cfg(test)]
 use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
+#[cfg(test)]
+pub(crate) use generation::install_after_codex_lineage_normalization_hook_v0;
+pub(crate) use generation::{CodexGenerationNormalizationCoordinatorV0, CodexGenerationRouteV0};
 use identity::{
     certify_scan, codex_core_record, codex_session_identity, codex_source_key, decode_append_proof,
     validate_owner, CodexEventIdentityStateV0,
@@ -434,8 +438,6 @@ use ingestion::{
     prepare_replayed_lineage_v0, scan_codex_jsonl_family_leaf_v0, CodexJsonlFamilyLeafContextV0,
     CodexJsonlFamilyPublicationV0,
 };
-#[cfg(test)]
-pub(crate) use jsonl_family::install_after_codex_lineage_normalization_hook_v0;
 pub(crate) use jsonl_family::{
     codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,
     CodexSessionTreeJsonlFamilyAdapterV0,

@@ -403,6 +403,32 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         .map(|route| route.metadata.clone())
         .collect();
 
+    if let Some(coordinator) = registry.codex_generation.as_ref() {
+        let selected_participants = registry
+            .routes
+            .iter()
+            .filter(|route| {
+                route
+                    .metadata
+                    .route_identity
+                    .as_ref()
+                    .is_some_and(|identity| selected_route_ids.contains(identity))
+            })
+            .filter_map(|route| route.codex_generation_participant)
+            .collect::<Vec<_>>();
+        if !selected_participants.is_empty() {
+            coordinator
+                .prepare(&selected_participants)
+                .map_err(|error| SourceBackedCoordinatorError::RouteScan {
+                    provider: CaptureProvider::Codex,
+                    source: SourceBackedRouteError::new(
+                        SourceBackedRouteErrorKind::InvalidSource,
+                        error.to_string(),
+                    ),
+                })?;
+        }
+    }
+
     let scan_started = Instant::now();
     let index_root = index_root.as_ref();
     let mut failed_routes = BTreeMap::<SourceRouteIdentity, SourceBackedFailedRoute>::new();

@@ -111,7 +111,16 @@ pub(in crate::provider::source_backed) fn register_codex_session_tree_routes(
         .iter()
         .map(|source| source.path.clone())
         .collect::<Vec<_>>();
+    let coordinator = registry
+        .codex_generation
+        .get_or_insert_with(|| Arc::new(CodexGenerationNormalizationCoordinatorV0::default()))
+        .clone();
+    let generation = coordinator
+        .register_session_tree(roots.clone())
+        .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?;
+    let participant = generation.participant();
     let adapter = CodexSessionTreeJsonlFamilyAdapterV0::new(roots)
+        .map(|adapter| adapter.with_generation(generation))
         .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?;
     #[cfg(test)]
     let adapter = adapter.with_after_stage_observer(run_after_codex_session_tree_stage_hook);
@@ -119,12 +128,14 @@ pub(in crate::provider::source_backed) fn register_codex_session_tree_routes(
         Arc::new(adapter),
         source.path.clone(),
     );
-    registry.register(executable_route(
+    let mut route = executable_route(
         source,
         selection,
         SourceBackedSelectorAuthority::DiscoveredWinner,
         driver,
-    )?);
+    )?;
+    route.codex_generation_participant = Some(participant);
+    registry.register(route);
     Ok(())
 }
 
@@ -136,19 +147,29 @@ pub(super) fn register_codex_explicit_session_route(
     let input = CodexExplicitSessionSourceBackedInputV0::discover(&source.path)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let route_path = input.path().to_path_buf();
-    let adapter = CodexExplicitSessionJsonlFamilyAdapterV0::new(input);
+    let coordinator = registry
+        .codex_generation
+        .get_or_insert_with(|| Arc::new(CodexGenerationNormalizationCoordinatorV0::default()))
+        .clone();
+    let generation = coordinator
+        .register_explicit_session(input.clone())
+        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    let participant = generation.participant();
+    let adapter = CodexExplicitSessionJsonlFamilyAdapterV0::new(input).with_generation(generation);
     #[cfg(test)]
     let adapter = adapter.with_after_stage_observer(run_after_explicit_codex_stage_hook);
     let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
         Arc::new(adapter),
         route_path,
     );
-    registry.register(executable_route(
+    let mut route = executable_route(
         source,
         selection,
         SourceBackedSelectorAuthority::ExplicitPath,
         driver,
-    )?);
+    )?;
+    route.codex_generation_participant = Some(participant);
+    registry.register(route);
     Ok(())
 }
 // SHA-256("ctx.codex.prompt-history.default-catalog-lineage.v0"). This is

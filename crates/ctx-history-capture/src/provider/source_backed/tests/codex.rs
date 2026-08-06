@@ -218,11 +218,11 @@ fn codex_transitive_root_normalization_quarantines_before_workers() {
     let index_path = temp.path().join("index");
     let refreshed =
         refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
-    let observation = observed.lock().unwrap().unwrap();
+    let observation = observed.lock().unwrap().clone().unwrap();
     assert_eq!(observation.valid_sources, 4);
     assert_eq!(observation.rejected_sources, 2);
-    assert_eq!(observation.pre_worker_counters.scanner_sources_started, 0);
-    assert_eq!(observation.pre_worker_counters.staged_documents, 0);
+    assert_eq!(observation.worker_starts_at_normalization, 0);
+    assert_eq!(observation.worker_start_latch.starts(), 4);
     let staged = staged.lock().unwrap().unwrap();
     assert_eq!(staged.scanner_sources_started, 4);
     assert_eq!(staged.scanner_sources_completed, 4);
@@ -376,11 +376,11 @@ fn codex_all_invalid_lineage_fails_without_workers_or_publication() {
         WriterOptions::default(),
     )
     .is_err());
-    let observation = observed.lock().unwrap().unwrap();
+    let observation = observed.lock().unwrap().clone().unwrap();
     assert_eq!(observation.valid_sources, 0);
     assert_eq!(observation.rejected_sources, 2);
-    assert_eq!(observation.pre_worker_counters.scanner_sources_started, 0);
-    assert_eq!(observation.pre_worker_counters.staged_documents, 0);
+    assert_eq!(observation.worker_starts_at_normalization, 0);
+    assert_eq!(observation.worker_start_latch.starts(), 0);
     assert!(VerifiedIndex::open(&index).is_err());
 }
 
