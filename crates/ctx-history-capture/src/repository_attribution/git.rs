@@ -18,6 +18,7 @@ use ctx_history_core::{
     RepositoryLocalRootAuthorization,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
 };
+use sha2::{Digest, Sha256};
 mod geometry;
 mod parsing;
 mod pull_request;
@@ -139,7 +140,6 @@ pub(super) struct ResolvedPullRequestMergeMembership {
 pub(super) enum ResolvedCommitProducer {
     Commit,
     Merge,
-    Rewrite,
 }
 
 #[derive(Debug, Clone)]
@@ -310,7 +310,6 @@ impl GitCertifier {
             ResolvedCommitProducer::Merge if parent_object_ids.len() < 2 => {
                 return Err(ProbeFailure::Failed("merge_has_nonmerge_parent_shape"));
             }
-            ResolvedCommitProducer::Rewrite => {}
             _ => {}
         }
 
@@ -380,6 +379,128 @@ impl GitCertifier {
             parent_object_ids,
             files,
         })
+    }
+
+    /// Resolves the exact full source from the bounded command and the one
+    /// native Git result prefix/subject in a single certified repository
+    /// window. The linked command/result receipt supplies causality; these
+    /// object probes only close identity, object format, and drift predicates.
+    pub(super) fn resolve_cherry_pick_operation(
+        &self,
+        certificate: &CertifiedCandidate,
+        source: &GitObjectId,
+        result_oid_prefix: &str,
+        result_subject: &str,
+        budget: &mut EventProbeBudget,
+    ) -> Result<(ResolvedCommit, [u8; 32]), ProbeFailure> {
+        source
+            .validate_contract()
+            .map_err(|_| ProbeFailure::Failed("invalid_cherry_pick_source"))?;
+        if source.format != certificate.object_format() {
+            return Err(ProbeFailure::Failed("cherry_pick_object_format_mismatch"));
+        }
+        certificate.ensure_current_geometry()?;
+        let opening_mutable_state = repository_mutable_evidence_state(
+            &certificate.git_dir,
+            &certificate.common_dir,
+            certificate.branch.as_deref(),
+        )?;
+        if opening_mutable_state != certificate.mutable_evidence_state {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+
+        let source_revision = format!("{}^{{commit}}", source.hex);
+        let source_output = self.run_git(
+            &certificate.repository_root,
+            &["show", "-s", "--format=%H", &source_revision],
+            false,
+            budget,
+        )?;
+        if utf8_lines(&source_output)?.as_slice() != [source.hex.as_str()] {
+            return Err(ProbeFailure::Failed(
+                "cherry_pick_source_resolution_mismatch",
+            ));
+        }
+
+        let result = self.resolve_commit(
+            certificate,
+            result_oid_prefix,
+            result_subject,
+            ResolvedCommitProducer::Commit,
+            budget,
+        )?;
+        if result.object_id.format != source.format || result.object_id == *source {
+            return Err(ProbeFailure::Failed("invalid_cherry_pick_mapping"));
+        }
+
+        certificate.ensure_current_geometry()?;
+        let closing_mutable_state = repository_mutable_evidence_state(
+            &certificate.git_dir,
+            &certificate.common_dir,
+            certificate.branch.as_deref(),
+        )?;
+        if closing_mutable_state != opening_mutable_state {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        Ok((result, repository_object_domain_sha256(certificate)))
+    }
+
+    /// Verifies full source/result commit objects in one immutable
+    /// repository/object domain. Object existence is corroboration only; the
+    /// caller must already hold prospective linked operation evidence.
+    pub(super) fn verify_commit_operation_objects(
+        &self,
+        certificate: &CertifiedCandidate,
+        object_ids: &[GitObjectId],
+        budget: &mut EventProbeBudget,
+    ) -> Result<[u8; 32], ProbeFailure> {
+        if object_ids.is_empty() || object_ids.len() > 2 {
+            return Err(ProbeFailure::Failed(
+                "commit_operation_object_bound_exceeded",
+            ));
+        }
+        certificate.ensure_current_geometry()?;
+        let opening_mutable_state = repository_mutable_evidence_state(
+            &certificate.git_dir,
+            &certificate.common_dir,
+            certificate.branch.as_deref(),
+        )?;
+        if opening_mutable_state != certificate.mutable_evidence_state {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        for object_id in object_ids {
+            object_id
+                .validate_contract()
+                .map_err(|_| ProbeFailure::Failed("invalid_commit_operation_object"))?;
+            if object_id.format != certificate.object_format() {
+                return Err(ProbeFailure::Failed(
+                    "commit_operation_object_format_mismatch",
+                ));
+            }
+            let revision = format!("{}^{{commit}}", object_id.hex);
+            let output = self.run_git(
+                &certificate.repository_root,
+                &["show", "-s", "--format=%H", &revision],
+                false,
+                budget,
+            )?;
+            let lines = utf8_lines(&output)?;
+            if lines.as_slice() != [object_id.hex.as_str()] {
+                return Err(ProbeFailure::Failed(
+                    "commit_operation_object_resolution_mismatch",
+                ));
+            }
+        }
+        certificate.ensure_current_geometry()?;
+        let closing_mutable_state = repository_mutable_evidence_state(
+            &certificate.git_dir,
+            &certificate.common_dir,
+            certificate.branch.as_deref(),
+        )?;
+        if closing_mutable_state != opening_mutable_state {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        Ok(repository_object_domain_sha256(certificate))
     }
 
     #[cfg(test)]
@@ -566,6 +687,18 @@ impl GitCertifier {
         }
         Ok(stdout)
     }
+}
+
+fn repository_object_domain_sha256(certificate: &CertifiedCandidate) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.object-domain.v1\0");
+    digest.update(certificate.binding.logical_repository_id.as_bytes());
+    digest.update([match certificate.object_format() {
+        GitObjectFormat::Sha1 => 1,
+        GitObjectFormat::Sha256 => 2,
+    }]);
+    digest.update(certificate.repository_geometry_state);
+    digest.finalize().into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

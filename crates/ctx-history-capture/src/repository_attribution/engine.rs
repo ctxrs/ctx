@@ -2,11 +2,12 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use ctx_history_core::{
     CoreRecordAnnotation, RepositoryAbstention, RepositoryAbstentionReason,
-    RepositoryCandidateKind, RepositoryEvidenceKind, RepositoryFileInvocationKind,
-    RepositoryFileInvocationTextRange, RepositoryFileObservation, RepositoryFileObservationKind,
-    RepositoryOutcomeKind, RepositoryOutcomeObservation, RepositoryVcsObservation,
-    RepositoryVcsObservationKind, CORE_BOUNDED_SHELL_SUBSET_REVISION,
-    CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    RepositoryCandidateKind, RepositoryCommitMapping, RepositoryCommitOperationKind,
+    RepositoryEvidenceKind, RepositoryFileInvocationKind, RepositoryFileInvocationTextRange,
+    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryOutcomeKind,
+    RepositoryOutcomeObservation, RepositoryVcsObservation, RepositoryVcsObservationKind,
+    CORE_BOUNDED_SHELL_SUBSET_REVISION, CORE_MISSING_ACTIVITY_TIME_UNIX_MS,
+    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
     CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
@@ -549,6 +550,214 @@ fn resolve_deferred_commit_observations(
                 exact.push(outcome);
                 continue;
             }
+            UnscopedOutcomeObservation::DeferredCommitOperation(deferred) => {
+                let Some(operation_path) = operation_path else {
+                    push_abstention(
+                        annotation,
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                        "commit_operation_has_no_operation_route",
+                    );
+                    continue;
+                };
+                let Some(certificate) = certified
+                    .iter()
+                    .filter(|certificate| operation_path.starts_with(&certificate.repository_root))
+                    .max_by_key(|certificate| certificate.repository_root.components().count())
+                else {
+                    push_abstention(
+                        annotation,
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                        "commit_operation_route_has_no_certified_binding",
+                    );
+                    continue;
+                };
+                let mut object_ids = deferred
+                    .mappings
+                    .iter()
+                    .flat_map(|mapping| [mapping.source.clone(), mapping.result.clone()])
+                    .collect::<Vec<_>>();
+                object_ids.sort();
+                object_ids.dedup();
+                let object_domain = match certifier.verify_commit_operation_objects(
+                    certificate,
+                    &object_ids,
+                    budget,
+                ) {
+                    Ok(object_domain) => object_domain,
+                    Err(ProbeFailure::BudgetExceeded) => {
+                        push_probe_failure(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            ProbeFailure::BudgetExceeded,
+                            false,
+                        );
+                        continue;
+                    }
+                    Err(ProbeFailure::ConcurrentDrift | ProbeFailure::Missing) => {
+                        push_abstention(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            RepositoryAbstentionReason::ConcurrentDrift,
+                            "commit_operation_repository_changed_during_verification",
+                        );
+                        continue;
+                    }
+                    Err(ProbeFailure::PlatformUnsupported) => {
+                        push_probe_failure(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            ProbeFailure::PlatformUnsupported,
+                            false,
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        push_abstention(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            RepositoryAbstentionReason::OutcomeResultInadmissible,
+                            "commit_operation_objects_did_not_verify_exactly",
+                        );
+                        continue;
+                    }
+                };
+                let Ok(commit_operation) =
+                    ctx_history_core::RepositoryCommitOperationEvent::repository_verified_yield(
+                        &deferred.linkage,
+                        deferred.kind,
+                        deferred.mappings,
+                        deferred.command_pre_head,
+                        deferred.sequencer_pre_head,
+                        deferred.command_post_head,
+                        object_domain,
+                    )
+                else {
+                    push_abstention(
+                        annotation,
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::OutcomeResultInadmissible,
+                        "commit_operation_failed_core_yield_admission",
+                    );
+                    continue;
+                };
+                exact.push(RepositoryOutcomeObservation {
+                    kind: RepositoryOutcomeKind::Commit,
+                    produced_object_ids: Vec::new(),
+                    commit_operation: Some(commit_operation),
+                    pull_request: None,
+                    pull_request_merge_commit: None,
+                    observed_at_unix_ms: deferred.observed_at_unix_ms,
+                    linkage: deferred.linkage,
+                    outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+                });
+                continue;
+            }
+            UnscopedOutcomeObservation::DeferredCherryPick(deferred) => {
+                let Some(operation_path) = operation_path else {
+                    push_abstention(
+                        annotation,
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                        "cherry_pick_has_no_operation_route",
+                    );
+                    continue;
+                };
+                let Some(certificate) = certified
+                    .iter()
+                    .filter(|certificate| operation_path.starts_with(&certificate.repository_root))
+                    .max_by_key(|certificate| certificate.repository_root.components().count())
+                else {
+                    push_abstention(
+                        annotation,
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::OutcomeRepositoryUnbound,
+                        "cherry_pick_route_has_no_certified_binding",
+                    );
+                    continue;
+                };
+                let (result, object_domain) = match certifier.resolve_cherry_pick_operation(
+                    certificate,
+                    &deferred.source,
+                    &deferred.result_oid_prefix,
+                    &deferred.result_subject,
+                    budget,
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(ProbeFailure::BudgetExceeded) => {
+                        push_probe_failure(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            ProbeFailure::BudgetExceeded,
+                            false,
+                        );
+                        continue;
+                    }
+                    Err(ProbeFailure::ConcurrentDrift | ProbeFailure::Missing) => {
+                        push_abstention(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            RepositoryAbstentionReason::ConcurrentDrift,
+                            "cherry_pick_repository_changed_during_resolution",
+                        );
+                        continue;
+                    }
+                    Err(ProbeFailure::PlatformUnsupported) => {
+                        push_probe_failure(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            ProbeFailure::PlatformUnsupported,
+                            false,
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        push_abstention(
+                            annotation,
+                            RepositoryEvidenceKind::ProviderNativeResult,
+                            RepositoryAbstentionReason::OutcomeResultInadmissible,
+                            "cherry_pick_source_or_result_did_not_resolve_exactly",
+                        );
+                        continue;
+                    }
+                };
+                let result_oid = result.object_id;
+                let mapping = RepositoryCommitMapping {
+                    source: deferred.source,
+                    result: result_oid.clone(),
+                };
+                let Ok(commit_operation) =
+                    ctx_history_core::RepositoryCommitOperationEvent::repository_verified_yield(
+                        &deferred.linkage,
+                        RepositoryCommitOperationKind::CherryPick,
+                        vec![mapping],
+                        None,
+                        None,
+                        result_oid,
+                        object_domain,
+                    )
+                else {
+                    push_abstention(
+                        annotation,
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::OutcomeResultInadmissible,
+                        "cherry_pick_failed_core_yield_admission",
+                    );
+                    continue;
+                };
+                exact.push(RepositoryOutcomeObservation {
+                    kind: RepositoryOutcomeKind::Commit,
+                    produced_object_ids: Vec::new(),
+                    commit_operation: Some(commit_operation),
+                    pull_request: None,
+                    pull_request_merge_commit: None,
+                    observed_at_unix_ms: deferred.observed_at_unix_ms,
+                    linkage: deferred.linkage,
+                    outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+                });
+                continue;
+            }
             UnscopedOutcomeObservation::DeferredCommit(deferred) => deferred,
         };
         let Some(operation_path) = operation_path else {
@@ -573,11 +782,10 @@ fn resolve_deferred_commit_observations(
             );
             continue;
         };
-        let producer = match (deferred.producer, deferred.rewrites_history) {
-            (_, true) => ResolvedCommitProducer::Rewrite,
-            (BoundedCommitProducer::Commit, false) => ResolvedCommitProducer::Commit,
-            (BoundedCommitProducer::Merge, false) => ResolvedCommitProducer::Merge,
-            (BoundedCommitProducer::Rebase, false) => {
+        let producer = match deferred.producer {
+            BoundedCommitProducer::Commit => ResolvedCommitProducer::Commit,
+            BoundedCommitProducer::Merge => ResolvedCommitProducer::Merge,
+            BoundedCommitProducer::Rebase | BoundedCommitProducer::CherryPick => {
                 push_abstention(
                     annotation,
                     RepositoryEvidenceKind::ProviderNativeResult,
@@ -660,8 +868,9 @@ fn resolve_deferred_commit_observations(
         exact.push(RepositoryOutcomeObservation {
             kind: RepositoryOutcomeKind::Commit,
             produced_object_ids: vec![resolved.object_id],
-            replacement_lineage: Vec::new(),
+            commit_operation: None,
             pull_request: None,
+            pull_request_merge_commit: None,
             observed_at_unix_ms: deferred.observed_at_unix_ms,
             linkage: deferred.linkage,
             outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,

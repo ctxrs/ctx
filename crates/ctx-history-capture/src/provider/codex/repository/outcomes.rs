@@ -315,7 +315,11 @@ mod tests {
     ) -> &ctx_history_core::RepositoryOutcomeObservation {
         match value {
             UnscopedOutcomeObservation::Exact(outcome) => outcome,
-            UnscopedOutcomeObservation::DeferredCommit(_) => panic!("expected exact outcome"),
+            UnscopedOutcomeObservation::DeferredCommit(_)
+            | UnscopedOutcomeObservation::DeferredCommitOperation(_)
+            | UnscopedOutcomeObservation::DeferredCherryPick(_) => {
+                panic!("expected exact outcome")
+            }
         }
     }
 
@@ -580,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_retains_amended_commit_identity_without_claiming_replacement_lineage() {
+    fn codex_retains_amended_result_as_unlinked_operation_evidence() {
         let oid = "68e96ac54a807931ef5629b1ef0fc0416e85d729";
         let command = concat!(
             "git status --short && git add crates/ctx-history-capture/src/provider/providers/openhands/tests.rs && ",
@@ -598,13 +602,15 @@ mod tests {
             &success(),
         )
         .unwrap();
+        let outcome = exact_outcome(&captured.outcomes[0]);
+        assert!(outcome.produced_object_ids.is_empty());
+        let operation = outcome.commit_operation.as_ref().unwrap();
         assert_eq!(
-            exact_outcome(&captured.outcomes[0]).produced_object_ids[0].hex,
-            oid
+            operation.kind,
+            ctx_history_core::RepositoryCommitOperationKind::Amend
         );
-        assert!(exact_outcome(&captured.outcomes[0])
-            .replacement_lineage
-            .is_empty());
+        assert!(operation.mappings.is_empty());
+        assert_eq!(operation.unlinked_results[0].hex, oid);
         assert_eq!(
             captured.abstentions[0].0,
             RepositoryAbstentionReason::HistoryRewriteUnlinked

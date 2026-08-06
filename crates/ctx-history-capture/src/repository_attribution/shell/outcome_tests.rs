@@ -14,6 +14,7 @@ fn outcome_recognition_is_bounded_and_alias_free() {
         Some(BoundedOutcomeOperation::Commit {
             producer: BoundedCommitProducer::Commit,
             rewrites_history: false,
+            operation_kind: None,
             exact_oid_output: true,
         })
     );
@@ -25,6 +26,7 @@ fn outcome_recognition_is_bounded_and_alias_free() {
         Some(BoundedOutcomeOperation::Commit {
             producer: BoundedCommitProducer::Commit,
             rewrites_history: false,
+            operation_kind: None,
             exact_oid_output: false,
         })
     );
@@ -33,6 +35,7 @@ fn outcome_recognition_is_bounded_and_alias_free() {
         Some(BoundedOutcomeOperation::Commit {
             producer: BoundedCommitProducer::Commit,
             rewrites_history: false,
+            operation_kind: None,
             exact_oid_output: false,
         })
     );
@@ -57,6 +60,7 @@ fn outcome_recognition_is_bounded_and_alias_free() {
         Some(BoundedOutcomeOperation::Commit {
             producer: BoundedCommitProducer::Merge,
             rewrites_history: false,
+            operation_kind: None,
             exact_oid_output: false,
         })
     );
@@ -120,10 +124,7 @@ fn literal_git_c_and_wrappers_are_candidates_but_wrappers_are_not_authority() {
             "env -- git -C ../repo commit -m exact && git -C ../repo rev-parse HEAD",
             base,
         ),
-        BoundedOutcomePlanDisposition::Abstained {
-            reason: RepositoryAbstentionReason::UnknownWrapper,
-            ..
-        }
+        BoundedOutcomePlanDisposition::Planned(_)
     ));
 }
 
@@ -177,6 +178,7 @@ fn exact_oid_plan_rejects_dry_runs_and_unsafe_intervening_commands() {
         Some(BoundedOutcomeOperation::Commit {
             producer: BoundedCommitProducer::Commit,
             rewrites_history: false,
+            operation_kind: None,
             exact_oid_output: true,
         })
     );
@@ -187,6 +189,7 @@ fn exact_oid_plan_rejects_dry_runs_and_unsafe_intervening_commands() {
         Some(BoundedOutcomeOperation::Commit {
             producer: BoundedCommitProducer::Commit,
             rewrites_history: false,
+            operation_kind: None,
             exact_oid_output: true,
         })
     );
@@ -197,6 +200,7 @@ fn exact_oid_plan_rejects_dry_runs_and_unsafe_intervening_commands() {
         Some(BoundedOutcomeOperation::Commit {
             producer: BoundedCommitProducer::Commit,
             rewrites_history: false,
+            operation_kind: None,
             exact_oid_output: true,
         })
     );
@@ -219,6 +223,44 @@ fn exact_oid_inspection_commands_are_never_commit_producers() {
                 BoundedOutcomePlanDisposition::Planned(_)
             ),
             "inspection command was recognized as a producer: {command}"
+        );
+    }
+}
+
+#[test]
+fn cherry_pick_requires_one_full_source_and_a_producing_mode() {
+    let base = Path::new("/repo");
+    let source = "0123456789abcdef0123456789abcdef01234567";
+    let BoundedOutcomePlanDisposition::Planned(plan) =
+        bounded_outcome_plan(&format!("git cherry-pick {source}"), base)
+    else {
+        panic!("expected bounded cherry-pick plan");
+    };
+    assert_eq!(plan.operation_source_oid.as_deref(), Some(source));
+    assert_eq!(
+        plan.operation,
+        BoundedOutcomeOperation::Commit {
+            producer: BoundedCommitProducer::CherryPick,
+            rewrites_history: true,
+            operation_kind: Some(ctx_history_core::RepositoryCommitOperationKind::CherryPick),
+            exact_oid_output: false,
+        }
+    );
+
+    for command in [
+        "git cherry-pick 0123456",
+        "git cherry-pick 0123456789abcdef0123456789abcdef01234567..1123456789abcdef0123456789abcdef01234567",
+        "git cherry-pick 0123456789abcdef0123456789abcdef01234567 1123456789abcdef0123456789abcdef01234567",
+        "git cherry-pick --no-commit 0123456789abcdef0123456789abcdef01234567",
+        "git cherry-pick -n 0123456789abcdef0123456789abcdef01234567",
+        "bash -lc 'git cherry-pick 0123456789abcdef0123456789abcdef01234567'",
+    ] {
+        assert!(
+            !matches!(
+                bounded_outcome_plan(command, base),
+                BoundedOutcomePlanDisposition::Planned(_)
+            ),
+            "{command}"
         );
     }
 }

@@ -19,15 +19,19 @@ pub use mcp_exchange::{
     CORE_MCP_EXCHANGE_REVISION, MAX_MCP_EXCHANGE_CALL_ID_BYTES,
 };
 pub use repository::{
-    GitObjectFormat, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
-    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidate,
-    RepositoryCandidateEvidence, RepositoryCandidateKind, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileInvocationEvidence,
-    RepositoryFileInvocationKind, RepositoryFileInvocationTextRange, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryLocalRootAuthorization, RepositoryObjectReplacement,
-    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
-    RepositoryPullRequestAssociationObservation, RepositoryPullRequestIdentity,
-    RepositoryVcsObservation, RepositoryVcsObservationKind,
+    repository_commit_operation_event_id, repository_outcome_receipt_id,
+    repository_result_map_sha256, GitObjectFormat, GitObjectId, RepositoryAbstention,
+    RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
+    RepositoryCandidate, RepositoryCandidateEvidence, RepositoryCandidateKind,
+    RepositoryCommitMapping, RepositoryCommitMappingCompleteness, RepositoryCommitOperationClass,
+    RepositoryCommitOperationEvent, RepositoryCommitOperationKind, RepositoryCommitOperationProof,
+    RepositoryCommitOperationState, RepositoryEvidence, RepositoryEvidenceConfidence,
+    RepositoryEvidenceKind, RepositoryFileInvocationEvidence, RepositoryFileInvocationKind,
+    RepositoryFileInvocationTextRange, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryLocalRootAuthorization, RepositoryOutcomeKind, RepositoryOutcomeLinkage,
+    RepositoryOutcomeObservation, RepositoryPullRequestAssociationObservation,
+    RepositoryPullRequestIdentity, RepositoryVcsObservation, RepositoryVcsObservationKind,
+    RepositoryVerifiedYieldProof,
 };
 use validation::{
     validate_count, validate_json_map, validate_optional_text, validate_owned_identity,
@@ -46,12 +50,12 @@ pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 /// This identity is part of the Core record contract fingerprint so a change
 /// to the accumulator cannot be interpreted under older generation semantics.
 pub const CORE_RECORD_ACCUMULATOR_IDENTITY: &[u8] = b"ctx-core-record-event-binding-v1\0";
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 8;
-pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 4;
-pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 3;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 9;
+pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 5;
+pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 4;
 pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 6;
 pub const CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION: u32 = 3;
-pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 4;
+pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 5;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN: &[u8] =
     b"ctx.core.repository-local-root-fingerprint.v1\0";

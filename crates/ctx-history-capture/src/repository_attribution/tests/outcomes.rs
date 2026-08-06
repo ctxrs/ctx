@@ -5,8 +5,9 @@ fn exact_commit_outcome() -> RepositoryOutcomeObservation {
             format: GitObjectFormat::Sha1,
             hex: "0123456789abcdef0123456789abcdef01234567".to_owned(),
         }],
-        replacement_lineage: Vec::new(),
+        commit_operation: None,
         pull_request: None,
+        pull_request_merge_commit: None,
         observed_at_unix_ms: 1,
         linkage: RepositoryOutcomeLinkage {
             provider: "fixture".to_owned(),
@@ -24,12 +25,13 @@ fn exact_pull_request_outcome(alias: RepositoryAlias) -> RepositoryOutcomeObserv
     RepositoryOutcomeObservation {
         kind: RepositoryOutcomeKind::PullRequestCreated,
         produced_object_ids: Vec::new(),
-        replacement_lineage: Vec::new(),
+        commit_operation: None,
         pull_request: Some(RepositoryPullRequestIdentity {
             forge_repository: alias,
             number: 42,
             provider_id: Some("PR_42".to_owned()),
         }),
+        pull_request_merge_commit: None,
         observed_at_unix_ms: 1,
         linkage: RepositoryOutcomeLinkage {
             provider: "fixture".to_owned(),
@@ -143,13 +145,12 @@ fn public_ctx_short_commit_resolves_full_oid_parents_and_changed_files() {
 }
 
 #[test]
-fn reachable_short_amend_resolves_new_identity_without_inventing_replacement_lineage() {
+fn short_amend_without_an_exact_source_result_map_abstains() {
     let temp = TempDir::new().unwrap();
     let repo = repository(temp.path(), "amended", None);
     fs::write(repo.join("tracked.txt"), "amended\n").unwrap();
     run_git(&repo, &["add", "tracked.txt"]);
     run_git(&repo, &["commit", "--amend", "-qm", "Amended outcome"]);
-    let oid = git_output(&repo, &["rev-parse", "HEAD"]);
     let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
     let linked = linked_short_commit(
         &repo,
@@ -166,20 +167,78 @@ fn reachable_short_amend_resolves_new_identity_without_inventing_replacement_lin
         outcome_abstentions: linked.abstentions,
         ..AttributionInput::default()
     });
-    let outcome = annotation
-        .repository_vcs_observations
-        .iter()
-        .find_map(|observation| match &observation.kind {
-            RepositoryVcsObservationKind::Outcome(outcome) => Some(outcome),
-            _ => None,
-        })
-        .expect("expected exact amended commit outcome");
-    assert_eq!(outcome.produced_object_ids[0].hex, oid);
-    assert!(outcome.replacement_lineage.is_empty());
+    assert!(annotation.repository_vcs_observations.iter().all(|observation| {
+        !matches!(&observation.kind, RepositoryVcsObservationKind::Outcome(_))
+    }));
     assert!(has_reason(
         &annotation,
         RepositoryAbstentionReason::HistoryRewriteUnlinked
     ));
+}
+
+#[test]
+fn native_cherry_pick_receipt_admits_exact_derivation_mapping() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "cherry-pick", None);
+    let primary = git_output(&repo, &["branch", "--show-current"]);
+    run_git(&repo, &["checkout", "-qb", "source"]);
+    fs::write(repo.join("picked.txt"), "picked\n").unwrap();
+    run_git(&repo, &["add", "picked.txt"]);
+    run_git(&repo, &["commit", "-qm", "Apply exact lineage"]);
+    let source = git_output(&repo, &["rev-parse", "HEAD"]);
+    run_git(&repo, &["checkout", "-q", &primary]);
+    fs::write(repo.join("primary.txt"), "diverge\n").unwrap();
+    run_git(&repo, &["add", "primary.txt"]);
+    run_git(&repo, &["commit", "-qm", "Diverge primary"]);
+    run_git(&repo, &["cherry-pick", &source]);
+    let result = git_output(&repo, &["rev-parse", "HEAD"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    assert_ne!(source, result);
+
+    let command = format!("git cherry-pick {source}");
+    let linked = linked_short_commit(
+        &repo,
+        &command,
+        format!("[{primary} {short}] Apply exact lineage\n 1 file changed, 1 insertion(+)\n"),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some(command),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+
+    let outcome = annotation
+        .repository_vcs_observations
+        .iter()
+        .find_map(|observation| match &observation.kind {
+            RepositoryVcsObservationKind::Outcome(outcome) => Some(outcome.as_ref()),
+            _ => None,
+        })
+        .expect("expected exact cherry-pick outcome");
+    let operation = outcome.commit_operation.as_ref().unwrap();
+    assert_eq!(
+        operation.kind,
+        ctx_history_core::RepositoryCommitOperationKind::CherryPick
+    );
+    assert_eq!(
+        operation.operation_class(),
+        ctx_history_core::RepositoryCommitOperationClass::Derivation
+    );
+    assert_eq!(operation.mappings[0].source.hex, source);
+    assert_eq!(operation.mappings[0].result.hex, result);
+    assert_eq!(
+        operation
+            .repository_verified_yields()
+            .map(|oid| oid.hex.as_str())
+            .collect::<Vec<_>>(),
+        [result.as_str()]
+    );
+    assert!(annotation.repository_abstentions.is_empty());
 }
 
 #[test]
