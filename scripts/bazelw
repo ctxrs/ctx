@@ -14,6 +14,63 @@ else
   repo_root="${script_repo_root}"
 fi
 export CTX_REPO_ROOT="${repo_root}"
+
+if (( "$#" == 0 )); then
+  set -- help
+fi
+command_name="$1"
+
+host_build_governor=""
+host_build_governed=0
+host_build_governor_active=0
+if [[ "${CTX_HOST_BUILD_GOVERNOR_ACTIVE:-0}" == "1" ]]; then
+  lease_id="${CTX_BUILD_GOVERNOR_LEASE_ID:-}"
+  lease_class="${CTX_BUILD_GOVERNOR_LEASE_CLASS:-}"
+  if [[ ! "$lease_id" =~ ^[0-9a-f]{32}$ || ! "$lease_class" =~ ^(heavy|light|remote)$ ]] ||
+    ! grep -Fq -- "/ctx-build-lease-${lease_id}.service" /proc/self/cgroup; then
+    printf 'CTX host build governor active marker is not backed by the current lease cgroup\n' >&2
+    exit 125
+  fi
+  host_build_governor_active=1
+fi
+case "${command_name}" in
+  analyze-profile|aquery|canonicalize-flags|cquery|dump|help|info|license|query|shutdown|version)
+    ;;
+  *)
+    if (( host_build_governor_active == 0 )); then
+      if [[ -v CTX_HOST_BUILD_GOVERNOR ]]; then
+        host_build_governor="${CTX_HOST_BUILD_GOVERNOR}"
+      else
+        config_home="${XDG_CONFIG_HOME:-${HOME:-}/.config}"
+        governor_hook="${config_home}/ctx/build-governor"
+        if [[ -e "${governor_hook}" || -L "${governor_hook}" ]]; then
+          host_build_governor="${governor_hook}"
+        fi
+      fi
+      if [[ -v CTX_HOST_BUILD_GOVERNOR && -z "${host_build_governor}" ]]; then
+        printf 'configured CTX host build governor must not be empty\n' >&2
+        exit 125
+      fi
+      if [[ -n "${host_build_governor}" ]]; then
+        if [[ "${host_build_governor}" != /* || ! -x "${host_build_governor}" ]]; then
+          printf 'configured CTX host build governor must be an absolute executable: %s\n' \
+            "${host_build_governor}" >&2
+          exit 125
+        fi
+        host_build_governed=1
+        if [[ -z "${BAZEL_JOBS:-}" && -z "${CTX_BAZEL_JOBS:-}" ]]; then
+          export CTX_BAZEL_JOBS=16
+        fi
+        if [[ -z "${BAZEL_LOCAL_CPU_RESOURCES:-}" && -z "${CTX_BAZEL_LOCAL_CPU_RESOURCES:-}" ]]; then
+          export CTX_BAZEL_LOCAL_CPU_RESOURCES=16
+        fi
+        if [[ -z "${BAZEL_LOCAL_RAM_RESOURCES:-}" && -z "${CTX_BAZEL_LOCAL_RAM_RESOURCES:-}" ]]; then
+          export CTX_BAZEL_LOCAL_RAM_RESOURCES=49152
+        fi
+      fi
+    fi
+    ;;
+esac
 # shellcheck source=scripts/ci-common.sh
 source "${script_repo_root}/scripts/ci-common.sh"
 
@@ -71,12 +128,14 @@ if [[ "${version_output}" != "bazel ${bazel_version}" ]]; then
   exit 64
 fi
 
-if (( "$#" == 0 )); then
-  set -- help
-fi
-
-command_name="$1"
 shift
+
+run_bazel() {
+  if (( host_build_governed == 1 )); then
+    exec "${host_build_governor}" bazel "${command_name}" -- "$@"
+  fi
+  exec "$@"
+}
 
 printf 'ctx bazel: jobs=%s cpu=%s ram_mb=%s test_jobs=%s rust_threads=%s cache=%s\n' \
   "${BAZEL_JOBS}" \
@@ -99,7 +158,7 @@ case "${command_name}" in
     fi
     ;;
   analyze-profile|canonicalize-flags|clean|dump|help|info|license|version)
-    exec "${bazel_bin}" \
+    run_bazel "${bazel_bin}" \
       --output_user_root="${output_root}" \
       --max_idle_secs="${CTX_BAZEL_MAX_IDLE_SECS:-600}" \
       "${command_name}" "$@"
@@ -129,7 +188,7 @@ case "${command_name}" in
         )
         ;;
     esac
-    exec "${bazel_bin}" \
+    run_bazel "${bazel_bin}" \
       --output_user_root="${output_root}" \
       --max_idle_secs="${CTX_BAZEL_MAX_IDLE_SECS:-600}" \
       "${command_name}" "${shared_args[@]}" "$@"

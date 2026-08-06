@@ -9,6 +9,7 @@ fi
 wrapper="${repo_root}/scripts/bazelw"
 fake_bazel="${repo_root}/scripts/tests/fixtures/fake-bazel.sh"
 fake_df="${repo_root}/scripts/tests/fixtures/fake-df.sh"
+fake_governor="${repo_root}/scripts/tests/fixtures/fake-build-governor.sh"
 test_root="$(mktemp -d "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/ctx-bazelw-test.XXXXXXXX")"
 trap 'rm -rf -- "${test_root}"' EXIT
 
@@ -31,6 +32,8 @@ export CTX_TOTAL_MEMORY_GB=128
 # Exercise the wrapper's default derivation independently from the bounded
 # thread count forwarded by an outer Bazel test invocation.
 unset RUST_TEST_THREADS
+unset CTX_HOST_BUILD_GOVERNOR CTX_HOST_BUILD_GOVERNOR_ACTIVE
+unset CTX_BUILD_GOVERNOR_LEASE_ID CTX_BUILD_GOVERNOR_LEASE_CLASS XDG_CONFIG_HOME
 export HOME="${test_root}/home"
 export TMPDIR="${test_root}/tmp"
 mkdir -p "${HOME}" "${TMPDIR}"
@@ -125,5 +128,113 @@ export XDG_CACHE_HOME="${test_root}/xdg-low-inode"
 selected_cache="$(ctx_bazel_cache_root)"
 [[ "${selected_cache}" == "${XDG_CACHE_HOME}/ctx/bazel" ]] \
   || fail 'low-inode spacious root did not fall back before invoking Bazel'
+
+grep -Fqx 'build:ctx-reapi --spawn_strategy=remote' "${repo_root}/.bazelrc" \
+  || fail 'ctx-reapi must force eligible spawn actions to remote execution'
+grep -Fqx 'build:ctx-reapi --remote_local_fallback=false' "${repo_root}/.bazelrc" \
+  || fail 'ctx-reapi must disable local fallback'
+grep -Fqx 'test:ctx-reapi --test_strategy=remote' "${repo_root}/.bazelrc" \
+  || fail 'ctx-reapi must force test actions to remote execution'
+[[ "$(grep -cE '^[^#[:space:]][^:[:space:]]*:ctx-reapi[[:space:]]' "${repo_root}/.bazelrc")" == "9" ]] \
+  || fail 'ctx-reapi repository policy has an unexpected directive count'
+
+# An explicitly activated generic host governor wraps build-capable commands,
+# raises healthy single-build defaults, and leaves query/read commands light.
+export XDG_CONFIG_HOME="${test_root}/governor-config"
+export CTX_FAKE_GOVERNOR_LOG="${test_root}/fake-governor.log"
+mkdir -p "${XDG_CONFIG_HOME}/ctx"
+ln -s "${fake_governor}" "${XDG_CONFIG_HOME}/ctx/build-governor"
+unset BAZEL_JOBS BAZEL_LOCAL_CPU_RESOURCES BAZEL_LOCAL_RAM_RESOURCES
+unset CTX_BAZEL_JOBS CTX_BAZEL_LOCAL_CPU_RESOURCES CTX_BAZEL_LOCAL_RAM_RESOURCES
+: >"${CTX_FAKE_GOVERNOR_LOG}"
+: >"${CTX_FAKE_BAZEL_LOG}"
+"${wrapper}" test //:governed --config=test 2>"${test_root}/governed-config.log"
+grep -Fqx 'mode=bazel' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'heavy command did not use governor'
+grep -Fqx 'command=test' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'governor command classification missing'
+grep -Fqx 'jobs=16' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'governed jobs default is not 16'
+grep -Fqx 'cpu=16' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'governed CPU default is not 16'
+grep -Fqx 'ram=49152' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'governed memory default is not bounded'
+assert_log_line 'arg=--jobs=16'
+assert_log_line 'arg=--local_resources=cpu=16'
+
+mapfile -t governed_argv < <(sed -n 's/^argv=//p' "${CTX_FAKE_GOVERNOR_LOG}")
+mapfile -t executed_argv < <(sed -n 's/^arg=//p' "${CTX_FAKE_BAZEL_LOG}")
+[[ "${governed_argv[0]:-}" == "${fake_bazel}" ]] \
+  || fail 'governor did not receive the Bazel executable first'
+[[ "${governed_argv[1]:-}" == --output_user_root=* ]] \
+  || fail 'governor did not receive output_user_root as a startup option'
+[[ "${governed_argv[2]:-}" == '--max_idle_secs=600' ]] \
+  || fail 'governor did not receive max_idle_secs before the command'
+[[ "${governed_argv[3]:-}" == 'test' ]] \
+  || fail 'governor did not receive startup options before the Bazel command'
+[[ "${#governed_argv[@]}" == "$(( ${#executed_argv[@]} + 1 ))" ]] \
+  || fail 'governor did not receive the complete Bazel argv'
+for (( index = 0; index < ${#executed_argv[@]}; index++ )); do
+  [[ "${governed_argv[index + 1]}" == "${executed_argv[index]}" ]] \
+    || fail "governor changed Bazel argument $index"
+done
+
+for governed_command in build coverage run clean; do
+  : >"${CTX_FAKE_GOVERNOR_LOG}"
+  : >"${CTX_FAKE_BAZEL_LOG}"
+  "${wrapper}" "${governed_command}" //:governed \
+    2>"${test_root}/${governed_command}-governed-config.log"
+  grep -Fqx 'mode=bazel' "${CTX_FAKE_GOVERNOR_LOG}" \
+    || fail "${governed_command} did not use governor"
+  grep -Fqx "command=${governed_command}" "${CTX_FAKE_GOVERNOR_LOG}" \
+    || fail "${governed_command} classification was not forwarded"
+done
+
+: >"${CTX_FAKE_GOVERNOR_LOG}"
+: >"${CTX_FAKE_BAZEL_LOG}"
+BAZEL_JOBS=5 \
+BAZEL_LOCAL_CPU_RESOURCES=3 \
+BAZEL_LOCAL_RAM_RESOURCES=4096 \
+  "${wrapper}" build //:governed-override 2>"${test_root}/governed-override-config.log"
+grep -Fqx 'jobs=5' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'governor changed explicit jobs override'
+grep -Fqx 'cpu=3' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'governor changed explicit CPU override'
+grep -Fqx 'ram=4096' "${CTX_FAKE_GOVERNOR_LOG}" || fail 'governor changed explicit memory override'
+assert_log_line 'arg=--jobs=5'
+assert_log_line 'arg=--local_resources=cpu=3'
+assert_log_line 'arg=--local_resources=memory=4096'
+
+: >"${CTX_FAKE_GOVERNOR_LOG}"
+"${wrapper}" query //... >/dev/null 2>"${test_root}/query-config.log"
+[[ ! -s "${CTX_FAKE_GOVERNOR_LOG}" ]] || fail 'light query unexpectedly acquired admission'
+
+: >"${CTX_FAKE_GOVERNOR_LOG}"
+"${wrapper}" shutdown 2>"${test_root}/governed-shutdown-config.log"
+[[ ! -s "${CTX_FAKE_GOVERNOR_LOG}" ]] || fail 'shutdown unexpectedly acquired admission'
+
+: >"${CTX_FAKE_GOVERNOR_LOG}"
+set +e
+CTX_HOST_BUILD_GOVERNOR_ACTIVE=1 "${wrapper}" build //:forged-active \
+  >"${test_root}/forged-active.out" 2>"${test_root}/forged-active.err"
+forged_active_status=$?
+set -e
+[[ "${forged_active_status}" == "125" ]] ||
+  fail "forged active marker exited ${forged_active_status}, expected 125"
+grep -Fq 'active marker is not backed by the current lease cgroup' \
+  "${test_root}/forged-active.err" || fail 'forged active marker did not fail closed'
+
+: >"${CTX_FAKE_GOVERNOR_LOG}"
+set +e
+CTX_HOST_BUILD_GOVERNOR= "${wrapper}" build //:empty-governor \
+  >"${test_root}/empty-governor.out" 2>"${test_root}/empty-governor.err"
+empty_governor_status=$?
+set -e
+[[ "${empty_governor_status}" == "125" ]] ||
+  fail "empty governor override exited ${empty_governor_status}, expected 125"
+grep -Fq 'configured CTX host build governor must not be empty' \
+  "${test_root}/empty-governor.err" || fail 'empty governor override did not fail closed'
+
+set +e
+CTX_HOST_BUILD_GOVERNOR="${test_root}/missing-governor" \
+  "${wrapper}" build //:must-not-run >"${test_root}/missing.out" 2>"${test_root}/missing.err"
+missing_status=$?
+set -e
+[[ "${missing_status}" == "125" ]] || fail "invalid governor exited ${missing_status}, expected 125"
+grep -Fq 'configured CTX host build governor must be an absolute executable' \
+  "${test_root}/missing.err" || fail 'missing governor did not fail closed'
 
 printf 'bazelw tests passed\n'
