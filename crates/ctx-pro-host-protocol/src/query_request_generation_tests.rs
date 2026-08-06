@@ -703,6 +703,45 @@ fn commit_coverage_detects_page_wide_producer_conflicts_and_duplicate_fact_units
 }
 
 #[test]
+fn commit_producer_conflicts_are_scoped_to_the_exact_commit_subject() {
+    let mut first_match = commit_match(
+        "produced-a",
+        CommitFactType::Produced,
+        FactState::Asserted,
+        "session:a",
+    );
+    let mut second_match = commit_match(
+        "produced-b",
+        CommitFactType::Produced,
+        FactState::Asserted,
+        "session:b",
+    );
+    let BlameMatch::Commit(first) = &mut first_match else {
+        unreachable!();
+    };
+    first.subject = resource(
+        "commit:first",
+        ResourceKind::Commit,
+        "1111111111111111111111111111111111111111",
+    );
+    let BlameMatch::Commit(second) = &mut second_match else {
+        unreachable!();
+    };
+    second.subject = resource(
+        "commit:second",
+        ResourceKind::Commit,
+        "2222222222222222222222222222222222222222",
+    );
+
+    commit_result(
+        vec![first_match, second_match],
+        outcome(BlameCoverageUnit::CommitFact, 2, 0, 0, 0),
+    )
+    .validate()
+    .unwrap();
+}
+
+#[test]
 fn commit_producer_facts_require_session_objects_and_exact_semantics() {
     let invalid_cases = [
         (

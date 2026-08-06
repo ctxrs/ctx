@@ -1,4 +1,7 @@
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -682,7 +685,8 @@ impl BlameResult {
             }
             ResolvedBlameTarget::Commit { .. } => {
                 let mut fact_ids = BTreeSet::new();
-                let mut asserted_producers = BTreeSet::new();
+                let mut asserted_producers =
+                    BTreeMap::<(ResourceKind, String), BTreeSet<(ResourceKind, String)>>::new();
                 for item in &self.matches {
                     let BlameMatch::Commit(item) = item else {
                         return Err(ProtocolError::new(
@@ -700,11 +704,13 @@ impl BlameResult {
                         && item.state == FactState::Asserted
                     {
                         if let Some(producer) = &item.object {
-                            asserted_producers.insert((producer.kind, producer.id.as_str()));
+                            asserted_producers
+                                .entry((item.subject.kind, item.subject.id.clone()))
+                                .or_default()
+                                .insert((producer.kind, producer.id.clone()));
                         }
                     }
                 }
-                let conflicting_producers = asserted_producers.len() >= 2;
                 for item in &self.matches {
                     let BlameMatch::Commit(item) = item else {
                         return Err(ProtocolError::new(
@@ -712,6 +718,9 @@ impl BlameResult {
                             "commit blame coverage contains a non-commit match",
                         ));
                     };
+                    let conflicting_producers = asserted_producers
+                        .get(&(item.subject.kind, item.subject.id.clone()))
+                        .is_some_and(|producers| producers.len() >= 2);
                     coverage.add(commit_fact_attribution(item, conflicting_producers), 1)?;
                 }
             }

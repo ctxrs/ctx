@@ -474,7 +474,7 @@ fn complete_lineage_result() -> BlameResult {
             repository: repository(),
         },
         git_snapshot: None,
-        outcome: outcome(BlameCoverageUnit::CommitFact, 2, 0, 0, 0),
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 1),
         matches: vec![
             commit_match(
                 &commit,
@@ -765,8 +765,10 @@ fn commit_lineage_keeps_paginated_production_for_a_different_exact_object() {
         "source-producer",
         FactConfidence::Explicit,
         FactState::Asserted,
-        1,
+        3,
     ));
+    result.evidence.push(event_evidence(3));
+    result.outcome = outcome(BlameCoverageUnit::CommitFact, 2, 0, 0, 1);
     result.validate().unwrap();
     let rendered = render_plain(&result, 80);
     assert!(rendered.contains("Also recorded"), "{rendered}");

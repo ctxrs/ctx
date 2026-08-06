@@ -1,3 +1,5 @@
+Possible producer found
+
 Commit      3333333333333333333333333333333333333333
 Repository  ctxrs/ctx
 
@@ -9,7 +11,8 @@ Lineage · complete · 1 operation
     actor         session rebaser
     proof         repository verified
     observed      2024-07-14T23:33:20.000Z
-    operation id  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    operation id
+      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     evidence      [1]
 
   Origin
