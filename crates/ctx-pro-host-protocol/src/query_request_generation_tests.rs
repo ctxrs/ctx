@@ -360,6 +360,7 @@ fn non_commit_blame_result_rejects_commit_lineage() {
     result.lineage = Some(CommitLineage {
         requested: ExactCommitRef {
             resource: resource("commit:one", ResourceKind::Commit, &oid),
+            logical_repository_id: "ctxrs/ctx".to_owned(),
             object_format: GitObjectFormat::Sha1,
             oid,
         },

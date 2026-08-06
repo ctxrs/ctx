@@ -612,8 +612,8 @@ impl BlameResult {
             blame_match.validate(&self.target, &available, &mut referenced)?;
         }
         match (&self.target, &self.lineage) {
-            (ResolvedBlameTarget::Commit { commit, .. }, Some(lineage)) => {
-                lineage.validate(commit, &available, &mut referenced)?;
+            (ResolvedBlameTarget::Commit { commit, repository }, Some(lineage)) => {
+                lineage.validate(commit, repository, &available, &mut referenced)?;
             }
             (
                 ResolvedBlameTarget::File { .. } | ResolvedBlameTarget::PullRequest { .. },

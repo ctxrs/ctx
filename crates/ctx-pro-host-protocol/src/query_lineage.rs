@@ -1,9 +1,12 @@
-use std::{cmp::Ordering, collections::BTreeSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    query::{same_resource_identity, validate_evidence_numbers},
+    query::{canonical_logical_repository_id, same_resource_identity, validate_evidence_numbers},
     ErrorClass, ProtocolError, ResourceKind, ResourceRef, MAX_BLAME_TARGET_BYTES,
     MAX_COMMIT_LINEAGE_EXAMINED_EVENTS, MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
 };
@@ -29,6 +32,7 @@ impl GitObjectFormat {
 #[serde(deny_unknown_fields)]
 pub struct ExactCommitRef {
     pub resource: ResourceRef,
+    pub logical_repository_id: String,
     pub object_format: GitObjectFormat,
     pub oid: String,
 }
@@ -39,6 +43,7 @@ impl ExactCommitRef {
         if self.resource.kind != ResourceKind::Commit {
             return Err(corrupt("exact commit reference is not a commit resource"));
         }
+        validate_logical_repository_id(&self.logical_repository_id)?;
         if self.oid.len() != self.object_format.oid_bytes()
             || !self
                 .oid
@@ -58,9 +63,14 @@ impl ExactCommitRef {
     }
 
     fn same_identity(&self, other: &Self) -> bool {
-        self.object_format == other.object_format
+        self.logical_repository_id == other.logical_repository_id
+            && self.object_format == other.object_format
             && self.oid == other.oid
-            && same_resource_identity(&self.resource, &other.resource)
+    }
+
+    fn shares_object_domain(&self, other: &Self) -> bool {
+        self.logical_repository_id == other.logical_repository_id
+            && self.object_format == other.object_format
     }
 }
 
@@ -118,9 +128,14 @@ impl CommitLineageEdge {
         available: &BTreeSet<u32>,
         referenced: &mut BTreeSet<u32>,
     ) -> Result<(), ProtocolError> {
-        validate_text(&self.operation_id, "commit lineage operation ID")?;
+        validate_operation_id(&self.operation_id)?;
         self.source.validate()?;
         self.result.validate()?;
+        if !self.source.shares_object_domain(&self.result) {
+            return Err(corrupt(
+                "commit lineage operation crosses a repository object domain",
+            ));
+        }
         if self.source.same_identity(&self.result) {
             return Err(corrupt(
                 "commit lineage operation source and result must be distinct exact objects",
@@ -138,26 +153,47 @@ impl CommitLineageEdge {
             ));
         }
         validate_session(&self.actor, "commit lineage operation actor")?;
+        validate_causal_proof(self.state, self.proof_class)?;
         validate_observed_at(self.observed_at_ms)?;
         validate_evidence_numbers(&self.evidence_numbers, available, referenced)
     }
 
+    fn same_operation_metadata(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.relation_class == other.relation_class
+            && self.actor == other.actor
+            && self.proof_class == other.proof_class
+            && self.state == other.state
+            && self.observed_at_ms == other.observed_at_ms
+            && self.evidence_numbers == other.evidence_numbers
+    }
+
+    fn same_shared_operation_metadata(&self, other: &CommitLineageYield) -> bool {
+        self.actor == other.actor
+            && self.proof_class == other.proof_class
+            && self.state == other.state
+            && self.observed_at_ms == other.observed_at_ms
+            && self.evidence_numbers == other.evidence_numbers
+    }
+
     fn stable_cmp(&self, other: &Self) -> Ordering {
         (
+            self.operation_id.as_str(),
             self.kind,
+            self.source.logical_repository_id.as_str(),
             self.source.object_format,
             self.source.oid.as_str(),
             self.result.object_format,
             self.result.oid.as_str(),
-            self.operation_id.as_str(),
         )
             .cmp(&(
+                other.operation_id.as_str(),
                 other.kind,
+                other.source.logical_repository_id.as_str(),
                 other.source.object_format,
                 other.source.oid.as_str(),
                 other.result.object_format,
                 other.result.oid.as_str(),
-                other.operation_id.as_str(),
             ))
     }
 }
@@ -168,6 +204,8 @@ impl CommitLineageEdge {
 #[serde(deny_unknown_fields)]
 pub struct CommitLineageYield {
     pub yield_id: String,
+    pub operation_id: String,
+    pub logical_repository_id: String,
     pub actor: ResourceRef,
     pub proof_class: CommitLineageProofClass,
     pub state: CommitLineageState,
@@ -182,14 +220,33 @@ impl CommitLineageYield {
         referenced: &mut BTreeSet<u32>,
     ) -> Result<(), ProtocolError> {
         validate_text(&self.yield_id, "commit lineage yield ID")?;
+        validate_operation_id(&self.operation_id)?;
+        validate_logical_repository_id(&self.logical_repository_id)?;
         validate_session(&self.actor, "commit lineage yield actor")?;
+        validate_causal_proof(self.state, self.proof_class)?;
         validate_observed_at(self.observed_at_ms)?;
         validate_evidence_numbers(&self.evidence_numbers, available, referenced)
     }
 
+    fn same_operation_metadata(&self, other: &Self) -> bool {
+        self.actor == other.actor
+            && self.proof_class == other.proof_class
+            && self.state == other.state
+            && self.observed_at_ms == other.observed_at_ms
+            && self.evidence_numbers == other.evidence_numbers
+    }
+
     fn stable_cmp(&self, other: &Self) -> Ordering {
-        (self.actor.id.as_str(), self.yield_id.as_str())
-            .cmp(&(other.actor.id.as_str(), other.yield_id.as_str()))
+        (
+            self.operation_id.as_str(),
+            self.yield_id.as_str(),
+            self.actor.id.as_str(),
+        )
+            .cmp(&(
+                other.operation_id.as_str(),
+                other.yield_id.as_str(),
+                other.actor.id.as_str(),
+            ))
     }
 }
 
@@ -385,18 +442,53 @@ impl CommitLineage {
     pub(crate) fn validate(
         &self,
         target: &ResourceRef,
+        repository: &ResourceRef,
         available: &BTreeSet<u32>,
         referenced: &mut BTreeSet<u32>,
     ) -> Result<(), ProtocolError> {
         self.requested.validate()?;
-        if !same_resource_identity(&self.requested.resource, target) {
+        repository.validate()?;
+        if repository.kind != ResourceKind::Repository {
             return Err(corrupt(
-                "commit lineage requested object does not preserve the resolved blame target",
+                "commit lineage resolved repository is not a repository resource",
+            ));
+        }
+        if !same_resource_identity(&self.requested.resource, target)
+            || self.requested.oid != target.display
+        {
+            return Err(corrupt(
+                "commit lineage requested object does not exactly match the resolved blame target",
+            ));
+        }
+        if canonical_logical_repository_id(&repository.display).as_ref()
+            != self.requested.logical_repository_id
+        {
+            return Err(corrupt(
+                "commit lineage requested object does not belong to the resolved repository",
             ));
         }
 
+        let mut edge_operations = BTreeMap::new();
+        let mut operation_ids = BTreeSet::new();
         for edge in &self.edges {
             edge.validate(available, referenced)?;
+            if !edge.source.shares_object_domain(&self.requested)
+                || !edge.result.shares_object_domain(&self.requested)
+            {
+                return Err(corrupt(
+                    "commit lineage edge crosses the requested repository object domain",
+                ));
+            }
+            operation_ids.insert(edge.operation_id.as_str());
+            if let Some(first) = edge_operations.get(edge.operation_id.as_str()) {
+                if !edge.same_operation_metadata(first) {
+                    return Err(corrupt(
+                        "commit lineage mappings for one operation disagree on metadata",
+                    ));
+                }
+            } else {
+                edge_operations.insert(edge.operation_id.as_str(), edge);
+            }
         }
         if self
             .edges
@@ -408,8 +500,38 @@ impl CommitLineage {
             ));
         }
 
+        let mut yielded_operations = BTreeMap::new();
+        let mut yield_ids = BTreeSet::new();
         for yielded_by in &self.yielded_by {
             yielded_by.validate(available, referenced)?;
+            if yielded_by.logical_repository_id != self.requested.logical_repository_id {
+                return Err(corrupt(
+                    "commit lineage yield crosses the requested repository domain",
+                ));
+            }
+            if !yield_ids.insert(yielded_by.yield_id.as_str()) {
+                return Err(corrupt(
+                    "commit lineage contains a duplicate yield record identity",
+                ));
+            }
+            operation_ids.insert(yielded_by.operation_id.as_str());
+            if let Some(first) = yielded_operations.get(yielded_by.operation_id.as_str()) {
+                if !yielded_by.same_operation_metadata(first) {
+                    return Err(corrupt(
+                        "commit lineage yields for one operation disagree on metadata",
+                    ));
+                }
+            } else {
+                yielded_operations.insert(yielded_by.operation_id.as_str(), yielded_by);
+            }
+            if edge_operations
+                .get(yielded_by.operation_id.as_str())
+                .is_some_and(|edge| !edge.same_shared_operation_metadata(yielded_by))
+            {
+                return Err(corrupt(
+                    "commit lineage mappings and yields for one operation disagree on metadata",
+                ));
+            }
         }
         if self
             .yielded_by
@@ -432,11 +554,9 @@ impl CommitLineage {
             ));
         }
 
-        let actual_returned_events = self
-            .edges
-            .len()
-            .checked_add(self.yielded_by.len())
-            .ok_or_else(|| bounds("commit lineage returned-event count overflowed"))?;
+        self.validate_operation_connectivity(&operation_ids)?;
+
+        let actual_returned_events = operation_ids.len();
         self.bounds
             .validate(actual_returned_events, self.complete)?;
 
@@ -463,29 +583,139 @@ impl CommitLineage {
         }
         if let Some(origin) = &self.origin {
             origin.validate()?;
-            if !self.contains_commit(origin) {
+            if !origin.shares_object_domain(&self.requested) {
                 return Err(corrupt(
-                    "commit lineage origin is not present in the retained lineage",
+                    "commit lineage origin crosses the requested repository object domain",
+                ));
+            }
+            let roots = self.indegree_zero_commits();
+            if roots.len() != 1 || !roots[0].same_identity(origin) {
+                return Err(corrupt(
+                    "commit lineage origin is not the unique indegree-zero root",
+                ));
+            }
+            if !self.directed_reachable(origin, &self.requested) {
+                return Err(corrupt(
+                    "commit lineage origin is not a directed ancestor of the requested commit",
                 ));
             }
         }
         if let Some(endpoint) = &self.endpoint {
             endpoint.validate(available, referenced)?;
-            if !self.contains_commit(endpoint.commit()) {
+            if !endpoint.commit().shares_object_domain(&self.requested) {
                 return Err(corrupt(
-                    "scoped commit endpoint is not present in the retained lineage",
+                    "scoped commit endpoint crosses the requested repository object domain",
+                ));
+            }
+            if !self.directed_reachable(&self.requested, endpoint.commit()) {
+                return Err(corrupt(
+                    "scoped commit endpoint is not the requested commit or a directed descendant",
                 ));
             }
         }
         Ok(())
     }
 
-    fn contains_commit(&self, commit: &ExactCommitRef) -> bool {
-        self.requested.same_identity(commit)
-            || self
-                .edges
+    fn validate_operation_connectivity(
+        &self,
+        operation_ids: &BTreeSet<&str>,
+    ) -> Result<(), ProtocolError> {
+        let mut connected_commits = vec![&self.requested];
+        let mut connected_operations: BTreeSet<&str> = self
+            .yielded_by
+            .iter()
+            .map(|yielded_by| yielded_by.operation_id.as_str())
+            .collect();
+
+        loop {
+            let mut changed = false;
+            for edge in &self.edges {
+                if connected_operations.contains(edge.operation_id.as_str())
+                    || !connected_commits.iter().any(|commit| {
+                        commit.same_identity(&edge.source) || commit.same_identity(&edge.result)
+                    })
+                {
+                    continue;
+                }
+                connected_operations.insert(edge.operation_id.as_str());
+                for mapping in self
+                    .edges
+                    .iter()
+                    .filter(|mapping| mapping.operation_id == edge.operation_id)
+                {
+                    for commit in [&mapping.source, &mapping.result] {
+                        if !connected_commits
+                            .iter()
+                            .any(|connected| connected.same_identity(commit))
+                        {
+                            connected_commits.push(commit);
+                        }
+                    }
+                }
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        if connected_operations.len() != operation_ids.len()
+            || operation_ids
                 .iter()
-                .any(|edge| edge.source.same_identity(commit) || edge.result.same_identity(commit))
+                .any(|operation_id| !connected_operations.contains(operation_id))
+        {
+            return Err(corrupt(
+                "commit lineage contains an operation disconnected from the requested commit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn indegree_zero_commits(&self) -> Vec<&ExactCommitRef> {
+        let mut commits = vec![&self.requested];
+        for edge in &self.edges {
+            for commit in [&edge.source, &edge.result] {
+                if !commits
+                    .iter()
+                    .any(|candidate| candidate.same_identity(commit))
+                {
+                    commits.push(commit);
+                }
+            }
+        }
+        commits
+            .into_iter()
+            .filter(|commit| {
+                !self
+                    .edges
+                    .iter()
+                    .any(|edge| edge.result.same_identity(commit))
+            })
+            .collect()
+    }
+
+    fn directed_reachable(&self, start: &ExactCommitRef, target: &ExactCommitRef) -> bool {
+        let mut reachable = vec![start];
+        loop {
+            if reachable.iter().any(|commit| commit.same_identity(target)) {
+                return true;
+            }
+            let prior_len = reachable.len();
+            for edge in &self.edges {
+                if reachable
+                    .iter()
+                    .any(|commit| commit.same_identity(&edge.source))
+                    && !reachable
+                        .iter()
+                        .any(|commit| commit.same_identity(&edge.result))
+                {
+                    reachable.push(&edge.result);
+                }
+            }
+            if reachable.len() == prior_len {
+                return false;
+            }
+        }
     }
 }
 
@@ -509,6 +739,41 @@ fn validate_text(value: &str, name: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+fn validate_logical_repository_id(value: &str) -> Result<(), ProtocolError> {
+    validate_text(value, "logical repository ID")?;
+    if canonical_logical_repository_id(value).as_ref() != value {
+        return Err(corrupt("logical repository ID is not canonical"));
+    }
+    Ok(())
+}
+
+fn validate_operation_id(value: &str) -> Result<(), ProtocolError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(corrupt(
+            "commit lineage operation ID is not a canonical lowercase SHA-256 digest",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_causal_proof(
+    state: CommitLineageState,
+    proof_class: CommitLineageProofClass,
+) -> Result<(), ProtocolError> {
+    if state == CommitLineageState::Asserted
+        && proof_class != CommitLineageProofClass::RepositoryVerified
+    {
+        return Err(corrupt(
+            "asserted commit operation yields require repository-verified proof",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_observed_at(value: Option<i64>) -> Result<(), ProtocolError> {
     if value.is_some_and(|value| value < 0) {
         return Err(corrupt(
@@ -527,261 +792,5 @@ fn corrupt(message: impl Into<String>) -> ProtocolError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn commit(id: &str, digit: char) -> ExactCommitRef {
-        let oid = digit.to_string().repeat(40);
-        ExactCommitRef {
-            resource: ResourceRef {
-                id: format!("commit:{id}"),
-                kind: ResourceKind::Commit,
-                display: oid.clone(),
-            },
-            object_format: GitObjectFormat::Sha1,
-            oid,
-        }
-    }
-
-    fn session(id: &str) -> ResourceRef {
-        ResourceRef {
-            id: format!("session:{id}"),
-            kind: ResourceKind::Session,
-            display: id.to_owned(),
-        }
-    }
-
-    fn edge(
-        operation_id: &str,
-        kind: CommitLineageOperationKind,
-        source: ExactCommitRef,
-        result: ExactCommitRef,
-    ) -> CommitLineageEdge {
-        CommitLineageEdge {
-            operation_id: operation_id.to_owned(),
-            kind,
-            relation_class: if kind == CommitLineageOperationKind::CherryPick {
-                CommitLineageRelationClass::Derivation
-            } else {
-                CommitLineageRelationClass::Replacement
-            },
-            source,
-            result,
-            actor: session("operator"),
-            proof_class: CommitLineageProofClass::RepositoryVerified,
-            state: CommitLineageState::Asserted,
-            observed_at_ms: Some(1_700_000_000_000),
-            evidence_numbers: vec![1],
-        }
-    }
-
-    fn complete_lineage() -> CommitLineage {
-        let source = commit("source", '1');
-        let requested = commit("requested", '2');
-        CommitLineage {
-            requested: requested.clone(),
-            edges: vec![edge(
-                "operation:rebase",
-                CommitLineageOperationKind::Rebase,
-                source.clone(),
-                requested.clone(),
-            )],
-            yielded_by: Vec::new(),
-            origin: Some(source),
-            endpoint: Some(ScopedCommitEndpoint::CurrentAtRef {
-                commit: requested,
-                scope: ResourceRef {
-                    id: "branch:main".to_owned(),
-                    kind: ResourceKind::Branch,
-                    display: "main".to_owned(),
-                },
-                observation_id: "observation:main".to_owned(),
-                observed_at_ms: 1_700_000_000_000,
-                evidence_numbers: vec![1],
-            }),
-            complete: true,
-            ambiguous: false,
-            bounds: CommitLineageBounds {
-                returned_events: 1,
-                returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
-                examined_events: 1,
-                examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
-                omission: CommitLineageOmission::Exact(0),
-                truncation_reason: None,
-            },
-        }
-    }
-
-    fn validate(lineage: &CommitLineage) -> Result<BTreeSet<u32>, ProtocolError> {
-        let available = BTreeSet::from([1]);
-        let mut referenced = BTreeSet::new();
-        lineage.validate(&lineage.requested.resource, &available, &mut referenced)?;
-        Ok(referenced)
-    }
-
-    #[test]
-    fn complete_exact_lineage_preserves_requested_object_and_all_references() {
-        let lineage = complete_lineage();
-        assert_eq!(validate(&lineage).unwrap(), BTreeSet::from([1]));
-        let encoded = serde_json::to_value(&lineage).unwrap();
-        assert_eq!(encoded["requested"]["oid"], "2".repeat(40));
-        assert_eq!(encoded["edges"][0]["kind"], "rebase");
-        assert_eq!(encoded["endpoint"]["kind"], "current_at_ref");
-        assert!(encoded.get("current").is_none());
-    }
-
-    #[test]
-    fn amend_and_cherry_pick_have_closed_distinct_relation_classes() {
-        let source = commit("source", '1');
-        let result = commit("result", '2');
-        for (kind, expected) in [
-            (
-                CommitLineageOperationKind::Amend,
-                CommitLineageRelationClass::Replacement,
-            ),
-            (
-                CommitLineageOperationKind::Rebase,
-                CommitLineageRelationClass::Replacement,
-            ),
-            (
-                CommitLineageOperationKind::CherryPick,
-                CommitLineageRelationClass::Derivation,
-            ),
-        ] {
-            let mut value = edge("operation:test", kind, source.clone(), result.clone());
-            value.relation_class = expected;
-            let available = BTreeSet::from([1]);
-            value.validate(&available, &mut BTreeSet::new()).unwrap();
-            value.relation_class = if expected == CommitLineageRelationClass::Replacement {
-                CommitLineageRelationClass::Derivation
-            } else {
-                CommitLineageRelationClass::Replacement
-            };
-            assert!(value.validate(&available, &mut BTreeSet::new()).is_err());
-        }
-    }
-
-    #[test]
-    fn exact_commit_rejects_abbreviated_mismatched_and_uppercase_oids() {
-        let mut value = commit("commit", 'a');
-        value.oid.pop();
-        assert!(value.validate().is_err());
-
-        let mut value = commit("commit", 'a');
-        value.oid = "A".repeat(40);
-        value.resource.display = value.oid.clone();
-        assert!(value.validate().is_err());
-
-        let mut value = commit("commit", 'a');
-        value.object_format = GitObjectFormat::Sha256;
-        assert!(value.validate().is_err());
-    }
-
-    #[test]
-    fn partial_or_ambiguous_lineage_suppresses_origin_and_endpoint() {
-        let mut partial = complete_lineage();
-        partial.complete = false;
-        partial.bounds.returned_events = MAX_COMMIT_LINEAGE_RETURNED_EVENTS;
-        partial.bounds.examined_events = MAX_COMMIT_LINEAGE_RETURNED_EVENTS;
-        partial.bounds.omission = CommitLineageOmission::AtLeast(1);
-        partial.bounds.truncation_reason = Some(CommitLineageTruncationReason::ReturnedEventLimit);
-        assert!(validate(&partial).is_err());
-        partial.origin = None;
-        partial.endpoint = None;
-        assert!(
-            validate(&partial).is_err(),
-            "actual retained count still disagrees"
-        );
-
-        partial.bounds.returned_events = 1;
-        partial.bounds.returned_event_limit = 1;
-        assert!(
-            validate(&partial).is_err(),
-            "published limit is not deterministic"
-        );
-
-        let mut ambiguous = complete_lineage();
-        ambiguous.ambiguous = true;
-        assert!(validate(&ambiguous).is_err());
-        ambiguous.origin = None;
-        ambiguous.endpoint = None;
-        validate(&ambiguous).unwrap();
-    }
-
-    #[test]
-    fn incomplete_bounds_require_nonzero_or_unknown_omission_and_reached_limit() {
-        let mut lineage = complete_lineage();
-        lineage.origin = None;
-        lineage.endpoint = None;
-        lineage.complete = false;
-        lineage.bounds.omission = CommitLineageOmission::Unknown;
-        lineage.bounds.truncation_reason = Some(CommitLineageTruncationReason::ExaminedEventLimit);
-        assert!(validate(&lineage).is_err());
-        lineage.bounds.examined_events = MAX_COMMIT_LINEAGE_EXAMINED_EVENTS;
-        validate(&lineage).unwrap();
-
-        lineage.bounds.omission = CommitLineageOmission::AtLeast(0);
-        assert!(validate(&lineage).is_err());
-        lineage.bounds.omission = CommitLineageOmission::Exact(0);
-        assert!(validate(&lineage).is_err());
-    }
-
-    #[test]
-    fn incoming_operation_and_standalone_yield_cannot_duplicate_the_actor() {
-        let mut lineage = complete_lineage();
-        lineage.origin = None;
-        lineage.endpoint = None;
-        lineage.yielded_by.push(CommitLineageYield {
-            yield_id: "yield:duplicate".to_owned(),
-            actor: session("operator"),
-            proof_class: CommitLineageProofClass::RecordExact,
-            state: CommitLineageState::Asserted,
-            observed_at_ms: None,
-            evidence_numbers: vec![1],
-        });
-        lineage.bounds.returned_events = 2;
-        assert!(validate(&lineage).is_err());
-    }
-
-    #[test]
-    fn edge_and_yield_order_is_deterministic_and_strict() {
-        let mut lineage = complete_lineage();
-        lineage.origin = None;
-        lineage.endpoint = None;
-        let source = commit("earlier", '0');
-        lineage.edges.push(edge(
-            "operation:amend",
-            CommitLineageOperationKind::Amend,
-            source,
-            lineage.edges[0].source.clone(),
-        ));
-        lineage.bounds.returned_events = 2;
-        lineage.bounds.examined_events = 2;
-        assert!(validate(&lineage).is_err());
-        lineage.edges.sort_by(CommitLineageEdge::stable_cmp);
-        validate(&lineage).unwrap();
-        lineage.edges.push(lineage.edges[0].clone());
-        lineage.bounds.returned_events = 3;
-        lineage.bounds.examined_events = 3;
-        assert!(validate(&lineage).is_err());
-    }
-
-    #[test]
-    fn endpoint_requires_exact_scope_observation_time_and_citation() {
-        let mut lineage = complete_lineage();
-        if let Some(ScopedCommitEndpoint::CurrentAtRef { scope, .. }) = lineage.endpoint.as_mut() {
-            scope.kind = ResourceKind::Repository;
-        }
-        assert!(validate(&lineage).is_err());
-        if let Some(ScopedCommitEndpoint::CurrentAtRef {
-            scope,
-            observed_at_ms,
-            ..
-        }) = lineage.endpoint.as_mut()
-        {
-            scope.kind = ResourceKind::Branch;
-            *observed_at_ms = -1;
-        }
-        assert!(validate(&lineage).is_err());
-    }
-}
+#[path = "query_lineage/tests.rs"]
+mod tests;

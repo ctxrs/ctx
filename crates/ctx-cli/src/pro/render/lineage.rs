@@ -104,7 +104,7 @@ fn render_edge(document: &mut Document, context: &RenderContext, edge: &CommitLi
         4,
         "outcome",
         METADATA_LABEL_WIDTH,
-        "operation yielded this commit",
+        yield_outcome(edge.state),
         state_token(edge.state),
         false,
     );
@@ -160,7 +160,7 @@ fn render_yield(document: &mut Document, context: &RenderContext, yielded_by: &C
         4,
         "outcome",
         METADATA_LABEL_WIDTH,
-        "operation yielded this commit",
+        yield_outcome(yielded_by.state),
         state_token(yielded_by.state),
         false,
     );
@@ -188,6 +188,16 @@ fn render_yield(document: &mut Document, context: &RenderContext, yielded_by: &C
             true,
         );
     }
+    push_field(
+        document,
+        context,
+        4,
+        "operation id",
+        METADATA_LABEL_WIDTH,
+        &yielded_by.operation_id,
+        Token::Text,
+        true,
+    );
     push_field(
         document,
         context,
@@ -330,6 +340,14 @@ const fn state_token(state: CommitLineageState) -> Token {
         CommitLineageState::Asserted => Token::Success,
         CommitLineageState::Ambiguous => Token::Warning,
         CommitLineageState::Contradicted => Token::Error,
+    }
+}
+
+const fn yield_outcome(state: CommitLineageState) -> &'static str {
+    match state {
+        CommitLineageState::Asserted => "operation yielded this commit",
+        CommitLineageState::Ambiguous => "operation yield is ambiguous",
+        CommitLineageState::Contradicted => "operation yield is contradicted",
     }
 }
 

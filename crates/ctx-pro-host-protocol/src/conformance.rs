@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "bc71a6638f1bc5729c534518e1731f8f9fef8678db08eea91db1ccf9cee1043b",
+            "fingerprint": "4ceed9bd755b30e7eb4636a69e9167e944034155472c54256240f8a72e114f07",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -318,12 +318,12 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
                 "identity": "ctx-core-record-event-binding-v1\0",
                 "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))"
             },
-            "repository_contract_revision": 8,
-            "repository_observation_revision": 4,
-            "bounded_shell_subset_revision": 3,
+            "repository_contract_revision": 9,
+            "repository_observation_revision": 5,
+            "bounded_shell_subset_revision": 4,
             "repository_association_policy_revision": 6,
             "repository_pull_request_association_capture_revision": 3,
-            "repository_outcome_capture_revision": 4,
+            "repository_outcome_capture_revision": 5,
             "repository_local_root_authorization_fingerprint_revision": 1,
             "mcp_tool_call_attribution_revision": 1,
             "session_lineage_revision": 1,
@@ -342,9 +342,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         value["golden_vectors"]["core_record_digests"],
         serde_json::json!({
             "core_record_sha256":
-                "7ba6703a4a876ff5b6ecf102f8e3c9ba6438ba1e83a10416dc521a3ec9608ae5",
+                "a03593841e89f0fee75b9e2936e602aef50aec201980ecd1be18dc3c0f19d0c2",
             "core_record_leaf_sha256":
-                "606262f83a28464425eea0e75d4284a760c687e07d5ff4202c320f15c4151d4c"
+                "49fbae1890c2ca9b3d94b8a7081aa122ed5c0fedca5aed92cec662df7b8819de"
         })
     );
 
@@ -356,9 +356,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     let envelope: Value = serde_json::from_slice(&frame[FRAME_HEADER_BYTES..]).unwrap();
     let evidence =
         &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
-    assert_eq!(evidence["repository_observation_revision"], 4);
+    assert_eq!(evidence["repository_observation_revision"], 5);
     assert_eq!(evidence["association_policy_revision"], 6);
-    assert_eq!(evidence["outcome_capture_revision"], 4);
+    assert_eq!(evidence["outcome_capture_revision"], 5);
     assert_eq!(
         evidence["candidates"],
         serde_json::json!([
@@ -553,9 +553,19 @@ fn inventory_freezes_blame_outcome_diagnostics_and_commit_lineage() {
             "omission_kinds": ["exact", "at_least", "unknown"],
             "endpoint_kinds": ["current_at_ref", "current_for_pr"],
             "stable_edge_order": [
-                "operation_kind", "source_object_format", "source_oid",
-                "result_object_format", "result_oid", "operation_id"
+                "operation_id", "operation_kind", "logical_repository_id",
+                "source_object_format", "source_oid", "result_object_format", "result_oid"
             ],
+            "stable_yield_order": ["operation_id", "yield_id", "actor_id"],
+            "commit_identity":
+                "canonical_logical_repository_id_plus_object_format_plus_full_oid",
+            "operation_id": "canonical_lowercase_sha256_digest",
+            "operation_grouping":
+                "edges_and_yields_share_operation_id_and_consistent_metadata",
+            "returned_event_count": "distinct_operation_ids_across_edges_and_yields",
+            "asserted_yield_proof": "repository_verified",
+            "connectivity":
+                "all_operations_connect_to_requested_and_claimed_origins_and_endpoints_follow_directed_reachability",
             "match_pagination": "independent"
         })
     );

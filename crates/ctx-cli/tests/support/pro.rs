@@ -801,13 +801,14 @@ if kind == 'commit':
         source_oid = 'f' * len(full_oid)
         exact_requested = {
           'resource':commit,
+          'logical_repository_id':repository,
           'object_format':object_format,
           'oid':full_oid
         }
         lineage = {
           'requested':exact_requested,
           'edges':[{
-            'operation_id':'operation:fixture-rebase',
+            'operation_id':'e' * 64,
             'kind':'rebase',
             'relation_class':'replacement',
             'source':{
@@ -816,6 +817,7 @@ if kind == 'commit':
                 'kind':'commit',
                 'display':source_oid
               },
+              'logical_repository_id':repository,
               'object_format':object_format,
               'oid':source_oid
             },
@@ -837,6 +839,7 @@ if kind == 'commit':
               'kind':'commit',
               'display':source_oid
             },
+            'logical_repository_id':repository,
             'object_format':object_format,
             'oid':source_oid
           },

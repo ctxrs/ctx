@@ -5,12 +5,12 @@ Lineage · partial · ambiguous
   Rebase · replacement
     source        commit 1111111111111111111111111111111111111111 (sha1)
     result        commit 3333333333333333333333333333333333333333 (sha1)
-    outcome       operation yielded this commit
+    outcome       operation yield is ambiguous
     actor         session rebaser
     proof         repository verified
     state         ambiguous
     observed      2024-07-14T23:33:20.000Z
-    operation id  operation:rebase-1
+    operation id  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     evidence      [1]
 
   ! More proven lineage may be omitted: at least 2 events.

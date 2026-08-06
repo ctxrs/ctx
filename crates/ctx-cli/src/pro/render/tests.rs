@@ -438,6 +438,7 @@ fn exact_commit(digit: char) -> ExactCommitRef {
     let oid = digit.to_string().repeat(40);
     ExactCommitRef {
         resource: resource(&format!("commit:{oid}"), ResourceKind::Commit, &oid),
+        logical_repository_id: "ctxrs/ctx".to_owned(),
         object_format: GitObjectFormat::Sha1,
         oid,
     }
@@ -449,7 +450,7 @@ fn lineage_edge(
     state: CommitLineageState,
 ) -> CommitLineageEdge {
     CommitLineageEdge {
-        operation_id: "operation:rebase-1".to_owned(),
+        operation_id: "a".repeat(64),
         kind: CommitLineageOperationKind::Rebase,
         relation_class: CommitLineageRelationClass::Replacement,
         source,
@@ -636,9 +637,28 @@ fn commit_lineage_complete_human_output_is_exact_and_deduplicates_yield_actor() 
 fn commit_lineage_partial_human_output_is_exact_and_abstains() {
     let result = partial_lineage_result(CommitLineageOmission::AtLeast(2));
     result.validate().unwrap();
+    let rendered = render_plain(&result, 80);
     assert_eq!(
-        render_plain(&result, 80),
+        rendered,
         include_str!("../../../testdata/pro/blame_commit_lineage_partial.golden.txt")
+    );
+    assert!(!rendered.contains("operation yielded"), "{rendered}");
+    assert!(
+        rendered.contains("operation yield is ambiguous"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn contradicted_lineage_never_affirms_an_operation_yield() {
+    let mut result = partial_lineage_result(CommitLineageOmission::AtLeast(1));
+    result.lineage.as_mut().unwrap().edges[0].state = CommitLineageState::Contradicted;
+    result.validate().unwrap();
+    let rendered = render_plain(&result, 80);
+    assert!(!rendered.contains("operation yielded"), "{rendered}");
+    assert!(
+        rendered.contains("operation yield is contradicted"),
+        "{rendered}"
     );
 }
 
@@ -708,8 +728,10 @@ fn standalone_yield_is_rendered_only_as_a_yield_record() {
     lineage.edges.clear();
     lineage.yielded_by = vec![CommitLineageYield {
         yield_id: "yield:requested".to_owned(),
+        operation_id: "b".repeat(64),
+        logical_repository_id: lineage.requested.logical_repository_id.clone(),
         actor: resource("session:rebaser", ResourceKind::Session, "rebaser"),
-        proof_class: CommitLineageProofClass::RecordExact,
+        proof_class: CommitLineageProofClass::RepositoryVerified,
         state: CommitLineageState::Asserted,
         observed_at_ms: Some(1_721_000_000_000),
         evidence_numbers: vec![1],
@@ -721,6 +743,42 @@ fn standalone_yield_is_rendered_only_as_a_yield_record() {
     assert!(rendered.contains("Yield record"), "{rendered}");
     assert!(!rendered.contains("Rebase · replacement"), "{rendered}");
     assert_eq!(rendered.matches("session rebaser").count(), 1, "{rendered}");
+}
+
+#[test]
+fn non_asserted_standalone_yields_never_use_affirmative_wording() {
+    for (state, expected) in [
+        (
+            CommitLineageState::Ambiguous,
+            "operation yield is ambiguous",
+        ),
+        (
+            CommitLineageState::Contradicted,
+            "operation yield is contradicted",
+        ),
+    ] {
+        let mut result = complete_lineage_result();
+        let lineage = result.lineage.as_mut().unwrap();
+        lineage.edges.clear();
+        lineage.yielded_by = vec![CommitLineageYield {
+            yield_id: "yield:requested".to_owned(),
+            operation_id: "b".repeat(64),
+            logical_repository_id: lineage.requested.logical_repository_id.clone(),
+            actor: resource("session:rebaser", ResourceKind::Session, "rebaser"),
+            proof_class: CommitLineageProofClass::RepositoryVerified,
+            state,
+            observed_at_ms: Some(1_721_000_000_000),
+            evidence_numbers: vec![1],
+        }];
+        lineage.origin = None;
+        lineage.endpoint = None;
+        lineage.ambiguous = true;
+        lineage.bounds.examined_events = 1;
+        result.validate().unwrap();
+        let rendered = render_plain(&result, 80);
+        assert!(!rendered.contains("operation yielded"), "{rendered}");
+        assert!(rendered.contains(expected), "{rendered}");
+    }
 }
 
 #[test]

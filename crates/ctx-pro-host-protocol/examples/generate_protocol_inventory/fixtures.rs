@@ -270,6 +270,7 @@ pub(super) fn blame_result() -> BlameResult {
             kind: ResourceKind::Commit,
             display: "3333333333333333333333333333333333333333".to_owned(),
         },
+        logical_repository_id: "ctxrs/ctx".to_owned(),
         object_format: GitObjectFormat::Sha1,
         oid: "3333333333333333333333333333333333333333".to_owned(),
     };
@@ -279,6 +280,7 @@ pub(super) fn blame_result() -> BlameResult {
             kind: ResourceKind::Commit,
             display: "1111111111111111111111111111111111111111".to_owned(),
         },
+        logical_repository_id: "ctxrs/ctx".to_owned(),
         object_format: GitObjectFormat::Sha1,
         oid: "1111111111111111111111111111111111111111".to_owned(),
     };
@@ -327,7 +329,7 @@ pub(super) fn blame_result() -> BlameResult {
         lineage: Some(CommitLineage {
             requested: requested.clone(),
             edges: vec![CommitLineageEdge {
-                operation_id: "operation:golden-rebase".to_owned(),
+                operation_id: "d".repeat(64),
                 kind: CommitLineageOperationKind::Rebase,
                 relation_class: CommitLineageRelationClass::Replacement,
                 source: source.clone(),

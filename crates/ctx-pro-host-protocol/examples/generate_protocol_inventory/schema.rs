@@ -95,9 +95,16 @@ pub(super) fn inventory() -> Value {
             "omission_kinds": ["exact", "at_least", "unknown"],
             "endpoint_kinds": ["current_at_ref", "current_for_pr"],
             "stable_edge_order": [
-                "operation_kind", "source_object_format", "source_oid",
-                "result_object_format", "result_oid", "operation_id"
+                "operation_id", "operation_kind", "logical_repository_id",
+                "source_object_format", "source_oid", "result_object_format", "result_oid"
             ],
+            "stable_yield_order": ["operation_id", "yield_id", "actor_id"],
+            "commit_identity": "canonical_logical_repository_id_plus_object_format_plus_full_oid",
+            "operation_id": "canonical_lowercase_sha256_digest",
+            "operation_grouping": "edges_and_yields_share_operation_id_and_consistent_metadata",
+            "returned_event_count": "distinct_operation_ids_across_edges_and_yields",
+            "asserted_yield_proof": "repository_verified",
+            "connectivity": "all_operations_connect_to_requested_and_claimed_origins_and_endpoints_follow_directed_reachability",
             "match_pagination": "independent"
         },
         "host_message_kinds": [
@@ -266,8 +273,9 @@ pub(super) fn inventory() -> Value {
             "BlameResult": fields(&[
                 "snapshot", "target", "git_snapshot", "outcome", "matches", "evidence", "next",
                 "lineage"
-             ], &[]),
-            "ExactCommitRef": fields(&["resource", "object_format", "oid"], &[]),
+            ], &[]),
+            "ExactCommitRef": fields(
+                &["resource", "logical_repository_id", "object_format", "oid"], &[]),
             "CommitLineage": fields(&[
                 "requested", "edges", "yielded_by", "origin", "endpoint", "complete",
                 "ambiguous", "bounds"
@@ -277,8 +285,8 @@ pub(super) fn inventory() -> Value {
                 "proof_class", "state", "observed_at_ms", "evidence_numbers"
             ], &[]),
             "CommitLineageYield": fields(&[
-                "yield_id", "actor", "proof_class", "state", "observed_at_ms",
-                "evidence_numbers"
+                "yield_id", "operation_id", "logical_repository_id", "actor", "proof_class",
+                "state", "observed_at_ms", "evidence_numbers"
             ], &[]),
             "CommitLineageBounds": fields(&[
                 "returned_events", "returned_event_limit", "examined_events",
