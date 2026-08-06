@@ -44,8 +44,9 @@ pub(crate) use verification::{
 #[cfg(test)]
 pub(crate) use verification::{
     candidate_identity_verification_activity, candidate_lineage_verification_activity,
-    hashed_artifact_bytes, physical_integrity_digest, reset_verification_activity,
-    verification_activity, verify_complete_searcher, verify_searcher_with_metrics,
+    candidate_projection_verification_activity, hashed_artifact_bytes, physical_integrity_digest,
+    reset_verification_activity, verification_activity, verify_complete_searcher,
+    verify_searcher_with_metrics,
 };
 
 #[cfg(test)]

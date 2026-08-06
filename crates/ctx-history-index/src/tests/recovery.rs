@@ -509,6 +509,7 @@ fn query_projection_fixture_record(source: &SourceKey, body: &str) -> CoreRecord
 fn recommit_candidate_with_query_projection_mutation(
     candidate_path: &Path,
     mutation: QueryProjectionMutation,
+    target_event_id: Option<ctx_history_core::StableEntityId>,
 ) {
     let directory = DurableMmapDirectory::open(candidate_path).unwrap();
     let index = Index::open(directory).unwrap();
@@ -519,12 +520,28 @@ fn recommit_candidate_with_query_projection_mutation(
         .try_into()
         .unwrap();
     let searcher = reader.searcher();
-    let address = searcher
-        .search(&AllQuery, &DocSetCollector)
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
+    let address = if let Some(event_id) = target_event_id {
+        let event_id_field = required_field(&index.schema(), "event_id").unwrap();
+        searcher
+            .search(
+                &tantivy::query::TermQuery::new(
+                    Term::from_field_text(event_id_field, &event_id.to_string()),
+                    tantivy::schema::IndexRecordOption::Basic,
+                ),
+                &DocSetCollector,
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+    } else {
+        searcher
+            .search(&AllQuery, &DocSetCollector)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+    };
     let core = decoded_stored_core(&searcher, address);
     let event_id = core.event_id;
     let complete = indexed_document(core);
@@ -632,7 +649,7 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
             .certify_source(certificate(&source, 2, 1))
             .unwrap();
         candidate.before_pointer_switch = Some(Box::new(move |candidate_path| {
-            recommit_candidate_with_query_projection_mutation(candidate_path, mutation);
+            recommit_candidate_with_query_projection_mutation(candidate_path, mutation, None);
         }));
 
         assert!(matches!(
@@ -649,6 +666,126 @@ fn candidate_publication_rejects_every_query_authoritative_projection_mutation()
         assert_eq!(retained.count_term("prior").unwrap(), 1, "{name}");
         assert_eq!(retained.count_term("candidate").unwrap(), 0, "{name}");
     }
+}
+
+fn assert_malicious_incremental_copy_is_rejected(
+    mutation: QueryProjectionMutation,
+    expected_error_field: &'static str,
+) {
+    let temp = tempdir().unwrap();
+    let source = source("malicious-incremental-copy.jsonl");
+    let original = document_for_session(&source, "original-session", 1, "shared copied body");
+    let mut copied = document_for_session(&source, "copied-session", 2, "shared copied body");
+    copied
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(original.session_id),
+            original.session_id,
+        )
+        .unwrap();
+    copied.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
+        proof: EventCopyProofKind::NativeCopiedFromField,
+    };
+    copied.validate_contract().unwrap();
+    let copied_event_id = copied.event_id;
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial.add_core_record(original).unwrap();
+    initial
+        .certify_source(appendable_certificate(&source, 1, 1, 10))
+        .unwrap();
+    let baseline = initial.commit(|_| true).unwrap();
+    let pointer_before = fs::read(temp.path().join("active-generation.json")).unwrap();
+    let (base_searcher, _) = open_unverified_generation(temp.path());
+
+    let mut candidate = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let base = candidate
+        .begin_source_append(source.clone())
+        .unwrap()
+        .clone();
+    candidate.add_core_record(copied).unwrap();
+    candidate
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&source, 2, 2, 20),
+                10,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let direct_result = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let result_for_hook = std::sync::Arc::clone(&direct_result);
+    let root = temp.path().to_path_buf();
+    candidate.before_pointer_switch = Some(Box::new(move |candidate_path| {
+        recommit_candidate_with_query_projection_mutation(
+            candidate_path,
+            mutation,
+            Some(copied_event_id),
+        );
+        let directory = DurableMmapDirectory::open(candidate_path).unwrap();
+        let index = Index::open(directory).unwrap();
+        let metas = index.load_metas().unwrap();
+        let manifest = load_publication_for_metas(&root, &metas).unwrap().manifest;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()
+            .unwrap();
+        *result_for_hook.lock().unwrap() = Some(crate::publication::verify_publication_candidate(
+            &reader.searcher(),
+            &manifest,
+            Some(&base_searcher),
+        ));
+    }));
+
+    assert!(matches!(
+        candidate.commit(|_| true),
+        Err(IndexError::ConcurrentGenerationChange)
+    ));
+    assert!(matches!(
+        direct_result.lock().unwrap().take().unwrap(),
+        Err(IndexError::InvalidStoredDocumentField(field)) if field == expected_error_field
+    ));
+    assert_eq!(
+        fs::read(temp.path().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), baseline.generation_id);
+    assert_eq!(retained.count_term("shared").unwrap(), 1);
+    assert!(retained
+        .event_by_id(copied_event_id.as_uuid())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn incremental_candidate_rejects_copied_lineage_projection_mismatches() {
+    for mutation in [
+        QueryProjectionMutation::Text("event_origin_kind", "unique_to_session"),
+        QueryProjectionMutation::Text("origin_event_identity_digest", "00"),
+    ] {
+        assert_malicious_incremental_copy_is_rejected(mutation, "query_projection");
+    }
+}
+
+#[test]
+fn incremental_candidate_rejects_injected_copied_body_posting() {
+    assert_malicious_incremental_copy_is_rejected(
+        QueryProjectionMutation::Text("body_search", "injectedcopybodyposting"),
+        "body_search",
+    );
 }
 
 #[test]

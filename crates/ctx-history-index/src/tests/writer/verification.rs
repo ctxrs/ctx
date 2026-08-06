@@ -131,6 +131,10 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit_for
     noop.commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
         .unwrap();
     assert_eq!(crate::publication::verification_activity(), (0, 0));
+    assert_eq!(
+        crate::publication::candidate_projection_verification_activity(),
+        0
+    );
     assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
     assert_eq!(constructions.load(Ordering::SeqCst), 0);
 
@@ -172,6 +176,11 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit_for
         .unwrap();
     append.commit(|_| true).unwrap();
     assert_eq!(crate::publication::verification_activity(), (1, 0));
+    assert_eq!(
+        crate::publication::candidate_projection_verification_activity(),
+        1,
+        "one tiny append must revalidate only its query-authoritative projection"
+    );
     assert_eq!(
         crate::publication::candidate_identity_verification_activity(),
         (2, 5),

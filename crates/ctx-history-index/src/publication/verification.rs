@@ -42,7 +42,8 @@ mod spill;
 
 use lineage::{verify_incremental_lineage, verify_lineage};
 use spill::{
-    IdentityDeltaSpill, ProjectionAccumulator, ProjectionDeltas, SpillVerificationIdentities,
+    reserve_verification_scratch, with_verification_scratch_budget, IdentityDeltaSpill,
+    ProjectionAccumulator, ProjectionDeltas, ScratchReservation, SpillVerificationIdentities,
     VerificationSpill, VERIFICATION_SPILL_BUFFER_BYTES, VERIFICATION_SPILL_RECORD_BYTES,
 };
 
@@ -122,6 +123,7 @@ thread_local! {
     static LOGICAL_PASSES: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_TERMS: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_DOCUMENTS: Cell<usize> = const { Cell::new(0) };
+    static CANDIDATE_PROJECTION_DOCUMENTS: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_LINEAGE_DECODES: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_LINEAGE_SPILLS: Cell<usize> = const { Cell::new(0) };
 }
@@ -458,6 +460,16 @@ pub(crate) fn verify_publication_candidate(
     manifest: &GenerationManifest,
     base_searcher: Option<&Searcher>,
 ) -> Result<()> {
+    with_verification_scratch_budget(|| {
+        verify_publication_candidate_with_budget(searcher, manifest, base_searcher)
+    })
+}
+
+fn verify_publication_candidate_with_budget(
+    searcher: &Searcher,
+    manifest: &GenerationManifest,
+    base_searcher: Option<&Searcher>,
+) -> Result<()> {
     let Some(base_searcher) = base_searcher else {
         return verify_searcher(searcher, manifest);
     };
@@ -532,6 +544,7 @@ fn verify_candidate_event_identities(
     let mut merged = TermMerger::new(streams);
     let mut changed_documents = 0_u64;
     let mut parent_sessions = 0_u64;
+    let mut projection_verifier = IncrementalProjectionVerifier::new(searcher, changed_segments)?;
     while merged.advance() {
         note_candidate_identity_term();
         let uuid = canonical_uuid_term(merged.key(), "event_id")?;
@@ -545,23 +558,25 @@ fn verify_candidate_event_identities(
                 note_candidate_identity_document();
                 let identities = if changed_segment_set.contains(&segment_ord) {
                     let record = query::stored_verification_record(searcher, address, fields)?;
+                    let identities = record.identities;
+                    projection_verifier.verify_document(searcher, fields, address, record)?;
                     changed_documents = changed_documents
                         .checked_add(1)
                         .ok_or(IndexError::CountOverflow)?;
                     parent_sessions = parent_sessions
-                        .checked_add(u64::from(record.identities.parent_session.is_some()))
+                        .checked_add(u64::from(identities.parent_session.is_some()))
                         .ok_or(IndexError::CountOverflow)?;
                     changed_identities.push(SpillVerificationIdentities {
-                        event: record.identities.event,
-                        session: record.identities.session,
-                        parent_session: record.identities.parent_session,
-                        root_session: record.identities.root_session,
-                        session_relationship: record.identities.session_relationship,
-                        event_origin: record.identities.event_origin,
+                        event: identities.event,
+                        session: identities.session,
+                        parent_session: identities.parent_session,
+                        root_session: identities.root_session,
+                        session_relationship: identities.session_relationship,
+                        event_origin: identities.event_origin,
                         session_source_ordinal: 0,
                     })?;
                     note_candidate_lineage_spill();
-                    record.identities
+                    identities
                 } else {
                     query::stored_verification_identities(searcher, address, fields)?
                 };
@@ -590,6 +605,7 @@ fn verify_candidate_event_identities(
     if changed_documents != expected_changed_documents {
         return Err(IndexError::InvalidStoredDocumentField("event_id"));
     }
+    projection_verifier.finish(searcher, fields, changed_segments)?;
     Ok(parent_sessions)
 }
 
@@ -728,6 +744,14 @@ fn note_candidate_identity_document() {
 fn note_candidate_identity_document() {}
 
 #[cfg(test)]
+fn note_candidate_projection_document() {
+    CANDIDATE_PROJECTION_DOCUMENTS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+fn note_candidate_projection_document() {}
+
+#[cfg(test)]
 pub(super) fn note_candidate_lineage_decode() {
     CANDIDATE_LINEAGE_DECODES.with(|count| count.set(count.get().saturating_add(1)));
 }
@@ -830,6 +854,7 @@ pub(crate) fn reset_verification_activity() {
     LOGICAL_PASSES.with(|count| count.set(0));
     CANDIDATE_IDENTITY_TERMS.with(|count| count.set(0));
     CANDIDATE_IDENTITY_DOCUMENTS.with(|count| count.set(0));
+    CANDIDATE_PROJECTION_DOCUMENTS.with(|count| count.set(0));
     CANDIDATE_LINEAGE_DECODES.with(|count| count.set(0));
     CANDIDATE_LINEAGE_SPILLS.with(|count| count.set(0));
 }
@@ -853,6 +878,11 @@ pub(crate) fn candidate_identity_verification_activity() -> (usize, usize) {
         CANDIDATE_IDENTITY_TERMS.with(Cell::get),
         CANDIDATE_IDENTITY_DOCUMENTS.with(Cell::get),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_projection_verification_activity() -> usize {
+    CANDIDATE_PROJECTION_DOCUMENTS.with(Cell::get)
 }
 
 #[cfg(test)]
