@@ -470,6 +470,7 @@ check_freebsd() {
     || fail "expected FreeBSD ELF ABI"
   assert_exact_lines "DT_NEEDED libraries" "$(elf_needed_libraries)" "libc.so.7
 libgcc_s.so.1
+liblzma.so.5
 libm.so.5
 libthr.so.3"
   check_no_elf_search_path
