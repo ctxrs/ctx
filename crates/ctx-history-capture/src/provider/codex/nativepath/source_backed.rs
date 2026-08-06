@@ -435,8 +435,8 @@ use identity::{
 #[cfg(test)]
 use ingestion::{ingest_codex_source_backed_inner_v0, ingest_codex_source_backed_v0};
 use ingestion::{
-    prepare_replayed_lineage_v0, scan_codex_jsonl_family_leaf_v0, CodexJsonlFamilyLeafContextV0,
-    CodexJsonlFamilyPublicationV0,
+    prepare_generation_lineage_v0, prepare_replayed_lineage_v0, scan_codex_jsonl_family_leaf_v0,
+    CodexJsonlFamilyLeafContextV0, CodexJsonlFamilyPublicationV0,
 };
 pub(crate) use jsonl_family::{
     codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,

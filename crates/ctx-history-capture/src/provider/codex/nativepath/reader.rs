@@ -269,6 +269,13 @@ impl CodexNativeScanner {
     ) -> Result<Self> {
         Self::new_with_lineage(source, proof, Some(lineage_facts))
     }
+
+    pub(crate) fn new_source_backed_without_lineage_v0(
+        source: CodexCatalogSource,
+        proof: Option<&CodexAppendProof>,
+    ) -> Result<Self> {
+        Self::new_with_lineage(source, proof, None)
+    }
 }
 
 struct ScannerPosition {

@@ -195,14 +195,19 @@ impl CodexGenerationNormalizationCoordinatorV0 {
                             ),
                         ));
                     }
+                } else {
+                    descriptors.insert(descriptor, (plan.1.clone(), plan.2.clone()));
+                }
+                let observation = (plan.0.source_path.clone(), plan.2.clone());
+                if owners.contains_key(&observation) {
                     // Overlapping automatic and explicit roots retain the
                     // first registered route's established source ownership.
+                    // A distinct path carrying the same native session ID is
+                    // not an overlap: both observations must reach lineage
+                    // normalization so the complete component is quarantined.
                     continue;
                 }
-                descriptors.insert(descriptor, (plan.1.clone(), plan.2.clone()));
-                owners
-                    .entry((plan.0.source_path.clone(), plan.2.clone()))
-                    .or_insert(participant);
+                owners.insert(observation, participant);
                 plans.push(plan);
             }
         }
@@ -217,6 +222,7 @@ impl CodexGenerationNormalizationCoordinatorV0 {
             .authority
             .bind_route_sources(&selected_native_session_ids)?;
         let authority = Arc::new(normalized.authority);
+        prepare_generation_lineage_v0(&normalized.sources, &authority)?;
         #[cfg(test)]
         let valid_sources = normalized.sources.len();
         #[cfg(test)]

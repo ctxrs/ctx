@@ -53,6 +53,7 @@ fn scan_codex_session_jsonl_leaf_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
+    collect_lineage_facts: bool,
     base_event_lookup: &BaseEventIdentityLookup,
     worker: &mut JsonlFamilyWorkerContext,
     emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
@@ -84,6 +85,7 @@ fn scan_codex_session_jsonl_leaf_v0(
         plan.1,
         plan.2,
         base,
+        collect_lineage_facts,
         &mut scan_context,
         |publication, records| {
             let publication = match publication {
@@ -119,7 +121,7 @@ fn prepare_codex_session_jsonl_scans_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaves: &[JsonlFamilyLeaf],
     bases: &HashMap<[u8; 32], &CertifiedSource>,
-    bind_route_sources: bool,
+    generation_prepared_lineage: bool,
 ) -> Result<Option<usize>> {
     let (plans, outcome_lineage) = {
         let state = state.lock().map_err(|_| codex_family_state_error())?;
@@ -139,11 +141,20 @@ fn prepare_codex_session_jsonl_scans_v0(
         .filter(|(source_key, _)| selected.contains(&source_key.exact_descriptor_digest()))
         .map(|(_, (_, _, native_session_id))| native_session_id.clone())
         .collect::<HashSet<_>>();
-    if bind_route_sources {
-        outcome_lineage
-            .bind_route_sources(&selected_native_session_ids)
-            .map_err(codex_family_capture_error)?;
+    if generation_prepared_lineage {
+        // Generation preparation already scanned and froze every selected
+        // ancestor fact set. Route-local exact replay must not attempt to
+        // register those facts a second time.
+        state
+            .lock()
+            .map_err(|_| codex_family_state_error())?
+            .replay_lineage
+            .clear();
+        return Ok(None);
     }
+    outcome_lineage
+        .bind_route_sources(&selected_native_session_ids)
+        .map_err(codex_family_capture_error)?;
     let mut replay_sources = Vec::new();
     let mut changed_ids = HashSet::new();
     for (source_key, (source, _, native_session_id)) in &plans {
@@ -629,7 +640,7 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
         leaves: &[JsonlFamilyLeaf],
         bases: &HashMap<[u8; 32], &CertifiedSource>,
     ) -> Result<Option<usize>> {
-        prepare_codex_session_jsonl_scans_v0(&self.state, leaves, bases, self.generation.is_none())
+        prepare_codex_session_jsonl_scans_v0(&self.state, leaves, bases, self.generation.is_some())
     }
 
     fn leaf_scan_phase(&self, leaf: &JsonlFamilyLeaf) -> Result<usize> {
@@ -687,6 +698,7 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
             &self.state,
             leaf,
             base,
+            self.generation.is_none(),
             base_event_lookup,
             worker,
             emit_page,
@@ -937,6 +949,7 @@ impl JsonlFamilyAdapter for CodexExplicitSessionJsonlFamilyAdapterV0 {
             &self.state,
             leaf,
             base,
+            self.generation.is_none(),
             base_event_lookup,
             worker,
             emit_page,

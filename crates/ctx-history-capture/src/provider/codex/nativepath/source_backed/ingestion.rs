@@ -33,6 +33,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
     source_key: SourceKey,
     native_session_id: String,
     base: Option<&CertifiedSource>,
+    collect_lineage_facts: bool,
     context: &mut CodexJsonlFamilyLeafContextV0<'_>,
     mut emit: impl FnMut(
         CodexJsonlFamilyPublicationV0,
@@ -85,11 +86,19 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         (Some(base), Some(proof))
             if source.catalog_observation.len > proof.checkpoint.observation.len =>
         {
-            match CodexNativeScanner::new_source_backed_with_lineage_v0(
-                source.clone(),
-                Some(proof),
-                context.outcome_lineage.new_fact_set(&native_session_id)?,
-            ) {
+            let scanner = if collect_lineage_facts {
+                CodexNativeScanner::new_source_backed_with_lineage_v0(
+                    source.clone(),
+                    Some(proof),
+                    context.outcome_lineage.new_fact_set(&native_session_id)?,
+                )
+            } else {
+                CodexNativeScanner::new_source_backed_without_lineage_v0(
+                    source.clone(),
+                    Some(proof),
+                )
+            };
+            match scanner {
                 Ok(scanner) => Some((base, scanner)),
                 Err(error) if invalid_append_proof(&error) => None,
                 Err(error) => return Err(map_lineage_capture_error(error)),
@@ -102,11 +111,15 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         None => (
             None,
             CodexJsonlFamilyPublicationV0::Replace,
-            CodexNativeScanner::new_source_backed_with_lineage_v0(
-                source.clone(),
-                None,
-                context.outcome_lineage.new_fact_set(&native_session_id)?,
-            )
+            if collect_lineage_facts {
+                CodexNativeScanner::new_source_backed_with_lineage_v0(
+                    source.clone(),
+                    None,
+                    context.outcome_lineage.new_fact_set(&native_session_id)?,
+                )
+            } else {
+                CodexNativeScanner::new_source_backed_without_lineage_v0(source.clone(), None)
+            }
             .map_err(map_lineage_capture_error)?,
         ),
     };
@@ -149,13 +162,13 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         }
     }
     let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
-    let lineage_facts = scan
-        .lineage_facts
-        .take()
-        .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-    context
-        .outcome_lineage
-        .register(&native_session_id, lineage_facts)?;
+    match scan.lineage_facts.take() {
+        Some(lineage_facts) if collect_lineage_facts => context
+            .outcome_lineage
+            .register(&native_session_id, lineage_facts)?,
+        None if !collect_lineage_facts => {}
+        Some(_) | None => return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable),
+    }
     let scan_counters = scan.counters;
     let certificate = match (append_base, scan.disposition) {
         (None, CodexParseDisposition::FullGeneration) => certify_scan(
@@ -709,6 +722,53 @@ pub(super) fn prepare_replayed_lineage_v0(
             .map_err(map_lineage_capture_error)?
             .is_some()
         {}
+        let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
+        let facts = scan
+            .lineage_facts
+            .take()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        outcome_lineage.register(native_session_id, facts)?;
+    }
+    Ok(())
+}
+
+/// Freezes every selected ancestor fact set before route-local workers run.
+///
+/// One route can own both an ancestor and a grandchild while a different route
+/// owns the intermediate child, so sorting whole routes cannot provide a
+/// generation-wide parent-before-child schedule. This deterministic prepass
+/// scans only sources whose facts can be consulted by a descendant; terminal
+/// leaves receive an empty completed state without a body pass. Publication
+/// workers subsequently parse and certify every accepted source normally, but
+/// they do not mutate the already-frozen lineage authority.
+pub(super) fn prepare_generation_lineage_v0(
+    sources: &[(CodexCatalogSource, SourceKey, String)],
+    outcome_lineage: &CodexOutcomeLineageAuthorityV0,
+) -> CodexSourceBackedResultV0<()> {
+    let mut ordered = sources.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        outcome_lineage
+            .depth(&left.2)
+            .cmp(&outcome_lineage.depth(&right.2))
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+    });
+    for (source, _, native_session_id) in ordered {
+        let facts = outcome_lineage.new_fact_set(native_session_id)?;
+        if !outcome_lineage.needs_descendant_facts(native_session_id)? {
+            outcome_lineage.register(native_session_id, facts)?;
+            continue;
+        }
+        let mut scanner =
+            CodexNativeScanner::new_source_backed_with_lineage_v0(source.clone(), None, facts)
+                .map_err(map_lineage_capture_error)?;
+        while scanner
+            .next_page()
+            .map_err(map_lineage_capture_error)?
+            .is_some()
+        {
+            scanner.release_transient_record_buffer();
+        }
         let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
         let facts = scan
             .lineage_facts
