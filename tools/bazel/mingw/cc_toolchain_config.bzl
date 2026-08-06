@@ -18,7 +18,7 @@ def _impl(ctx):
             tool_path(name = "cpp", path = "bin/x86_64-w64-mingw32-clang.exe"),
             tool_path(name = "gcc", path = "bin/x86_64-w64-mingw32-clang.exe"),
             tool_path(name = "gcov", path = "bin/llvm-cov.exe"),
-            tool_path(name = "ld", path = "bin/ctx-x86_64-w64-mingw32-clang.cmd"),
+            tool_path(name = "ld", path = "bin/x86_64-w64-mingw32-clang.exe"),
             tool_path(name = "nm", path = "bin/llvm-nm.exe"),
             tool_path(name = "objcopy", path = "bin/llvm-objcopy.exe"),
             tool_path(name = "objdump", path = "bin/llvm-objdump.exe"),

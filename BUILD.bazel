@@ -252,10 +252,12 @@ py_test(
         "$(rootpath MODULE.bazel)",
         "$(rootpath contracts/release-targets-v1.json)",
         "$(rootpath //tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch)",
+        "$(rootpath //tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch)",
     ],
     data = [
         "MODULE.bazel",
         "contracts/release-targets-v1.json",
+        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
         "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
     ],
 )
@@ -269,6 +271,7 @@ py_test(
     data = [
         "MODULE.bazel",
         "contracts/release-targets-v1.json",
+        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
         "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
     ],
     imports = ["tools/bazel"],
@@ -859,7 +862,10 @@ sh_test(
         "scripts/stage-github-release-assets.sh",
         "scripts/stage-semantic-release-handoff.sh",
         "//tools/bazel:release_routes.bzl",
+        "//tools/bazel/mingw:cc_toolchain_config.bzl",
+        "//tools/bazel/mingw:repository.bzl",
         "//tools/bazel/patches:rules-rust-freebsd-host.patch",
+        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
         "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
     ],
     tags = ["release-gate"],

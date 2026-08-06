@@ -1,5 +1,6 @@
 """Focused analysis tests for public release route transitions."""
 
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load(
     ":release_routes.bzl",
@@ -28,6 +29,14 @@ def _platform_probe_impl(ctx):
             ctx.attr.windows_abi_value,
             expected_abi,
         ))
+    retained_suffixes = ctx.attr.retained_suffixes[BuildSettingInfo].value
+    expected_suffixes = [".lib", ".so"] + ([".a"] if ctx.attr.expect_windows_gnu else [])
+    if retained_suffixes != expected_suffixes:
+        fail("{} retained Cargo archive suffixes {}, expected {}".format(
+            ctx.label,
+            retained_suffixes,
+            expected_suffixes,
+        ))
     output = ctx.actions.declare_file(ctx.label.name)
     ctx.actions.write(output, "#!/usr/bin/env sh\nexit 0\n", is_executable = True)
     return [DefaultInfo(executable = output)]
@@ -41,6 +50,9 @@ _platform_probe = rule(
             providers = [platform_common.ConstraintValueInfo],
         ),
         "expect_windows_gnu": attr.bool(default = False),
+        "retained_suffixes": attr.label(
+            default = Label("@rules_rust//cargo/settings:cargo_manifest_dir_filename_suffixes_to_retain"),
+        ),
         "windows_gnu_value": attr.string(mandatory = True),
         "windows_abi_value": attr.string(mandatory = True),
     },

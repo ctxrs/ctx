@@ -13,14 +13,16 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "platforms", version = "1.1.0")
 
 # rules_rust 0.71.3 publishes the x86_64-unknown-freebsd toolchain, but its
-# host detector omits FreeBSD, and Windows-GNU raw-dylib compilation does not
-# discover the selected C++ toolchain's dlltool. Keep native release
-# construction on the pinned module with the smallest possible upstream fixes.
+# host detector omits FreeBSD, and Windows needs two narrow upstream fixes:
+# GNU raw-dylib compilation must discover the selected C++ toolchain's
+# dlltool, and retained Cargo runfiles must survive both Windows symlink modes.
+# Keep native release construction on the pinned module with those fixes only.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
     patches = [
         "//tools/bazel/patches:rules-rust-freebsd-host.patch",
+        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
         "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
     ],
     version = "0.71.3",

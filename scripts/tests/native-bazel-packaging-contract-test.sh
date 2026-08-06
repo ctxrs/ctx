@@ -23,7 +23,10 @@ release_config="${source_root}/.bazelrc"
 module_definition="${source_root}/MODULE.bazel"
 module_lock="${source_root}/MODULE.bazel.lock"
 rules_rust_freebsd_patch="${source_root}/tools/bazel/patches/rules-rust-freebsd-host.patch"
+rules_rust_windows_runfiles_patch="${source_root}/tools/bazel/patches/rules-rust-windows-cargo-runfiles.patch"
 rules_rust_windows_patch="${source_root}/tools/bazel/patches/rules-rust-windows-gnu-dlltool-path.patch"
+mingw_repository="${source_root}/tools/bazel/mingw/repository.bzl"
+mingw_toolchain="${source_root}/tools/bazel/mingw/cc_toolchain_config.bzl"
 
 grep -Fxq 'build:release --lockfile_mode=error' "${release_config}" || {
   echo 'release config must fail closed on incomplete module lock data' >&2
@@ -53,9 +56,18 @@ PY
 
 for required_patch in \
   '//tools/bazel/patches:rules-rust-freebsd-host.patch' \
+  '//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch' \
   '//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch'; do
   grep -Fq -- "${required_patch}" "${module_definition}" || {
     printf 'rules_rust must retain release patch: %s\n' "${required_patch}" >&2
+    exit 1
+  }
+done
+for required_patch_line in \
+  '-            if !self' \
+  '+            if self'; do
+  grep -Fq -- "${required_patch_line}" "${rules_rust_windows_runfiles_patch}" || {
+    echo "rules_rust Windows Cargo runfiles patch is missing: ${required_patch_line}" >&2
     exit 1
   }
 done
@@ -68,6 +80,33 @@ for required_patch_line in \
     exit 1
   }
 done
+
+for required in \
+  '"@rules_rust//cargo/settings:cargo_manifest_dir_filename_suffixes_to_retain"' \
+  '[".a"] if attr.target_id == "windows-x64" else []'; do
+  grep -Fq -- "${required}" "${release_routes}" || {
+    printf 'Windows release route does not retain static Cargo archives: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+for required in \
+  'ctx.file("x86_64-w64-mingw32/lib/libgcc.a", "!<arch>\n")' \
+  'ctx.file("x86_64-w64-mingw32/lib/libgcc_eh.a", "!<arch>\n")'; do
+  grep -Fq -- "${required}" "${mingw_repository}" || {
+    printf 'LLVM-MinGW GCC compatibility bridge is not in clang search root: %s\n' "${required}" >&2
+    exit 1
+  }
+done
+grep -Fq 'tool_path(name = "ld", path = "bin/x86_64-w64-mingw32-clang.exe")' \
+  "${mingw_toolchain}" || {
+  echo 'LLVM-MinGW linker route does not use the direct hermetic driver' >&2
+  exit 1
+}
+if grep -Fq 'compat-libgcc' "${mingw_repository}" \
+  || grep -Fq 'ctx-x86_64-w64-mingw32-clang.cmd' "${mingw_repository}" "${mingw_toolchain}"; then
+  echo 'LLVM-MinGW route retains the unused compatibility wrapper path' >&2
+  exit 1
+fi
 for required_patch_line in \
   '+load("@bazel_skylib//lib:paths.bzl", "paths")' \
   '+    if toolchain.target_os == "windows" and toolchain.target_abi == "gnu" and cc_toolchain:' \
