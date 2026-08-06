@@ -63,21 +63,30 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
     let source_refresh_requested =
         source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     if runtime.config.daemon.mode.runs_only_source_refresh() {
-        cancel_core_finalization_generation_lease(
-            data_root,
-            "daemon mode disabled Pro finalization",
-        )?;
         runtime.consumer_retry_deferral.reset();
         if let Some(activity) = query_activity {
             activity.cancel_idle_wakeup();
         }
         if source_refresh_requested && !runtime.history_retry.ready() {
+            cancel_core_finalization_generation_lease(
+                data_root,
+                "daemon mode disabled Pro finalization",
+            )?;
             return Ok(deferred_pending_core_refresh(data_root, runtime));
         }
         if let Some(iteration) = run_pending_core_refresh(data_root, runtime, source_refresh)? {
+            cancel_core_finalization_generation_lease(
+                data_root,
+                "daemon mode disabled Pro finalization",
+            )?;
             return Ok(iteration);
         }
-        return run_dirty_core_refresh(data_root, runtime, source_refresh);
+        let iteration = run_dirty_core_refresh(data_root, runtime, source_refresh)?;
+        cancel_core_finalization_generation_lease(
+            data_root,
+            "daemon mode disabled Pro finalization",
+        )?;
+        return Ok(iteration);
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
     if source_refresh_requested {
