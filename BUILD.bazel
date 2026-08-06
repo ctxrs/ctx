@@ -42,6 +42,13 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
+config_setting(
+    name = "release_freebsd",
+    constraint_values = ["@platforms//os:freebsd"],
+    values = {"compilation_mode": "opt"},
+    visibility = ["//visibility:public"],
+)
+
 java_binary(
     name = "bazel-diff",
     main_class = "com.bazel_diff.Main",
@@ -761,7 +768,9 @@ py_test(
     ],
     srcs = ["scripts/tests/detached-debug-symbols-test.py"],
     data = [
+        "BUILD.bazel",
         "scripts/release/detached-debug-symbols.py",
+        "//tools/bazel:ctx_rust.bzl",
         "//tools/bazel:pinned_rust_objcopy",
         "//tools/bazel:pinned_rustc",
     ],

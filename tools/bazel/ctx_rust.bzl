@@ -23,12 +23,20 @@ _MACOS_LINK_FLAGS = select({
     "//conditions:default": [],
 })
 
+# FreeBSD's linker does not emit a GNU build ID by default. Release packaging
+# binds detached symbols to that identity, so request a content-derived ID only
+# for optimized FreeBSD binaries.
+_FREEBSD_RELEASE_LINK_FLAGS = select({
+    "//:release_freebsd": ["-Clink-arg=-Wl,--build-id=sha1"],
+    "//conditions:default": [],
+})
+
 def ctx_rust_binary(name, data = [], rustc_flags = [], tags = [], **kwargs):
     """Creates a Rust binary with the configured, tracked development linker."""
     _rust_binary(
         name = name,
         data = data + _MOLD_DATA,
-        rustc_flags = rustc_flags + _MOLD_FLAGS + _MACOS_LINK_FLAGS,
+        rustc_flags = rustc_flags + _MOLD_FLAGS + _MACOS_LINK_FLAGS + _FREEBSD_RELEASE_LINK_FLAGS,
         tags = tags,
         **kwargs
     )
