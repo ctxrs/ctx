@@ -16,6 +16,15 @@ pub(crate) enum CursorRejectionKind {
     UnsupportedShape,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum CursorDiscoveryResultEvidence {
+    SuccessfulPayloadOnly,
+    Failed,
+    Diagnostic,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CursorSafePart {
     BodyFree {
@@ -42,6 +51,7 @@ pub(super) enum CursorSafePart {
         native_content: Value,
         call_id: Option<String>,
         ambiguous_linkage: bool,
+        discovery_evidence: CursorDiscoveryResultEvidence,
     },
 }
 
@@ -428,6 +438,7 @@ where
         native_content,
         call_id: evidence.call_id,
         ambiguous_linkage: evidence.ambiguous_linkage,
+        discovery_evidence: evidence.discovery_evidence,
     }))
 }
 
@@ -578,6 +589,7 @@ impl<'de> Visitor<'de> for CursorToolUseBlockVisitor {
 struct CursorToolResultEvidence {
     call_id: Option<String>,
     ambiguous_linkage: bool,
+    discovery_evidence: CursorDiscoveryResultEvidence,
 }
 
 struct CursorToolResultBlockVisitor;
@@ -596,22 +608,82 @@ impl<'de> Visitor<'de> for CursorToolResultBlockVisitor {
         let mut call_id = None;
         let mut call_id_seen = false;
         let mut ambiguous_linkage = false;
+        let mut type_seen = false;
+        let mut type_exact = false;
+        let mut content_seen = false;
+        let mut payload_present = false;
+        let mut is_error_seen = false;
+        let mut is_error = None;
+        let mut diagnostic_member = false;
+        let mut unknown_member = false;
         while let Some(field) = map.next_key::<String>()? {
-            if field == "tool_use_id" {
-                let value = map.next_value_seed(ExactBoundedStringSeed {
-                    max_chars: MAX_CURSOR_ATOM_CHARS,
-                })?;
-                ambiguous_linkage |= call_id_seen || value.is_none();
-                call_id_seen = true;
-                call_id = value;
-            } else {
-                map.next_value::<IgnoredAny>()?;
+            match field.as_str() {
+                "type" => {
+                    let value = map.next_value_seed(ExactBoundedStringSeed {
+                        max_chars: MAX_CURSOR_ATOM_CHARS,
+                    })?;
+                    unknown_member |= type_seen || value.as_deref() != Some("tool_result");
+                    type_seen = true;
+                    type_exact = value.as_deref() == Some("tool_result");
+                }
+                "tool_use_id" => {
+                    let value = map.next_value_seed(ExactBoundedStringSeed {
+                        max_chars: MAX_CURSOR_ATOM_CHARS,
+                    })?;
+                    ambiguous_linkage |= call_id_seen || value.is_none();
+                    unknown_member |= call_id_seen || value.is_none();
+                    call_id_seen = true;
+                    call_id = value;
+                }
+                "content" => {
+                    let value = map.next_value::<Value>()?;
+                    unknown_member |= content_seen;
+                    content_seen = true;
+                    payload_present = cursor_payload_is_present(&value);
+                }
+                "is_error" => {
+                    let value = map.next_value::<Value>()?;
+                    unknown_member |= is_error_seen || !value.is_boolean();
+                    is_error_seen = true;
+                    is_error = value.as_bool();
+                }
+                "stderr" | "warning" | "warnings" | "error" | "errors" | "diagnostic"
+                | "diagnostics" => {
+                    diagnostic_member = true;
+                    map.next_value::<IgnoredAny>()?;
+                }
+                _ => {
+                    unknown_member = true;
+                    map.next_value::<IgnoredAny>()?;
+                }
             }
         }
+        let discovery_evidence = if diagnostic_member {
+            CursorDiscoveryResultEvidence::Diagnostic
+        } else if unknown_member || !type_seen || !type_exact || !call_id_seen || !content_seen {
+            CursorDiscoveryResultEvidence::Unknown
+        } else {
+            match (is_error, payload_present) {
+                (Some(true), _) => CursorDiscoveryResultEvidence::Failed,
+                (Some(false), true) => CursorDiscoveryResultEvidence::SuccessfulPayloadOnly,
+                _ => CursorDiscoveryResultEvidence::Unknown,
+            }
+        };
         Ok(CursorToolResultEvidence {
             call_id,
             ambiguous_linkage,
+            discovery_evidence,
         })
+    }
+}
+
+fn cursor_payload_is_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
     }
 }
 

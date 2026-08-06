@@ -1,5 +1,6 @@
 pub(crate) mod adapter;
 pub(crate) mod codex;
+pub(crate) mod ctx_retrieval;
 pub(crate) mod custom_history_jsonl;
 pub(crate) mod file_touches;
 pub(crate) mod native_ingestion;

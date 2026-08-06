@@ -12,6 +12,11 @@ use super::{
 };
 use crate::{CaptureError, GEMINI_CLI_SOURCE_FORMAT};
 
+pub(super) struct GeminiProjectedContent {
+    pub(super) annotation: ctx_history_core::CoreRecordAnnotation,
+    pub(super) discovery_exclusion: Option<ctx_history_core::CoreDiscoveryExclusion>,
+}
+
 pub(super) fn project_event(
     source: &SourceKey,
     session_id: StableEntityId,
@@ -19,7 +24,7 @@ pub(super) fn project_event(
     root_session_id: StableEntityId,
     session: &super::super::GeminiSession,
     event: super::super::GeminiRetainedEvent,
-    annotation: ctx_history_core::CoreRecordAnnotation,
+    content: GeminiProjectedContent,
 ) -> GeminiSourceBackedResult<CoreRecord> {
     let super::super::GeminiEventIdentity::NativeRecordId(native_event_id) = &event.identity;
     let event_id = gemini_event_id(source, session_id, &event)?;
@@ -77,17 +82,19 @@ pub(super) fn project_event(
         .cwd
         .as_deref()
         .map(|cwd| bounded_chars(cwd, MAX_GEMINI_LEXICAL_METADATA_CHARS));
-    record.content.structured_content = annotation.structured_content;
+    record.content.structured_content = content.annotation.structured_content;
+    record.content.discovery_exclusion = content.discovery_exclusion;
     record
         .content
         .omit_structured_content_if_aggregate_exceeds_limit()?;
-    record.metadata = annotation.metadata;
-    record.repository_candidate_evidence = annotation.repository_candidate_evidence;
-    record.repository_bindings = annotation.repository_bindings;
-    record.repository_abstentions = annotation.repository_abstentions;
-    record.repository_file_invocation_evidence = annotation.repository_file_invocation_evidence;
-    record.repository_file_observations = annotation.repository_file_observations;
-    record.repository_vcs_observations = annotation.repository_vcs_observations;
+    record.metadata = content.annotation.metadata;
+    record.repository_candidate_evidence = content.annotation.repository_candidate_evidence;
+    record.repository_bindings = content.annotation.repository_bindings;
+    record.repository_abstentions = content.annotation.repository_abstentions;
+    record.repository_file_invocation_evidence =
+        content.annotation.repository_file_invocation_evidence;
+    record.repository_file_observations = content.annotation.repository_file_observations;
+    record.repository_vcs_observations = content.annotation.repository_vcs_observations;
     record.bind_repository_commit_operation_identities()?;
     record.validate_contract()?;
     Ok(record)

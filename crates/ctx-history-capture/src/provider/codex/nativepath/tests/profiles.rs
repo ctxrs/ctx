@@ -201,6 +201,217 @@ fn output_heavy_scan_retains_complete_result_bodies() {
 }
 
 #[test]
+fn ctx_retrieval_discovery_fixture_requires_exact_cli_envelopes_and_mcp_evidence() {
+    let contents = include_str!("fixtures/ctx_retrieval_discovery.jsonl");
+    let (_temp, path) = write_source(contents);
+    let (scan, sink) = scan_collect(discover_one(&path, "ctx-retrieval-discovery"), None);
+
+    assert_eq!(scan.counters.rejected_complete_records, 0);
+    assert_eq!(sink.rows.len(), 19);
+    let excluded = sink
+        .rows
+        .iter()
+        .filter(|row| row.discovery_exclusion.is_some())
+        .map(|row| {
+            (
+                row.provider_event_identity
+                    .as_ref()
+                    .map(|identity| identity.value.as_str())
+                    .unwrap_or("missing"),
+                row.event_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        excluded,
+        vec![
+            ("ctx-exact", EventType::ToolCall),
+            ("ctx-exact", EventType::CommandOutput),
+            ("ctx-stderr", EventType::ToolCall),
+            ("ctx-malformed", EventType::ToolCall),
+            ("ctx-warning", EventType::ToolCall),
+            ("mcp-ctx-exact", EventType::ToolOutput),
+        ]
+    );
+    assert!(sink.rows.iter().all(|row| {
+        row.discovery_exclusion
+            .is_none_or(|value| value == CoreDiscoveryExclusion::CtxRetrievalDerived)
+    }));
+
+    let exact_output = sink
+        .rows
+        .iter()
+        .find(|row| {
+            row.event_type == EventType::CommandOutput
+                && row
+                    .provider_event_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.value == "ctx-exact")
+        })
+        .unwrap();
+    assert_eq!(
+        exact_output.lexical_body,
+        concat!(
+            "Chunk ID: a1b2c3\n",
+            "Wall time: 0.125 seconds\n",
+            "Process exited with code 0\n",
+            "Final output:\n",
+            "{\"results\":[{\"id\":\"event-1\"}]}"
+        )
+    );
+
+    for call_id in [
+        "ctx-stderr",
+        "ctx-malformed",
+        "ctx-warning",
+        "ctx-ordinary",
+        "ctx-composed",
+        "mcp-ctx-unknown",
+        "mcp-wrong-alias",
+        "mcp-ctx-error",
+        "mcp-ctx-duplicate",
+        "mcp-ctx-unknown-tool",
+    ] {
+        assert!(
+            sink.rows
+                .iter()
+                .filter(|row| {
+                    row.provider_event_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.value == call_id)
+                })
+                .all(|row| {
+                    row.event_type == EventType::ToolCall || row.discovery_exclusion.is_none()
+                }),
+            "unexpected derived result for {call_id}"
+        );
+    }
+}
+
+#[test]
+fn orphan_and_duplicate_pending_ctx_results_fail_open() {
+    let output = concat!(
+        "Chunk ID: abc123\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "{\"results\":[]}"
+    );
+    let duplicate_call = || {
+        jsonl(json!({
+            "timestamp": "2026-08-05T15:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "duplicate-ctx-call",
+                "arguments": {"cmd": "ctx search duplicate"}
+            }
+        }))
+    };
+    let contents = [
+        session_meta("ctx-linkage-fail-open"),
+        tool_output("orphan-ctx-call", output),
+        duplicate_call(),
+        duplicate_call(),
+        tool_output("duplicate-ctx-call", output),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (_, sink) = scan_collect(discover_one(&path, "ctx-linkage-fail-open"), None);
+
+    let orphan = sink
+        .rows
+        .iter()
+        .find(|row| {
+            row.provider_event_identity
+                .as_ref()
+                .is_some_and(|identity| identity.value == "orphan-ctx-call")
+        })
+        .unwrap();
+    assert_eq!(orphan.lexical_body, output);
+    assert_eq!(orphan.discovery_exclusion, None);
+
+    let duplicate_rows = sink
+        .rows
+        .iter()
+        .filter(|row| {
+            row.provider_event_identity
+                .as_ref()
+                .is_some_and(|identity| identity.value == "duplicate-ctx-call")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(duplicate_rows.len(), 3);
+    assert_eq!(
+        duplicate_rows
+            .iter()
+            .filter(|row| row.event_type == EventType::ToolCall)
+            .count(),
+        2
+    );
+    assert!(duplicate_rows
+        .iter()
+        .filter(|row| row.event_type == EventType::ToolCall)
+        .all(|row| {
+            row.discovery_exclusion == Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+        }));
+    let duplicate_result = duplicate_rows
+        .iter()
+        .find(|row| row.event_type == EventType::CommandOutput)
+        .unwrap();
+    assert_eq!(duplicate_result.lexical_body, output);
+    assert_eq!(duplicate_result.discovery_exclusion, None);
+}
+
+#[test]
+fn codex_duplicate_result_terminals_fail_open_without_retracting_invocation_exclusion() {
+    let call_id = "duplicate-ctx-result";
+    let output = concat!(
+        "Chunk ID: abc123\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "{\"results\":[]}"
+    );
+    let contents = [
+        session_meta("duplicate-ctx-result-owner"),
+        jsonl(json!({
+            "timestamp": "2026-08-05T15:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": call_id,
+                "arguments": {"cmd": "ctx search duplicate-result"}
+            }
+        })),
+        tool_output(call_id, output),
+        tool_output(call_id, output),
+    ]
+    .concat();
+    let (_temp, path) = write_source(&contents);
+    let (_, sink) = scan_collect(discover_one(&path, "duplicate-ctx-result-owner"), None);
+    let rows = sink
+        .rows
+        .iter()
+        .filter(|row| {
+            row.provider_event_identity
+                .as_ref()
+                .is_some_and(|identity| identity.value == call_id)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0].discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert!(rows[1..]
+        .iter()
+        .all(|row| row.discovery_exclusion.is_none() && row.lexical_body == output));
+}
+
+#[test]
 fn mcp_direct_result_minimal_synthetic_retains_text_and_linkage() {
     let call_id = "exec-mcp-direct";
     let output = "direct MCP result survives";
@@ -660,8 +871,8 @@ fn synthetic_adversarial_fixture_requires_source_unique_terminal_authority() {
 
     assert_eq!(scan.counters.rejected_complete_records, 0);
     assert_eq!(sink.rows.len(), 14);
-    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 10);
-    assert!(scan.counters.peak_mcp_terminal_authority_bytes > 10 * 32);
+    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 20);
+    assert!(scan.counters.peak_mcp_terminal_authority_bytes > 20 * 32);
     for marker in [
         "AMBIGUOUS_MCP_RESULT",
         "DUPLICATE_SAME_FIRST",
@@ -782,7 +993,7 @@ fn malformed_same_id_mcp_terminals_abstain_before_and_after_valid_results() {
 
     assert_eq!(scan.counters.malformed_records, 4);
     assert_eq!(scan.counters.rejected_complete_records, 4);
-    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 6);
+    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 12);
     assert_eq!(sink.rows.len(), cases.len());
     for (row, (call_id, marker, attributed)) in sink.rows.iter().zip(cases) {
         assert_eq!(row.lexical_body, marker);
@@ -949,4 +1160,58 @@ fn pending_call_checkpoint_keeps_fresh_and_append_source_backed_outputs_identica
         fresh_scan.complete_prefix_sha256
     );
     assert_eq!(append_scan.next_raw_ordinal, fresh_scan.next_raw_ordinal);
+}
+
+#[test]
+fn pending_ctx_retrieval_link_restores_exact_result_exclusion() {
+    let call_id = "split-ctx-retrieval";
+    let initial = [
+        session_meta("split-ctx-retrieval-owner"),
+        jsonl(json!({
+            "timestamp": "2026-08-05T13:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": call_id,
+                "arguments": {"cmd": "ctx show session aabbccdd"}
+            }
+        })),
+    ]
+    .concat();
+    let output = concat!(
+        "Chunk ID: 012abc\n",
+        "Wall time: 0.031 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "{\"session\":{\"id\":\"session-1\"}}"
+    );
+    let appended = tool_output(call_id, output);
+    let complete = format!("{initial}{appended}");
+    let (_temp, path) = write_source(&initial);
+
+    let (initial_scan, _) = scan_collect(discover_one(&path, "split-ctx-retrieval-owner"), None);
+    let proof = initial_scan
+        .bind_checkpoint("split-ctx-retrieval", CodexCheckpointGeneration::new(91))
+        .unwrap()
+        .unwrap();
+    fs::write(&path, &complete).unwrap();
+
+    let (_, append) = scan_collect(
+        discover_one(&path, "split-ctx-retrieval-owner"),
+        Some(&proof),
+    );
+    let (_, fresh) = scan_collect(discover_one(&path, "split-ctx-retrieval-owner"), None);
+    let fresh_result = fresh
+        .rows
+        .iter()
+        .find(|row| row.event_type == EventType::CommandOutput)
+        .unwrap();
+
+    assert_eq!(append.rows, vec![fresh_result.clone()]);
+    assert_eq!(append.rows[0].lexical_body, output);
+    assert_eq!(
+        append.rows[0].discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
 }

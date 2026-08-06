@@ -2,6 +2,7 @@
 mod repository_tests {
     use std::{fs, path::PathBuf, process::Command};
 
+    use serde_json::Value;
     use tempfile::TempDir;
 
     use super::super::*;
@@ -59,8 +60,300 @@ mod repository_tests {
             session_id,
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
+            result_terminal_authority: CursorResultTerminalAuthority::default(),
             event_identities: CursorEventIdentityState::default(),
         }
+    }
+
+    fn project_cursor_records(
+        projector: &mut CursorProjector,
+        records: &[Value],
+    ) -> Vec<CoreRecord> {
+        let mut authority = CursorResultTerminalAuthority {
+            available: true,
+            ..CursorResultTerminalAuthority::default()
+        };
+        for (ordinal, record) in records.iter().enumerate() {
+            let encoded = serde_json::to_vec(record).unwrap();
+            if let Some(events) = project_cursor_jsonl_record(
+                &encoded,
+                ordinal as u64,
+                ordinal as u64,
+                0,
+                encoded.len() as u64,
+            )
+            .unwrap()
+            {
+                for event in events {
+                    if let CursorEventBody::ToolOutput {
+                        call_id: Some(call_id),
+                        ..
+                    } = event.body
+                    {
+                        authority.observe(&call_id, false);
+                    }
+                }
+            }
+        }
+        projector.result_terminal_authority = authority;
+        let mut worker = JsonlFamilyWorkerContext::default();
+        let mut emitted = Vec::new();
+        for (ordinal, record) in records.iter().enumerate() {
+            let encoded = serde_json::to_vec(record).unwrap();
+            let record = JsonlRecordRef::for_test(&encoded, ordinal as u64);
+            let evidence = record.evidence();
+            let events = project_cursor_jsonl_record(
+                record.bytes(),
+                evidence.physical_ordinal(),
+                evidence.physical_ordinal(),
+                evidence.byte_start(),
+                evidence.byte_end_exclusive(),
+            )
+            .unwrap()
+            .unwrap();
+            for event in events {
+                let duplicate_occurrence = next_event_occurrence(
+                    &event,
+                    &projector.source,
+                    projector.session_id,
+                    &mut projector.event_identities,
+                )
+                .unwrap();
+                let normalized_body = cursor_normalized_body(&event).unwrap();
+                let (annotation, contribution) = projector
+                    .attribution_for_event_with_normalized_body(
+                        &mut worker,
+                        &event,
+                        normalized_body.as_deref(),
+                    );
+                if let Some(record) = core_record(
+                    &projector.source,
+                    projector.session_id,
+                    &projector.native_session_id,
+                    event,
+                    duplicate_occurrence,
+                    CursorProjectedContent {
+                        annotation,
+                        discovery_exclusion: discovery_exclusion_for([contribution]),
+                        normalized_body,
+                    },
+                )
+                .unwrap()
+                {
+                    emitted.push(record);
+                }
+            }
+        }
+        emitted
+    }
+
+    fn cursor_ctx_call(call_id: &str, tool_name: &str, input: Value) -> Value {
+        serde_json::json!({
+            "timestamp": "2026-07-31T12:00:00Z",
+            "role": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": call_id,
+                "name": tool_name,
+                "input": input,
+            }]},
+        })
+    }
+
+    fn cursor_ctx_result(
+        call_id: &str,
+        content: &str,
+        is_error: Option<bool>,
+        extra_member: Option<(&str, Value)>,
+    ) -> Value {
+        let mut block = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": content,
+        });
+        if let Some(is_error) = is_error {
+            block["is_error"] = Value::Bool(is_error);
+        }
+        if let Some((key, value)) = extra_member {
+            block.as_object_mut().unwrap().insert(key.to_owned(), value);
+        }
+        serde_json::json!({
+            "timestamp": "2026-07-31T12:00:01Z",
+            "role": "user",
+            "message": {"role": "user", "content": [block]},
+        })
+    }
+
+    #[test]
+    fn cursor_ctx_retrieval_cli_mcp_and_proven_success_payloads_are_excluded() {
+        let payload = "complete Cursor retrieval payload";
+        let records = project_cursor_records(
+            &mut projector(),
+            &[
+                cursor_ctx_call(
+                    "cli",
+                    "run_shell_command",
+                    serde_json::json!({"command": "ctx.exe show session aabbccdd"}),
+                ),
+                cursor_ctx_result("cli", payload, Some(false), None),
+                cursor_ctx_call(
+                    "mcp",
+                    "mcp__ctx__query_events",
+                    serde_json::json!({"limit": 5}),
+                ),
+                cursor_ctx_result("mcp", "typed MCP payload", Some(false), None),
+                cursor_ctx_call(
+                    "ordinary",
+                    "run_shell_command",
+                    serde_json::json!({"command": "ctx status"}),
+                ),
+            ],
+        );
+        assert_eq!(records.len(), 5);
+        for record in &records[..4] {
+            assert_eq!(
+                record.content.discovery_exclusion,
+                Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+            );
+        }
+        assert_eq!(records[4].content.discovery_exclusion, None);
+        let result_body: Value =
+            serde_json::from_str(records[1].content.normalized_body.as_deref().unwrap()).unwrap();
+        assert_eq!(result_body["content"], payload);
+        assert_eq!(records[1].content.structured_content, Some(result_body));
+    }
+
+    #[test]
+    fn cursor_duplicate_result_terminals_fail_open_including_the_earlier_result() {
+        let records = project_cursor_records(
+            &mut projector(),
+            &[
+                cursor_ctx_call(
+                    "duplicate-result",
+                    "run_shell_command",
+                    serde_json::json!({"command": "ctx search duplicate-result"}),
+                ),
+                cursor_ctx_result(
+                    "duplicate-result",
+                    "first duplicate Cursor payload",
+                    Some(false),
+                    None,
+                ),
+                cursor_ctx_result(
+                    "duplicate-result",
+                    "second duplicate Cursor payload",
+                    Some(false),
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records[0].content.discovery_exclusion,
+            Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+        );
+        assert_eq!(records[1].content.discovery_exclusion, None);
+        assert_eq!(records[2].content.discovery_exclusion, None);
+        assert!(records[1]
+            .content
+            .normalized_body
+            .as_deref()
+            .unwrap()
+            .contains("first duplicate Cursor payload"));
+        assert!(records[2]
+            .content
+            .normalized_body
+            .as_deref()
+            .unwrap()
+            .contains("second duplicate Cursor payload"));
+    }
+
+    #[test]
+    fn cursor_ctx_retrieval_results_without_exact_clean_success_fail_open() {
+        let payload = "searchable Cursor diagnostic payload";
+        let cases = [
+            ("missing-success", None, None),
+            ("failed", Some(true), None),
+            (
+                "warning",
+                Some(false),
+                Some(("warning", serde_json::json!("provider warning"))),
+            ),
+            (
+                "stderr",
+                Some(false),
+                Some(("stderr", serde_json::json!("provider stderr"))),
+            ),
+            (
+                "unknown-member",
+                Some(false),
+                Some(("future_field", serde_json::json!(true))),
+            ),
+        ];
+        for (call_id, is_error, extra_member) in cases {
+            let records = project_cursor_records(
+                &mut projector(),
+                &[
+                    cursor_ctx_call(
+                        call_id,
+                        "run_shell_command",
+                        serde_json::json!({"command": "ctx search fail-open"}),
+                    ),
+                    cursor_ctx_result(call_id, payload, is_error, extra_member),
+                ],
+            );
+            assert_eq!(
+                records[0].content.discovery_exclusion,
+                Some(CoreDiscoveryExclusion::CtxRetrievalDerived),
+                "invocation did not classify for {call_id}"
+            );
+            assert_eq!(
+                records[1].content.discovery_exclusion, None,
+                "result did not fail open for {call_id}"
+            );
+            let result_body: Value =
+                serde_json::from_str(records[1].content.normalized_body.as_deref().unwrap())
+                    .unwrap();
+            assert_eq!(result_body["content"], payload);
+        }
+    }
+
+    #[test]
+    fn cursor_ctx_retrieval_pending_classification_survives_append_checkpoint() {
+        let mut initial = projector();
+        let call_records = project_cursor_records(
+            &mut initial,
+            &[cursor_ctx_call(
+                "append",
+                "run_shell_command",
+                serde_json::json!({"command": "ctx locate event deadbeef"}),
+            )],
+        );
+        assert_eq!(
+            call_records[0].content.discovery_exclusion,
+            Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+        );
+        let checkpoint = encode_cursor_checkpoint(&initial).unwrap();
+        let restored = decode_cursor_checkpoint(&checkpoint, &initial.native_session_id).unwrap();
+        let mut appended = projector();
+        appended.tool_contexts = restored.tool_contexts;
+        appended.linkage_capacity_exceeded = restored.linkage_capacity_exceeded;
+
+        let result_records = project_cursor_records(
+            &mut appended,
+            &[cursor_ctx_result(
+                "append",
+                "append Cursor payload",
+                Some(false),
+                None,
+            )],
+        );
+        assert_eq!(
+            result_records[0].content.discovery_exclusion,
+            Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+        );
+        assert!(appended.tool_contexts.is_empty());
     }
 
     fn has_reason(
@@ -91,8 +384,11 @@ mod repository_tests {
             &native_session_id,
             event,
             occurrence,
-            annotation,
-            normalized_body,
+            CursorProjectedContent {
+                annotation,
+                discovery_exclusion: None,
+                normalized_body,
+            },
         )
         .unwrap()
         .unwrap()
@@ -570,6 +866,7 @@ mod repository_tests {
                 command: Some("x".repeat(MAX_CURSOR_CHECKPOINT_BYTES)),
                 declared_workdir: Some("/tmp/project".to_owned()),
                 input_paths: CursorInputPathEvidence::Exact(Vec::new()),
+                ctx_retrieval_derived: false,
             }),
         );
         assert!(projector.tool_contexts.is_empty());
@@ -674,6 +971,23 @@ mod fidelity_identity_tests {
             .collect()
     }
 
+    fn indexed_records(index: &Path, native_session_id: &str) -> Vec<CoreRecord> {
+        let source = source_key(native_session_id).unwrap();
+        let verified = VerifiedIndex::open(index).unwrap();
+        verified
+            .core_source_event_page(&source, None, 64)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| {
+                verified
+                    .core_record_by_id(item.event_id.as_uuid())
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect()
+    }
+
     fn assert_ids_preserved(previous: &[StableEntityId], current: &[StableEntityId]) {
         for event_id in previous {
             assert!(current.contains(event_id), "prior event identity changed");
@@ -706,6 +1020,7 @@ mod fidelity_identity_tests {
             session_id,
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
+            result_terminal_authority: CursorResultTerminalAuthority::default(),
             event_identities: CursorEventIdentityState::default(),
         }
     }
@@ -729,8 +1044,11 @@ mod fidelity_identity_tests {
             &projector.native_session_id,
             event,
             duplicate_occurrence,
-            annotation,
-            normalized_body,
+            CursorProjectedContent {
+                annotation,
+                discovery_exclusion: None,
+                normalized_body,
+            },
         )
         .unwrap()
         .unwrap()
@@ -1089,6 +1407,91 @@ mod fidelity_identity_tests {
     }
 
     #[test]
+    fn cursor_late_duplicate_result_forces_replacement_and_corrects_the_earlier_result() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("cursor-data");
+        let native_session_id = "late-duplicate-session";
+        let transcript = transcript_path(&root, "project", native_session_id);
+        let call_id = "late-duplicate-result";
+        let call = json!({
+            "timestamp": "2026-07-31T12:00:00Z",
+            "role": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": call_id,
+                "name": "run_shell_command",
+                "input": {"command": "ctx search late-duplicate"}
+            }]}
+        });
+        let result = |content: &str, timestamp: &str| {
+            json!({
+                "timestamp": timestamp,
+                "role": "user",
+                "message": {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": content,
+                    "is_error": false
+                }]}
+            })
+        };
+        write_transcript(
+            &transcript,
+            &[
+                call,
+                result(
+                    "first late duplicate Cursor payload",
+                    "2026-07-31T12:00:01Z",
+                ),
+            ],
+        );
+        let registry = registry(&root);
+        let index = temp.path().join("index");
+
+        refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+        let initial = indexed_records(&index, native_session_id);
+        assert_eq!(initial.len(), 2);
+        assert!(initial.iter().all(|record| {
+            record.content.discovery_exclusion == Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+        }));
+        let initial_ids = initial
+            .iter()
+            .map(|record| record.event_id)
+            .collect::<Vec<_>>();
+
+        append_transcript(
+            &transcript,
+            &result(
+                "second late duplicate Cursor payload",
+                "2026-07-31T12:00:02Z",
+            ),
+        );
+        refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+        let corrected = indexed_records(&index, native_session_id);
+        assert_eq!(corrected.len(), 3);
+        assert_eq!(corrected[0].event_id, initial_ids[0]);
+        assert_eq!(corrected[1].event_id, initial_ids[1]);
+        assert_eq!(
+            corrected[0].content.discovery_exclusion,
+            Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+        );
+        assert_eq!(corrected[1].content.discovery_exclusion, None);
+        assert_eq!(corrected[2].content.discovery_exclusion, None);
+        assert!(corrected[1]
+            .content
+            .normalized_body
+            .as_deref()
+            .unwrap()
+            .contains("first late duplicate Cursor payload"));
+        assert!(corrected[2]
+            .content
+            .normalized_body
+            .as_deref()
+            .unwrap()
+            .contains("second late duplicate Cursor payload"));
+    }
+
+    #[test]
     fn cursor_equivalent_duplicate_routes_cover_move_overlap_deterministically() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("cursor-data");
@@ -1099,7 +1502,7 @@ mod fidelity_identity_tests {
         write_transcript(&first, &rows);
 
         reset_cursor_signature_records();
-        let initial = CursorJsonlAdapter.discover(&root).unwrap();
+        let initial = CursorJsonlAdapter::default().discover(&root).unwrap();
         assert_eq!(initial.leaves().len(), 1);
         let initial_source = initial.leaves()[0].source().clone();
         assert_eq!(initial.leaves()[0].source_path(), first);
@@ -1107,7 +1510,7 @@ mod fidelity_identity_tests {
 
         write_transcript(&second, &rows);
         reset_cursor_signature_records();
-        let overlap = CursorJsonlAdapter.discover(&root).unwrap();
+        let overlap = CursorJsonlAdapter::default().discover(&root).unwrap();
         assert_eq!(overlap.leaves().len(), 1);
         assert_eq!(overlap.leaves()[0].source_path(), first);
         let overlap_binding = decode_binding(&overlap.leaves()[0]).unwrap();
@@ -1116,7 +1519,7 @@ mod fidelity_identity_tests {
 
         fs::remove_file(&first).unwrap();
         reset_cursor_signature_records();
-        let moved = CursorJsonlAdapter.discover(&root).unwrap();
+        let moved = CursorJsonlAdapter::default().discover(&root).unwrap();
         assert_eq!(moved.leaves().len(), 1);
         assert_eq!(moved.leaves()[0].source_path(), second);
         assert_eq!(cursor_signature_records(), 0);
@@ -1143,7 +1546,7 @@ mod fidelity_identity_tests {
             &[message("user", "2026-07-31T12:00:00Z", "conflict")],
         );
 
-        let error = CursorJsonlAdapter.discover(&root).unwrap_err();
+        let error = CursorJsonlAdapter::default().discover(&root).unwrap_err();
         assert!(error.to_string().contains("conflicting transcript copies"));
     }
 }

@@ -5,6 +5,7 @@ use super::*;
 const MAX_CODEX_MCP_TERMINAL_AUTHORITIES: usize = 4 * 1024;
 const MAX_MCP_RAW_CALL_IDS_PER_RECORD: usize = 8;
 const MCP_TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/mcp-terminal-call-id/v1\0";
+const RESULT_TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/result-terminal-call-id/v1\0";
 const MCP_TERMINAL_AUTHORITY_ENTRY_OVERHEAD_BYTES: usize = 3 * size_of::<usize>();
 
 pub(in super::super) fn mcp_terminal_candidate_evidence(
@@ -42,8 +43,10 @@ struct McpTerminalAuthorityState {
 
 #[derive(Debug, Default)]
 pub(in super::super) struct CodexMcpTerminalAuthority {
-    call_ids: BTreeMap<[u8; 32], McpTerminalAuthorityState>,
-    exhausted: bool,
+    mcp_call_ids: BTreeMap<[u8; 32], McpTerminalAuthorityState>,
+    result_call_ids: BTreeMap<[u8; 32], McpTerminalAuthorityState>,
+    mcp_exhausted: bool,
+    result_exhausted: bool,
 }
 
 impl CodexMcpTerminalAuthority {
@@ -52,64 +55,110 @@ impl CodexMcpTerminalAuthority {
         evidence: &McpRawRecordEvidence,
         in_certified_prefix: bool,
     ) {
-        if self.exhausted || !evidence.is_terminal() {
+        if self.mcp_exhausted || !evidence.is_terminal() {
             return;
         }
         if evidence.call_id_capacity_exceeded {
-            self.exhaust();
+            self.exhaust_mcp();
             return;
         }
         for digest in &evidence.call_id_sha256 {
-            if !self.call_ids.contains_key(digest)
-                && self.call_ids.len() >= MAX_CODEX_MCP_TERMINAL_AUTHORITIES
+            if !self.mcp_call_ids.contains_key(digest)
+                && self.mcp_call_ids.len() >= MAX_CODEX_MCP_TERMINAL_AUTHORITIES
             {
-                self.exhaust();
+                self.exhaust_mcp();
                 return;
             }
-            let state = self.call_ids.entry(*digest).or_default();
+            let state = self.mcp_call_ids.entry(*digest).or_default();
             state.candidates = state.candidates.saturating_add(1).min(2);
             state.in_certified_prefix |= in_certified_prefix;
             state.after_certified_prefix |= !in_certified_prefix;
         }
     }
 
+    pub(in super::super) fn observe_result_call_id(
+        &mut self,
+        call_id: &str,
+        in_certified_prefix: bool,
+    ) {
+        if self.result_exhausted {
+            return;
+        }
+        let digest = result_terminal_call_id_digest(call_id);
+        if !self.result_call_ids.contains_key(&digest)
+            && self.result_call_ids.len() >= MAX_CODEX_MCP_TERMINAL_AUTHORITIES
+        {
+            self.result_call_ids.clear();
+            self.result_exhausted = true;
+            return;
+        }
+        let state = self.result_call_ids.entry(digest).or_default();
+        state.candidates = state.candidates.saturating_add(1).min(2);
+        state.in_certified_prefix |= in_certified_prefix;
+        state.after_certified_prefix |= !in_certified_prefix;
+    }
+
     pub(super) fn is_unique(&self, call_id: &str) -> bool {
-        !self.exhausted
+        !self.mcp_exhausted
             && self
-                .call_ids
+                .mcp_call_ids
                 .get(&mcp_terminal_call_id_digest(call_id))
                 .is_some_and(|state| state.candidates == 1)
     }
 
+    pub(super) fn is_unique_result(&self, call_id: &str) -> bool {
+        !self.result_exhausted
+            && self
+                .result_call_ids
+                .get(&result_terminal_call_id_digest(call_id))
+                .is_some_and(|state| state.candidates == 1)
+    }
+
     pub(in super::super) fn append_requires_replacement(&self) -> bool {
-        self.exhausted
-            || self.call_ids.values().any(|state| {
+        self.mcp_exhausted
+            || self.result_exhausted
+            || self.mcp_call_ids.values().any(|state| {
+                state.in_certified_prefix && state.after_certified_prefix && state.candidates > 1
+            })
+            || self.result_call_ids.values().any(|state| {
                 state.in_certified_prefix && state.after_certified_prefix && state.candidates > 1
             })
     }
 
     pub(in super::super) fn entry_count(&self) -> usize {
-        self.call_ids.len()
+        self.mcp_call_ids
+            .len()
+            .saturating_add(self.result_call_ids.len())
     }
 
     pub(in super::super) fn estimated_owned_bytes(&self) -> usize {
         size_of::<Self>().saturating_add(
-            self.call_ids.len().saturating_mul(
-                size_of::<([u8; 32], McpTerminalAuthorityState)>()
-                    .saturating_add(MCP_TERMINAL_AUTHORITY_ENTRY_OVERHEAD_BYTES),
-            ),
+            self.mcp_call_ids
+                .len()
+                .saturating_add(self.result_call_ids.len())
+                .saturating_mul(
+                    size_of::<([u8; 32], McpTerminalAuthorityState)>()
+                        .saturating_add(MCP_TERMINAL_AUTHORITY_ENTRY_OVERHEAD_BYTES),
+                ),
         )
     }
 
-    fn exhaust(&mut self) {
-        self.call_ids.clear();
-        self.exhausted = true;
+    fn exhaust_mcp(&mut self) {
+        self.mcp_call_ids.clear();
+        self.mcp_exhausted = true;
     }
 }
 
 fn mcp_terminal_call_id_digest(call_id: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(MCP_TERMINAL_CALL_ID_DOMAIN);
+    hasher.update(call_id.as_bytes());
+    hasher.finalize().into()
+}
+
+fn result_terminal_call_id_digest(call_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(RESULT_TERMINAL_CALL_ID_DOMAIN);
     hasher.update(call_id.as_bytes());
     hasher.finalize().into()
 }

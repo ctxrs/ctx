@@ -39,6 +39,7 @@ fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
             authority,
             pending_calls: HashMap::new(),
             running_processes: HashMap::new(),
+            terminal_authority: OpenClawTerminalAuthority::unscanned_for_test(),
             linkage_capacity_exceeded: false,
             fallback_identities: FallbackEventIdentityState::default(),
         },
@@ -73,6 +74,7 @@ fn project_session_event(
         authority,
         pending_calls: HashMap::new(),
         running_processes: HashMap::new(),
+        terminal_authority: OpenClawTerminalAuthority::unscanned_for_test(),
         linkage_capacity_exceeded: false,
         fallback_identities: FallbackEventIdentityState::default(),
     };
@@ -97,6 +99,296 @@ fn project_session_event(
         .unwrap();
     assert_eq!(emitted.len(), 1);
     emitted.pop().unwrap()
+}
+
+fn project_values(projector: &mut OpenClawProjector, values: &[Value]) -> Vec<CoreRecord> {
+    projector.terminal_authority = terminal_authority_for_values(values);
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let mut emitted = Vec::new();
+    for (ordinal, value) in values.iter().enumerate() {
+        let bytes = serde_json::to_vec(value).unwrap();
+        projector
+            .project(
+                JsonlRecordRef::for_test(&bytes, ordinal as u64),
+                &mut worker,
+                &mut |record| {
+                    emitted.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    emitted
+}
+
+fn retrieval_excluded(record: &CoreRecord) -> bool {
+    record.content.discovery_exclusion
+        == Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+}
+
+#[test]
+fn openclaw_exact_cli_and_success_envelope_are_excluded() {
+    let (_temp, mut projector) = test_projector();
+    let records = project_values(
+        &mut projector,
+        &[
+            serde_json::json!({
+                "type": "message",
+                "id": "retrieval-call-record",
+                "timestamp": "2026-08-05T12:00:00Z",
+                "message": {"role": "assistant", "content": [{
+                    "type": "toolCall",
+                    "id": "retrieval-call",
+                    "name": "exec",
+                    "arguments": {"command": "ctx search needle"}
+                }]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "retrieval-result-record",
+                "timestamp": "2026-08-05T12:00:01Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "retrieval-call",
+                    "content": "exact OpenClaw payload",
+                    "details": {"status": "completed", "exitCode": 0}
+                }
+            }),
+        ],
+    );
+
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(retrieval_excluded));
+    assert_eq!(
+        records[1].content.normalized_body.as_deref(),
+        Some("exact OpenClaw payload")
+    );
+}
+
+#[test]
+fn openclaw_mixed_diagnostic_and_unknown_shapes_fail_open() {
+    let (_temp, mut projector) = test_projector();
+    let records = project_values(
+        &mut projector,
+        &[
+            serde_json::json!({
+                "type": "message",
+                "id": "mixed-call-record",
+                "timestamp": "2026-08-05T12:00:00Z",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "ordinary sibling"},
+                    {"type": "toolCall", "id": "mixed-call", "name": "exec", "arguments": {"command": "ctx search needle"}}
+                ]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "mixed-result-record",
+                "timestamp": "2026-08-05T12:00:01Z",
+                "message": {"role": "toolResult", "toolCallId": "mixed-call", "content": "mixed payload", "details": {"status": "completed", "exitCode": 0}}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "diagnostic-call-record",
+                "timestamp": "2026-08-05T12:00:02Z",
+                "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "diagnostic-call", "name": "exec", "arguments": {"command": "ctx show event deadbeef"}}]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "diagnostic-result-record",
+                "timestamp": "2026-08-05T12:00:03Z",
+                "message": {"role": "toolResult", "toolCallId": "diagnostic-call", "content": "kept diagnostic", "details": {"status": "completed", "exitCode": 0, "stderr": "warning"}}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "unknown-call-record",
+                "timestamp": "2026-08-05T12:00:04Z",
+                "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "unknown-call", "name": "exec", "arguments": {"command": "ctx search another"}}]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "unknown-result-record",
+                "timestamp": "2026-08-05T12:00:05Z",
+                "message": {"role": "toolResult", "toolCallId": "unknown-call", "content": "kept unknown", "details": {"status": "completed", "exitCode": 0, "mystery": true}}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "alias-call-record",
+                "timestamp": "2026-08-05T12:00:06Z",
+                "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "alias-call", "name": "exec", "arguments": {"command": "ctx search alias-ambiguity"}}]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "alias-result-record",
+                "timestamp": "2026-08-05T12:00:07Z",
+                "message": {"role": "toolResult", "toolCallId": "alias-call", "tool_call_id": "conflicting-call", "content": "kept alias ambiguity", "details": {"status": "completed", "exitCode": 0}}
+            }),
+        ],
+    );
+
+    assert_eq!(records.len(), 8);
+    assert!(!retrieval_excluded(&records[0]));
+    assert!(!retrieval_excluded(&records[1]));
+    assert!(retrieval_excluded(&records[2]));
+    assert!(!retrieval_excluded(&records[3]));
+    assert!(retrieval_excluded(&records[4]));
+    assert!(!retrieval_excluded(&records[5]));
+    assert!(retrieval_excluded(&records[6]));
+    assert!(!retrieval_excluded(&records[7]));
+    assert_eq!(
+        records[3].content.normalized_body.as_deref(),
+        Some("kept diagnostic")
+    );
+    assert_eq!(
+        records[5].content.normalized_body.as_deref(),
+        Some("kept unknown")
+    );
+    assert_eq!(
+        records[7].content.normalized_body.as_deref(),
+        Some("kept alias ambiguity")
+    );
+}
+
+#[test]
+fn openclaw_running_retrieval_survives_checkpoint_and_continuation_linkage() {
+    let (_temp, mut projector) = test_projector();
+    let prefix = project_values(
+        &mut projector,
+        &[
+            serde_json::json!({
+                "type": "message",
+                "id": "running-call-record",
+                "timestamp": "2026-08-05T12:00:00Z",
+                "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "running-call", "name": "exec", "arguments": {"command": "ctx search needle"}}]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "running-result-record",
+                "timestamp": "2026-08-05T12:00:01Z",
+                "message": {"role": "toolResult", "toolCallId": "running-call", "content": "partial payload", "details": {"status": "running", "sessionId": "process-1"}}
+            }),
+        ],
+    );
+    assert!(retrieval_excluded(&prefix[0]));
+    assert!(!retrieval_excluded(&prefix[1]));
+
+    let checkpoint = encode_projector_checkpoint(&projector).unwrap();
+    let binding = Binding {
+        index_relative_path: PathBuf::from("sessions.json"),
+        native_session_id: projector.native_session_id.clone(),
+        index: Value::Null,
+        native_session_family: OpenClawNativeSessionFamily::Absent,
+        terminal_ambiguity_fingerprint: OpenClawTerminalAuthority::for_scan()
+            .ambiguity_fingerprint(),
+    };
+    let restored = decode_projector_checkpoint(&checkpoint, &binding).unwrap();
+    assert!(matches!(
+        restored.running_processes.get("process-1"),
+        Some(PendingCallState::Exact(PendingCall {
+            retrieval_contribution: StoredContributionClass::RetrievalDerived,
+            ..
+        }))
+    ));
+    projector.pending_calls = restored.pending_calls;
+    projector.running_processes = restored.running_processes;
+    projector.linkage_capacity_exceeded = restored.linkage_capacity_exceeded;
+
+    let suffix = project_values(
+        &mut projector,
+        &[
+            serde_json::json!({
+                "type": "message",
+                "id": "continuation-call-record",
+                "timestamp": "2026-08-05T12:00:02Z",
+                "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "continuation-call", "name": "process", "arguments": {"sessionId": "process-1"}}]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "continuation-result-record",
+                "timestamp": "2026-08-05T12:00:03Z",
+                "message": {"role": "toolResult", "toolCallId": "continuation-call", "content": "final payload", "details": {"status": "completed", "exitCode": 0}}
+            }),
+        ],
+    );
+    assert_eq!(suffix.len(), 2);
+    assert!(suffix.iter().all(retrieval_excluded));
+    assert_eq!(
+        suffix[1].content.normalized_body.as_deref(),
+        Some("final payload")
+    );
+    assert!(!projector.running_processes.contains_key("process-1"));
+    let retired_checkpoint = encode_projector_checkpoint(&projector).unwrap();
+    let retired = decode_projector_checkpoint(&retired_checkpoint, &binding).unwrap();
+    assert!(retired.running_processes.is_empty());
+}
+
+#[test]
+fn openclaw_foreign_tool_cannot_inherit_running_retrieval_by_session_id() {
+    let (_temp, mut projector) = test_projector();
+    let records = project_values(
+        &mut projector,
+        &[
+            serde_json::json!({
+                "type": "message",
+                "id": "running-call-record",
+                "timestamp": "2026-08-05T12:00:00Z",
+                "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "running-call", "name": "exec", "arguments": {"command": "ctx search needle"}}]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "running-result-record",
+                "timestamp": "2026-08-05T12:00:01Z",
+                "message": {"role": "toolResult", "toolCallId": "running-call", "content": "partial payload", "details": {"status": "running", "sessionId": "process-1"}}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "foreign-call-record",
+                "timestamp": "2026-08-05T12:00:02Z",
+                "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "foreign-call", "name": "custom", "arguments": {"sessionId": "process-1"}}]}
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "foreign-result-record",
+                "timestamp": "2026-08-05T12:00:03Z",
+                "message": {"role": "toolResult", "toolCallId": "foreign-call", "content": "foreign payload", "details": {"status": "completed", "exitCode": 0}}
+            }),
+        ],
+    );
+
+    assert_eq!(records.len(), 4);
+    assert!(retrieval_excluded(&records[0]));
+    assert!(!retrieval_excluded(&records[1]));
+    assert!(!retrieval_excluded(&records[2]));
+    assert!(!retrieval_excluded(&records[3]));
+    assert!(projector.running_processes.contains_key("process-1"));
+}
+
+#[test]
+fn openclaw_unattested_command_tool_aliases_fail_open() {
+    let values = ["exec_command", "shell", "bash", "command"]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, name)| {
+            [
+                serde_json::json!({
+                    "type": "message",
+                    "id": format!("alias-call-record-{index}"),
+                    "timestamp": "2026-08-05T12:00:00Z",
+                    "message": {"role": "assistant", "content": [{"type": "toolCall", "id": format!("alias-call-{index}"), "name": name, "arguments": {"command": "ctx search needle"}}]}
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "id": format!("alias-result-record-{index}"),
+                    "timestamp": "2026-08-05T12:00:01Z",
+                    "message": {"role": "toolResult", "toolCallId": format!("alias-call-{index}"), "content": format!("alias payload {index}"), "details": {"status": "completed", "exitCode": 0}}
+                }),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let (_temp, mut projector) = test_projector();
+    let records = project_values(&mut projector, &values);
+
+    assert_eq!(records.len(), values.len());
+    assert!(records.iter().all(|record| !retrieval_excluded(record)));
 }
 
 #[cfg(unix)]
@@ -894,6 +1186,8 @@ fn checkpoint_byte_overflow_degrades_to_typed_linkage_capacity() {
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 1,
             continuation_call_id_sha256: Vec::new(),
+            process_session_id: None,
+            retrieval_contribution: StoredContributionClass::Unknown,
         }),
     );
 
@@ -931,6 +1225,8 @@ fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
                 declared_workdir: Some("/tmp/repository".to_owned()),
                 event_sequence: 1,
                 continuation_call_id_sha256: Vec::new(),
+                process_session_id: None,
+                retrieval_contribution: StoredContributionClass::Unknown,
             }),
         );
     }
@@ -980,6 +1276,137 @@ fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
 }
 
 #[test]
+fn source_wide_reused_result_id_keeps_both_results_searchable() {
+    let values = vec![
+        serde_json::json!({
+            "type": "message",
+            "id": "duplicate-call-1",
+            "timestamp": "2026-08-05T12:00:00Z",
+            "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "reused-result", "name": "exec", "arguments": {"command": "ctx search first"}}]}
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "duplicate-result-1",
+            "timestamp": "2026-08-05T12:00:01Z",
+            "message": {"role": "toolResult", "toolCallId": "reused-result", "content": "first payload", "details": {"status": "completed", "exitCode": 0}}
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "duplicate-call-2",
+            "timestamp": "2026-08-05T12:00:02Z",
+            "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "reused-result", "name": "exec", "arguments": {"command": "ctx search second"}}]}
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "duplicate-result-2",
+            "timestamp": "2026-08-05T12:00:03Z",
+            "message": {"role": "toolResult", "toolCallId": "reused-result", "content": "second payload", "details": {"status": "completed", "exitCode": 0}}
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "unique-call",
+            "timestamp": "2026-08-05T12:00:04Z",
+            "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "unique-result", "name": "exec", "arguments": {"command": "ctx search unique"}}]}
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "unique-result-record",
+            "timestamp": "2026-08-05T12:00:05Z",
+            "message": {"role": "toolResult", "toolCallId": "unique-result", "content": "unique payload", "details": {"status": "completed", "exitCode": 0}}
+        }),
+    ];
+    let (_temp, mut projector) = test_projector();
+    let records = project_values(&mut projector, &values);
+
+    assert_eq!(records.len(), values.len());
+    assert!(!retrieval_excluded(&records[1]));
+    assert!(!retrieval_excluded(&records[3]));
+    assert!(retrieval_excluded(&records[5]));
+    for record in [&records[1], &records[3]] {
+        assert!(record.repository_abstentions.iter().any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref() == Some("openclaw_tool_result_call_id_is_ambiguous")
+        }));
+    }
+}
+
+#[test]
+fn terminal_ambiguity_fingerprint_invalidates_only_affected_append() {
+    let temp = tempfile::tempdir().unwrap();
+    let transcript_path = temp.path().join("session.jsonl");
+    let source = source_key("main/fingerprint-session").unwrap();
+    let authority = ProviderSourceRoot::open(temp.path()).unwrap();
+    let scan = |values: &[Value]| {
+        let mut bytes = Vec::new();
+        for value in values {
+            serde_json::to_writer(&mut bytes, value).unwrap();
+            bytes.push(b'\n');
+        }
+        fs::write(&transcript_path, bytes).unwrap();
+        let opened = Arc::new(authority.open_file(Path::new("session.jsonl")).unwrap());
+        terminal_authority_for_source(&source, &transcript_path, opened).unwrap()
+    };
+    let first_call = serde_json::json!({
+        "type": "message",
+        "id": "call-a",
+        "timestamp": "2026-08-05T12:00:00Z",
+        "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call-a", "name": "exec", "arguments": {"command": "ctx search a"}}]}
+    });
+    let first_result = serde_json::json!({
+        "type": "message",
+        "id": "result-a",
+        "timestamp": "2026-08-05T12:00:01Z",
+        "message": {"role": "toolResult", "toolCallId": "call-a", "content": "a", "details": {"status": "completed", "exitCode": 0}}
+    });
+    let second_call = serde_json::json!({
+        "type": "message",
+        "id": "call-b",
+        "timestamp": "2026-08-05T12:00:02Z",
+        "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call-b", "name": "exec", "arguments": {"command": "ctx search b"}}]}
+    });
+    let second_result = serde_json::json!({
+        "type": "message",
+        "id": "result-b",
+        "timestamp": "2026-08-05T12:00:03Z",
+        "message": {"role": "toolResult", "toolCallId": "call-b", "content": "b", "details": {"status": "completed", "exitCode": 0}}
+    });
+    let reused_result = serde_json::json!({
+        "type": "message",
+        "id": "result-a-reused",
+        "timestamp": "2026-08-05T12:00:04Z",
+        "message": {"role": "toolResult", "toolCallId": "call-a", "content": "a again", "details": {"status": "completed", "exitCode": 0}}
+    });
+
+    let prefix = scan(&[first_call.clone(), first_result.clone()]);
+    let unique_append = scan(&[
+        first_call.clone(),
+        first_result.clone(),
+        second_call.clone(),
+        second_result.clone(),
+    ]);
+    assert_eq!(
+        prefix.ambiguity_fingerprint(),
+        unique_append.ambiguity_fingerprint()
+    );
+    assert!(unique_append.is_unique("call-a"));
+    assert!(unique_append.is_unique("call-b"));
+
+    let duplicate_append = scan(&[
+        first_call,
+        first_result,
+        second_call,
+        second_result,
+        reused_result,
+    ]);
+    assert_ne!(
+        prefix.ambiguity_fingerprint(),
+        duplicate_append.ambiguity_fingerprint()
+    );
+    assert!(!duplicate_append.is_unique("call-a"));
+    assert!(duplicate_append.is_unique("call-b"));
+}
+
+#[test]
 fn fallback_event_ids_survive_insert_and_delete_before_with_stable_duplicates() {
     let baseline = fallback_event_ids(&["prefix", "target", "suffix"]);
     let inserted = fallback_event_ids(&["inserted", "prefix", "target", "suffix"]);
@@ -1005,6 +1432,8 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         native_session_id: native_session_id.to_owned(),
         index: Value::Null,
         native_session_family: OpenClawNativeSessionFamily::Absent,
+        terminal_ambiguity_fingerprint: OpenClawTerminalAuthority::for_scan()
+            .ambiguity_fingerprint(),
     };
     let source = source_key(native_session_id).unwrap();
     let session_id = session_identity(&source, native_session_id).unwrap();
@@ -1045,6 +1474,8 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 0,
             continuation_call_id_sha256: Vec::new(),
+            process_session_id: None,
+            retrieval_contribution: StoredContributionClass::Unknown,
         }),
     );
     let mut projector = OpenClawProjector {
@@ -1056,6 +1487,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         authority,
         pending_calls,
         running_processes: HashMap::new(),
+        terminal_authority: OpenClawTerminalAuthority::unscanned_for_test(),
         linkage_capacity_exceeded,
         fallback_identities: FallbackEventIdentityState::default(),
     };
@@ -1097,6 +1529,8 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 1_u64 << 16,
             continuation_call_id_sha256: Vec::new(),
+            process_session_id: None,
+            retrieval_contribution: StoredContributionClass::Unknown,
         }),
     );
     let mut input = AttributionInput::default();

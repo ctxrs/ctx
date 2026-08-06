@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::cell::Cell;
 
 use crate::{
+    provider::ctx_retrieval::{ContributionClass, ResultAtom, ResultTerminalStatus},
     CaptureError, OutputOutcome, OutputOutcomeMetadata, Result, MAX_PROVIDER_JSONL_LINE_BYTES,
     PROVIDER_MAX_PREVIEW_CHARS,
 };

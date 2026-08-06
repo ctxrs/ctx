@@ -1,10 +1,24 @@
 use super::super::invocation_evidence::CLAUDE_MAX_EXACT_FILE_INVOCATIONS_PER_CALL;
 use super::*;
 use crate::repository_attribution::RepositoryAttributor;
-use ctx_history_core::{
-    CertifiedSource, RepositoryFileInvocationKind, ScannedSourceCounts, SourceObservation,
+use crate::{
+    provider::source_backed::{
+        refresh_source_backed_generation, register_landed_source_backed_route,
+        SourceBackedProviderRegistry, SourceBackedRouteSelection,
+    },
+    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderSourceStatus,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_history_core::{
+    CertifiedSource, CoreDiscoveryExclusion, RepositoryFileInvocationKind, ScannedSourceCounts,
+    SourceObservation,
+};
+use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+};
 
 fn initialized_test_repository() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
@@ -30,6 +44,73 @@ fn initialized_test_repository() -> tempfile::TempDir {
             .success());
     }
     temp
+}
+
+fn claude_test_registry(root: &Path) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_landed_source_backed_route(
+        &mut registry,
+        ProviderSource {
+            provider: CaptureProvider::Claude,
+            path: root.to_path_buf(),
+            exists: true,
+            source_format: CLAUDE_PROJECTS_SOURCE_FORMAT,
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+        },
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    registry
+}
+
+fn claude_test_writer_options() -> WriterOptions {
+    WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: 15_000_000,
+    }
+}
+
+fn write_claude_transcript(path: &Path, records: &[serde_json::Value]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    for record in records {
+        serde_json::to_writer(&mut bytes, record).unwrap();
+        bytes.push(b'\n');
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+fn append_claude_transcript(path: &Path, record: &serde_json::Value) {
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    serde_json::to_writer(&mut file, record).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.sync_all().unwrap();
+}
+
+fn indexed_claude_records(index: &Path, native_session_id: &str) -> Vec<CoreRecord> {
+    let key = ClaudeSessionKey {
+        root_session_id: native_session_id.to_owned(),
+        workflow_run_id: None,
+        agent_id: None,
+    };
+    let source = source_key(&key).unwrap();
+    let verified = VerifiedIndex::open(index).unwrap();
+    verified
+        .core_source_event_page(&source, None, 64)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| {
+            verified
+                .core_record_by_id(item.event_id.as_uuid())
+                .unwrap()
+                .unwrap()
+        })
+        .collect()
 }
 
 #[test]
@@ -613,6 +694,7 @@ fn duplicate_call_ids_are_ambiguous_and_result_linkage_abstains() {
                 command_too_large: false,
                 declared_workdir: Some("/tmp/repository".to_owned()),
                 event_sequence: 1,
+                ctx_retrieval_derived: false,
             }),
         );
     }
@@ -657,9 +739,365 @@ fn test_projector() -> ClaudeProjector {
         session: ClaudeSessionMetadata::new(key),
         pending_calls: HashMap::new(),
         linkage_capacity_exceeded: false,
+        result_terminal_authority: ClaudeResultTerminalAuthority::default(),
         rejected_records: 0,
         fallback_identities: FallbackEventIdentityState::default(),
     }
+}
+
+fn project_claude_records(projector: &mut ClaudeProjector, records: &[Vec<u8>]) -> Vec<CoreRecord> {
+    let mut authority = ClaudeResultTerminalAuthority {
+        available: true,
+        ..ClaudeResultTerminalAuthority::default()
+    };
+    for (ordinal, record) in records.iter().enumerate() {
+        let locator = ClaudePhysicalLocator {
+            path: PathBuf::from("test-session.jsonl"),
+            byte_start: 0,
+            byte_end_exclusive: record.len() as u64,
+            line_number: ordinal as u64 + 1,
+            record_sha256: Sha256::digest(record).into(),
+        };
+        if let Ok(parsed) = parse_native_record(record, ordinal as u64, &locator) {
+            for call_id in parsed.rows.iter().filter_map(|row| {
+                row.tool_result
+                    .as_ref()
+                    .and_then(|result| result.call_id.as_deref())
+            }) {
+                authority.observe(call_id, false);
+            }
+        }
+    }
+    projector.result_terminal_authority = authority;
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let mut emitted = Vec::new();
+    for (ordinal, record) in records.iter().enumerate() {
+        projector
+            .project(
+                JsonlRecordRef::for_test(record, ordinal as u64),
+                &mut worker,
+                &mut |record| {
+                    emitted.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    emitted
+}
+
+fn claude_ctx_call(call_id: &str, tool_name: &str, input: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "type": "assistant",
+        "uuid": format!("call-{call_id}"),
+        "sessionId": "test-session",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": call_id,
+            "name": tool_name,
+            "input": input,
+        }]},
+    }))
+    .unwrap()
+}
+
+fn claude_ctx_result(
+    call_id: &str,
+    content: &str,
+    is_error: Option<bool>,
+    extra_block_member: Option<(&str, serde_json::Value)>,
+    tool_use_result: Option<serde_json::Value>,
+) -> Vec<u8> {
+    let mut block = serde_json::json!({
+        "type": "tool_result",
+        "tool_use_id": call_id,
+        "content": content,
+    });
+    if let Some(is_error) = is_error {
+        block["is_error"] = serde_json::Value::Bool(is_error);
+    }
+    if let Some((key, value)) = extra_block_member {
+        block.as_object_mut().unwrap().insert(key.to_owned(), value);
+    }
+    let mut record = serde_json::json!({
+        "type": "user",
+        "uuid": format!("result-{call_id}"),
+        "sessionId": "test-session",
+        "message": {"role": "user", "content": [block]},
+    });
+    if let Some(tool_use_result) = tool_use_result {
+        record["toolUseResult"] = tool_use_result;
+    }
+    serde_json::to_vec(&record).unwrap()
+}
+
+#[test]
+fn claude_ctx_retrieval_cli_mcp_and_success_payloads_are_excluded_without_body_loss() {
+    let cli_call = claude_ctx_call(
+        "cli",
+        "Bash",
+        serde_json::json!({"command": "ctx --color=never search exact-canary"}),
+    );
+    let payload = "complete retrieval payload canary";
+    let cli_result = claude_ctx_result(
+        "cli",
+        payload,
+        Some(false),
+        None,
+        Some(serde_json::json!({
+            "stdout": payload,
+            "stderr": "",
+            "interrupted": false,
+            "isImage": false,
+            "noOutputExpected": false,
+        })),
+    );
+    let mcp_call = claude_ctx_call(
+        "mcp",
+        "mcp__ctx__search",
+        serde_json::json!({"query": "typed-canary"}),
+    );
+    let ordinary = claude_ctx_call(
+        "ordinary",
+        "Bash",
+        serde_json::json!({"command": "ctx status"}),
+    );
+
+    let records = project_claude_records(
+        &mut test_projector(),
+        &[cli_call, cli_result, mcp_call, ordinary],
+    );
+    assert_eq!(records.len(), 4);
+    for record in &records[..3] {
+        assert_eq!(
+            record.content.discovery_exclusion,
+            Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+        );
+    }
+    assert_eq!(records[3].content.discovery_exclusion, None);
+    assert_eq!(records[1].content.normalized_body.as_deref(), Some(payload));
+    assert_eq!(
+        records[1]
+            .content
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("result_content_complete"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn claude_duplicate_result_terminals_fail_open_without_retracting_invocation_exclusion() {
+    let call = claude_ctx_call(
+        "duplicate-result",
+        "Bash",
+        serde_json::json!({"command": "ctx search duplicate-result"}),
+    );
+    let first = claude_ctx_result(
+        "duplicate-result",
+        "first duplicate result payload",
+        Some(false),
+        None,
+        None,
+    );
+    let second = claude_ctx_result(
+        "duplicate-result",
+        "second duplicate result payload",
+        Some(false),
+        None,
+        None,
+    );
+
+    let records = project_claude_records(&mut test_projector(), &[call, first, second]);
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records[0].content.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(records[1].content.discovery_exclusion, None);
+    assert_eq!(records[2].content.discovery_exclusion, None);
+    assert_eq!(
+        records[1].content.normalized_body.as_deref(),
+        Some("first duplicate result payload")
+    );
+    assert_eq!(
+        records[2].content.normalized_body.as_deref(),
+        Some("second duplicate result payload")
+    );
+}
+
+#[test]
+fn claude_late_duplicate_result_forces_replacement_and_retracts_prior_exclusion() {
+    let temp = tempfile::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let transcript = projects
+        .join("project")
+        .join("late-duplicate-session.jsonl");
+    let index = temp.path().join("index");
+    let native_session_id = "late-duplicate-session";
+    let call_id = "late-duplicate-result";
+    let call = serde_json::json!({
+        "type": "assistant",
+        "uuid": "late-duplicate-call",
+        "sessionId": native_session_id,
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": call_id,
+            "name": "Bash",
+            "input": {"command": "ctx search late-duplicate"}
+        }]},
+    });
+    let result = |uuid: &str, content: &str| {
+        serde_json::json!({
+            "type": "user",
+            "uuid": uuid,
+            "sessionId": native_session_id,
+            "message": {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": call_id,
+                "content": content,
+                "is_error": false
+            }]},
+        })
+    };
+    write_claude_transcript(
+        &transcript,
+        &[
+            call,
+            result(
+                "late-duplicate-first",
+                "first late duplicate Claude payload",
+            ),
+        ],
+    );
+    let registry = claude_test_registry(&projects);
+
+    refresh_source_backed_generation(&index, &registry, claude_test_writer_options()).unwrap();
+    let initial = indexed_claude_records(&index, native_session_id);
+    assert_eq!(initial.len(), 2);
+    assert!(initial.iter().all(|record| {
+        record.content.discovery_exclusion == Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    }));
+    let initial_ids = initial
+        .iter()
+        .map(|record| record.event_id)
+        .collect::<Vec<_>>();
+
+    append_claude_transcript(
+        &transcript,
+        &result(
+            "late-duplicate-second",
+            "second late duplicate Claude payload",
+        ),
+    );
+    refresh_source_backed_generation(&index, &registry, claude_test_writer_options()).unwrap();
+    let corrected = indexed_claude_records(&index, native_session_id);
+    assert_eq!(corrected.len(), 3);
+    assert_eq!(corrected[0].event_id, initial_ids[0]);
+    assert_eq!(corrected[1].event_id, initial_ids[1]);
+    assert_eq!(
+        corrected[0].content.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(corrected[1].content.discovery_exclusion, None);
+    assert_eq!(corrected[2].content.discovery_exclusion, None);
+    assert_eq!(
+        corrected[1].content.normalized_body.as_deref(),
+        Some("first late duplicate Claude payload")
+    );
+    assert_eq!(
+        corrected[2].content.normalized_body.as_deref(),
+        Some("second late duplicate Claude payload")
+    );
+}
+
+#[test]
+fn claude_ctx_retrieval_results_fail_open_for_every_unproven_or_diagnostic_envelope() {
+    let payload = "searchable diagnostic payload";
+    let cases = [
+        ("missing-success", None, None, None),
+        ("failed", Some(true), None, None),
+        (
+            "warning",
+            Some(false),
+            Some(("warning", serde_json::json!("provider warning"))),
+            None,
+        ),
+        (
+            "unknown-member",
+            Some(false),
+            Some(("future_field", serde_json::json!(true))),
+            None,
+        ),
+        (
+            "stderr",
+            Some(false),
+            None,
+            Some(serde_json::json!({
+                "stdout": payload,
+                "stderr": "provider stderr",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false,
+            })),
+        ),
+        (
+            "partial-envelope",
+            Some(false),
+            None,
+            Some(serde_json::json!({"stdout": payload})),
+        ),
+    ];
+
+    for (call_id, is_error, extra, tool_use_result) in cases {
+        let call = claude_ctx_call(
+            call_id,
+            "Bash",
+            serde_json::json!({"command": "ctx search fail-open"}),
+        );
+        let result = claude_ctx_result(call_id, payload, is_error, extra, tool_use_result);
+        let records = project_claude_records(&mut test_projector(), &[call, result]);
+        assert_eq!(
+            records[0].content.discovery_exclusion,
+            Some(CoreDiscoveryExclusion::CtxRetrievalDerived),
+            "invocation did not classify for {call_id}"
+        );
+        assert_eq!(
+            records[1].content.discovery_exclusion, None,
+            "result did not fail open for {call_id}"
+        );
+        assert_eq!(records[1].content.normalized_body.as_deref(), Some(payload));
+    }
+}
+
+#[test]
+fn claude_ctx_retrieval_pending_classification_survives_append_checkpoint() {
+    let call = claude_ctx_call(
+        "append",
+        "Bash",
+        serde_json::json!({"command": "ctx show event deadbeef"}),
+    );
+    let mut initial = test_projector();
+    let call_records = project_claude_records(&mut initial, &[call]);
+    assert_eq!(
+        call_records[0].content.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    let checkpoint = encode_projector_checkpoint(&initial).unwrap();
+    let restored = decode_projector_checkpoint(&checkpoint, &initial.binding).unwrap();
+    let mut appended = test_projector();
+    appended.session = restored.session;
+    appended.pending_calls = restored.pending_calls;
+    appended.linkage_capacity_exceeded = restored.linkage_capacity_exceeded;
+
+    let result = claude_ctx_result("append", "append payload", Some(false), None, None);
+    let result_records = project_claude_records(&mut appended, &[result]);
+    assert_eq!(
+        result_records[0].content.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert!(appended.pending_calls.is_empty());
 }
 
 #[test]
@@ -1146,6 +1584,7 @@ fn checkpoint_byte_overflow_degrades_to_typed_linkage_capacity() {
             command_too_large: false,
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 1,
+            ctx_retrieval_derived: false,
         }),
     );
 
@@ -1222,6 +1661,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
             command_too_large: false,
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 0,
+            ctx_retrieval_derived: false,
         }),
     );
     let mut projector = ClaudeProjector {
@@ -1232,6 +1672,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         session: ClaudeSessionMetadata::new(key),
         pending_calls,
         linkage_capacity_exceeded,
+        result_terminal_authority: ClaudeResultTerminalAuthority::default(),
         rejected_records: 0,
         fallback_identities: FallbackEventIdentityState::default(),
     };
@@ -1271,6 +1712,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
             command_too_large: false,
             declared_workdir: Some("/tmp/project".to_owned()),
             event_sequence: 1_u64 << 16,
+            ctx_retrieval_derived: false,
         }),
     );
     let mut input = AttributionInput::default();

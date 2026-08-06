@@ -5,8 +5,8 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    EventRole, EventType, FileChangeKind, McpExchangeContent, McpToolCallAttribution,
-    RepositoryFileObservationKind, SessionRelationshipKind,
+    CoreDiscoveryExclusion, EventRole, EventType, FileChangeKind, McpExchangeContent,
+    McpToolCallAttribution, RepositoryFileObservationKind, SessionRelationshipKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -100,6 +100,7 @@ pub(crate) struct CodexSourceBackedRowV0 {
     pub(crate) session_cwd: Option<String>,
     pub(crate) lexical_body: String,
     pub(crate) structured_content: Option<Value>,
+    pub(crate) discovery_exclusion: Option<CoreDiscoveryExclusion>,
     pub(crate) mcp_tool_call: Option<McpToolCallAttribution>,
     pub(crate) mcp_exchange: Option<McpExchangeContent>,
     pub(crate) touched_paths: Vec<String>,
@@ -315,6 +316,9 @@ pub(super) fn build_source_backed_event_row(
     kind: CodexRetainedKind,
     retained: &CodexDecodedRecord,
 ) -> CaptureResult<std::result::Result<CodexSourceBackedBuiltRowV0, CodexRetainedNonMaterialized>> {
+    let discovery_exclusion = (kind == CodexRetainedKind::ToolCall)
+        .then(|| codex_tool_call_discovery_exclusion(&retained.payload))
+        .flatten();
     let semantic = match source_backed_semantic_projection(kind, &retained.payload) {
         SourceBackedSemanticProjection::Materialized(semantic) => *semantic,
         SourceBackedSemanticProjection::ValidUnmaterializable => {
@@ -355,6 +359,7 @@ pub(super) fn build_source_backed_event_row(
             session_cwd: None,
             lexical_body: semantic.lexical_body,
             structured_content: semantic.structured_content,
+            discovery_exclusion,
             mcp_tool_call: None,
             mcp_exchange: None,
             touched_paths: Vec::new(),
@@ -376,6 +381,7 @@ pub(super) fn build_source_backed_sparse_output_row(
     _outcome: &OutputOutcomeMetadata,
     normalized_body: String,
     structured_content: Option<Value>,
+    discovery_exclusion: Option<CoreDiscoveryExclusion>,
     mcp_tool_call: Option<McpToolCallAttribution>,
     mcp_exchange: Option<McpExchangeContent>,
     repository_result: Option<CodexRepositoryResultEvidence>,
@@ -403,6 +409,7 @@ pub(super) fn build_source_backed_sparse_output_row(
         session_cwd,
         lexical_body,
         structured_content,
+        discovery_exclusion,
         mcp_tool_call,
         mcp_exchange,
         touched_paths: Vec::new(),
@@ -410,6 +417,32 @@ pub(super) fn build_source_backed_sparse_output_row(
         repository_result,
         repository_files: Vec::new(),
     }))
+}
+
+fn codex_tool_call_discovery_exclusion(payload: &Value) -> Option<CoreDiscoveryExclusion> {
+    if payload.get("type").and_then(Value::as_str) != Some("function_call")
+        || payload.get("tool").is_some()
+        || !payload
+            .get("call_id")
+            .and_then(Value::as_str)
+            .is_some_and(|call_id| !call_id.is_empty())
+    {
+        return None;
+    }
+    let tool_name = payload.get("name").and_then(Value::as_str)?;
+    if !crate::provider::codex::events::codex_is_command_tool(tool_name) {
+        return None;
+    }
+    let mut argument_candidates = ["arguments", "input", "action", "execution"]
+        .into_iter()
+        .filter_map(|field| payload.get(field));
+    let arguments = argument_candidates.next()?;
+    if argument_candidates.next().is_some() {
+        return None;
+    }
+    crate::provider::ctx_retrieval::discovery_exclusion_for([
+        crate::provider::ctx_retrieval::classify_direct_cli_tool_input(arguments),
+    ])
 }
 
 pub(super) fn provider_event_identity(payload: &Value) -> Option<CodexProviderEventIdentityV0> {
