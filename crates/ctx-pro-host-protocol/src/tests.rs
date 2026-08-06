@@ -127,6 +127,8 @@ fn finalizing_status_binds_durable_progress_without_displacing_prior_receipt() {
     let progress = CoreMaterializationFinalizationProgress {
         materialization_id: "e".repeat(64),
         core_generation_id: requested.clone(),
+        finish_request_digest: "1".repeat(64),
+        materializer_revision: "materializer-v1".to_owned(),
         phase: CoreMaterializationFinalizationPhase::EmitFlat,
         cursor_sha256: "f".repeat(64),
     };
@@ -134,12 +136,12 @@ fn finalizing_status_binds_durable_progress_without_displacing_prior_receipt() {
         currentness: CoreProjectionCurrentness::Finalizing,
         requested_core_generation_id: Some(requested),
         core_receipt: Some(receipt('a')),
-        coverage: MaterializedCoverage::Partial,
-        repository_coverage: RepositoryCoverage::default(),
+        coverage: MaterializedCoverage::Complete,
+        repository_coverage: repository_coverage(2),
         core_preparation_peak_workers: 4,
         access: access(ProAccessState::Available),
         supported_operations: operations(),
-        available_operations: BTreeSet::new(),
+        available_operations: operations(),
         finalization_progress: Some(progress),
         storage_evidence: None,
     };
@@ -155,6 +157,8 @@ fn finalizing_status_binds_durable_progress_without_displacing_prior_receipt() {
     status.finalization_progress = Some(CoreMaterializationFinalizationProgress {
         materialization_id: "e".repeat(64),
         core_generation_id: "d".repeat(64),
+        finish_request_digest: "1".repeat(64),
+        materializer_revision: "materializer-v1".to_owned(),
         phase: CoreMaterializationFinalizationPhase::EmitFlat,
         cursor_sha256: "f".repeat(64),
     });
@@ -408,6 +412,29 @@ fn core_capability_and_strict_status_frame_round_trip() {
 
     let value = serde_json::json!({"requested_core_generation_id": null, "legacy": true});
     assert!(serde_json::from_value::<StatusRequest>(value).is_err());
+}
+
+#[test]
+fn protocol_v2_frame_is_rejected_before_v3_payload_decoding() {
+    let envelope = HostEnvelope {
+        sequence: 4,
+        request_id: uuid::Uuid::from_u128(1),
+        message: HostMessage::Status(StatusRequest {
+            requested_core_generation_id: None,
+        }),
+    };
+    let mut bytes = Vec::new();
+    write_frame(&mut bytes, &envelope).unwrap();
+    let version_offset = FRAME_MAGIC.len();
+    bytes[version_offset..version_offset + 2].copy_from_slice(&2_u16.to_be_bytes());
+
+    assert!(matches!(
+        read_frame::<_, HostEnvelope>(&mut Cursor::new(bytes)),
+        Err(FrameError::UnsupportedVersion {
+            received: 2,
+            supported: 3
+        })
+    ));
 }
 
 #[test]

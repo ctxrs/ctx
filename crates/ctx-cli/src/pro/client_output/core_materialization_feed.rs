@@ -537,17 +537,20 @@ fn sync_core_feed_attempt_with_launch<C: CoreMaterializationConsumer>(
     match consumer.finish(finish.clone())? {
         CoreMaterializationFinalizationStep::Pending(pending) => {
             pending
-                .validate_for_finish(&finish)
+                .validate_for_finish(&finish, &began.materializer_revision)
                 .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
             Ok(CoreMaterializationSyncProgress::FinalizationPending(
                 pending,
             ))
         }
         CoreMaterializationFinalizationStep::Finished(finished) => {
+            finished
+                .validate_for_finish(&finish, &began.materializer_revision)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
             validate_finished_core(
                 &head,
                 &finished,
-                Some(&began.materializer_revision),
+                &began.materializer_revision,
                 consumer,
                 selection,
             )?;
@@ -601,9 +604,18 @@ fn continue_core_finalization<C: CoreMaterializationConsumer>(
             ))
         }
         CoreMaterializationFinalizationStep::Finished(finished) => {
+            finished
+                .validate_for_continue(&request)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
             let sources = core_source_states(index.manifest())?;
             let head = core_generation_head(index, &sources)?;
-            validate_finished_core(&head, &finished, None, consumer, selection)?;
+            validate_finished_core(
+                &head,
+                &finished,
+                &request.expected_progress.materializer_revision,
+                consumer,
+                selection,
+            )?;
             Ok(CoreMaterializationSyncProgress::Finished(
                 CoreMaterializationSyncReport {
                     receipt: finished.receipt,
@@ -628,7 +640,7 @@ fn continue_core_finalization<C: CoreMaterializationConsumer>(
 fn validate_finished_core<C: CoreMaterializationConsumer>(
     head: &CoreGenerationHead,
     finished: &CoreMaterializationFinished,
-    expected_materializer_revision: Option<&str>,
+    expected_materializer_revision: &str,
     consumer: &mut C,
     selection: CoreWorkerLaunchSelection,
 ) -> Result<()> {
@@ -636,9 +648,7 @@ fn validate_finished_core<C: CoreMaterializationConsumer>(
         .receipt
         .validate_for_head(head)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    if expected_materializer_revision
-        .is_some_and(|revision| finished.receipt.materializer_revision != revision)
-    {
+    if finished.receipt.materializer_revision != expected_materializer_revision {
         bail!("invalid_response: terminal Core receipt changed materializer revision");
     }
     let post_finish_status = consumer.status(StatusRequest {

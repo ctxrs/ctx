@@ -171,11 +171,7 @@ impl ProClient {
             HelperMessage::Error(error) => return Err(protocol_error(error)),
             _ => bail!("protocol_mismatch: helper did not answer hello negotiation"),
         };
-        if hello.protocol_version != PROTOCOL_VERSION
-            || hello.protocol_fingerprint != protocol_fingerprint
-        {
-            bail!("protocol_mismatch: helper does not implement the exact Protocol V1 inventory");
-        }
+        validate_hello_identity(&hello, &protocol_fingerprint)?;
         if !hello.capabilities.is_subset(&offered) {
             bail!("protocol_mismatch: helper advertised capabilities the host did not offer");
         }
@@ -340,7 +336,19 @@ pub(super) fn validate_protocol_session(
     protocol_fingerprint: &str,
 ) -> Result<()> {
     if protocol_fingerprint != PROTOCOL_FINGERPRINT {
-        bail!("protocol_mismatch: ctx requires the current Protocol V1 fingerprint");
+        bail!("protocol_mismatch: ctx requires the current Protocol V3 fingerprint");
+    }
+    Ok(())
+}
+
+pub(super) fn validate_hello_identity(
+    hello: &ctx_pro_host_protocol::HelloResult,
+    protocol_fingerprint: &str,
+) -> Result<()> {
+    if hello.protocol_version != PROTOCOL_VERSION
+        || hello.protocol_fingerprint != protocol_fingerprint
+    {
+        bail!("protocol_mismatch: helper does not implement the exact Protocol V3 inventory");
     }
     Ok(())
 }

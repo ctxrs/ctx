@@ -248,6 +248,7 @@ struct Consumer {
     event_state_response_loss_after: Option<u64>,
     event_response_loss_after: Option<u64>,
     lose_finish_response: bool,
+    terminal_finish_digest_override: Option<String>,
     rebuild_required_finishes: u8,
     finish_pending: Option<CoreMaterializationFinalizationPending>,
     continue_pending: Option<CoreMaterializationFinalizationPending>,
@@ -706,7 +707,11 @@ impl CoreMaterializationConsumer for Consumer {
             self.finish = Some(request);
             return Ok(CoreMaterializationFinalizationStep::Pending(pending));
         }
+        let materialization_id = request.materialization_id.clone();
+        let finish_request_digest = request.canonical_digest().unwrap();
         let response = CoreMaterializationFinished {
+            materialization_id,
+            finish_request_digest,
             receipt: CoreMaterializationReceipt {
                 core_generation_id: request.head.core_generation_id.clone(),
                 core_record_contract_fingerprint: request
@@ -746,6 +751,11 @@ impl CoreMaterializationConsumer for Consumer {
             .as_ref()
             .ok_or_else(|| anyhow!("invalid_request: no Core materialization to continue"))?;
         let response = CoreMaterializationFinished {
+            materialization_id: request.expected_progress.materialization_id.clone(),
+            finish_request_digest: self
+                .terminal_finish_digest_override
+                .take()
+                .unwrap_or_else(|| request.expected_progress.finish_request_digest.clone()),
             receipt: CoreMaterializationReceipt {
                 core_generation_id: finish.head.core_generation_id.clone(),
                 core_record_contract_fingerprint: finish

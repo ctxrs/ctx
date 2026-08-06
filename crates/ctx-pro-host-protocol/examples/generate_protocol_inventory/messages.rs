@@ -236,9 +236,16 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
         ),
         (
             "core_materialization_finished",
-            HelperMessage::CoreMaterializationFinished(CoreMaterializationFinished {
-                receipt: receipt(),
-                replayed: false,
+            HelperMessage::CoreMaterializationFinished({
+                let finish = finish_request();
+                CoreMaterializationFinished {
+                    materialization_id: finish.materialization_id.clone(),
+                    finish_request_digest: finish
+                        .canonical_digest()
+                        .unwrap_or_else(|error| panic!("finish request digest: {}", error.message)),
+                    receipt: receipt(),
+                    replayed: false,
+                }
             }),
         ),
         (
@@ -290,6 +297,10 @@ fn finalization_progress(
     CoreMaterializationFinalizationProgress {
         materialization_id: materialization_id(),
         core_generation_id: "a".repeat(64),
+        finish_request_digest: finish_request()
+            .canonical_digest()
+            .unwrap_or_else(|error| panic!("finish request digest: {}", error.message)),
+        materializer_revision: "golden-core-materializer-v1".to_owned(),
         phase,
         cursor_sha256: cursor.to_string().repeat(64),
     }

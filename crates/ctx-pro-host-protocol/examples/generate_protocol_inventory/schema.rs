@@ -270,11 +270,14 @@ pub(super) fn inventory() -> Value {
             ], &[]),
             "ContinueCoreMaterializationRequest": fields(&["expected_progress"], &[]),
             "CoreMaterializationFinalizationProgress": fields(&[
-                "materialization_id", "core_generation_id", "phase", "cursor_sha256"
+                "materialization_id", "core_generation_id", "finish_request_digest",
+                "materializer_revision", "phase", "cursor_sha256"
             ], &[]),
             "CoreMaterializationFinalizationPending": fields(
                 &["progress", "replayed"], &[]),
-            "CoreMaterializationFinished": fields(&["receipt", "replayed"], &[]),
+            "CoreMaterializationFinished": fields(&[
+                "materialization_id", "finish_request_digest", "receipt", "replayed"
+            ], &[]),
             "QuerySnapshotExpectation.core": fields(&["kind", "receipt"], &[]),
             "ProtocolError": fields(
                 &["class", "message", "retryable", "details"], &[]),

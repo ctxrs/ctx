@@ -318,7 +318,7 @@ pub(crate) fn pin_active_verified_generation(
         .map(PinnedSourceBackedGeneration)
 }
 
-fn pin_retained_generation(
+pub(crate) fn pin_retained_generation(
     data_root: &Path,
     generation_id: &str,
 ) -> Result<PinnedSourceBackedGeneration> {

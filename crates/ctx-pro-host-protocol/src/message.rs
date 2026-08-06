@@ -170,7 +170,7 @@ impl<'de> Deserialize<'de> for HelperEnvelope {
 }
 
 // Core record pages intentionally carry complete records and can dominate this
-// enum's stack size. Boxing changes only the Rust representation, never wire V1.
+// enum's stack size. Boxing changes only the Rust representation, never wire V3.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -195,6 +195,9 @@ pub enum HostMessage {
     ApplyCoreEventDeltaPages(ApplyCoreEventDeltaPagesRequest),
 }
 
+// Complete query and Core page responses likewise dominate this wire enum's
+// in-memory size. Its serde representation remains the Protocol V3 authority.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -608,13 +611,26 @@ impl StatusResult {
                         "finalizing Core status requires durable progress",
                     )
                 })?;
+                let prior_active = self.core_receipt.as_ref();
                 if self.requested_core_generation_id.as_deref()
                     != Some(progress.core_generation_id.as_str())
-                    || self.coverage != MaterializedCoverage::Partial
+                    || prior_active.is_some_and(|receipt| {
+                        receipt.core_generation_id == progress.core_generation_id
+                    })
+                    || if prior_active.is_some() {
+                        !matches!(
+                            self.coverage,
+                            MaterializedCoverage::Complete
+                                | MaterializedCoverage::Empty
+                                | MaterializedCoverage::Abstained
+                        )
+                    } else {
+                        self.coverage != MaterializedCoverage::Partial
+                    }
                 {
                     return Err(ProtocolError::new(
                         ErrorClass::Sequence,
-                        "finalizing Core status does not match its requested generation or coverage",
+                        "finalizing Core status does not match its target or prior active projection",
                     ));
                 }
             }
@@ -634,10 +650,13 @@ impl StatusResult {
                 | MaterializedCoverage::Empty
                 | MaterializedCoverage::Abstained
         );
-        if terminal_coverage != (self.currentness == CoreProjectionCurrentness::Current) {
+        let completed_snapshot = self.currentness == CoreProjectionCurrentness::Current
+            || (self.currentness == CoreProjectionCurrentness::Finalizing
+                && self.core_receipt.is_some());
+        if terminal_coverage != completed_snapshot {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
-                "terminal materialized coverage requires a current Core projection",
+                "terminal materialized coverage requires a current or prior active Core projection",
             ));
         }
         if let Some(receipt) = &self.core_receipt {
@@ -669,7 +688,7 @@ impl StatusResult {
                 "available Pro operations must be a subset of supported operations",
             ));
         }
-        let globally_ready = self.currentness == CoreProjectionCurrentness::Current
+        let globally_ready = completed_snapshot
             && self.coverage == MaterializedCoverage::Complete
             && self.access.global_prerequisites_available();
         if !globally_ready && !self.available_operations.is_empty() {

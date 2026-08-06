@@ -846,6 +846,16 @@ fn explicit_finite_idle_exit_remains_due_with_retry_and_refresh_pending() {
 }
 
 #[test]
+fn explicit_finite_idle_exit_can_defer_pending_pro_finalization() {
+    assert!(daemon_should_attempt_finite_idle_shutdown(
+        Some(StdDuration::ZERO),
+        Some(Instant::now()),
+        false,
+        false,
+    ));
+}
+
+#[test]
 fn persistent_default_never_has_a_finite_idle_exit() {
     assert!(!daemon_should_attempt_finite_idle_shutdown(
         None,

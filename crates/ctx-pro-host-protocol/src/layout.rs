@@ -1,6 +1,6 @@
 //! Filesystem and helper-launch contract shared by the OSS host and Pro helper.
 //!
-//! These names are part of the exact local Protocol V2 integration contract.
+//! These names are part of the exact local Protocol V3 integration contract.
 //! Callers remain responsible for path authorization and filesystem safety.
 
 use std::path::{Path, PathBuf};

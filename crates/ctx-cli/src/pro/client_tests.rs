@@ -3,9 +3,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use ctx_pro_host_protocol::{
     BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameResult,
-    CoreMaterializationReceipt, CoreProjectionCurrentness, ErrorClass, MaterializedCoverage,
-    ProAccessState, ProAccessStatus, ProOperation, ProStorageEvidence, ProtocolError,
-    QuerySnapshotExpectation, RepositoryCoverage, ResolvedBlameTarget, ResourceKind, ResourceRef,
+    CoreMaterializationFinalizationPhase, CoreMaterializationFinalizationProgress,
+    CoreMaterializationReceipt, CoreProjectionCurrentness, ErrorClass, HelloResult,
+    MaterializedCoverage, ProAccessState, ProAccessStatus, ProOperation, ProStorageEvidence,
+    ProtocolError, QuerySnapshotExpectation, RepositoryCoverage, ResolvedBlameTarget, ResourceKind,
+    ResourceRef,
 };
 
 fn receipt(generation: char) -> CoreMaterializationReceipt {
@@ -139,7 +141,7 @@ fn every_helper_session_requires_the_current_protocol_fingerprint() {
         let error = super::transport::validate_protocol_session(&core, fingerprint).unwrap_err();
         assert!(error
             .to_string()
-            .contains("requires the current Protocol V1 fingerprint"));
+            .contains("requires the current Protocol V3 fingerprint"));
     }
     super::transport::validate_protocol_session(&core, PROTOCOL_FINGERPRINT).unwrap();
 
@@ -149,6 +151,20 @@ fn every_helper_session_requires_the_current_protocol_fingerprint() {
         "0a5db03b653a8effa18ff3ef6a275b085f3e68eedf7d3f982ac18d4a6c38b642",
     )
     .is_err());
+}
+
+#[test]
+fn protocol_v2_hello_is_rejected_by_the_exact_v3_handshake() {
+    let hello = HelloResult {
+        protocol_version: 2,
+        protocol_fingerprint: PROTOCOL_FINGERPRINT.to_owned(),
+        helper_version: "legacy-helper".to_owned(),
+        capabilities: BTreeSet::from([Capability::Status]),
+        authorization_challenge_base64url: String::new(),
+    };
+    let error =
+        super::transport::validate_hello_identity(&hello, PROTOCOL_FINGERPRINT).unwrap_err();
+    assert!(error.to_string().contains("exact Protocol V3 inventory"));
 }
 
 #[test]
@@ -168,6 +184,59 @@ fn blame_request_is_bound_to_the_exact_core_receipt() {
     let ctx_pro_host_protocol::QuerySnapshotExpectation::Core { receipt } =
         request.expected_snapshot;
     assert_eq!(receipt.core_generation_id, "a".repeat(64));
+}
+
+#[test]
+fn unscoped_status_keeps_the_prior_active_snapshot_queryable() {
+    let mut finalizing = status(MaterializedCoverage::Complete);
+    finalizing.currentness = CoreProjectionCurrentness::Finalizing;
+    finalizing.requested_core_generation_id = Some("b".repeat(64));
+    finalizing.finalization_progress = Some(CoreMaterializationFinalizationProgress {
+        materialization_id: "c".repeat(64),
+        core_generation_id: "b".repeat(64),
+        finish_request_digest: "d".repeat(64),
+        materializer_revision: "materializer-v1".to_owned(),
+        phase: CoreMaterializationFinalizationPhase::EmitReplay,
+        cursor_sha256: "e".repeat(64),
+    });
+    finalizing.validate().unwrap();
+
+    let status = helper_status_with(None, &mut |message, _| {
+        let HostMessage::Status(request) = message else {
+            panic!("unscoped helper status must send Status")
+        };
+        assert!(request.requested_core_generation_id.is_none());
+        Ok(HelperMessage::Status(finalizing.clone()))
+    })
+    .unwrap();
+    let generation = blame_core_generation(&status, None).unwrap();
+
+    let request = support::current_blame_request(
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        None,
+        &status,
+        &generation,
+    )
+    .unwrap();
+    let QuerySnapshotExpectation::Core { receipt } = request.expected_snapshot;
+    assert_eq!(receipt.core_generation_id, "a".repeat(64));
+
+    let wait_error = support::current_blame_request(
+        BlameTarget::Commit {
+            oid: "0123456789abcdef".to_owned(),
+            repository: None,
+        },
+        10,
+        None,
+        &status,
+        &"b".repeat(64),
+    )
+    .unwrap_err();
+    assert_eq!(stable_error_code(&wait_error), Some("stale_source"));
 }
 
 #[test]

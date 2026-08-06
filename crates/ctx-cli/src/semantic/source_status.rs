@@ -537,7 +537,7 @@ fn pro_projection_report_from_status(
     } else {
         match currentness {
             Some("stale") => ("stale", json!("stale_source")),
-            Some("not_materialized" | "partial") => (
+            Some("not_materialized" | "partial" | "finalizing") => (
                 "pending",
                 lifecycle
                     .get("error_code")

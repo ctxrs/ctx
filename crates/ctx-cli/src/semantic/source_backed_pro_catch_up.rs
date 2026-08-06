@@ -124,7 +124,6 @@ impl SourceBackedProCatchUpStatus {
         }
         self.error_code = Some(error.code().to_owned());
         self.last_error = Some(error.to_string());
-        self.finalization_progress = None;
         self
     }
 
@@ -169,6 +168,12 @@ impl SourceBackedProCatchUpStatus {
             && self.receipt_core_generation_id.as_deref() == Some(core_generation_id)
     }
 
+    fn is_scheduled_target(&self) -> bool {
+        self.pending
+            && (self.retryable || self.reason.as_deref() == Some("finalizing"))
+            && self.status != SourceBackedProCatchUpState::Completed
+    }
+
     fn to_json(&self) -> Result<Value> {
         Ok(compact_json(serde_json::to_value(self)?))
     }
@@ -210,10 +215,14 @@ impl SourceBackedProCatchUpError {
     }
 
     fn retryable(&self) -> bool {
-        !matches!(
-            self,
-            Self::Projection { code, .. } if code == "pro_not_installed"
-        )
+        match self {
+            Self::GenerationMismatch { .. } => false,
+            Self::IndexUnavailable(_) => true,
+            Self::Projection { code, .. } => !matches!(
+                code.as_str(),
+                "pro_not_installed" | "invalid_response" | "protocol_mismatch"
+            ),
+        }
     }
 }
 
@@ -329,7 +338,14 @@ where
     let prior = read_status(data_root);
     let attempts = next_attempt(prior.as_ref(), core_generation_id);
     let attempt_started = Instant::now();
-    let pending = SourceBackedProCatchUpStatus::pending(core_generation_id, attempts);
+    let pending = prior
+        .as_ref()
+        .filter(|status| status.core_generation_id == core_generation_id)
+        .and_then(|status| status.finalization_progress.clone())
+        .map(|progress| {
+            SourceBackedProCatchUpStatus::pending(core_generation_id, attempts).finalizing(progress)
+        })
+        .unwrap_or_else(|| SourceBackedProCatchUpStatus::pending(core_generation_id, attempts));
     persist_status(data_root, &pending)?;
 
     let result = (|| {
@@ -497,6 +513,28 @@ pub(super) fn status_generation(data_root: &Path) -> Option<String> {
     read_status(data_root).map(|status| status.core_generation_id)
 }
 
+pub(super) fn scheduled_target_generation(data_root: &Path) -> Result<Option<String>> {
+    let Some(value) = read_status_json(data_root) else {
+        return Ok(None);
+    };
+    let status: SourceBackedProCatchUpStatus = serde_json::from_value(value)
+        .context("decode durable source-backed Pro catch-up target")?;
+    if !status.is_scheduled_target() {
+        return Ok(None);
+    }
+    if let Some(progress) = &status.finalization_progress {
+        progress.validate().map_err(|error| {
+            anyhow::anyhow!("invalid durable Pro finalization target: {}", error.message)
+        })?;
+        if progress.core_generation_id != status.core_generation_id {
+            anyhow::bail!(
+                "invalid durable Pro finalization target: progress generation does not match its job"
+            );
+        }
+    }
+    Ok(Some(status.core_generation_id))
+}
+
 pub(super) fn status_has_finalization_pending(data_root: &Path, core_generation_id: &str) -> bool {
     read_status(data_root).is_some_and(|status| {
         status.status == SourceBackedProCatchUpState::Pending
@@ -570,9 +608,14 @@ fn wait_for_completed_generation_with(
 mod tests {
     use std::cell::Cell;
 
+    use ctx_history_core::{
+        CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation, TypedKey,
+    };
     use ctx_history_index::{GenerationWriter, WriterOptions};
 
-    use crate::semantic::source_backed_refresh_coordinator::count_verified_index_opens;
+    use crate::semantic::source_backed_refresh_coordinator::{
+        count_verified_index_opens, pin_retained_generation,
+    };
 
     use super::*;
 
@@ -586,6 +629,45 @@ mod tests {
         .unwrap()
         .commit(|_| true)
         .unwrap();
+        open_verified_index(&source_backed_index_root(data_root)).unwrap()
+    }
+
+    fn index_with_certified_source(data_root: &Path) -> VerifiedIndex {
+        let source = SourceKey::derive(
+            "codex",
+            "codex_session_jsonl",
+            "session",
+            1,
+            SourceAnchor::provider_native(
+                "session-file",
+                TypedKey::utf8("continuation-newer-core.jsonl").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let observation =
+            SourceObservation::new(source.clone(), "regular-file-v1", vec![1]).unwrap();
+        let mut writer = GenerationWriter::open(
+            source_backed_index_root(data_root),
+            WriterOptions::default(),
+        )
+        .unwrap()
+        .into_writer()
+        .unwrap();
+        writer.begin_source(source).unwrap();
+        writer
+            .certify_source(
+                CertifiedSource::certify(
+                    observation.clone(),
+                    observation,
+                    "continuation-test-parser-v1",
+                    [7; 32],
+                    ScannedSourceCounts::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        writer.commit(|_| true).unwrap();
         open_verified_index(&source_backed_index_root(data_root)).unwrap()
     }
 
@@ -629,6 +711,8 @@ mod tests {
                 progress: CoreMaterializationFinalizationProgress {
                     materialization_id: "b".repeat(64),
                     core_generation_id: index.generation_id().to_owned(),
+                    finish_request_digest: "d".repeat(64),
+                    materializer_revision: "test-core-materializer-v1".to_owned(),
                     phase,
                     cursor_sha256: cursor.to_string().repeat(64),
                 },
@@ -712,6 +796,175 @@ mod tests {
             generation
         );
         assert!(status_has_finalization_pending(temp.path(), &generation));
+    }
+
+    #[test]
+    fn lost_pending_response_keeps_exact_target_after_core_advances() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        let lost = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| Ok(()),
+            |_, _| anyhow::bail!("helper_crashed: committed Pending response was lost"),
+        )
+        .unwrap();
+        assert_eq!(lost.status["status"], "error");
+        assert_eq!(lost.status["retryable"], true);
+        assert_eq!(
+            scheduled_target_generation(temp.path()).unwrap().as_deref(),
+            Some(generation.as_str())
+        );
+
+        let newer = index_with_certified_source(temp.path());
+        assert_ne!(newer.generation_id(), generation);
+        let retained = pin_retained_generation(temp.path(), &generation).unwrap();
+        assert_eq!(retained.generation_id(), generation);
+        let resumed = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(retained.generation_id()),
+                verified_index: Some(retained.verified_index()),
+            },
+            |_| Ok(()),
+            |_, supplied| {
+                Ok(finalization_outcome(
+                    supplied,
+                    CoreMaterializationFinalizationPhase::EmitReplay,
+                    'c',
+                    true,
+                ))
+            },
+        )
+        .unwrap();
+        assert!(resumed.continuation_pending);
+        assert_eq!(resumed.status["core_generation_id"], generation);
+        assert_eq!(resumed.status["reason"], "finalizing");
+    }
+
+    #[test]
+    fn lost_continue_response_preserves_finalizing_tuple_until_reconciliation() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        let first = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |_| Ok(()),
+            |_, supplied| {
+                Ok(finalization_outcome(
+                    supplied,
+                    CoreMaterializationFinalizationPhase::EmitReplay,
+                    'c',
+                    false,
+                ))
+            },
+        )
+        .unwrap();
+        let expected = first.status["finalization_progress"].clone();
+
+        let lost = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |data_root| {
+                let during_attempt = read_status_json(data_root).unwrap();
+                assert_eq!(during_attempt["reason"], "finalizing");
+                assert_eq!(during_attempt["finalization_progress"], expected);
+                Ok(())
+            },
+            |_, _| anyhow::bail!("helper_crashed: committed Continue response was lost"),
+        )
+        .unwrap();
+        assert_eq!(lost.status["status"], "error");
+        assert_eq!(lost.status["retryable"], true);
+        assert_eq!(lost.status["finalization_progress"], expected);
+
+        let reconciled = run_with(
+            temp.path(),
+            &generation,
+            ProCatchUpAuthority {
+                generation_id: Some(&generation),
+                verified_index: Some(&index),
+            },
+            |data_root| {
+                let during_attempt = read_status_json(data_root).unwrap();
+                assert_eq!(during_attempt["reason"], "finalizing");
+                assert_eq!(during_attempt["finalization_progress"], expected);
+                Ok(())
+            },
+            |_, supplied| {
+                Ok(finalization_outcome(
+                    supplied,
+                    CoreMaterializationFinalizationPhase::EmitFlat,
+                    'd',
+                    true,
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(reconciled.status["attempts"], 3);
+        assert_eq!(reconciled.status["reason"], "finalizing");
+        assert_ne!(reconciled.status["finalization_progress"], expected);
+    }
+
+    #[test]
+    fn finalization_digest_and_revision_mismatches_are_terminal() {
+        for mismatch in ["digest", "revision"] {
+            let temp = tempfile::tempdir().unwrap();
+            let index = empty_index(temp.path());
+            let generation = index.generation_id().to_owned();
+            run_with(
+                temp.path(),
+                &generation,
+                ProCatchUpAuthority {
+                    generation_id: Some(&generation),
+                    verified_index: Some(&index),
+                },
+                |_| Ok(()),
+                |_, supplied| {
+                    Ok(finalization_outcome(
+                        supplied,
+                        CoreMaterializationFinalizationPhase::EmitReplay,
+                        'c',
+                        false,
+                    ))
+                },
+            )
+            .unwrap();
+
+            let failed = run_with(
+                temp.path(),
+                &generation,
+                ProCatchUpAuthority {
+                    generation_id: Some(&generation),
+                    verified_index: Some(&index),
+                },
+                |_| Ok(()),
+                |_, _| anyhow::bail!("invalid_response: finalization {mismatch} mismatch"),
+            )
+            .unwrap();
+            assert_eq!(failed.status["status"], "error", "{mismatch}");
+            assert_eq!(failed.status["retryable"], false, "{mismatch}");
+            assert_eq!(failed.status["reason"], "invalid_response", "{mismatch}");
+            assert!(
+                scheduled_target_generation(temp.path()).unwrap().is_none(),
+                "{mismatch}"
+            );
+        }
     }
 
     #[test]

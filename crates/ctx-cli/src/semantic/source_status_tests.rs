@@ -757,6 +757,18 @@ fn pro_helper_status_is_the_only_projection_readiness_authority() {
         "available_operations": [],
         "error_code": "stale_source",
     });
+    let helper_finalizing = json!({
+        "installed": true,
+        "ready": true,
+        "materialized": false,
+        "projection_currentness": "finalizing",
+        "materialized_coverage": "complete",
+        "repository_coverage": {},
+        "access_state": "active",
+        "supported_operations": ["file_blame"],
+        "available_operations": ["file_blame"],
+        "error_code": "finalizing",
+    });
     let completed_job = json!({
         "status": "completed",
         "pending": false,
@@ -788,6 +800,13 @@ fn pro_helper_status_is_the_only_projection_readiness_authority() {
         Some(&completed_job),
         "pro-catch-up.json",
     );
+    let finalizing = pro_projection_report_from_status(
+        Some("generation-1"),
+        false,
+        &helper_finalizing,
+        Some(&retry_job),
+        "pro-catch-up.json",
+    );
 
     assert_eq!(ready["authority"], "pro_helper_status");
     assert_eq!(ready["status"], "ready");
@@ -808,6 +827,9 @@ fn pro_helper_status_is_the_only_projection_readiness_authority() {
     assert_eq!(stale["receipt"]["generation_matches"], false);
     assert_eq!(stale["catch_up"]["status"], "completed");
     assert_eq!(stale["reason"], "stale_source");
+    assert_eq!(finalizing["status"], "pending");
+    assert_eq!(finalizing["reason"], "finalizing");
+    assert_eq!(finalizing["available_operations"], json!(["file_blame"]));
 
     let raced = pro_projection_report_from_status(
         Some("generation-1"),

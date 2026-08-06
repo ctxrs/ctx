@@ -33,10 +33,12 @@ pub(super) fn current_blame_request(
     status
         .validate()
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    if status.currentness != CoreProjectionCurrentness::Current
-        || status.coverage != MaterializedCoverage::Complete
+    if !matches!(
+        status.currentness,
+        CoreProjectionCurrentness::Current | CoreProjectionCurrentness::Finalizing
+    ) || status.coverage != MaterializedCoverage::Complete
     {
-        bail!("not_materialized: Pro Core projection is not current with complete target coverage");
+        bail!("not_materialized: Pro Core projection has no complete queryable coverage");
     }
     let operation = match &target {
         BlameTarget::File { .. } => ProOperation::FileBlame,

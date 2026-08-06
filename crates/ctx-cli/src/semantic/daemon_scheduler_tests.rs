@@ -44,7 +44,8 @@ use crate::{
 use super::{
     background_refresh_rest, daemon_consumer_retry_due, daemon_core_refresh_job_path,
     daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
-    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, persist_pro_status,
+    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path,
+    newer_active_pro_generation_is_pending, persist_pro_status, pin_scheduled_pro_target,
     prepare_pro_retry_for_generation, preserve_daemon_background_refresh_recovery_provenance,
     read_daemon_job_status, read_pro_status, record_daemon_job_retry, record_source_refresh_retry,
     restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
@@ -1020,6 +1021,8 @@ fn durable_finalization_pending_bypasses_same_generation_attempt_guard() {
             "finalization_progress": {
                 "materialization_id": "a".repeat(64),
                 "core_generation_id": generation,
+                "finish_request_digest": "c".repeat(64),
+                "materializer_revision": "materializer-v1",
                 "phase": "emit_replay",
                 "cursor_sha256": "b".repeat(64),
             },
@@ -1049,6 +1052,106 @@ fn durable_finalization_pending_bypasses_same_generation_attempt_guard() {
         Some(generation.as_str())
     );
     assert_eq!(pinned_generation(temp.path()), generation);
+}
+
+#[test]
+fn fresh_restart_pins_durable_finalizing_target_before_newer_active_core() {
+    let temp = tempfile::tempdir().unwrap();
+    let finalizing_generation = publish_empty_core_generation(temp.path());
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "pending",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": finalizing_generation,
+            "receipt_core_generation_id": null,
+            "finalization_progress": {
+                "materialization_id": "a".repeat(64),
+                "core_generation_id": finalizing_generation,
+                "finish_request_digest": "c".repeat(64),
+                "materializer_revision": "materializer-v1",
+                "phase": "emit_replay",
+                "cursor_sha256": "b".repeat(64),
+            },
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+            "reason": "finalizing",
+            "consecutive_failures": 0,
+            "retry_after_ms": null,
+            "retry_not_before_at_ms": null,
+        }),
+    )
+    .unwrap();
+    let active_generation = publish_semantic_catch_up_generation(temp.path(), 1);
+    assert_ne!(active_generation, finalizing_generation);
+
+    let (scheduled_generation, scheduled_pin) = pin_scheduled_pro_target(temp.path())
+        .unwrap()
+        .expect("durable finalization target");
+    assert_eq!(scheduled_generation, finalizing_generation);
+    assert_eq!(scheduled_pin.generation_id(), finalizing_generation);
+    assert!(newer_active_pro_generation_is_pending(temp.path(), &finalizing_generation).unwrap());
+    let queued = super::core_pro_catch_up_iteration(false, true);
+    assert!(queued.continue_immediately);
+}
+
+#[test]
+fn foreground_query_defers_the_next_finalization_quantum() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let finalizing = json!({
+        "schema_version": 1,
+        "owner": "daemon",
+        "kind": "source_backed_pro_catch_up",
+        "status": "pending",
+        "pending": true,
+        "retryable": false,
+        "core_generation_id": generation,
+        "receipt_core_generation_id": null,
+        "finalization_progress": {
+            "materialization_id": "a".repeat(64),
+            "core_generation_id": generation,
+            "finish_request_digest": "c".repeat(64),
+            "materializer_revision": "materializer-v1",
+            "phase": "emit_replay",
+            "cursor_sha256": "b".repeat(64),
+        },
+        "attempts": 1,
+        "last_attempt_at_ms": 1,
+        "last_attempt_duration_us": 1,
+        "error_code": null,
+        "last_error": null,
+        "reason": "finalizing",
+        "consecutive_failures": 0,
+        "retry_after_ms": null,
+        "retry_not_before_at_ms": null,
+    });
+    persist_pro_status(temp.path(), &finalizing).unwrap();
+    let activity = Arc::new(crate::semantic::query_service::DaemonQueryActivity::new());
+    let _request = activity.begin_request().expect("foreground query");
+    let mut runtime = DaemonRuntime::default();
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        Some(activity.as_ref()),
+        None,
+    )
+    .unwrap();
+
+    assert!(!deferred.did_work);
+    assert!(!deferred.continue_immediately);
+    assert_eq!(read_pro_status(temp.path()).unwrap(), finalizing);
 }
 
 #[test]

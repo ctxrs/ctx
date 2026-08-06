@@ -1,23 +1,78 @@
 use super::*;
 
+fn finish_for(index: &VerifiedIndex, revision: &str) -> FinishCoreMaterializationRequest {
+    let sources = core_source_states(index.manifest()).unwrap();
+    let head = core_generation_head(index, &sources).unwrap();
+    let begin = BeginCoreMaterializationRequest {
+        head: head.clone(),
+        expected_prior_receipt: None,
+    };
+    FinishCoreMaterializationRequest {
+        materialization_id: ctx_pro_host_protocol::core_materialization_id(&begin, revision)
+            .unwrap(),
+        head,
+        expected_prior_receipt: None,
+        source_delta_pages: 1,
+        changed_sources: 1,
+        removed_sources: 0,
+        event_delta_pages: 1,
+        event_mutations: 1,
+    }
+}
+
 fn progress_for(
     index: &VerifiedIndex,
     phase: CoreMaterializationFinalizationPhase,
     cursor: char,
     revision: &str,
 ) -> CoreMaterializationFinalizationProgress {
-    let sources = core_source_states(index.manifest()).unwrap();
-    let head = core_generation_head(index, &sources).unwrap();
-    let begin = BeginCoreMaterializationRequest {
-        head,
-        expected_prior_receipt: None,
-    };
+    let finish = finish_for(index, revision);
     CoreMaterializationFinalizationProgress {
-        materialization_id: ctx_pro_host_protocol::core_materialization_id(&begin, revision)
-            .unwrap(),
+        materialization_id: finish.materialization_id.clone(),
         core_generation_id: index.generation_id().to_owned(),
+        finish_request_digest: finish.canonical_digest().unwrap(),
+        materializer_revision: revision.to_owned(),
         phase,
         cursor_sha256: cursor.to_string().repeat(64),
+    }
+}
+
+#[test]
+fn continuation_completion_rejects_changed_finish_digest_and_revision() {
+    let (_temp, index) =
+        single_source_index("finalization-terminal-cas.jsonl", vec!["body".to_owned()]);
+    let expected = progress_for(
+        &index,
+        CoreMaterializationFinalizationPhase::ReadyToActivate,
+        '9',
+        "test-core-materializer-v1",
+    );
+
+    for changed_revision in [false, true] {
+        let mut consumer = Consumer::new();
+        consumer.finalization_progress = Some(expected.clone());
+        consumer.finish = Some(finish_for(&index, "test-core-materializer-v1"));
+        if changed_revision {
+            consumer.revision = "test-core-materializer-v2".to_owned();
+        } else {
+            consumer.terminal_finish_digest_override = Some("f".repeat(64));
+        }
+        let status = consumer
+            .status(StatusRequest {
+                requested_core_generation_id: Some(index.generation_id().to_owned()),
+            })
+            .unwrap();
+        let error = continue_core_finalization(
+            &index,
+            &status,
+            &mut consumer,
+            CoreWorkerLaunchSelection::explicit_test(1),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("continuation CAS"),
+            "unexpected terminal CAS error: {error:#}"
+        );
     }
 }
 
@@ -168,6 +223,8 @@ fn protocol_dispatch_maps_both_typed_finalization_responses() {
         CoreMaterializationFinalizationProgress {
             materialization_id: "a".repeat(64),
             core_generation_id: "b".repeat(64),
+            finish_request_digest: "d".repeat(64),
+            materializer_revision: "materializer-v1".to_owned(),
             phase: CoreMaterializationFinalizationPhase::ReadyToActivate,
             cursor_sha256: "c".repeat(64),
         },
@@ -182,6 +239,8 @@ fn protocol_dispatch_maps_both_typed_finalization_responses() {
     ));
 
     let finished = CoreMaterializationFinished {
+        materialization_id: "a".repeat(64),
+        finish_request_digest: "d".repeat(64),
         receipt: CoreMaterializationReceipt {
             core_generation_id: "b".repeat(64),
             core_record_contract_fingerprint: "c".repeat(64),
