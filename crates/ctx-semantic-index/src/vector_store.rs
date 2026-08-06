@@ -26,7 +26,7 @@ pub(super) struct SemanticVectorSearch {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct SemanticChunkDocument {
+pub struct SemanticChunkDocument {
     pub(super) event_id: Uuid,
     pub(super) seq: u64,
     pub(super) chunk_index: usize,
@@ -36,7 +36,13 @@ pub(super) struct SemanticChunkDocument {
     pub(super) end_char: usize,
 }
 
-pub(super) struct SemanticVectorStore {
+impl SemanticChunkDocument {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+pub struct SemanticVectorStore {
     pub(super) conn: Connection,
     pub(super) flat: flat_segments::FlatSegmentStore,
 }
@@ -44,7 +50,8 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 mod source_projection;
-pub(super) use source_projection::{
+pub use flat_segments::PinnedFlatGeneration;
+pub use source_projection::{
     semantic_core_content_is_control, source_backed_semantic_vector_path, SemanticBatchEmbedder,
     SemanticDocumentBuilder, SourceBackedGenerationPin, SourceBackedSemanticOutcome,
 };

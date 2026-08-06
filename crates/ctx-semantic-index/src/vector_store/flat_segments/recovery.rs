@@ -1,7 +1,7 @@
 use super::*;
 
 impl FlatSegmentStore {
-    pub(in crate::semantic) fn compact(&self) -> FlatResult<FlatPublishOutcome> {
+    pub(crate) fn compact(&self) -> FlatResult<FlatPublishOutcome> {
         self.require_writable()?;
         let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;

@@ -42,6 +42,8 @@ TANTIVY_RESOLVED_FEATURES = [
 WORKSPACE_RELEASE_PACKAGES = {
     "ctx-history-core",
     "ctx-history-index",
+    "ctx-semantic-index",
+    "ctx-semantic-model",
 }
 NOTICE_BASENAMES = (
     "authors",

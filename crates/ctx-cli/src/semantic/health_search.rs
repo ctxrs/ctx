@@ -1,7 +1,4 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-};
+use std::{env, fs, path::Path};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -114,19 +111,5 @@ pub(super) fn secure_private_dir_permissions(path: &Path) -> Result<()> {
 pub(super) fn secure_private_file_permissions(path: &Path) -> Result<()> {
     restrict_private_file(path)
         .with_context(|| format!("secure private file {}", path.display()))?;
-    Ok(())
-}
-
-pub(super) fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
-    for candidate in [
-        path.to_path_buf(),
-        PathBuf::from(format!("{}-wal", path.display())),
-        PathBuf::from(format!("{}-shm", path.display())),
-    ] {
-        if candidate.exists() {
-            restrict_private_file(&candidate)
-                .with_context(|| format!("secure semantic vector file {}", candidate.display()))?;
-        }
-    }
     Ok(())
 }

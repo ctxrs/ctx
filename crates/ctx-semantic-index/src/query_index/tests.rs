@@ -95,7 +95,7 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     let index_root = temp.path().join("index");
     let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())?
         .into_writer()
-        .map_err(crate::semantic::committed_generation_recovery_error)?;
+        .map_err(crate::committed_generation_recovery_error)?;
     writer.begin_source(source.clone())?;
     let mut vector_items = Vec::with_capacity(UNRELATED_EVENTS as usize + 1);
     let mut target_event_id = None;

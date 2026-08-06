@@ -16,7 +16,7 @@ pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 5;
 pub(super) const SEMANTIC_VECTOR_BACKEND_FLAT_F32: &str = "flat-f32";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SemanticVectorFailureKind {
+pub enum SemanticVectorFailureKind {
     Unavailable,
     StorageConflict,
     ResetRequired,
@@ -24,7 +24,7 @@ pub(super) enum SemanticVectorFailureKind {
 }
 
 #[derive(Debug)]
-pub(super) struct SemanticVectorStoreError {
+pub struct SemanticVectorStoreError {
     pub(super) kind: SemanticVectorFailureKind,
     message: String,
 }
@@ -69,9 +69,7 @@ impl fmt::Display for SemanticVectorStoreError {
 
 impl std::error::Error for SemanticVectorStoreError {}
 
-pub(super) fn semantic_vector_failure_kind(
-    error: &anyhow::Error,
-) -> Option<SemanticVectorFailureKind> {
+pub fn semantic_vector_failure_kind(error: &anyhow::Error) -> Option<SemanticVectorFailureKind> {
     error.chain().find_map(|cause| {
         cause
             .downcast_ref::<SemanticVectorStoreError>()
@@ -80,14 +78,14 @@ pub(super) fn semantic_vector_failure_kind(
 }
 
 impl SemanticVectorStore {
-    pub(super) fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         let conn = control::open_writable(path)?;
         let flat = FlatSegmentStore::open(path, active_model_contract())
             .map_err(semantic_flat_store_error)?;
         Ok(Self { conn, flat })
     }
 
-    pub(super) fn open_read_only(path: &Path) -> Result<Option<Self>> {
+    pub fn open_read_only(path: &Path) -> Result<Option<Self>> {
         let Some(conn) = control::open_read_only(path)? else {
             return Ok(None);
         };

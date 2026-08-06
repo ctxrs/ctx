@@ -1,0 +1,31 @@
+[package]
+name = "ctx-semantic-index"
+version = "0.26.0"
+description = "Generation-pinned Flat-F32 semantic indexing and query for ctx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
+ctx-semantic-model = { path = "../ctx-semantic-model" }
+fs2 = "0.4.3"
+memmap2.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

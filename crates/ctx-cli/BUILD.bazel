@@ -75,6 +75,7 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-index:lib",
     "//crates/ctx-history-refresh:lib",
     "//crates/ctx-pro-host-protocol:lib",
+    "//crates/ctx-semantic-index:lib",
     "//crates/ctx-semantic-model:lib",
 ]
 
@@ -84,6 +85,7 @@ CTX_CLI_TEST_DEPS = [
     "//crates/ctx-history-index:lib",
     "//crates/ctx-history-refresh:test_support_lib",
     "//crates/ctx-pro-host-protocol:lib",
+    "//crates/ctx-semantic-index:test_support_lib",
     "//crates/ctx-semantic-model:test_support_lib",
 ]
 

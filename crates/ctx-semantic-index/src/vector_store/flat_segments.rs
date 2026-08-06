@@ -32,22 +32,22 @@ use artifacts::*;
 use catalog::*;
 use manifest::*;
 use pinned::load_pinned_generation;
-pub(in crate::semantic) use pinned::PinnedFlatGeneration;
+pub use pinned::PinnedFlatGeneration;
 #[cfg(test)]
-pub(in crate::semantic) use pinned::PinnedScanSegment;
+pub(crate) use pinned::PinnedScanSegment;
 use recovery::*;
 use source_compaction::*;
 use source_stage_log::*;
 use source_staging::*;
 use validation::*;
 
-pub(in crate::semantic) type FlatResult<T> = std::result::Result<T, FlatStoreError>;
+pub(crate) type FlatResult<T> = std::result::Result<T, FlatStoreError>;
 
 const COMPACT_SEGMENT_THRESHOLD: usize = 16;
 const FLAT_SOURCE_RECEIPT_DOMAIN: &[u8] = b"ctx-flat-source-receipt-v1\0";
 
 #[derive(Debug, Error)]
-pub(in crate::semantic) enum FlatStoreError {
+pub(crate) enum FlatStoreError {
     #[error("{operation} {path}: {source}")]
     Io {
         operation: &'static str,
@@ -73,111 +73,111 @@ pub(in crate::semantic) enum FlatStoreError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::semantic) struct FlatModelContract {
-    pub(in crate::semantic) contract_version: u32,
-    pub(in crate::semantic) model_id: String,
-    pub(in crate::semantic) model_revision: String,
-    pub(in crate::semantic) tokenizer: String,
-    pub(in crate::semantic) pooling: String,
-    pub(in crate::semantic) dimensions: u32,
-    pub(in crate::semantic) normalization: String,
+pub(crate) struct FlatModelContract {
+    pub(crate) contract_version: u32,
+    pub(crate) model_id: String,
+    pub(crate) model_revision: String,
+    pub(crate) tokenizer: String,
+    pub(crate) pooling: String,
+    pub(crate) dimensions: u32,
+    pub(crate) normalization: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(in crate::semantic) struct FlatSourceHash([u8; 32]);
+pub(crate) struct FlatSourceHash([u8; 32]);
 
 impl FlatSourceHash {
-    pub(in crate::semantic) fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    pub(in crate::semantic) fn parse_hex(value: &str) -> FlatResult<Self> {
+    pub(crate) fn parse_hex(value: &str) -> FlatResult<Self> {
         let bytes = decode_sha256(value).ok_or_else(|| {
             FlatStoreError::InvalidInput("source text hash must be lowercase SHA-256".to_owned())
         })?;
         Ok(Self(bytes))
     }
 
-    pub(in crate::semantic) fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    pub(in crate::semantic) fn to_hex(self) -> String {
+    pub(crate) fn to_hex(self) -> String {
         encode_hex(&self.0)
     }
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::semantic) struct FlatChunk {
-    pub(in crate::semantic) chunk_index: u32,
-    pub(in crate::semantic) start_char: u32,
-    pub(in crate::semantic) end_char: u32,
-    pub(in crate::semantic) vector: Vec<f32>,
+pub(crate) struct FlatChunk {
+    pub(crate) chunk_index: u32,
+    pub(crate) start_char: u32,
+    pub(crate) end_char: u32,
+    pub(crate) vector: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::semantic) struct FlatEventReplacement {
-    pub(in crate::semantic) event_id: Uuid,
-    pub(in crate::semantic) seq: u64,
-    pub(in crate::semantic) source_text_hash: FlatSourceHash,
-    pub(in crate::semantic) chunks: Vec<FlatChunk>,
+pub(crate) struct FlatEventReplacement {
+    pub(crate) event_id: Uuid,
+    pub(crate) seq: u64,
+    pub(crate) source_text_hash: FlatSourceHash,
+    pub(crate) chunks: Vec<FlatChunk>,
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::semantic) struct FlatEventMetadataUpdate {
-    pub(in crate::semantic) event_id: Uuid,
-    pub(in crate::semantic) seq: u64,
-    pub(in crate::semantic) source_text_hash: FlatSourceHash,
-    pub(in crate::semantic) stable_identity_hash: [u8; 32],
+pub(crate) struct FlatEventMetadataUpdate {
+    pub(crate) event_id: Uuid,
+    pub(crate) seq: u64,
+    pub(crate) source_text_hash: FlatSourceHash,
+    pub(crate) stable_identity_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::semantic) struct FlatSourceReceipt {
-    pub(in crate::semantic) source_identity_digest: String,
-    pub(in crate::semantic) source_reconciliation_id: String,
-    pub(in crate::semantic) indexed_documents: u64,
-    pub(in crate::semantic) semantic_eligible_documents: u64,
-    pub(in crate::semantic) core_record_accumulator: String,
-    pub(in crate::semantic) contract_fingerprint: String,
-    pub(in crate::semantic) semantic_policy_fingerprint: String,
-    pub(in crate::semantic) owned_event_count: u64,
-    pub(in crate::semantic) owned_event_ids_hash: String,
+pub(crate) struct FlatSourceReceipt {
+    pub(crate) source_identity_digest: String,
+    pub(crate) source_reconciliation_id: String,
+    pub(crate) indexed_documents: u64,
+    pub(crate) semantic_eligible_documents: u64,
+    pub(crate) core_record_accumulator: String,
+    pub(crate) contract_fingerprint: String,
+    pub(crate) semantic_policy_fingerprint: String,
+    pub(crate) owned_event_count: u64,
+    pub(crate) owned_event_ids_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatSourceReceiptInput {
-    pub(in crate::semantic) source_identity_digest: String,
-    pub(in crate::semantic) source_reconciliation_id: String,
-    pub(in crate::semantic) indexed_documents: u64,
-    pub(in crate::semantic) semantic_eligible_documents: u64,
-    pub(in crate::semantic) core_record_accumulator: String,
-    pub(in crate::semantic) contract_fingerprint: String,
-    pub(in crate::semantic) semantic_policy_fingerprint: String,
+pub(crate) struct FlatSourceReceiptInput {
+    pub(crate) source_identity_digest: String,
+    pub(crate) source_reconciliation_id: String,
+    pub(crate) indexed_documents: u64,
+    pub(crate) semantic_eligible_documents: u64,
+    pub(crate) core_record_accumulator: String,
+    pub(crate) contract_fingerprint: String,
+    pub(crate) semantic_policy_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatSourceState {
-    pub(in crate::semantic) source_identity_digest: String,
-    pub(in crate::semantic) receipt: Option<FlatSourceReceipt>,
+pub(crate) struct FlatSourceState {
+    pub(crate) source_identity_digest: String,
+    pub(crate) receipt: Option<FlatSourceReceipt>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::semantic) struct FlatPublicationToken {
-    pub(in crate::semantic) generation: u64,
-    pub(in crate::semantic) generation_hash: Option<String>,
+pub(crate) struct FlatPublicationToken {
+    pub(crate) generation: u64,
+    pub(crate) generation_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatActiveEvent {
-    pub(in crate::semantic) event_id: Uuid,
-    pub(in crate::semantic) seq: u64,
-    pub(in crate::semantic) source_text_hash: FlatSourceHash,
-    pub(in crate::semantic) chunk_count: u32,
-    pub(in crate::semantic) source_identity_digest: String,
-    pub(in crate::semantic) source_reconciliation_id: String,
-    pub(in crate::semantic) stable_identity_hash: [u8; 32],
+pub(crate) struct FlatActiveEvent {
+    pub(crate) event_id: Uuid,
+    pub(crate) seq: u64,
+    pub(crate) source_text_hash: FlatSourceHash,
+    pub(crate) chunk_count: u32,
+    pub(crate) source_identity_digest: String,
+    pub(crate) source_reconciliation_id: String,
+    pub(crate) stable_identity_hash: [u8; 32],
     vector_generation: u64,
     first_vector_ordinal: u64,
 }
@@ -188,87 +188,87 @@ pub(in crate::semantic) struct FlatActiveEvent {
 /// can probe this shared pin without cloning or linearly scanning the active
 /// corpus for every event.
 #[derive(Clone)]
-pub(in crate::semantic) struct FlatActiveEventLookup {
+pub(crate) struct FlatActiveEventLookup {
     events: Arc<Vec<FlatActiveEvent>>,
 }
 
 impl FlatActiveEventLookup {
-    pub(in crate::semantic) fn from_events(mut events: Vec<FlatActiveEvent>) -> Self {
+    pub(crate) fn from_events(mut events: Vec<FlatActiveEvent>) -> Self {
         events.sort_by_key(|event| event.event_id);
         Self {
             events: Arc::new(events),
         }
     }
 
-    pub(in crate::semantic) fn event(&self, event_id: Uuid) -> Option<&FlatActiveEvent> {
+    pub(crate) fn event(&self, event_id: Uuid) -> Option<&FlatActiveEvent> {
         self.events
             .binary_search_by_key(&event_id, |event| event.event_id)
             .ok()
             .map(|index| &self.events[index])
     }
 
-    pub(in crate::semantic) fn events(&self) -> &[FlatActiveEvent] {
+    pub(crate) fn events(&self) -> &[FlatActiveEvent] {
         &self.events
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatActiveStats {
-    pub(in crate::semantic) generation: u64,
-    pub(in crate::semantic) generation_hash: Option<String>,
-    pub(in crate::semantic) segment_count: usize,
-    pub(in crate::semantic) active_events: usize,
-    pub(in crate::semantic) active_chunks: usize,
-    pub(in crate::semantic) active_vector_bytes: u64,
-    pub(in crate::semantic) stored_chunks: u64,
-    pub(in crate::semantic) stored_vector_bytes: u64,
-    pub(in crate::semantic) deleted_events: usize,
+pub(crate) struct FlatActiveStats {
+    pub(crate) generation: u64,
+    pub(crate) generation_hash: Option<String>,
+    pub(crate) segment_count: usize,
+    pub(crate) active_events: usize,
+    pub(crate) active_chunks: usize,
+    pub(crate) active_vector_bytes: u64,
+    pub(crate) stored_chunks: u64,
+    pub(crate) stored_vector_bytes: u64,
+    pub(crate) deleted_events: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatRecoveryReport {
-    pub(in crate::semantic) model_contract_reset: bool,
-    pub(in crate::semantic) removed_temporary_files: usize,
-    pub(in crate::semantic) removed_obsolete_manifests: usize,
-    pub(in crate::semantic) removed_orphan_segments: usize,
-    pub(in crate::semantic) retained_busy_files: usize,
+pub(crate) struct FlatRecoveryReport {
+    pub(crate) model_contract_reset: bool,
+    pub(crate) removed_temporary_files: usize,
+    pub(crate) removed_obsolete_manifests: usize,
+    pub(crate) removed_orphan_segments: usize,
+    pub(crate) retained_busy_files: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatPublishOutcome {
-    pub(in crate::semantic) published: bool,
-    pub(in crate::semantic) generation: u64,
-    pub(in crate::semantic) generation_hash: Option<String>,
-    pub(in crate::semantic) replaced_events: usize,
-    pub(in crate::semantic) deleted_events: usize,
+pub(crate) struct FlatPublishOutcome {
+    pub(crate) published: bool,
+    pub(crate) generation: u64,
+    pub(crate) generation_hash: Option<String>,
+    pub(crate) replaced_events: usize,
+    pub(crate) deleted_events: usize,
 }
 
-pub(in crate::semantic) struct FlatSourceFinalization {
-    pub(in crate::semantic) publication: FlatPublishOutcome,
-    pub(in crate::semantic) receipt: Option<FlatSourceReceipt>,
-    pub(in crate::semantic) deleted_chunks: u64,
+pub(crate) struct FlatSourceFinalization {
+    pub(crate) publication: FlatPublishOutcome,
+    pub(crate) receipt: Option<FlatSourceReceipt>,
+    pub(crate) deleted_chunks: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::semantic) struct FlatSourceStagingToken {
-    pub(in crate::semantic) source_reconciliation_id: String,
-    pub(in crate::semantic) page_sequence: u64,
-    pub(in crate::semantic) page_hash: String,
+pub(crate) struct FlatSourceStagingToken {
+    pub(crate) source_reconciliation_id: String,
+    pub(crate) page_sequence: u64,
+    pub(crate) page_hash: String,
 }
 
-pub(in crate::semantic) struct FlatSourcePageOutcome {
-    pub(in crate::semantic) staging: FlatSourceStagingToken,
+pub(crate) struct FlatSourcePageOutcome {
+    pub(crate) staging: FlatSourceStagingToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::semantic) enum FlatSourceStageResume {
+pub(crate) enum FlatSourceStageResume {
     Ready,
     Restarted,
 }
 
 impl FlatPublishOutcome {
-    pub(in crate::semantic) fn token(&self) -> FlatPublicationToken {
+    pub(crate) fn token(&self) -> FlatPublicationToken {
         FlatPublicationToken {
             generation: self.generation,
             generation_hash: self.generation_hash.clone(),
@@ -277,10 +277,10 @@ impl FlatPublishOutcome {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(in crate::semantic) struct FlatWorkStats {
-    pub(in crate::semantic) vectors_touched: u64,
-    pub(in crate::semantic) vector_bytes_touched: u64,
-    pub(in crate::semantic) metadata_records_touched: u64,
+pub(crate) struct FlatWorkStats {
+    pub(crate) vectors_touched: u64,
+    pub(crate) vector_bytes_touched: u64,
+    pub(crate) metadata_records_touched: u64,
 }
 
 impl FlatWorkStats {
@@ -303,7 +303,7 @@ enum StoreMode {
     ReadOnly,
 }
 
-pub(in crate::semantic) struct FlatSegmentStore {
+pub(crate) struct FlatSegmentStore {
     root: PathBuf,
     contract: FlatModelContract,
     mode: StoreMode,
@@ -421,10 +421,7 @@ impl FlatReconciliationView {
 }
 
 impl FlatSegmentStore {
-    pub(in crate::semantic) fn open(
-        root: impl AsRef<Path>,
-        contract: FlatModelContract,
-    ) -> FlatResult<Self> {
+    pub(crate) fn open(root: impl AsRef<Path>, contract: FlatModelContract) -> FlatResult<Self> {
         ensure_little_endian()?;
         validate_model_contract(&contract)?;
         let root = root.as_ref().to_path_buf();
@@ -481,7 +478,7 @@ impl FlatSegmentStore {
         Ok(store)
     }
 
-    pub(in crate::semantic) fn open_read_only(
+    pub(crate) fn open_read_only(
         root: impl AsRef<Path>,
         contract: FlatModelContract,
     ) -> FlatResult<Self> {
@@ -533,10 +530,10 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn recovery_report(&self) -> &FlatRecoveryReport {
+    pub(crate) fn recovery_report(&self) -> &FlatRecoveryReport {
         &self.recovery
     }
-    pub(in crate::semantic) fn pin_generation(&self) -> FlatResult<Option<PinnedFlatGeneration>> {
+    pub(crate) fn pin_generation(&self) -> FlatResult<Option<PinnedFlatGeneration>> {
         let generation = self.source_generation.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
         })?;
@@ -557,7 +554,7 @@ impl FlatSegmentStore {
         Ok(Some(pinned))
     }
 
-    pub(in crate::semantic) fn active_stats(&self) -> FlatResult<FlatActiveStats> {
+    pub(crate) fn active_stats(&self) -> FlatResult<FlatActiveStats> {
         let generation = self.source_generation.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
         })?;
@@ -576,7 +573,7 @@ impl FlatSegmentStore {
             .unwrap_or_default())
     }
 
-    pub(in crate::semantic) fn active_publication_token(&self) -> FlatResult<FlatPublicationToken> {
+    pub(crate) fn active_publication_token(&self) -> FlatResult<FlatPublicationToken> {
         let stats = self.active_stats()?;
         Ok(FlatPublicationToken {
             generation: stats.generation,
@@ -584,7 +581,7 @@ impl FlatSegmentStore {
         })
     }
 
-    pub(in crate::semantic) fn source_states(&self) -> FlatResult<Vec<FlatSourceState>> {
+    pub(crate) fn source_states(&self) -> FlatResult<Vec<FlatSourceState>> {
         let generation = self.source_generation.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
         })?;
@@ -604,13 +601,13 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn active_hash(&self) -> FlatResult<Option<String>> {
+    pub(crate) fn active_hash(&self) -> FlatResult<Option<String>> {
         let _guard = self.lock_shared()?;
         Ok(select_manifest(&self.root, &self.contract)?.map(|selected| selected.generation_hash))
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn reset_active_event_snapshot_count(&self) {
+    pub(crate) fn reset_active_event_snapshot_count(&self) {
         self.active_event_snapshot_count.store(0, Ordering::Relaxed);
         self.active_generation_load_count
             .store(0, Ordering::Relaxed);
@@ -627,53 +624,53 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn active_event_snapshot_count(&self) -> u64 {
+    pub(crate) fn active_event_snapshot_count(&self) -> u64 {
         self.active_event_snapshot_count.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn active_generation_load_count(&self) -> u64 {
+    pub(crate) fn active_generation_load_count(&self) -> u64 {
         self.active_generation_load_count.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn source_catalog_load_count(&self) -> u64 {
+    pub(crate) fn source_catalog_load_count(&self) -> u64 {
         self.source_catalog_load_count.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn source_catalog_records_replayed(&self) -> u64 {
+    pub(crate) fn source_catalog_records_replayed(&self) -> u64 {
         self.source_catalog_records_replayed.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn source_publication_count(&self) -> u64 {
+    pub(crate) fn source_publication_count(&self) -> u64 {
         self.source_publication_count.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn global_manifest_parse_count(&self) -> u64 {
+    pub(crate) fn global_manifest_parse_count(&self) -> u64 {
         self.global_manifest_parse_count.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn global_manifest_serialization_count(&self) -> u64 {
+    pub(crate) fn global_manifest_serialization_count(&self) -> u64 {
         self.global_manifest_serialization_count
             .load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn global_segment_directory_scan_count(&self) -> u64 {
+    pub(crate) fn global_segment_directory_scan_count(&self) -> u64 {
         self.global_segment_directory_scan_count
             .load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn staging_peak_event_records(&self) -> u64 {
+    pub(crate) fn staging_peak_event_records(&self) -> u64 {
         self.staging_peak_event_records.load(Ordering::Relaxed)
     }
 
-    pub(in crate::semantic) fn begin_source_generation_view(&self) -> FlatResult<()> {
+    pub(crate) fn begin_source_generation_view(&self) -> FlatResult<()> {
         self.require_writable()?;
         let mut generation = self.source_generation.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat source generation lock is poisoned".to_owned())
@@ -696,7 +693,7 @@ impl FlatSegmentStore {
         Ok(())
     }
 
-    pub(in crate::semantic) fn end_source_generation_view(&self) -> FlatResult<()> {
+    pub(crate) fn end_source_generation_view(&self) -> FlatResult<()> {
         let mut stage = self.source_stage.lock().map_err(|_| {
             FlatStoreError::Corrupt("flat source stage lock is poisoned".to_owned())
         })?;
@@ -710,43 +707,43 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn fail_after_source_frontier_commit_once(&self) {
+    pub(crate) fn fail_after_source_frontier_commit_once(&self) {
         self.fail_after_source_frontier_commit
             .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn take_source_frontier_commit_failure(&self) -> bool {
+    pub(crate) fn take_source_frontier_commit_failure(&self) -> bool {
         self.fail_after_source_frontier_commit
             .swap(false, Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn fail_after_source_finalization_once(&self) {
+    pub(crate) fn fail_after_source_finalization_once(&self) {
         self.fail_after_source_finalization
             .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn take_source_finalization_failure(&self) -> bool {
+    pub(crate) fn take_source_finalization_failure(&self) -> bool {
         self.fail_after_source_finalization
             .swap(false, Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn fail_after_source_acknowledgement_once(&self) {
+    pub(crate) fn fail_after_source_acknowledgement_once(&self) {
         self.fail_after_source_acknowledgement
             .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn take_source_acknowledgement_failure(&self) -> bool {
+    pub(crate) fn take_source_acknowledgement_failure(&self) -> bool {
         self.fail_after_source_acknowledgement
             .swap(false, Ordering::Relaxed)
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn rollback_active_manifest(&self) -> FlatResult<FlatPublicationToken> {
+    pub(crate) fn rollback_active_manifest(&self) -> FlatResult<FlatPublicationToken> {
         self.require_writable()?;
         let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;
@@ -764,7 +761,7 @@ impl FlatSegmentStore {
         Ok(token)
     }
 
-    pub(in crate::semantic) fn publish_replacement_event_chunks(
+    pub(crate) fn publish_replacement_event_chunks(
         &self,
         replacements: &[FlatEventReplacement],
         tombstones: &[Uuid],
@@ -828,7 +825,7 @@ impl FlatSegmentStore {
     }
 
     #[cfg(test)]
-    pub(in crate::semantic) fn source_event_lookup(
+    pub(crate) fn source_event_lookup(
         &self,
         source_identity_digest: &str,
     ) -> FlatResult<FlatActiveEventLookup> {
@@ -848,7 +845,7 @@ impl FlatSegmentStore {
         Ok(FlatActiveEventLookup { events })
     }
 
-    pub(in crate::semantic) fn work_stats(&self) -> FlatWorkStats {
+    pub(crate) fn work_stats(&self) -> FlatWorkStats {
         FlatWorkStats {
             vectors_touched: self.vectors_touched.load(Ordering::Relaxed),
             vector_bytes_touched: self.vector_bytes_touched.load(Ordering::Relaxed),
@@ -856,7 +853,7 @@ impl FlatSegmentStore {
         }
     }
 
-    pub(in crate::semantic) fn work_since(&self, earlier: FlatWorkStats) -> FlatWorkStats {
+    pub(crate) fn work_since(&self, earlier: FlatWorkStats) -> FlatWorkStats {
         self.work_stats().saturating_delta(earlier)
     }
 

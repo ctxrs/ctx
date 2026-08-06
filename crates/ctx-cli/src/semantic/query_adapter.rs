@@ -2,15 +2,13 @@ use std::{path::Path, time::Duration as StdDuration};
 
 use anyhow::{anyhow, Result};
 use ctx_history_index::{EventSearchCandidate, EventSearchFilters, VerifiedIndex};
+use ctx_semantic_index::{SemanticNotReady, SemanticQueryPin};
 use ctx_semantic_model::{semantic_model_key, SEMANTIC_DIMENSIONS};
 use serde_json::{json, Value};
 
 use crate::compact_json;
 
-use super::{
-    query_index::{SemanticNotReady, SemanticQueryPin},
-    query_service::daemon_query_request,
-};
+use super::query_service::daemon_query_request;
 
 #[derive(Default)]
 pub(crate) struct SemanticQueryAdapter {

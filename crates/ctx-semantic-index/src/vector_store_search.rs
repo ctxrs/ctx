@@ -190,7 +190,7 @@ mod tests {
     use std::{sync::mpsc, time::Duration};
 
     use super::*;
-    use crate::semantic::vector_store::{SemanticChunkDocument, SemanticVectorStore};
+    use crate::vector_store::{SemanticChunkDocument, SemanticVectorStore};
 
     #[test]
     fn direct_exact_generation_scan_waits_for_bounded_admission() -> Result<()> {

@@ -3,6 +3,11 @@ use std::{path::Path, process, time::Instant};
 use anyhow::{anyhow, Result};
 use ctx_history_core::{utc_now, AgentType, CaptureProvider, EventRole, EventType};
 use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
+use ctx_semantic_index::{
+    semantic_core_content_is_control, source_backed_semantic_vector_path, SemanticBatchEmbedder,
+    SemanticChunkDocument, SemanticDocumentBuilder, SemanticEventDocument, SemanticVectorStore,
+    SourceBackedGenerationPin, SourceBackedSemanticOutcome,
+};
 use ctx_semantic_model::{
     semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetchRequest,
     ArtifactFetcher, SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition,
@@ -27,12 +32,6 @@ use super::{
         SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
     },
     source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
-    vector_store::{
-        semantic_core_content_is_control, source_backed_semantic_vector_path,
-        SemanticBatchEmbedder, SemanticChunkDocument, SemanticDocumentBuilder, SemanticVectorStore,
-        SourceBackedGenerationPin, SourceBackedSemanticOutcome,
-    },
-    SemanticEventDocument,
 };
 
 #[cfg(test)]
@@ -299,7 +298,7 @@ pub(super) fn run_daemon_semantic_job(
         &model_config,
         deadline,
     )?;
-    let (status, reason, last_error) = if outcome.ready {
+    let (status, reason, last_error) = if outcome.ready() {
         ("ready", None, None)
     } else {
         ("budget_exhausted", None, None)
@@ -359,28 +358,28 @@ impl SemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
                 occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
             }
         }
-        Ok(Some(SemanticEventDocument {
-            event_id: record.event_id.as_uuid(),
-            session_id: Some(record.session_id.as_uuid()),
-            seq: record.event_sequence,
+        Ok(Some(SemanticEventDocument::new(
+            record.event_id.as_uuid(),
+            Some(record.session_id.as_uuid()),
+            record.event_sequence,
             occurred_at_ms,
-            event_type: parse_core_event_type(&record.event_type)?,
-            role: record
+            parse_core_event_type(&record.event_type)?,
+            record
                 .role
                 .as_deref()
                 .map(parse_core_event_role)
                 .transpose()?,
-            rank_bucket: "lite_turn".to_owned(),
-            provider: Some(parse_core_provider(&record.provider)?),
-            source_format: Some(record.source_format.clone()),
-            agent_type: Some(parse_core_agent_type(&record.agent_type)?),
-            session_is_primary: Some(record.is_primary),
-            cwd: record.cwd.clone(),
-            record_title: None,
-            record_kind: Some(record.event_type.clone()),
-            record_workspace: record.workspace.clone(),
-            text: sections.join("\n\n"),
-        }))
+            "lite_turn".to_owned(),
+            Some(parse_core_provider(&record.provider)?),
+            Some(record.source_format.clone()),
+            Some(parse_core_agent_type(&record.agent_type)?),
+            Some(record.is_primary),
+            record.cwd.clone(),
+            None,
+            Some(record.event_type.clone()),
+            record.workspace.clone(),
+            sections.join("\n\n"),
+        )))
     }
 }
 
@@ -406,14 +405,14 @@ fn annotate_source_backed_semantic_progress(
     job: &mut Value,
     outcome: &SourceBackedSemanticOutcome,
 ) {
-    job["source_records_decoded"] = json!(outcome.records_decoded);
-    job["source_records_embedded"] = json!(outcome.records_embedded);
-    job["source_records_reused"] = json!(outcome.records_reused);
-    job["source_records_filtered"] = json!(outcome.records_filtered);
-    job["source_invalidated_chunks"] = json!(outcome.invalidated_chunks);
-    job["source_deleted_chunks"] = json!(outcome.deleted_chunks);
-    job["source_generation_ready"] = json!(outcome.ready);
-    job["source_work_remaining"] = json!(outcome.work_remaining);
+    job["source_records_decoded"] = json!(outcome.records_decoded());
+    job["source_records_embedded"] = json!(outcome.records_embedded());
+    job["source_records_reused"] = json!(outcome.records_reused());
+    job["source_records_filtered"] = json!(outcome.records_filtered());
+    job["source_invalidated_chunks"] = json!(outcome.invalidated_chunks());
+    job["source_deleted_chunks"] = json!(outcome.deleted_chunks());
+    job["source_generation_ready"] = json!(outcome.ready());
+    job["source_work_remaining"] = json!(outcome.work_remaining());
 }
 
 struct RuntimeSourceSemanticEmbedder<'a> {
@@ -427,7 +426,7 @@ impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         let texts = chunks
             .iter()
-            .map(|chunk| chunk.text.clone())
+            .map(|chunk| chunk.text().to_owned())
             .collect::<Vec<_>>();
         let (embeddings, _) =
             self.runtime

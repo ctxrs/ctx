@@ -1,4 +1,11 @@
 use super::*;
+use ctx_semantic_index::{
+    source_backed_semantic_vector_path,
+    test_support::{
+        newer_schema_error, reset_required_error, semantic_vector_schema_version,
+        storage_conflict_error, unavailable_error,
+    },
+};
 
 #[test]
 fn daemon_job_json_keeps_outcomes_without_live_worker_snapshots() {
@@ -205,8 +212,8 @@ fn semantic_failure_classes_control_retry_backoff() {
         SemanticFailureClass::CorruptSidecar
     );
     for typed in [
-        SemanticVectorStoreError::storage_conflict("sidecar identity changed"),
-        SemanticVectorStoreError::newer_schema(SEMANTIC_VECTOR_SCHEMA_VERSION + 1),
+        storage_conflict_error("sidecar identity changed"),
+        newer_schema_error(semantic_vector_schema_version() + 1),
     ] {
         assert_eq!(
             classify_semantic_failure(&anyhow::Error::new(typed)),
@@ -214,13 +221,13 @@ fn semantic_failure_classes_control_retry_backoff() {
         );
     }
     assert_eq!(
-        classify_semantic_failure(&anyhow::Error::new(
-            SemanticVectorStoreError::reset_required("sidecar reset required")
-        )),
+        classify_semantic_failure(&anyhow::Error::new(reset_required_error(
+            "sidecar reset required"
+        ))),
         SemanticFailureClass::CorruptSidecar
     );
     assert_eq!(
-        classify_semantic_failure(&anyhow::Error::new(SemanticVectorStoreError::unavailable(
+        classify_semantic_failure(&anyhow::Error::new(unavailable_error(
             "flat segment store temporarily unavailable"
         ))),
         SemanticFailureClass::Retryable

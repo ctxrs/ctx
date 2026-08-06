@@ -31,6 +31,7 @@ WORKSPACE_PACKAGES = (
     ("ctx", "crates/ctx-cli"),
     ("ctx-history-core", "crates/ctx-history-core"),
     ("ctx-history-index", "crates/ctx-history-index"),
+    ("ctx-semantic-index", "crates/ctx-semantic-index"),
     ("ctx-semantic-model", "crates/ctx-semantic-model"),
 )
 EXTERNAL_PACKAGES = (
@@ -138,6 +139,7 @@ members = [
   "crates/ctx-cli",
   "crates/ctx-history-core",
   "crates/ctx-history-index",
+  "crates/ctx-semantic-index",
   "crates/ctx-semantic-model",
 ]
 
@@ -206,6 +208,7 @@ repository = "https://example.invalid/{name}"
             "@@//crates/ctx-cli:ctx",
             "@@//crates/ctx-history-core:ctx_history_core",
             "@@//crates/ctx-history-index:ctx_history_index",
+            "@@//crates/ctx-semantic-index:ctx_semantic_index",
             "@@//crates/ctx-semantic-model:ctx_semantic_model",
         ]
         inventory_labels.extend(
@@ -289,6 +292,7 @@ repository = "https://example.invalid/{name}"
                 (
                     "ctx-history-core",
                     "ctx-history-index",
+                    "ctx-semantic-index",
                     "ctx-semantic-model",
                 ),
             ),
@@ -297,6 +301,16 @@ repository = "https://example.invalid/{name}"
                 "ctx-history-index",
                 "0.26.0",
                 ("ctx-semantic-model", "tantivy 0.26.1"),
+            ),
+            self.package(
+                "ctx-semantic-index",
+                "0.26.0",
+                (
+                    "ctx-history-core",
+                    "ctx-history-index",
+                    "ctx-semantic-model",
+                    "memmap2 0.9.0",
+                ),
             ),
             self.package(
                 "ctx-semantic-model",
@@ -624,7 +638,7 @@ repository = "https://example.invalid/{name}"
                 for item in component.get("properties", [])
             )
         ]
-        self.assertEqual(len(cargo_components), 10)
+        self.assertEqual(len(cargo_components), 11)
         self.assertTrue(
             all(component.get("licenses") for component in cargo_components)
         )

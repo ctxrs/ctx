@@ -16,7 +16,7 @@ use super::{
     SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticGeneration,
     SourceBackedSemanticOutcome, SourceBackedSemanticSource,
 };
-use crate::semantic::{
+use crate::{
     vector_store::control::FULL_REBUILD_STATE,
     vector_store::flat_segments::{
         FlatPublicationToken, FlatPublishOutcome, FlatSourceReceipt, FlatSourceState,
@@ -326,7 +326,7 @@ impl SemanticVectorStore {
         })
     }
 
-    pub(in crate::semantic) fn source_backed_generation_pin_exact(
+    pub fn source_backed_generation_pin_exact(
         &self,
         core_generation_id: &str,
         semantic_documents: u64,
