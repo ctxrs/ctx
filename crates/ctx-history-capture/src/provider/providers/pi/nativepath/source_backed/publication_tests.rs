@@ -109,3 +109,30 @@ fn parent_session_path_resolves_header_identity_and_publishes_forked_unknown_cop
     let path_as_native_id = session_identity_for_native(parent_path.to_str().unwrap()).unwrap();
     assert_ne!(child.parent_session_id, Some(path_as_native_id));
 }
+
+#[test]
+fn provider_p1_lineage_declared_missing_parent_fails_closed() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let child_path = temp.path().join("child.jsonl");
+    let missing_parent = temp.path().join("missing-parent.jsonl");
+    write_session(
+        &child_path,
+        "pi-child-with-missing-parent",
+        Some(&missing_parent),
+        "must not publish as a root",
+    );
+
+    let error = refresh_source_backed_generation(
+        &temp.path().join("index"),
+        &registry(temp.path()),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("declares unresolved parentSession"));
+}

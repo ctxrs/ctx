@@ -452,6 +452,16 @@ py_test(
 )
 
 py_test(
+    name = "provider_support_matrix_tests",
+    srcs = [
+        "scripts/check-provider-support-matrix.py",
+        "scripts/tests/check-provider-support-matrix-test.py",
+    ],
+    main = "scripts/tests/check-provider-support-matrix-test.py",
+    data = [":provider_support_matrix"],
+)
+
+py_test(
     name = "release_sbom_tests",
     srcs = [
         "scripts/release-sbom.py",

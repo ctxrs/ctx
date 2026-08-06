@@ -57,7 +57,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
-const PARSER_REVISION: &str = "openclaw-source-backed-v8-session-lineage";
+const PARSER_REVISION: &str = "openclaw-source-backed-v9-lineage-authority-certainty";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RUNNING_PROCESSES: usize = 256;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
@@ -75,8 +75,18 @@ struct Binding {
     index_relative_path: PathBuf,
     native_session_id: String,
     index: Value,
-    parent_native_session_id: Option<String>,
-    root_native_session_id: Option<String>,
+    native_session_family: OpenClawNativeSessionFamily,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum OpenClawNativeSessionFamily {
+    Absent,
+    Resolved {
+        parent_native_session_id: String,
+        root_native_session_id: String,
+    },
+    Invalid,
 }
 
 impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
@@ -165,8 +175,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
                 index_relative_path,
                 native_session_id,
                 index: compound.index,
-                parent_native_session_id: compound.parent_native_session_id,
-                root_native_session_id: compound.root_native_session_id,
+                native_session_family: compound.native_session_family,
             };
             leaves.push(JsonlFamilyLeaf::observe(
                 source,
@@ -215,8 +224,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             source_file.as_ref(),
         )?;
         if compound.index != binding.index
-            || compound.parent_native_session_id != binding.parent_native_session_id
-            || compound.root_native_session_id != binding.root_native_session_id
+            || compound.native_session_family != binding.native_session_family
         {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -225,8 +233,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             leaf.source_path(),
             &binding.native_session_id,
             &binding.index,
-            binding.parent_native_session_id.as_deref(),
-            binding.root_native_session_id.as_deref(),
+            &binding.native_session_family,
             imported_at,
             session_id,
         )?;
@@ -599,46 +606,86 @@ fn native_session_id(path: &Path) -> String {
     )
 }
 
-fn related_session_id(index: &Value, agent_id: Option<&str>, fields: &[&str]) -> Option<String> {
-    fields
-        .iter()
-        .find_map(|field| index.get(*field).and_then(Value::as_str))
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| super::qualify_session_id(agent_id, value))
+#[derive(Debug, Default)]
+struct OpenClawRelatedSessionClaim {
+    value: Option<String>,
+    invalid: bool,
 }
 
-fn native_session_family(path: &Path, index: &Value) -> (Option<String>, Option<String>) {
-    let Some(entries) = index.as_object() else {
-        return (None, None);
-    };
+fn related_session_claim(
+    index: &Value,
+    agent_id: Option<&str>,
+    fields: &[&str],
+) -> OpenClawRelatedSessionClaim {
+    let mut resolved = OpenClawRelatedSessionClaim::default();
+    for field in fields {
+        let Some(value) = index.get(*field) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let Some(claim) = value.as_str().filter(|claim| !claim.trim().is_empty()) else {
+            resolved.invalid = true;
+            continue;
+        };
+        let claim = super::qualify_session_id(agent_id, claim);
+        if resolved
+            .value
+            .as_ref()
+            .is_some_and(|current| current != &claim)
+        {
+            resolved.invalid = true;
+        } else {
+            resolved.value = Some(claim);
+        }
+    }
+    resolved
+}
+
+fn native_session_family(path: &Path, index: &Value) -> OpenClawNativeSessionFamily {
     let direct_id = path
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    let Some((_, selected)) = entries.iter().find(|(_, entry)| {
+    let selected = super::super::openclaw_session_index_for_file(path, index);
+    let selected_spawned_by = match lineage_claim(&selected, "spawnedBy") {
+        OpenClawLineageClaim::Absent => return OpenClawNativeSessionFamily::Absent,
+        OpenClawLineageClaim::Valid(claim) => claim,
+        OpenClawLineageClaim::Invalid => return OpenClawNativeSessionFamily::Invalid,
+    };
+    let Some(entries) = index.as_object() else {
+        return OpenClawNativeSessionFamily::Invalid;
+    };
+    let mut matching = entries.iter().filter(|(_, entry)| {
         entry
             .get("sessionId")
             .and_then(Value::as_str)
             .is_some_and(|id| id == direct_id)
-    }) else {
-        return (None, None);
+    });
+    let Some((_, direct_entry)) = matching.next() else {
+        return OpenClawNativeSessionFamily::Invalid;
     };
-    let Some(first_parent_key) = selected.get("spawnedBy").and_then(Value::as_str) else {
-        return (None, None);
-    };
-    let mut current_key = first_parent_key;
+    if matching.next().is_some() {
+        return OpenClawNativeSessionFamily::Invalid;
+    }
+    if lineage_claim(direct_entry, "spawnedBy") != OpenClawLineageClaim::Valid(selected_spawned_by)
+    {
+        return OpenClawNativeSessionFamily::Invalid;
+    }
+    let mut current_key = selected_spawned_by;
     let mut parent = None;
     let mut root = None;
     let mut visited = BTreeSet::new();
     for depth in 0..16 {
         if !visited.insert(current_key.to_owned()) {
-            return (None, None);
+            return OpenClawNativeSessionFamily::Invalid;
         }
         let Some(entry) = entries.get(current_key) else {
-            return (None, None);
+            return OpenClawNativeSessionFamily::Invalid;
         };
-        let Some(session_id) = entry.get("sessionId").and_then(Value::as_str) else {
-            return (None, None);
+        let OpenClawLineageClaim::Valid(session_id) = lineage_claim(entry, "sessionId") else {
+            return OpenClawNativeSessionFamily::Invalid;
         };
         let agent = current_key
             .strip_prefix("agent:")
@@ -648,13 +695,44 @@ fn native_session_family(path: &Path, index: &Value) -> (Option<String>, Option<
             parent = Some(qualified.clone());
         }
         root = Some(qualified);
-        let Some(next) = entry.get("spawnedBy").and_then(Value::as_str) else {
-            break;
+        let next = match lineage_claim(entry, "spawnedBy") {
+            OpenClawLineageClaim::Absent => break,
+            OpenClawLineageClaim::Valid(claim) => claim,
+            OpenClawLineageClaim::Invalid => return OpenClawNativeSessionFamily::Invalid,
         };
+        if depth == 15 {
+            return OpenClawNativeSessionFamily::Invalid;
+        }
         current_key = next;
     }
-    let root = root.or_else(|| parent.clone());
-    (parent, root)
+    let Some(parent_native_session_id) = parent else {
+        return OpenClawNativeSessionFamily::Invalid;
+    };
+    OpenClawNativeSessionFamily::Resolved {
+        root_native_session_id: root.unwrap_or_else(|| parent_native_session_id.clone()),
+        parent_native_session_id,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenClawLineageClaim<'a> {
+    Absent,
+    Valid(&'a str),
+    Invalid,
+}
+
+fn lineage_claim<'a>(value: &'a Value, field: &str) -> OpenClawLineageClaim<'a> {
+    let Some(value) = value.get(field) else {
+        return OpenClawLineageClaim::Absent;
+    };
+    if value.is_null() {
+        return OpenClawLineageClaim::Absent;
+    }
+    value
+        .as_str()
+        .filter(|claim| !claim.trim().is_empty())
+        .map(OpenClawLineageClaim::Valid)
+        .unwrap_or(OpenClawLineageClaim::Invalid)
 }
 
 fn explicit_branch(value: &Value) -> Option<String> {

@@ -30,6 +30,18 @@ ALLOWED_EVENT_ORIGIN_SUPPORT = {
     "explicit_no_copy",
     "unknown",
 }
+EXPECTED_PROVIDER_LINEAGE_SUPPORT = {
+    "codex": ("exact_relationship", "unknown"),
+    "pi": ("exact_relationship", "unknown"),
+    "open_code": ("exact_relationship", "explicit_no_copy"),
+    "crush": ("exact_relationship", "explicit_no_copy"),
+    "goose": ("exact_relationship", "unknown"),
+    "openclaw": ("exact_relationship", "explicit_no_copy"),
+    "gemini_cli": ("exact_relationship", "explicit_no_copy"),
+    "zed": ("exact_relationship", "explicit_no_copy"),
+    "mistral_vibe": ("exact_relationship", "unknown"),
+    "mux": ("exact_relationship", "explicit_no_copy"),
+}
 REQUIRED_FIDELITY_FIELDS = {
     "user_prompts",
     "assistant_messages",
@@ -355,6 +367,27 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
         fail(f"providers[{provider_id}] has no provider-specific public test references")
 
 
+def validate_provider_lineage_claims(providers: list[dict[str, Any]]) -> None:
+    for provider in providers:
+        provider_id = str(provider.get("id"))
+        expected_relationship, expected_origin = EXPECTED_PROVIDER_LINEAGE_SUPPORT.get(
+            provider_id,
+            ("unknown", "unknown"),
+        )
+        lineage = provider.get("lineage_support", {})
+        observed = (
+            lineage.get("session_relationship"),
+            lineage.get("event_origin"),
+        )
+        expected = (expected_relationship, expected_origin)
+        if observed != expected:
+            fail(
+                f"providers[{provider_id}].lineage_support must be "
+                f"{expected_relationship}/{expected_origin}, got "
+                f"{observed[0]}/{observed[1]}"
+            )
+
+
 def main() -> int:
     try:
         matrix = json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
@@ -405,6 +438,7 @@ def main() -> int:
         seen_ids: set[str] = set()
         for index, provider in enumerate(providers):
             validate_provider(provider, index, seen_ids)
+        validate_provider_lineage_claims(providers)
     except (OSError, json.JSONDecodeError, MatrixError) as exc:
         print(f"provider support matrix check failed: {exc}", file=sys.stderr)
         return 1

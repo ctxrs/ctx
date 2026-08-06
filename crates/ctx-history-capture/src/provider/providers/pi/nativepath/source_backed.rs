@@ -48,7 +48,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v3";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v4-lineage-resolution";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -539,7 +539,7 @@ fn resolve_pi_lineage(discovered: &mut [DiscoveredPiSource]) -> Result<()> {
             .binding
             .parent_session_path
             .as_ref()
-            .and_then(|path| {
+            .map(|path| {
                 let candidate = if path.is_absolute() {
                     path.clone()
                 } else {
@@ -549,9 +549,20 @@ fn resolve_pi_lineage(discovered: &mut [DiscoveredPiSource]) -> Result<()> {
                         .unwrap_or_else(|| Path::new(""))
                         .join(path)
                 };
-                fs::canonicalize(candidate).ok()
+                let canonical = fs::canonicalize(&candidate).map_err(|_| {
+                    CaptureError::InvalidPayload(format!(
+                        "Pi session {:?} declares unresolved parentSession {:?}",
+                        source.binding.native_session_id, path
+                    ))
+                })?;
+                by_path.get(&canonical).copied().ok_or_else(|| {
+                    CaptureError::InvalidPayload(format!(
+                        "Pi session {:?} declares parentSession {:?} outside its bounded inventory",
+                        source.binding.native_session_id, path
+                    ))
+                })
             })
-            .and_then(|path| by_path.get(&path).copied());
+            .transpose()?;
         parents.push(parent);
     }
 

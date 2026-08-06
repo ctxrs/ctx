@@ -38,7 +38,8 @@ const ZED_LOGICAL_SESSION_KIND: &str = "zed-thread";
 const ZED_LOGICAL_EVENT_KIND: &str = "zed-thread-event";
 const ZED_SOURCE_SCHEMA_VARIANT: &str = "zed-nativepath-sqlite-v0";
 const ZED_SOURCE_REVISION_KIND: &str = "zed-logical-rows-v1";
-pub(crate) const ZED_PARSER_REVISION: &str = "zed-nativepath-source-backed-v1-session-lineage";
+pub(crate) const ZED_PARSER_REVISION: &str =
+    "zed-nativepath-source-backed-v2-complete-session-lineage";
 
 #[derive(Debug, Error)]
 pub(crate) enum ZedSourceBackedErrorV0 {
@@ -501,6 +502,34 @@ mod tests {
         let child = lineage.resolve("a-child").unwrap().unwrap();
         assert_eq!(child.parent_thread_id.as_deref(), Some("thread-1"));
         assert_eq!(child.root_thread_id, "thread-1");
+    }
+
+    #[test]
+    fn provider_p1_lineage_rejects_a_missing_referenced_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let database = source.join("threads.db");
+        create_database(&database, "missing parent lineage sentinel");
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "update threads set parent_id = 'missing-parent' where id = 'thread-1'",
+                [],
+            )
+            .unwrap();
+
+        let snapshot =
+            acquire_snapshot(crate::test_provider_sqlite_data_root(), &database).unwrap();
+        let mut lineage = ZedThreadLineageResolver::new(snapshot.connection().unwrap()).unwrap();
+        let error = match lineage.resolve("thread-1") {
+            Err(error) => error,
+            Ok(_) => panic!("missing Zed parent must fail closed"),
+        };
+
+        assert!(error
+            .to_string()
+            .contains("references missing parent \"missing-parent\""));
     }
 
     #[derive(Default)]

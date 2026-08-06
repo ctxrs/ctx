@@ -58,7 +58,7 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
+        "session_relationship": "exact_relationship",
         "event_origin": "unknown"
       },
       "fidelity": {
@@ -103,7 +103,7 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
       "lineage_support": {
-        "session_relationship": "unknown",
+        "session_relationship": "exact_relationship",
         "event_origin": "unknown"
       },
       "fidelity": {
@@ -189,8 +189,8 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
-        "event_origin": "unknown"
+        "session_relationship": "exact_relationship",
+        "event_origin": "explicit_no_copy"
       },
       "fidelity": {
         "user_prompts": true,
@@ -367,8 +367,8 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
-        "event_origin": "unknown"
+        "session_relationship": "exact_relationship",
+        "event_origin": "explicit_no_copy"
       },
       "fidelity": {
         "user_prompts": true,
@@ -411,7 +411,7 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
       "lineage_support": {
-        "session_relationship": "unknown",
+        "session_relationship": "exact_relationship",
         "event_origin": "unknown"
       },
       "fidelity": {
@@ -706,8 +706,8 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
       "lineage_support": {
-        "session_relationship": "unknown",
-        "event_origin": "unknown"
+        "session_relationship": "exact_relationship",
+        "event_origin": "explicit_no_copy"
       },
       "fidelity": {
         "user_prompts": true,
@@ -1062,8 +1062,8 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
-        "event_origin": "unknown"
+        "session_relationship": "exact_relationship",
+        "event_origin": "explicit_no_copy"
       },
       "fidelity": {
         "user_prompts": true,
@@ -1242,8 +1242,8 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
-        "event_origin": "unknown"
+        "session_relationship": "exact_relationship",
+        "event_origin": "explicit_no_copy"
       },
       "fidelity": {
         "user_prompts": true,
@@ -1695,7 +1695,7 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
+        "session_relationship": "exact_relationship",
         "event_origin": "unknown"
       },
       "fidelity": {
@@ -1739,8 +1739,8 @@
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
       "lineage_support": {
-        "session_relationship": "unknown",
-        "event_origin": "unknown"
+        "session_relationship": "exact_relationship",
+        "event_origin": "explicit_no_copy"
       },
       "fidelity": {
         "user_prompts": true,
