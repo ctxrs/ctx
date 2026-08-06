@@ -171,7 +171,7 @@ impl OpenClawProjector {
         {
             append_invocation_abstention(&mut annotation, abstention);
         }
-        apply_annotation(&mut record, annotation);
+        apply_annotation(&mut record, annotation).map_err(contract)?;
         record
             .content
             .omit_structured_content_if_aggregate_exceeds_limit()

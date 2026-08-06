@@ -489,7 +489,8 @@ impl JsonlFamilyProjector for ClaudeProjector {
                 fallback_identity,
                 normalized_body,
             )?;
-            apply_annotation(&mut core, worker.repository_attributor().attribute(input));
+            apply_annotation(&mut core, worker.repository_attributor().attribute(input))
+                .map_err(contract)?;
             core.content
                 .omit_structured_content_if_aggregate_exceeds_limit()
                 .map_err(contract)?;

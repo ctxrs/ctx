@@ -793,6 +793,41 @@ impl CoreRecord {
             })
     }
 
+    /// Finalizes repository commit-operation identities after provider capture
+    /// has attached the repository annotation to this stable Core record.
+    pub fn bind_repository_commit_operation_identities(&mut self) -> CoreRecordResult<()> {
+        let bindings = self
+            .repository_bindings
+            .iter()
+            .cloned()
+            .map(|binding| (binding.binding_id.clone(), binding))
+            .collect::<BTreeMap<_, _>>();
+        for observation in &mut self.repository_vcs_observations {
+            let RepositoryVcsObservationKind::Outcome(outcome) = &mut observation.kind else {
+                continue;
+            };
+            let Some(operation) = &mut outcome.commit_operation else {
+                continue;
+            };
+            let binding = bindings
+                .get(&observation.repository_binding_id)
+                .ok_or_else(|| {
+                    CoreRecordError::UnknownRepositoryBinding(
+                        observation.repository_binding_id.clone(),
+                    )
+                })?;
+            let linkage = outcome.linkage.clone();
+            operation.bind_scoped_identity(
+                &self.source,
+                self.event_id,
+                self.session_id,
+                binding,
+                &linkage,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Retains a previously certified logical identity when the same event is
     /// rebuilt after its local candidate disappeared. The old local route is
     /// deliberately revoked; only immutable identity and scoped observations

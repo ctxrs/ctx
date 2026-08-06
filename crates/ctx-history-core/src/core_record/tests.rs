@@ -1809,8 +1809,6 @@ fn operation_event_and_pull_request_shapes_are_explicit() {
 
 #[test]
 fn plural_exact_operation_mapping_bound_accepts_32_rejects_33_and_leaves_unlinked_unchanged() {
-    let scope = record();
-    let repository = binding();
     let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
     let mappings = |count: usize| {
         (0..count)
@@ -1823,10 +1821,6 @@ fn plural_exact_operation_mapping_bound_accepts_32_rejects_33_and_leaves_unlinke
 
     let accepted_mappings = mappings(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS);
     let accepted = RepositoryCommitOperationEvent::repository_verified_yield(
-        &scope.source,
-        scope.event_id,
-        scope.session_id,
-        &repository,
         &linkage,
         RepositoryCommitOperationKind::Rebase,
         accepted_mappings.clone(),
@@ -1843,10 +1837,6 @@ fn plural_exact_operation_mapping_bound_accepts_32_rejects_33_and_leaves_unlinke
 
     let rejected_mappings = mappings(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS + 1);
     let rejected = RepositoryCommitOperationEvent::repository_verified_yield(
-        &scope.source,
-        scope.event_id,
-        scope.session_id,
-        &repository,
         &linkage,
         RepositoryCommitOperationKind::Rebase,
         rejected_mappings.clone(),
@@ -1866,10 +1856,6 @@ fn plural_exact_operation_mapping_bound_accepts_32_rejects_33_and_leaves_unlinke
 
     let unlinked_sources = (0..33).map(|index| numbered_oid(index + 1)).collect();
     let unlinked = RepositoryCommitOperationEvent::record_exact_unlinked(
-        &scope.source,
-        scope.event_id,
-        scope.session_id,
-        &repository,
         &linkage,
         RepositoryCommitOperationKind::Rebase,
         unlinked_sources,
@@ -1898,11 +1884,7 @@ fn plural_operation_id_replay_is_stable_and_mapping_order_is_canonical() {
     let mut replay_mappings = mappings.clone();
     replay_mappings.reverse();
 
-    let first = RepositoryCommitOperationEvent::repository_verified_yield(
-        &scope.source,
-        scope.event_id,
-        scope.session_id,
-        &repository,
+    let mut first = RepositoryCommitOperationEvent::repository_verified_yield(
         &linkage,
         RepositoryCommitOperationKind::Rebase,
         mappings.clone(),
@@ -1912,11 +1894,7 @@ fn plural_operation_id_replay_is_stable_and_mapping_order_is_canonical() {
         [8; 32],
     )
     .unwrap();
-    let replay = RepositoryCommitOperationEvent::repository_verified_yield(
-        &scope.source,
-        scope.event_id,
-        scope.session_id,
-        &repository,
+    let mut replay = RepositoryCommitOperationEvent::repository_verified_yield(
         &linkage,
         RepositoryCommitOperationKind::Rebase,
         replay_mappings.clone(),
@@ -1926,6 +1904,25 @@ fn plural_operation_id_replay_is_stable_and_mapping_order_is_canonical() {
         [8; 32],
     )
     .unwrap();
+
+    first
+        .bind_scoped_identity(
+            &scope.source,
+            scope.event_id,
+            scope.session_id,
+            &repository,
+            &linkage,
+        )
+        .unwrap();
+    replay
+        .bind_scoped_identity(
+            &scope.source,
+            scope.event_id,
+            scope.session_id,
+            &repository,
+            &linkage,
+        )
+        .unwrap();
 
     assert_eq!(first, replay);
     assert_eq!(first.mappings.len(), 2);
@@ -2121,10 +2118,6 @@ fn core_record_rejects_operation_id_transplanted_to_another_repository() {
         result: oid('a'),
     };
     let operation = RepositoryCommitOperationEvent::repository_verified_yield(
-        &record.source,
-        record.event_id,
-        record.session_id,
-        &repository,
         &linkage,
         RepositoryCommitOperationKind::Amend,
         vec![mapping.clone()],
@@ -2154,6 +2147,9 @@ fn core_record_rejects_operation_id_transplanted_to_another_repository() {
             reference: None,
             relative_path: None,
         });
+    record
+        .bind_repository_commit_operation_identities()
+        .unwrap();
     record.validate_contract().unwrap();
 
     record.repository_bindings[0].logical_repository_id = "repo-2".to_owned();

@@ -734,10 +734,6 @@ impl RepositoryCommitOperationEvent {
     /// drift-free repository/object-domain verification pass.
     #[allow(clippy::too_many_arguments)]
     pub fn repository_verified_yield(
-        source: &SourceKey,
-        core_event_id: StableEntityId,
-        core_session_id: StableEntityId,
-        repository: &RepositoryBinding,
         linkage: &RepositoryOutcomeLinkage,
         kind: RepositoryCommitOperationKind,
         mut mappings: Vec<RepositoryCommitMapping>,
@@ -747,10 +743,6 @@ impl RepositoryCommitOperationEvent {
         repository_object_domain_sha256: [u8; 32],
     ) -> CoreRecordResult<Self> {
         mappings.sort();
-        let object_format = mappings
-            .first()
-            .map(|mapping| mapping.source.format)
-            .ok_or(CoreRecordError::InvalidRepositoryOutcome)?;
         let exact_source_oids = canonical_mapping_sources(&mappings);
         let proof = RepositoryVerifiedYieldProof {
             command_pre_head,
@@ -764,16 +756,7 @@ impl RepositoryCommitOperationEvent {
             mutation_excluded: true,
         };
         let event = Self {
-            event_id: repository_commit_operation_event_id(
-                source,
-                core_event_id,
-                core_session_id,
-                repository,
-                object_format,
-                &mappings,
-                linkage,
-                kind,
-            ),
+            event_id: unscoped_repository_commit_operation_event_id(linkage, kind),
             receipt_id: repository_outcome_receipt_id(linkage),
             kind,
             mappings,
@@ -784,13 +767,6 @@ impl RepositoryCommitOperationEvent {
             proof: RepositoryCommitOperationProof::RepositoryVerifiedYield(proof),
         };
         event.validate_contract(linkage)?;
-        event.validate_scoped_identity(
-            source,
-            core_event_id,
-            core_session_id,
-            repository,
-            linkage,
-        )?;
         Ok(event)
     }
 
@@ -798,10 +774,6 @@ impl RepositoryCommitOperationEvent {
     /// authority. Unlinked objects remain observations only.
     #[allow(clippy::too_many_arguments)]
     pub fn record_exact_unlinked(
-        source: &SourceKey,
-        core_event_id: StableEntityId,
-        core_session_id: StableEntityId,
-        repository: &RepositoryBinding,
         linkage: &RepositoryOutcomeLinkage,
         kind: RepositoryCommitOperationKind,
         mut unlinked_sources: Vec<GitObjectId>,
@@ -812,22 +784,8 @@ impl RepositoryCommitOperationEvent {
         unlinked_sources.dedup();
         unlinked_results.sort();
         unlinked_results.dedup();
-        let object_format = unlinked_sources
-            .first()
-            .or_else(|| unlinked_results.first())
-            .map(|object_id| object_id.format)
-            .ok_or(CoreRecordError::InvalidRepositoryOutcome)?;
         let event = Self {
-            event_id: repository_commit_operation_event_id(
-                source,
-                core_event_id,
-                core_session_id,
-                repository,
-                object_format,
-                &[],
-                linkage,
-                kind,
-            ),
+            event_id: unscoped_repository_commit_operation_event_id(linkage, kind),
             receipt_id: repository_outcome_receipt_id(linkage),
             kind,
             mappings: Vec::new(),
@@ -838,13 +796,6 @@ impl RepositoryCommitOperationEvent {
             proof: RepositoryCommitOperationProof::RecordExact,
         };
         event.validate_contract(linkage)?;
-        event.validate_scoped_identity(
-            source,
-            core_event_id,
-            core_session_id,
-            repository,
-            linkage,
-        )?;
         Ok(event)
     }
 
@@ -921,6 +872,32 @@ impl RepositoryCommitOperationEvent {
         self.proof.validate_contract(self)
     }
 
+    pub fn bind_scoped_identity(
+        &mut self,
+        source: &SourceKey,
+        core_event_id: StableEntityId,
+        core_session_id: StableEntityId,
+        repository: &RepositoryBinding,
+        linkage: &RepositoryOutcomeLinkage,
+    ) -> CoreRecordResult<()> {
+        let object_format = self
+            .object_ids()
+            .next()
+            .map(|object_id| object_id.format)
+            .ok_or(CoreRecordError::InvalidRepositoryOutcome)?;
+        self.event_id = repository_commit_operation_event_id(
+            source,
+            core_event_id,
+            core_session_id,
+            repository,
+            object_format,
+            &self.mappings,
+            linkage,
+            self.kind,
+        );
+        self.validate_scoped_identity(source, core_event_id, core_session_id, repository, linkage)
+    }
+
     pub(super) fn validate_scoped_identity(
         &self,
         source: &SourceKey,
@@ -986,6 +963,21 @@ impl RepositoryCommitOperationEvent {
             .filter(move |_| admitted)
             .map(|mapping| &mapping.result)
     }
+}
+
+fn unscoped_repository_commit_operation_event_id(
+    linkage: &RepositoryOutcomeLinkage,
+    kind: RepositoryCommitOperationKind,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.commit-operation-event.unscoped.v1\0");
+    digest.update(repository_outcome_receipt_id(linkage));
+    digest.update([match kind {
+        RepositoryCommitOperationKind::Amend => 1,
+        RepositoryCommitOperationKind::Rebase => 2,
+        RepositoryCommitOperationKind::CherryPick => 3,
+    }]);
+    digest.finalize().into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
