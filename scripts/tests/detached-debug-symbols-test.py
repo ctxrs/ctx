@@ -23,6 +23,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "scripts/release/detached-debug-symbols.py"
+BUILD_DEFINITION = ROOT / "BUILD.bazel"
+RUST_POLICY = ROOT / "tools/bazel/ctx_rust.bzl"
 SOURCE_COMMIT = "1" * 40
 if len(sys.argv) < 3:
     raise RuntimeError("test requires the declared Bazel Rust tool runfiles")
@@ -33,6 +35,49 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError("could not load detached symbol tool")
 SYMBOL_TOOL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SYMBOL_TOOL)
+
+
+def freebsd_release_link_argument() -> str:
+    build_text = BUILD_DEFINITION.read_text(encoding="utf-8")
+    policy_text = RUST_POLICY.read_text(encoding="utf-8")
+    release_setting = re.search(
+        r'config_setting\(\s*name = "release_freebsd",(?P<body>.*?)\n\)',
+        build_text,
+        re.DOTALL,
+    )
+    if release_setting is None:
+        raise RuntimeError("FreeBSD release config_setting is missing")
+    setting_body = release_setting.group("body")
+    if 'constraint_values = ["@platforms//os:freebsd"]' not in setting_body:
+        raise RuntimeError("FreeBSD release config_setting is not platform-scoped")
+    if 'values = {"compilation_mode": "opt"}' not in setting_body:
+        raise RuntimeError("FreeBSD release config_setting is not release-scoped")
+
+    selector = re.search(
+        r'_FREEBSD_RELEASE_LINK_FLAGS = select\(\{(?P<body>.*?)\n\}\)',
+        policy_text,
+        re.DOTALL,
+    )
+    if selector is None:
+        raise RuntimeError("FreeBSD release linker policy is missing")
+    match = re.search(
+        r'"//:release_freebsd": \["-Clink-arg=(?P<argument>[^"]+)"\]',
+        selector.group("body"),
+    )
+    if match is None:
+        raise RuntimeError("FreeBSD release linker argument is missing")
+    if match.group("argument") != "-Wl,--build-id=sha1":
+        raise RuntimeError("FreeBSD release linker argument is not a SHA-1 build ID")
+
+    binary_body = policy_text.split("def ctx_rust_binary", 1)[1].split(
+        "def ctx_rust_test", 1
+    )[0]
+    test_body = policy_text.split("def ctx_rust_test", 1)[1]
+    if "_FREEBSD_RELEASE_LINK_FLAGS" not in binary_body:
+        raise RuntimeError("FreeBSD release linker policy is not attached to binaries")
+    if "_FREEBSD_RELEASE_LINK_FLAGS" in test_body:
+        raise RuntimeError("FreeBSD release linker policy leaked into tests")
+    return match.group("argument")
 
 
 def elf_sections(path: Path) -> set[str]:
@@ -114,7 +159,15 @@ int main(void) { printf("%d\\n", answer()); return 0; }
         )
         self.artifact = self.directory / "ctx"
         subprocess.run(
-            ["cc", "-g", "-O1", "-Wl,--build-id=sha1", "-o", self.artifact, source],
+            [
+                "cc",
+                "-g",
+                "-O1",
+                freebsd_release_link_argument(),
+                "-o",
+                self.artifact,
+                source,
+            ],
             check=True,
             timeout=60,
         )
