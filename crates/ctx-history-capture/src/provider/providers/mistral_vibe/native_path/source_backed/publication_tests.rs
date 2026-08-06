@@ -131,10 +131,11 @@ fn url_and_stdio_transport_metadata_publish_terminal_content_without_mcp_identit
     .join("\n")
         + "\n";
     let temp = crate::test_support_paths::tempdir().unwrap();
-    write_session(temp.path(), &messages);
+    let source_root = temp.path().join("source");
+    write_session(&source_root, &messages);
 
-    let first = publish(temp.path(), &temp.path().join("index-a"));
-    let second = publish(temp.path(), &temp.path().join("index-b"));
+    let first = publish(&source_root, &temp.path().join("index-a"));
+    let second = publish(&source_root, &temp.path().join("index-b"));
     assert_eq!(first.len(), 4);
     assert_eq!(
         first
@@ -225,10 +226,11 @@ fn reused_tool_result_ids_keep_existing_native_and_collision_identities() {
     .join("\n")
         + "\n";
     let temp = crate::test_support_paths::tempdir().unwrap();
-    write_session(temp.path(), &messages);
+    let source_root = temp.path().join("source");
+    write_session(&source_root, &messages);
 
-    let first = publish(temp.path(), &temp.path().join("index-a"));
-    let second = publish(temp.path(), &temp.path().join("index-b"));
+    let first = publish(&source_root, &temp.path().join("index-a"));
+    let second = publish(&source_root, &temp.path().join("index-b"));
     assert_eq!(first.len(), 3);
     assert_eq!(
         first
