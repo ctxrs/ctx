@@ -8,6 +8,7 @@ use ctx_history_index::{
     CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeError, CoreEventRangeFilters,
     CoreEventRangePage, CoreEventRangeSelection, IndexError, VerifiedIndex,
 };
+use ctx_history_refresh::{verify_generation_query_authority, GenerationQueryAuthorityError};
 use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -50,6 +51,8 @@ pub(crate) const fn mcp_event_query_core_record_bytes(response_cap: usize) -> us
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EventQueryError {
+    #[error(transparent)]
+    GenerationAuthority(#[from] GenerationQueryAuthorityError),
     #[error(transparent)]
     Range(#[from] CoreEventRangeError),
     #[error("{field} must be an absolute RFC3339 timestamp: {value:?}")]
@@ -225,12 +228,14 @@ pub(crate) fn open_event_range_index(
     cursor: Option<&CoreEventRangeCursor>,
 ) -> std::result::Result<VerifiedIndex, EventQueryError> {
     let root = data_root.join("search/lexical");
-    match cursor {
+    let index = match cursor {
         Some(cursor) => VerifiedIndex::open_pinned_generation(&root, cursor.generation_id()),
         None => VerifiedIndex::open_pinned(&root),
     }
     .map_err(CoreEventRangeError::from)
-    .map_err(Into::into)
+    .map_err(EventQueryError::from)?;
+    verify_generation_query_authority(&index)?;
+    Ok(index)
 }
 
 fn read_page(
@@ -802,6 +807,7 @@ pub(crate) fn event_query_error_value(error: &EventQueryError) -> Value {
         EventQueryError::Range(CoreEventRangeError::RecordExceedsStrictBudget { .. })
     );
     let error_code = match error {
+        EventQueryError::GenerationAuthority(error) => error.error_code(),
         EventQueryError::Range(CoreEventRangeError::Index(
             IndexError::PinnedGenerationNotRetained { .. },
         )) => "generation_not_retained",
@@ -838,11 +844,13 @@ pub(crate) fn event_query_error_value(error: &EventQueryError) -> Value {
         EventQueryError::Io(_) => "output_failed",
         _ => "event_query_failed",
     };
+    let retryable = output_limit_exceeded
+        || matches!(error, EventQueryError::GenerationAuthority(error) if error.retryable());
     json!({
         "schema_version": EVENT_QUERY_SCHEMA_VERSION,
         "error_code": error_code,
         "detail": error.to_string(),
-        "retryable": output_limit_exceeded,
+        "retryable": retryable,
         "restart_required": error_code == "generation_not_retained",
         "recommendation": if output_limit_exceeded {
             Some("use CLI JSONL with ctx list events")

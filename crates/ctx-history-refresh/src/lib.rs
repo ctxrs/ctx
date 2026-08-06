@@ -84,9 +84,9 @@ pub use publication::{
     optional_generation, pin_active_verified_generation, pin_published_generation,
     pin_retained_generation, published_explicit_source_relocation_authority,
     published_refresh_receipt, published_refresh_receipt_for_index, source_backed_index_root,
-    verified_generation_is_query_ready, PinnedSourceBackedGeneration,
-    SourceBackedRefreshPublication, SourceBackedZeroSourceAuthority,
-    SourceBackedZeroSourceAuthorityKind,
+    verified_generation_is_query_ready, verify_generation_query_authority,
+    GenerationQueryAuthorityError, PinnedSourceBackedGeneration, SourceBackedRefreshPublication,
+    SourceBackedZeroSourceAuthority, SourceBackedZeroSourceAuthorityKind,
 };
 pub use request::{
     AdmissionResponseBarrier, RefreshAdmission, RefreshLogicalPhase, RefreshLogicalStatus,

@@ -85,16 +85,93 @@ pub fn open_verified_index(index_root: &Path) -> std::result::Result<VerifiedInd
     VerifiedIndex::open_pinned(index_root)
 }
 
+/// A verified Core generation that cannot be admitted at the public query
+/// boundary because its source-refresh publication authority is absent or
+/// invalid.
+#[derive(Debug)]
+pub enum GenerationQueryAuthorityError {
+    UncertifiedEmpty {
+        generation_id: String,
+    },
+    Invalid {
+        generation_id: String,
+        detail: String,
+    },
+}
+
+impl GenerationQueryAuthorityError {
+    pub const fn error_code(&self) -> &'static str {
+        match self {
+            Self::UncertifiedEmpty { .. } => "source_unavailable",
+            Self::Invalid { .. } => "publication_authority_invalid",
+        }
+    }
+
+    pub const fn retryable(&self) -> bool {
+        matches!(self, Self::UncertifiedEmpty { .. })
+    }
+
+    const fn is_uncertified_empty(&self) -> bool {
+        matches!(self, Self::UncertifiedEmpty { .. })
+    }
+}
+
+impl fmt::Display for GenerationQueryAuthorityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UncertifiedEmpty { generation_id } => write!(
+                formatter,
+                "Core generation {generation_id} is empty without certified zero-source publication authority"
+            ),
+            Self::Invalid {
+                generation_id,
+                detail,
+            } => write!(
+                formatter,
+                "Core generation {generation_id} has invalid source-refresh publication authority: {detail}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GenerationQueryAuthorityError {}
+
+/// Applies the one generation-bound publication-authority check shared by all
+/// public Core query openers. Physical verification alone is insufficient for
+/// an empty generation because absence must be certified by refresh metadata.
+pub fn verify_generation_query_authority(
+    index: &VerifiedIndex,
+) -> std::result::Result<(), GenerationQueryAuthorityError> {
+    let generation_id = index.generation_id().to_owned();
+    match index.publication_metadata() {
+        None if index.manifest().sources.is_empty() => {
+            Err(GenerationQueryAuthorityError::UncertifiedEmpty { generation_id })
+        }
+        None => Ok(()),
+        Some(_) => {
+            let metadata = SourceBackedPublicationMetadata::decode(index).map_err(|error| {
+                GenerationQueryAuthorityError::Invalid {
+                    generation_id: generation_id.clone(),
+                    detail: format!("{error:#}"),
+                }
+            })?;
+            if metadata.certifies_generation(index) {
+                Ok(())
+            } else {
+                Err(GenerationQueryAuthorityError::UncertifiedEmpty { generation_id })
+            }
+        }
+    }
+}
+
 /// Evaluates query readiness from the committed generation and its opaque
 /// refresh metadata, independently of any later mutable refresh attempt.
 pub fn verified_generation_is_query_ready(index: &VerifiedIndex) -> Result<bool> {
-    match index.publication_metadata() {
-        Some(_) => {
-            let metadata = SourceBackedPublicationMetadata::decode(index)
-                .context("decode Core source-refresh publication authority")?;
-            Ok(metadata.certifies_generation(index))
-        }
-        None => Ok(!index.manifest().sources.is_empty()),
+    match verify_generation_query_authority(index) {
+        Ok(()) => Ok(true),
+        Err(error) if error.is_uncertified_empty() => Ok(false),
+        Err(error) => Err(anyhow::Error::new(error))
+            .context("decode Core source-refresh publication authority"),
     }
 }
 
@@ -1063,8 +1140,10 @@ pub fn pin_published_generation(
     let Some(index) = open_published_generation(data_root, journal)? else {
         return Ok(None);
     };
-    if !verified_generation_is_query_ready(&index)? {
-        return Ok(None);
+    match verify_generation_query_authority(&index) {
+        Ok(()) => {}
+        Err(error) if error.is_uncertified_empty() => return Ok(None),
+        Err(error) => return Err(anyhow::Error::new(error)),
     }
     Ok(Some(PinnedSourceBackedGeneration { index }))
 }
@@ -1080,9 +1159,7 @@ pub fn pin_retained_generation(
             index_root.display()
         )
     })?;
-    if !verified_generation_is_query_ready(&index)? {
-        bail!("retained Core generation {generation_id} has no zero-source publication authority");
-    }
+    verify_generation_query_authority(&index).map_err(anyhow::Error::new)?;
     Ok(PinnedSourceBackedGeneration { index })
 }
 
@@ -1090,7 +1167,9 @@ pub fn pin_active_verified_generation(
     data_root: &Path,
     journal: &dyn RefreshJournal,
 ) -> Result<PinnedSourceBackedGeneration> {
-    pin_published_generation(data_root, journal)
+    let index = open_published_generation(data_root, journal)
         .context("source_unavailable: verify active Core generation")?
-        .ok_or_else(|| anyhow!("source_unavailable: active verified Core generation is missing"))
+        .ok_or_else(|| anyhow!("source_unavailable: active verified Core generation is missing"))?;
+    verify_generation_query_authority(&index).map_err(anyhow::Error::new)?;
+    Ok(PinnedSourceBackedGeneration { index })
 }

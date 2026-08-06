@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_index::{CoreEventRecord, IndexError, SessionRecord, VerifiedIndex};
+use ctx_history_refresh::verify_generation_query_authority;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -272,15 +273,20 @@ pub(super) fn validate_session_selector(
 
 pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
     let root = index_root(data_root);
-    match VerifiedIndex::open_pinned(&root) {
-        Ok(index) => Ok(index),
-        Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => Err(anyhow!(
-            "the Core index does not exist; retry with daemon refresh enabled"
-        )),
-        Err(error) => {
-            Err(error).with_context(|| format!("open verified Core index {}", root.display()))
+    let index = match VerifiedIndex::open_pinned(&root) {
+        Ok(index) => index,
+        Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => {
+            return Err(anyhow!(
+                "the Core index does not exist; retry with daemon refresh enabled"
+            ));
         }
-    }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("open verified Core index {}", root.display()));
+        }
+    };
+    verify_generation_query_authority(&index).map_err(anyhow::Error::new)?;
+    Ok(index)
 }
 
 pub(super) fn index_root(data_root: &Path) -> PathBuf {

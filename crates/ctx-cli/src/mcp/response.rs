@@ -130,6 +130,19 @@ pub(super) fn tool_error_result(err: Error) -> Value {
             "structuredContent": structured,
         });
     }
+    if let Some(error) = err.downcast_ref::<ctx_history_refresh::GenerationQueryAuthorityError>() {
+        let detail = error.to_string();
+        return json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": detail.clone() }],
+            "structuredContent": {
+                "error": detail.clone(),
+                "error_code": error.error_code(),
+                "detail": detail,
+                "retryable": error.retryable(),
+            },
+        });
+    }
     if let Some(error) = err.downcast_ref::<ctx_history_index::IndexError>() {
         let error_code = match error {
             ctx_history_index::IndexError::SessionEventCursorGenerationMismatch { .. } => {
