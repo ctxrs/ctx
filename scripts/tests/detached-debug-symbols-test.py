@@ -18,6 +18,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -231,6 +232,44 @@ int main(void) { printf("%d\\n", answer()); return 0; }
             + identifier.bytes
         )
         self.assertEqual(SYMBOL_TOOL.macho_uuid(macho), str(identifier))
+
+    def test_macho_prepare_removes_the_nlist_symbol_table(self) -> None:
+        artifact = self.directory / "ctx-macos"
+        artifact.write_bytes(b"shipping binary")
+        symbol_tree = self.directory / "macho-symbols"
+        symbol_tree.mkdir()
+        dsymutil = self.directory / "dsymutil"
+        strip = self.directory / "strip"
+        calls: list[list[str]] = []
+
+        def fake_run(arguments: list[str], **_kwargs: object) -> str:
+            command = [str(argument) for argument in arguments]
+            calls.append(command)
+            if command[0] == str(dsymutil):
+                output = Path(command[command.index("-o") + 1])
+                dwarf = output / "Contents" / "Resources" / "DWARF" / artifact.name
+                dwarf.parent.mkdir(parents=True)
+                dwarf.write_bytes(b"detached symbols")
+            return ""
+
+        identifier = "12345678-1234-5678-9abc-def012345678"
+        with (
+            mock.patch.object(SYMBOL_TOOL, "run", side_effect=fake_run),
+            mock.patch.object(SYMBOL_TOOL, "macho_uuid", return_value=identifier),
+        ):
+            self.assertEqual(
+                SYMBOL_TOOL.prepare_macho(
+                    artifact,
+                    symbol_tree,
+                    {"dsymutil": dsymutil, "strip": strip},
+                ),
+                ("mach-o-uuid", identifier),
+            )
+
+        self.assertIn(
+            [str(strip), "-S", "-x", "-N", str(artifact)],
+            calls,
+        )
 
     def test_ignores_all_hostile_ambient_symbol_tools(self) -> None:
         hostile_bin = self.directory / "hostile-bin"

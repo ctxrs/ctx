@@ -33,6 +33,27 @@ trap cleanup EXIT
 repo="${test_root}/repo"
 runfiles="${test_root}/runfiles"
 route_runfiles="${runfiles}/_main/ctx_release_routes/linux-x64"
+advisory_launcher="${source_root}/dependency_advisory_gate"
+advisory_stage2="${source_root}/_dependency_advisory_gate_stage2_bootstrap.py"
+advisory_venv="${source_root}/_dependency_advisory_gate.venv"
+tomli_repo="+http_archive+ctx_tomli"
+python_runfile="$(sed -n \
+  's/^PYTHON_BINARY_ACTUAL = "\([^"]*\)"$/\1/p' "${advisory_launcher}")"
+python_repo="${python_runfile%%/*}"
+[[ -x "${advisory_launcher}" && -f "${advisory_stage2}" && \
+  -d "${advisory_venv}" ]] || {
+  echo "dependency advisory gate Python launcher runfiles are incomplete" >&2
+  exit 1
+}
+[[ "${python_runfile}" == */* && \
+  -x "${TEST_SRCDIR}/${python_runfile}" ]] || {
+  echo "dependency advisory gate Python interpreter runfile is unavailable" >&2
+  exit 1
+}
+[[ -d "${TEST_SRCDIR}/${tomli_repo}" ]] || {
+  echo "dependency advisory gate tomli runfiles are unavailable" >&2
+  exit 1
+}
 mkdir -p \
   "${repo}/scripts" \
   "${repo}/scripts/release" \
@@ -47,8 +68,12 @@ mkdir -p \
   "${route_runfiles}"
 ln -s "${source_root}/scripts/dependency-advisory-gate.py" \
   "${runfiles}/_main/scripts/dependency-advisory-gate.py"
-ln -s "${TEST_SRCDIR}/_main~_repo_rules~ctx_tomli" \
-  "${runfiles}/_main~_repo_rules~ctx_tomli"
+ln -s "${advisory_stage2}" \
+  "${runfiles}/_main/_dependency_advisory_gate_stage2_bootstrap.py"
+ln -s "${advisory_venv}" \
+  "${runfiles}/_main/_dependency_advisory_gate.venv"
+ln -s "${TEST_SRCDIR}/${python_repo}" "${runfiles}/${python_repo}"
+ln -s "${TEST_SRCDIR}/${tomli_repo}" "${runfiles}/${tomli_repo}"
 ln -s "${TEST_SRCDIR}/bazel_tools" "${runfiles}/bazel_tools"
 ln -s "${pinned_rustc}" "${route_runfiles}/rustc"
 ln -s "${pinned_rust_objcopy}" "${route_runfiles}/rust-objcopy"
@@ -416,8 +441,7 @@ path.write_text(
 )
 PY
 
-test -x "${source_root}/dependency_advisory_gate"
-ln -s "${source_root}/dependency_advisory_gate" \
+ln -s "${advisory_launcher}" \
   "${route_runfiles}/advisory-gate"
 ln -s "${repo}/scripts/release-sbom.py" "${route_runfiles}/sbom-tool"
 ln -s "${artifact}" "${route_runfiles}/artifact"

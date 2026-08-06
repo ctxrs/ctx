@@ -510,11 +510,14 @@ py_binary(
 
 py_test(
     name = "dependency_advisory_gate_tests",
+    args = ["$(rootpath :dependency_advisory_gate)"],
     srcs = [
         "scripts/dependency-advisory-gate.py",
         "scripts/tests/dependency-advisory-gate-test.py",
     ],
-    data = glob(["scripts/tests/fixtures/dependency-advisory/**"]),
+    data = glob(["scripts/tests/fixtures/dependency-advisory/**"]) + [
+        ":dependency_advisory_gate",
+    ],
     deps = ["@ctx_tomli//:lib"],
     main = "scripts/tests/dependency-advisory-gate-test.py",
     tags = ["release-gate", "security"],

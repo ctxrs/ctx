@@ -29,6 +29,12 @@ grep -Fxq 'build:release --lockfile_mode=error' "${release_config}" || {
   exit 1
 }
 
+grep -Fq 'load("@rules_python//python:defs.bzl", "py_library")' \
+  "${module_definition}" || {
+  echo 'Bazel 9 external tomli repository must load py_library explicitly' >&2
+  exit 1
+}
+
 python3 - "${module_lock}" <<'PY'
 import json
 from pathlib import Path

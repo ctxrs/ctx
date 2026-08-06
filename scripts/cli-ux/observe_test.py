@@ -6,6 +6,7 @@ import errno
 import hashlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -36,6 +37,12 @@ class ObserverTests(unittest.TestCase):
         )
         self.addCleanup(self.temporary.cleanup)
         self.root_parent = Path(self.temporary.name)
+        self.observed_python = self.root_parent / "python"
+        self.observed_python.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        self.observed_python.chmod(0o700)
 
     def run_fixture(
         self,
@@ -49,7 +56,7 @@ class ObserverTests(unittest.TestCase):
         stdin: bytes | str = b"",
     ) -> dict[str, object]:
         receipt = observe.observe(
-            [sys.executable, str(FIXTURE), mode, *arguments],
+            [str(self.observed_python), str(FIXTURE), mode, *arguments],
             columns=columns,
             rows=rows,
             timeout_ms=timeout_ms,
@@ -175,6 +182,15 @@ class ObserverTests(unittest.TestCase):
             stdin_receipt["observed"]["plain_projection"]["text"],
             "stdin:'hello\\n'\n",
         )
+
+    def test_group_writable_executable_is_rejected(self) -> None:
+        executable = self.root_parent / "group-writable"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o720)
+        with self.assertRaisesRegex(
+            observe.ObservationError, "group- or world-writable"
+        ):
+            observe._resolve_executable([str(executable)])
 
     def test_failure_signal_and_timeout_are_distinct(self) -> None:
         failed = self.run_fixture("exit")
@@ -313,7 +329,7 @@ class ObserverTests(unittest.TestCase):
                 "--output",
                 str(output),
                 "--",
-                sys.executable,
+                str(self.observed_python),
                 str(FIXTURE),
                 "environment",
             ],
@@ -347,7 +363,7 @@ class ObserverTests(unittest.TestCase):
                 "--output",
                 str(timeout_output),
                 "--",
-                sys.executable,
+                str(self.observed_python),
                 str(FIXTURE),
                 "timeout",
             ],
