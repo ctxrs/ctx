@@ -1,5 +1,5 @@
 #[cfg(test)]
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 use std::{
     fmt,
     path::Path,
@@ -39,6 +39,149 @@ pub(crate) use ctx_history_refresh::{
     SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
     SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
+
+#[cfg(test)]
+pub(crate) fn publish_authoritative_empty_generation_for_test(
+    index_root: &Path,
+    request_id: &str,
+    operation: ctx_history_refresh::RefreshOperation,
+    scope: ctx_history_capture::SourceBackedRefreshScope,
+    published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
+) -> Result<SourceBackedRefreshPublication> {
+    publish_authoritative_empty_generation_with_route_results_for_test(
+        index_root,
+        request_id,
+        operation,
+        scope,
+        published_explicit_source_catalog,
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test(
+    index_root: &Path,
+    request_id: &str,
+    operation: ctx_history_refresh::RefreshOperation,
+    scope: ctx_history_capture::SourceBackedRefreshScope,
+    published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
+    route_results: Option<Vec<SourceBackedRefreshRouteResult>>,
+) -> Result<SourceBackedRefreshPublication> {
+    use ctx_history_index::{GenerationWriter, IndexError, SourceRouteIdentity, WriterOptions};
+    use ctx_history_refresh::{
+        SourceBackedZeroSourceAuthority, SourceBackedZeroSourceAuthorityKind,
+    };
+
+    let previous_generation = open_verified_index(index_root)
+        .ok()
+        .map(|index| index.generation_id().to_owned());
+    let selected_routes = match &scope {
+        ctx_history_capture::SourceBackedRefreshScope::All => {
+            vec![SourceRouteIdentity::from_sha256("ab".repeat(32))?]
+        }
+        ctx_history_capture::SourceBackedRefreshScope::Exact(routes) => {
+            if routes.is_empty() {
+                return Err(anyhow!("authoritative-empty test scope has no route"));
+            }
+            routes.iter().cloned().collect()
+        }
+    };
+    let route_results = route_results.unwrap_or_else(|| {
+        selected_routes
+            .iter()
+            .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+            .collect()
+    });
+    let authority_routes = route_results
+        .iter()
+        .map(|result| {
+            if !result.outcome.is_success() {
+                return Err(anyhow!(
+                    "authoritative-empty test route did not succeed: {}",
+                    result.route_identity
+                ));
+            }
+            SourceRouteIdentity::from_sha256(result.route_identity.clone()).map_err(Into::into)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if authority_routes.iter().collect::<BTreeSet<_>>().len() != authority_routes.len() {
+        return Err(anyhow!(
+            "authoritative-empty test fixture contains a duplicate route"
+        ));
+    }
+    let refresh_scope = match &scope {
+        ctx_history_capture::SourceBackedRefreshScope::All => json!({"kind": "all"}),
+        ctx_history_capture::SourceBackedRefreshScope::Exact(routes) => json!({
+            "kind": "exact",
+            "routes": routes.iter().map(SourceRouteIdentity::as_str).collect::<Vec<_>>(),
+        }),
+    };
+    let metadata_previous_generation = previous_generation.clone();
+    let metadata_route_results = route_results.clone();
+    let metadata_authority_routes = authority_routes.clone();
+    let metadata_catalog = published_explicit_source_catalog.clone();
+    let request_id = request_id.to_owned();
+    let published = GenerationWriter::open(index_root, WriterOptions::default())?
+        .into_writer()
+        .map_err(crate::semantic::committed_generation_recovery_error)?
+        .commit_with_publication_metadata(
+            |_| true,
+            move |context| {
+                let generation_id = context.generation_id().to_owned();
+                let generation_changed =
+                    metadata_previous_generation.as_deref() != Some(generation_id.as_str());
+                let receipt = SourceBackedRefreshReceipt {
+                    previous_generation: metadata_previous_generation.clone(),
+                    published_generation: generation_id.clone(),
+                    generation_changed,
+                    published_explicit_source_catalog: metadata_catalog.clone(),
+                    current: SourceBackedRefreshCurrent::default(),
+                    route_results: metadata_route_results.clone(),
+                    zero_source_authority: metadata_authority_routes
+                        .iter()
+                        .cloned()
+                        .map(|route_identity| SourceBackedZeroSourceAuthority {
+                            generation_id: generation_id.clone(),
+                            route_identity,
+                            kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                        })
+                        .collect(),
+                    catalog_route_bindings: Vec::new(),
+                };
+                serde_json::to_vec(&json!({
+                    "version": 2,
+                    "request_id": request_id,
+                    "operation": operation.as_str(),
+                    "refresh_scope": refresh_scope,
+                    "receipt": receipt.to_json(),
+                    "route_observations": vec![Value::Null; metadata_authority_routes.len()],
+                }))
+                .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
+            },
+        )?;
+    let generation_id = published.receipt().generation_id.clone();
+    let (_, _, verified_index) = published.into_parts();
+    Ok(SourceBackedRefreshPublication {
+        generation_id: generation_id.clone(),
+        published_explicit_source_catalog,
+        unsupported_routes: 0,
+        certified_source_count: 0,
+        certified_source_bytes: 0,
+        current: SourceBackedRefreshCurrent::default(),
+        timings: SourceBackedRefreshTimings::default(),
+        route_results,
+        zero_source_authority: authority_routes
+            .into_iter()
+            .map(|route_identity| SourceBackedZeroSourceAuthority {
+                generation_id: generation_id.clone(),
+                route_identity,
+                kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+            })
+            .collect(),
+        catalog_route_bindings: Vec::new(),
+        verified_index: Some(Arc::new(verified_index)),
+    })
+}
 
 #[cfg(test)]
 pub(in crate::semantic) struct CoreRefreshEngine(ctx_history_refresh::RefreshEngine);

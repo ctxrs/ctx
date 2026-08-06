@@ -265,11 +265,14 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
 
     let index_failure = &responses[cases.len() + 1]["result"];
     assert_eq!(index_failure["isError"], true);
-    assert!(index_failure["structuredContent"]["error_code"].is_null());
-    assert!(index_failure["structuredContent"]["error"]
-        .as_str()
-        .unwrap()
-        .contains("the Core index does not exist; retry with daemon refresh enabled"));
+    assert_eq!(
+        index_failure["structuredContent"],
+        json!({
+            "error": "source_unavailable",
+            "error_code": "source_unavailable",
+        })
+    );
+    assert_eq!(mcp_content_text(index_failure), "source_unavailable");
 
     let recovered = &responses[cases.len() + 2]["result"];
     assert!(recovered["isError"].is_null());

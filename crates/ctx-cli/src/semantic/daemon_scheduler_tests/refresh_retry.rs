@@ -132,8 +132,7 @@ fn mixed_route_dispositions_schedule_only_retryable_routes() {
     let executor_blocked = blocked_route.clone();
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
-            let mut publication = publish_empty_authoritative_generation(execution.index_root);
-            publication.route_results = [
+            let route_results = [
                 (&executor_retryable, "unavailable"),
                 (&executor_blocked, "incompatible"),
             ]
@@ -154,7 +153,10 @@ fn mixed_route_dispositions_schedule_only_retryable_routes() {
                 result
             })
             .collect();
-            Ok(publication)
+            Ok(publish_empty_authoritative_generation_with_route_results(
+                &execution,
+                Some(route_results),
+            ))
         },
     ));
     coordinator.initialize_watch_route_authority(BTreeSet::from([
@@ -219,7 +221,7 @@ fn terminal_admission_fence_failure_releases_root_before_exact_dirty_route_runs(
                 execution.scope,
                 SourceBackedRefreshScope::Exact(BTreeSet::from([executor_route.clone()]))
             );
-            let mut publication = publish_empty_authoritative_generation(execution.index_root);
+            let mut publication = publish_empty_authoritative_generation(&execution);
             publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
                 executor_route.as_str().to_owned(),
                 true,
@@ -505,7 +507,7 @@ fn persistent_terminal_status_failure_retries_without_reexecution_or_hot_spin() 
     let observed_executions = Arc::clone(&executions);
     let executor = Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
         observed_executions.fetch_add(1, Ordering::SeqCst);
-        Ok(publish_empty_authoritative_generation(execution.index_root))
+        Ok(publish_empty_authoritative_generation(&execution))
     });
     let terminal_writes = Arc::new(AtomicUsize::new(0));
     let observed_terminal_writes = Arc::clone(&terminal_writes);

@@ -31,13 +31,14 @@ fn source_refresh_endpoint(socket_path: &Path) -> DaemonQueryEndpoint {
 fn background_maintenance_wake_is_accepted_through_client_and_coordinator() -> Result<()> {
     let data_root = short_data_root()?;
     ctx_history_core::platform_security::establish_private_data_root(data_root.path())?;
-    let writer = ctx_history_index::GenerationWriter::open(
-        source_backed_index_root(data_root.path()),
-        ctx_history_index::WriterOptions::default(),
+    let generation = super::publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(data_root.path()),
+        "background-maintenance-wake-fixture",
+        ctx_history_refresh::RefreshOperation::Refresh,
+        ctx_history_capture::SourceBackedRefreshScope::All,
+        None,
     )?
-    .into_writer()
-    .map_err(crate::semantic::committed_generation_recovery_error)?;
-    let generation = writer.commit(|_| true)?.generation_id;
+    .generation_id;
     let coordinator = Arc::new(CoreRefreshEngine::new());
     let service = start_daemon_source_refresh_service_with_coordinator_for_test(
         data_root.path(),

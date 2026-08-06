@@ -516,11 +516,7 @@ fn codex_core_records(index: &VerifiedIndex) -> Vec<CoreRecord> {
     records
 }
 
-pub(super) fn write_codex_rollout(
-    root: &Path,
-    native_session_id: &str,
-    text: &str,
-) -> PathBuf {
+pub(super) fn write_codex_rollout(root: &Path, native_session_id: &str, text: &str) -> PathBuf {
     write_codex_rollout_with_parent(root, native_session_id, None, text)
 }
 

@@ -212,28 +212,16 @@ fn typed_unknown_recovery_reenqueues_stable_uuid_and_returns_its_terminal_genera
         let run = service
             .source_refresh
             .run_next_with(
-                move |_, _| {
-                    let commit = ctx_history_index::GenerationWriter::open(
-                        source_backed_index_root(&data_root),
-                        WriterOptions::default(),
-                    )?
-                    .into_writer()
-                    .map_err(crate::semantic::committed_generation_recovery_error)?
-                    .commit(|_| true)?;
-                    *execute_generation.lock().unwrap() = Some(commit.generation_id.clone());
-                    Ok(SourceBackedRefreshPublication {
-                        generation_id: commit.generation_id,
-                        published_explicit_source_catalog: None,
-                        unsupported_routes: 0,
-                        certified_source_count: 0,
-                        certified_source_bytes: 0,
-                        current: SourceBackedRefreshCurrent::default(),
-                        timings: SourceBackedRefreshTimings::default(),
-                        route_results: Vec::new(),
-                        zero_source_authority: Vec::new(),
-                        catalog_route_bindings: Vec::new(),
-                        verified_index: None,
-                    })
+                move |request_id, _| {
+                    let publication = publish_authoritative_empty_generation_for_test(
+                        &source_backed_index_root(&data_root),
+                        request_id,
+                        ctx_history_refresh::RefreshOperation::Refresh,
+                        ctx_history_capture::SourceBackedRefreshScope::All,
+                        None,
+                    )?;
+                    *execute_generation.lock().unwrap() = Some(publication.generation_id.clone());
+                    Ok(publication)
                 },
                 move || Ok(probe_generation.lock().unwrap().clone()),
                 |_| Ok(()),
@@ -585,28 +573,15 @@ fn old_wait_request_keeps_exact_identity_across_restart_and_returns_exact_genera
         let run = service
             .source_refresh
             .run_next_with(
-                move |_, _| {
-                    let writer = ctx_history_index::GenerationWriter::open(
-                        source_backed_index_root(&data_root),
-                        WriterOptions::default(),
-                    )?
-                    .into_writer()
-                    .map_err(crate::semantic::committed_generation_recovery_error)?;
-                    let commit = writer.commit(|_| true)?;
-                    *execute_generation.lock().unwrap() = Some(commit.generation_id.clone());
-                    let mut publication = SourceBackedRefreshPublication {
-                        generation_id: commit.generation_id,
-                        published_explicit_source_catalog: Some(execute_authority),
-                        unsupported_routes: 0,
-                        certified_source_count: 0,
-                        certified_source_bytes: 0,
-                        current: SourceBackedRefreshCurrent::default(),
-                        timings: SourceBackedRefreshTimings::default(),
-                        route_results: Vec::new(),
-                        zero_source_authority: Vec::new(),
-                        catalog_route_bindings: Vec::new(),
-                        verified_index: None,
-                    };
+                move |request_id, _| {
+                    let mut publication = publish_authoritative_empty_generation_for_test(
+                        &source_backed_index_root(&data_root),
+                        request_id,
+                        ctx_history_refresh::RefreshOperation::Import,
+                        ctx_history_capture::SourceBackedRefreshScope::All,
+                        Some(execute_authority),
+                    )?;
+                    *execute_generation.lock().unwrap() = Some(publication.generation_id.clone());
                     publication.current.removed_source_count = 0;
                     Ok(publication)
                 },

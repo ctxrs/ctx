@@ -435,7 +435,7 @@
       "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-capture/src/provider/codex/nativepath/source_backed.rs",
-      "parser_revision": "codex-nativepath-core-record-v20-exact-retrieval-json-authority",
+      "parser_revision": "codex-nativepath-core-record-v21-transitive-root-normalization",
       "suite_id": "ctx-history-capture::test:codex_direct_result",
       "conformance_suite": "codex_direct_result",
       "tests": [

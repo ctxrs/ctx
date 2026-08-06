@@ -127,17 +127,6 @@ pub(crate) fn start_mcp_source_refresh_daemon(temp: &TempDir) -> McpSourceRefres
             status["daemon"]["running"] == true
                 && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
-            ctx(temp)
-                .args([
-                    "import",
-                    "--all",
-                    "--no-daemon",
-                    "--format=json",
-                    "--progress",
-                    "none",
-                ])
-                .assert()
-                .success();
             return daemon;
         }
         assert!(

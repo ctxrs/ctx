@@ -1,9 +1,8 @@
 use super::*;
 use crate::semantic::source_backed_refresh_coordinator::{
-    coordinate_source_backed_refresh, open_verified_index, SourceBackedRefreshMode,
-    SourceBackedRefreshReceipt,
+    coordinate_source_backed_refresh, publish_authoritative_empty_generation_for_test,
+    SourceBackedRefreshMode,
 };
-use ctx_history_index::IndexError;
 
 #[test]
 fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass() -> Result<()> {
@@ -12,38 +11,16 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
     ctx_history_core::platform_security::establish_private_data_root(&data_root)?;
     let interrupted = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
-            let request_id = execution.request_id.to_owned();
-            let published = GenerationWriter::open(execution.index_root, WriterOptions::default())?
-                .into_writer()
-                .map_err(crate::semantic::committed_generation_recovery_error)?
-                .commit_with_publication_metadata(
-                    |_| true,
-                    |context| {
-                        let generation_id = context.generation_id().to_owned();
-                        let receipt = SourceBackedRefreshReceipt {
-                            previous_generation: None,
-                            published_generation: generation_id.clone(),
-                            generation_changed: true,
-                            published_explicit_source_catalog: None,
-                            current: SourceBackedRefreshCurrent::default(),
-                            route_results: Vec::new(),
-                            zero_source_authority: Vec::new(),
-                            catalog_route_bindings: Vec::new(),
-                        };
-                        serde_json::to_vec(&json!({
-                            "version": 1,
-                            "request_id": request_id,
-                            "operation": "refresh",
-                            "refresh_scope": {"kind": "all"},
-                            "receipt": receipt.to_json(),
-                            "route_observations": [],
-                        }))
-                        .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
-                    },
-                )?;
+            let published = publish_authoritative_empty_generation_for_test(
+                execution.index_root,
+                execution.request_id,
+                execution.operation,
+                execution.scope.clone(),
+                execution.explicit_source_catalog.cloned(),
+            )?;
             Err(anyhow!(
                 "injected crash after automatic publication {}",
-                published.receipt().generation_id
+                published.generation_id
             ))
         },
     ));
@@ -72,23 +49,13 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             executor_calls.fetch_add(1, Ordering::SeqCst);
-            let receipt = GenerationWriter::open(execution.index_root, WriterOptions::default())?
-                .into_writer()
-                .map_err(crate::semantic::committed_generation_recovery_error)?
-                .commit(|_| true)?;
-            Ok(SourceBackedRefreshPublication {
-                generation_id: receipt.generation_id,
-                published_explicit_source_catalog: None,
-                unsupported_routes: 0,
-                certified_source_count: 0,
-                certified_source_bytes: 0,
-                current: SourceBackedRefreshCurrent::default(),
-                timings: SourceBackedRefreshTimings::default(),
-                route_results: Vec::new(),
-                zero_source_authority: Vec::new(),
-                catalog_route_bindings: Vec::new(),
-                verified_index: None,
-            })
+            publish_authoritative_empty_generation_for_test(
+                execution.index_root,
+                execution.request_id,
+                execution.operation,
+                execution.scope.clone(),
+                execution.explicit_source_catalog.cloned(),
+            )
         },
     ));
     let mut runtime = DaemonRuntime::default();
@@ -142,52 +109,13 @@ fn recovered_periodic_no_op_restores_cooldown_from_original_request() -> Result<
     let data_root = temp.path().join("data");
     ctx_history_core::platform_security::establish_private_data_root(&data_root)?;
     let executor = Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
-        let previous_generation = open_verified_index(execution.index_root)
-            .ok()
-            .map(|index| index.generation_id().to_owned());
-        let request_id = execution.request_id.to_owned();
-        let published = GenerationWriter::open(execution.index_root, WriterOptions::default())?
-            .into_writer()
-            .map_err(crate::semantic::committed_generation_recovery_error)?
-            .commit_with_publication_metadata(
-                |_| true,
-                move |context| {
-                    let generation_id = context.generation_id().to_owned();
-                    let receipt = SourceBackedRefreshReceipt {
-                        previous_generation: previous_generation.clone(),
-                        published_generation: generation_id.clone(),
-                        generation_changed: previous_generation.as_deref()
-                            != Some(generation_id.as_str()),
-                        published_explicit_source_catalog: None,
-                        current: SourceBackedRefreshCurrent::default(),
-                        route_results: Vec::new(),
-                        zero_source_authority: Vec::new(),
-                        catalog_route_bindings: Vec::new(),
-                    };
-                    serde_json::to_vec(&json!({
-                        "version": 1,
-                        "request_id": request_id,
-                        "operation": "refresh",
-                        "refresh_scope": {"kind": "all"},
-                        "receipt": receipt.to_json(),
-                        "route_observations": [],
-                    }))
-                    .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
-                },
-            )?;
-        Ok(SourceBackedRefreshPublication {
-            generation_id: published.receipt().generation_id.clone(),
-            published_explicit_source_catalog: None,
-            unsupported_routes: 0,
-            certified_source_count: 0,
-            certified_source_bytes: 0,
-            current: SourceBackedRefreshCurrent::default(),
-            timings: SourceBackedRefreshTimings::default(),
-            route_results: Vec::new(),
-            zero_source_authority: Vec::new(),
-            catalog_route_bindings: Vec::new(),
-            verified_index: None,
-        })
+        publish_authoritative_empty_generation_for_test(
+            execution.index_root,
+            execution.request_id,
+            execution.operation,
+            execution.scope.clone(),
+            execution.explicit_source_catalog.cloned(),
+        )
     });
     let first = CoreRefreshEngine::with_executor(executor);
     let initial = first.enqueue_periodic(&data_root)?;

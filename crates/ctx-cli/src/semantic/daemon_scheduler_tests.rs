@@ -31,10 +31,12 @@ use crate::{
         daemon::{daemon_wait_duration, install_daemon_test_job_hooks, DaemonTestJobHooks},
         source_backed_refresh_coordinator::EventWatermark,
         source_backed_refresh_coordinator::{
-            coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
-            SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
-            SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-            SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
+            coordinate_source_backed_refresh, publish_authoritative_empty_generation_for_test,
+            publish_authoritative_empty_generation_with_route_results_for_test,
+            source_backed_index_root, CoreRefreshEngine, SourceBackedRefreshCurrent,
+            SourceBackedRefreshExecution, SourceBackedRefreshMode, SourceBackedRefreshPublication,
+            SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure,
+            SourceBackedRefreshTimings,
         },
         source_epoch_status_report,
     },
@@ -73,14 +75,13 @@ fn daemon_args() -> DaemonRunArgs {
 }
 
 fn publish_empty_core_generation(data_root: &Path) -> String {
-    ctx_history_index::GenerationWriter::open(
-        source_backed_index_root(data_root),
-        ctx_history_index::WriterOptions::default(),
+    publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(data_root),
+        "daemon-scheduler-empty-core-fixture",
+        ctx_history_refresh::RefreshOperation::Refresh,
+        SourceBackedRefreshScope::All,
+        None,
     )
-    .unwrap()
-    .into_writer()
-    .unwrap()
-    .commit(|_| true)
     .unwrap()
     .generation_id
 }
@@ -88,30 +89,31 @@ fn publish_empty_core_generation(data_root: &Path) -> String {
 #[path = "daemon_scheduler_tests/refresh_retry.rs"]
 mod refresh_retry;
 
-fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefreshPublication {
-    let receipt = GenerationWriter::open(index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap()
-        .commit(|_| true)
-        .unwrap();
-    SourceBackedRefreshPublication {
-        route_results: Vec::new(),
-        zero_source_authority: Vec::new(),
-        catalog_route_bindings: Vec::new(),
-        verified_index: None,
-        generation_id: receipt.generation_id.clone(),
-        published_explicit_source_catalog: None,
-        unsupported_routes: 0,
-        certified_source_count: 0,
-        certified_source_bytes: 0,
-        current: SourceBackedRefreshCurrent::default(),
-        timings: SourceBackedRefreshTimings {
-            discovery_us: 1,
-            scan_stage_us: 1,
-            commit_us: 1,
-        },
-    }
+fn publish_empty_authoritative_generation(
+    execution: &SourceBackedRefreshExecution<'_>,
+) -> SourceBackedRefreshPublication {
+    publish_empty_authoritative_generation_with_route_results(execution, None)
+}
+
+fn publish_empty_authoritative_generation_with_route_results(
+    execution: &SourceBackedRefreshExecution<'_>,
+    route_results: Option<Vec<SourceBackedRefreshRouteResult>>,
+) -> SourceBackedRefreshPublication {
+    let mut publication = publish_authoritative_empty_generation_with_route_results_for_test(
+        execution.index_root,
+        execution.request_id,
+        execution.operation,
+        execution.scope.clone(),
+        execution.explicit_source_catalog.cloned(),
+        route_results,
+    )
+    .unwrap();
+    publication.timings = SourceBackedRefreshTimings {
+        discovery_us: 1,
+        scan_stage_us: 1,
+        commit_us: 1,
+    };
+    publication
 }
 
 fn readiness_source() -> ctx_history_core::SourceKey {
@@ -637,7 +639,7 @@ fn one_core_cycle_then_scheduler_drains_optional_consumers() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
-            Ok(publish_empty_authoritative_generation(execution.index_root))
+            Ok(publish_empty_authoritative_generation(&execution))
         },
     ));
     coordinator.enqueue_for_test(None);
@@ -849,7 +851,7 @@ fn nonretryable_pro_attempt_is_generation_guarded() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
-            Ok(publish_empty_authoritative_generation(execution.index_root))
+            Ok(publish_empty_authoritative_generation(&execution))
         },
     ));
     coordinator.enqueue_for_test(None);
@@ -918,7 +920,7 @@ fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
-            Ok(publish_empty_authoritative_generation(execution.index_root))
+            Ok(publish_empty_authoritative_generation(&execution))
         },
     ));
     coordinator.enqueue_for_test(None);
