@@ -6,7 +6,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use ctx_history_core::utc_now;
-use ctx_history_index::VerifiedIndex;
+use ctx_history_index::{
+    release_generation_retention_lease, GenerationRetentionLease, VerifiedIndex,
+};
 #[cfg(test)]
 use ctx_pro_host_protocol::CoreMaterializationFinalizationPhase;
 use ctx_pro_host_protocol::{
@@ -28,7 +30,10 @@ use crate::{
 };
 
 use super::{
-    paths_status::{daemon_jobs_path, read_daemon_job_status, write_daemon_job_status},
+    paths_status::{
+        daemon_jobs_path, read_daemon_job_status, read_daemon_job_status_strict,
+        write_daemon_job_status,
+    },
     source_backed_refresh_coordinator::{
         nonzero_duration_micros, open_verified_index, source_backed_index_root,
         PinnedCorePublication, PinnedSourceBackedGeneration,
@@ -529,6 +534,38 @@ fn read_status(data_root: &Path) -> Option<SourceBackedProCatchUpStatus> {
     read_status_json(data_root).and_then(|value| serde_json::from_value(value).ok())
 }
 
+enum DurableProCatchUpJobRead {
+    Missing,
+    Valid(SourceBackedProCatchUpStatus),
+    Malformed(anyhow::Error),
+}
+
+fn read_durable_status(data_root: &Path) -> DurableProCatchUpJobRead {
+    let value = match read_daemon_job_status_strict(&status_path(data_root)) {
+        Ok(Some(value)) => value,
+        Ok(None) => return DurableProCatchUpJobRead::Missing,
+        Err(error) => {
+            return DurableProCatchUpJobRead::Malformed(anyhow::anyhow!(
+                "invalid_response: durable source-backed Pro catch-up job is unreadable: {error:#}"
+            ))
+        }
+    };
+    match serde_json::from_value(value) {
+        Ok(status) => DurableProCatchUpJobRead::Valid(status),
+        Err(error) => DurableProCatchUpJobRead::Malformed(anyhow::anyhow!(
+            "invalid_response: durable source-backed Pro catch-up job is malformed: {error}"
+        )),
+    }
+}
+
+fn require_durable_status(data_root: &Path) -> Result<Option<SourceBackedProCatchUpStatus>> {
+    match read_durable_status(data_root) {
+        DurableProCatchUpJobRead::Missing => Ok(None),
+        DurableProCatchUpJobRead::Valid(status) => Ok(Some(status)),
+        DurableProCatchUpJobRead::Malformed(error) => Err(error),
+    }
+}
+
 fn persist_status(data_root: &Path, status: &SourceBackedProCatchUpStatus) -> Result<()> {
     write_daemon_job_status(&status_path(data_root), &status.to_json()?)
 }
@@ -546,11 +583,9 @@ pub(super) fn status_generation(data_root: &Path) -> Option<String> {
 }
 
 pub(super) fn scheduled_target_generation(data_root: &Path) -> Result<Option<String>> {
-    let Some(value) = read_status_json(data_root) else {
+    let Some(status) = require_durable_status(data_root)? else {
         return Ok(None);
     };
-    let status: SourceBackedProCatchUpStatus = serde_json::from_value(value)
-        .context("decode durable source-backed Pro catch-up target")?;
     if !status.is_scheduled_target() {
         return Ok(None);
     }
@@ -571,7 +606,7 @@ pub(super) fn scheduled_target_generation(data_root: &Path) -> Result<Option<Str
 /// durable Pro job before the scheduler attempts to pin that job's target.
 pub(super) fn reconcile_core_finalization_generation_lease(data_root: &Path) -> Result<()> {
     let lease = core_finalization_generation_lease(data_root)?;
-    let Some(value) = read_status_json(data_root) else {
+    let Some(status) = require_durable_status(data_root)? else {
         if lease.is_some() {
             cancel_core_finalization_generation_lease(
                 data_root,
@@ -580,8 +615,6 @@ pub(super) fn reconcile_core_finalization_generation_lease(data_root: &Path) -> 
         }
         return Ok(());
     };
-    let status: SourceBackedProCatchUpStatus = serde_json::from_value(value)
-        .context("invalid_response: decode durable source-backed Pro catch-up job")?;
     if status.schema_version != SOURCE_BACKED_PRO_CATCH_UP_SCHEMA_VERSION
         || status.owner != "daemon"
         || status.kind != "source_backed_pro_catch_up"
@@ -603,7 +636,7 @@ pub(super) fn reconcile_core_finalization_generation_lease(data_root: &Path) -> 
         || (status.status == SourceBackedProCatchUpState::Error && !status.retryable);
     if terminal {
         if let Some(lease) = lease {
-            release_core_finalization_generation_lease(data_root, Some(lease.generation_id()))?;
+            release_observed_generation_lease(data_root, &lease)?;
         }
         return Ok(());
     }
@@ -664,14 +697,26 @@ pub(crate) fn cancel_core_finalization_generation_lease(
     let Some(lease) = core_finalization_generation_lease(data_root)? else {
         return Ok(false);
     };
-    let attempts = read_status(data_root)
+    let attempts = require_durable_status(data_root)?
+        .as_ref()
         .filter(|status| status.core_generation_id == lease.generation_id())
         .map(|status| status.attempts)
         .unwrap_or(1);
     let cancelled =
         SourceBackedProCatchUpStatus::pending(lease.generation_id(), attempts).cancelled(reason);
     persist_status(data_root, &cancelled)?;
-    release_core_finalization_generation_lease(data_root, Some(lease.generation_id()))
+    release_observed_generation_lease(data_root, &lease)
+}
+
+fn release_observed_generation_lease(
+    data_root: &Path,
+    lease: &GenerationRetentionLease,
+) -> Result<bool> {
+    release_generation_retention_lease(source_backed_index_root(data_root), lease).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid_response: durable Core generation lease changed before terminal release: {error}"
+        )
+    })
 }
 
 pub(super) fn status_has_finalization_pending(data_root: &Path, core_generation_id: &str) -> bool {
@@ -1205,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_releases_terminal_and_stale_leases_but_rejects_a_foreign_owner() {
+    fn restart_releases_terminal_and_truly_missing_job_leases() {
         let temp = tempfile::tempdir().unwrap();
         let index = empty_index(temp.path());
         let generation = index.generation_id().to_owned();
@@ -1251,7 +1296,110 @@ mod tests {
             read_status_json(temp.path()).unwrap()["error_code"],
             "cancelled"
         );
+    }
 
+    #[test]
+    fn malformed_and_unreadable_jobs_fail_closed_without_releasing_the_lease() {
+        for corruption in ["truncated", "typed", "unreadable"] {
+            let temp = tempfile::tempdir().unwrap();
+            let index = empty_index(temp.path());
+            let generation = index.generation_id().to_owned();
+            let progress = finalization_progress(
+                &index,
+                CoreMaterializationFinalizationPhase::EmitReplay,
+                'c',
+            );
+            reconstruct_core_finalization_generation_lease(temp.path(), &progress).unwrap();
+            let observed = core_finalization_generation_lease(temp.path())
+                .unwrap()
+                .unwrap();
+            let finalizing =
+                SourceBackedProCatchUpStatus::pending(&generation, 1).finalizing(progress);
+            persist_status(temp.path(), &finalizing).unwrap();
+            match corruption {
+                "truncated" => {
+                    fs::write(status_path(temp.path()), b"{\"schema_version\":").unwrap();
+                }
+                "typed" => {
+                    fs::write(
+                        status_path(temp.path()),
+                        b"{\"schema_version\":\"invalid\"}",
+                    )
+                    .unwrap();
+                }
+                "unreadable" => {
+                    fs::remove_file(status_path(temp.path())).unwrap();
+                    fs::create_dir(status_path(temp.path())).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let error = reconcile_core_finalization_generation_lease(temp.path()).unwrap_err();
+            assert!(
+                error.to_string().starts_with("invalid_response:"),
+                "{corruption}: {error:#}"
+            );
+            assert_eq!(
+                core_finalization_generation_lease(temp.path()).unwrap(),
+                Some(observed.clone()),
+                "{corruption}"
+            );
+            let cancel =
+                cancel_core_finalization_generation_lease(temp.path(), "test cancel").unwrap_err();
+            assert!(
+                cancel.to_string().starts_with("invalid_response:"),
+                "{corruption}: {cancel:#}"
+            );
+            assert_eq!(
+                core_finalization_generation_lease(temp.path()).unwrap(),
+                Some(observed),
+                "{corruption}"
+            );
+        }
+    }
+
+    #[test]
+    fn progress_and_job_generation_mismatch_cancels_and_releases_exact_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        let progress = finalization_progress(
+            &index,
+            CoreMaterializationFinalizationPhase::EmitReplay,
+            'c',
+        );
+        reconstruct_core_finalization_generation_lease(temp.path(), &progress).unwrap();
+        let mismatched = CoreMaterializationFinalizationProgress {
+            core_generation_id: "f".repeat(64),
+            ..progress
+        };
+        persist_status(
+            temp.path(),
+            &SourceBackedProCatchUpStatus::pending(&generation, 1).finalizing(mismatched),
+        )
+        .unwrap();
+
+        reconcile_core_finalization_generation_lease(temp.path()).unwrap();
+
+        assert!(core_finalization_generation_lease(temp.path())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            read_status_json(temp.path()).unwrap()["error_code"],
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn lease_owner_mismatch_cancels_and_releases_exact_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = empty_index(temp.path());
+        let generation = index.generation_id().to_owned();
+        let progress = finalization_progress(
+            &index,
+            CoreMaterializationFinalizationPhase::EmitReplay,
+            'c',
+        );
         let index_root = source_backed_index_root(temp.path());
         let foreign = acquire_generation_retention_lease(
             &index_root,
@@ -1260,18 +1408,63 @@ mod tests {
             &"f".repeat(64),
         )
         .unwrap();
-        let finalizing = SourceBackedProCatchUpStatus::pending(&generation, 3).finalizing(progress);
-        persist_status(temp.path(), &finalizing).unwrap();
-        let error = reconcile_core_finalization_generation_lease(temp.path()).unwrap_err();
-        assert!(
-            error.to_string().starts_with("invalid_response:"),
-            "{error:#}"
-        );
+        persist_status(
+            temp.path(),
+            &SourceBackedProCatchUpStatus::pending(&generation, 1).finalizing(progress),
+        )
+        .unwrap();
+
+        reconcile_core_finalization_generation_lease(temp.path()).unwrap();
+
+        assert!(load_generation_retention_lease(&index_root)
+            .unwrap()
+            .is_none());
+        assert_ne!(foreign.owner_kind(), "pro_core_finalization");
         assert_eq!(
-            load_generation_retention_lease(&index_root).unwrap(),
-            Some(foreign.clone())
+            read_status_json(temp.path()).unwrap()["error_code"],
+            "cancelled"
         );
-        release_generation_retention_lease(&index_root, &foreign).unwrap();
+    }
+
+    #[test]
+    fn lease_generation_mismatch_cancels_and_releases_exact_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = index_with_certified_source_at(temp.path(), "lease-mismatch-g1.jsonl", 1);
+        let generation = first.generation_id().to_owned();
+        let progress = finalization_progress(
+            &first,
+            CoreMaterializationFinalizationPhase::EmitReplay,
+            'c',
+        );
+        reconstruct_core_finalization_generation_lease(temp.path(), &progress).unwrap();
+        let index_root = source_backed_index_root(temp.path());
+        let expected = load_generation_retention_lease(&index_root)
+            .unwrap()
+            .unwrap();
+        release_generation_retention_lease(&index_root, &expected).unwrap();
+        let second = index_with_certified_source_at(temp.path(), "lease-mismatch-g2.jsonl", 2);
+        acquire_generation_retention_lease(
+            &index_root,
+            second.generation_id(),
+            expected.owner_kind(),
+            expected.owner_id(),
+        )
+        .unwrap();
+        persist_status(
+            temp.path(),
+            &SourceBackedProCatchUpStatus::pending(&generation, 1).finalizing(progress),
+        )
+        .unwrap();
+
+        reconcile_core_finalization_generation_lease(temp.path()).unwrap();
+
+        assert!(load_generation_retention_lease(&index_root)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            read_status_json(temp.path()).unwrap()["error_code"],
+            "cancelled"
+        );
     }
 
     #[test]

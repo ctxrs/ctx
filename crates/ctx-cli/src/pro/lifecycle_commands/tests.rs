@@ -4,6 +4,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use ctx_history_index::{
+    acquire_generation_retention_lease, load_generation_retention_lease, GenerationWriter,
+    WriterOptions,
+};
+
 use super::*;
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
 
@@ -253,6 +258,67 @@ fn ordinary_uninstall_preserves_local_pro_data_and_fresh_epoch_authority() {
         status["next_action"]["reason"],
         "restore_preserved_pro_data"
     );
+}
+
+#[test]
+fn lease_only_uninstall_releases_before_reporting_pro_absent() {
+    let root = tempfile::tempdir().unwrap();
+    let index_root = ctx_history_refresh::source_backed_index_root(root.path());
+    let receipt = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap()
+        .commit(|_| true)
+        .unwrap();
+    acquire_generation_retention_lease(
+        &index_root,
+        &receipt.generation_id,
+        "pro_core_finalization",
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let layout = ProFilesystemLayout::new(root.path());
+    assert!(!layout.helper_path().exists());
+    assert!(!layout.lifecycle_lock_path().exists());
+
+    let value = run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap();
+
+    assert_eq!(value["local_pro_data"], "absent");
+    assert!(load_generation_retention_lease(&index_root)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn lease_only_uninstall_fails_closed_on_malformed_job_state() {
+    let root = tempfile::tempdir().unwrap();
+    let index_root = ctx_history_refresh::source_backed_index_root(root.path());
+    let receipt = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap()
+        .commit(|_| true)
+        .unwrap();
+    acquire_generation_retention_lease(
+        &index_root,
+        &receipt.generation_id,
+        "pro_core_finalization",
+        &"a".repeat(64),
+    )
+    .unwrap();
+    let status_path = root.path().join("daemon/jobs/pro-catch-up.json");
+    fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+    fs::write(&status_path, b"{\"schema_version\":").unwrap();
+
+    let error = run_uninstall(root.path(), None, UninstallDataDisposition::Keep, true).unwrap_err();
+
+    assert!(
+        error.to_string().starts_with("invalid_response:"),
+        "{error:#}"
+    );
+    assert!(load_generation_retention_lease(&index_root)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
