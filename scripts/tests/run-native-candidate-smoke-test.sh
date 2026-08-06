@@ -5,10 +5,88 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 smoke="${repo_root}/scripts/run-native-candidate-smoke.sh"
 pro_status_fixtures="${repo_root}/scripts/tests/fixtures/native-candidate-pro-status"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-native-smoke-test.XXXXXX")"
-trap 'rm -rf "${tmp}"' EXIT
 
-fake="${tmp}/ctx"
-cat > "${fake}" <<'EOF'
+cleanup_survivor_fixture() {
+  local survivor_pids
+  [[ -n "${survivor_copy:-}" ]] || return 0
+  survivor_pids="$(process_ids_for_command_path "${survivor_copy}")"
+  [[ -n "${survivor_pids}" ]] || return 0
+  kill -TERM ${survivor_pids} 2>/dev/null || true
+  sleep 1
+  survivor_pids="$(process_ids_for_command_path "${survivor_copy}")"
+  [[ -z "${survivor_pids}" ]] || kill -KILL ${survivor_pids} 2>/dev/null || true
+}
+
+cleanup_test() {
+  local test_status=$?
+  trap - EXIT
+  cleanup_survivor_fixture || true
+  rm -rf "${tmp}"
+  exit "${test_status}"
+}
+trap cleanup_test EXIT
+
+fake_template="${tmp}/ctx.template"
+make_fake() {
+  local destination="$1"
+  local pro_status_fixture="$2"
+  sed "s|__PRO_STATUS_FIXTURE__|${pro_status_fixture}|" "${fake_template}" > "${destination}"
+  chmod +x "${destination}"
+}
+
+file_mode() {
+  if mode="$(stat -c '%a' "$1" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -f '%Lp' "$1"
+  fi
+}
+
+file_size() {
+  if size="$(stat -c '%s' "$1" 2>/dev/null)"; then
+    printf '%s\n' "${size}"
+  else
+    stat -f '%z' "$1"
+  fi
+}
+
+file_hash() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    sha256 -q "$1"
+  fi
+}
+
+snapshot_tree() {
+  local tree_root="$1"
+  (
+    cd "${tree_root}"
+    while IFS= read -r entry; do
+      if [[ -d "${entry}" ]]; then
+        printf '%s\tdirectory\t%s\t%s\t-\n' \
+          "${entry}" "$(file_mode "${entry}")" "$(file_size "${entry}")"
+      elif [[ -f "${entry}" ]]; then
+        printf '%s\tfile\t%s\t%s\t%s\n' \
+          "${entry}" "$(file_mode "${entry}")" "$(file_size "${entry}")" \
+          "$(file_hash "${entry}")"
+      else
+        printf '%s\tother\t%s\t%s\t-\n' \
+          "${entry}" "$(file_mode "${entry}")" "$(file_size "${entry}")"
+      fi
+    done < <(find . -mindepth 1 -print | LC_ALL=C sort)
+  )
+}
+
+process_ids_for_command_path() {
+  ps -axo pid=,command= 2>/dev/null \
+    | awk -v executable="$1" '$2 == executable || $3 == executable { print $1 }' \
+    | LC_ALL=C sort -n
+}
+
+cat > "${fake_template}" <<'EOF'
 #!/bin/sh
 set -eu
 
@@ -24,6 +102,27 @@ else
   data_root_mode="$(stat -f '%Lp' "${CTX_DATA_ROOT}")"
 fi
 test "${data_root_mode}" = 700
+
+case "${0##*/}" in
+  *ctx-hang*)
+    sleep 30
+    ;;
+  *lifecycle*)
+    if test "${1:-}" = status && test "${CTX_ANALYTICS_ENABLED+x}" != x; then
+      candidate_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+      : > "${candidate_dir}/.ctx.install.lock"
+      : > "${candidate_dir}/.ctx.daemon-quiescence.lock"
+      mkdir -p "${candidate_dir}/.ctx.daemon-quiescence-acks"
+      sleep 3
+    fi
+    ;;
+  *ctx-survivor*)
+    if test "${1:-}" = --version; then
+      "$0" --survivor-child &
+      sleep 3
+    fi
+    ;;
+esac
 
 case " $* " in
   *" --backend semantic "*)
@@ -61,7 +160,7 @@ case "${1:-}" in
   --version)
     version=0.25.0
     case "${0##*/}" in
-      *bad-version*) version=9.9.9 ;;
+      *bad-version*|*ctx-survivor*) version=9.9.9 ;;
       *ctx-v1*) version=1.0.0 ;;
     esac
     printf 'ctx %s\n' "${version}"
@@ -93,7 +192,7 @@ case "${1:-}" in
   status)
     if test -n "${CTX_PRO_HELPER:-}"; then
       printf '%s' '{"read_only":true,"pro":'
-      cat "${0}.pro-status.json"
+      cat "__PRO_STATUS_FIXTURE__"
       printf '%s\n' '}'
     elif test "${CTX_ANALYTICS_ENABLED+x}" != x; then
       analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
@@ -151,18 +250,21 @@ JSON
 JSON
     fi
     ;;
+  --survivor-child)
+    sleep 30
+    ;;
   *)
     printf 'unexpected fake ctx arguments: %s\n' "$*" >&2
     exit 1
     ;;
 esac
 EOF
-chmod +x "${fake}"
 printf '%s\n' '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}' > "${tmp}/fixture.jsonl"
 
 expected='{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","released_defaults":"passed","explicit_opt_outs":"passed","pro_helper_override_ignored":"passed","semantic_offline_fail_closed":"passed"}}'
 for access_case in absent-helper-trial absent-helper-locked absent-helper-unavailable; do
-  cp "${pro_status_fixtures}/${access_case}.json" "${fake}.pro-status.json"
+  fake="${tmp}/ctx"
+  make_fake "${fake}" "${pro_status_fixtures}/${access_case}.json"
   result="${tmp}/result-${access_case}.json"
   "${smoke}" "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${result}" >/dev/null
   [[ "$(tr -d '\r\n' < "${result}")" == "${expected}" ]] || {
@@ -175,8 +277,7 @@ done
 ctx_v1_parent="${tmp}/ctx-v1-parent"
 mkdir -p "${ctx_v1_parent}"
 ordinary_fake="${ctx_v1_parent}/ctx"
-cp "${fake}" "${ordinary_fake}"
-cp "${pro_status_fixtures}/absent-helper-trial.json" "${ordinary_fake}.pro-status.json"
+make_fake "${ordinary_fake}" "${pro_status_fixtures}/absent-helper-trial.json"
 ordinary_result="${tmp}/result-ordinary-under-ctx-v1-parent.json"
 "${smoke}" "${ordinary_fake}" "${tmp}/fixture.jsonl" 0.25.0 "${ordinary_result}" >/dev/null
 [[ "$(tr -d '\r\n' < "${ordinary_result}")" == "${expected}" ]] || {
@@ -186,8 +287,7 @@ ordinary_result="${tmp}/result-ordinary-under-ctx-v1-parent.json"
 }
 
 v1_fake="${tmp}/ctx-v1"
-cp "${fake}" "${v1_fake}"
-cp "${pro_status_fixtures}/absent-helper-trial.json" "${v1_fake}.pro-status.json"
+make_fake "${v1_fake}" "${pro_status_fixtures}/absent-helper-trial.json"
 v1_result="${tmp}/result-v1.json"
 "${smoke}" "${v1_fake}" "${tmp}/fixture.jsonl" 1.0.0 "${v1_result}" >/dev/null
 [[ "$(tr -d '\r\n' < "${v1_result}")" == "${expected}" ]] || {
@@ -196,8 +296,63 @@ v1_result="${tmp}/result-v1.json"
   exit 1
 }
 
+lifecycle_parent="${tmp}/lifecycle-candidate"
+lifecycle_tmpdir="${tmp}/lifecycle-smoke-tmp"
+mkdir -p "${lifecycle_parent}" "${lifecycle_tmpdir}"
+lifecycle_fake="${lifecycle_parent}/ctx-lifecycle"
+make_fake "${lifecycle_fake}" "${pro_status_fixtures}/absent-helper-trial.json"
+mkdir -p "${lifecycle_parent}/sealed-release-metadata"
+printf '%s\n' 'sealed release metadata' > "${lifecycle_parent}/sealed-release-metadata/manifest.txt"
+chmod 0750 "${lifecycle_parent}/sealed-release-metadata"
+chmod 0640 "${lifecycle_parent}/sealed-release-metadata/manifest.txt"
+lifecycle_snapshot_before="${tmp}/lifecycle-before.snapshot"
+lifecycle_snapshot_during="${tmp}/lifecycle-during.snapshot"
+lifecycle_snapshot_after="${tmp}/lifecycle-after.snapshot"
+snapshot_tree "${lifecycle_parent}" > "${lifecycle_snapshot_before}"
+lifecycle_result="${tmp}/result-lifecycle.json"
+TMPDIR="${lifecycle_tmpdir}" "${smoke}" \
+  "${lifecycle_fake}" "${tmp}/fixture.jsonl" 0.25.0 "${lifecycle_result}" \
+  >"${tmp}/lifecycle.out" 2>"${tmp}/lifecycle.err" &
+lifecycle_smoke_pid=$!
+lifecycle_copy=""
+for _ in {1..15}; do
+  for copy in "${lifecycle_tmpdir}"/ctx-native-candidate-smoke.*/candidate/ctx-lifecycle; do
+    if [[ -f "${copy}" \
+      && -e "$(dirname "${copy}")/.ctx.install.lock" \
+      && -e "$(dirname "${copy}")/.ctx.daemon-quiescence.lock" \
+      && -d "$(dirname "${copy}")/.ctx.daemon-quiescence-acks" ]]; then
+      lifecycle_copy="${copy}"
+      break 2
+    fi
+  done
+  sleep 1
+done
+[[ -n "${lifecycle_copy}" ]] || {
+  wait "${lifecycle_smoke_pid}" || true
+  printf 'candidate smoke did not create lifecycle artifacts beside its private copy\n' >&2
+  cat "${tmp}/lifecycle.err" >&2
+  exit 1
+}
+[[ "${lifecycle_copy##*/}" == "${lifecycle_fake##*/}" ]]
+[[ ! -L "${lifecycle_copy}" ]]
+cmp -s "${lifecycle_fake}" "${lifecycle_copy}"
+snapshot_tree "${lifecycle_parent}" > "${lifecycle_snapshot_during}"
+cmp -s "${lifecycle_snapshot_before}" "${lifecycle_snapshot_during}"
+lifecycle_root="$(dirname "$(dirname "${lifecycle_copy}")")"
+wait "${lifecycle_smoke_pid}" || {
+  cat "${tmp}/lifecycle.err" >&2
+  exit 1
+}
+[[ "$(tr -d '\r\n' < "${lifecycle_result}")" == "${expected}" ]]
+snapshot_tree "${lifecycle_parent}" > "${lifecycle_snapshot_after}"
+cmp -s "${lifecycle_snapshot_before}" "${lifecycle_snapshot_after}"
+[[ ! -e "${lifecycle_root}" ]] || {
+  printf 'candidate smoke did not clean its private lifecycle artifacts\n' >&2
+  exit 1
+}
+
 failed_result="${tmp}/failed-result.json"
-cp "${fake}" "${tmp}/ctx-bad-version"
+make_fake "${tmp}/ctx-bad-version" "${pro_status_fixtures}/absent-helper-trial.json"
 if "${smoke}" \
   "${tmp}/ctx-bad-version" "${tmp}/fixture.jsonl" 0.25.0 "${failed_result}" \
   >"${tmp}/failure.out" 2>"${tmp}/failure.err"; then
@@ -211,8 +366,7 @@ fi
 grep -Fq 'candidate version mismatch' "${tmp}/failure.err"
 
 hung_result="${tmp}/hung-result.json"
-cp "${fake}" "${tmp}/ctx-hang"
-sed -i '/case "${1:-}" in/i\case "$0" in *ctx-hang) sleep 30 ;; esac' "${tmp}/ctx-hang"
+make_fake "${tmp}/ctx-hang" "${pro_status_fixtures}/absent-helper-trial.json"
 started="$(date +%s)"
 if CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS=1 "${smoke}" \
   "${tmp}/ctx-hang" "${tmp}/fixture.jsonl" 0.25.0 "${hung_result}" \
@@ -227,5 +381,54 @@ elapsed="$(( $(date +%s) - started ))"
 }
 [[ ! -e "${hung_result}" ]]
 grep -Fq 'candidate command exceeded 1 seconds' "${tmp}/hung.err"
+
+survivor_tmpdir="${tmp}/survivor-smoke-tmp"
+mkdir -p "${survivor_tmpdir}"
+survivor_fake="${tmp}/ctx-survivor"
+make_fake "${survivor_fake}" "${pro_status_fixtures}/absent-helper-trial.json"
+survivor_result="${tmp}/survivor-result.json"
+TMPDIR="${survivor_tmpdir}" "${smoke}" \
+  "${survivor_fake}" "${tmp}/fixture.jsonl" 0.25.0 "${survivor_result}" \
+  >"${tmp}/survivor.out" 2>"${tmp}/survivor.err" &
+survivor_smoke_pid=$!
+survivor_copy=""
+survivor_processes=""
+for _ in {1..15}; do
+  for copy in "${survivor_tmpdir}"/ctx-native-candidate-smoke.*/candidate/ctx-survivor; do
+    if [[ -f "${copy}" ]]; then
+      process_ids="$(process_ids_for_command_path "${copy}")"
+      if [[ -n "${process_ids}" ]]; then
+        survivor_copy="${copy}"
+        survivor_processes="${process_ids}"
+        break 2
+      fi
+    fi
+  done
+  sleep 1
+done
+[[ -n "${survivor_copy}" && -n "${survivor_processes}" ]] || {
+  wait "${survivor_smoke_pid}" || true
+  printf 'candidate smoke did not start a copied-candidate survivor\n' >&2
+  cat "${tmp}/survivor.err" >&2
+  exit 1
+}
+survivor_root="$(dirname "$(dirname "${survivor_copy}")")"
+if wait "${survivor_smoke_pid}"; then
+  printf 'candidate smoke accepted a copied-candidate survivor failure fixture\n' >&2
+  exit 1
+fi
+grep -Fq 'candidate version mismatch' "${tmp}/survivor.err"
+survivor_remaining="$(process_ids_for_command_path "${survivor_copy}")"
+if [[ -n "${survivor_remaining}" ]]; then
+  cleanup_survivor_fixture
+  printf 'candidate smoke cleanup left copied-candidate survivors running: %s\n' \
+    "${survivor_remaining}" >&2
+  exit 1
+fi
+[[ ! -e "${survivor_root}" ]] || {
+  printf 'candidate smoke cleanup did not remove its private root after reaping the survivor\n' >&2
+  exit 1
+}
+[[ ! -e "${survivor_result}" ]]
 
 printf 'native candidate smoke tests passed\n'

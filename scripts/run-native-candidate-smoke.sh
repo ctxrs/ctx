@@ -79,9 +79,50 @@ mkdir -p "${result_dir}"
 rm -f "${result_path}"
 result_tmp="${result_path}.tmp.$$"
 root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-native-candidate-smoke.XXXXXX")"
+cleanup_candidate_processes() {
+  [ -n "${candidate_binary:-}" ] || return 0
+
+  cleanup_pids="$(process_ids_for_binary)"
+  [ -n "${cleanup_pids}" ] || return 0
+  kill -TERM ${cleanup_pids} 2>/dev/null || true
+
+  cleanup_waited=0
+  while [ "${cleanup_waited}" -lt 3 ]; do
+    sleep 1
+    cleanup_pids="$(process_ids_for_binary)"
+    [ -n "${cleanup_pids}" ] || return 0
+    cleanup_waited=$((cleanup_waited + 1))
+  done
+
+  kill -KILL ${cleanup_pids} 2>/dev/null || true
+  cleanup_waited=0
+  while [ "${cleanup_waited}" -lt 2 ]; do
+    sleep 1
+    cleanup_pids="$(process_ids_for_binary)"
+    [ -n "${cleanup_pids}" ] || return 0
+    cleanup_waited=$((cleanup_waited + 1))
+  done
+
+  printf 'candidate cleanup could not terminate copied-candidate processes: %s\n' \
+    "${cleanup_pids}" >&2
+  return 1
+}
 cleanup() {
-  rm -f "${result_tmp}"
-  rm -rf "${root}"
+  cleanup_status=$?
+  trap - 0
+  trap '' 1 2 15
+  if ! cleanup_candidate_processes; then
+    printf 'candidate smoke retained private root for survivor diagnosis: %s\n' \
+      "${root}" >&2
+    rm -f "${result_tmp}" "${result_path}" || true
+    if [ "${cleanup_status}" -eq 0 ]; then
+      cleanup_status=1
+    fi
+    exit "${cleanup_status}"
+  fi
+  rm -f "${result_tmp}" || true
+  rm -rf "${root}" || true
+  exit "${cleanup_status}"
 }
 trap cleanup 0
 trap 'exit 1' 1 2 15
@@ -95,6 +136,21 @@ tmp_root="${root}/tmp"
 work_root="${root}/work"
 mkdir -p "${profile}" "${data_root}" "${config_root}" "${cache_root}" \
   "${state_root}" "${tmp_root}" "${work_root}"
+candidate_dir="${root}/candidate"
+candidate_binary="${candidate_dir}/${binary##*/}"
+mkdir -p "${candidate_dir}"
+chmod 0700 "${root}" "${candidate_dir}"
+if ! cp "${binary}" "${candidate_binary}" \
+  || [ ! -f "${candidate_binary}" ] \
+  || [ -L "${candidate_binary}" ]; then
+  printf 'candidate smoke could not create a regular private candidate copy\n' >&2
+  exit 1
+fi
+chmod 0700 "${candidate_binary}"
+if ! cmp -s "${binary}" "${candidate_binary}"; then
+  printf 'candidate smoke private candidate copy does not match the supplied binary\n' >&2
+  exit 1
+fi
 
 # Start from an empty environment so provider overrides and user configuration
 # cannot escape the isolated roots. Individual operational commands opt out of
@@ -128,7 +184,7 @@ ctx() {
     CTX_UPGRADE_AUTO=off \
     CTX_DAEMON_ENABLED=false \
     CTX_SEARCH_SEMANTIC=0 \
-    "${binary}" "$@"
+    "${candidate_binary}" "$@"
 }
 
 ctx_source_refresh() {
@@ -138,7 +194,7 @@ ctx_source_refresh() {
     CTX_DAEMON_ENABLED=true \
     CTX_SEARCH_SEMANTIC=0 \
     CTX_DAEMON_AUTOSTART_OFF=0 \
-    "${binary}" "$@"
+    "${candidate_binary}" "$@"
 }
 
 inventory_default_field() {
@@ -239,7 +295,8 @@ pro_status_reports_absent_local_runtime() {
 
 process_ids_for_binary() {
   ps -axo pid=,command= 2>/dev/null \
-    | awk -v executable="${binary}" '$2 == executable { print $1 }' \
+    | awk -v executable="${candidate_binary}" \
+      '$2 == executable || $3 == executable { print $1 }' \
     | LC_ALL=C sort -n
 }
 
@@ -357,7 +414,7 @@ fi
 analytics_default_events="${root}/analytics-default.jsonl"
 run_bounded "${root}/status.json" "${root}/status.err" clean_env \
   CTX_ANALYTICS_ENDPOINT="file://${analytics_default_events}" \
-  "${binary}" status --format json || {
+  "${candidate_binary}" status --format json || {
   cat "${root}/status.err" >&2
   exit 1
 }
@@ -386,7 +443,7 @@ run_bounded "${root}/status-opt-out.json" "${root}/status-opt-out.err" clean_env
   CTX_ANALYTICS_ENDPOINT="file://${analytics_opt_out_events}" \
   CTX_UPGRADE_AUTO=off \
   CTX_DAEMON_ENABLED=false \
-  "${binary}" status --format json || {
+  "${candidate_binary}" status --format json || {
   cat "${root}/status-opt-out.err" >&2
   exit 1
 }
@@ -420,7 +477,7 @@ run_bounded "${root}/pro-status.json" "${root}/pro-status.err" \
   clean_env CTX_ANALYTICS_ENABLED=false CTX_UPGRADE_AUTO=off \
   CTX_DAEMON_ENABLED=false \
   CTX_PRO_HELPER="${untrusted_helper}" \
-  "${binary}" status --format json || {
+  "${candidate_binary}" status --format json || {
   cat "${root}/pro-status.err" >&2
   printf 'candidate Pro status query failed while testing helper selection\n' >&2
   exit 1
@@ -460,7 +517,7 @@ if run_bounded "${root}/semantic.out" "${root}/semantic.err" clean_env \
   CTX_UPGRADE_AUTO=off \
   CTX_DAEMON_ENABLED=1 \
   CTX_SEARCH_SEMANTIC=1 \
-  "${binary}" search "parser test" --backend semantic --refresh off --format json; then
+  "${candidate_binary}" search "parser test" --backend semantic --refresh off --format json; then
   printf 'semantic-only search unexpectedly succeeded\n' >&2
   exit 1
 fi
