@@ -10,16 +10,20 @@ fi
 grep -Fq '{{printf "%s\t%s\t%s" .Architecture .ServerVersion .ID}}' \
   "${source_root}/scripts/release/run-linux-bazel-release-controller.sh"
 
-tmp_dir="$(mktemp -d)"
+tmp_dir=""
+socket_dir=""
 socket_pid=""
 cleanup() {
   if [[ -n "${socket_pid}" ]]; then
     kill "${socket_pid}" >/dev/null 2>&1 || true
     wait "${socket_pid}" >/dev/null 2>&1 || true
   fi
-  rm -rf "${tmp_dir}"
+  [[ -z "${tmp_dir}" ]] || rm -rf "${tmp_dir}"
+  [[ -z "${socket_dir}" ]] || rm -rf "${socket_dir}"
 }
 trap cleanup EXIT
+tmp_dir="$(mktemp -d)"
+socket_dir="$(mktemp -d /tmp/ctx-lbrc.XXXXXX)"
 
 fixture="${tmp_dir}/source"
 mkdir -p \
@@ -60,7 +64,7 @@ printf 'scanner\n' >"${tmp_dir}/advisory/osv-scanner"
 chmod 0755 "${tmp_dir}/advisory/osv-scanner"
 printf '{}\n' >"${tmp_dir}/advisory/database-metadata.json"
 
-socket_path="${tmp_dir}/docker.sock"
+socket_path="${socket_dir}/docker.sock"
 python3 - "${socket_path}" <<'PY' &
 import socket
 import sys
