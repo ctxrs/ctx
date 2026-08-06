@@ -12,6 +12,85 @@ pub(super) enum StateBucket {
 }
 
 impl OpenClawProjector {
+    fn tool_call_source_contribution(
+        &self,
+        source_value: &Value,
+        tool_calls: &[NativeToolCall<'_>],
+    ) -> ctx_retrieval::ContributionClass {
+        let message = source_value.get("message").unwrap_or(source_value);
+        let mut contributions = Vec::new();
+        if !exact_object_keys(source_value, &["type", "id", "timestamp", "message"])
+            || !exact_object_keys(message, &["role", "content"])
+        {
+            contributions.push(ctx_retrieval::ContributionClass::Unknown);
+        }
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            contributions.push(ctx_retrieval::ContributionClass::Unknown);
+            return ctx_retrieval::reduce_contributions(contributions);
+        };
+        for (block_index, block) in content.iter().enumerate() {
+            match block.get("type").and_then(Value::as_str) {
+                Some("toolCall") => {
+                    let contribution = tool_calls
+                        .iter()
+                        .find(|call| call.block_index == block_index)
+                        .map_or(ctx_retrieval::ContributionClass::Unknown, |call| {
+                            self.tool_call_contribution(call)
+                        });
+                    contributions.push(contribution);
+                }
+                Some("text") => {
+                    contributions.push(
+                        if exact_object_keys(block, &["type", "text"])
+                            && block.get("text").is_some_and(Value::is_string)
+                        {
+                            ctx_retrieval::ContributionClass::Ordinary
+                        } else {
+                            ctx_retrieval::ContributionClass::Unknown
+                        },
+                    );
+                }
+                _ => contributions.push(ctx_retrieval::ContributionClass::Unknown),
+            }
+        }
+        ctx_retrieval::reduce_contributions(contributions)
+    }
+
+    fn tool_call_contribution(
+        &self,
+        call: &NativeToolCall<'_>,
+    ) -> ctx_retrieval::ContributionClass {
+        if !exact_object_keys(call.block, &["type", "id", "name", "arguments"])
+            || call.call_id.is_none_or(|call_id| call_id.is_empty())
+        {
+            return ctx_retrieval::ContributionClass::Unknown;
+        }
+        if let Some(process_session_id) = attested_process_session_id(call) {
+            return match self.running_processes.get(process_session_id) {
+                Some(PendingCallState::Exact(pending)) => pending.retrieval_contribution.into(),
+                Some(PendingCallState::Ambiguous) | None => {
+                    ctx_retrieval::ContributionClass::Unknown
+                }
+            };
+        }
+        let Some(tool_name) = call.tool_name.filter(|name| !name.trim().is_empty()) else {
+            return ctx_retrieval::ContributionClass::Unknown;
+        };
+        if tool_name == "process" {
+            return ctx_retrieval::ContributionClass::Unknown;
+        }
+        if tool_name != "exec" {
+            return ctx_retrieval::ContributionClass::Ordinary;
+        }
+        let Some(arguments) = call.block.get("arguments") else {
+            return ctx_retrieval::ContributionClass::Unknown;
+        };
+        if !exact_object_keys(arguments, &["command", "workdir", "cwd", "sessionId"]) {
+            return ctx_retrieval::ContributionClass::Unknown;
+        }
+        ctx_retrieval::classify_direct_cli_tool_input(arguments)
+    }
+
     pub(super) fn remember_state(
         &mut self,
         bucket: StateBucket,
@@ -55,6 +134,7 @@ impl OpenClawProjector {
         tool_call: Option<&NativeToolCall<'_>>,
         tool_result: Option<&NativeToolResult<'_>>,
         output: Option<&OpenClawOutputMetadata>,
+        source_contribution: Option<ctx_retrieval::ContributionClass>,
         subrecord: Option<(SubrecordSelector, TypedKey, u64)>,
         worker: &mut JsonlFamilyWorkerContext,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
@@ -157,13 +237,27 @@ impl OpenClawProjector {
             ..AttributionInput::default()
         };
         if let (Some(call), Some(projected)) = (tool_call, tool_call_projection.as_ref()) {
-            self.observe_tool_call(call, projected, event_sequence, &mut input);
+            self.observe_tool_call(
+                call,
+                projected,
+                event_sequence,
+                source_contribution.unwrap_or(ctx_retrieval::ContributionClass::Unknown),
+                &mut input,
+            );
         }
-        let running = if let (Some(result), Some(output)) = (tool_result, output) {
-            self.observe_tool_result(source_bytes, event, result, output, &mut input)
-        } else {
-            None
-        };
+        let (running, result_contribution) =
+            if let (Some(result), Some(output)) = (tool_result, output) {
+                self.observe_tool_result(
+                    source_bytes,
+                    source_value,
+                    event,
+                    result,
+                    output,
+                    &mut input,
+                )
+            } else {
+                (None, None)
+            };
         let mut annotation = worker.repository_attributor().attribute(input);
         if let Some(abstention) = tool_call_projection
             .as_ref()
@@ -172,6 +266,9 @@ impl OpenClawProjector {
             append_invocation_abstention(&mut annotation, abstention);
         }
         apply_annotation(&mut record, annotation);
+        record.content.discovery_exclusion = ctx_retrieval::discovery_exclusion_for(
+            source_contribution.into_iter().chain(result_contribution),
+        );
         record
             .content
             .omit_structured_content_if_aggregate_exceeds_limit()
@@ -193,6 +290,7 @@ impl OpenClawProjector {
         call: &NativeToolCall<'_>,
         projected: &StrictToolCallProjection,
         event_sequence: u64,
+        source_contribution: ctx_retrieval::ContributionClass,
         input: &mut AttributionInput,
     ) {
         input.command = call.command.clone();
@@ -202,12 +300,14 @@ impl OpenClawProjector {
         let Some(call_id) = call.call_id.filter(|id| !id.is_empty()) else {
             return;
         };
-        let state = match call
-            .process_session_id
+        let process_session_id = attested_process_session_id(call);
+        let state = match process_session_id
             .and_then(|session_id| self.running_processes.get(session_id))
             .cloned()
         {
             Some(PendingCallState::Exact(mut pending)) => {
+                pending.retrieval_contribution = source_contribution.into();
+                pending.process_session_id = process_session_id.map(str::to_owned);
                 if pending.continuation_call_id_sha256.len() < 64 {
                     pending
                         .continuation_call_id_sha256
@@ -225,6 +325,8 @@ impl OpenClawProjector {
                 declared_workdir: call.declared_workdir.clone(),
                 event_sequence,
                 continuation_call_id_sha256: Vec::new(),
+                process_session_id: None,
+                retrieval_contribution: source_contribution.into(),
             }),
         };
         if let PendingCallState::Exact(pending) = &state {
@@ -237,22 +339,54 @@ impl OpenClawProjector {
     fn observe_tool_result(
         &mut self,
         source_bytes: &[u8],
+        source_value: &Value,
         event: &normalization::OpenClawEventFact,
         result: &NativeToolResult<'_>,
         output: &OpenClawOutputMetadata,
         input: &mut AttributionInput,
-    ) -> Option<(String, PendingCall)> {
-        let (context, _linkage_abstained) = resolve_pending_call(
-            &mut self.pending_calls,
-            result.call_id,
-            self.linkage_capacity_exceeded,
-            input,
-        );
-        let context = context?;
+    ) -> (
+        Option<(String, PendingCall)>,
+        Option<ctx_retrieval::ContributionClass>,
+    ) {
+        let (context, _linkage_abstained) =
+            match result.call_id.filter(|call_id| !call_id.is_empty()) {
+                Some(call_id) if !self.terminal_authority.is_unique(call_id) => {
+                    self.pending_calls.remove(call_id);
+                    input.outcome_abstentions.push((
+                        RepositoryAbstentionReason::ProviderOutputUnjoined,
+                        "openclaw_tool_result_call_id_is_ambiguous",
+                    ));
+                    (None, true)
+                }
+                _ => resolve_pending_call(
+                    &mut self.pending_calls,
+                    result.call_id,
+                    self.linkage_capacity_exceeded,
+                    input,
+                ),
+            };
+        let linked_invocation = context
+            .as_ref()
+            .map(|context| ctx_retrieval::ContributionClass::from(context.retrieval_contribution));
+        let result_contribution =
+            classify_openclaw_tool_result(source_value, result, linked_invocation);
+        let Some(mut context) = context else {
+            return (None, Some(result_contribution));
+        };
         input.command = context.command.clone();
         input.declared_tool_workdir = context.declared_workdir.clone();
         if let Some(process_session_id) = result.running_process_session_id {
-            return Some((process_session_id.to_owned(), context));
+            if let Some(previous_process_session_id) = context.process_session_id.take() {
+                self.running_processes.remove(&previous_process_session_id);
+            }
+            context.process_session_id = Some(process_session_id.to_owned());
+            return (
+                Some((process_session_id.to_owned(), context)),
+                Some(result_contribution),
+            );
+        }
+        if let Some(process_session_id) = context.process_session_id.take() {
+            self.running_processes.remove(&process_session_id);
         }
         if let (Some(command), Some(result_call_id)) = (context.command.as_deref(), result.call_id)
         {
@@ -281,8 +415,16 @@ impl OpenClawProjector {
                 input.outcome_abstentions = linked.abstentions;
             }
         }
-        None
+        (None, Some(result_contribution))
     }
+}
+
+fn attested_process_session_id<'a>(call: &NativeToolCall<'a>) -> Option<&'a str> {
+    if call.tool_name != Some("process") {
+        return None;
+    }
+    call.process_session_id
+        .filter(|session_id| !session_id.is_empty())
 }
 
 fn append_invocation_abstention(
@@ -417,6 +559,239 @@ fn output_outcome_label(outcome: crate::OutputOutcome) -> &'static str {
     }
 }
 
+fn exact_object_keys(value: &Value, allowed: &[&str]) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.keys().all(|key| allowed.contains(&key.as_str())))
+}
+
+fn classify_openclaw_tool_result(
+    source_value: &Value,
+    result: &NativeToolResult<'_>,
+    linked_invocation: Option<ctx_retrieval::ContributionClass>,
+) -> ctx_retrieval::ContributionClass {
+    let mut atoms = vec![ctx_retrieval::ResultAtom::KnownProviderEnvelope];
+    if !exact_object_keys(source_value, &["type", "id", "timestamp", "message"])
+        || !exact_object_keys(
+            result.message,
+            &[
+                "role",
+                "toolCallId",
+                "tool_call_id",
+                "toolName",
+                "tool_name",
+                "name",
+                "tool",
+                "content",
+                "details",
+                "isError",
+                "is_error",
+                "success",
+                "ok",
+                "status",
+                "state",
+                "outcome",
+                "exitCode",
+                "exit_code",
+                "timedOut",
+                "timed_out",
+                "timeout",
+            ],
+        )
+    {
+        atoms.push(ctx_retrieval::ResultAtom::Unknown);
+    }
+    let call_id_members = ["toolCallId", "tool_call_id"]
+        .into_iter()
+        .filter_map(|key| result.message.get(key))
+        .collect::<Vec<_>>();
+    if call_id_members.len() != 1
+        || call_id_members[0]
+            .as_str()
+            .filter(|call_id| !call_id.is_empty())
+            != result.call_id
+    {
+        atoms.push(ctx_retrieval::ResultAtom::Unknown);
+    }
+
+    let mut payload_members = usize::from(result.message.get("content").is_some());
+    if result
+        .message
+        .get("content")
+        .is_some_and(has_openclaw_structural_diagnostic)
+    {
+        atoms.push(ctx_retrieval::ResultAtom::Diagnostic);
+    }
+    if let Some(details) = result.message.get("details") {
+        let Some(details) = details.as_object() else {
+            atoms.push(ctx_retrieval::ResultAtom::Unknown);
+            return ctx_retrieval::classify_linked_result(
+                linked_invocation,
+                strict_openclaw_terminal_status(result.message, None),
+                atoms,
+            );
+        };
+        const PAYLOAD_KEYS: &[&str] = &["stdout", "output", "content", "result", "text"];
+        const KNOWN_DETAIL_KEYS: &[&str] = &[
+            "stdout",
+            "output",
+            "content",
+            "result",
+            "text",
+            "stderr",
+            "warning",
+            "warnings",
+            "error",
+            "errors",
+            "diagnostic",
+            "diagnostics",
+            "status",
+            "state",
+            "outcome",
+            "success",
+            "ok",
+            "isError",
+            "is_error",
+            "timedOut",
+            "timed_out",
+            "timeout",
+            "exitCode",
+            "exit_code",
+            "durationMs",
+            "duration_ms",
+            "sessionId",
+            "cwd",
+            "commit_oid",
+            "commitOid",
+        ];
+        payload_members += details
+            .keys()
+            .filter(|key| PAYLOAD_KEYS.contains(&key.as_str()))
+            .count();
+        if details
+            .keys()
+            .any(|key| !KNOWN_DETAIL_KEYS.contains(&key.as_str()))
+        {
+            atoms.push(ctx_retrieval::ResultAtom::Unknown);
+        }
+        if details.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "stderr"
+                    | "warning"
+                    | "warnings"
+                    | "error"
+                    | "errors"
+                    | "diagnostic"
+                    | "diagnostics"
+            ) || (PAYLOAD_KEYS.contains(&key.as_str()) && has_openclaw_structural_diagnostic(value))
+        }) {
+            atoms.push(ctx_retrieval::ResultAtom::Diagnostic);
+        }
+    }
+    match payload_members {
+        1 => atoms.push(ctx_retrieval::ResultAtom::Payload),
+        0 => {}
+        _ => atoms.push(ctx_retrieval::ResultAtom::Unknown),
+    }
+    ctx_retrieval::classify_linked_result(
+        linked_invocation,
+        strict_openclaw_terminal_status(
+            result.message,
+            result.message.get("details").and_then(Value::as_object),
+        ),
+        atoms,
+    )
+}
+
+fn has_openclaw_structural_diagnostic(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(has_openclaw_structural_diagnostic),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "stderr"
+                    | "warning"
+                    | "warnings"
+                    | "error"
+                    | "errors"
+                    | "diagnostic"
+                    | "diagnostics"
+            ) || has_openclaw_structural_diagnostic(value)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn strict_openclaw_terminal_status(
+    message: &Value,
+    details: Option<&serde_json::Map<String, Value>>,
+) -> ctx_retrieval::ResultTerminalStatus {
+    let mut success = false;
+    let mut failure = false;
+    let mut unknown = false;
+    for object in [message.as_object(), details].into_iter().flatten() {
+        for key in ["success", "ok"] {
+            if let Some(value) = object.get(key) {
+                match value.as_bool() {
+                    Some(true) => success = true,
+                    Some(false) => failure = true,
+                    None => unknown = true,
+                }
+            }
+        }
+        for key in ["isError", "is_error"] {
+            if let Some(value) = object.get(key) {
+                match value.as_bool() {
+                    Some(true) => failure = true,
+                    Some(false) => {}
+                    None => unknown = true,
+                }
+            }
+        }
+        for key in ["timedOut", "timed_out", "timeout"] {
+            if let Some(value) = object.get(key) {
+                match value.as_bool() {
+                    Some(true) => failure = true,
+                    Some(false) => {}
+                    None => unknown = true,
+                }
+            }
+        }
+        for key in ["exitCode", "exit_code"] {
+            if let Some(value) = object.get(key) {
+                match value.as_i64() {
+                    Some(0) => success = true,
+                    Some(_) => failure = true,
+                    None => unknown = true,
+                }
+            }
+        }
+        for key in ["status", "state", "outcome"] {
+            if let Some(value) = object.get(key) {
+                let Some(value) = value.as_str() else {
+                    unknown = true;
+                    continue;
+                };
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "success" | "succeeded" | "complete" | "completed" | "ok" => success = true,
+                    "failed" | "failure" | "error" | "errored" | "timeout" | "timed_out"
+                    | "timedout" | "cancelled" | "canceled" => failure = true,
+                    "running" | "pending" | "in_progress" => unknown = true,
+                    _ => unknown = true,
+                }
+            }
+        }
+    }
+    if failure {
+        ctx_retrieval::ResultTerminalStatus::Failed
+    } else if unknown || !success {
+        ctx_retrieval::ResultTerminalStatus::Unknown
+    } else {
+        ctx_retrieval::ResultTerminalStatus::Succeeded
+    }
+}
+
 impl JsonlFamilyProjector for OpenClawProjector {
     fn project(
         &mut self,
@@ -454,6 +829,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
         );
         let tool_calls = native_tool_calls(&value);
         if !tool_calls.is_empty() {
+            let source_contribution = self.tool_call_source_contribution(&value, &tool_calls);
             let mut call_id_counts = HashMap::<&str, usize>::new();
             for call_id in tool_calls.iter().filter_map(|call| call.call_id) {
                 *call_id_counts.entry(call_id).or_default() += 1;
@@ -471,6 +847,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
                     Some(call),
                     None,
                     None,
+                    Some(source_contribution),
                     Some(subrecord),
                     worker,
                     emit,
@@ -487,6 +864,7 @@ impl JsonlFamilyProjector for OpenClawProjector {
             None,
             tool_result.as_ref(),
             output.as_ref(),
+            None,
             None,
             worker,
             emit,

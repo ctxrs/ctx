@@ -1,9 +1,136 @@
 use super::*;
 
+const TERMINAL_AUTHORITY_POLICY_REVISION: &str = "openclaw-terminal-result-authority-v1";
+const TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/openclaw/terminal-call-id/v1\0";
+const TERMINAL_AMBIGUITY_FINGERPRINT_DOMAIN: &[u8] =
+    b"ctx/openclaw/terminal-ambiguity-fingerprint/v1\0";
+
+#[derive(Debug)]
+pub(super) struct OpenClawTerminalAuthority {
+    call_ids: HashMap<[u8; 32], u8>,
+    exhausted: bool,
+    complete: bool,
+}
+
+impl OpenClawTerminalAuthority {
+    pub(super) fn for_scan() -> Self {
+        Self {
+            call_ids: HashMap::new(),
+            exhausted: false,
+            complete: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn unscanned_for_test() -> Self {
+        Self {
+            call_ids: HashMap::new(),
+            exhausted: false,
+            complete: false,
+        }
+    }
+
+    fn observe(&mut self, call_id: &str) {
+        if self.exhausted || call_id.is_empty() {
+            return;
+        }
+        let digest = terminal_call_id_digest(call_id);
+        if !self.call_ids.contains_key(&digest) && self.call_ids.len() >= MAX_TERMINAL_CALL_IDS {
+            self.call_ids.clear();
+            self.exhausted = true;
+            return;
+        }
+        let count = self.call_ids.entry(digest).or_default();
+        *count = count.saturating_add(1).min(2);
+    }
+
+    pub(super) fn is_unique(&self, call_id: &str) -> bool {
+        if !self.complete {
+            return true;
+        }
+        !self.exhausted
+            && self
+                .call_ids
+                .get(&terminal_call_id_digest(call_id))
+                .is_some_and(|count| *count == 1)
+    }
+
+    pub(super) fn ambiguity_fingerprint(&self) -> [u8; 32] {
+        let mut ambiguous = self
+            .call_ids
+            .iter()
+            .filter_map(|(digest, count)| (*count > 1).then_some(*digest))
+            .collect::<Vec<_>>();
+        ambiguous.sort_unstable();
+        let mut hasher = Sha256::new();
+        hasher.update(TERMINAL_AMBIGUITY_FINGERPRINT_DOMAIN);
+        hasher.update([u8::from(self.exhausted)]);
+        for digest in ambiguous {
+            hasher.update(digest);
+        }
+        hasher.finalize().into()
+    }
+}
+
+fn terminal_call_id_digest(call_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(TERMINAL_CALL_ID_DOMAIN);
+    hasher.update(call_id.as_bytes());
+    hasher.finalize().into()
+}
+
+pub(super) fn terminal_authority_for_source(
+    source: &SourceKey,
+    source_path: &Path,
+    source_file: Arc<OpenedProviderSourceFile>,
+) -> Result<OpenClawTerminalAuthority> {
+    let identity = JsonlSourceIdentity::new(
+        CaptureProvider::OpenClaw.as_str(),
+        PARSER_REVISION,
+        TERMINAL_AUTHORITY_POLICY_REVISION,
+        source.exact_descriptor_digest(),
+        source_path,
+    );
+    let mut reader = JsonlReader::open(identity, source_file, None, None)?;
+    let mut authority = OpenClawTerminalAuthority::for_scan();
+    while reader
+        .visit_page(&mut |record| -> Result<()> {
+            let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
+                return Ok(());
+            };
+            if let Some(call_id) = native_tool_result(&value).and_then(|result| result.call_id) {
+                authority.observe(call_id);
+            }
+            Ok(())
+        })?
+        .is_some()
+    {}
+    if reader.outcome().is_none() {
+        return Err(CaptureError::SystemInvariant(
+            "OpenClaw terminal authority scan has no terminal evidence",
+        ));
+    }
+    Ok(authority)
+}
+
+#[cfg(test)]
+pub(super) fn terminal_authority_for_values<'a>(
+    values: impl IntoIterator<Item = &'a Value>,
+) -> OpenClawTerminalAuthority {
+    let mut authority = OpenClawTerminalAuthority::for_scan();
+    for value in values {
+        if let Some(call_id) = native_tool_result(value).and_then(|result| result.call_id) {
+            authority.observe(call_id);
+        }
+    }
+    authority
+}
+
 pub(super) struct NativeToolCall<'a> {
     pub(super) block: &'a Value,
     pub(super) block_index: usize,
     pub(super) call_id: Option<&'a str>,
+    pub(super) tool_name: Option<&'a str>,
     pub(super) command: Option<String>,
     pub(super) declared_workdir: Option<String>,
     pub(super) file_observations: Vec<UnscopedFileObservation>,
@@ -42,11 +169,8 @@ fn native_tool_call_block(block: &Value, block_index: usize) -> NativeToolCall<'
     };
     let command = string(&["command"]);
     let declared_workdir = string(&["workdir", "cwd"]);
-    let tool_name = block
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let kind = match tool_name.to_ascii_lowercase().as_str() {
+    let tool_name = block.get("name").and_then(Value::as_str);
+    let kind = match tool_name.unwrap_or_default().to_ascii_lowercase().as_str() {
         "read" | "read_file" | "grep" | "glob" | "search" => RepositoryFileObservationKind::Read,
         "edit" | "edit_file" | "apply_patch" => RepositoryFileObservationKind::Modified,
         "write" | "write_file" => RepositoryFileObservationKind::Unknown,
@@ -67,6 +191,7 @@ fn native_tool_call_block(block: &Value, block_index: usize) -> NativeToolCall<'
         block,
         block_index,
         call_id: block.get("id").and_then(Value::as_str),
+        tool_name,
         command,
         declared_workdir,
         file_observations,
@@ -114,13 +239,15 @@ pub(super) struct CompoundAdmission {
     pub(super) index: Value,
     pub(super) index_file: Option<OpenedProviderSourceFile>,
     pub(super) native_session_family: OpenClawNativeSessionFamily,
+    pub(super) terminal_authority: OpenClawTerminalAuthority,
 }
 
 pub(super) fn admit_compound(
     authority: &ProviderSourceRoot,
     path: &Path,
     index_relative_path: &Path,
-    transcript: &OpenedProviderSourceFile,
+    transcript: Arc<OpenedProviderSourceFile>,
+    source: &SourceKey,
 ) -> Result<CompoundAdmission> {
     let index_file = match authority.open_file(index_relative_path) {
         Ok(index) => Some(index),
@@ -139,6 +266,7 @@ pub(super) fn admit_compound(
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
         .map(|index| native_session_family(path, &index))
         .unwrap_or(OpenClawNativeSessionFamily::Absent);
+    let terminal_authority = terminal_authority_for_source(source, path, Arc::clone(&transcript))?;
     let observation = super::super::super::OpenClawSessionObservation::from_admitted(
         path.to_path_buf(),
         transcript.metadata(),
@@ -151,6 +279,7 @@ pub(super) fn admit_compound(
         index: observation.index,
         index_file,
         native_session_family,
+        terminal_authority,
     })
 }
 

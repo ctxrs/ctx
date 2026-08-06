@@ -118,6 +118,149 @@ pub(super) fn outcome_for_sequence(
 }
 
 #[test]
+fn codex_ctx_retrieval_invocation_and_exact_result_persist_exclusion_with_complete_bodies() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000099";
+    let call_id = "ctx-retrieval-core";
+    let output = concat!(
+        "Chunk ID: 9abc01\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "{\"results\":[{\"id\":\"event-core\"}]}"
+    );
+    let result = serde_json::json!({
+        "timestamp": "2026-08-05T16:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output
+        }
+    })
+    .to_string();
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(call_id, "ctx search exact-core", temp.path()),
+            result,
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let invocation = outcome_for_sequence(&verified, session_id, 1);
+    let result = outcome_for_sequence(&verified, session_id, 2);
+
+    assert_eq!(
+        invocation.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(
+        result.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(result.content.normalized_body.as_deref(), Some(output));
+    assert!(invocation
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("ctx search exact-core")));
+}
+
+#[test]
+fn appended_duplicate_ctx_result_retracts_prior_exclusion_and_preserves_identities() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000098";
+    let call_id = "ctx-retrieval-late-duplicate";
+    let first_output = concat!(
+        "Chunk ID: 9abc01\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "first late duplicate payload"
+    );
+    let second_output = concat!(
+        "Chunk ID: 9abc02\n",
+        "Wall time: 0.250 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "second late duplicate payload"
+    );
+    let result = |timestamp: &str, output: &str| {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output,
+            },
+        })
+        .to_string()
+    };
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(call_id, "ctx search late-duplicate", temp.path()),
+            result("2025-03-07T16:00:01Z", first_output),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let initial = VerifiedIndex::open(&index).unwrap();
+    let initial_invocation = outcome_for_sequence(&initial, session_id, 1);
+    let initial_result = outcome_for_sequence(&initial, session_id, 2);
+    assert_eq!(
+        initial_result.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    let invocation_id = initial_invocation.event_id;
+    let result_id = initial_result.event_id;
+    drop(initial);
+
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap();
+    writeln!(file, "{}", result("2025-03-07T16:00:02Z", second_output)).unwrap();
+    drop(file);
+
+    let receipt = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(receipt.counters.appended_sources, 0);
+    assert_eq!(receipt.counters.replaced_sources, 1);
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let invocation = outcome_for_sequence(&verified, session_id, 1);
+    let first = outcome_for_sequence(&verified, session_id, 2);
+    let second = outcome_for_sequence(&verified, session_id, 3);
+    assert_eq!(invocation.event_id, invocation_id);
+    assert_eq!(first.event_id, result_id);
+    assert_eq!(
+        invocation.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(first.content.discovery_exclusion, None);
+    assert_eq!(second.content.discovery_exclusion, None);
+    assert_eq!(first.content.normalized_body.as_deref(), Some(first_output));
+    assert_eq!(
+        second.content.normalized_body.as_deref(),
+        Some(second_output)
+    );
+}
+
+#[test]
 fn codex_exact_commit_result_publishes_scoped_outcome_and_complete_raw_output() {
     use ctx_history_core::{RepositoryOutcomeKind, RepositoryVcsObservationKind};
 

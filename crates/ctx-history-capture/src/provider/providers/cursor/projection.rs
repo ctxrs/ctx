@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 
 use crate::common::time::parse_rfc3339_utc;
 
-use super::parser::{CursorInputPathEvidence, CursorSafePart, CursorSanitizedRecord};
+use super::parser::{
+    CursorDiscoveryResultEvidence, CursorInputPathEvidence, CursorSafePart, CursorSanitizedRecord,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct CursorNativeOrder {
@@ -34,6 +36,8 @@ pub(crate) enum CursorEventBody {
         native_content: serde_json::Value,
         call_id: Option<String>,
         ambiguous_linkage: bool,
+        #[serde(skip)]
+        discovery_evidence: CursorDiscoveryResultEvidence,
     },
 }
 
@@ -96,6 +100,7 @@ pub(super) fn project_cursor_record(
                     native_content,
                     call_id,
                     ambiguous_linkage,
+                    discovery_evidence,
                 } => (
                     EventType::ToolOutput,
                     role,
@@ -103,6 +108,7 @@ pub(super) fn project_cursor_record(
                         native_content,
                         call_id,
                         ambiguous_linkage,
+                        discovery_evidence,
                     },
                 ),
             };

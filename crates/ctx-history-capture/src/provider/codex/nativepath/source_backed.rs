@@ -69,7 +69,8 @@ const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v9";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v18-lineage-evidence-authority";
+const CODEX_PARSER_REVISION: &str =
+    "codex-nativepath-core-record-v19-lineage-evidence-source-unique-result-exclusion";
 #[cfg(test)]
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 #[cfg(test)]

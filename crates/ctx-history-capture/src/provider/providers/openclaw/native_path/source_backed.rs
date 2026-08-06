@@ -28,11 +28,12 @@ use crate::OutputOutcome;
 use crate::{
     common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
+        ctx_retrieval,
         normalization::{provider_explicit_result_value_text, provider_timestamp_value},
         source_backed::family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
             JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyTerminalProof,
-            JsonlFamilyWorkerContext, JsonlRecordRef,
+            JsonlFamilyWorkerContext, JsonlReader, JsonlRecordRef, JsonlSourceIdentity,
         },
     },
     provider_sources::{provider_source_for_path, ProviderSourceStatus},
@@ -57,9 +58,11 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
-const PARSER_REVISION: &str = "openclaw-source-backed-v9-lineage-authority-certainty";
+const PARSER_REVISION: &str =
+    "openclaw-source-backed-v10-lineage-authority-source-wide-result-authority";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RUNNING_PROCESSES: usize = 256;
+const MAX_TERMINAL_CALL_IDS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -76,6 +79,7 @@ struct Binding {
     native_session_id: String,
     index: Value,
     native_session_family: OpenClawNativeSessionFamily,
+    terminal_ambiguity_fingerprint: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,8 +162,14 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
                 ));
             }
             let source = source_key(&native_session_id)?;
-            let transcript = authority.open_file(&transcript_relative_path)?;
-            let compound = admit_compound(&authority, &path, &index_relative_path, &transcript)?;
+            let transcript = Arc::new(authority.open_file(&transcript_relative_path)?);
+            let compound = admit_compound(
+                &authority,
+                &path,
+                &index_relative_path,
+                Arc::clone(&transcript),
+                &source,
+            )?;
             transcript.revalidate()?;
             if exact_dependency_paths.insert(index_relative_path.clone()) {
                 if let Some(index_file) = &compound.index_file {
@@ -176,6 +186,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
                 native_session_id,
                 index: compound.index,
                 native_session_family: compound.native_session_family,
+                terminal_ambiguity_fingerprint: compound.terminal_authority.ambiguity_fingerprint(),
             };
             leaves.push(JsonlFamilyLeaf::observe(
                 source,
@@ -221,10 +232,13 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             leaf.authority(),
             leaf.source_path(),
             &binding.index_relative_path,
-            source_file.as_ref(),
+            Arc::clone(&source_file),
+            leaf.source(),
         )?;
         if compound.index != binding.index
             || compound.native_session_family != binding.native_session_family
+            || compound.terminal_authority.ambiguity_fingerprint()
+                != binding.terminal_ambiguity_fingerprint
         {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -260,6 +274,7 @@ impl JsonlFamilyAdapter for OpenClawJsonlAdapter {
             authority: Arc::clone(leaf.authority()),
             pending_calls,
             running_processes,
+            terminal_authority: compound.terminal_authority,
             linkage_capacity_exceeded,
             fallback_identities: FallbackEventIdentityState::new(
                 (mode == JsonlFamilyProjectionMode::CertifiedAppend)
@@ -279,6 +294,7 @@ struct OpenClawProjector {
     authority: Arc<ProviderSourceRoot>,
     pending_calls: HashMap<String, PendingCallState>,
     running_processes: HashMap<String, PendingCallState>,
+    terminal_authority: OpenClawTerminalAuthority,
     linkage_capacity_exceeded: bool,
     fallback_identities: FallbackEventIdentityState,
 }
@@ -291,6 +307,37 @@ struct PendingCall {
     declared_workdir: Option<String>,
     event_sequence: u64,
     continuation_call_id_sha256: Vec<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_session_id: Option<String>,
+    retrieval_contribution: StoredContributionClass,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredContributionClass {
+    RetrievalDerived,
+    Ordinary,
+    Unknown,
+}
+
+impl From<ctx_retrieval::ContributionClass> for StoredContributionClass {
+    fn from(value: ctx_retrieval::ContributionClass) -> Self {
+        match value {
+            ctx_retrieval::ContributionClass::RetrievalDerived => Self::RetrievalDerived,
+            ctx_retrieval::ContributionClass::Ordinary => Self::Ordinary,
+            ctx_retrieval::ContributionClass::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<StoredContributionClass> for ctx_retrieval::ContributionClass {
+    fn from(value: StoredContributionClass) -> Self {
+        match value {
+            StoredContributionClass::RetrievalDerived => Self::RetrievalDerived,
+            StoredContributionClass::Ordinary => Self::Ordinary,
+            StoredContributionClass::Unknown => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

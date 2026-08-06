@@ -4,8 +4,8 @@ use crate::provider::source_backed::family::jsonl::{
 };
 
 pub(super) const MAX_PROJECTOR_CHECKPOINT_BYTES: usize = 40 * 1024;
-const PROJECTOR_CHECKPOINT_VERSION: u32 = 1;
-const PROJECTOR_CHECKPOINT_PREFIX: &str = "openclaw.projector-checkpoint.v1:";
+const PROJECTOR_CHECKPOINT_VERSION: u32 = 2;
+const PROJECTOR_CHECKPOINT_PREFIX: &str = "openclaw.projector-checkpoint.v2:";
 
 pub(super) struct RestoredProjectorCheckpoint {
     pub(super) session: SessionCheckpoint,

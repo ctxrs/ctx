@@ -109,6 +109,31 @@ ctx_rust_test(
 )
 
 ctx_rust_test(
+    name = "ctx_retrieval_classifier_tests",
+    srcs = [
+        "src/provider/ctx_retrieval.rs",
+        "src/provider/tool_input.rs",
+        "tests/ctx_retrieval_classifier.rs",
+    ],
+    crate_name = "ctx_retrieval_classifier",
+    crate_root = "tests/ctx_retrieval_classifier.rs",
+    edition = crate_edition(),
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + ["//crates/ctx-history-core:lib"],
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
     name = "self_contained_core_final_locator_removal_tests",
     srcs = [
         "tests/self_contained_core_final_locator_removal.rs",

@@ -12,6 +12,7 @@ pub(in super::super) fn decode_result_record(
     let occurred_at_unix_ms = result.occurred_at_unix_ms;
     let native_record_id = result.native_record_id;
     let mut probed = result.outputs;
+    let aggregate_unknown = result.aggregate_unknown;
     if probed.len() > MAX_GEMINI_NATIVE_PAGE_RECORDS {
         return Err(format!(
             "Gemini result record exceeds the {MAX_GEMINI_NATIVE_PAGE_RECORDS} output limit"
@@ -30,6 +31,9 @@ pub(in super::super) fn decode_result_record(
             .as_ref()
             .and_then(|call_id| result_call_counts.get(call_id))
             .is_some_and(|count| *count != 1);
+        if aggregate_unknown || output.ambiguous_native_fields {
+            output.atoms.push(ResultAtom::Unknown);
+        }
     }
     for (index, probed) in probed.into_iter().enumerate() {
         let sub_ordinal = u32::try_from(index)
@@ -101,6 +105,9 @@ fn decode_output_diagnostic(
             preview: String::new(),
             searchable_text: String::new(),
             safe_file_touches: Vec::new(),
+            extra_body_contributions: Vec::new(),
+            result_terminal_status: Some(output.terminal_status),
+            result_atoms: output.atoms.clone(),
         },
         serialized_body_bytes: body_bytes.len(),
     })
@@ -150,8 +157,16 @@ pub(in super::super) fn decode_retained_event(
     raw_ordinal: u64,
     source_record: GeminiSourceRecordEvidence,
 ) -> std::result::Result<Option<DecodedGeminiEvent>, GeminiDecodingError> {
-    let (id, occurred_at, event_type, role, body, searchable_text, safe_file_touches) = match class
-    {
+    let (
+        id,
+        occurred_at,
+        event_type,
+        role,
+        body,
+        searchable_text,
+        safe_file_touches,
+        extra_body_contributions,
+    ) = match class {
         GeminiRecordClass::Message => {
             let dto: GeminiMessageDto = serde_json::from_slice(payload)
                 .map_err(|error| format!("invalid Gemini message: {error}"))?;
@@ -173,6 +188,7 @@ pub(in super::super) fn decode_retained_event(
                     model: dto.model,
                 },
                 text,
+                Vec::new(),
                 Vec::new(),
             )
         }
@@ -199,6 +215,12 @@ pub(in super::super) fn decode_retained_event(
             let searchable_text = tool_call_search_text(&calls);
             let safe_file_touches =
                 safe_file_touches(&calls).map_err(GeminiDecodingError::TouchOverflow)?;
+            let extra_body_contributions = match dto.content {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::String(text)) if text.is_empty() => Vec::new(),
+                Some(Value::String(_)) => vec![ContributionClass::Ordinary],
+                Some(_) => vec![ContributionClass::Unknown],
+            };
             (
                 required_record_id(dto.id)?,
                 dto.timestamp.as_deref().and_then(parse_timestamp),
@@ -207,6 +229,7 @@ pub(in super::super) fn decode_retained_event(
                 GeminiEventBody::ToolCall { calls },
                 searchable_text,
                 safe_file_touches,
+                extra_body_contributions,
             )
         }
         GeminiRecordClass::StateNotice => {
@@ -222,6 +245,7 @@ pub(in super::super) fn decode_retained_event(
                     summary: summary.clone(),
                 },
                 summary.unwrap_or_default(),
+                Vec::new(),
                 Vec::new(),
             )
         }
@@ -241,6 +265,7 @@ pub(in super::super) fn decode_retained_event(
                     target_native_record_id: target.clone(),
                 },
                 format!("rewind to {target}"),
+                Vec::new(),
                 Vec::new(),
             )
         }
@@ -275,6 +300,9 @@ pub(in super::super) fn decode_retained_event(
             preview,
             searchable_text,
             safe_file_touches,
+            extra_body_contributions,
+            result_terminal_status: None,
+            result_atoms: Vec::new(),
         },
         serialized_body_bytes: body_bytes.len(),
     }))

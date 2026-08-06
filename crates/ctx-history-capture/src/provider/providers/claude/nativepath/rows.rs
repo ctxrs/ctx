@@ -81,6 +81,15 @@ pub(crate) enum ClaudeOutputOutcome {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ClaudeDiscoveryResultEvidence {
+    SuccessfulPayloadOnly,
+    Failed,
+    Diagnostic,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClaudeToolResult {
@@ -90,6 +99,10 @@ pub(crate) struct ClaudeToolResult {
     pub(crate) duration_ms: Option<u64>,
     pub(crate) content: Value,
     pub(crate) tool_use_result: Option<Value>,
+    // Projection-only structural evidence. Fallback identity and retained
+    // provider content continue to depend only on the complete native body.
+    #[serde(skip)]
+    pub(crate) discovery_evidence: ClaudeDiscoveryResultEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

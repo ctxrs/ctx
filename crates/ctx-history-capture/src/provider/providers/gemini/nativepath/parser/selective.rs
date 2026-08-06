@@ -269,6 +269,7 @@ struct GeminiMessageDto {
 struct GeminiToolCallRecordDto {
     id: Option<String>,
     timestamp: Option<String>,
+    content: Option<Value>,
     #[serde(default)]
     tool_calls: Vec<GeminiToolCallDto>,
 }
@@ -298,6 +299,8 @@ struct GeminiOutputOutcomeDto {
     duration_ms: U64Marker,
     redacted: RedactionMarker,
     is_redacted: RedactionMarker,
+    framing_unknown: bool,
+    diagnostic_member: bool,
 }
 
 impl GeminiOutputOutcomeDto {
@@ -314,6 +317,8 @@ impl GeminiOutputOutcomeDto {
         self.exit_code.0 = self.exit_code.0.or(other.exit_code.0);
         self.status_code.0 = self.status_code.0.or(other.status_code.0);
         self.duration_ms.0 = self.duration_ms.0.or(other.duration_ms.0);
+        self.framing_unknown |= other.framing_unknown;
+        self.diagnostic_member |= other.diagnostic_member;
     }
 
     fn combined_metadata(&self, inner: &Self) -> OutputOutcomeMetadata {
@@ -389,6 +394,75 @@ impl GeminiOutputOutcomeDto {
     fn is_redacted(&self) -> bool {
         self.redacted.0 || self.is_redacted.0 || self.status.redacted || self.state.redacted
     }
+
+    fn terminal_status_with(&self, inner: &Self) -> ResultTerminalStatus {
+        if self.framing_unknown || inner.framing_unknown {
+            return ResultTerminalStatus::Unknown;
+        }
+        let failure = self.error.0
+            || self.success.0 == Some(false)
+            || self.ok.0 == Some(false)
+            || self.is_error.0 == Some(true)
+            || self.timed_out.0 == Some(true)
+            || self.timeout.0 == Some(true)
+            || self.exit_code.0.is_some_and(|code| code != 0)
+            || self.status_code.0.is_some_and(|code| code >= 400)
+            || self.status.failure
+            || self.state.failure
+            || self.outcome.failure
+            || inner.error.0
+            || inner.success.0 == Some(false)
+            || inner.ok.0 == Some(false)
+            || inner.is_error.0 == Some(true)
+            || inner.timed_out.0 == Some(true)
+            || inner.timeout.0 == Some(true)
+            || inner.exit_code.0.is_some_and(|code| code != 0)
+            || inner.status_code.0.is_some_and(|code| code >= 400)
+            || inner.status.failure
+            || inner.state.failure
+            || inner.outcome.failure;
+        if failure {
+            return ResultTerminalStatus::Failed;
+        }
+        let nonterminal_or_unknown_status = [
+            self.status,
+            self.state,
+            self.outcome,
+            inner.status,
+            inner.state,
+            inner.outcome,
+        ]
+        .into_iter()
+        .any(|status| status.present && !status.success && !status.failure);
+        if nonterminal_or_unknown_status {
+            return ResultTerminalStatus::Unknown;
+        }
+        let success = self.success.0 == Some(true)
+            || self.ok.0 == Some(true)
+            || self.exit_code.0 == Some(0)
+            || self
+                .status_code
+                .0
+                .is_some_and(|code| (200..400).contains(&code))
+            || self.status.success
+            || self.state.success
+            || self.outcome.success
+            || inner.success.0 == Some(true)
+            || inner.ok.0 == Some(true)
+            || inner.exit_code.0 == Some(0)
+            || inner
+                .status_code
+                .0
+                .is_some_and(|code| (200..400).contains(&code))
+            || inner.status.success
+            || inner.state.success
+            || inner.outcome.success;
+        if success {
+            ResultTerminalStatus::Succeeded
+        } else {
+            ResultTerminalStatus::Unknown
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -411,12 +485,14 @@ struct StatusMarker {
     success: bool,
     failure: bool,
     redacted: bool,
+    present: bool,
 }
 
 impl StatusMarker {
     fn merge_nested(&mut self, other: Self) {
         self.success |= other.success;
         self.failure |= other.failure;
+        self.present |= other.present;
     }
 }
 
@@ -454,6 +530,8 @@ struct ProbedGeminiOutput {
     file_paths: Vec<String>,
     ambiguous_native_fields: bool,
     outcome: OutputOutcomeMetadata,
+    terminal_status: ResultTerminalStatus,
+    atoms: Vec<ResultAtom>,
     redacted: bool,
     fallback_identity_sha256: [u8; 32],
 }
@@ -462,6 +540,7 @@ struct ProbedGeminiResult {
     native_record_id: Option<String>,
     occurred_at_unix_ms: Option<i64>,
     outputs: Vec<ProbedGeminiOutput>,
+    aggregate_unknown: bool,
 }
 
 pub(super) struct DecodedGeminiResult {
@@ -827,4 +906,6 @@ impl<'a> GeminiRawJson<'a> {
 struct GeminiRawOutput {
     outcome: GeminiOutputOutcomeDto,
     content: GeminiSelectedContent,
+    known_envelope: bool,
+    unknown_envelope_member: bool,
 }

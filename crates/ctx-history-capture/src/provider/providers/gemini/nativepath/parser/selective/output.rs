@@ -61,6 +61,7 @@ impl GeminiRawJson<'_> {
         let mut content = None;
         let mut output_alias = None;
         let mut text = None;
+        let mut unknown_member = false;
         if self.peek() == Some(b'}') {
             self.take(b'}')?;
             return Ok(output);
@@ -82,11 +83,13 @@ impl GeminiRawJson<'_> {
                 }
                 Some(key) => {
                     if !self.outcome_field(key, &mut output.outcome, depth)? {
+                        unknown_member = true;
                         let nested = self.nested_outcome_value(depth.saturating_add(1))?;
                         output.outcome.merge_nested(nested.outcome);
                     }
                 }
                 None => {
+                    unknown_member = true;
                     let nested = self.nested_outcome_value(depth.saturating_add(1))?;
                     output.outcome.merge_nested(nested.outcome);
                 }
@@ -109,10 +112,13 @@ impl GeminiRawJson<'_> {
                 }
             }
         }
-        output.content = content
-            .or(output_alias)
-            .or(text)
-            .unwrap_or(GeminiSelectedContent::Absent);
+        let payload_member_count = usize::from(content.is_some())
+            + usize::from(output_alias.is_some())
+            + usize::from(text.is_some());
+        output.known_envelope = payload_member_count > 0;
+        output.unknown_envelope_member =
+            output.known_envelope && (payload_member_count != 1 || unknown_member);
+        output.content = content.or(output_alias).or(text).unwrap_or_default();
         Ok(output)
     }
 
@@ -240,24 +246,44 @@ impl GeminiRawJson<'_> {
         depth: usize,
     ) -> std::result::Result<bool, String> {
         match key {
-            "error" => outcome.error = FailureMarker(self.failure_marker(depth)?),
-            "success" => outcome.success = BoolMarker(self.bool_marker(depth)?),
-            "ok" => outcome.ok = BoolMarker(self.bool_marker(depth)?),
+            "error" => {
+                outcome.diagnostic_member = true;
+                outcome.error = FailureMarker(self.failure_marker(depth)?);
+            }
+            "warning" | "warnings" | "stderr" | "diagnostic" | "diagnostics" => {
+                outcome.diagnostic_member = true;
+                self.skip_value(depth)?;
+            }
+            "success" => {
+                outcome.success = BoolMarker(self.bool_marker(depth)?);
+                outcome.framing_unknown |= outcome.success.0.is_none();
+            }
+            "ok" => {
+                outcome.ok = BoolMarker(self.bool_marker(depth)?);
+                outcome.framing_unknown |= outcome.ok.0.is_none();
+            }
             "status" => outcome.status = self.status_marker(depth)?,
             "state" => outcome.state = self.status_marker(depth)?,
             "outcome" => outcome.outcome = self.status_marker(depth)?,
             "isError" | "is_error" => {
                 outcome.is_error = BoolMarker(self.bool_marker(depth)?);
+                outcome.framing_unknown |= outcome.is_error.0.is_none();
             }
             "timedOut" | "timed_out" => {
                 outcome.timed_out = BoolMarker(self.bool_marker(depth)?);
+                outcome.framing_unknown |= outcome.timed_out.0.is_none();
             }
-            "timeout" => outcome.timeout = BoolMarker(self.bool_marker(depth)?),
+            "timeout" => {
+                outcome.timeout = BoolMarker(self.bool_marker(depth)?);
+                outcome.framing_unknown |= outcome.timeout.0.is_none();
+            }
             "exitCode" | "exit_code" => {
                 outcome.exit_code = I64Marker(self.i64_marker(depth)?);
+                outcome.framing_unknown |= outcome.exit_code.0.is_none();
             }
             "statusCode" | "status_code" => {
                 outcome.status_code = I64Marker(self.i64_marker(depth)?);
+                outcome.framing_unknown |= outcome.status_code.0.is_none();
             }
             "durationMs" | "duration_ms" | "duration" => {
                 outcome.duration_ms = U64Marker(self.u64_marker(depth)?);
@@ -341,7 +367,10 @@ impl GeminiRawJson<'_> {
         self.whitespace();
         if self.peek() != Some(b'"') {
             self.skip_value(depth)?;
-            return Ok(StatusMarker::default());
+            return Ok(StatusMarker {
+                present: true,
+                ..StatusMarker::default()
+            });
         }
         let value = self.string(64)?;
         if value.truncated {
@@ -367,6 +396,7 @@ impl GeminiRawJson<'_> {
                     | "canceled"
             ),
             redacted,
+            present: true,
         })
     }
 
@@ -431,6 +461,7 @@ pub(super) fn parse_result_record_selectively(
     let mut saw_timestamp = false;
     let mut saw_result = false;
     let mut saw_tool_calls = false;
+    let mut aggregate_unknown = false;
 
     if parser.peek() != Some(b'}') {
         loop {
@@ -465,14 +496,21 @@ pub(super) fn parse_result_record_selectively(
                         return Err("duplicate toolCalls field in Gemini result record".to_owned());
                     }
                     saw_tool_calls = true;
-                    calls = parser.result_calls(1)?;
+                    let parsed = parser.result_calls(1)?;
+                    calls = parsed.0;
+                    aggregate_unknown |= parsed.1;
                 }
+                Some("type") => parser.skip_value(1)?,
                 Some(key) => {
                     if !parser.outcome_field(key, &mut outcome, 1)? {
+                        aggregate_unknown = true;
                         parser.skip_value(1)?;
                     }
                 }
-                None => parser.skip_value(1)?,
+                None => {
+                    aggregate_unknown = true;
+                    parser.skip_value(1)?;
+                }
             }
             parser.whitespace();
             match parser.peek() {
@@ -535,6 +573,7 @@ pub(super) fn parse_result_record_selectively(
             .and_then(parse_timestamp)
             .map(|timestamp| timestamp.timestamp_millis()),
         outputs,
+        aggregate_unknown,
     })
 }
 
@@ -555,6 +594,7 @@ pub(super) fn finish_probed_output(
         }
     };
     let outcome = outer_outcome.combined_metadata(&result.outcome);
+    let terminal_status = outer_outcome.terminal_status_with(&result.outcome);
     let fallback_identity_sha256 = result_fallback_identity_sha256(
         call_id.as_deref(),
         tool_name.as_deref(),
@@ -568,6 +608,22 @@ pub(super) fn finish_probed_output(
         GeminiSelectedContent::Null => Some(Value::Null),
         GeminiSelectedContent::Structured { value, .. } => Some(value),
     };
+    let mut atoms = Vec::new();
+    if result.known_envelope {
+        atoms.push(ResultAtom::KnownProviderEnvelope);
+    }
+    if result_value.is_some() {
+        atoms.push(ResultAtom::Payload);
+    }
+    if outer_outcome.diagnostic_member
+        || result.outcome.diagnostic_member
+        || result_value.as_ref().is_some_and(has_structural_diagnostic)
+    {
+        atoms.push(ResultAtom::Diagnostic);
+    }
+    if result.unknown_envelope_member {
+        atoms.push(ResultAtom::Unknown);
+    }
     ProbedGeminiOutput {
         result: result_value,
         call_id,
@@ -578,6 +634,8 @@ pub(super) fn finish_probed_output(
         file_paths: repository_args.file_paths,
         ambiguous_native_fields: repository_args.ambiguous_native_fields,
         outcome,
+        terminal_status,
+        atoms,
         redacted: record_redacted || outer_outcome.redacted_with(&result.outcome),
         fallback_identity_sha256,
     }
@@ -775,17 +833,21 @@ impl GeminiRawJson<'_> {
     fn result_calls(
         &mut self,
         depth: usize,
-    ) -> std::result::Result<Vec<GeminiRawResultCall>, String> {
+    ) -> std::result::Result<(Vec<GeminiRawResultCall>, bool), String> {
         self.whitespace();
         self.take(b'[')?;
         self.whitespace();
         let mut calls = Vec::new();
+        let mut unknown_member = false;
         if self.peek() == Some(b']') {
             self.take(b']')?;
-            return Ok(calls);
+            return Ok((calls, false));
         }
         loop {
-            if let Some(call) = self.result_call(depth.saturating_add(1))? {
+            let (call, unknown) = self.result_call(depth.saturating_add(1))?;
+            unknown_member |= unknown;
+            if let Some(call) = call {
+                unknown_member |= call.result.is_none();
                 calls.push(call);
             }
             self.whitespace();
@@ -806,17 +868,17 @@ impl GeminiRawJson<'_> {
                 }
             }
         }
-        Ok(calls)
+        Ok((calls, unknown_member))
     }
 
     fn result_call(
         &mut self,
         depth: usize,
-    ) -> std::result::Result<Option<GeminiRawResultCall>, String> {
+    ) -> std::result::Result<(Option<GeminiRawResultCall>, bool), String> {
         self.whitespace();
         if self.peek() != Some(b'{') {
             self.skip_value(depth)?;
-            return Ok(None);
+            return Ok((None, true));
         }
         self.take(b'{')?;
         self.whitespace();
@@ -833,7 +895,7 @@ impl GeminiRawJson<'_> {
         let mut result_seen = false;
         if self.peek() == Some(b'}') {
             self.take(b'}')?;
-            return Ok(Some(call));
+            return Ok((Some(call), true));
         }
         loop {
             let key = self.key()?;
@@ -880,10 +942,14 @@ impl GeminiRawJson<'_> {
                 }
                 Some(key) => {
                     if !self.outcome_field(key, &mut call.outcome, depth)? {
+                        call.outcome.framing_unknown = true;
                         self.skip_value(depth)?;
                     }
                 }
-                None => self.skip_value(depth)?,
+                None => {
+                    call.outcome.framing_unknown = true;
+                    self.skip_value(depth)?;
+                }
             }
             self.whitespace();
             match self.peek() {
@@ -903,6 +969,25 @@ impl GeminiRawJson<'_> {
                 }
             }
         }
-        Ok(Some(call))
+        Ok((Some(call), false))
+    }
+}
+
+fn has_structural_diagnostic(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(has_structural_diagnostic),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "stderr"
+                    | "warning"
+                    | "warnings"
+                    | "error"
+                    | "errors"
+                    | "diagnostic"
+                    | "diagnostics"
+            ) || has_structural_diagnostic(value)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
 }
