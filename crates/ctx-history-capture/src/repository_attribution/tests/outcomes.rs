@@ -363,6 +363,71 @@ fn native_cherry_pick_receipt_admits_exact_derivation_mapping() {
     assert!(annotation.repository_abstentions.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn native_cherry_pick_substituted_after_source_read_abstains() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "cherry-pick-substitution", None);
+    let primary = git_output(&repo, &["branch", "--show-current"]);
+    run_git(&repo, &["checkout", "-qb", "source"]);
+    fs::write(repo.join("picked.txt"), "picked\n").unwrap();
+    run_git(&repo, &["add", "picked.txt"]);
+    run_git(&repo, &["commit", "-qm", "Apply substituted lineage"]);
+    let source = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    run_git(&repo, &["checkout", "-q", &primary]);
+    fs::write(repo.join("primary.txt"), "diverge\n").unwrap();
+    run_git(&repo, &["add", "primary.txt"]);
+    run_git(&repo, &["commit", "-qm", "Diverge substitution primary"]);
+    let substitute = git_output(&repo, &["rev-parse", "HEAD"]);
+    run_git(&repo, &["cherry-pick", &source]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    run_git(&repo, &["branch", "-D", "source"]);
+
+    let source_object = loose_object_path(&repo, &source);
+    let substitute_object = loose_object_path(&repo, &substitute);
+    assert!(source_object.is_file());
+    assert!(substitute_object.is_file());
+    let wrapper =
+        delegating_git_with_object_mutation(temp.path(), &source_object, Some(&substitute_object));
+    let command = format!("git cherry-pick {source}");
+    let linked = linked_short_commit(
+        &repo,
+        &command,
+        format!("[{primary} {short}] Apply substituted lineage\n 1 file changed, 1 insertion(+)\n"),
+    );
+    let mut attributor = RepositoryAttributor::default();
+    attributor.certifier = GitCertifier::for_test(wrapper, Duration::from_secs(2));
+    let annotation = attributor.attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some(command),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+
+    assert!(annotation
+        .repository_vcs_observations
+        .iter()
+        .all(|observation| {
+            !matches!(&observation.kind, RepositoryVcsObservationKind::Outcome(_))
+        }));
+    assert!(annotation.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::OutcomeResultInadmissible
+            && abstention.detail.as_deref()
+                == Some("cherry_pick_source_or_result_did_not_resolve_exactly")
+    }));
+    assert!(attributor.git_subprocess_count() <= super::git::MAX_GIT_SUBPROCESSES_PER_EVENT);
+    assert_eq!(
+        fs::read(&source_object).unwrap(),
+        fs::read(&substitute_object).unwrap()
+    );
+    assert!(temp.path().join("mapped-object-first-read").is_dir());
+}
+
 #[test]
 fn plural_mapping_model_preserves_native_sha256_cherry_pick_certification() {
     let temp = TempDir::new().unwrap();
@@ -430,7 +495,10 @@ fn plural_mapping_model_preserves_native_sha256_cherry_pick_certification() {
         proof.repository_geometry_after_sha256
     );
     assert_ne!(proof.repository_geometry_before_sha256, [0; 32]);
-    assert_eq!(proof.exact_source_oids, [operation.mappings[0].source.clone()]);
+    assert_eq!(
+        proof.exact_source_oids,
+        [operation.mappings[0].source.clone()]
+    );
     assert!(annotation.repository_abstentions.is_empty());
 }
 

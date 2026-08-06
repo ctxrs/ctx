@@ -437,6 +437,11 @@ impl GitCertifier {
             return Err(ProbeFailure::Failed("invalid_cherry_pick_mapping"));
         }
 
+        let mut mapped_object_ids = [source.clone(), result.object_id.clone()];
+        mapped_object_ids.sort();
+        let object_domain =
+            self.recertify_commit_operation_objects(certificate, &mapped_object_ids, budget)?;
+
         certificate.ensure_current_geometry()?;
         let closing_mutable_state = repository_mutable_evidence_state(
             &certificate.git_dir,
@@ -446,7 +451,7 @@ impl GitCertifier {
         if closing_mutable_state != opening_mutable_state {
             return Err(ProbeFailure::ConcurrentDrift);
         }
-        Ok((result, repository_object_domain_sha256(certificate)))
+        Ok((result, object_domain))
     }
 
     #[cfg(test)]

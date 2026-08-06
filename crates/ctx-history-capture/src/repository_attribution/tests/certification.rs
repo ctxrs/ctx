@@ -176,7 +176,7 @@ fn plural_operation_objects_are_batch_verified_with_an_explicit_unique_bound() {
         .verify_commit_operation_objects(&certificate, &object_ids, &mut budget)
         .unwrap();
     assert_ne!(domain, [0; 32]);
-    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 1);
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 2);
 
     let over_bound = (0..=git::MAX_VERIFIED_COMMIT_OPERATION_OBJECTS)
         .map(|index| GitObjectId {
@@ -191,7 +191,55 @@ fn plural_operation_objects_are_batch_verified_with_an_explicit_unique_bound() {
         failure,
         git::ProbeFailure::Failed("commit_operation_object_bound_exceeded")
     );
-    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 1);
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn mapped_object_removed_after_first_operation_read_fails_recertification() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "mapped-object-removal", None);
+    let removed_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("next.txt"), "next\n").unwrap();
+    run_git(&repo, &["add", "next.txt"]);
+    run_git(&repo, &["commit", "-qm", "next mapped object"]);
+    let next_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    let mut object_ids = [removed_oid.clone(), next_oid]
+        .into_iter()
+        .map(|hex| GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex,
+        })
+        .collect::<Vec<_>>();
+    object_ids.sort();
+
+    let removed_object = loose_object_path(&repo, &removed_oid);
+    assert!(removed_object.is_file());
+    let certifier = GitCertifier::for_test(
+        delegating_git_with_object_mutation(temp.path(), &removed_object, None),
+        Duration::from_secs(2),
+    );
+    let certificate = certifier
+        .certify(
+            &repo,
+            CandidateKind::Directory,
+            RepositoryEvidenceKind::DeclaredToolWorkdir,
+        )
+        .unwrap();
+    let subprocesses_before = certifier.git_subprocess_count();
+
+    let failure = certifier
+        .verify_commit_operation_objects(
+            &certificate,
+            &object_ids,
+            &mut git::EventProbeBudget::new(),
+        )
+        .unwrap_err();
+
+    assert_eq!(failure, ProbeFailure::Failed("git_command_failed"));
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 2);
+    assert!(!removed_object.exists());
+    assert!(temp.path().join("mapped-object-first-read").is_dir());
 }
 
 #[cfg(unix)]

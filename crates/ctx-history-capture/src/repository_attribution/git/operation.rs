@@ -16,6 +16,52 @@ impl GitCertifier {
         object_ids: &[GitObjectId],
         budget: &mut EventProbeBudget,
     ) -> Result<[u8; 32], ProbeFailure> {
+        self.validate_commit_operation_objects(certificate, object_ids)?;
+        let opening_mutable_state = self.open_commit_operation_object_window(certificate)?;
+
+        self.resolve_commit_operation_objects(
+            certificate,
+            object_ids,
+            budget,
+            "commit_operation_object_resolution_mismatch",
+        )?;
+        self.ensure_commit_operation_object_window(certificate, opening_mutable_state)?;
+        self.resolve_commit_operation_objects(
+            certificate,
+            object_ids,
+            budget,
+            "commit_operation_object_recertification_mismatch",
+        )?;
+        self.ensure_commit_operation_object_window(certificate, opening_mutable_state)?;
+        Ok(repository_object_domain_sha256(certificate))
+    }
+
+    /// Re-certifies one already-resolved mapping set immediately before its
+    /// repository-verified yield is admitted. All objects remain batched in one
+    /// bounded Git process so the proof cost is constant in process count.
+    pub(super) fn recertify_commit_operation_objects(
+        &self,
+        certificate: &CertifiedCandidate,
+        object_ids: &[GitObjectId],
+        budget: &mut EventProbeBudget,
+    ) -> Result<[u8; 32], ProbeFailure> {
+        self.validate_commit_operation_objects(certificate, object_ids)?;
+        let opening_mutable_state = self.open_commit_operation_object_window(certificate)?;
+        self.resolve_commit_operation_objects(
+            certificate,
+            object_ids,
+            budget,
+            "commit_operation_object_recertification_mismatch",
+        )?;
+        self.ensure_commit_operation_object_window(certificate, opening_mutable_state)?;
+        Ok(repository_object_domain_sha256(certificate))
+    }
+
+    fn validate_commit_operation_objects(
+        &self,
+        certificate: &CertifiedCandidate,
+        object_ids: &[GitObjectId],
+    ) -> Result<(), ProbeFailure> {
         if object_ids.is_empty() || object_ids.len() > MAX_VERIFIED_COMMIT_OPERATION_OBJECTS {
             return Err(ProbeFailure::Failed(
                 "commit_operation_object_bound_exceeded",
@@ -37,6 +83,13 @@ impl GitCertifier {
             }
         }
 
+        Ok(())
+    }
+
+    fn open_commit_operation_object_window(
+        &self,
+        certificate: &CertifiedCandidate,
+    ) -> Result<[u8; 32], ProbeFailure> {
         certificate.ensure_current_geometry()?;
         let opening_mutable_state = repository_mutable_evidence_state(
             &certificate.git_dir,
@@ -46,7 +99,16 @@ impl GitCertifier {
         if opening_mutable_state != certificate.mutable_evidence_state {
             return Err(ProbeFailure::ConcurrentDrift);
         }
+        Ok(opening_mutable_state)
+    }
 
+    fn resolve_commit_operation_objects(
+        &self,
+        certificate: &CertifiedCandidate,
+        object_ids: &[GitObjectId],
+        budget: &mut EventProbeBudget,
+        mismatch_detail: &'static str,
+    ) -> Result<(), ProbeFailure> {
         let revisions = object_ids
             .iter()
             .map(|object_id| format!("{}^{{commit}}", object_id.hex))
@@ -61,11 +123,16 @@ impl GitCertifier {
                 .zip(object_ids)
                 .any(|(actual, expected)| *actual != expected.hex.as_str())
         {
-            return Err(ProbeFailure::Failed(
-                "commit_operation_object_resolution_mismatch",
-            ));
+            return Err(ProbeFailure::Failed(mismatch_detail));
         }
+        Ok(())
+    }
 
+    fn ensure_commit_operation_object_window(
+        &self,
+        certificate: &CertifiedCandidate,
+        opening_mutable_state: [u8; 32],
+    ) -> Result<(), ProbeFailure> {
         certificate.ensure_current_geometry()?;
         let closing_mutable_state = repository_mutable_evidence_state(
             &certificate.git_dir,
@@ -75,6 +142,6 @@ impl GitCertifier {
         if closing_mutable_state != opening_mutable_state {
             return Err(ProbeFailure::ConcurrentDrift);
         }
-        Ok(repository_object_domain_sha256(certificate))
+        Ok(())
     }
 }
