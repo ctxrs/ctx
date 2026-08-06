@@ -123,7 +123,7 @@ fn provider_p1_lineage_declared_missing_parent_fails_closed() {
     );
 
     let error = refresh_source_backed_generation(
-        &temp.path().join("index"),
+        temp.path().join("index"),
         &registry(temp.path()),
         WriterOptions {
             indexer_threads: 1,
