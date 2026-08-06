@@ -14,11 +14,16 @@ use crate::{
 
 use super::{
     note_candidate_lineage_decode, note_candidate_lineage_spill,
-    spill::{IdentityDeltaSpill, IdentityKeySpill, SpillVerificationIdentities, VerificationSpill},
+    spill::{
+        reserve_verification_scratch, IdentityDeltaSpill, IdentityKeySpill, ScratchReservation,
+        SpillVerificationIdentities, VerificationSpill,
+    },
 };
 
 const MAX_LINEAGE_DEPTH: usize = 1_024;
-const MAX_SESSION_CACHE_ENTRIES: usize = 65_536;
+const MAX_SESSION_CACHE_ENTRIES: usize = 4_096;
+const SESSION_CACHE_HEAP_RESERVATION_BYTES: u64 = 1024 * 1024;
+const HASH_MAP_BUCKET_OVERHEAD_FACTOR: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SessionRelationship {
@@ -40,7 +45,7 @@ pub(super) fn verify_incremental_lineage(
     changed.for_each(|identities| affected_sessions.push(identities.session))?;
     retired.for_each(|identities| affected_sessions.push(identities.session))?;
 
-    let mut resolver = IncrementalResolver::new(searcher, fields, changed_segments);
+    let mut resolver = IncrementalResolver::new(searcher, fields, changed_segments)?;
     affected_sessions.for_each_unique(|session| {
         let candidate = resolver.resolve_session(session)?;
         let base = resolve_session_indexed(base_searcher, fields, session, None)?;
@@ -108,14 +113,18 @@ struct IncrementalResolver<'a> {
 }
 
 impl<'a> IncrementalResolver<'a> {
-    fn new(searcher: &'a Searcher, fields: Fields, changed_segments: HashSet<usize>) -> Self {
-        Self {
+    fn new(
+        searcher: &'a Searcher,
+        fields: Fields,
+        changed_segments: HashSet<usize>,
+    ) -> Result<Self> {
+        Ok(Self {
             searcher,
             fields,
             changed_segments,
-            relationships: BoundedSessionCache::default(),
-            valid_roots: BoundedSessionCache::default(),
-        }
+            relationships: BoundedSessionCache::create()?,
+            valid_roots: BoundedSessionCache::create()?,
+        })
     }
 
     fn resolve_session(&mut self, session: CompactIdentity) -> Result<Option<SessionRelationship>> {
@@ -391,17 +400,18 @@ impl<'a> IncrementalResolver<'a> {
 
 struct BoundedSessionCache<T: Copy> {
     entries: HashMap<[u8; 32], T>,
-}
-
-impl<T: Copy> Default for BoundedSessionCache<T> {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::with_capacity(MAX_SESSION_CACHE_ENTRIES),
-        }
-    }
+    _reservation: ScratchReservation,
 }
 
 impl<T: Copy> BoundedSessionCache<T> {
+    fn create() -> Result<Self> {
+        debug_assert!(modeled_session_cache_bytes::<T>() <= SESSION_CACHE_HEAP_RESERVATION_BYTES);
+        Ok(Self {
+            entries: HashMap::new(),
+            _reservation: reserve_verification_scratch(0, SESSION_CACHE_HEAP_RESERVATION_BYTES)?,
+        })
+    }
+
     fn get(&self, identity: CompactIdentity) -> Option<T> {
         self.entries.get(&identity.digest).copied()
     }
@@ -413,6 +423,18 @@ impl<T: Copy> BoundedSessionCache<T> {
         self.entries.insert(identity.digest, value);
     }
 }
+
+const fn modeled_session_cache_bytes<T>() -> u64 {
+    let bucket_bytes = std::mem::size_of::<([u8; 32], T)>() + 1;
+    (MAX_SESSION_CACHE_ENTRIES * HASH_MAP_BUCKET_OVERHEAD_FACTOR * bucket_bytes) as u64
+}
+
+const _: () = assert!(
+    modeled_session_cache_bytes::<SessionRelationship>() <= SESSION_CACHE_HEAP_RESERVATION_BYTES
+);
+const _: () = assert!(
+    modeled_session_cache_bytes::<CompactIdentity>() <= SESSION_CACHE_HEAP_RESERVATION_BYTES
+);
 
 fn indexed_identities(
     searcher: &Searcher,
@@ -533,7 +555,7 @@ fn verify_session_relationships(
         .map(|index| index.terms().stream())
         .collect::<std::io::Result<Vec<_>>>()?;
     let mut merged = tantivy::termdict::TermMerger::new(streams);
-    let mut valid_roots = BoundedSessionCache::default();
+    let mut valid_roots = BoundedSessionCache::create()?;
     while merged.advance() {
         let mut session = None;
         let mut relationship = None;
@@ -855,4 +877,42 @@ fn for_each_live_posting(
         doc_id = postings.advance();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::publication::verification::spill::with_verification_scratch_budget;
+
+    #[test]
+    fn session_caches_are_lazy_and_fit_the_reserved_heap_model() {
+        assert!(
+            modeled_session_cache_bytes::<SessionRelationship>()
+                <= SESSION_CACHE_HEAP_RESERVATION_BYTES
+        );
+        assert!(
+            modeled_session_cache_bytes::<CompactIdentity>()
+                <= SESSION_CACHE_HEAP_RESERVATION_BYTES
+        );
+
+        with_verification_scratch_budget(|| {
+            let mut cache = BoundedSessionCache::<CompactIdentity>::create()?;
+            assert_eq!(cache.entries.capacity(), 0);
+
+            for ordinal in 0..=MAX_SESSION_CACHE_ENTRIES {
+                let mut digest = [0_u8; 32];
+                digest[..8].copy_from_slice(&(ordinal as u64).to_le_bytes());
+                let identity = CompactIdentity { digest };
+                cache.insert(identity, identity);
+            }
+
+            assert_eq!(cache.entries.len(), 1);
+            assert!(
+                cache.entries.capacity()
+                    <= MAX_SESSION_CACHE_ENTRIES * HASH_MAP_BUCKET_OVERHEAD_FACTOR
+            );
+            Ok(())
+        })
+        .expect("bounded cache reservation");
+    }
 }
