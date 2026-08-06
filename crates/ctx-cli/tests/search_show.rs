@@ -129,6 +129,158 @@ fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
 }
 
 #[test]
+fn codex_ctx_retrieval_echoes_are_hidden_from_search_but_remain_directly_retrievable() {
+    const PROVIDER_SESSION_ID: &str = "ctx-retrieval-self-echo-e2e";
+    const EXCLUDED_DIRECT_INVOCATION: &str = "zzctxexactdirectinvocatione2ecanary";
+    const EXCLUDED_DIRECT_PAYLOAD: &str = "zzctxexactdirectpayloade2ecanary";
+    const EXCLUDED_MCP_PAYLOAD: &str = "zzctxexactmcppayloade2ecanary";
+
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-retrieval-self-echo");
+    let (_daemon, imported) = import_codex_fixture_through_daemon(&temp, &fixture);
+    assert_eq!(imported["outcome"], "success", "{imported:#}");
+
+    let lexical_event_search = |query: &str| {
+        json_output(ctx(&temp).args([
+            "search",
+            query,
+            "--provider",
+            "codex",
+            "--events",
+            "--include-current-session",
+            "--backend",
+            "lexical",
+            "--refresh",
+            "off",
+            "--format=json",
+        ]))
+    };
+
+    for excluded in [
+        EXCLUDED_DIRECT_INVOCATION,
+        EXCLUDED_DIRECT_PAYLOAD,
+        EXCLUDED_MCP_PAYLOAD,
+    ] {
+        let search = lexical_event_search(excluded);
+        assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
+        assert_eq!(
+            search["results"].as_array().map(Vec::len),
+            Some(0),
+            "ctx retrieval echo remained searchable for {excluded}: {search:#}"
+        );
+    }
+
+    for (case, searchable) in [
+        ("failed", "zzctxfailedresulte2ecanary"),
+        ("diagnostic-bearing", "zzctxdiagnosticresulte2ecanary"),
+        ("mixed", "zzctxmixedresulte2ecanary"),
+        ("ambiguous", "zzctxambiguousresulte2ecanary"),
+        ("malformed", "zzctxmalformedresulte2ecanary"),
+        ("non-ctx", "zznonctxresulte2ecanary"),
+    ] {
+        let search = lexical_event_search(searchable);
+        let results = search["results"].as_array().unwrap();
+        assert!(
+            results.iter().any(|result| {
+                result["provider"] == "codex"
+                    && result["snippet"]
+                        .as_str()
+                        .is_some_and(|snippet| snippet.contains(searchable))
+            }),
+            "{case} content did not fail open into lexical search: {search:#}"
+        );
+    }
+
+    let listed = json_output(ctx(&temp).args([
+        "list",
+        "events",
+        "--provider",
+        "codex",
+        "--provider-session",
+        PROVIDER_SESSION_ID,
+        "--content",
+        "full",
+        "--limit",
+        "100",
+        "--format=json",
+    ]));
+    let listed_events = listed["events"].as_array().unwrap();
+    assert_eq!(listed_events.len(), 16, "{listed:#}");
+
+    let exact_records = [
+        ("direct-exact", "tool_call", EXCLUDED_DIRECT_INVOCATION),
+        ("direct-exact", "command_output", EXCLUDED_DIRECT_PAYLOAD),
+        ("mcp-ctx-exact", "tool_output", EXCLUDED_MCP_PAYLOAD),
+    ]
+    .map(|(native_event_id, event_type, oracle)| {
+        let event = listed_events
+            .iter()
+            .find(|event| {
+                event["event_type"] == event_type
+                    && event["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(oracle))
+            })
+            .unwrap_or_else(|| {
+                panic!("missing listed {native_event_id}/{event_type} record: {listed:#}")
+            });
+        assert_eq!(event["content"]["complete"], true, "{event:#}");
+        assert!(
+            serde_json::to_string(&event["native_event_id"])
+                .unwrap()
+                .contains(native_event_id),
+            "{event:#}"
+        );
+        event
+    });
+
+    assert_eq!(
+        exact_records[2]["mcp_exchange"]["invocation"]["server"], "ctx",
+        "{:#}",
+        exact_records[2]
+    );
+    assert_eq!(
+        exact_records[2]["mcp_exchange"]["invocation"]["tool"], "search",
+        "{:#}",
+        exact_records[2]
+    );
+
+    for record in exact_records {
+        let event_id = record["ctx_event_id"].as_str().unwrap();
+        let shown = json_output(ctx(&temp).args(["show", "event", event_id, "--format=json"]));
+        assert_eq!(shown["event"]["ctx_event_id"], event_id, "{shown:#}");
+        assert_eq!(shown["event"]["text"], record["text"], "{shown:#}");
+        assert_eq!(shown["event"]["content"]["complete"], true, "{shown:#}");
+    }
+
+    let native_session = json_output(ctx(&temp).args([
+        "show",
+        "session",
+        "--provider",
+        "codex",
+        "--provider-session",
+        PROVIDER_SESSION_ID,
+        "--mode",
+        "log",
+        "--max-events",
+        "100",
+        "--format=json",
+    ]));
+    assert_eq!(
+        native_session["provider_session_id"], PROVIDER_SESSION_ID,
+        "{native_session:#}"
+    );
+    let native_session_text = serde_json::to_string(&native_session["events"]).unwrap();
+    for retained in [
+        EXCLUDED_DIRECT_INVOCATION,
+        EXCLUDED_DIRECT_PAYLOAD,
+        EXCLUDED_MCP_PAYLOAD,
+    ] {
+        assert!(native_session_text.contains(retained), "{native_session:#}");
+    }
+}
+
+#[test]
 fn search_keeps_huge_matching_grapheme_hits_in_json_and_human_output() {
     const SNIPPET_MAX_BYTES: usize = 16 * 1024;
     const SESSION_ID: &str = "019c0000-0000-7000-8000-000000000001";

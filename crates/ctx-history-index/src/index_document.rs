@@ -12,7 +12,7 @@ use ctx_history_core::{
 
 use crate::{Fields, IndexError, Result};
 
-const BASE_FIELD_VALUES: usize = 33;
+const BASE_FIELD_VALUES: usize = 34;
 pub(crate) const SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN: usize = 64;
 pub(crate) const SOURCE_EVENT_ORDER_KEY_LEN: usize = 104;
 const SOURCE_EVENT_ORDER_EVENT_DIGEST_OFFSET: usize = SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN;
@@ -506,9 +506,10 @@ pub(crate) fn core_content_bytes(content: &CoreContent) -> Result<usize> {
 
 /// Derives the lexical body projection for one complete Core record.
 ///
-/// Proven ancestor copies remain complete stored Core records, but their body
-/// must not create another full-text posting set. Unknown and positively
-/// unique records retain the ordinary policy-selected body projection.
+/// Proven ancestor copies and content carrying an independent discovery
+/// exclusion remain complete stored Core records, but their bodies must not
+/// create full-text postings. Unknown and positively unique event origins do
+/// not alter the content-owned discovery policy.
 pub(crate) fn project_indexed_body_search(
     event_origin: &EventOrigin,
     content: CoreContent,
@@ -620,6 +621,7 @@ impl IndexDocument {
         source: IndexSourceFields,
     ) -> Result<Self> {
         let core_record_encoded_bytes = core_record_bytes.len();
+        let discovery_eligible = record.content.is_discovery_eligible();
         let semantic_event_order = SemanticEventOrderKey::for_event(record.event_id)?;
         let source_event_order = SourceEventOrderKey::for_document(
             &source,
@@ -759,6 +761,9 @@ impl IndexDocument {
             semantic_event_order.into_bytes(),
         );
         target.add_bytes(fields.event_range_order, event_range_order.into_bytes());
+        if discovery_eligible {
+            target.add_u64(fields.discovery_eligible, 1);
+        }
         Ok(target)
     }
 }
@@ -975,6 +980,12 @@ mod tests {
                 .get_first(fields.event_origin_kind)
                 .and_then(|value| value.as_str()),
             Some("copied_from_ancestor")
+        );
+        assert_eq!(
+            document
+                .get_first(fields.discovery_eligible)
+                .and_then(|value| value.as_u64()),
+            Some(1)
         );
         let stored = document
             .get_first(fields.core_record)

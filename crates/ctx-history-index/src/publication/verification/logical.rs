@@ -548,6 +548,9 @@ fn expected_query_projection_delta(
         fields.event_range_order,
         &record.event_range_order,
     ));
+    if core.content.is_discovery_eligible() {
+        add(Term::from_field_u64(fields.discovery_eligible, 1));
+    }
 
     // Basic postings expose one membership per distinct term and document even
     // when Core contributes the same exact value through multiple properties.
@@ -569,19 +572,15 @@ struct IncrementalProjectionVerifier {
 
 impl IncrementalProjectionVerifier {
     fn new(searcher: &Searcher, changed_segments: &[usize]) -> Result<Self> {
-        let spill = VerificationSpill::create(
-            searcher
-                .segment_readers()
-                .iter()
-                .enumerate()
-                .map(|(segment_ord, segment)| {
-                    if changed_segments.binary_search(&segment_ord).is_ok() {
-                        segment.max_doc()
-                    } else {
-                        0
-                    }
-                }),
-        )?;
+        let spill = VerificationSpill::create(searcher.segment_readers().iter().enumerate().map(
+            |(segment_ord, segment)| {
+                if changed_segments.binary_search(&segment_ord).is_ok() {
+                    segment.max_doc()
+                } else {
+                    0
+                }
+            },
+        ))?;
         let deltas = spill.load_projection_deltas()?;
         Ok(Self {
             deltas,
@@ -677,9 +676,9 @@ impl IncrementalProjectionVerifier {
     }
 }
 
-fn incremental_query_projection_fields(fields: crate::Fields) -> [Field; 28] {
+fn incremental_query_projection_fields(fields: crate::Fields) -> [Field; 29] {
     let remaining = remaining_query_projection_fields(fields);
-    let mut all = [fields.event_id; 28];
+    let mut all = [fields.event_id; 29];
     all[..4].copy_from_slice(&[
         fields.event_id,
         fields.session_id,
@@ -779,7 +778,7 @@ fn verify_remaining_query_projections(
     Ok(())
 }
 
-fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 24] {
+fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 25] {
     [
         fields.event_identity_digest,
         fields.session_relationship_kind,
@@ -805,6 +804,7 @@ fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 24] {
         fields.session_event_order,
         fields.semantic_event_order,
         fields.event_range_order,
+        fields.discovery_eligible,
     ]
 }
 
@@ -1144,6 +1144,7 @@ mod body_projection_tests {
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: Some("normalized body".to_owned()),
             structured_content: None,
+            discovery_exclusion: None,
             mcp_exchange: Some(McpExchangeContent {
                 provider_call_id: "excluded-call-id".to_owned(),
                 invocation: Some(McpInvocationContent {

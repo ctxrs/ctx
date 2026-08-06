@@ -1,8 +1,8 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 mod file_invocation;
@@ -10,11 +10,12 @@ mod projection;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    CaptureProvider, CoreRecord, CoreRecordError, ProjectionContractError, RepositoryAbstention,
-    RepositoryAbstentionReason, RepositoryEvidenceKind, RepositoryFileObservationKind, SourceKey,
-    StableEntityId, TypedKey,
+    CaptureProvider, CertifiedSource, CoreRecord, CoreRecordError, ProjectionContractError,
+    RepositoryAbstention, RepositoryAbstentionReason, RepositoryEvidenceKind,
+    RepositoryFileObservationKind, SourceKey, StableEntityId, TypedKey,
 };
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use thiserror::Error;
 
 use super::dto::{GeminiEventBody, GeminiTranscriptLayout};
@@ -25,12 +26,14 @@ use super::{
     GeminiTranscriptSource,
 };
 use crate::{
-    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    common::io::{open_provider_source_file, OpenedProviderSourceFile, ProviderSourceRoot},
+    provider::ctx_retrieval,
     provider::source_backed::{
         executable_route,
         family::jsonl::{
-            jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlRecordRef,
+            jsonl_family_driver, observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode,
+            JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyWorkerContext,
+            JsonlReader, JsonlRecordRef, JsonlSourceIdentity,
         },
         SourceBackedCoordinatorResult, SourceBackedProviderRegistry, SourceBackedRouteSelection,
         SourceBackedSelectorAuthority,
@@ -48,10 +51,11 @@ const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
-    "gemini-nativepath-source-backed-v1-session-lineage";
+    "gemini-nativepath-source-backed-v2-session-lineage-source-unique-result-exclusion";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 const MAX_GEMINI_REPOSITORY_FIELD_CHARS: usize = 64 * 1024;
 const MAX_GEMINI_TOOL_CONTEXTS: usize = 256;
+const RESULT_TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/gemini/result-terminal-call-id/v1\0";
 
 pub(crate) mod registration {
     use super::*;
@@ -116,11 +120,46 @@ impl GeminiFamilyBinding {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct GeminiJsonlAdapter;
+#[derive(Debug, Default)]
+struct GeminiJsonlAdapter {
+    preflight: Mutex<HashMap<[u8; 32], GeminiResultTerminalAuthority>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GeminiResultTerminalAuthority {
+    call_ids: HashMap<[u8; 32], u8>,
+    exhausted: bool,
+    available: bool,
+}
+
+impl GeminiResultTerminalAuthority {
+    fn observe(&mut self, call_id: &str) {
+        self.available = true;
+        if self.exhausted {
+            return;
+        }
+        let digest = gemini_result_terminal_call_id_digest(call_id);
+        if !self.call_ids.contains_key(&digest) && self.call_ids.len() >= MAX_GEMINI_TOOL_CONTEXTS {
+            self.call_ids.clear();
+            self.exhausted = true;
+            return;
+        }
+        let candidates = self.call_ids.entry(digest).or_default();
+        *candidates = candidates.saturating_add(1).min(2);
+    }
+
+    fn is_unique(&self, call_id: &str) -> bool {
+        !self.available
+            || (!self.exhausted
+                && self
+                    .call_ids
+                    .get(&gemini_result_terminal_call_id_digest(call_id))
+                    .is_some_and(|candidates| *candidates == 1))
+    }
+}
 
 fn gemini_jsonl_adapter() -> Arc<dyn JsonlFamilyAdapter> {
-    Arc::new(GeminiJsonlAdapter)
+    Arc::new(GeminiJsonlAdapter::default())
 }
 
 impl JsonlFamilyAdapter for GeminiJsonlAdapter {
@@ -142,6 +181,25 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         JsonlFamilyAppendMode::Replacement
+    }
+
+    fn prepare_leaf_scans(
+        &self,
+        leaves: &[JsonlFamilyLeaf],
+        _bases: &HashMap<[u8; 32], &CertifiedSource>,
+    ) -> crate::Result<Option<usize>> {
+        let mut authorities = HashMap::new();
+        for leaf in leaves {
+            let opened = open_gemini_preflight_source(leaf)?;
+            authorities.insert(
+                leaf.source().exact_descriptor_digest(),
+                preflight_gemini_result_terminals(leaf, opened)?,
+            );
+        }
+        *self.preflight.lock().map_err(|_| {
+            CaptureError::SystemInvariant("Gemini result-terminal preflight lock was poisoned")
+        })? = authorities;
+        Ok(None)
     }
 
     fn discover(&self, root: &Path) -> crate::Result<JsonlFamilyInventory> {
@@ -202,6 +260,16 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
         if !expected_source.exact_descriptor_eq(leaf.source()) {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
+        let source_digest = leaf.source().exact_descriptor_digest();
+        let result_terminal_authority = self
+            .preflight
+            .lock()
+            .map_err(|_| {
+                CaptureError::SystemInvariant("Gemini result-terminal preflight lock was poisoned")
+            })?
+            .remove(&source_digest)
+            .map(Ok)
+            .unwrap_or_else(|| preflight_gemini_result_terminals(leaf, Arc::clone(&source_file)))?;
         let session_id = gemini_session_id(leaf.source(), &binding.session.native_session_id)
             .map_err(capture_error)?;
         let parent_session_id = binding
@@ -227,10 +295,76 @@ impl JsonlFamilyAdapter for GeminiJsonlAdapter {
             authority: Arc::clone(leaf.authority()),
             tool_contexts: BTreeMap::new(),
             linkage_capacity_exceeded: false,
+            result_terminal_authority,
             native_item_ids: GeminiSourceNativeItemIds::default(),
             emitted_event_digests: BTreeSet::new(),
         }))
     }
+}
+
+fn open_gemini_preflight_source(
+    leaf: &JsonlFamilyLeaf,
+) -> crate::Result<Arc<OpenedProviderSourceFile>> {
+    let opened = open_provider_source_file(leaf.source_path())?;
+    if observe_opened_file(leaf.source_path(), &opened)? != *leaf.observation() {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(Arc::new(opened))
+}
+
+fn preflight_gemini_result_terminals(
+    leaf: &JsonlFamilyLeaf,
+    source_file: Arc<OpenedProviderSourceFile>,
+) -> crate::Result<GeminiResultTerminalAuthority> {
+    let binding = decode_binding(leaf)?;
+    let mut parser =
+        GeminiBorrowedRecordParser::new(binding.transcript(leaf), binding.session.clone());
+    let identity = JsonlSourceIdentity::new(
+        CaptureProvider::Gemini.as_str(),
+        GEMINI_SOURCE_BACKED_PARSER_REVISION,
+        "gemini-result-terminal-preflight-v1",
+        leaf.source().exact_descriptor_digest(),
+        leaf.source_path(),
+    );
+    let mut reader = JsonlReader::open(identity, source_file, None, None)?;
+    let mut authority = GeminiResultTerminalAuthority {
+        available: true,
+        ..GeminiResultTerminalAuthority::default()
+    };
+    while reader
+        .visit_page(&mut |record: JsonlRecordRef<'_>| -> crate::Result<()> {
+            let evidence = record.evidence();
+            let events = parser
+                .project(
+                    record.bytes(),
+                    evidence.physical_ordinal(),
+                    evidence.byte_start(),
+                    evidence.byte_end_exclusive(),
+                    evidence.record_digest(),
+                )
+                .map_err(capture_scan_error)?;
+            for event in events {
+                if let GeminiEventBody::OutputDiagnostic {
+                    call_id: Some(call_id),
+                    ..
+                } = event.body
+                {
+                    authority.observe(&call_id);
+                }
+            }
+            Ok(())
+        })?
+        .is_some()
+    {}
+    parser.finish().map_err(capture_scan_error)?;
+    Ok(authority)
+}
+
+fn gemini_result_terminal_call_id_digest(call_id: &str) -> [u8; 32] {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(RESULT_TERMINAL_CALL_ID_DOMAIN);
+    hasher.update(call_id.as_bytes());
+    hasher.finalize().into()
 }
 
 struct GeminiProjector {
@@ -244,6 +378,7 @@ struct GeminiProjector {
     authority: Arc<ProviderSourceRoot>,
     tool_contexts: BTreeMap<String, GeminiToolContextState>,
     linkage_capacity_exceeded: bool,
+    result_terminal_authority: GeminiResultTerminalAuthority,
     native_item_ids: GeminiSourceNativeItemIds,
     emitted_event_digests: BTreeSet<[u8; 32]>,
 }
@@ -310,6 +445,7 @@ struct GeminiToolContext {
     declared_workdir: Option<String>,
     file_paths: Vec<String>,
     ambiguous_native_fields: bool,
+    retrieval_contribution: Option<ctx_retrieval::ContributionClass>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,19 +482,27 @@ impl JsonlFamilyProjector for GeminiProjector {
         if !events.is_empty() {
             self.native_item_ids.remember(native_item_id);
         }
+        let mut retained = Vec::new();
         for event in events {
             let event_id =
                 gemini_event_id(&self.source, self.session_id, &event).map_err(capture_error)?;
             if !self.emitted_event_digests.insert(event_id.digest()) {
                 continue;
             }
-            let annotation = gemini_attribution_for_event(
+            let (annotation, contribution) = gemini_attribution_for_event(
                 worker.repository_attributor(),
                 &self.session,
                 &mut self.tool_contexts,
                 &mut self.linkage_capacity_exceeded,
+                &self.result_terminal_authority,
                 &event,
             );
+            retained.push((event, annotation, contribution));
+        }
+        let discovery_exclusion = ctx_retrieval::discovery_exclusion_for(
+            retained.iter().map(|(_, _, contribution)| *contribution),
+        );
+        for (event, annotation, _) in retained {
             emit(
                 project_event(
                     &self.source,
@@ -367,7 +511,10 @@ impl JsonlFamilyProjector for GeminiProjector {
                     self.root_session_id,
                     &self.session,
                     event,
-                    annotation,
+                    projection::GeminiProjectedContent {
+                        annotation,
+                        discovery_exclusion,
+                    },
                 )
                 .map_err(capture_error)?,
             )?;
@@ -387,8 +534,12 @@ fn gemini_attribution_for_event(
     session: &GeminiSession,
     tool_contexts: &mut BTreeMap<String, GeminiToolContextState>,
     linkage_capacity_exceeded: &mut bool,
+    result_terminal_authority: &GeminiResultTerminalAuthority,
     event: &super::GeminiRetainedEvent,
-) -> ctx_history_core::CoreRecordAnnotation {
+) -> (
+    ctx_history_core::CoreRecordAnnotation,
+    ctx_retrieval::ContributionClass,
+) {
     let structured_content = gemini_structured_content(event);
     let mut input = crate::repository_attribution::AttributionInput {
         activity_at_unix_ms: event
@@ -400,6 +551,7 @@ fn gemini_attribution_for_event(
         ..crate::repository_attribution::AttributionInput::default()
     };
     let mut adapter_abstentions = Vec::new();
+    let mut contribution = ctx_retrieval::ContributionClass::Ordinary;
     if session.cwd_ambiguous {
         input.provider_native_context_ambiguous = true;
         adapter_abstentions.push((
@@ -410,6 +562,16 @@ fn gemini_attribution_for_event(
     }
     match &event.body {
         GeminiEventBody::ToolCall { calls } => {
+            let member_contributions = calls
+                .iter()
+                .map(gemini_tool_call_contribution)
+                .collect::<Vec<_>>();
+            contribution = ctx_retrieval::reduce_contributions(
+                member_contributions
+                    .iter()
+                    .copied()
+                    .chain(event.extra_body_contributions.iter().copied()),
+            );
             let contexts = calls
                 .iter()
                 .map(gemini_tool_call_context)
@@ -429,7 +591,9 @@ fn gemini_attribution_for_event(
                     "gemini_tool_calls_do_not_share_one_exact_repository_context",
                 ));
             }
-            for (call, mut context) in calls.iter().zip(contexts) {
+            for ((call, mut context), member_contribution) in
+                calls.iter().zip(contexts).zip(member_contributions)
+            {
                 let Some(call_id) = call
                     .id
                     .as_deref()
@@ -444,6 +608,7 @@ fn gemini_attribution_for_event(
                 };
                 context.origin_call_id = Some(call_id.to_owned());
                 context.origin_event_sequence = gemini_event_sequence(event);
+                context.retrieval_contribution = Some(member_contribution);
                 if tool_contexts.contains_key(call_id) {
                     tool_contexts.insert(call_id.to_owned(), GeminiToolContextState::Ambiguous);
                 } else if tool_contexts.len() < MAX_GEMINI_TOOL_CONTEXTS {
@@ -465,6 +630,9 @@ fn gemini_attribution_for_event(
             outcome,
             ..
         } => {
+            let unique_terminal = call_id
+                .as_deref()
+                .is_some_and(|call_id| result_terminal_authority.is_unique(call_id));
             let direct = GeminiToolContext {
                 command: command.clone(),
                 command_too_large: *command_too_large,
@@ -476,6 +644,10 @@ fn gemini_attribution_for_event(
             let linked = call_id
                 .as_ref()
                 .and_then(|call_id| tool_contexts.remove(call_id));
+            let linked_invocation = match &linked {
+                Some(GeminiToolContextState::Exact(linked)) => linked.retrieval_contribution,
+                Some(GeminiToolContextState::Ambiguous) | None => None,
+            };
             let (context, linkage_exact) = match linked {
                 Some(GeminiToolContextState::Exact(linked)) => {
                     merge_gemini_result_context(direct, linked)
@@ -571,6 +743,15 @@ fn gemini_attribution_for_event(
                 linkage_exact,
                 result.is_some(),
             ));
+            contribution = ctx_retrieval::classify_linked_result(
+                (linkage_exact && unique_terminal)
+                    .then_some(linked_invocation)
+                    .flatten(),
+                event
+                    .result_terminal_status
+                    .unwrap_or(ctx_retrieval::ResultTerminalStatus::Unknown),
+                event.result_atoms.iter().copied(),
+            );
         }
         GeminiEventBody::Message { .. }
         | GeminiEventBody::StateNotice { .. }
@@ -578,7 +759,22 @@ fn gemini_attribution_for_event(
     }
     let mut annotation = repository_attributor.attribute(input);
     append_adapter_abstentions(&mut annotation, adapter_abstentions);
-    annotation
+    (annotation, contribution)
+}
+
+fn gemini_tool_call_contribution(
+    call: &super::dto::GeminiToolCall,
+) -> ctx_retrieval::ContributionClass {
+    let Some(name) = call.name.as_deref().filter(|name| !name.trim().is_empty()) else {
+        return ctx_retrieval::ContributionClass::Unknown;
+    };
+    if name != "run_shell_command" {
+        return ctx_retrieval::ContributionClass::Ordinary;
+    }
+    call.args.as_ref().map_or(
+        ctx_retrieval::ContributionClass::Unknown,
+        ctx_retrieval::classify_direct_cli_tool_input,
+    )
 }
 
 fn gemini_structured_content(event: &super::GeminiRetainedEvent) -> Option<serde_json::Value> {
@@ -927,35 +1123,65 @@ pub(super) fn project_gemini_test_events(
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let mut tool_contexts = BTreeMap::new();
     let mut linkage_capacity_exceeded = false;
+    let mut result_terminal_authority = GeminiResultTerminalAuthority {
+        available: true,
+        ..GeminiResultTerminalAuthority::default()
+    };
+    for event in &events {
+        if let GeminiEventBody::OutputDiagnostic {
+            call_id: Some(call_id),
+            ..
+        } = &event.body
+        {
+            result_terminal_authority.observe(call_id);
+        }
+    }
     let mut emitted_event_digests = BTreeSet::new();
-    events
-        .into_iter()
-        .filter_map(|event| {
-            let event_id = match gemini_event_id(&source_key, session_id, &event) {
-                Ok(event_id) => event_id,
-                Err(error) => return Some(Err(error)),
-            };
-            if !emitted_event_digests.insert(event_id.digest()) {
-                return None;
-            }
-            let annotation = gemini_attribution_for_event(
-                &mut repository_attributor,
-                &session,
-                &mut tool_contexts,
-                &mut linkage_capacity_exceeded,
-                &event,
-            );
-            Some(project_event(
+    let mut retained = Vec::new();
+    for event in events {
+        let event_id = gemini_event_id(&source_key, session_id, &event)?;
+        if !emitted_event_digests.insert(event_id.digest()) {
+            continue;
+        }
+        let (annotation, contribution) = gemini_attribution_for_event(
+            &mut repository_attributor,
+            &session,
+            &mut tool_contexts,
+            &mut linkage_capacity_exceeded,
+            &result_terminal_authority,
+            &event,
+        );
+        retained.push((event, annotation, contribution));
+    }
+    let mut records = Vec::with_capacity(retained.len());
+    let start = 0;
+    while start < retained.len() {
+        let evidence = retained[start].0.source_record;
+        let end = retained[start..]
+            .iter()
+            .position(|(event, _, _)| event.source_record != evidence)
+            .map_or(retained.len(), |offset| start + offset);
+        let discovery_exclusion = ctx_retrieval::discovery_exclusion_for(
+            retained[start..end]
+                .iter()
+                .map(|(_, _, contribution)| *contribution),
+        );
+        for (event, annotation, _) in retained.drain(start..end) {
+            records.push(project_event(
                 &source_key,
                 session_id,
                 parent_session_id,
                 root_session_id,
                 &session,
                 event,
-                annotation,
-            ))
-        })
-        .collect()
+                projection::GeminiProjectedContent {
+                    annotation,
+                    discovery_exclusion,
+                },
+            )?);
+        }
+    }
+    Ok(records)
 }
 
 fn capture_scan_error(error: GeminiScanError) -> CaptureError {

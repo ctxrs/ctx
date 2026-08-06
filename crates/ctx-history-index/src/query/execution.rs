@@ -313,7 +313,22 @@ impl VerifiedIndex {
                 usize::try_from(segment.max_doc()).map_err(|_| IndexError::CountOverflow)?;
             let mut message_docs = vec![false; max_doc];
             let mut copied_docs = vec![false; max_doc];
+            let mut discovery_eligible_docs = vec![false; max_doc];
             let mut selected_docs = vec![false; max_doc];
+            let discovery_eligible = segment.inverted_index(fields.discovery_eligible)?;
+            if let Some(term_info) = discovery_eligible
+                .get_term_info(&Term::from_field_u64(fields.discovery_eligible, 1))?
+            {
+                let mut postings = discovery_eligible
+                    .read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        discovery_eligible_docs[doc_id as usize] = true;
+                    }
+                    doc_id = postings.advance();
+                }
+            }
             let event_types = segment.inverted_index(fields.event_type)?;
             if let Some(term_info) =
                 event_types.get_term_info(&Term::from_field_text(fields.event_type, "message"))?
@@ -354,6 +369,7 @@ impl VerifiedIndex {
                     if !segment.is_deleted(doc_id)
                         && message_docs[doc_id as usize]
                         && !copied_docs[doc_id as usize]
+                        && discovery_eligible_docs[doc_id as usize]
                     {
                         selected_docs[doc_id as usize] = true;
                         total = total.checked_add(1).ok_or(IndexError::CountOverflow)?;

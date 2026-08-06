@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::provider::ctx_retrieval::{ContributionClass, ResultAtom, ResultTerminalStatus};
 use crate::{common::io::ProviderSourceRoot, CaptureError};
 
 #[cfg(test)]
@@ -144,6 +145,14 @@ pub(crate) struct GeminiRetainedEvent {
     pub(crate) preview: String,
     pub(crate) searchable_text: String,
     pub(crate) safe_file_touches: Vec<String>,
+    /// Complete-body contributions used only while projecting this source
+    /// record. They are deliberately excluded from retained provider data.
+    #[serde(skip)]
+    pub(crate) extra_body_contributions: Vec<ContributionClass>,
+    #[serde(skip)]
+    pub(crate) result_terminal_status: Option<ResultTerminalStatus>,
+    #[serde(skip)]
+    pub(crate) result_atoms: Vec<ResultAtom>,
 }
 
 /// The certified scanner position immediately before or after a page. It only

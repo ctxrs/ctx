@@ -1,10 +1,58 @@
 use super::project::{mcp_terminal_candidate_evidence, CodexMcpTerminalAuthority};
 use super::*;
+use crate::provider::codex::nativepath::record::codex_record_class;
 
 struct McpTerminalAuthorityPreflight {
     authority: CodexMcpTerminalAuthority,
     bytes_read: u64,
     peak_record_bytes: usize,
+}
+
+fn observe_result_terminal_call_id(
+    authority: &mut CodexMcpTerminalAuthority,
+    record: &[u8],
+    in_certified_prefix: bool,
+) {
+    if let Ok(probe) = classify_codex_record(record) {
+        if matches!(probe.class, CodexRecordClass::ExcludedResult(_)) {
+            if let Some(call_id) = probe
+                .call_id
+                .as_deref()
+                .filter(|call_id| !call_id.is_empty())
+            {
+                authority.observe_result_call_id(call_id, in_certified_prefix);
+                return;
+            }
+        }
+    }
+
+    // Projection can recover a bounded valid terminal after the strict
+    // selector probe declines to expose linkage metadata. Observe that same
+    // provider-recognized envelope here so uniqueness never depends on which
+    // valid projection path retained the result.
+    let Ok(envelope) = serde_json::from_slice::<Value>(record) else {
+        return;
+    };
+    let Some(record_type) = envelope.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(payload) = envelope.get("payload") else {
+        return;
+    };
+    let item_type = payload.get("type").and_then(Value::as_str);
+    if !matches!(
+        codex_record_class(record_type, item_type),
+        CodexRecordClass::ExcludedResult(_)
+    ) {
+        return;
+    }
+    if let Some(call_id) = payload
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+    {
+        authority.observe_result_call_id(call_id, in_certified_prefix);
+    }
 }
 
 fn preflight_mcp_terminal_authority(
@@ -44,12 +92,12 @@ fn preflight_mcp_terminal_authority(
             continue;
         }
         let record = trim_jsonl_terminator(&record_buffer[..record_read.stored_len]);
+        let in_certified_prefix =
+            certified_prefix_end.is_some_and(|prefix_end| offset <= prefix_end);
         if let Some(evidence) = mcp_terminal_candidate_evidence(record) {
-            authority.observe(
-                &evidence,
-                certified_prefix_end.is_some_and(|prefix_end| offset <= prefix_end),
-            );
+            authority.observe(&evidence, in_certified_prefix);
         }
+        observe_result_terminal_call_id(&mut authority, record, in_certified_prefix);
     }
     Ok(McpTerminalAuthorityPreflight {
         authority,
@@ -184,7 +232,7 @@ impl CodexNativeScanner {
             && authority_preflight.authority.append_requires_replacement()
         {
             return Err(invalid_checkpoint_proof(
-                "an appended MCP terminal reuses a certified native call ID",
+                "an appended terminal reuses a certified native call ID",
             ));
         }
         let authority_entries = authority_preflight.authority.entry_count();

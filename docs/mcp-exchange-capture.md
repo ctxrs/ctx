@@ -196,6 +196,15 @@ rebuilt or pass the documented narrow same-epoch preservation migration before
 these terms become searchable. Historical Core rows that have no captured
 exchange remain unchanged.
 
+One narrow discovery policy also uses exact captured attribution and native
+call/result linkage. With the configured MCP alias exactly `ctx`, successful
+payload-only calls to the closed ctx retrieval tool set are retained in Core
+but omitted from ranked lexical and semantic discovery. The index consumes only
+the provider-neutral exclusion reason emitted by capture; it does not infer
+product identity from response prose. Other aliases, failures, warnings,
+stderr, mixed results, unknown status, and ambiguous linkage remain searchable.
+Complete event output remains available through show and enumeration.
+
 ## Privacy and network behavior
 
 MCP arguments and responses can contain credentials, personal data, private

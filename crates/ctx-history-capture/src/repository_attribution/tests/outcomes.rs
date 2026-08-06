@@ -383,10 +383,7 @@ fn asserted_cherry_pick_rejects_pre_head_from_another_repository_object_domain()
     let foreign_repo = repository(temp.path(), "foreign-pre-head-domain", None);
     fs::write(foreign_repo.join("foreign.txt"), "foreign\n").unwrap();
     run_git(&foreign_repo, &["add", "foreign.txt"]);
-    run_git(
-        &foreign_repo,
-        &["commit", "-qm", "Create foreign pre-HEAD"],
-    );
+    run_git(&foreign_repo, &["commit", "-qm", "Create foreign pre-HEAD"]);
     let foreign_pre_head = git_output(&foreign_repo, &["rev-parse", "HEAD"]);
 
     let receipt = serde_json::json!({

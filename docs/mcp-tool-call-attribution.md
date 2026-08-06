@@ -66,7 +66,7 @@ Deep Agents hosted trace. Capability revision 3 exact providers are
 Codex, Warp, and Copilot CLI. The exact full tuples are:
 
 - Codex `codex_session_jsonl_tree` / `codex-nativepath-jsonl-v0`, parser
-  `codex-nativepath-core-record-v16-aggregate-content-admission`, for unversioned producer generation 1
+  `codex-nativepath-core-record-v19-lineage-evidence-source-unique-result-exclusion`, for unversioned producer generation 1
   only. Codex producer versions 0.200.0, 0.201.0, and 0.202.0 are separate
   explicit `not-qualified` lanes and never inherit that exact status.
 - Warp `warp_sqlite` / `warp-agent-task-protobuf-v1`, parser

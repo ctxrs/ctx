@@ -1,19 +1,20 @@
 //! Thin Cursor adapter for the shared certified-append JSONL family.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::{self, BufRead, BufReader, Read},
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
-    EventType, NativeItemKey, NativeSessionKey, RepositoryAbstention, RepositoryAbstentionReason,
-    RepositoryEvidenceKind, RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor,
-    SourceKey, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource,
+    CoreDiscoveryExclusion, CoreRecord, EventIdentityInput, EventType, NativeItemKey,
+    NativeSessionKey, RepositoryAbstention, RepositoryAbstentionReason, RepositoryEvidenceKind,
+    RepositoryFileObservationKind, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
+    TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -29,15 +30,19 @@ use super::{
     discover_cursor_transcripts,
     invocation_evidence::cursor_repository_file_invocation_evidence,
     layout::CursorTranscriptPath,
-    parser::{project_cursor_jsonl_record, CursorInputPathEvidence},
+    parser::{project_cursor_jsonl_record, CursorDiscoveryResultEvidence, CursorInputPathEvidence},
     projection::{CursorEventBody, CursorNativeEvent},
 };
 use crate::{
-    common::io::OpenedProviderSourceFile,
+    common::io::{open_provider_source_file, OpenedProviderSourceFile},
+    provider::ctx_retrieval::{
+        classify_direct_cli_command, classify_linked_result, classify_mcp_invocation,
+        discovery_exclusion_for, ContributionClass, ResultAtom, ResultTerminalStatus,
+    },
     provider::source_backed::family::jsonl::{
-        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyTerminalProof,
-        JsonlFamilyWorkerContext, JsonlRecordRef,
+        observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
+        JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyTerminalProof,
+        JsonlFamilyWorkerContext, JsonlReader, JsonlRecordRef, JsonlSourceIdentity,
     },
     CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -48,9 +53,10 @@ const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-v9-aggregate-content-admission";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-v10-source-unique-result-exclusion";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 const MAX_CURSOR_TOOL_CONTEXTS: usize = 256;
+const RESULT_TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/cursor/result-terminal-call-id/v1\0";
 
 mod binding;
 mod checkpoint;
@@ -99,11 +105,68 @@ fn cursor_base_identity_probes() -> u64 {
     CURSOR_BASE_IDENTITY_PROBES.get()
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CursorJsonlAdapter;
+#[derive(Debug, Default)]
+struct CursorJsonlAdapter {
+    preflight: Mutex<CursorPreflightState>,
+}
+
+#[derive(Debug, Default)]
+struct CursorPreflightState {
+    replacement_required: bool,
+    authorities: HashMap<[u8; 32], CursorResultTerminalAuthority>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CursorResultTerminalState {
+    candidates: u8,
+    in_certified_prefix: bool,
+    after_certified_prefix: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CursorResultTerminalAuthority {
+    call_ids: HashMap<[u8; 32], CursorResultTerminalState>,
+    exhausted: bool,
+    available: bool,
+}
+
+impl CursorResultTerminalAuthority {
+    fn observe(&mut self, call_id: &str, in_certified_prefix: bool) {
+        self.available = true;
+        if self.exhausted {
+            return;
+        }
+        let digest = cursor_result_terminal_call_id_digest(call_id);
+        if !self.call_ids.contains_key(&digest) && self.call_ids.len() >= MAX_CURSOR_TOOL_CONTEXTS {
+            self.call_ids.clear();
+            self.exhausted = true;
+            return;
+        }
+        let state = self.call_ids.entry(digest).or_default();
+        state.candidates = state.candidates.saturating_add(1).min(2);
+        state.in_certified_prefix |= in_certified_prefix;
+        state.after_certified_prefix |= !in_certified_prefix;
+    }
+
+    fn is_unique(&self, call_id: &str) -> bool {
+        !self.available
+            || (!self.exhausted
+                && self
+                    .call_ids
+                    .get(&cursor_result_terminal_call_id_digest(call_id))
+                    .is_some_and(|state| state.candidates == 1))
+    }
+
+    fn append_requires_replacement(&self) -> bool {
+        self.exhausted
+            || self.call_ids.values().any(|state| {
+                state.in_certified_prefix && state.after_certified_prefix && state.candidates > 1
+            })
+    }
+}
 
 pub(crate) fn cursor_jsonl_adapter() -> Arc<dyn JsonlFamilyAdapter> {
-    Arc::new(CursorJsonlAdapter)
+    Arc::new(CursorJsonlAdapter::default())
 }
 
 impl JsonlFamilyAdapter for CursorJsonlAdapter {
@@ -124,7 +187,43 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
-        JsonlFamilyAppendMode::CertifiedSuffix
+        if self
+            .preflight
+            .lock()
+            .map(|state| state.replacement_required)
+            .unwrap_or(true)
+        {
+            JsonlFamilyAppendMode::Replacement
+        } else {
+            JsonlFamilyAppendMode::CertifiedSuffix
+        }
+    }
+
+    fn prepare_leaf_scans(
+        &self,
+        leaves: &[JsonlFamilyLeaf],
+        bases: &HashMap<[u8; 32], &CertifiedSource>,
+    ) -> Result<Option<usize>> {
+        let mut authorities = HashMap::new();
+        let mut replacement_required = false;
+        for leaf in leaves {
+            let digest = leaf.source().exact_descriptor_digest();
+            let certified_prefix_end = bases
+                .get(&digest)
+                .and_then(|base| base.frontier())
+                .map(|frontier| frontier.certified_prefix_bytes());
+            let opened = open_cursor_preflight_source(leaf)?;
+            let authority = preflight_cursor_result_terminals(leaf, opened, certified_prefix_end)?;
+            replacement_required |=
+                certified_prefix_end.is_some() && authority.append_requires_replacement();
+            authorities.insert(digest, authority);
+        }
+        let mut state = self.preflight.lock().map_err(|_| {
+            CaptureError::SystemInvariant("Cursor result-terminal preflight lock was poisoned")
+        })?;
+        state.replacement_required = replacement_required;
+        state.authorities = authorities;
+        Ok(None)
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -247,6 +346,19 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         validate_binding(leaf, &binding, source_file.as_ref())?;
+        let source_digest = leaf.source().exact_descriptor_digest();
+        let result_terminal_authority = self
+            .preflight
+            .lock()
+            .map_err(|_| {
+                CaptureError::SystemInvariant("Cursor result-terminal preflight lock was poisoned")
+            })?
+            .authorities
+            .remove(&source_digest)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                preflight_cursor_result_terminals(leaf, Arc::clone(&source_file), None)
+            })?;
         let session_id = session_id(leaf.source(), &binding.native_session_id)?;
         let restored = checkpoint
             .map(|checkpoint| decode_cursor_checkpoint(checkpoint, &binding.native_session_id))
@@ -261,6 +373,7 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             session_id,
             tool_contexts,
             linkage_capacity_exceeded,
+            result_terminal_authority,
             event_identities: CursorEventIdentityState::new(
                 (mode == JsonlFamilyProjectionMode::CertifiedAppend)
                     .then_some(base_event_lookup)
@@ -270,12 +383,76 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
     }
 }
 
+fn open_cursor_preflight_source(leaf: &JsonlFamilyLeaf) -> Result<Arc<OpenedProviderSourceFile>> {
+    let opened = open_provider_source_file(leaf.source_path())?;
+    if observe_opened_file(leaf.source_path(), &opened)? != *leaf.observation() {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(Arc::new(opened))
+}
+
+fn preflight_cursor_result_terminals(
+    leaf: &JsonlFamilyLeaf,
+    source_file: Arc<OpenedProviderSourceFile>,
+    certified_prefix_end: Option<u64>,
+) -> Result<CursorResultTerminalAuthority> {
+    let identity = JsonlSourceIdentity::new(
+        CaptureProvider::Cursor.as_str(),
+        PARSER_REVISION,
+        "cursor-result-terminal-preflight-v1",
+        leaf.source().exact_descriptor_digest(),
+        leaf.source_path(),
+    );
+    let mut reader = JsonlReader::open(identity, source_file, None, None)?;
+    let mut authority = CursorResultTerminalAuthority {
+        available: true,
+        ..CursorResultTerminalAuthority::default()
+    };
+    while reader
+        .visit_page(&mut |record: JsonlRecordRef<'_>| -> Result<()> {
+            let evidence = record.evidence();
+            let Some(events) = project_cursor_jsonl_record(
+                record.bytes(),
+                evidence.physical_ordinal(),
+                evidence.physical_ordinal(),
+                evidence.byte_start(),
+                evidence.byte_end_exclusive(),
+            )?
+            else {
+                return Ok(());
+            };
+            let in_certified_prefix = certified_prefix_end
+                .is_some_and(|prefix_end| evidence.byte_end_exclusive() <= prefix_end);
+            for event in events {
+                if let CursorEventBody::ToolOutput {
+                    call_id: Some(call_id),
+                    ..
+                } = event.body
+                {
+                    authority.observe(&call_id, in_certified_prefix);
+                }
+            }
+            Ok(())
+        })?
+        .is_some()
+    {}
+    Ok(authority)
+}
+
+fn cursor_result_terminal_call_id_digest(call_id: &str) -> [u8; 32] {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(RESULT_TERMINAL_CALL_ID_DOMAIN);
+    hasher.update(call_id.as_bytes());
+    hasher.finalize().into()
+}
+
 struct CursorProjector {
     source: SourceKey,
     native_session_id: String,
     session_id: StableEntityId,
     tool_contexts: BTreeMap<String, CursorToolContextState>,
     linkage_capacity_exceeded: bool,
+    result_terminal_authority: CursorResultTerminalAuthority,
     event_identities: CursorEventIdentityState,
 }
 
@@ -321,6 +498,8 @@ struct CursorToolContext {
     command: Option<String>,
     declared_workdir: Option<String>,
     input_paths: CursorInputPathEvidence,
+    #[serde(default)]
+    ctx_retrieval_derived: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,19 +537,23 @@ impl JsonlFamilyProjector for CursorProjector {
                 &mut self.event_identities,
             )?;
             let normalized_body = cursor_normalized_body(&event)?;
-            let attribution = self.attribution_for_event_with_normalized_body(
-                worker,
-                &event,
-                normalized_body.as_deref(),
-            );
+            let (attribution, discovery_contribution) = self
+                .attribution_for_event_with_normalized_body(
+                    worker,
+                    &event,
+                    normalized_body.as_deref(),
+                );
             if let Some(document) = core_record(
                 &self.source,
                 self.session_id,
                 &self.native_session_id,
                 event,
                 duplicate_occurrence,
-                attribution,
-                normalized_body,
+                CursorProjectedContent {
+                    annotation: attribution,
+                    discovery_exclusion: discovery_exclusion_for([discovery_contribution]),
+                    normalized_body,
+                },
             )? {
                 emit(document)?;
             }
@@ -408,6 +591,7 @@ impl CursorProjector {
     ) -> ctx_history_core::CoreRecordAnnotation {
         let normalized_body = cursor_normalized_body(event).unwrap();
         self.attribution_for_event_with_normalized_body(worker, event, normalized_body.as_deref())
+            .0
     }
 
     fn attribution_for_event_with_normalized_body(
@@ -415,7 +599,7 @@ impl CursorProjector {
         worker: &mut JsonlFamilyWorkerContext,
         event: &CursorNativeEvent,
         normalized_body: Option<&str>,
-    ) -> ctx_history_core::CoreRecordAnnotation {
+    ) -> (ctx_history_core::CoreRecordAnnotation, ContributionClass) {
         let activity_at_unix_ms = event
             .occurred_at
             .map(|occurred_at| occurred_at.timestamp_millis());
@@ -424,6 +608,7 @@ impl CursorProjector {
             | CursorEventBody::ToolOutput { native_content, .. } => Some(native_content.clone()),
             CursorEventBody::Text { .. } | CursorEventBody::None => None,
         };
+        let mut discovery_contribution = ContributionClass::Unknown;
         let mut input = crate::repository_attribution::AttributionInput {
             activity_at_unix_ms,
             structured_content,
@@ -437,16 +622,24 @@ impl CursorProjector {
         match &event.body {
             CursorEventBody::ToolCall {
                 call_id,
+                tool_name,
                 command,
                 declared_workdir,
                 input_paths,
                 ambiguous_native_fields,
                 ..
             } => {
+                discovery_contribution = cursor_call_contribution(
+                    tool_name.as_deref(),
+                    command.as_deref(),
+                    *ambiguous_native_fields,
+                );
                 let context = CursorToolContext {
                     command: command.clone(),
                     declared_workdir: declared_workdir.clone(),
                     input_paths: input_paths.clone(),
+                    ctx_retrieval_derived: discovery_contribution
+                        == ContributionClass::RetrievalDerived,
                 };
                 apply_cursor_context(&mut input, &context);
                 append_cursor_input_path_abstentions(
@@ -478,8 +671,12 @@ impl CursorProjector {
             CursorEventBody::ToolOutput {
                 call_id,
                 ambiguous_linkage,
+                discovery_evidence,
                 ..
             } => {
+                let unique_terminal = call_id
+                    .as_deref()
+                    .is_some_and(|call_id| self.result_terminal_authority.is_unique(call_id));
                 let context = if *ambiguous_linkage {
                     None
                 } else {
@@ -491,6 +688,10 @@ impl CursorProjector {
                             CursorToolContextState::Ambiguous => None,
                         })
                 };
+                discovery_contribution = cursor_result_contribution(
+                    *discovery_evidence,
+                    context.as_ref().filter(|_| unique_terminal),
+                );
                 if let Some(context) = context {
                     apply_cursor_context(&mut input, &context);
                     append_cursor_input_path_abstentions(
@@ -524,8 +725,64 @@ impl CursorProjector {
         let mut annotation = worker.repository_attributor().attribute(input);
         preserve_cursor_ordinary_file_observations(&mut annotation);
         append_adapter_abstentions(&mut annotation, adapter_abstentions);
-        annotation
+        (annotation, discovery_contribution)
     }
+}
+
+fn cursor_call_contribution(
+    tool_name: Option<&str>,
+    command: Option<&str>,
+    ambiguous_native_fields: bool,
+) -> ContributionClass {
+    if ambiguous_native_fields {
+        return ContributionClass::Unknown;
+    }
+    let Some(tool_name) = tool_name else {
+        return ContributionClass::Unknown;
+    };
+    if let Some((server, tool)) = typed_mcp_tool_name(tool_name) {
+        return classify_mcp_invocation(server, tool);
+    }
+    if tool_name != "run_shell_command" {
+        return ContributionClass::Unknown;
+    }
+    command.map_or(ContributionClass::Unknown, classify_direct_cli_command)
+}
+
+fn cursor_result_contribution(
+    evidence: CursorDiscoveryResultEvidence,
+    context: Option<&CursorToolContext>,
+) -> ContributionClass {
+    let linked_invocation = context
+        .filter(|context| context.ctx_retrieval_derived)
+        .map(|_| ContributionClass::RetrievalDerived);
+    match evidence {
+        CursorDiscoveryResultEvidence::SuccessfulPayloadOnly => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Succeeded,
+            [ResultAtom::KnownProviderEnvelope, ResultAtom::Payload],
+        ),
+        CursorDiscoveryResultEvidence::Failed => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Failed,
+            [ResultAtom::KnownProviderEnvelope, ResultAtom::Payload],
+        ),
+        CursorDiscoveryResultEvidence::Diagnostic => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Succeeded,
+            [ResultAtom::Payload, ResultAtom::Diagnostic],
+        ),
+        CursorDiscoveryResultEvidence::Unknown => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Unknown,
+            [ResultAtom::Unknown],
+        ),
+    }
+}
+
+fn typed_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty() && !tool.contains("__")).then_some((server, tool))
 }
 
 fn append_adapter_abstentions(
@@ -778,16 +1035,21 @@ fn discard_through_newline(reader: &mut BufReader<std::fs::File>) -> io::Result<
     }
 }
 
+struct CursorProjectedContent {
+    annotation: ctx_history_core::CoreRecordAnnotation,
+    discovery_exclusion: Option<CoreDiscoveryExclusion>,
+    normalized_body: Option<String>,
+}
+
 fn core_record(
     source: &SourceKey,
     session_id: StableEntityId,
     native_session_id: &str,
     event: CursorNativeEvent,
     duplicate_occurrence: u64,
-    annotation: ctx_history_core::CoreRecordAnnotation,
-    normalized_body: Option<String>,
+    content: CursorProjectedContent,
 ) -> Result<Option<CoreRecord>> {
-    let Some(text) = normalized_body else {
+    let Some(text) = content.normalized_body else {
         return Ok(None);
     };
     if text.is_empty() {
@@ -828,18 +1090,20 @@ fn core_record(
         .occurred_at
         .map(|occurred_at| occurred_at.timestamp_millis());
     record.role = Some(event.role.as_str().to_owned());
-    record.content.structured_content = annotation.structured_content;
+    record.content.structured_content = content.annotation.structured_content;
+    record.content.discovery_exclusion = content.discovery_exclusion;
     record
         .content
         .omit_structured_content_if_aggregate_exceeds_limit()
         .map_err(contract)?;
-    record.metadata = annotation.metadata;
-    record.repository_candidate_evidence = annotation.repository_candidate_evidence;
-    record.repository_bindings = annotation.repository_bindings;
-    record.repository_abstentions = annotation.repository_abstentions;
-    record.repository_file_invocation_evidence = annotation.repository_file_invocation_evidence;
-    record.repository_file_observations = annotation.repository_file_observations;
-    record.repository_vcs_observations = annotation.repository_vcs_observations;
+    record.metadata = content.annotation.metadata;
+    record.repository_candidate_evidence = content.annotation.repository_candidate_evidence;
+    record.repository_bindings = content.annotation.repository_bindings;
+    record.repository_abstentions = content.annotation.repository_abstentions;
+    record.repository_file_invocation_evidence =
+        content.annotation.repository_file_invocation_evidence;
+    record.repository_file_observations = content.annotation.repository_file_observations;
+    record.repository_vcs_observations = content.annotation.repository_vcs_observations;
     record
         .bind_repository_commit_operation_identities()
         .map_err(contract)?;

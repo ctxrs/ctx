@@ -13,6 +13,7 @@ pub(super) struct ProjectedMcpExchange {
     content: ctx_history_core::McpExchangeContent,
     arguments_observed_encoded_bytes: Option<u64>,
     payload_observed_encoded_bytes: Option<u64>,
+    strict_discovery_payload: bool,
 }
 
 impl ProjectedMcpExchange {
@@ -41,6 +42,52 @@ impl ProjectedMcpExchange {
 
     pub(super) fn into_content(self) -> ctx_history_core::McpExchangeContent {
         self.content
+    }
+
+    pub(super) fn discovery_exclusion(
+        &self,
+        source_unique_terminal: bool,
+    ) -> Option<ctx_history_core::CoreDiscoveryExclusion> {
+        let invocation = self.content.invocation.as_ref();
+        let linked_invocation =
+            source_unique_terminal
+                .then_some(invocation)
+                .flatten()
+                .map(|invocation| {
+                    crate::provider::ctx_retrieval::classify_mcp_invocation(
+                        &invocation.server,
+                        &invocation.tool,
+                    )
+                });
+        let terminal_status = self
+            .content
+            .response
+            .as_ref()
+            .map(|response| match response.status {
+                ctx_history_core::McpTerminalStatus::Succeeded => {
+                    crate::provider::ctx_retrieval::ResultTerminalStatus::Succeeded
+                }
+                ctx_history_core::McpTerminalStatus::Failed
+                | ctx_history_core::McpTerminalStatus::Cancelled
+                | ctx_history_core::McpTerminalStatus::TimedOut => {
+                    crate::provider::ctx_retrieval::ResultTerminalStatus::Failed
+                }
+                ctx_history_core::McpTerminalStatus::Unknown => {
+                    crate::provider::ctx_retrieval::ResultTerminalStatus::Unknown
+                }
+            })
+            .unwrap_or(crate::provider::ctx_retrieval::ResultTerminalStatus::Unknown);
+        let atom = if self.strict_discovery_payload {
+            crate::provider::ctx_retrieval::ResultAtom::Payload
+        } else {
+            crate::provider::ctx_retrieval::ResultAtom::Unknown
+        };
+        let contribution = crate::provider::ctx_retrieval::classify_linked_result(
+            linked_invocation,
+            terminal_status,
+            [atom],
+        );
+        crate::provider::ctx_retrieval::discovery_exclusion_for([contribution])
     }
 
     fn omit_arguments(&mut self) {
@@ -96,8 +143,103 @@ pub(super) fn project_mcp_exchange(record: &[u8], payload: &Value) -> Option<Pro
         return None;
     }
     let expected_call_id = payload.get("call_id").and_then(Value::as_str)?;
+    let strict_discovery_payload = std::str::from_utf8(record)
+        .ok()
+        .and_then(exact_json_value)
+        .is_some_and(|record| strict_mcp_retrieval_payload(&record, expected_call_id));
     let evidence = serde_json::from_slice::<McpExchangeEnvelope<'_>>(record).ok()?;
-    evidence.project(expected_call_id)
+    evidence.project(expected_call_id, strict_discovery_payload)
+}
+
+fn strict_mcp_retrieval_payload(record: &Value, expected_call_id: &str) -> bool {
+    let Some(record) = record.as_object() else {
+        return false;
+    };
+    if !only_members(record, &["timestamp", "type", "payload"])
+        || record.get("type").and_then(Value::as_str) != Some("event_msg")
+        || record
+            .get("timestamp")
+            .is_some_and(|timestamp| !timestamp.as_str().is_some_and(|value| !value.is_empty()))
+    {
+        return false;
+    }
+    let Some(payload) = record.get("payload").and_then(Value::as_object) else {
+        return false;
+    };
+    if !only_members(
+        payload,
+        &["type", "call_id", "invocation", "duration", "result"],
+    ) || payload.get("type").and_then(Value::as_str) != Some("mcp_tool_call_end")
+        || payload.get("call_id").and_then(Value::as_str) != Some(expected_call_id)
+    {
+        return false;
+    }
+    let Some(invocation) = payload.get("invocation").and_then(Value::as_object) else {
+        return false;
+    };
+    if !only_members(invocation, &["server", "tool", "arguments"])
+        || !invocation
+            .get("server")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        || !invocation
+            .get("tool")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    {
+        return false;
+    }
+    let Some(duration) = payload.get("duration").and_then(Value::as_object) else {
+        return false;
+    };
+    if !only_members(duration, &["secs", "nanos"])
+        || duration.get("secs").and_then(Value::as_u64).is_none()
+        || !duration
+            .get("nanos")
+            .and_then(Value::as_u64)
+            .is_some_and(|nanos| nanos < 1_000_000_000)
+    {
+        return false;
+    }
+    let Some(result) = payload.get("result").and_then(Value::as_object) else {
+        return false;
+    };
+    if result.len() != 1 {
+        return false;
+    }
+    let Some(ok) = result.get("Ok").and_then(Value::as_object) else {
+        return false;
+    };
+    if !only_members(ok, &["content", "isError"])
+        || ok
+            .get("isError")
+            .is_some_and(|is_error| is_error.as_bool() != Some(false))
+    {
+        return false;
+    }
+    let Some(content) = ok.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut saw_payload = false;
+    for block in content {
+        let Some(block) = block.as_object() else {
+            return false;
+        };
+        if !only_members(block, &["type", "text"])
+            || block.get("type").and_then(Value::as_str) != Some("text")
+        {
+            return false;
+        }
+        let Some(text) = block.get("text").and_then(Value::as_str) else {
+            return false;
+        };
+        saw_payload |= !text.is_empty();
+    }
+    saw_payload
+}
+
+fn only_members(object: &Map<String, Value>, allowed: &[&str]) -> bool {
+    object.keys().all(|key| allowed.contains(&key.as_str()))
 }
 
 pub(super) fn selected_content_fits(
@@ -126,11 +268,16 @@ struct McpExchangeEnvelope<'a> {
 }
 
 impl McpExchangeEnvelope<'_> {
-    fn project(self, expected_call_id: &str) -> Option<ProjectedMcpExchange> {
+    fn project(
+        self,
+        expected_call_id: &str,
+        strict_discovery_payload: bool,
+    ) -> Option<ProjectedMcpExchange> {
         if self.ambiguous || self.record_type.as_deref() != Some("event_msg") {
             return None;
         }
-        self.payload?.project(expected_call_id)
+        self.payload?
+            .project(expected_call_id, strict_discovery_payload)
     }
 }
 
@@ -195,7 +342,11 @@ struct McpExchangePayload<'a> {
 }
 
 impl McpExchangePayload<'_> {
-    fn project(self, expected_call_id: &str) -> Option<ProjectedMcpExchange> {
+    fn project(
+        self,
+        expected_call_id: &str,
+        strict_discovery_payload: bool,
+    ) -> Option<ProjectedMcpExchange> {
         if self.duplicate_item_type
             || self.duplicate_call_id
             || self.item_type.as_deref() != Some("mcp_tool_call_end")
@@ -240,6 +391,7 @@ impl McpExchangePayload<'_> {
             },
             arguments_observed_encoded_bytes,
             payload_observed_encoded_bytes: projected_result.observed_encoded_bytes,
+            strict_discovery_payload,
         })
     }
 }

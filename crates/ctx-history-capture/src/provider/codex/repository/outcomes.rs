@@ -5,7 +5,7 @@ use ctx_history_core::{
 use serde_json::{json, Value};
 
 use crate::{
-    provider::codex::events::CodexToolCallContext,
+    provider::codex::events::{exact_codex_exec_result_body, CodexToolCallContext},
     repository_attribution::{
         bounded_outcome_evidence_relevant, bounded_pull_request_association_query,
         lexical_absolute, linked_outcome_evidence, LinkedOutcomeEvidence, LinkedOutcomeInput,
@@ -13,8 +13,6 @@ use crate::{
     },
     OutputOutcome, OutputOutcomeMetadata,
 };
-
-const MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexRepositoryResultEvidence {
@@ -213,92 +211,6 @@ fn result_summary(
             "raw_output_retained": false,
         }
     })
-}
-
-fn exact_codex_exec_result_body(output: &str) -> Result<Option<&str>, ()> {
-    if !output.starts_with("Chunk ID: ") {
-        return if output
-            .lines()
-            .any(|line| line.trim().starts_with("Chunk ID: "))
-        {
-            Err(())
-        } else {
-            Ok(None)
-        };
-    }
-    if output.is_empty()
-        || output.len() > MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES
-        || output.contains('\0')
-    {
-        return Err(());
-    }
-    let (chunk_id, remainder) = output
-        .strip_prefix("Chunk ID: ")
-        .and_then(|value| value.split_once('\n'))
-        .ok_or(())?;
-    if chunk_id.len() != 6
-        || !chunk_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(());
-    }
-    let (wall_time, remainder) = remainder
-        .strip_prefix("Wall time: ")
-        .and_then(|value| value.split_once(" seconds\n"))
-        .ok_or(())?;
-    if wall_time.is_empty() || wall_time.len() > 32 {
-        return Err(());
-    }
-    let mut wall_time_components = wall_time.split('.');
-    let whole = wall_time_components.next().ok_or(())?;
-    let fractional = wall_time_components.next();
-    if whole.is_empty()
-        || !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || fractional.is_some_and(|value| {
-            value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
-        })
-        || wall_time_components.next().is_some()
-        || wall_time
-            .parse::<f64>()
-            .ok()
-            .is_none_or(|seconds| !seconds.is_finite())
-    {
-        return Err(());
-    }
-    let remainder = remainder
-        .strip_prefix("Process exited with code 0\n")
-        .ok_or(())?;
-    let body = if let Some(remainder) = remainder.strip_prefix("Original token count: ") {
-        let (token_count, remainder) = remainder.split_once('\n').ok_or(())?;
-        if token_count.is_empty()
-            || token_count.len() > 20
-            || !token_count.bytes().all(|byte| byte.is_ascii_digit())
-            || token_count.parse::<u64>().is_err()
-        {
-            return Err(());
-        }
-        remainder.strip_prefix("Output:\n").ok_or(())?
-    } else {
-        remainder.strip_prefix("Final output:\n").ok_or(())?
-    };
-    if body.is_empty()
-        || body.len() > MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES
-        || body.lines().any(|line| {
-            let line = line.trim();
-            line.starts_with("Chunk ID: ")
-                || line.starts_with("Wall time: ")
-                || line.starts_with("Process exited with code ")
-                || line.starts_with("Original token count: ")
-                || line == "Output:"
-                || line == "Final output:"
-                || line.starts_with("Warning: truncated output (original token count: ")
-                || line.starts_with("Warning: truncated output (original char count: ")
-        })
-    {
-        return Err(());
-    }
-    Ok(Some(body))
 }
 
 fn hex_digest(value: &[u8; 32]) -> String {

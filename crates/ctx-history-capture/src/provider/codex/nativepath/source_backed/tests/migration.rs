@@ -78,7 +78,7 @@ fn v8_frontier_and_v11_parser_generation_is_rebuilt_to_current_authority() {
 }
 
 #[test]
-fn lineage_evidence_authority_rebuilds_v17_parser_generation() {
+fn retrieval_exclusion_rebuilds_current_main_v18_parser_generation() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -97,7 +97,7 @@ fn lineage_evidence_authority_rebuilds_v17_parser_generation() {
     let old_certificate = CertifiedSource::certify_with_frontier(
         current_certificate.observation().clone(),
         current_certificate.observation().clone(),
-        "codex-nativepath-core-record-v17-session-copy-lineage",
+        "codex-nativepath-core-record-v18-lineage-evidence-authority",
         *current_certificate.content_digest(),
         current_certificate.counts(),
         current_certificate.frontier().cloned(),
@@ -120,7 +120,7 @@ fn lineage_evidence_authority_rebuilds_v17_parser_generation() {
     let certificate = &old.manifest().sources[0];
     assert_eq!(
         certificate.parser_revision(),
-        "codex-nativepath-core-record-v17-session-copy-lineage"
+        "codex-nativepath-core-record-v18-lineage-evidence-authority"
     );
     assert_eq!(
         certificate.frontier().unwrap().checkpoint_kind(),

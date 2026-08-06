@@ -92,6 +92,7 @@ fn record() -> CoreRecord {
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: Some("complete body".to_owned()),
             structured_content: Some(serde_json::json!({"type": "message"})),
+            discovery_exclusion: None,
             mcp_exchange: None,
         },
         metadata: BTreeMap::new(),
@@ -140,6 +141,7 @@ fn selected_constructor_defaults_the_active_core_contract() {
     );
     assert_eq!(constructed.parser_revision, "provider-parser-v7");
     assert!(constructed.mcp_tool_call.is_none());
+    assert!(constructed.content.is_discovery_eligible());
     assert_eq!(
         constructed.content.normalized_body.as_deref(),
         Some("complete selected body")
@@ -374,6 +376,89 @@ fn mcp_tool_call(server: impl Into<String>, tool: impl Into<String>) -> McpToolC
         server: server.into(),
         tool: tool.into(),
     }
+}
+
+#[test]
+fn discovery_exclusion_is_optional_typed_and_fail_closed_on_noncanonical_wire_values() {
+    let absent = record();
+    assert!(absent.content.is_discovery_eligible());
+    let absent_wire = serde_json::to_value(&absent).unwrap();
+    assert!(!absent_wire["content"]
+        .as_object()
+        .unwrap()
+        .contains_key("discovery_exclusion"));
+
+    let mut excluded = absent;
+    excluded.content.discovery_exclusion = Some(CoreDiscoveryExclusion::CtxRetrievalDerived);
+    assert!(!excluded.content.is_discovery_eligible());
+    let encoded = excluded.encode_stored().unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        wire["content"]["discovery_exclusion"],
+        serde_json::Value::String("ctx_retrieval_derived".to_owned())
+    );
+    assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), excluded);
+
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::Value::String("future_reason".to_owned()),
+    ] {
+        let mut wire = serde_json::to_value(record()).unwrap();
+        wire["content"]
+            .as_object_mut()
+            .unwrap()
+            .insert("discovery_exclusion".to_owned(), invalid);
+        assert!(matches!(
+            CoreRecord::decode_stored(&serde_json::to_vec(&wire).unwrap()),
+            Err(CoreRecordError::Json(_))
+        ));
+    }
+}
+
+#[test]
+fn discovery_exclusion_requires_complete_policy_selected_content() {
+    for status in [
+        CoreContentPolicyStatus::Redacted {
+            reason: "sensitive".to_owned(),
+        },
+        CoreContentPolicyStatus::Omitted {
+            reason: "policy".to_owned(),
+        },
+    ] {
+        let mut excluded = record();
+        excluded.content.policy_status = status;
+        excluded.content.discovery_exclusion = Some(CoreDiscoveryExclusion::CtxRetrievalDerived);
+        if matches!(
+            excluded.content.policy_status,
+            CoreContentPolicyStatus::Omitted { .. }
+        ) {
+            excluded.content.normalized_body = None;
+            excluded.content.structured_content = None;
+        }
+        assert!(matches!(
+            excluded.validate_contract(),
+            Err(CoreRecordError::InvalidContentPolicyState)
+        ));
+    }
+}
+
+#[test]
+fn discovery_exclusion_changes_stored_content_but_not_stable_identity_or_lineage() {
+    let baseline = record();
+    let mut excluded = baseline.clone();
+    excluded.content.discovery_exclusion = Some(CoreDiscoveryExclusion::CtxRetrievalDerived);
+
+    assert_eq!(excluded.event_id, baseline.event_id);
+    assert_eq!(excluded.session_id, baseline.session_id);
+    assert_eq!(excluded.parent_session_id, baseline.parent_session_id);
+    assert_eq!(excluded.root_session_id, baseline.root_session_id);
+    assert_eq!(excluded.session_relationship, baseline.session_relationship);
+    assert_eq!(excluded.event_origin, baseline.event_origin);
+    assert_eq!(excluded.source, baseline.source);
+    assert_ne!(
+        core_record_leaf_sha256(&excluded).unwrap(),
+        core_record_leaf_sha256(&baseline).unwrap()
+    );
 }
 
 fn mcp_exchange() -> McpExchangeContent {
@@ -2353,14 +2438,14 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "67bab9f428c639820a173fabb2e27aa173aa0979d81ded77ad48c6613b8d1ca5"
+        "0610be9a5810ce742b505dc4c3b3db24e9ab795126a6b62e0ef2172e04a85cc3"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "679209888be4de5d771033ed1f2831a284c2ed5ba34848ec06178d870947521e"
+        "fc61723d453f4e953145517891e8c9c7129ec09068a821182c77b52a006df982"
     );
     for changed in [
         CoreContractRevisions {

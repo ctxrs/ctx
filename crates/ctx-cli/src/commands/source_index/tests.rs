@@ -21,10 +21,10 @@ mod tests {
     use ctx_history_core::{
         derive_event_id, derive_session_id, CertifiedSource, CoreContentPolicyStatus, CoreRecord,
         EventCopyProofKind, EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey,
-        RepositoryBinding, RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
-        RepositoryFileObservation, RepositoryFileObservationKind, ScannedSourceCounts,
-        SessionIdentityInput, SessionRelationshipKind, SourceAnchor, SourceKey, SourceObservation,
-        TypedKey, MAX_CORE_CONTENT_BYTES,
+        RepositoryBinding, RepositoryEvidence, RepositoryEvidenceConfidence,
+        RepositoryEvidenceKind, RepositoryFileObservation, RepositoryFileObservationKind,
+        ScannedSourceCounts, SessionIdentityInput, SessionRelationshipKind, SourceAnchor,
+        SourceKey, SourceObservation, TypedKey, MAX_CORE_CONTENT_BYTES,
     };
     use ctx_history_index::{
         AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,

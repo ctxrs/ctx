@@ -341,6 +341,27 @@ impl CodexNativeScanner {
             projected_tool_result_content(result_kind, call_id, &mut projected_output);
         let projected_mcp_exchange = project_mcp_exchange(record, &decoded.payload)
             .and_then(|exchange| exchange.fit_selected_body(&projected_output.normalized_body));
+        let discovery_exclusion = projected_mcp_exchange
+            .as_ref()
+            .and_then(|exchange| {
+                call_id.and_then(|call_id| {
+                    exchange.discovery_exclusion(
+                        self.mcp_terminal_authority.is_unique(call_id)
+                            && self.mcp_terminal_authority.is_unique_result(call_id),
+                    )
+                })
+            })
+            .or_else(|| {
+                call_id
+                    .filter(|call_id| self.mcp_terminal_authority.is_unique_result(call_id))
+                    .and_then(|call_id| {
+                        codex_linked_result_discovery_exclusion(
+                            record,
+                            Some(call_id),
+                            context.as_ref(),
+                        )
+                    })
+            });
         if !selected_content_fits(
             &projected_output.normalized_body,
             structured_content.as_ref(),
@@ -370,6 +391,7 @@ impl CodexNativeScanner {
             &structural.outcome,
             projected_output.normalized_body,
             structured_content,
+            discovery_exclusion,
             mcp_tool_call,
             mcp_exchange,
             repository_result,
@@ -601,6 +623,75 @@ impl CodexNativeScanner {
         self.counters.rejected_complete_records =
             self.counters.rejected_complete_records.saturating_add(1);
     }
+}
+
+fn codex_linked_result_discovery_exclusion(
+    record: &[u8],
+    call_id: Option<&str>,
+    context: Option<&CodexToolCallContext>,
+) -> Option<ctx_history_core::CoreDiscoveryExclusion> {
+    let exact_success =
+        call_id.is_some_and(|call_id| codex_exact_successful_function_output(record, call_id));
+    let terminal_status = if exact_success {
+        crate::provider::ctx_retrieval::ResultTerminalStatus::Succeeded
+    } else {
+        crate::provider::ctx_retrieval::ResultTerminalStatus::Unknown
+    };
+    let atoms = if exact_success {
+        [
+            crate::provider::ctx_retrieval::ResultAtom::KnownProviderEnvelope,
+            crate::provider::ctx_retrieval::ResultAtom::Payload,
+        ]
+    } else {
+        [
+            crate::provider::ctx_retrieval::ResultAtom::Unknown,
+            crate::provider::ctx_retrieval::ResultAtom::Unknown,
+        ]
+    };
+    let linked_invocation = call_id
+        .zip(context)
+        .and_then(|(call_id, context)| exact_ctx_cli_link(context, call_id));
+    let contribution = crate::provider::ctx_retrieval::classify_linked_result(
+        linked_invocation,
+        terminal_status,
+        atoms,
+    );
+    crate::provider::ctx_retrieval::discovery_exclusion_for([contribution])
+}
+
+fn exact_ctx_cli_link(
+    context: &CodexToolCallContext,
+    result_call_id: &str,
+) -> Option<crate::provider::ctx_retrieval::ContributionClass> {
+    let origin_call_id = context.origin_call_id.as_deref()?;
+    context.origin_event_sequence?;
+    if context.command_too_large
+        || context.correlation_ambiguous
+        || context.continuation_capacity_exceeded
+        || context.continuation_call_id_sha256.len() > MAX_CODEX_TOOL_CONTEXTS
+        || context
+            .continuation_call_id_sha256
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != context.continuation_call_id_sha256.len()
+    {
+        return None;
+    }
+    if context.continuation_cell_id.is_some() {
+        let result_digest =
+            crate::provider::codex::repository::continuation_call_id_sha256(result_call_id);
+        if origin_call_id == result_call_id
+            || !context.continuation_call_id_sha256.contains(&result_digest)
+        {
+            return None;
+        }
+    } else if origin_call_id != result_call_id {
+        return None;
+    }
+    Some(crate::provider::ctx_retrieval::classify_direct_cli_command(
+        context.exact_command.as_deref()?,
+    ))
 }
 
 fn linked_call_ids(call_id: &str, context: Option<&CodexToolCallContext>) -> Vec<String> {

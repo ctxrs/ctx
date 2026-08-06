@@ -257,6 +257,104 @@ fn complete_verifier_rejects_injected_copied_body_postings() {
 }
 
 #[test]
+fn complete_verifier_rejects_missing_discovery_eligibility_for_ordinary_core() {
+    let temp = tempdir().unwrap();
+    let source = source("missing-discovery-eligibility.jsonl");
+    let expected = document(&source, 1, "ordinary searchable body");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(expected.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let fields = fields_from_schema(pinned.searcher.schema()).unwrap();
+    let document = indexed_document(expected);
+    let mut forged = TantivyDocument::default();
+    for (field, value) in document.field_values() {
+        if field != fields.discovery_eligible {
+            forged.add_field_value(field, value);
+        }
+    }
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        GenerationManifest::from_sources(vec![certificate(&source, 2, 1)]).unwrap(),
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    assert!(matches!(
+        verify_searcher(&searcher, &manifest),
+        Err(IndexError::InvalidStoredDocumentField("query_projection"))
+    ));
+}
+
+fn excluded_projection_forgery_error(
+    source_name: &str,
+    forge: impl FnOnce(&mut TantivyDocument, Fields),
+) -> IndexError {
+    let temp = tempdir().unwrap();
+    let source = source(source_name);
+    let excluded = retrieval_excluded(document(&source, 1, "retrieval derived payload"));
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(excluded.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    let fields = fields_from_schema(pinned.searcher.schema()).unwrap();
+    let mut forged = indexed_document(excluded);
+    forge(&mut forged, fields);
+    let index = pinned.searcher.index().clone();
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        GenerationManifest::from_sources(vec![certificate(&source, 2, 1)]).unwrap(),
+        std::slice::from_ref(&source),
+        vec![forged],
+    );
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    verify_searcher(&searcher, &manifest).unwrap_err()
+}
+
+#[test]
+fn complete_verifier_rejects_body_projection_for_retrieval_excluded_core() {
+    let error =
+        excluded_projection_forgery_error("excluded-body-projection.jsonl", |document, fields| {
+            document.add_text(fields.body_search, "forged body projection");
+        });
+    assert!(matches!(
+        error,
+        IndexError::InvalidStoredDocumentField("body_search")
+    ));
+}
+
+#[test]
+fn complete_verifier_rejects_discovery_eligibility_for_excluded_core() {
+    let error = excluded_projection_forgery_error(
+        "excluded-eligibility-projection.jsonl",
+        |document, fields| {
+            document.add_u64(fields.discovery_eligible, 1);
+        },
+    );
+    assert!(matches!(
+        error,
+        IndexError::InvalidStoredDocumentField("query_projection")
+    ));
+}
+
+#[test]
 fn complete_verifier_rejects_source_count_corruption() {
     let temp = tempdir().unwrap();
     let first = source("count-first.jsonl");

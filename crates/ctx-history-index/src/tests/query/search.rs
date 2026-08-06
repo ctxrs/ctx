@@ -342,6 +342,93 @@ fn many_copied_bodies_add_no_postings_or_score_order_changes() {
 }
 
 #[test]
+fn many_retrieval_derived_bodies_add_no_postings_or_score_order_changes() {
+    const EXCLUDED: u64 = 64;
+    const NEEDLE: &str = "retrievalbodystatsneedle";
+
+    fn records_with_excluded_body(source: &SourceKey, excluded_body: &str) -> Vec<CoreRecord> {
+        let first = document_for_session(
+            source,
+            "retrieval-stats-original-first",
+            1,
+            "retrievalbodystatsneedle concise",
+        );
+        let second = document_for_session(
+            source,
+            "retrieval-stats-original-second",
+            2,
+            "retrievalbodystatsneedle deliberately longer original body",
+        );
+        let mut records = vec![first, second];
+        for offset in 0..EXCLUDED {
+            records.push(retrieval_excluded(document_for_session(
+                source,
+                &format!("retrieval-stats-excluded-{offset}"),
+                offset + 3,
+                excluded_body,
+            )));
+        }
+        records
+    }
+
+    let source = source("retrieval-body-statistics.jsonl");
+    let duplicated = records_with_excluded_body(&source, "retrievalbodystatsneedle concise");
+    let expected_excluded = duplicated[2].clone();
+    let control = records_with_excluded_body(&source, "unrelated retrieval body control");
+    let (_duplicated_temp, duplicated_index) = publish_class_aware_records(duplicated);
+    let (_control_temp, control_index) = publish_class_aware_records(control);
+
+    let duplicated_hits = duplicated_index
+        .search_event_candidates(NEEDLE, EXCLUDED as usize + 2)
+        .unwrap();
+    let control_hits = control_index
+        .search_event_candidates(NEEDLE, EXCLUDED as usize + 2)
+        .unwrap();
+    assert_eq!(duplicated_hits.len(), 2);
+    assert_eq!(
+        candidate_ids(&duplicated_hits),
+        candidate_ids(&control_hits)
+    );
+    assert_eq!(duplicated_hits[0].score, control_hits[0].score);
+    assert_eq!(duplicated_hits[1].score, control_hits[1].score);
+
+    let fields = fields_from_schema(duplicated_index.searcher.schema()).unwrap();
+    let term = Term::from_field_text(fields.body_search, NEEDLE);
+    assert_eq!(duplicated_index.searcher.doc_freq(&term).unwrap(), 2);
+    assert_eq!(
+        duplicated_index
+            .searcher
+            .search(
+                &TermQuery::new(term, IndexRecordOption::WithFreqs),
+                &DocSetCollector,
+            )
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        duplicated_index
+            .searcher
+            .search(
+                &TermQuery::new(
+                    Term::from_field_u64(fields.discovery_eligible, 1),
+                    IndexRecordOption::Basic,
+                ),
+                &Count,
+            )
+            .unwrap(),
+        2
+    );
+
+    let visible = duplicated_index
+        .core_record_by_id(expected_excluded.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(visible.event_origin, EventOrigin::Unknown);
+    assert_eq!(visible.content, expected_excluded.content);
+}
+
+#[test]
 fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     let temp = tempdir().unwrap();
     let codex_root = source("codex-root");
@@ -602,6 +689,126 @@ fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview()
             .as_deref(),
         Some(body.as_str())
     );
+}
+
+#[test]
+fn retrieval_derived_records_are_absent_from_discovery_but_present_in_core_enumeration() {
+    let temp = tempdir().unwrap();
+    let source = source("retrieval-derived-search.jsonl");
+    let ordinary = document(&source, 1, "ordinary searchable canary");
+
+    let mut excluded_call = document(&source, 2, "retrievalderivedcanary call payload");
+    excluded_call.event_type = "tool_call".to_owned();
+    excluded_call.role = Some("assistant".to_owned());
+    excluded_call.repository_bindings.push(RepositoryBinding {
+        binding_id: "binding-1".to_owned(),
+        logical_repository_id: "repo-1".to_owned(),
+        checkout_id: None,
+        worktree_id: None,
+        aliases: Vec::new(),
+        git_object_format: None,
+        local_root_authorization: None,
+        evidence: vec![RepositoryEvidence {
+            kind: RepositoryEvidenceKind::FileActivity,
+            confidence: RepositoryEvidenceConfidence::Explicit,
+        }],
+        association_policy_revision: CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    });
+    excluded_call.repository_file_observations = vec![RepositoryFileObservation {
+        repository_binding_id: "binding-1".to_owned(),
+        relative_path: "src/RetrievalDerivedCanary.rs".to_owned(),
+        kind: RepositoryFileObservationKind::Modified,
+        prior_relative_path: None,
+    }];
+    excluded_call.validate_contract().unwrap();
+    let excluded_call = retrieval_excluded(excluded_call);
+
+    let mut excluded_output = document(&source, 3, "retrievalderivedcanary output payload");
+    excluded_output.event_type = "tool_output".to_owned();
+    excluded_output.role = Some("tool".to_owned());
+    excluded_output.validate_contract().unwrap();
+    let excluded_output = retrieval_excluded(excluded_output);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [
+        ordinary.clone(),
+        excluded_call.clone(),
+        excluded_output.clone(),
+    ] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 3)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    assert!(index
+        .search_event_candidates("retrievalderivedcanary", 10)
+        .unwrap()
+        .is_empty());
+    for scope in [SearchContentScope::Calls, SearchContentScope::Outputs] {
+        let filters = EventSearchFilters {
+            content_scope: scope,
+            ..EventSearchFilters::default()
+        };
+        assert!(index
+            .search_event_candidates_with_filters("retrievalderivedcanary", &filters, 10)
+            .unwrap()
+            .is_empty());
+        assert!(index
+            .list_event_candidates_with_filters(&filters, 10)
+            .unwrap()
+            .is_empty());
+    }
+    assert!(index
+        .list_event_candidates_with_filters(
+            &EventSearchFilters {
+                file: Some("retrievalderivedcanary.rs".to_owned()),
+                ..EventSearchFilters::default()
+            },
+            10,
+        )
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        candidate_ids(
+            &index
+                .list_event_candidates_with_filters(&EventSearchFilters::default(), 10)
+                .unwrap()
+        ),
+        vec![ordinary.event_id]
+    );
+
+    for expected in [&excluded_call, &excluded_output] {
+        assert_eq!(
+            index
+                .core_record_by_id(expected.event_id.as_uuid())
+                .unwrap()
+                .unwrap(),
+            *expected
+        );
+        assert_eq!(
+            index
+                .event_by_id(expected.event_id.as_uuid())
+                .unwrap()
+                .unwrap()
+                .event_id,
+            expected.event_id
+        );
+    }
+    assert_eq!(
+        index
+            .core_events_for_session(ordinary.session_id.as_uuid())
+            .unwrap()
+            .len(),
+        3
+    );
+    let source_page = index.core_source_event_page(&source, None, 10).unwrap();
+    assert!(source_page.terminal);
+    assert_eq!(source_page.items.len(), 3);
 }
 
 #[test]

@@ -250,6 +250,7 @@ pub(super) fn codex_core_record(
         session_cwd,
         lexical_body,
         structured_content,
+        discovery_exclusion,
         mcp_tool_call,
         mcp_exchange,
         touched_paths,
@@ -468,6 +469,7 @@ pub(super) fn codex_core_record(
         .as_ref()
         .and_then(|git| bounded_core_metadata(git.branch.as_deref()));
     record.content.structured_content = annotation.structured_content;
+    record.content.discovery_exclusion = discovery_exclusion;
     record.content.mcp_exchange = mcp_exchange;
     record
         .content

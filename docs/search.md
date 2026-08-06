@@ -11,6 +11,15 @@ The Core/Tantivy generation contains policy-selected meaningful text, complete
 normalized records, and the metadata needed to match indexed events. Search
 snippets and typed event/session presentation come from those stored records.
 
+Exact ctx history-retrieval invocations and their uniquely linked, successful,
+payload-only results are retained as complete Core records but excluded from
+ranked discovery. This prevents a later search from ranking an earlier `ctx
+search`, `show`, `list events`, `locate`, or `blame` payload as if it were the
+underlying agent history. Classification is syntax- and linkage-based, not a
+text regex: failed-result diagnostics, warnings, stderr, mixed records, unknown
+status, and ambiguous results remain searchable. Direct `show` and event
+enumeration still return the complete excluded records.
+
 Default results are session-diverse: ctx shows the strongest matching event
 from each session, then lets you drill into dense event-level results.
 Human output labels the result window as relevance ordered and identifies

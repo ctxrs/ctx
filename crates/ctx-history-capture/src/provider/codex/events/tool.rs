@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 #[cfg(test)]
@@ -8,6 +9,8 @@ use super::retention::{codex_exit_code, codex_wall_time_ms};
 use crate::provider::normalization::provider_output_event_is_failure;
 #[cfg(test)]
 use crate::{OutputOutcome, OutputOutcomeMetadata};
+
+const MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CodexToolCallContext {
@@ -25,6 +28,138 @@ pub(crate) struct CodexToolCallContext {
     pub(crate) continuation_call_id_sha256: Vec<[u8; 32]>,
     pub(crate) continuation_capacity_exceeded: bool,
     pub(crate) correlation_ambiguous: bool,
+}
+
+/// Proves the exact native `function_call_output` shape and Codex's successful
+/// exec envelope without deriving control evidence from normalized prose.
+/// Unknown or duplicate members are rejected by the typed envelope.
+pub(crate) fn codex_exact_successful_function_output(
+    record: &[u8],
+    expected_call_id: &str,
+) -> bool {
+    let Ok(envelope) = serde_json::from_slice::<ExactFunctionOutputEnvelope<'_>>(record) else {
+        return false;
+    };
+    envelope.record_type == "response_item"
+        && envelope.payload.item_type == "function_call_output"
+        && !envelope.payload.call_id.is_empty()
+        && envelope.payload.call_id == expected_call_id
+        && envelope
+            .timestamp
+            .as_deref()
+            .is_none_or(|timestamp| !timestamp.is_empty())
+        && exact_codex_exec_result_body(&envelope.payload.output).is_ok_and(|body| body.is_some())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExactFunctionOutputEnvelope<'a> {
+    #[serde(default, borrow)]
+    timestamp: Option<Cow<'a, str>>,
+    #[serde(rename = "type", borrow)]
+    record_type: Cow<'a, str>,
+    #[serde(borrow)]
+    payload: ExactFunctionOutputPayload<'a>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExactFunctionOutputPayload<'a> {
+    #[serde(rename = "type", borrow)]
+    item_type: Cow<'a, str>,
+    #[serde(borrow)]
+    call_id: Cow<'a, str>,
+    #[serde(borrow)]
+    output: Cow<'a, str>,
+}
+
+/// Parses the two bounded Codex exec result envelope revisions observed in
+/// native rollout records. The returned body is evidence only; callers retain
+/// the original complete provider-normalized body.
+pub(crate) fn exact_codex_exec_result_body(output: &str) -> Result<Option<&str>, ()> {
+    if !output.starts_with("Chunk ID: ") {
+        return if output
+            .lines()
+            .any(|line| line.trim().starts_with("Chunk ID: "))
+        {
+            Err(())
+        } else {
+            Ok(None)
+        };
+    }
+    if output.is_empty()
+        || output.len() > MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES
+        || output.contains('\0')
+    {
+        return Err(());
+    }
+    let (chunk_id, remainder) = output
+        .strip_prefix("Chunk ID: ")
+        .and_then(|value| value.split_once('\n'))
+        .ok_or(())?;
+    if chunk_id.len() != 6
+        || !chunk_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(());
+    }
+    let (wall_time, remainder) = remainder
+        .strip_prefix("Wall time: ")
+        .and_then(|value| value.split_once(" seconds\n"))
+        .ok_or(())?;
+    if wall_time.is_empty() || wall_time.len() > 32 {
+        return Err(());
+    }
+    let mut wall_time_components = wall_time.split('.');
+    let whole = wall_time_components.next().ok_or(())?;
+    let fractional = wall_time_components.next();
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fractional.is_some_and(|value| {
+            value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || wall_time_components.next().is_some()
+        || wall_time
+            .parse::<f64>()
+            .ok()
+            .is_none_or(|seconds| !seconds.is_finite())
+    {
+        return Err(());
+    }
+    let remainder = remainder
+        .strip_prefix("Process exited with code 0\n")
+        .ok_or(())?;
+    let body = if let Some(remainder) = remainder.strip_prefix("Original token count: ") {
+        let (token_count, remainder) = remainder.split_once('\n').ok_or(())?;
+        if token_count.is_empty()
+            || token_count.len() > 20
+            || !token_count.bytes().all(|byte| byte.is_ascii_digit())
+            || token_count.parse::<u64>().is_err()
+        {
+            return Err(());
+        }
+        remainder.strip_prefix("Output:\n").ok_or(())?
+    } else {
+        remainder.strip_prefix("Final output:\n").ok_or(())?
+    };
+    if body.is_empty()
+        || body.len() > MAX_CODEX_EXEC_RESULT_ENVELOPE_BYTES
+        || body.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("Chunk ID: ")
+                || line.starts_with("Wall time: ")
+                || line.starts_with("Process exited with code ")
+                || line.starts_with("Original token count: ")
+                || line == "Output:"
+                || line == "Final output:"
+                || line.starts_with("Warning: truncated output (original token count: ")
+                || line.starts_with("Warning: truncated output (original char count: ")
+        })
+    {
+        return Err(());
+    }
+    Ok(Some(body))
 }
 
 #[cfg(test)]
@@ -262,6 +397,61 @@ fn codex_output_exit_code(value: &Value) -> Option<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn exact_function_output_envelope_is_structural_and_fail_open() {
+        let output = concat!(
+            "Chunk ID: abc123\n",
+            "Wall time: 0.125 seconds\n",
+            "Process exited with code 0\n",
+            "Final output:\n",
+            "{\"results\":[]}"
+        );
+        let exact = serde_json::to_vec(&json!({
+            "timestamp": "2026-08-05T12:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-exact",
+                "output": output
+            }
+        }))
+        .unwrap();
+        assert!(codex_exact_successful_function_output(&exact, "call-exact"));
+        assert_eq!(
+            exact_codex_exec_result_body(output),
+            Ok(Some("{\"results\":[]}"))
+        );
+
+        let with_stderr = serde_json::to_vec(&json!({
+            "timestamp": "2026-08-05T12:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-exact",
+                "output": output,
+                "stderr": "diagnostic"
+            }
+        }))
+        .unwrap();
+        assert!(!codex_exact_successful_function_output(
+            &with_stderr,
+            "call-exact"
+        ));
+
+        let duplicate_output = br#"{"timestamp":"2026-08-05T12:00:00Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-exact","output":"first","output":"Chunk ID: abc123\nWall time: 0.125 seconds\nProcess exited with code 0\nFinal output:\n{}"}}"#;
+        assert!(!codex_exact_successful_function_output(
+            duplicate_output,
+            "call-exact"
+        ));
+        for malformed in [
+            "Chunk ID: abc123\nWall time: 0.125 seconds\nProcess exited with code 0\n{}",
+            "Chunk ID: abc123\nWall time: 0.125 seconds\nProcess exited with code 7\nFinal output:\n{}",
+            "Chunk ID: abc123\nWall time: 0.125 seconds\nProcess exited with code 0\nFinal output:\nWarning: truncated output (original token count: 7)\n{}",
+        ] {
+            assert_eq!(exact_codex_exec_result_body(malformed), Err(()));
+        }
+    }
 
     #[test]
     fn output_content_keeps_exact_text_once_and_retains_block_metadata() {

@@ -4,14 +4,14 @@ use std::{
     collections::{BTreeSet, HashMap},
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, RepositoryAbstentionReason, SessionIdentityInput,
-    SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
+    EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryAbstentionReason,
+    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -21,8 +21,8 @@ use super::{
     invocation_evidence::ClaudeExactFileInvocationAbstention,
     record::parse_native_record,
     rows::{
-        ClaudeOutputOutcome, ClaudePhysicalLocator, ClaudeRetainedRow, ClaudeSessionMetadata,
-        CLAUDE_MAX_RECORD_ROWS,
+        ClaudeDiscoveryResultEvidence, ClaudeOutputOutcome, ClaudePhysicalLocator,
+        ClaudeRetainedRow, ClaudeSessionMetadata, ToolCallRequest, CLAUDE_MAX_RECORD_ROWS,
     },
     source::{classify_claude_path, claude_projects_root, ClaudeSessionKey, SessionLayout},
 };
@@ -32,14 +32,19 @@ use crate::repository_attribution::{
 };
 use crate::OutputOutcome;
 use crate::{
-    common::io::{OpenedProviderSourceFile, ProviderSourceRoot},
+    common::io::{open_provider_source_file, OpenedProviderSourceFile, ProviderSourceRoot},
     provider::{
+        ctx_retrieval::{
+            classify_direct_cli_tool_input, classify_linked_result, classify_mcp_invocation,
+            discovery_exclusion_for, ContributionClass, ResultAtom, ResultTerminalStatus,
+        },
         normalization::provider_explicit_result_value_text,
         providers::native_jsonl::visit_native_jsonl_files,
         source_backed::family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory,
             JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector,
-            JsonlFamilyWorkerContext, JsonlFileObservation, JsonlRecordRef,
+            JsonlFamilyWorkerContext, JsonlFileObservation, JsonlReader, JsonlRecordRef,
+            JsonlSourceIdentity,
         },
     },
     CaptureError, Result, CLAUDE_PROJECTS_SOURCE_FORMAT,
@@ -53,9 +58,10 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v7-aggregate-content-admission";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v8-source-unique-result-exclusion";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
+const RESULT_TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/claude-nativepath/result-terminal-call-id/v1\0";
 
 mod binding;
 mod checkpoint;
@@ -65,11 +71,68 @@ use binding::*;
 use checkpoint::*;
 use normalized_body::{event_kind, lexical_body};
 
+#[derive(Debug, Default)]
+struct ClaudeJsonlAdapter {
+    preflight: Mutex<ClaudePreflightState>,
+}
+
+#[derive(Debug, Default)]
+struct ClaudePreflightState {
+    replacement_required: bool,
+    authorities: HashMap<[u8; 32], ClaudeResultTerminalAuthority>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
-struct ClaudeJsonlAdapter;
+struct ClaudeResultTerminalState {
+    candidates: u8,
+    in_certified_prefix: bool,
+    after_certified_prefix: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClaudeResultTerminalAuthority {
+    call_ids: HashMap<[u8; 32], ClaudeResultTerminalState>,
+    exhausted: bool,
+    available: bool,
+}
+
+impl ClaudeResultTerminalAuthority {
+    fn observe(&mut self, call_id: &str, in_certified_prefix: bool) {
+        self.available = true;
+        if self.exhausted {
+            return;
+        }
+        let digest = claude_result_terminal_call_id_digest(call_id);
+        if !self.call_ids.contains_key(&digest) && self.call_ids.len() >= MAX_PENDING_CALLS {
+            self.call_ids.clear();
+            self.exhausted = true;
+            return;
+        }
+        let state = self.call_ids.entry(digest).or_default();
+        state.candidates = state.candidates.saturating_add(1).min(2);
+        state.in_certified_prefix |= in_certified_prefix;
+        state.after_certified_prefix |= !in_certified_prefix;
+    }
+
+    fn is_unique(&self, call_id: &str) -> bool {
+        !self.available
+            || (!self.exhausted
+                && self
+                    .call_ids
+                    .get(&claude_result_terminal_call_id_digest(call_id))
+                    .is_some_and(|state| state.candidates == 1))
+    }
+
+    fn append_requires_replacement(&self) -> bool {
+        self.exhausted
+            || self.call_ids.values().any(|state| {
+                state.in_certified_prefix && state.after_certified_prefix && state.candidates > 1
+            })
+    }
+}
 
 fn claude_source_backed_adapter() -> Arc<dyn JsonlFamilyAdapter> {
-    Arc::new(ClaudeJsonlAdapter)
+    Arc::new(ClaudeJsonlAdapter::default())
 }
 
 impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
@@ -90,7 +153,43 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
-        JsonlFamilyAppendMode::CertifiedSuffix
+        if self
+            .preflight
+            .lock()
+            .map(|state| state.replacement_required)
+            .unwrap_or(true)
+        {
+            JsonlFamilyAppendMode::Replacement
+        } else {
+            JsonlFamilyAppendMode::CertifiedSuffix
+        }
+    }
+
+    fn prepare_leaf_scans(
+        &self,
+        leaves: &[JsonlFamilyLeaf],
+        bases: &HashMap<[u8; 32], &CertifiedSource>,
+    ) -> Result<Option<usize>> {
+        let mut authorities = HashMap::new();
+        let mut replacement_required = false;
+        for leaf in leaves {
+            let digest = leaf.source().exact_descriptor_digest();
+            let certified_prefix_end = bases
+                .get(&digest)
+                .and_then(|base| base.frontier())
+                .map(|frontier| frontier.certified_prefix_bytes());
+            let opened = open_preflight_source(leaf)?;
+            let authority = preflight_claude_result_terminals(leaf, opened, certified_prefix_end)?;
+            replacement_required |=
+                certified_prefix_end.is_some() && authority.append_requires_replacement();
+            authorities.insert(digest, authority);
+        }
+        let mut state = self.preflight.lock().map_err(|_| {
+            CaptureError::SystemInvariant("Claude result-terminal preflight lock was poisoned")
+        })?;
+        state.replacement_required = replacement_required;
+        state.authorities = authorities;
+        Ok(None)
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -172,7 +271,7 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
     fn projector_with_provider_checkpoint(
         &self,
         leaf: &JsonlFamilyLeaf,
-        _source_file: Arc<OpenedProviderSourceFile>,
+        source_file: Arc<OpenedProviderSourceFile>,
         _imported_at: DateTime<Utc>,
         checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<BaseEventIdentityLookup>,
@@ -180,6 +279,17 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
     ) -> Result<Box<dyn JsonlFamilyProjector>> {
         let binding = decode_binding(leaf)?;
         let identities = identities(&binding)?;
+        let source_digest = leaf.source().exact_descriptor_digest();
+        let result_terminal_authority = self
+            .preflight
+            .lock()
+            .map_err(|_| {
+                CaptureError::SystemInvariant("Claude result-terminal preflight lock was poisoned")
+            })?
+            .authorities
+            .remove(&source_digest)
+            .map(Ok)
+            .unwrap_or_else(|| preflight_claude_result_terminals(leaf, source_file, None))?;
         let restored = checkpoint
             .map(|checkpoint| decode_projector_checkpoint(checkpoint, &binding))
             .transpose()?;
@@ -207,6 +317,7 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             identities,
             pending_calls,
             linkage_capacity_exceeded,
+            result_terminal_authority,
             rejected_records: 0,
             fallback_identities: FallbackEventIdentityState::new(
                 (mode == JsonlFamilyProjectionMode::CertifiedAppend)
@@ -215,6 +326,69 @@ impl JsonlFamilyAdapter for ClaudeJsonlAdapter {
             ),
         }))
     }
+}
+
+fn open_preflight_source(leaf: &JsonlFamilyLeaf) -> Result<Arc<OpenedProviderSourceFile>> {
+    let opened = open_provider_source_file(leaf.source_path())?;
+    if observe_opened_file(leaf.source_path(), &opened)? != *leaf.observation() {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(Arc::new(opened))
+}
+
+fn preflight_claude_result_terminals(
+    leaf: &JsonlFamilyLeaf,
+    source_file: Arc<OpenedProviderSourceFile>,
+    certified_prefix_end: Option<u64>,
+) -> Result<ClaudeResultTerminalAuthority> {
+    let identity = JsonlSourceIdentity::new(
+        CaptureProvider::Claude.as_str(),
+        PARSER_REVISION,
+        "claude-result-terminal-preflight-v1",
+        leaf.source().exact_descriptor_digest(),
+        leaf.source_path(),
+    );
+    let mut reader = JsonlReader::open(identity, source_file, None, None)?;
+    let mut authority = ClaudeResultTerminalAuthority {
+        available: true,
+        ..ClaudeResultTerminalAuthority::default()
+    };
+    while reader
+        .visit_page(&mut |record: JsonlRecordRef<'_>| -> Result<()> {
+            let evidence = record.evidence();
+            let locator = ClaudePhysicalLocator {
+                path: leaf.source_path().to_path_buf(),
+                byte_start: evidence.byte_start(),
+                byte_end_exclusive: evidence.byte_end_exclusive(),
+                line_number: evidence.physical_ordinal().saturating_add(1),
+                record_sha256: evidence.record_digest(),
+            };
+            let Ok(parsed) =
+                parse_native_record(record.bytes(), evidence.physical_ordinal(), &locator)
+            else {
+                return Ok(());
+            };
+            let in_certified_prefix = certified_prefix_end
+                .is_some_and(|prefix_end| evidence.byte_end_exclusive() <= prefix_end);
+            for call_id in parsed.rows.iter().filter_map(|row| {
+                row.tool_result
+                    .as_ref()
+                    .and_then(|result| result.call_id.as_deref())
+            }) {
+                authority.observe(call_id, in_certified_prefix);
+            }
+            Ok(())
+        })?
+        .is_some()
+    {}
+    Ok(authority)
+}
+
+fn claude_result_terminal_call_id_digest(call_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(RESULT_TERMINAL_CALL_ID_DOMAIN);
+    hasher.update(call_id.as_bytes());
+    hasher.finalize().into()
 }
 
 struct Identities {
@@ -233,6 +407,7 @@ struct ClaudeProjector {
     session: ClaudeSessionMetadata,
     pending_calls: HashMap<String, PendingCallState>,
     linkage_capacity_exceeded: bool,
+    result_terminal_authority: ClaudeResultTerminalAuthority,
     rejected_records: u64,
     fallback_identities: FallbackEventIdentityState,
 }
@@ -245,6 +420,8 @@ struct PendingCall {
     command_too_large: bool,
     declared_workdir: Option<String>,
     event_sequence: u64,
+    #[serde(default)]
+    ctx_retrieval_derived: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +527,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
             let event_sequence = row_event_sequence(&row)?;
             let normalized_body = lexical_body(&row);
             let structured_content = row_structured_content(&row);
+            let mut discovery_contribution = ContributionClass::Unknown;
             let mut input = AttributionInput {
                 activity_at_unix_ms: row
                     .occurred_at
@@ -361,6 +539,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
                 ..AttributionInput::default()
             };
             if let Some(call) = &row.tool_call {
+                discovery_contribution = claude_call_contribution(call);
                 input.command = call.command.clone();
                 input.command_disposition = if call.command_too_large {
                     CommandEvidenceDisposition::CommandTooLarge
@@ -413,6 +592,8 @@ impl JsonlFamilyProjector for ClaudeProjector {
                             command_too_large: call.command_too_large,
                             declared_workdir: call.declared_workdir.clone(),
                             event_sequence,
+                            ctx_retrieval_derived: discovery_contribution
+                                == ContributionClass::RetrievalDerived,
                         }),
                     );
                 }
@@ -423,6 +604,14 @@ impl JsonlFamilyProjector for ClaudeProjector {
                     result.call_id.as_deref(),
                     self.linkage_capacity_exceeded,
                     &mut input,
+                );
+                let unique_terminal = result
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|call_id| self.result_terminal_authority.is_unique(call_id));
+                discovery_contribution = claude_result_contribution(
+                    result,
+                    context.as_ref().filter(|_| unique_terminal),
                 );
                 if let (Some(context), Some(result_call_id)) = (context, result.call_id.as_deref())
                 {
@@ -491,6 +680,7 @@ impl JsonlFamilyProjector for ClaudeProjector {
             )?;
             apply_annotation(&mut core, worker.repository_attributor().attribute(input))
                 .map_err(contract)?;
+            core.content.discovery_exclusion = discovery_exclusion_for([discovery_contribution]);
             core.content
                 .omit_structured_content_if_aggregate_exceeds_limit()
                 .map_err(contract)?;
@@ -507,6 +697,55 @@ impl JsonlFamilyProjector for ClaudeProjector {
     fn rejected_records(&self) -> u64 {
         self.rejected_records
     }
+}
+
+fn claude_call_contribution(call: &ToolCallRequest) -> ContributionClass {
+    let Some(tool_name) = call.tool_name.as_deref() else {
+        return ContributionClass::Unknown;
+    };
+    if let Some((server, tool)) = typed_mcp_tool_name(tool_name) {
+        return classify_mcp_invocation(server, tool);
+    }
+    if tool_name != "Bash" || call.command_too_large {
+        return ContributionClass::Unknown;
+    }
+    classify_direct_cli_tool_input(&call.input)
+}
+
+fn claude_result_contribution(
+    result: &super::rows::ClaudeToolResult,
+    context: Option<&PendingCall>,
+) -> ContributionClass {
+    let linked_invocation = context
+        .filter(|context| context.ctx_retrieval_derived)
+        .map(|_| ContributionClass::RetrievalDerived);
+    match result.discovery_evidence {
+        ClaudeDiscoveryResultEvidence::SuccessfulPayloadOnly => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Succeeded,
+            [ResultAtom::KnownProviderEnvelope, ResultAtom::Payload],
+        ),
+        ClaudeDiscoveryResultEvidence::Failed => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Failed,
+            [ResultAtom::KnownProviderEnvelope, ResultAtom::Payload],
+        ),
+        ClaudeDiscoveryResultEvidence::Diagnostic => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Succeeded,
+            [ResultAtom::Payload, ResultAtom::Diagnostic],
+        ),
+        ClaudeDiscoveryResultEvidence::Unknown => classify_linked_result(
+            linked_invocation,
+            ResultTerminalStatus::Unknown,
+            [ResultAtom::Unknown],
+        ),
+    }
+}
+
+fn typed_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty() && !tool.contains("__")).then_some((server, tool))
 }
 
 fn core_record(

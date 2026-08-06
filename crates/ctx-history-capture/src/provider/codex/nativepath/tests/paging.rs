@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn ctx_retrieval_link_survives_source_backed_page_rollover() {
+    let call_id = "paged-ctx-retrieval";
+    let mut contents = session_meta("paged-ctx-retrieval-owner");
+    contents.push_str(&jsonl(json!({
+        "timestamp": "2026-08-05T14:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": call_id,
+            "arguments": {"cmd": "ctx search paged"}
+        }
+    })));
+    for index in 0..MAX_CODEX_PAGE_ROWS {
+        contents.push_str(&message("assistant", &format!("page filler {index}")));
+    }
+    let output = concat!(
+        "Chunk ID: 123abc\n",
+        "Wall time: 0.062 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "{\"results\":[]}"
+    );
+    contents.push_str(&tool_output(call_id, output));
+    let (_temp, path) = write_source(&contents);
+
+    let (_, sink) = scan_collect(discover_one(&path, "paged-ctx-retrieval-owner"), None);
+    assert!(sink.pages.len() >= 2);
+    let result = sink
+        .rows
+        .iter()
+        .find(|row| row.event_type == EventType::CommandOutput)
+        .unwrap();
+    assert_eq!(result.lexical_body, output);
+    assert_eq!(
+        result.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+}
+
+#[test]
 fn terminal_authority_defers_a_verified_append_and_retry_advances_the_prefix() {
     let initial = [
         session_meta("mutation-owner"),

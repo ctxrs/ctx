@@ -273,11 +273,9 @@ fn copied_lineage_is_hidden_from_mcp_search_but_visible_in_show_and_query_events
     );
     assert_eq!(shown_event["text"], COPIED_SEARCH_CANARY);
 
-    let queried = crate::mcp::query_events_for_test(
-        &json!({"content": "full", "limit": 100}),
-        temp.path(),
-    )
-    .unwrap();
+    let queried =
+        crate::mcp::query_events_for_test(&json!({"content": "full", "limit": 100}), temp.path())
+            .unwrap();
     let queried_event = queried["events"]
         .as_array()
         .unwrap()
