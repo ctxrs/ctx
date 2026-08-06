@@ -8,7 +8,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    CaptureProvider, EventRole, EventType, RepositoryFileInvocationKind, TypedKey,
+    CaptureProvider, EventOrigin, EventRole, EventType, RepositoryFileInvocationKind,
+    SessionRelationshipKind, TypedKey,
 };
 #[cfg(unix)]
 use ctx_history_core::{

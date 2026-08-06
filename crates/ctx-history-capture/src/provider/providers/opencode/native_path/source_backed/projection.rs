@@ -535,6 +535,15 @@ pub(super) fn core_record(
         };
         record.set_session_relationship(kind, Some(parent_session_id), session.root_session_id)?;
     }
+    if source.provider() == ctx_history_core::CaptureProvider::OpenCode.as_str()
+        && session.parent_native_identity.is_some()
+    {
+        // OpenCode persists `session.parent_id` only for task-created child
+        // sessions. Those children start with child-owned records. Interactive
+        // forks deliberately omit the field and mint fresh message/part IDs,
+        // so unparented sessions must retain the default unknown origin.
+        record.event_origin = ctx_history_core::EventOrigin::UniqueToSession;
+    }
     record.provider_session_id = Some(session.native_identity.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(normalized_time);
