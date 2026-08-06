@@ -1430,6 +1430,33 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
 
 #[test]
 fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
+    struct RestoreUpgradeTarget(Option<std::ffi::OsString>);
+    impl Drop for RestoreUpgradeTarget {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("CTX_UPGRADE_TEST_TARGET", value),
+                None => std::env::remove_var("CTX_UPGRADE_TEST_TARGET"),
+            }
+        }
+    }
+
+    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _restore_upgrade_target = RestoreUpgradeTarget(std::env::var_os("CTX_UPGRADE_TEST_TARGET"));
+    let installation = tempfile::tempdir()?;
+    let installation_executable =
+        installation
+            .path()
+            .join(if cfg!(windows) { "ctx.exe" } else { "ctx" });
+    fs::write(&installation_executable, b"test ctx executable")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&installation_executable, fs::Permissions::from_mode(0o700))?;
+    }
+    std::env::set_var("CTX_UPGRADE_TEST_TARGET", &installation_executable);
+
     let root = tempfile::tempdir()?;
     super::super::daemon_autostart::write_daemon_restart_request(
         root.path(),
@@ -1456,9 +1483,11 @@ fn post_lock_initialization_failure_retains_restart_intent() -> Result<()> {
     )
     .expect_err("the injected post-lock initialization failure must surface");
 
-    assert!(error
-        .to_string()
-        .contains("injected daemon failure before readiness"));
+    let rendered_error = error.to_string();
+    assert!(
+        rendered_error.contains("injected daemon failure before readiness"),
+        "unexpected daemon initialization error: {rendered_error}"
+    );
     assert!(super::super::daemon_autostart::read_daemon_restart_request(root.path()).is_some());
     Ok(())
 }

@@ -259,22 +259,27 @@ pub(crate) fn run_lifecycle(args: ProArgs, data_root: PathBuf, ui: &mut Ui) -> R
     let human_output = !args.json_output();
     let retry_command = render::human_retry_command(&args);
     let mut telemetry = ProLifecycleTelemetryV1::new(args.telemetry_operation());
-    let result = run_lifecycle_inner(args, &data_root, &mut telemetry, ui);
+    let control_validation = crate::pro::commercial_config::reject_test_control_outside_test_host();
+    let emit_telemetry = control_validation.is_ok();
+    let result =
+        control_validation.and_then(|()| run_lifecycle_inner(args, &data_root, &mut telemetry, ui));
     #[cfg(ctx_pro_test_helper)]
     let result = crate::pro::test_control::finish(result);
     if let Err(error) = &result {
         telemetry.fail(stable_error_code(error));
     }
-    send_pro_operation(
-        &data_root,
-        ProHostOperationV1::Lifecycle(telemetry),
-        if result.is_ok() {
-            Outcome::Success
-        } else {
-            Outcome::Failure
-        },
-        started.elapsed(),
-    );
+    if emit_telemetry {
+        send_pro_operation(
+            &data_root,
+            ProHostOperationV1::Lifecycle(telemetry),
+            if result.is_ok() {
+                Outcome::Success
+            } else {
+                Outcome::Failure
+            },
+            started.elapsed(),
+        );
+    }
     crate::pro::human_result(result, human_output, retry_command, ui)
 }
 
@@ -284,7 +289,6 @@ fn run_lifecycle_inner(
     telemetry: &mut ProLifecycleTelemetryV1,
     ui: &mut Ui,
 ) -> Result<()> {
-    crate::pro::commercial_config::reject_test_control_outside_test_host()?;
     #[cfg(ctx_pro_test_helper)]
     crate::pro::test_control::prepare()?;
     args.validate_invocation()?;

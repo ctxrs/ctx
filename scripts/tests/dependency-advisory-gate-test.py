@@ -14,6 +14,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/dependency-advisory-gate.py"
+GATE = Path(sys.argv.pop(1)).resolve(strict=True)
 FIXTURES = ROOT / "scripts/tests/fixtures/dependency-advisory"
 FAKE_SCANNER = FIXTURES / "fake-osv-scanner.py"
 NOW = "2026-07-29T17:00:00Z"
@@ -122,8 +123,7 @@ class AdvisoryGateTest(unittest.TestCase):
         environment["FAKE_OSV_EXIT"] = str(scanner_exit)
         result = subprocess.run(
             [
-                sys.executable,
-                str(SCRIPT),
+                str(GATE),
                 "--repo-root",
                 str(self.repo),
                 "--policy",
