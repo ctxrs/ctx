@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+use ctx_history_core::MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -469,6 +470,7 @@ impl CommitLineage {
         }
 
         let mut edge_operations: BTreeMap<&str, &CommitLineageEdge> = BTreeMap::new();
+        let mut operation_mapping_counts = BTreeMap::new();
         let mut operation_ids = BTreeSet::new();
         for edge in &self.edges {
             edge.validate(available, referenced)?;
@@ -479,6 +481,7 @@ impl CommitLineage {
                     "commit lineage edge crosses the requested repository object domain",
                 ));
             }
+            record_operation_mapping(edge.operation_id.as_str(), &mut operation_mapping_counts)?;
             operation_ids.insert(edge.operation_id.as_str());
             if let Some(first) = edge_operations.get(edge.operation_id.as_str()) {
                 if !edge.same_operation_metadata(first) {
@@ -514,6 +517,10 @@ impl CommitLineage {
                     "commit lineage contains a duplicate yield record identity",
                 ));
             }
+            record_operation_mapping(
+                yielded_by.operation_id.as_str(),
+                &mut operation_mapping_counts,
+            )?;
             operation_ids.insert(yielded_by.operation_id.as_str());
             if let Some(first) = yielded_operations.get(yielded_by.operation_id.as_str()) {
                 if !yielded_by.same_operation_metadata(first) {
@@ -717,6 +724,20 @@ impl CommitLineage {
             }
         }
     }
+}
+
+fn record_operation_mapping<'a>(
+    operation_id: &'a str,
+    operation_mapping_counts: &mut BTreeMap<&'a str, usize>,
+) -> Result<(), ProtocolError> {
+    let count = operation_mapping_counts.entry(operation_id).or_default();
+    if *count == MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS {
+        return Err(bounds(
+            "commit lineage operation exceeds the Core per-operation mapping bound",
+        ));
+    }
+    *count += 1;
+    Ok(())
 }
 
 fn validate_session(resource: &ResourceRef, name: &str) -> Result<(), ProtocolError> {

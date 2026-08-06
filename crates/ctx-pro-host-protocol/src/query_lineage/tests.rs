@@ -377,6 +377,35 @@ fn returned_event_bound_counts_distinct_operations_at_99_100_and_101() {
 }
 
 #[test]
+fn per_operation_mapping_bound_accepts_exactly_32_edges_plus_yields() {
+    for lineage in [
+        single_operation_group(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS, false),
+        single_operation_group(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS - 1, true),
+    ] {
+        validate(&lineage).unwrap();
+        assert_eq!(
+            lineage.edges.len() + lineage.yielded_by.len(),
+            MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS
+        );
+        assert_eq!(lineage.bounds.returned_events, 1);
+    }
+}
+
+#[test]
+fn per_operation_mapping_bound_rejects_33_edges_plus_yields() {
+    for lineage in [
+        single_operation_group(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS + 1, false),
+        single_operation_group(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS, true),
+    ] {
+        assert_eq!(
+            lineage.edges.len() + lineage.yielded_by.len(),
+            MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS + 1
+        );
+        assert!(validate(&lineage).is_err());
+    }
+}
+
+#[test]
 fn disconnected_operations_are_rejected() {
     let mut lineage = complete_lineage();
     lineage.origin = None;
@@ -583,6 +612,43 @@ fn distinct_operation_chain(count: usize) -> CommitLineage {
             returned_events: u32::try_from(count).unwrap(),
             returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
             examined_events: u32::try_from(count).unwrap(),
+            examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+            omission: CommitLineageOmission::Exact(0),
+            truncation_reason: None,
+        },
+    }
+}
+
+fn single_operation_group(edge_count: usize, include_yield: bool) -> CommitLineage {
+    let requested = numbered_commit(0);
+    let operation_id = "operation:bounded-group";
+    let edges = (0..edge_count)
+        .map(|index| {
+            edge(
+                operation_id,
+                CommitLineageOperationKind::Rebase,
+                numbered_commit(index * 2),
+                numbered_commit(index * 2 + 1),
+            )
+        })
+        .collect();
+    let yielded_by = include_yield
+        .then(|| yielded(operation_id))
+        .into_iter()
+        .collect();
+
+    CommitLineage {
+        requested,
+        edges,
+        yielded_by,
+        origin: None,
+        endpoint: None,
+        complete: true,
+        ambiguous: false,
+        bounds: CommitLineageBounds {
+            returned_events: 1,
+            returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+            examined_events: 1,
             examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
             omission: CommitLineageOmission::Exact(0),
             truncation_reason: None,
