@@ -5,10 +5,40 @@ use serde_json::Value;
 use crate::{
     AgentType, Confidence, EventRole, EventType, Fidelity, FileChangeKind,
     ProviderArtifactDescriptor, ProviderCursorRange, ProviderSourceTrust, SessionEdgeType,
-    SessionStatus,
+    SessionRelationshipKind, SessionStatus,
 };
 
 pub const CTX_HISTORY_JSONL_V1_SCHEMA_VERSION: &str = "ctx-history-jsonl-v1";
+
+/// Optional lineage extension carried by a provider-owned Custom History file.
+///
+/// Absence is the legacy contract: parent/root fields are lineage hints only
+/// and event origin remains unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CtxHistoryJsonlLineageContract {
+    ProviderNativeV1,
+}
+
+/// Exact proof kinds a generic Custom History producer may declare.
+///
+/// Certified ordered-prefix proof remains provider-adapter-owned because the
+/// generic interchange parser cannot certify a provider's prefix algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CtxHistoryJsonlCopyProofKind {
+    NativeEventIdentity,
+    NativeCopiedFromField,
+    NativeCallResultIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CtxHistoryJsonlCopiedFromSelector {
+    pub ancestor_native_session_id: String,
+    pub ancestor_event_id: String,
+    pub proof: CtxHistoryJsonlCopyProofKind,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "record_type", rename_all = "snake_case")]
@@ -24,6 +54,8 @@ pub enum CtxHistoryJsonlRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CtxHistoryJsonlManifestRecord {
     pub schema_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_contract: Option<CtxHistoryJsonlLineageContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +102,8 @@ pub struct CtxHistoryJsonlSessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_relationship: Option<SessionRelationshipKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_agent_id: Option<String>,
     #[serde(default)]
     pub agent_type: AgentType,
@@ -101,6 +135,8 @@ pub struct CtxHistoryJsonlEventRecord {
     pub event_index: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_from: Option<CtxHistoryJsonlCopiedFromSelector>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,5 +239,37 @@ mod tests {
             err.to_string().contains("missing field `edge_type`"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn lineage_extension_is_typed_and_legacy_records_remain_unset() {
+        let legacy = r#"{"record_type":"event","source_id":"src-1","session_id":"sess-1","event_index":2,"event_id":"evt-2","event_type":"message","occurred_at":"2026-07-01T12:00:02Z"}"#;
+        let CtxHistoryJsonlRecord::Event(legacy) =
+            serde_json::from_str::<CtxHistoryJsonlRecord>(legacy).unwrap()
+        else {
+            panic!("expected event record");
+        };
+        assert!(legacy.copied_from.is_none());
+
+        let copied = r#"{"record_type":"event","source_id":"src-1","session_id":"fork","event_index":2,"event_id":"evt-2","copied_from":{"ancestor_native_session_id":"native-root","ancestor_event_id":"evt-1","proof":"native_event_identity"},"event_type":"message","occurred_at":"2026-07-01T12:00:02Z"}"#;
+        let CtxHistoryJsonlRecord::Event(copied) =
+            serde_json::from_str::<CtxHistoryJsonlRecord>(copied).unwrap()
+        else {
+            panic!("expected event record");
+        };
+        assert_eq!(
+            copied.copied_from.unwrap().proof,
+            CtxHistoryJsonlCopyProofKind::NativeEventIdentity
+        );
+    }
+
+    #[test]
+    fn copied_from_selector_rejects_unknown_fields_and_proof_kinds() {
+        for raw in [
+            r#"{"record_type":"event","source_id":"src-1","session_id":"fork","event_index":2,"event_id":"evt-2","copied_from":{"ancestor_native_session_id":"native-root","ancestor_event_id":"evt-1","proof":"native_event_identity","text":"private"},"occurred_at":"2026-07-01T12:00:02Z"}"#,
+            r#"{"record_type":"event","source_id":"src-1","session_id":"fork","event_index":2,"event_id":"evt-2","copied_from":{"ancestor_native_session_id":"native-root","ancestor_event_id":"evt-1","proof":"certified_ordered_prefix"},"occurred_at":"2026-07-01T12:00:02Z"}"#,
+        ] {
+            assert!(serde_json::from_str::<CtxHistoryJsonlRecord>(raw).is_err());
+        }
     }
 }

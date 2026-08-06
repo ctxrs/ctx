@@ -2,9 +2,9 @@ use std::path::Path;
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, CoreRecordError,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, PositionStability,
-    ProjectionContractError, SessionIdentityInput, SourceAnchor, SourceObservation, StableEntityId,
-    TypedKey,
+    EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey, PositionStability,
+    ProjectionContractError, SessionIdentityInput, SessionRelationshipKind, SourceAnchor,
+    SourceObservation, StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_index::GenerationWriter;
@@ -38,7 +38,8 @@ const ZED_LOGICAL_SESSION_KIND: &str = "zed-thread";
 const ZED_LOGICAL_EVENT_KIND: &str = "zed-thread-event";
 const ZED_SOURCE_SCHEMA_VARIANT: &str = "zed-nativepath-sqlite-v0";
 const ZED_SOURCE_REVISION_KIND: &str = "zed-logical-rows-v1";
-pub(crate) const ZED_PARSER_REVISION: &str = "zed-nativepath-source-backed-v0";
+pub(crate) const ZED_PARSER_REVISION: &str =
+    "zed-nativepath-source-backed-v2-complete-session-lineage";
 
 #[derive(Debug, Error)]
 pub(crate) enum ZedSourceBackedErrorV0 {
@@ -283,16 +284,23 @@ fn zed_core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        context.root_session_id,
+        session_id,
         source.clone(),
         event_sequence,
         event.event_type.as_str(),
         agent_type.as_str(),
-        context.parent_session_id.is_none(),
+        true,
         ZED_PARSER_REVISION,
         event.normalized_body,
     )?;
-    record.parent_session_id = context.parent_session_id;
+    if let Some(parent_session_id) = context.parent_session_id {
+        record.set_session_relationship(
+            SessionRelationshipKind::Delegated,
+            Some(parent_session_id),
+            context.root_session_id,
+        )?;
+        record.event_origin = EventOrigin::UniqueToSession;
+    }
     record.provider_session_id = Some(session.thread_id.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
@@ -494,6 +502,34 @@ mod tests {
         let child = lineage.resolve("a-child").unwrap().unwrap();
         assert_eq!(child.parent_thread_id.as_deref(), Some("thread-1"));
         assert_eq!(child.root_thread_id, "thread-1");
+    }
+
+    #[test]
+    fn provider_p1_lineage_rejects_a_missing_referenced_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let database = source.join("threads.db");
+        create_database(&database, "missing parent lineage sentinel");
+        Connection::open(&database)
+            .unwrap()
+            .execute(
+                "update threads set parent_id = 'missing-parent' where id = 'thread-1'",
+                [],
+            )
+            .unwrap();
+
+        let snapshot =
+            acquire_snapshot(crate::test_provider_sqlite_data_root(), &database).unwrap();
+        let mut lineage = ZedThreadLineageResolver::new(snapshot.connection().unwrap()).unwrap();
+        let error = match lineage.resolve("thread-1") {
+            Err(error) => error,
+            Ok(_) => panic!("missing Zed parent must fail closed"),
+        };
+
+        assert!(error
+            .to_string()
+            .contains("references missing parent \"missing-parent\""));
     }
 
     #[derive(Default)]

@@ -161,7 +161,7 @@ fn scan_only_output(content: Value) -> super::stream::GooseScannedMessage {
                  content_json text not null
              );
              create table schema_version (version integer not null);
-             insert into schema_version values (14);
+             insert into schema_version values (15);
              insert into sessions values ('session-1');",
         )
         .unwrap();
@@ -182,6 +182,70 @@ fn scan_only_output(content: Value) -> super::stream::GooseScannedMessage {
     .unwrap();
     assert_eq!(rows.len(), 1);
     rows.remove(0)
+}
+
+#[test]
+fn repeated_message_ids_across_sessions_remain_exact_native_identities() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (
+                 id text primary key,
+                 parent_session_id text
+             );
+             create table messages (
+                 id integer primary key,
+                 message_id text,
+                 session_id text not null,
+                 role text not null,
+                 content_json text not null
+             );
+             create table schema_version (version integer not null);
+             insert into schema_version values (15);
+             insert into sessions values ('parent', null), ('child', 'parent');
+             insert into messages values
+                 (1, 'copied-message', 'parent', 'user', '[{\"type\":\"text\",\"text\":\"parent\"}]'),
+                 (2, 'copied-message', 'child', 'user', '[{\"type\":\"text\",\"text\":\"child\"}]');",
+        )
+        .unwrap();
+    let schema = GooseNativeSchema::probe(&connection).unwrap();
+    let rows = goose_fetch_native_message_page(
+        &connection,
+        &schema,
+        GooseNativeRowKeyset::Unstarted,
+        GooseNativePageLimits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| !row.identity_degraded));
+    assert!(rows
+        .iter()
+        .all(|row| row.provider_message_identity.as_deref() == Some("copied-message")));
+    assert!(rows
+        .iter()
+        .all(|row| row.native_identity.contains("copied-message")));
+}
+
+#[test]
+fn missing_and_colliding_message_ids_do_not_invent_copy_authority() {
+    let missing = super::stream::goose_native_message_identity(None, 0, 7);
+    assert!(missing.identity_degraded);
+    assert_eq!(missing.provider_message_identity, None);
+    assert!(missing
+        .native_identity
+        .starts_with("goose-message-identity-v1:messages-id:"));
+
+    let collision =
+        super::stream::goose_native_message_identity(Some("provider-message".to_owned()), 2, 8);
+    assert!(collision.identity_degraded);
+    assert_eq!(
+        collision.provider_message_identity.as_deref(),
+        Some("provider-message")
+    );
+    assert!(collision
+        .native_identity
+        .starts_with("goose-message-identity-v1:messages-id:"));
 }
 
 mod source_backed;

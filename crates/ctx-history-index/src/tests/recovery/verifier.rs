@@ -1,3 +1,14 @@
+const COMPACT_IDENTITY_DIGEST_BYTES: u64 = 32;
+const VERIFICATION_IDENTITY_SLOTS: u64 = 6;
+const VERIFICATION_IDENTITY_TAG_BYTES: u64 = 3;
+const VERIFICATION_SOURCE_ORDINAL_BYTES: u64 = 4;
+const VERIFICATION_QUERY_PROJECTION_BYTES: u64 = 32;
+const VERIFICATION_SCRATCH_BYTES_PER_DOCUMENT: u64 = COMPACT_IDENTITY_DIGEST_BYTES
+    * VERIFICATION_IDENTITY_SLOTS
+    + VERIFICATION_IDENTITY_TAG_BYTES
+    + VERIFICATION_SOURCE_ORDINAL_BYTES
+    + VERIFICATION_QUERY_PROJECTION_BYTES;
+
 #[test]
 fn complete_verifier_decodes_once_with_bounded_parallel_segment_state() {
     const SOURCE_COUNT: usize = 6;
@@ -24,7 +35,7 @@ fn complete_verifier_decodes_once_with_bounded_parallel_segment_state() {
     assert!(metrics.body_tokens >= expected_documents as u64);
     assert_eq!(
         metrics.verification_spill_bytes,
-        expected_documents as u64 * 133
+        expected_documents as u64 * VERIFICATION_SCRATCH_BYTES_PER_DOCUMENT
     );
     assert!(metrics.verification_tracked_heap_bytes < 64 * 1024);
 }
@@ -124,7 +135,10 @@ fn complete_verifier_splits_one_large_segment_across_workers() {
     assert_eq!(metrics.document_decodes, DOCUMENTS as usize);
     assert_eq!(metrics.source_terms, 3);
     assert!(metrics.body_tokens >= DOCUMENTS);
-    assert_eq!(metrics.verification_spill_bytes, (DOCUMENTS + 1) * 133);
+    assert_eq!(
+        metrics.verification_spill_bytes,
+        (DOCUMENTS + 1) * VERIFICATION_SCRATCH_BYTES_PER_DOCUMENT
+    );
     assert!(metrics.verification_tracked_heap_bytes < 1024 * 1024);
 }
 
@@ -174,6 +188,71 @@ fn complete_verifier_rejects_identity_digest_corruption() {
     assert!(matches!(
         error,
         IndexError::InvalidStoredDocumentField("core_record")
+    ));
+}
+
+#[test]
+fn complete_verifier_rejects_injected_copied_body_postings() {
+    let temp = tempdir().unwrap();
+    let source = source("injected-copy-body.jsonl");
+    let original = document_for_session(&source, "original-session", 1, "verified original body");
+    let mut copied = document_for_session(&source, "copied-session", 2, "verified original body");
+    copied
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(original.session_id),
+            original.session_id,
+        )
+        .unwrap();
+    copied.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
+        proof: EventCopyProofKind::NativeCopiedFromField,
+    };
+    copied.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(original).unwrap();
+    writer.add_core_record(copied.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let mut forged_documents = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .map(|address| indexed_document(decoded_stored_core(&searcher, address)))
+        .collect::<Vec<_>>();
+    let forged_copy = forged_documents
+        .iter_mut()
+        .find(|document| {
+            document
+                .get_first(fields.event_id)
+                .and_then(|value| value.as_str())
+                == Some(copied.event_id.to_string().as_str())
+        })
+        .unwrap();
+    forged_copy.add_text(fields.body_search, "injectedcopybodyposting");
+    let index = searcher.index().clone();
+    drop(searcher);
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        forged_documents,
+    );
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    assert!(matches!(
+        verify_searcher(&searcher, &manifest),
+        Err(IndexError::InvalidStoredDocumentField("body_search"))
     ));
 }
 

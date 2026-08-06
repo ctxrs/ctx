@@ -9,7 +9,7 @@ pub(super) fn copy_exact_authenticated_file<R: Read, W: Write>(
     aggregate_allowance: u64,
 ) -> Result<u64> {
     if expected_bytes > aggregate_allowance {
-        return Err(IndexError::PredecessorMigrationByteLimit {
+        return Err(IndexError::CurrentRepublishByteLimit {
             actual: expected_bytes,
             maximum: aggregate_allowance,
         });
@@ -22,7 +22,7 @@ pub(super) fn copy_exact_authenticated_file<R: Read, W: Write>(
             .map_err(|_| IndexError::CountOverflow)?;
         let read = source.read(&mut buffer[..read_limit])?;
         if read == 0 {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "source file truncated while cloning",
             ));
         }
@@ -33,7 +33,7 @@ pub(super) fn copy_exact_authenticated_file<R: Read, W: Write>(
     }
     let mut growth_probe = [0_u8; 1];
     if source.read(&mut growth_probe)? != 0 {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "source file grew while cloning",
         ));
     }
@@ -64,7 +64,7 @@ mod tests {
         let mut destination = Vec::new();
         assert!(matches!(
             copy_exact_authenticated_file(&mut source, &mut destination, 17, 17),
-            Err(IndexError::PredecessorMigrationSourceTopology(
+            Err(IndexError::CurrentRepublishSourceTopology(
                 "source file grew while cloning"
             ))
         ));

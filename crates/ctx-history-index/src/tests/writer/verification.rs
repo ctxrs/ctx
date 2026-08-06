@@ -131,6 +131,10 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit_for
     noop.commit_with_complete_inventory_revalidation(|_| true, |current| current == &inventory)
         .unwrap();
     assert_eq!(crate::publication::verification_activity(), (0, 0));
+    assert_eq!(
+        crate::publication::candidate_projection_verification_activity(),
+        0
+    );
     assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
     assert_eq!(constructions.load(Ordering::SeqCst), 0);
 
@@ -173,9 +177,103 @@ fn publication_activity_keeps_cold_scrub_and_uses_incremental_identity_audit_for
     append.commit(|_| true).unwrap();
     assert_eq!(crate::publication::verification_activity(), (1, 0));
     assert_eq!(
+        crate::publication::candidate_projection_verification_activity(),
+        1,
+        "one tiny append must revalidate only its query-authoritative projection"
+    );
+    assert_eq!(
         crate::publication::candidate_identity_verification_activity(),
         (2, 5),
         "one changed identity must sample the retained session without replaying its records"
+    );
+    assert_eq!(
+        crate::publication::candidate_lineage_verification_activity(),
+        (4, 1),
+        "one tiny append must spill only itself and decode only its changed/retained session edge"
+    );
+}
+
+#[test]
+fn unrelated_append_does_not_replay_retained_copy_lineage() {
+    const RETAINED_COPIES: u64 = 128;
+
+    let temp = tempdir().unwrap();
+    let lineage_source = source("retained-copy-lineage.jsonl");
+    let append_source = source("unrelated-append.jsonl");
+    let original = document_for_session(&lineage_source, "lineage-root", 1, "original");
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(lineage_source.clone()).unwrap();
+    initial.add_core_record(original.clone()).unwrap();
+    for sequence in 2..=RETAINED_COPIES + 1 {
+        let mut copy = document_for_session(
+            &lineage_source,
+            "lineage-child",
+            sequence,
+            "retained copied body",
+        );
+        copy.set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(original.session_id),
+            original.session_id,
+        )
+        .unwrap();
+        copy.event_origin = EventOrigin::CopiedFromAncestor {
+            ancestor_session_id: Box::new(original.session_id),
+            ancestor_event_id: Box::new(original.event_id),
+            proof: EventCopyProofKind::NativeEventIdentity,
+        };
+        initial.add_core_record(copy).unwrap();
+    }
+    initial
+        .certify_source(certificate(&lineage_source, 1, RETAINED_COPIES + 1))
+        .unwrap();
+    initial.begin_source(append_source.clone()).unwrap();
+    initial
+        .add_core_record(document(&append_source, 1, "retained unrelated body"))
+        .unwrap();
+    initial
+        .certify_source(appendable_certificate(&append_source, 1, 1, 10))
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let mut append = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let base = append
+        .begin_source_append(append_source.clone())
+        .unwrap()
+        .clone();
+    append
+        .add_core_record(document(&append_source, 2, "tiny unrelated append"))
+        .unwrap();
+    append
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&append_source, 2, 2, 20),
+                10,
+                [1; 32],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    crate::publication::reset_verification_activity();
+    append.commit(|_| true).unwrap();
+    assert_eq!(crate::publication::verification_activity(), (1, 0));
+    assert_eq!(
+        crate::publication::candidate_identity_verification_activity(),
+        (2, 5)
+    );
+    assert_eq!(
+        crate::publication::candidate_lineage_verification_activity(),
+        (4, 1),
+        "the delta verifier must not decode or spill the retained copy corpus"
     );
 }
 

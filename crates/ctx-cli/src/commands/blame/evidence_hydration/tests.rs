@@ -124,6 +124,8 @@ fn event_record(core: CoreRecord) -> CoreEventRecord {
         session_id: core.session_id,
         parent_session_id: core.parent_session_id,
         root_session_id: core.root_session_id,
+        session_relationship: core.session_relationship,
+        event_origin: core.event_origin.clone(),
         source: core.source.clone(),
         provider: core.source.provider().to_owned(),
         source_format: core.source.source_format().to_owned(),

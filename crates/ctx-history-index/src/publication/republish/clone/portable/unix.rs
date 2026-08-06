@@ -144,7 +144,7 @@ pub(super) fn directory_entries(
                 .checked_add(1)
                 .ok_or(IndexError::CountOverflow)?;
             if actual > maximum {
-                return Err(IndexError::PredecessorMigrationFileLimit { actual, maximum });
+                return Err(IndexError::CurrentRepublishFileLimit { actual, maximum });
             }
             entries.push(OsString::from_vec(bytes.to_vec()));
         }
@@ -207,7 +207,7 @@ pub(super) fn discard_destination(
     for entry in directory_entries(
         destination,
         destination_path,
-        super::MAX_MIGRATION_DIRECTORY_ENTRIES,
+        super::MAX_REPUBLISH_DIRECTORY_ENTRIES,
     )
     .map_err(|error| io::Error::other(error.to_string()))?
     {

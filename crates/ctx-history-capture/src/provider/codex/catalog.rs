@@ -6,7 +6,7 @@ use std::{
 #[cfg(test)]
 use std::{path::PathBuf, thread};
 
-use ctx_history_core::{AgentType, CaptureProvider};
+use ctx_history_core::{AgentType, CaptureProvider, SessionRelationshipKind};
 use serde_json::{json, Value};
 
 #[cfg(test)]
@@ -473,21 +473,21 @@ fn catalog_codex_session_opened(
         .and_then(|payload| payload.get("source"))
         .cloned()
         .unwrap_or(Value::Null);
-    let parent_external_session_id = codex_parent_session_id(&source)
-        .or_else(|| {
-            payload
-                .and_then(|payload| payload.get("parent_thread_id"))
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            payload
-                .and_then(|payload| payload.get("forked_from_id"))
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .map(str::to_owned)
-        });
+    let parent_thread_id = payload
+        .and_then(|payload| payload.get("parent_thread_id"))
+        .and_then(Value::as_str);
+    let forked_from_id = payload
+        .and_then(|payload| payload.get("forked_from_id"))
+        .and_then(Value::as_str);
+    let history_base_thread_id = payload
+        .and_then(|payload| payload.pointer("/history_base/thread_id"))
+        .and_then(Value::as_str);
+    let (parent_external_session_id, session_relationship) = codex_session_relationship(
+        &source,
+        parent_thread_id,
+        forked_from_id,
+        history_base_thread_id,
+    );
     let external_session_id = payload
         .and_then(|payload| payload.get("id"))
         .and_then(Value::as_str)
@@ -505,10 +505,10 @@ fn catalog_codex_session_opened(
         })
         .and_then(parse_rfc3339_utc)
         .map(|timestamp| timestamp.timestamp_millis());
-    let agent_type = if parent_external_session_id.is_some() {
-        AgentType::Subagent
-    } else {
+    let agent_type = if session_relationship.is_primary() {
         AgentType::Primary
+    } else {
+        AgentType::Subagent
     };
     let role_hint = payload
         .and_then(|payload| payload.get("agent_role"))
@@ -620,6 +620,57 @@ pub(crate) fn codex_parent_session_id(source: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned)
+}
+
+pub(crate) fn codex_session_relationship(
+    source: &Value,
+    parent_thread_id: Option<&str>,
+    forked_from_id: Option<&str>,
+    history_base_thread_id: Option<&str>,
+) -> (Option<String>, SessionRelationshipKind) {
+    let source_parent = codex_parent_session_id(source);
+    let direct_parent = parent_thread_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned);
+    let forked_parent = forked_from_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned);
+    let history_parent = history_base_thread_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned);
+    let delegated_parent = match (source_parent, direct_parent) {
+        (Some(source_parent), Some(direct_parent)) if source_parent != direct_parent => {
+            return (Some(source_parent), SessionRelationshipKind::RelatedUnknown);
+        }
+        (Some(source_parent), _) => Some(source_parent),
+        (None, direct_parent) => direct_parent,
+    };
+    if let Some(parent) = delegated_parent {
+        if forked_parent
+            .iter()
+            .chain(history_parent.iter())
+            .any(|metadata_parent| metadata_parent != &parent)
+        {
+            return (Some(parent), SessionRelationshipKind::RelatedUnknown);
+        }
+        return (Some(parent), SessionRelationshipKind::Delegated);
+    }
+
+    if let (Some(forked_parent), Some(history_parent)) = (&forked_parent, &history_parent) {
+        if forked_parent != history_parent {
+            return (
+                Some(forked_parent.clone()),
+                SessionRelationshipKind::RelatedUnknown,
+            );
+        }
+    }
+    if let Some(parent) = forked_parent {
+        return (Some(parent), SessionRelationshipKind::Forked);
+    }
+    if let Some(parent) = history_parent {
+        return (Some(parent), SessionRelationshipKind::ResumedFrom);
+    }
+    (None, SessionRelationshipKind::Root)
 }
 pub(crate) fn codex_source_kind(source: &Value) -> Option<String> {
     if let Some(value) = source.as_str().filter(|value| !value.trim().is_empty()) {

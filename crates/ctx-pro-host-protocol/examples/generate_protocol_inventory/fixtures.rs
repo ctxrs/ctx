@@ -1,9 +1,10 @@
 use super::*;
 use ctx_history_core::{
     core_record_contract_fingerprint, derive_event_id, derive_session_id, CoreContent,
-    CoreContentPolicyStatus, EventIdentityInput, NativeItemKey, NativeSessionKey,
-    RepositoryCandidateEvidence, RepositoryCandidateKind, SessionIdentityInput, SourceAnchor,
-    TypedKey, CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
+    CoreContentPolicyStatus, EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey,
+    RepositoryCandidateEvidence, RepositoryCandidateKind, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION,
+    CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
 
 pub(super) fn source(lineage: u8) -> SourceKey {
@@ -116,6 +117,8 @@ pub(super) fn record() -> CoreRecord {
         session_id,
         parent_session_id: None,
         root_session_id: session_id,
+        session_relationship: SessionRelationshipKind::Root,
+        event_origin: EventOrigin::Unknown,
         source,
         provider_session_id: Some("golden-session".to_owned()),
         native_event_id: None,

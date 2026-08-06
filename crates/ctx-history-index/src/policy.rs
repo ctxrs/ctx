@@ -11,12 +11,12 @@ use sha2::{Digest, Sha256};
 pub const SOURCE_GENERATION_POLICY_VERSION: u32 = 10;
 pub const SOURCE_ROUTE_SNAPSHOT_REVISION: u32 = 1;
 pub const AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS: u32 = 3;
-pub const LEXICAL_SCHEMA_REVISION: u32 = 17;
+pub const LEXICAL_SCHEMA_REVISION: u32 = 18;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
-pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 4;
+pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 5;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
-pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 2;
+pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 3;
 pub const SEMANTIC_CHUNKING_REVISION: u32 = 1;
 pub const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
@@ -280,12 +280,12 @@ mod tests {
             .unwrap()
             .contains_key("core_repository_association_policy_revision"));
         assert_eq!(first.policy_version, 10);
-        assert_eq!(first.lexical.event_projector_revision, 4);
-        assert_eq!(first.lexical.schema_revision, 17);
+        assert_eq!(first.lexical.event_projector_revision, 5);
+        assert_eq!(first.lexical.schema_revision, 18);
         assert_eq!(first.lexical.tokenizer_revision, 2);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "f9204898f2c6783d94954d1aad4e374bd507f538b547fb0d66c8b8174c6838a3"
+            "b7709c8a96622d4ae6aeb3f1d8e480f42c1f0db8e4b919e8597e4c05a5b6ce5b"
         );
     }
 
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn semantic_policy_persisted_bytes_and_model_authority_are_frozen() {
-        const EXPECTED: &str = "{\"eligibility_revision\":2,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_meaningful_text_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
+        const EXPECTED: &str = "{\"eligibility_revision\":3,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_meaningful_text_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
         let policy = current_semantic_generation_policy();
         let contract = ctx_semantic_model::semantic_model_contract();
         let persisted = serde_json::to_string(&policy).unwrap();
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(persisted, EXPECTED);
         assert_eq!(
             policy.canonical_sha256().unwrap(),
-            "821211bd0eb0f0a73427c9c1e325a5503e765393f33b41f21d4a57323ed1fff0"
+            "edfec4554ed1da01aa3451dbc7d4328c7a8a2c5d974acb65ca7397be1dbc5848"
         );
         assert_eq!(
             policy.embedding.contract_revision,

@@ -66,6 +66,91 @@ fn current_11811_shape_selects_populated_message_part_over_empty_session_message
 }
 
 #[test]
+fn native_task_parent_is_delegated_unique_but_fresh_id_fork_shape_stays_root_unknown() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "shared payload"}),
+    );
+    connection
+        .execute(
+            "insert into session values (
+                 'task-child', 'project-1', null, 'current-session', 'task-child', ?1,
+                 'Task child', '1.18.11', 'build', 1782259203000, 1782259204000
+             )",
+            [temp.path().to_string_lossy().as_ref()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into message values (
+                 'task-message', 'task-child', 1782259203000, 1782259203000, ?1
+             )",
+            [json!({"role": "assistant", "time": {"created": 1782259203000_i64}}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                 'task-part', 'task-message', 'task-child',
+                 1782259203000, 1782259203000, ?1
+             )",
+            [json!({"type": "text", "text": "task-owned payload"}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into session values (
+                 'interactive-fork', 'project-1', null, null, 'interactive-fork', ?1,
+                 'Interactive fork', '1.18.11', 'build', 1782259205000, 1782259206000
+             )",
+            [temp.path().to_string_lossy().as_ref()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into message values (
+                 'fresh-fork-message', 'interactive-fork',
+                 1782259205000, 1782259205000, ?1
+             )",
+            [json!({"role": "assistant", "time": {"created": 1782259205000_i64}}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                 'fresh-fork-part', 'fresh-fork-message', 'interactive-fork',
+                 1782259205000, 1782259205000, ?1
+             )",
+            [json!({"type": "text", "text": "shared payload"}).to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (_, _, records) = scan_current_schema(&database);
+    let task = records
+        .iter()
+        .find(|record| record.provider_session_id.as_deref() == Some("task-child"))
+        .unwrap();
+    assert_eq!(
+        task.session_relationship,
+        SessionRelationshipKind::Delegated
+    );
+    assert_eq!(task.event_origin, EventOrigin::UniqueToSession);
+    assert!(!task.is_primary);
+
+    let fork = records
+        .iter()
+        .find(|record| record.provider_session_id.as_deref() == Some("interactive-fork"))
+        .unwrap();
+    assert_eq!(fork.session_relationship, SessionRelationshipKind::Root);
+    assert_eq!(fork.event_origin, EventOrigin::Unknown);
+    assert!(fork.is_primary);
+}
+
+#[test]
 fn independently_populated_representations_fail_closed() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("opencode.db");

@@ -74,6 +74,12 @@ fn core_projection_keeps_complete_success_failure_unknown_and_large_results_once
             &message,
         )
         .unwrap();
+        assert_eq!(
+            record.session_relationship,
+            ctx_history_core::SessionRelationshipKind::Root
+        );
+        assert_eq!(record.event_origin, ctx_history_core::EventOrigin::Unknown);
+        assert!(record.is_primary);
         assert_eq!(record.content.meaningful_text(), body);
         let structured = record.content.structured_content.as_ref().unwrap();
         assert_eq!(

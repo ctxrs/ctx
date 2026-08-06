@@ -18,10 +18,12 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
-    CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord, CtxHistoryJsonlEventRecord,
-    CtxHistoryJsonlRecord, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionEdgeType, SessionIdentityInput, SourceAnchor, SourceFrontier, SourceKey, StableEntityId,
-    TypedKey, CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
+    CertifiedSourceDeletion, CertifiedSourceInventory, CoreRecord,
+    CtxHistoryJsonlCopiedFromSelector, CtxHistoryJsonlCopyProofKind, CtxHistoryJsonlEventRecord,
+    CtxHistoryJsonlLineageContract, CtxHistoryJsonlRecord, EventCopyProofKind, NativeSessionKey,
+    ProjectionContractError, ScannedSourceCounts, SessionEdgeType, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, SourceFrontier, SourceKey, StableEntityId, TypedKey,
+    CTX_HISTORY_JSONL_V1_SCHEMA_VERSION,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -60,7 +62,7 @@ const CUSTOM_SOURCE_IDENTITY_VERSION: u32 = 1;
 const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
 const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v1-source-backed-v1";
 pub(super) const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str =
-    "custom-history-jsonl-source-backed-v2";
+    "custom-history-jsonl-source-backed-v3";
 const CUSTOM_SOURCE_FRONTIER_KIND: &str = "custom-history-jsonl-frontier-v2";
 pub(super) const CUSTOM_SESSION_KEY_NAMESPACE: &str = "custom-history.session";
 pub(super) const CUSTOM_EVENT_KEY_NAMESPACE: &str = "custom-history.event";
@@ -136,8 +138,10 @@ pub(super) fn record_custom_history_work(update: impl FnOnce(&mut CustomHistoryS
 pub(crate) enum CustomHistorySourceBackedBound {
     CatalogRecords,
     CatalogMetadataBytes,
+    NativeSessionIdBytes,
     ParentSessionIdBytes,
     RootSessionIdBytes,
+    EventIdBytes,
     EdgeIdBytes,
 }
 
@@ -469,10 +473,11 @@ pub(super) struct CustomSessionCatalogEntry {
     pub(super) line_number: usize,
     pub(super) source_id: String,
     pub(super) session_id: String,
+    pub(super) native_session_id: Option<String>,
     pub(super) parent_session_id: Option<String>,
     pub(super) root_session_id: Option<String>,
+    pub(super) session_relationship: Option<SessionRelationshipKind>,
     pub(super) agent_type: String,
-    pub(super) is_primary: bool,
     pub(super) cwd: Option<String>,
 }
 
@@ -480,6 +485,16 @@ pub(super) struct CustomSessionCatalogEntry {
 pub(super) struct CustomEventCatalogEntry {
     pub(super) line_number: usize,
     pub(super) line: CompleteLine,
+    pub(super) event_id: Option<String>,
+    pub(super) copied_from: Option<CtxHistoryJsonlCopiedFromSelector>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ValidatedCopiedFrom {
+    pub(super) ancestor_session_id: String,
+    pub(super) ancestor_event_id: String,
+    pub(super) ancestor_event_index: u64,
+    pub(super) proof: EventCopyProofKind,
 }
 
 #[derive(Debug)]
@@ -510,6 +525,7 @@ pub(super) struct ParsedProjection {
     pub(super) sessions: BTreeMap<CustomSessionKey, CustomSessionCatalogEntry>,
     pub(super) session_roots: BTreeMap<CustomSessionKey, String>,
     pub(super) events: BTreeMap<CustomEventKey, CustomEventCatalogEntry>,
+    pub(super) copied_origins: BTreeMap<CustomEventKey, ValidatedCopiedFrom>,
     pub(super) event_spool: File,
     observed_prior_prefix_digest: Option<[u8; 32]>,
     retained_records_before_prior_prefix: Option<u64>,

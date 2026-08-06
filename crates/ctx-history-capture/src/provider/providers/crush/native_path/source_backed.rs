@@ -13,9 +13,9 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CertifiedSource, CoreRecord,
-    CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceInventoryObservation, SourceKey,
-    StableEntityId, TypedKey,
+    CoreRecordError, EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SessionRelationshipKind,
+    SourceAnchor, SourceInventoryObservation, SourceKey, StableEntityId, TypedKey,
 };
 use rusqlite::{limits::Limit, Connection};
 use serde_json::json;
@@ -60,7 +60,7 @@ const CRUSH_SOURCE_ANCHOR_NAMESPACE: &str = "crush.project-database";
 const CRUSH_INVENTORY_AUTHORITY_NAMESPACE: &str = "crush.project-inventory";
 const CRUSH_INVENTORY_REVISION_KIND: &str = "crush-selected-registered-projects-v0";
 pub(crate) const CRUSH_SOURCE_SCHEMA_VARIANT: &str = "crush-project-sqlite-v0";
-pub(crate) const CRUSH_PARSER_REVISION: &str = "crush-sqlite-source-backed-v1";
+pub(crate) const CRUSH_PARSER_REVISION: &str = "crush-sqlite-source-backed-v2-session-lineage";
 const CRUSH_NATIVE_SESSION_NAMESPACE: &str = "crush.session";
 const CRUSH_NATIVE_MESSAGE_NAMESPACE: &str = "crush.message";
 const CRUSH_LOGICAL_SESSION_KIND: &str = "crush-session";
@@ -633,16 +633,26 @@ fn core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        lineage.root_session_id,
+        session_id,
         source.database.source_key.clone(),
         fnv1a64(row.id.as_bytes()),
         event.event_type.as_str(),
         lineage.agent_type.as_str(),
-        lineage.is_primary,
+        true,
         CRUSH_PARSER_REVISION,
         policy_selected_body(row, projection),
     )?;
-    record.parent_session_id = lineage.parent_session_id;
+    if let Some(parent_session_id) = lineage.parent_session_id {
+        let kind = if lineage.is_primary {
+            SessionRelationshipKind::RelatedUnknown
+        } else {
+            SessionRelationshipKind::Delegated
+        };
+        record.set_session_relationship(kind, Some(parent_session_id), lineage.root_session_id)?;
+        if kind == SessionRelationshipKind::Delegated {
+            record.event_origin = EventOrigin::UniqueToSession;
+        }
+    }
     record.provider_session_id = Some(row.session_id.clone());
     record.native_event_id = Some(TypedKey::utf8(row.id.clone())?);
     record.occurred_at_unix_ms = event.occurred_at_unix_ms;

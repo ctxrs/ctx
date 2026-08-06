@@ -18,7 +18,7 @@ fn timeval_seconds(value: libc::timeval) -> f64 {
 /// Reaps a dedicated Linux operation child and returns its process-scoped
 /// resource usage. The prepared index and all output/accounting work live in
 /// the parent; only symmetric harness setup and the tiny report surround the
-/// measured migration/republish operation in the child lifetime.
+/// measured republish/republish operation in the child lifetime.
 pub(super) fn wait4_operation(child: &Child) -> io::Result<IsolatedProcessUsage> {
     let pid = libc::pid_t::try_from(child.id())
         .map_err(|_| io::Error::other("qualification child PID does not fit pid_t"))?;

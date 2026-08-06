@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e",
+            "fingerprint": "bc71a6638f1bc5729c534518e1731f8f9fef8678db08eea91db1ccf9cee1043b",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -326,6 +326,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
             "repository_outcome_capture_revision": 4,
             "repository_local_root_authorization_fingerprint_revision": 1,
             "mcp_tool_call_attribution_revision": 1,
+            "session_lineage_revision": 1,
             "mcp_tool_call_attribution": {
                 "wire_path": "CoreRecord.mcp_tool_call",
                 "presence": "optional_omitted_when_absent_explicit_null_rejected",
@@ -341,9 +342,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         value["golden_vectors"]["core_record_digests"],
         serde_json::json!({
             "core_record_sha256":
-                "618d194dea547828014c828028e2b2cf2b06663ae9ca6e7d0a7ea4cba22961a0",
+                "7ba6703a4a876ff5b6ecf102f8e3c9ba6438ba1e83a10416dc521a3ec9608ae5",
             "core_record_leaf_sha256":
-                "1e265db24d2ed62287acfe7224df0315e53e30c52fc802a0e2364e7a73d7dd95"
+                "606262f83a28464425eea0e75d4284a760c687e07d5ff4202c320f15c4151d4c"
         })
     );
 
@@ -424,6 +425,72 @@ fn inventory_freezes_mcp_tool_call_wire_contract() {
         .unwrap()
         .insert("mcp_tool_call".to_owned(), Value::Null);
     assert!(serde_json::from_value::<CoreRecord>(explicit_null).is_err());
+}
+
+#[test]
+fn inventory_freezes_fail_closed_session_lineage_wire_contract() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    assert_eq!(
+        canonical["enums"]["session_relationship_kind"],
+        serde_json::json!([
+            "root",
+            "delegated",
+            "forked",
+            "resumed_from",
+            "workflow_child",
+            "related_unknown"
+        ])
+    );
+    assert_eq!(
+        canonical["enums"]["event_origin_kind"],
+        serde_json::json!(["unknown", "unique_to_session", "copied_from_ancestor"])
+    );
+    assert_eq!(
+        canonical["dto_fields"]["EventOrigin.copied_from_ancestor"],
+        serde_json::json!({
+            "required": ["kind", "ancestor_session_id", "ancestor_event_id", "proof"],
+            "optional": []
+        })
+    );
+
+    let frame = unhex(
+        value["golden_vectors"]["host_frames"]["apply_core_event_delta_page"]
+            .as_str()
+            .unwrap(),
+    );
+    let envelope: Value = serde_json::from_slice(&frame[FRAME_HEADER_BYTES..]).unwrap();
+    let record = envelope["message"]["body"]["page"]["deltas"][0]["value"].clone();
+    assert!(canonical["dto_fields"]["CoreRecord"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "session_relationship"));
+    assert!(canonical["dto_fields"]["CoreRecord"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "event_origin"));
+    assert_eq!(record["session_relationship"], "root");
+    assert_eq!(
+        record["event_origin"],
+        serde_json::json!({"kind": "unknown"})
+    );
+
+    let mut missing = record.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("session_relationship");
+    assert!(serde_json::from_value::<CoreRecord>(missing).is_err());
+
+    let mut unknown_relationship = record.clone();
+    unknown_relationship["session_relationship"] = serde_json::json!("future_kind");
+    assert!(serde_json::from_value::<CoreRecord>(unknown_relationship).is_err());
+
+    let mut unknown_origin = record;
+    unknown_origin["event_origin"] = serde_json::json!({"kind": "future_kind"});
+    assert!(serde_json::from_value::<CoreRecord>(unknown_origin).is_err());
 }
 
 #[test]

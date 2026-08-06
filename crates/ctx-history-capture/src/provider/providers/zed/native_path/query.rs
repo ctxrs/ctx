@@ -67,7 +67,6 @@ impl ZedThreadLineageResolver {
     pub(super) fn resolve(&mut self, thread_id: &str) -> ZedNativeResult<Option<ZedThreadLineage>> {
         let mut visited = HashSet::new();
         let mut current = thread_id.to_owned();
-        let mut root_thread_id = thread_id.to_owned();
         let mut parent_thread_id = None;
         let mut depth = 0_usize;
 
@@ -81,10 +80,9 @@ impl ZedThreadLineageResolver {
                 return if depth == 0 {
                     Ok(None)
                 } else {
-                    Ok(Some(ZedThreadLineage {
-                        parent_thread_id,
-                        root_thread_id,
-                    }))
+                    Err(ZedNativePathError::UnsupportedSchema(format!(
+                        "Zed thread relationship references missing parent {current:?}"
+                    )))
                 };
             };
             if depth > ZED_RELATIONSHIP_MAX_DEPTH {
@@ -95,11 +93,10 @@ impl ZedThreadLineageResolver {
             if depth == 1 {
                 parent_thread_id = Some(current.clone());
             }
-            root_thread_id = current;
             let Some(next) = parent else {
                 return Ok(Some(ZedThreadLineage {
                     parent_thread_id,
-                    root_thread_id,
+                    root_thread_id: current,
                 }));
             };
             current = next;

@@ -34,6 +34,8 @@ pub(crate) fn render_event(
         "ctx_session_id": event.session_id.as_uuid(),
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
         "root_ctx_session_id": event.root_session_id.as_uuid(),
+        "session_relationship": event.session_relationship,
+        "event_origin": crate::commands::source_index::event_origin_json(&event.event_origin),
         "occurred_at": occurred_at,
         "occurred_at_ms": event.occurred_at_unix_ms,
         "sequence": event.event_sequence,

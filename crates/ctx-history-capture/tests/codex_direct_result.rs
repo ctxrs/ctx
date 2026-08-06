@@ -742,7 +742,7 @@ fn invalid_attribution_preserves_terminal_content_and_all_stable_identities() {
     );
     assert_eq!(
         exact.parser_revision,
-        "codex-nativepath-core-record-v16-aggregate-content-admission"
+        "codex-nativepath-core-record-v17-session-copy-lineage"
     );
     assert_eq!(exact.parser_revision, invalid.parser_revision);
     assert_eq!(

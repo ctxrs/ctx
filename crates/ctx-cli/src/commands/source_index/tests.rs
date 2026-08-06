@@ -20,10 +20,11 @@ mod tests {
     };
     use ctx_history_core::{
         derive_event_id, derive_session_id, CertifiedSource, CoreContentPolicyStatus, CoreRecord,
-        EventIdentityInput, NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
-        RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
-        RepositoryFileObservationKind, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-        SourceKey, SourceObservation, TypedKey, MAX_CORE_CONTENT_BYTES,
+        EventCopyProofKind, EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey,
+        RepositoryBinding, RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+        RepositoryFileObservation, RepositoryFileObservationKind, ScannedSourceCounts,
+        SessionIdentityInput, SessionRelationshipKind, SourceAnchor, SourceKey, SourceObservation,
+        TypedKey, MAX_CORE_CONTENT_BYTES,
     };
     use ctx_history_index::{
         AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,
@@ -348,6 +349,8 @@ mod tests {
         );
         assert_eq!(value["query"], "primary query OR term with spaces");
         assert_eq!(value["filters"]["content_scope"], "all");
+        assert_eq!(value["results"][0]["session_relationship"], "root");
+        assert_eq!(value["results"][0]["event_origin"]["kind"], "unknown");
         assert_eq!(
             sorted_json_keys(&value["result_window"]),
             vec!["limit", "more_available", "returned"]

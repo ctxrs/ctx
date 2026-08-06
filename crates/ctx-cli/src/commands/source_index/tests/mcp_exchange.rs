@@ -1,6 +1,7 @@
 use ctx_history_core::{
-    McpExchangeContent, McpInvocationContent, McpJsonCapture, McpTerminalResponseContent,
-    McpTerminalStatus, McpTextCapture, McpToolCallAttribution,
+    EventCopyProofKind, EventOrigin, McpExchangeContent, McpInvocationContent, McpJsonCapture,
+    McpTerminalResponseContent, McpTerminalStatus, McpTextCapture, McpToolCallAttribution,
+    SessionRelationshipKind,
 };
 
 use super::*;
@@ -9,6 +10,7 @@ use crate::commands::source_index::mcp_show_event;
 const ARGUMENT_SEARCH_CANARY: &str = "zzargumentcanary8h63";
 const CALL_ID_SEARCH_CANARY: &str = "zzcallidcanary7g52";
 const RESPONSE_SEARCH_CANARY: &str = "zzresponsecanary9j74";
+const COPIED_SEARCH_CANARY: &str = "zzcopiedlineagecanary6k41";
 
 fn complete_exchange(payload: Value) -> McpExchangeContent {
     McpExchangeContent {
@@ -189,6 +191,14 @@ fn search_snippets_use_mcp_invocation_arguments_but_exclude_response_and_call_id
 
     let (mcp_value, _) = mcp_search(argument_request, temp.path()).unwrap();
     assert_eq!(mcp_value["results"][0]["snippet"], snippet);
+    assert_eq!(
+        mcp_value["results"][0]["session_relationship"],
+        value["results"][0]["session_relationship"]
+    );
+    assert_eq!(
+        mcp_value["results"][0]["event_origin"],
+        value["results"][0]["event_origin"]
+    );
 
     let shown = mcp_show_event(
         temp.path(),
@@ -218,4 +228,63 @@ fn search_snippets_use_mcp_invocation_arguments_but_exclude_response_and_call_id
         assert!(collection.result_window.hits.is_empty());
         assert!(value["results"].as_array().unwrap().is_empty());
     }
+}
+
+#[test]
+fn copied_lineage_is_hidden_from_mcp_search_but_visible_in_show_and_query_events() {
+    let temp = tempdir().unwrap();
+    write_test_generation(temp.path());
+    let ancestor = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 97, 1);
+    let mut copied = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 98, 1);
+    copied.parent_session_id = Some(ancestor.session_id);
+    copied.root_session_id = ancestor.session_id;
+    copied.session_relationship = SessionRelationshipKind::Forked;
+    copied.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: Box::new(ancestor.session_id),
+        ancestor_event_id: Box::new(ancestor.event_id),
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+    let ancestor = fixture_core_event(&ancestor, "ancestor body");
+    let copied = fixture_core_event(&copied, COPIED_SEARCH_CANARY);
+    append_fixture_session(temp.path(), std::slice::from_ref(&ancestor), 97);
+    append_fixture_session(temp.path(), std::slice::from_ref(&copied), 98);
+
+    let mut search = request(RefreshArg::Off);
+    search.query = COPIED_SEARCH_CANARY.to_owned();
+    search.events = true;
+    search.limit = 10;
+    let (searched, _) = mcp_search(search, temp.path()).unwrap();
+    assert!(searched["results"].as_array().unwrap().is_empty());
+
+    let shown = mcp_show_event(
+        temp.path(),
+        &copied.event_id.as_uuid().to_string(),
+        0,
+        0,
+        None,
+        crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+    )
+    .unwrap();
+    let shown_event = &shown["event"];
+    assert_eq!(shown_event["session_relationship"], "forked");
+    assert_eq!(
+        shown_event["event_origin"],
+        event_origin_json(&copied.event_origin)
+    );
+    assert_eq!(shown_event["text"], COPIED_SEARCH_CANARY);
+
+    let queried = crate::mcp::query_events_for_test(
+        &json!({"content": "full", "limit": 100}),
+        temp.path(),
+    )
+    .unwrap();
+    let queried_event = queried["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["ctx_event_id"] == json!(copied.event_id.as_uuid()))
+        .expect("copied event remains addressable through query_events");
+    assert_eq!(queried_event["session_relationship"], "forked");
+    assert_eq!(queried_event["event_origin"], shown_event["event_origin"]);
+    assert_eq!(queried_event["text"], COPIED_SEARCH_CANARY);
 }

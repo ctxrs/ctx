@@ -365,7 +365,7 @@ mod tests {
         .into_iter()
         .collect::<BTreeSet<_>>();
 
-        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(parsed.schema_version, 2);
         assert_eq!(ids, expected);
     }
 

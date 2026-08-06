@@ -43,6 +43,7 @@ The source contract is:
       "source_id": "default",
       "source_format": "example-agent-jsonl-v1",
       "path": "/path/owned/by/example-agent/history.jsonl",
+      "lineage_contract": "provider_native_v1",
       "enabled": true,
       "refresh": "manual"
     }
@@ -59,6 +60,12 @@ Identifiers are at most 128 bytes, start with a lowercase ASCII letter or
 digit, and contain only lowercase ASCII letters, digits, `.`, `_`, or `-`.
 Relative paths resolve from the manifest directory. A durable path cannot also
 declare command runtime options.
+
+`lineage_contract` is optional and currently accepts only
+`provider_native_v1`. It must match the provider-owned JSONL manifest. The
+custom parser admits copied origin only when that durable source supplies
+unique stable native session/event selectors and a typed ancestor chain.
+Command-only sources cannot declare this authority.
 
 Command-only manifests remain parseable so existing installations receive a
 stable compatibility diagnostic. They are reported as `unsupported`,

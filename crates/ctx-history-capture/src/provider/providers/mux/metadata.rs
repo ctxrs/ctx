@@ -20,6 +20,7 @@ pub(super) struct MuxBoundedSessionMetadata {
     pub(super) provider_session_id: String,
     pub(super) parent_provider_session_id: Option<String>,
     pub(super) root_provider_session_id: Option<String>,
+    pub(super) lineage_ambiguous: bool,
     pub(super) started_at: String,
     pub(super) cwd: Option<String>,
     pub(super) model: Option<String>,
@@ -78,7 +79,7 @@ fn mux_bounded_session_metadata_from_value(
         &source.session_dir,
         "workspace id",
     )?;
-    let parent_provider_session_id = mux_string_pointer(
+    let parent_aliases = mux_lineage_aliases(
         &metadata,
         &[
             "/parentWorkspaceId",
@@ -86,17 +87,32 @@ fn mux_bounded_session_metadata_from_value(
             "/parentSessionId",
             "/parent_session_id",
         ],
-    )
-    .or_else(|| source.parent_provider_session_id.clone())
-    .map(|value| bounded_mux_id(value, &source.session_dir, "parent workspace id"))
-    .transpose()?;
-    let root_provider_session_id = mux_string_pointer(
+    );
+    let parent_provider_session_id = parent_aliases
+        .value
+        .clone()
+        .or_else(|| source.parent_provider_session_id.clone())
+        .map(|value| bounded_mux_id(value, &source.session_dir, "parent workspace id"))
+        .transpose()?;
+    let root_aliases = mux_lineage_aliases(
         &metadata,
         &["/rootWorkspaceId", "/rootTaskId", "/rootSessionId"],
-    )
-    .or_else(|| parent_provider_session_id.clone())
-    .map(|value| bounded_mux_id(value, &source.session_dir, "root workspace id"))
-    .transpose()?;
+    );
+    let root_provider_session_id = root_aliases
+        .value
+        .clone()
+        .or_else(|| parent_provider_session_id.clone())
+        .map(|value| bounded_mux_id(value, &source.session_dir, "root workspace id"))
+        .transpose()?;
+    let path_parent_conflicts = matches!(
+        (
+            parent_aliases.value.as_deref(),
+            source.parent_provider_session_id.as_deref(),
+        ),
+        (Some(metadata_parent), Some(path_parent)) if metadata_parent != path_parent
+    );
+    let lineage_ambiguous =
+        parent_aliases.conflicting || root_aliases.conflicting || path_parent_conflicts;
     let bounded_text = |value: Option<String>| {
         value.map(|text| provider_local_preview(&text, PROVIDER_MAX_PREVIEW_CHARS).0)
     };
@@ -117,12 +133,33 @@ fn mux_bounded_session_metadata_from_value(
         provider_session_id,
         parent_provider_session_id,
         root_provider_session_id,
+        lineage_ambiguous,
         started_at: started_at.to_rfc3339(),
         cwd,
         model,
         metadata_revision: metadata_revision.to_owned(),
         metadata_failure,
     })
+}
+
+struct MuxLineageAliases {
+    value: Option<String>,
+    conflicting: bool,
+}
+
+fn mux_lineage_aliases(value: &Value, pointers: &[&str]) -> MuxLineageAliases {
+    let claims = pointers
+        .iter()
+        .filter_map(|pointer| value.pointer(pointer))
+        .filter_map(Value::as_str)
+        .filter(|claim| !claim.trim().is_empty())
+        .collect::<Vec<_>>();
+    MuxLineageAliases {
+        value: claims.first().map(|claim| (*claim).to_owned()),
+        conflicting: claims
+            .first()
+            .is_some_and(|first| claims.iter().skip(1).any(|claim| claim != first)),
+    }
 }
 
 pub(super) fn bounded_mux_id(value: String, path: &Path, label: &'static str) -> Result<String> {

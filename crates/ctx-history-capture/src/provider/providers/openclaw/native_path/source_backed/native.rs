@@ -113,8 +113,7 @@ pub(super) fn native_tool_result(value: &Value) -> Option<NativeToolResult<'_>> 
 pub(super) struct CompoundAdmission {
     pub(super) index: Value,
     pub(super) index_file: Option<OpenedProviderSourceFile>,
-    pub(super) parent_native_session_id: Option<String>,
-    pub(super) root_native_session_id: Option<String>,
+    pub(super) native_session_family: OpenClawNativeSessionFamily,
 }
 
 pub(super) fn admit_compound(
@@ -135,6 +134,11 @@ pub(super) fn admit_compound(
     if let Some(index) = &index_file {
         index.revalidate()?;
     }
+    let native_session_family = index_bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+        .map(|index| native_session_family(path, &index))
+        .unwrap_or(OpenClawNativeSessionFamily::Absent);
     let observation = super::super::super::OpenClawSessionObservation::from_admitted(
         path.to_path_buf(),
         transcript.metadata(),
@@ -143,17 +147,87 @@ pub(super) fn admit_compound(
             .zip(index_bytes.as_deref())
             .map(|(index, bytes)| (index.metadata(), bytes)),
     )?;
-    let (parent_native_session_id, root_native_session_id) = index_bytes
-        .as_deref()
-        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
-        .map(|index| native_session_family(path, &index))
-        .unwrap_or((None, None));
     Ok(CompoundAdmission {
         index: observation.index,
         index_file,
-        parent_native_session_id,
-        root_native_session_id,
+        native_session_family,
     })
+}
+
+struct OpenClawSessionLineage {
+    relationship: SessionRelationshipKind,
+    parent_native_session_id: Option<String>,
+    root_native_session_id: Option<String>,
+}
+
+fn resolve_session_lineage(
+    agent_id: Option<&str>,
+    native_session_family: &OpenClawNativeSessionFamily,
+    selected_index: &Value,
+) -> Result<OpenClawSessionLineage> {
+    let generic_parent = related_session_claim(
+        selected_index,
+        agent_id,
+        &["parentSessionId", "parent_session_id"],
+    );
+    let generic_root = related_session_claim(
+        selected_index,
+        agent_id,
+        &["rootSessionId", "root_session_id"],
+    );
+    match native_session_family {
+        OpenClawNativeSessionFamily::Resolved {
+            parent_native_session_id,
+            root_native_session_id,
+        } => {
+            let contradictory = generic_parent.invalid
+                || generic_root.invalid
+                || generic_parent
+                    .value
+                    .as_ref()
+                    .is_some_and(|generic| generic != parent_native_session_id)
+                || generic_root
+                    .value
+                    .as_ref()
+                    .is_some_and(|generic| generic != root_native_session_id);
+            Ok(OpenClawSessionLineage {
+                relationship: if contradictory {
+                    SessionRelationshipKind::RelatedUnknown
+                } else {
+                    SessionRelationshipKind::Delegated
+                },
+                parent_native_session_id: Some(parent_native_session_id.clone()),
+                root_native_session_id: Some(root_native_session_id.clone()),
+            })
+        }
+        OpenClawNativeSessionFamily::Absent | OpenClawNativeSessionFamily::Invalid => {
+            let Some(parent_native_session_id) = generic_parent.value else {
+                if matches!(native_session_family, OpenClawNativeSessionFamily::Invalid)
+                    || generic_parent.invalid
+                    || generic_root.invalid
+                    || generic_root.value.is_some()
+                {
+                    return Err(CaptureError::InvalidPayload(
+                        "OpenClaw session has invalid lineage without a resolvable parent"
+                            .to_owned(),
+                    ));
+                }
+                return Ok(OpenClawSessionLineage {
+                    relationship: SessionRelationshipKind::Root,
+                    parent_native_session_id: None,
+                    root_native_session_id: None,
+                });
+            };
+            let root_native_session_id = generic_root
+                .value
+                .unwrap_or_else(|| parent_native_session_id.clone());
+            Ok(OpenClawSessionLineage {
+                relationship: SessionRelationshipKind::RelatedUnknown,
+                parent_native_session_id: Some(parent_native_session_id),
+                root_native_session_id: Some(root_native_session_id),
+            })
+        }
+    }
 }
 
 pub(super) struct SessionState {
@@ -165,7 +239,7 @@ pub(super) struct SessionState {
     pub(super) cwd: Option<String>,
     pub(super) branch: Option<String>,
     pub(super) agent_type: AgentType,
-    pub(super) is_primary: bool,
+    pub(super) relationship: SessionRelationshipKind,
 }
 
 impl SessionState {
@@ -173,31 +247,18 @@ impl SessionState {
         path: &Path,
         native_session_id: &str,
         index: &Value,
-        native_parent_session_id: Option<&str>,
-        native_root_session_id: Option<&str>,
+        native_session_family: &OpenClawNativeSessionFamily,
         imported_at: DateTime<Utc>,
         direct_session_id: StableEntityId,
     ) -> Result<Self> {
         let agent_id = super::super::super::openclaw_agent_id(path)
             .map(|value| super::super::capped_text(&value));
         let provider_session_id = native_session_id.to_owned();
-        let parent_provider_session_id =
-            native_parent_session_id.map(str::to_owned).or_else(|| {
-                related_session_id(
-                    index,
-                    agent_id.as_deref(),
-                    &["parentSessionId", "parent_session_id"],
-                )
-            });
-        let root_provider_session_id = native_root_session_id
-            .map(str::to_owned)
-            .or_else(|| {
-                related_session_id(
-                    index,
-                    agent_id.as_deref(),
-                    &["rootSessionId", "root_session_id"],
-                )
-            })
+        let lineage = resolve_session_lineage(agent_id.as_deref(), native_session_family, index)?;
+        let parent_provider_session_id = lineage.parent_native_session_id;
+        let relationship = lineage.relationship;
+        let root_provider_session_id = lineage
+            .root_native_session_id
             .or_else(|| parent_provider_session_id.clone());
         let parent_session_id = parent_provider_session_id
             .as_deref()
@@ -217,12 +278,12 @@ impl SessionState {
             started_at: imported_at,
             cwd: None,
             branch: explicit_branch(index),
-            agent_type: if parent_session_id.is_some() {
+            agent_type: if relationship == SessionRelationshipKind::Delegated {
                 AgentType::Subagent
             } else {
                 AgentType::Primary
             },
-            is_primary: parent_session_id.is_none(),
+            relationship,
         })
     }
 

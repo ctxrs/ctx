@@ -43,13 +43,8 @@ pub use contracts::{
     LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_PUBLICATION_METADATA_BYTES,
 };
 pub(crate) use core_contract::{
-    audit_searcher_core_contract, classify_core_contract_generation,
     current_core_record_contract_fingerprint, expected_source_generation_policy_hash,
-    CoreContractGeneration,
-};
-#[cfg(test)]
-pub(crate) use core_contract::{
-    SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT, SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH,
+    validate_core_contract_fingerprint,
 };
 pub use ctx_history_core::CoreRecord;
 pub(crate) use identity::{
@@ -72,19 +67,20 @@ pub use preparation::{
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
 #[cfg(test)]
-pub(crate) use publication::republish_current_for_qualification;
 pub(crate) use publication::{
-    best_effort_post_migration_cleanup, canonical_commit_payload, create_candidate_generation,
-    load_active_generation_pointer, load_publication_for_metas, meta_generation,
-    migrate_allowlisted_predecessor, open_slot_index, payload_generation_id,
-    physical_integrity_audit, physical_integrity_digest, publish_active_generation_pointer,
+    best_effort_post_republish_cleanup, physical_integrity_digest,
+    republish_current_for_qualification,
+};
+pub(crate) use publication::{
+    canonical_commit_payload, create_candidate_generation, load_active_generation_pointer,
+    load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
+    physical_integrity_audit, publish_active_generation_pointer,
     reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
     reclaim_unreferenced_manifests, reconcile_commit_error, scrub_and_certify_physical_integrity,
     searcher_generation, sync_directory, sync_generation, verify_or_certify_physical_integrity,
     verify_physical_integrity, verify_publication_candidate, verify_searcher,
     verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
-    PhysicalIntegrityAudit, PointerPublicationOutcome, PredecessorMigrationOutcome,
-    INDEX_GENERATIONS_DIRECTORY,
+    PhysicalIntegrityAudit, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
@@ -105,7 +101,9 @@ pub use reader::VerifiedIndex;
 pub(crate) use schema::required_field;
 pub(crate) use schema::{fields_from_schema, lexical_schema, validate_schema, Fields};
 pub use search_projection::project_body_search;
-pub use writer_support::BaseEventIdentityLookup;
+pub use writer_support::{
+    BaseEventIdentityLookup, CandidateEventOriginResolution, CandidateEventOriginResolver,
+};
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -209,9 +207,9 @@ impl PendingDeletion {
 /// These errors describe versioned pointer, schema, policy, or physical index
 /// settings, not damaged control metadata. Callers must not read, clone,
 /// migrate, or otherwise interpret the incompatible generation.
-/// Core fingerprint mismatches are deliberately excluded: the exact
-/// same-epoch predecessor is handled by its read/migration bridge, while every
-/// unknown Core fingerprint fails closed without source reconstruction.
+/// Core fingerprint mismatches are deliberately excluded: current-schema
+/// generations with an unknown or retired fingerprint fail closed, while an
+/// obsolete schema is detected first and rebuilt without interpreting rows.
 pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
     matches!(
         error,
@@ -273,12 +271,11 @@ pub struct GenerationWriter {
     after_pointer_switch: Option<GenerationPathHook>,
 }
 
-/// Mandatory result of opening the generation writer across the narrow
-/// same-epoch predecessor transition.
+/// Compatibility result for opening a generation writer.
 ///
-/// Ordinary `Err` values mean no successor pointer became visible. A committed
-/// migration is always represented by one of the committed variants, so
-/// callers must explicitly acknowledge recovery before continuing.
+/// New opens return `Ready`; the committed migration variants remain available
+/// so downstream callers do not need a protocol-level transition for this
+/// internal cleanup.
 pub enum GenerationWriterOpenOutcome {
     Ready(GenerationWriter),
     RecoveredCommittedMigration {
@@ -349,14 +346,28 @@ impl GenerationWriter {
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
 
-        let (mut active_pointer, pointer_requires_rebuild) =
+        let (active_pointer, mut pointer_requires_rebuild) =
             match load_active_generation_pointer(&root) {
                 Ok(pointer) => (pointer, false),
                 Err(error) if generation_incompatibility_requires_rebuild(&error) => (None, true),
                 Err(error) => return Err(error),
             };
-        let mut committed_predecessor_migration_recovery = None;
-        let mut report_committed_predecessor_migration_recovery = false;
+        if !pointer_requires_rebuild {
+            if let Some(pointer) = active_pointer.as_ref() {
+                let schema_check = open_slot_index(&root, pointer.active())
+                    .and_then(|index| validate_schema(&index.schema()));
+                if let Err(error) = schema_check {
+                    if generation_incompatibility_requires_rebuild(&error) {
+                        // A retired schema is disposable source projection, not
+                        // clone authority. Keep its pointer untouched until a
+                        // fresh current candidate is completely published.
+                        pointer_requires_rebuild = true;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+        }
         if !pointer_requires_rebuild {
             reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
             let retained_generation_ids = active_pointer
@@ -366,37 +377,6 @@ impl GenerationWriter {
                 .collect::<Vec<_>>();
             reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
             reclaim_unreferenced_certifications(&root, active_pointer.as_ref())?;
-
-            if let Some(pointer) = active_pointer.clone() {
-                let outcome = migrate_allowlisted_predecessor(&root, &pointer, &options)?;
-                let migrated = match outcome {
-                    PredecessorMigrationOutcome::Unchanged(pointer) => pointer,
-                    PredecessorMigrationOutcome::Migrated(pointer) => {
-                        committed_predecessor_migration_recovery =
-                            Some(CommittedPredecessorMigrationRecovery::new(
-                                pointer.active().generation_id().to_owned(),
-                                "successor pointer published durably".to_owned(),
-                            ));
-                        pointer
-                    }
-                    PredecessorMigrationOutcome::CommittedVisible { pointer, recovery } => {
-                        report_committed_predecessor_migration_recovery = true;
-                        committed_predecessor_migration_recovery = Some(recovery);
-                        pointer
-                    }
-                    PredecessorMigrationOutcome::CommittedRecoveryRequired { recovery } => {
-                        return Ok(
-                            GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired {
-                                recovery,
-                            },
-                        );
-                    }
-                };
-                if migrated != pointer {
-                    active_pointer = Some(migrated.clone());
-                    best_effort_post_migration_cleanup(&root, &migrated);
-                }
-            }
         }
 
         let writer = (|| -> Result<Self> {
@@ -583,25 +563,7 @@ impl GenerationWriter {
                 after_pointer_switch: None,
             })
         })();
-        match (writer, committed_predecessor_migration_recovery) {
-            (Ok(writer), Some(recovery)) if report_committed_predecessor_migration_recovery => {
-                Ok(GenerationWriterOpenOutcome::RecoveredCommittedMigration { writer, recovery })
-            }
-            (Ok(writer), _) => Ok(GenerationWriterOpenOutcome::Ready(writer)),
-            (Err(error), Some(recovery)) => {
-                let generation_id = recovery.generation_id().to_owned();
-                let detail = format!(
-                    "{}; successor writer reload failed after pointer visibility: {error}",
-                    recovery.detail()
-                );
-                Ok(
-                    GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired {
-                        recovery: CommittedPredecessorMigrationRecovery::new(generation_id, detail),
-                    },
-                )
-            }
-            (Err(error), None) => Err(error),
-        }
+        writer.map(GenerationWriterOpenOutcome::Ready)
     }
 
     /// Returns the base generation captured after this writer acquired

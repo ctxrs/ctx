@@ -13,10 +13,10 @@ use crate::provider::codex::nativepath::reader::CodexLineageFactPresenceV0;
 // cannot bypass the new lineage authority.
 const LINEAGE_DEPENDENCY_DOMAIN: &[u8] = b"ctx/codex-lineage-dependency/v3\0";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CodexOutcomeOriginV0 {
     UniqueToSession,
-    CopiedFromAncestor,
+    CopiedFromAncestor { ancestor_native_session_id: String },
     Unproven,
 }
 
@@ -369,9 +369,6 @@ impl CodexOutcomeLineageAuthorityV0 {
         native_session_id: &str,
         origin_call_id: &str,
         result_call_id: &str,
-        origin_occurred_at_unix_ms: Option<i64>,
-        result_occurred_at_unix_ms: i64,
-        session_started_at_unix_ms: i64,
     ) -> CodexSourceBackedResultV0<CodexOutcomeOriginV0> {
         let Some(current) = self
             .indices
@@ -383,20 +380,9 @@ impl CodexOutcomeLineageAuthorityV0 {
         if current.relationship_state == RelationshipStateV0::Cycle {
             return Ok(CodexOutcomeOriginV0::Unproven);
         }
-        // A Codex fork snapshots its parent when the child session starts. An
-        // exact invocation/result pair recorded strictly after that boundary
-        // cannot have been copied from the parent, even when an older ancestor
-        // archive is unavailable. Mismatched, incomplete, or pre-fork evidence
-        // continues through the fail-closed ancestor-presence proof below.
-        if exact_correlated_result_postdates_fork(
-            origin_call_id,
-            result_call_id,
-            origin_occurred_at_unix_ms,
-            result_occurred_at_unix_ms,
-            session_started_at_unix_ms,
-        ) {
-            return Ok(CodexOutcomeOriginV0::UniqueToSession);
-        }
+        // Codex event timestamps are not lineage authority: copied native rows
+        // may be reordered or restamped. Only an exhaustive walk of certified
+        // ancestor call/result facts can prove copied presence or unique absence.
         let mut parent = match &current.parent {
             ParentLinkV0::Root => return Ok(CodexOutcomeOriginV0::UniqueToSession),
             ParentLinkV0::Missing(_) => return Ok(CodexOutcomeOriginV0::Unproven),
@@ -432,7 +418,9 @@ impl CodexOutcomeLineageAuthorityV0 {
             };
             match parent_facts.presence(origin_call_id, result_call_id) {
                 CodexLineageFactPresenceV0::Present => {
-                    return Ok(CodexOutcomeOriginV0::CopiedFromAncestor)
+                    return Ok(CodexOutcomeOriginV0::CopiedFromAncestor {
+                        ancestor_native_session_id: parent_node.native_session_id.clone(),
+                    })
                 }
                 CodexLineageFactPresenceV0::Unproven => return Ok(CodexOutcomeOriginV0::Unproven),
                 CodexLineageFactPresenceV0::Absent => {}
@@ -452,20 +440,6 @@ impl CodexOutcomeLineageAuthorityV0 {
             panic!("poison Codex lineage facts lock");
         }));
     }
-}
-
-fn exact_correlated_result_postdates_fork(
-    origin_call_id: &str,
-    result_call_id: &str,
-    origin_occurred_at_unix_ms: Option<i64>,
-    result_occurred_at_unix_ms: i64,
-    session_started_at_unix_ms: i64,
-) -> bool {
-    !origin_call_id.is_empty()
-        && origin_call_id == result_call_id
-        && origin_occurred_at_unix_ms
-            .is_some_and(|occurred_at| occurred_at > session_started_at_unix_ms)
-        && result_occurred_at_unix_ms > session_started_at_unix_ms
 }
 
 fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedResultV0<usize> {
@@ -704,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_parent_classification_bypasses_poisoned_fact_lock() {
+    fn terminal_lineage_states_bypass_poisoned_fact_lock() {
         let sources = vec![
             source("root", None, 1),
             source("child", Some("root"), 2),
@@ -713,26 +687,17 @@ mod tests {
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         authority.poison_facts_lock();
         assert_eq!(
-            authority
-                .classify("root", "call", "call", None, 0, 0)
-                .unwrap(),
+            authority.classify("root", "call", "call").unwrap(),
             CodexOutcomeOriginV0::UniqueToSession
         );
         assert_eq!(
             authority
-                .classify("missing-parent", "call", "call", None, 0, 0)
+                .classify("missing-parent", "call", "call")
                 .unwrap(),
             CodexOutcomeOriginV0::Unproven
         );
-        assert_eq!(
-            authority
-                .classify("child", "call", "call", Some(101), 102, 100)
-                .unwrap(),
-            CodexOutcomeOriginV0::UniqueToSession,
-            "PR #290 exact post-fork pairs must still bypass ancestor facts"
-        );
         assert!(matches!(
-            authority.classify("child", "call", "call", None, 0, 0),
+            authority.classify("child", "call", "call"),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
         ));
     }
@@ -761,40 +726,33 @@ mod tests {
         ];
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         assert_eq!(
-            authority
-                .classify("left", "call", "call", Some(101), 102, 100)
-                .unwrap(),
+            authority.classify("left", "call", "call").unwrap(),
             CodexOutcomeOriginV0::Unproven
         );
     }
 
     #[test]
-    fn only_exact_post_fork_correlated_results_bypass_ancestor_lookup() {
-        assert!(exact_correlated_result_postdates_fork(
-            "call-1",
-            "call-1",
-            Some(101),
-            102,
-            100,
-        ));
+    fn lineage_evidence_authority_requires_certified_absence_for_unique_classification() {
+        let sources = vec![
+            source("root", None, 1),
+            source("child", Some("root"), 2),
+            source("missing-parent", Some("outside-route"), 3),
+        ];
+        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        authority
+            .register("root", authority.new_fact_set("root").unwrap())
+            .unwrap();
 
-        for candidate in [
-            ("call-1", "call-2", Some(101), 102, 100),
-            ("", "", Some(101), 102, 100),
-            ("call-1", "call-1", None, 102, 100),
-            ("call-1", "call-1", Some(100), 102, 100),
-            ("call-1", "call-1", Some(99), 102, 100),
-            ("call-1", "call-1", Some(101), 100, 100),
-            ("call-1", "call-1", Some(101), 99, 100),
-        ] {
-            assert!(!exact_correlated_result_postdates_fork(
-                candidate.0,
-                candidate.1,
-                candidate.2,
-                candidate.3,
-                candidate.4,
-            ));
-        }
+        assert_eq!(
+            authority.classify("child", "call", "call").unwrap(),
+            CodexOutcomeOriginV0::UniqueToSession
+        );
+        assert_eq!(
+            authority
+                .classify("missing-parent", "call", "call")
+                .unwrap(),
+            CodexOutcomeOriginV0::Unproven
+        );
     }
 
     #[test]
@@ -805,9 +763,7 @@ mod tests {
             .bind_route_sources(&HashSet::from(["child".to_owned()]))
             .unwrap();
         assert_eq!(
-            authority
-                .classify("child", "call", "call", None, 0, 0)
-                .unwrap(),
+            authority.classify("child", "call", "call").unwrap(),
             CodexOutcomeOriginV0::Unproven
         );
     }
@@ -820,7 +776,7 @@ mod tests {
             .bind_route_sources(&HashSet::from(["root".to_owned(), "child".to_owned()]))
             .unwrap();
         assert!(matches!(
-            authority.classify("child", "call", "call", None, 0, 0),
+            authority.classify("child", "call", "call"),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
         ));
     }
@@ -897,13 +853,13 @@ mod tests {
         }
         authority.release_component(component_a).unwrap();
         assert_eq!(
-            authority
-                .classify("child-b", "copied", "copied", None, 0, 0)
-                .unwrap(),
-            CodexOutcomeOriginV0::CopiedFromAncestor
+            authority.classify("child-b", "copied", "copied").unwrap(),
+            CodexOutcomeOriginV0::CopiedFromAncestor {
+                ancestor_native_session_id: "root-b".to_owned(),
+            }
         );
         assert!(matches!(
-            authority.classify("child-a", "copied", "copied", None, 0, 0),
+            authority.classify("child-a", "copied", "copied"),
             Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
         ));
     }
@@ -985,10 +941,10 @@ mod tests {
             processed_facts += FACTS_PER_COMPONENT;
             authority.register(root, facts).unwrap();
             assert_eq!(
-                authority
-                    .classify(child, &marker, &marker, None, 0, 0)
-                    .unwrap(),
-                CodexOutcomeOriginV0::CopiedFromAncestor
+                authority.classify(child, &marker, &marker).unwrap(),
+                CodexOutcomeOriginV0::CopiedFromAncestor {
+                    ancestor_native_session_id: root.clone(),
+                }
             );
             authority
                 .register(child, authority.new_fact_set(child).unwrap())

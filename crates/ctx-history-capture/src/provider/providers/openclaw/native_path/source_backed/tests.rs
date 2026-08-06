@@ -1,7 +1,8 @@
 use super::*;
 use crate::repository_attribution::RepositoryAttributor;
 use ctx_history_core::{
-    CertifiedSource, RepositoryFileInvocationKind, ScannedSourceCounts, SourceObservation,
+    CertifiedSource, EventOrigin, RepositoryFileInvocationKind, ScannedSourceCounts,
+    SourceObservation,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
 #[cfg(unix)]
@@ -22,8 +23,7 @@ fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
         Path::new("/agents/main/sessions/test-session.jsonl"),
         native_session_id,
         &Value::Null,
-        None,
-        None,
+        &OpenClawNativeSessionFamily::Absent,
         DateTime::<Utc>::UNIX_EPOCH,
         session_id,
     )
@@ -43,6 +43,60 @@ fn test_projector() -> (tempfile::TempDir, OpenClawProjector) {
             fallback_identities: FallbackEventIdentityState::default(),
         },
     )
+}
+
+fn project_session_event(
+    path: &Path,
+    native_session_id: &str,
+    index: &Value,
+    native_session_family: &OpenClawNativeSessionFamily,
+) -> CoreRecord {
+    let temp = tempfile::tempdir().unwrap();
+    let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+    let source = source_key(native_session_id).unwrap();
+    let session_id = session_identity(&source, native_session_id).unwrap();
+    let session = SessionState::new(
+        path,
+        native_session_id,
+        index,
+        native_session_family,
+        DateTime::<Utc>::UNIX_EPOCH,
+        session_id,
+    )
+    .unwrap();
+    let mut projector = OpenClawProjector {
+        source,
+        native_session_id: native_session_id.to_owned(),
+        session_id,
+        session,
+        index_file: None,
+        authority,
+        pending_calls: HashMap::new(),
+        running_processes: HashMap::new(),
+        linkage_capacity_exceeded: false,
+        fallback_identities: FallbackEventIdentityState::default(),
+    };
+    let value = serde_json::json!({
+        "type": "message",
+        "id": "child-event",
+        "timestamp": "2026-08-05T12:00:00Z",
+        "message": {"role": "user", "content": "exact child-owned OpenClaw event"}
+    });
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let mut emitted = Vec::new();
+    projector
+        .project(
+            JsonlRecordRef::for_test(&bytes, 0),
+            &mut worker,
+            &mut |record| {
+                emitted.push(record);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(emitted.len(), 1);
+    emitted.pop().unwrap()
 }
 
 #[cfg(unix)]
@@ -213,11 +267,180 @@ fn native_tool_call_result_and_spawned_family_are_exact() {
             Path::new("/agents/worker/sessions/child-session.jsonl"),
             &index
         ),
-        (
-            Some("main/parent-session".to_owned()),
-            Some("main/parent-session".to_owned())
-        )
+        OpenClawNativeSessionFamily::Resolved {
+            parent_native_session_id: "main/parent-session".to_owned(),
+            root_native_session_id: "main/parent-session".to_owned(),
+        }
     );
+}
+
+#[test]
+fn provider_p1_lineage_malformed_dangling_and_cyclic_spawned_by_are_invalid() {
+    let path = Path::new("/agents/worker/sessions/child-session.jsonl");
+    for index in [
+        serde_json::json!({
+            "agent:worker:child": {
+                "sessionId": "child-session",
+                "spawnedBy": 7
+            }
+        }),
+        serde_json::json!({
+            "agent:worker:child": {
+                "sessionId": "child-session",
+                "spawnedBy": "missing-parent-key"
+            }
+        }),
+        serde_json::json!({
+            "agent:worker:child": {
+                "sessionId": "child-session",
+                "spawnedBy": "agent:main:parent"
+            },
+            "agent:main:parent": {
+                "sessionId": "parent-session",
+                "spawnedBy": "agent:worker:child"
+            }
+        }),
+    ] {
+        assert_eq!(
+            native_session_family(path, &index),
+            OpenClawNativeSessionFamily::Invalid
+        );
+    }
+}
+
+#[test]
+fn provider_p1_lineage_invalid_spawned_by_without_parent_fails_closed() {
+    let path = Path::new("/agents/worker/sessions/child-session.jsonl");
+    let native_session_id = "worker/child-session";
+    let source = source_key(native_session_id).unwrap();
+    let session_id = session_identity(&source, native_session_id).unwrap();
+
+    let error = SessionState::new(
+        path,
+        native_session_id,
+        &Value::Null,
+        &OpenClawNativeSessionFamily::Invalid,
+        DateTime::<Utc>::UNIX_EPOCH,
+        session_id,
+    )
+    .err()
+    .expect("invalid spawnedBy must not publish a root");
+
+    assert!(error.to_string().contains("without a resolvable parent"));
+}
+
+#[test]
+fn spawned_children_are_delegated_unique_while_generic_parents_stay_unknown() {
+    let spawned_index = serde_json::from_str::<Value>(SESSIONS).unwrap();
+    let spawned_path = Path::new("/agents/worker/sessions/child-session.jsonl");
+    let spawned_family = native_session_family(spawned_path, &spawned_index);
+    let spawned = project_session_event(
+        spawned_path,
+        "worker/child-session",
+        &Value::Null,
+        &spawned_family,
+    );
+    assert_eq!(
+        spawned.session_relationship,
+        SessionRelationshipKind::Delegated
+    );
+    assert_eq!(spawned.event_origin, EventOrigin::UniqueToSession);
+    assert!(!spawned.is_primary);
+    assert_eq!(
+        spawned.content.meaningful_text(),
+        "exact child-owned OpenClaw event"
+    );
+    assert_eq!(
+        spawned.native_event_id,
+        Some(TypedKey::utf8("child-event").unwrap())
+    );
+
+    let generic = project_session_event(
+        Path::new("/agents/worker/sessions/generic-child.jsonl"),
+        "worker/generic-child",
+        &serde_json::json!({
+            "parentSessionId": "generic-parent",
+            "rootSessionId": "generic-root"
+        }),
+        &OpenClawNativeSessionFamily::Absent,
+    );
+    assert_eq!(
+        generic.session_relationship,
+        SessionRelationshipKind::RelatedUnknown
+    );
+    assert_eq!(generic.event_origin, EventOrigin::Unknown);
+    assert!(generic.is_primary);
+    assert_eq!(
+        generic.content.meaningful_text(),
+        "exact child-owned OpenClaw event"
+    );
+    assert_eq!(
+        generic.native_event_id,
+        Some(TypedKey::utf8("child-event").unwrap())
+    );
+
+    let unsupported_fork_source = project_session_event(
+        Path::new("/agents/worker/sessions/sqlite-fork-lookalike.jsonl"),
+        "worker/sqlite-fork-lookalike",
+        &serde_json::json!({
+            "forkSource": {
+                "sessionId": "unsupported-sqlite-parent",
+                "entryId": "unsupported-sqlite-entry"
+            }
+        }),
+        &OpenClawNativeSessionFamily::Absent,
+    );
+    assert_eq!(
+        unsupported_fork_source.session_relationship,
+        SessionRelationshipKind::Root
+    );
+    assert_eq!(unsupported_fork_source.event_origin, EventOrigin::Unknown);
+    assert!(unsupported_fork_source.parent_session_id.is_none());
+}
+
+#[test]
+fn provider_p1_lineage_contradictory_native_and_generic_authorities_are_unknown() {
+    let record = project_session_event(
+        Path::new("/agents/worker/sessions/child-session.jsonl"),
+        "worker/child-session",
+        &serde_json::json!({
+            "parentSessionId": "generic-parent",
+            "rootSessionId": "generic-root"
+        }),
+        &OpenClawNativeSessionFamily::Resolved {
+            parent_native_session_id: "main/native-parent".to_owned(),
+            root_native_session_id: "main/native-root".to_owned(),
+        },
+    );
+
+    assert_eq!(
+        record.session_relationship,
+        SessionRelationshipKind::RelatedUnknown
+    );
+    assert_eq!(record.event_origin, EventOrigin::Unknown);
+    assert!(record.is_primary);
+    assert!(record.parent_session_id.is_some());
+}
+
+#[test]
+fn provider_p1_lineage_contradictory_generic_parent_aliases_are_unknown() {
+    let record = project_session_event(
+        Path::new("/agents/worker/sessions/generic-child.jsonl"),
+        "worker/generic-child",
+        &serde_json::json!({
+            "parentSessionId": "first-parent",
+            "parent_session_id": "second-parent"
+        }),
+        &OpenClawNativeSessionFamily::Absent,
+    );
+
+    assert_eq!(
+        record.session_relationship,
+        SessionRelationshipKind::RelatedUnknown
+    );
+    assert_eq!(record.event_origin, EventOrigin::Unknown);
+    assert!(record.is_primary);
+    assert!(record.parent_session_id.is_some());
 }
 
 #[test]
@@ -781,8 +1004,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         index_relative_path: PathBuf::from("sessions.json"),
         native_session_id: native_session_id.to_owned(),
         index: Value::Null,
-        parent_native_session_id: None,
-        root_native_session_id: None,
+        native_session_family: OpenClawNativeSessionFamily::Absent,
     };
     let source = source_key(native_session_id).unwrap();
     let session_id = session_identity(&source, native_session_id).unwrap();
@@ -791,8 +1013,7 @@ fn append_after_prior_duplicate_probes_base_and_restores_call_ambiguity() {
         &source_path,
         native_session_id,
         &binding.index,
-        None,
-        None,
+        &binding.native_session_family,
         DateTime::<Utc>::UNIX_EPOCH,
         session_id,
     )

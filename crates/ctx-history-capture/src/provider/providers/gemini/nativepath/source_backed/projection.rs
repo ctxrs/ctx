@@ -1,7 +1,7 @@
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CaptureProvider, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId,
-    TypedKey,
+    EventOrigin, NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey,
+    StableEntityId, TypedKey,
 };
 
 use super::{
@@ -46,16 +46,26 @@ pub(super) fn project_event(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        root_session_id,
+        session_id,
         source.clone(),
         event_sequence,
         event.event_type.as_str(),
         session.agent_type.as_str(),
-        is_primary,
+        true,
         GEMINI_SOURCE_BACKED_PARSER_REVISION,
         body,
     )?;
-    record.parent_session_id = parent_session_id;
+    if let Some(parent_session_id) = parent_session_id {
+        let kind = if is_primary {
+            ctx_history_core::SessionRelationshipKind::RelatedUnknown
+        } else {
+            ctx_history_core::SessionRelationshipKind::Delegated
+        };
+        record.set_session_relationship(kind, Some(parent_session_id), root_session_id)?;
+        if kind == ctx_history_core::SessionRelationshipKind::Delegated {
+            record.event_origin = EventOrigin::UniqueToSession;
+        }
+    }
     record.provider_session_id = Some(session.native_session_id.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = event

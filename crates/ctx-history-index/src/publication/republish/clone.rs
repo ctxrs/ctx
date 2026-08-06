@@ -12,7 +12,7 @@ use super::super::ActiveGenerationPointer;
     target_os = "windows",
     target_os = "freebsd"
 )))]
-compile_error!("predecessor migration clone is only qualified on ctx release targets");
+compile_error!("predecessor republish clone is only qualified on ctx release targets");
 
 mod candidate;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -21,53 +21,53 @@ mod exact_copy;
 mod portable;
 
 use candidate::CandidateAuthentication;
-pub(super) use candidate::MigrationCandidate;
+pub(super) use candidate::RepublishCandidate;
 
-pub(super) const MAX_MIGRATION_CLONE_FILES: usize = 4_096;
-pub(super) const MAX_MIGRATION_CLONE_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
-const MAX_MIGRATION_DIRECTORY_ENTRIES: usize = 4_096;
+pub(super) const MAX_REPUBLISH_CLONE_FILES: usize = 4_096;
+pub(super) const MAX_REPUBLISH_CLONE_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+const MAX_REPUBLISH_DIRECTORY_ENTRIES: usize = 4_096;
 const MAX_MANAGED_METADATA_BYTES: u64 = 1024 * 1024;
-const MIGRATION_HEADROOM_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
+const REPUBLISH_HEADROOM_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 const MANAGED_FILE: &str = ".managed.json";
 const TANTIVY_LOCK_FILES: [&str; 2] = [".tantivy-meta.lock", ".tantivy-writer.lock"];
 
-pub(super) fn create_authenticated_migration_candidate(
+pub(super) fn create_authenticated_republish_candidate(
     root: &Path,
     predecessor_pointer: &ActiveGenerationPointer,
     predecessor_index: &Index,
-) -> Result<MigrationCandidate> {
+) -> Result<RepublishCandidate> {
     #[cfg(test)]
     if portable::forced_for_test() {
-        let (candidate, guard) = portable::create_authenticated_migration_candidate(
+        let (candidate, guard) = portable::create_authenticated_republish_candidate(
             root,
             predecessor_pointer,
             predecessor_index,
         )?;
-        return Ok(MigrationCandidate::new(
+        return Ok(RepublishCandidate::new(
             candidate,
             CandidateAuthentication::Portable(guard),
         ));
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let (candidate, guard) = unix::create_authenticated_migration_candidate(
+        let (candidate, guard) = unix::create_authenticated_republish_candidate(
             root,
             predecessor_pointer,
             predecessor_index,
         )?;
-        Ok(MigrationCandidate::new(
+        Ok(RepublishCandidate::new(
             candidate,
             CandidateAuthentication::DescriptorClone(guard),
         ))
     }
     #[cfg(any(target_os = "windows", target_os = "freebsd"))]
     {
-        let (candidate, guard) = portable::create_authenticated_migration_candidate(
+        let (candidate, guard) = portable::create_authenticated_republish_candidate(
             root,
             predecessor_pointer,
             predecessor_index,
         )?;
-        Ok(MigrationCandidate::new(
+        Ok(RepublishCandidate::new(
             candidate,
             CandidateAuthentication::Portable(guard),
         ))
@@ -79,7 +79,7 @@ fn validate_single_component(path: &Path) -> Result<()> {
     if !matches!(components.next(), Some(std::path::Component::Normal(_)))
         || components.next().is_some()
     {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "managed path escapes generation directory",
         ));
     }
@@ -95,7 +95,7 @@ fn admit_clone_resource(
 ) -> Result<()> {
     *files = files.checked_add(1).ok_or(IndexError::CountOverflow)?;
     if *files > maximum_files {
-        return Err(IndexError::PredecessorMigrationFileLimit {
+        return Err(IndexError::CurrentRepublishFileLimit {
             actual: *files,
             maximum: maximum_files,
         });
@@ -104,7 +104,7 @@ fn admit_clone_resource(
         .checked_add(next_bytes)
         .ok_or(IndexError::CountOverflow)?;
     if *bytes > maximum_bytes {
-        return Err(IndexError::PredecessorMigrationByteLimit {
+        return Err(IndexError::CurrentRepublishByteLimit {
             actual: *bytes,
             maximum: maximum_bytes,
         });
@@ -143,10 +143,10 @@ mod unix {
     use super::exact_copy::copy_exact_authenticated_file;
     use super::{
         admit_clone_resource, validate_single_component, MANAGED_FILE, MAX_MANAGED_METADATA_BYTES,
-        MAX_MIGRATION_CLONE_BYTES, MAX_MIGRATION_CLONE_FILES, MAX_MIGRATION_DIRECTORY_ENTRIES,
-        MIGRATION_HEADROOM_RESERVE_BYTES, TANTIVY_LOCK_FILES,
+        MAX_REPUBLISH_CLONE_BYTES, MAX_REPUBLISH_CLONE_FILES, MAX_REPUBLISH_DIRECTORY_ENTRIES,
+        REPUBLISH_HEADROOM_RESERVE_BYTES, TANTIVY_LOCK_FILES,
     };
-    pub(in crate::publication::migration) use guard::CandidateGuard;
+    pub(in crate::publication::republish) use guard::CandidateGuard;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct FileIdentity {
@@ -225,7 +225,7 @@ mod unix {
         fn from_file(file: File) -> Result<Self> {
             let identity = FileIdentity::from_metadata(&file.metadata()?);
             if !identity.is_directory() {
-                return Err(IndexError::PredecessorMigrationSourceTopology(
+                return Err(IndexError::CurrentRepublishSourceTopology(
                     "generation path is not a directory",
                 ));
             }
@@ -233,7 +233,7 @@ mod unix {
         }
     }
 
-    pub(super) fn create_authenticated_migration_candidate(
+    pub(super) fn create_authenticated_republish_candidate(
         root: &Path,
         predecessor_pointer: &ActiveGenerationPointer,
         predecessor_index: &Index,
@@ -260,7 +260,7 @@ mod unix {
         let available = available_bytes(&generations.file)?;
         record_plan_metrics(&plan, available);
         if available < plan.required_headroom {
-            return Err(IndexError::PredecessorMigrationInsufficientHeadroom {
+            return Err(IndexError::CurrentRepublishInsufficientHeadroom {
                 available,
                 required: plan.required_headroom,
             });
@@ -334,10 +334,10 @@ mod unix {
         let mut planned = BTreeMap::new();
         let mut total_files = 0_usize;
         let mut total_bytes = 0_u64;
-        for name in directory_entries(&source.file, MAX_MIGRATION_DIRECTORY_ENTRIES)? {
+        for name in directory_entries(&source.file, MAX_REPUBLISH_DIRECTORY_ENTRIES)? {
             let name_text = name
                 .to_str()
-                .ok_or(IndexError::PredecessorMigrationSourceTopology(
+                .ok_or(IndexError::CurrentRepublishSourceTopology(
                     "non-UTF-8 directory entry",
                 ))?;
             let relative = PathBuf::from(&name);
@@ -351,8 +351,8 @@ mod unix {
                     &mut total_files,
                     &mut total_bytes,
                     identity.bytes,
-                    MAX_MIGRATION_CLONE_FILES,
-                    MAX_MIGRATION_CLONE_BYTES,
+                    MAX_REPUBLISH_CLONE_FILES,
+                    MAX_REPUBLISH_CLONE_BYTES,
                 )?;
                 planned.insert(
                     relative.clone(),
@@ -364,7 +364,7 @@ mod unix {
                 );
             } else if name_text == MANAGED_FILE {
                 if identity.bytes > MAX_MANAGED_METADATA_BYTES {
-                    return Err(IndexError::PredecessorMigrationByteLimit {
+                    return Err(IndexError::CurrentRepublishByteLimit {
                         actual: identity.bytes,
                         maximum: MAX_MANAGED_METADATA_BYTES,
                     });
@@ -374,8 +374,8 @@ mod unix {
                     &mut total_files,
                     &mut total_bytes,
                     identity.bytes,
-                    MAX_MIGRATION_CLONE_FILES,
-                    MAX_MIGRATION_CLONE_BYTES,
+                    MAX_REPUBLISH_CLONE_FILES,
+                    MAX_REPUBLISH_CLONE_BYTES,
                 )?;
                 planned.insert(
                     relative.clone(),
@@ -388,36 +388,35 @@ mod unix {
             } else if TANTIVY_LOCK_FILES.contains(&name_text) && identity.bytes == 0 {
                 continue;
             } else {
-                return Err(IndexError::PredecessorMigrationSourceTopology(
+                return Err(IndexError::CurrentRepublishSourceTopology(
                     "unexpected directory entry",
                 ));
             }
         }
         if seen_active != active || !managed_seen {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "active or managed file missing",
             ));
         }
 
         let managed = planned.get(Path::new(MANAGED_FILE)).ok_or(
-            IndexError::PredecessorMigrationSourceTopology("managed file missing"),
+            IndexError::CurrentRepublishSourceTopology("managed file missing"),
         )?;
         let managed_bytes = read_bound_file(source, managed, MAX_MANAGED_METADATA_BYTES)?;
-        let managed_paths: Vec<PathBuf> = serde_json::from_slice(&managed_bytes).map_err(|_| {
-            IndexError::PredecessorMigrationSourceTopology("invalid managed metadata")
-        })?;
+        let managed_paths: Vec<PathBuf> = serde_json::from_slice(&managed_bytes)
+            .map_err(|_| IndexError::CurrentRepublishSourceTopology("invalid managed metadata"))?;
         for path in &managed_paths {
             validate_single_component(path)?;
         }
         let managed_set = managed_paths.iter().cloned().collect::<BTreeSet<_>>();
         if managed_set.len() != managed_paths.len() || managed_set != active {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "managed metadata does not match active files",
             ));
         }
 
         let required_headroom = total_bytes
-            .checked_add(MIGRATION_HEADROOM_RESERVE_BYTES)
+            .checked_add(REPUBLISH_HEADROOM_RESERVE_BYTES)
             .ok_or(IndexError::CountOverflow)?;
         Ok(ClonePlan {
             files: planned.into_values().collect(),
@@ -434,7 +433,7 @@ mod unix {
         let mut file = open_regular_file_at(&directory.file, &planned.path)?;
         let before = FileIdentity::from_metadata(&file.metadata()?);
         if before != planned.identity {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "source file changed after authentication",
             ));
         }
@@ -443,7 +442,7 @@ mod unix {
             .take(maximum.saturating_add(1))
             .read_to_end(&mut bytes)?;
         if bytes.len() as u64 != planned.identity.bytes {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "source file size changed while reading",
             ));
         }
@@ -468,7 +467,7 @@ mod unix {
             let mut source_file = open_regular_file_at(&source.file, &planned.path)?;
             let before = FileIdentity::from_metadata(&source_file.metadata()?);
             if before != planned.identity {
-                return Err(IndexError::PredecessorMigrationSourceTopology(
+                return Err(IndexError::CurrentRepublishSourceTopology(
                     "source file changed after authentication",
                 ));
             }
@@ -488,7 +487,7 @@ mod unix {
                 let linked_file = open_regular_file_at(&destination.file, &planned.path)?;
                 let linked_identity = FileIdentity::from_metadata(&linked_file.metadata()?);
                 if linked_identity != before {
-                    return Err(IndexError::PredecessorMigrationSourceTopology(
+                    return Err(IndexError::CurrentRepublishSourceTopology(
                         "hardlink target identity does not match authenticated source",
                     ));
                 }
@@ -501,7 +500,7 @@ mod unix {
                 let remaining_allowance = plan
                     .logical_bytes
                     .checked_sub(actual_copied_bytes)
-                    .ok_or(IndexError::PredecessorMigrationByteLimit {
+                    .ok_or(IndexError::CurrentRepublishByteLimit {
                         actual: actual_copied_bytes,
                         maximum: plan.logical_bytes,
                     })?;
@@ -517,19 +516,19 @@ mod unix {
                 let destination_identity =
                     FileIdentity::from_metadata(&destination_file.metadata()?);
                 if copied != before.bytes || destination_identity.bytes != before.bytes {
-                    return Err(IndexError::PredecessorMigrationSourceTopology(
+                    return Err(IndexError::CurrentRepublishSourceTopology(
                         "copy byte count does not match authenticated source",
                     ));
                 }
                 actual_copied_bytes = actual_copied_bytes
                     .checked_add(copied)
                     .ok_or(IndexError::CountOverflow)?;
-                if actual_copied_bytes > MAX_MIGRATION_CLONE_BYTES
+                if actual_copied_bytes > MAX_REPUBLISH_CLONE_BYTES
                     || actual_copied_bytes > plan.logical_bytes
                 {
-                    return Err(IndexError::PredecessorMigrationByteLimit {
+                    return Err(IndexError::CurrentRepublishByteLimit {
                         actual: actual_copied_bytes,
-                        maximum: plan.logical_bytes.min(MAX_MIGRATION_CLONE_BYTES),
+                        maximum: plan.logical_bytes.min(MAX_REPUBLISH_CLONE_BYTES),
                     });
                 }
                 copied_files = copied_files
@@ -538,7 +537,7 @@ mod unix {
             }
             let after = FileIdentity::from_metadata(&source_file.metadata()?);
             if after != before {
-                return Err(IndexError::PredecessorMigrationSourceTopology(
+                return Err(IndexError::CurrentRepublishSourceTopology(
                     "source file changed while cloning",
                 ));
             }
@@ -555,7 +554,7 @@ mod unix {
         destination_name: &Path,
         destination: &BoundDirectory,
     ) -> Result<()> {
-        for name in directory_entries(&destination.file, MAX_MIGRATION_DIRECTORY_ENTRIES)? {
+        for name in directory_entries(&destination.file, MAX_REPUBLISH_DIRECTORY_ENTRIES)? {
             let relative = Path::new(&name);
             validate_single_component(relative)?;
             let file = open_regular_file_at(&destination.file, relative)?;
@@ -583,7 +582,7 @@ mod unix {
             .map_err(source_topology_open_error)?;
         let identity = FileIdentity::from_metadata(&file.metadata()?);
         if !identity.is_regular() {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "non-regular directory entry",
             ));
         }
@@ -690,8 +689,8 @@ mod unix {
         let metadata = fs::symlink_metadata(path).map_err(source_topology_open_error)?;
         let actual = FileIdentity::from_metadata(&metadata);
         if !actual.is_directory() || !actual.is_same_object(expected) {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
-                "generation parent path changed during migration",
+            return Err(IndexError::CurrentRepublishSourceTopology(
+                "generation parent path changed during republish",
             ));
         }
         Ok(())
@@ -700,8 +699,8 @@ mod unix {
     fn validate_child_binding(parent: &File, path: &Path, expected: FileIdentity) -> Result<()> {
         let actual = stat_at(parent, path)?;
         if !actual.is_directory() || !actual.is_same_object(expected) {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
-                "active generation directory changed during migration",
+            return Err(IndexError::CurrentRepublishSourceTopology(
+                "active generation directory changed during republish",
             ));
         }
         Ok(())
@@ -710,8 +709,8 @@ mod unix {
     fn validate_file_binding(parent: &File, path: &Path, expected: FileIdentity) -> Result<()> {
         let actual = stat_at(parent, path)?;
         if !actual.is_regular() || actual != expected {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
-                "source file changed during migration",
+            return Err(IndexError::CurrentRepublishSourceTopology(
+                "source file changed during republish",
             ));
         }
         Ok(())
@@ -781,7 +780,7 @@ mod unix {
                 .checked_add(1)
                 .ok_or(IndexError::CountOverflow)?;
             if actual > maximum {
-                return Err(IndexError::PredecessorMigrationFileLimit { actual, maximum });
+                return Err(IndexError::CurrentRepublishFileLimit { actual, maximum });
             }
             entries.push(OsString::from_vec(bytes.to_vec()));
         }
@@ -820,8 +819,8 @@ mod unix {
             .raw_os_error()
             .is_some_and(|code| [libc::ELOOP, libc::ENOTDIR].contains(&code))
         {
-            IndexError::PredecessorMigrationSourceTopology(
-                "symlinked or non-directory migration source",
+            IndexError::CurrentRepublishSourceTopology(
+                "symlinked or non-directory republish source",
             )
         } else {
             IndexError::Io(error)

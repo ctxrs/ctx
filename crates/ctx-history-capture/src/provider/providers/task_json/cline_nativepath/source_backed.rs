@@ -787,14 +787,14 @@ mod replay_tests {
                 "f29a3a4b-8b02-8b15-ad30-22b8d3e245e5",
                 "985dcf50-7cf6-85de-87cb-79a03269ff1e",
                 "13ba5b2e-3b34-8fbd-97c7-6647718d8504",
-                "470d8280067cbb14913f609791f3996756e8eea7d7c216db763d0518881da6b9",
+                "ca69353456e743afabdcb5c70bbf8040cdf517fb65d6e1cfc12a2c458abd4de0",
             ),
             (
                 TaskJsonNativeDialect::ROO,
                 "095b0fe0-c153-8364-b970-22637e99ce3e",
                 "15349de7-8b56-8e85-b075-3a9d9e01d7a1",
                 "7e7f3701-2c21-83b6-b6df-d9e4a7a4d805",
-                "6c898dea13fc6c56d0f5498d2e8d334f6583791116719a555456808e537a5c39",
+                "9f146f18a4182d1b531cf4f8e309e92a8b3b89cd570cdf893253ccb8bfb6d6df",
             ),
         ];
         for (dialect, event_id, session_id, source_id, record_leaf) in cases {

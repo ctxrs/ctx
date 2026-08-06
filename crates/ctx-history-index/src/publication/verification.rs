@@ -37,11 +37,14 @@ use super::{
     ActiveGenerationPointer,
 };
 
+mod lineage;
 mod spill;
 
+use lineage::{verify_incremental_lineage, verify_lineage};
 use spill::{
-    ProjectionAccumulator, ProjectionDeltas, SpillVerificationIdentities, VerificationSpill,
-    VERIFICATION_SPILL_BUFFER_BYTES, VERIFICATION_SPILL_RECORD_BYTES,
+    reserve_verification_scratch, with_verification_scratch_budget, IdentityDeltaSpill,
+    ProjectionAccumulator, ProjectionDeltas, ScratchReservation, SpillVerificationIdentities,
+    VerificationSpill, VERIFICATION_SPILL_BUFFER_BYTES, VERIFICATION_SPILL_RECORD_BYTES,
 };
 
 #[derive(Default)]
@@ -120,6 +123,9 @@ thread_local! {
     static LOGICAL_PASSES: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_TERMS: Cell<usize> = const { Cell::new(0) };
     static CANDIDATE_IDENTITY_DOCUMENTS: Cell<usize> = const { Cell::new(0) };
+    static CANDIDATE_PROJECTION_DOCUMENTS: Cell<usize> = const { Cell::new(0) };
+    static CANDIDATE_LINEAGE_DECODES: Cell<usize> = const { Cell::new(0) };
+    static CANDIDATE_LINEAGE_SPILLS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn verify_searcher_structure(
@@ -142,6 +148,7 @@ pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest
 }
 
 /// Verifies the complete publication authority carried by one immutable searcher.
+#[cfg(test)]
 pub(crate) fn verify_complete_searcher(
     searcher: &Searcher,
     manifest: &GenerationManifest,
@@ -212,6 +219,7 @@ impl PhysicalIntegrityAudit {
 /// `topology_authority` is the caller's already-decoded publication topology.
 /// `None` is reserved for a new root or a source-authoritative cold rebuild whose
 /// incompatible pointer must remain opaque until the candidate replaces it.
+#[cfg(test)]
 pub(crate) fn physical_integrity_digest(
     index: &tantivy::Index,
     generation_path: &Path,
@@ -452,6 +460,16 @@ pub(crate) fn verify_publication_candidate(
     manifest: &GenerationManifest,
     base_searcher: Option<&Searcher>,
 ) -> Result<()> {
+    with_verification_scratch_budget(|| {
+        verify_publication_candidate_with_budget(searcher, manifest, base_searcher)
+    })
+}
+
+fn verify_publication_candidate_with_budget(
+    searcher: &Searcher,
+    manifest: &GenerationManifest,
+    base_searcher: Option<&Searcher>,
+) -> Result<()> {
     let Some(base_searcher) = base_searcher else {
         return verify_searcher(searcher, manifest);
     };
@@ -476,13 +494,25 @@ pub(crate) fn verify_publication_candidate(
     verify_searcher_structure(searcher, manifest)?;
     let fields = fields_from_schema(searcher.schema())?;
     query::validate_verification_projection(fields)?;
-    let expected_parent_sessions =
-        verify_candidate_event_identities(searcher, fields, &changed_segments)?;
+    let mut changed_identities = IdentityDeltaSpill::create()?;
+    let expected_parent_sessions = verify_candidate_event_identities(
+        searcher,
+        fields,
+        &changed_segments,
+        &mut changed_identities,
+    )?;
     verify_candidate_session_identities(
         searcher,
         fields,
         &changed_segments,
         expected_parent_sessions,
+    )?;
+    verify_incremental_lineage(
+        searcher,
+        base_searcher,
+        fields,
+        &changed_segments,
+        &changed_identities,
     )
 }
 
@@ -490,6 +520,7 @@ fn verify_candidate_event_identities(
     searcher: &Searcher,
     fields: crate::Fields,
     changed_segments: &[usize],
+    changed_identities: &mut IdentityDeltaSpill,
 ) -> Result<u64> {
     if changed_segments.is_empty() {
         return Ok(0);
@@ -513,6 +544,7 @@ fn verify_candidate_event_identities(
     let mut merged = TermMerger::new(streams);
     let mut changed_documents = 0_u64;
     let mut parent_sessions = 0_u64;
+    let mut projection_verifier = IncrementalProjectionVerifier::new(searcher, changed_segments)?;
     while merged.advance() {
         note_candidate_identity_term();
         let uuid = canonical_uuid_term(merged.key(), "event_id")?;
@@ -526,13 +558,25 @@ fn verify_candidate_event_identities(
                 note_candidate_identity_document();
                 let identities = if changed_segment_set.contains(&segment_ord) {
                     let record = query::stored_verification_record(searcher, address, fields)?;
+                    let identities = record.identities;
+                    projection_verifier.verify_document(searcher, fields, address, record)?;
                     changed_documents = changed_documents
                         .checked_add(1)
                         .ok_or(IndexError::CountOverflow)?;
                     parent_sessions = parent_sessions
-                        .checked_add(u64::from(record.identities.parent_session.is_some()))
+                        .checked_add(u64::from(identities.parent_session.is_some()))
                         .ok_or(IndexError::CountOverflow)?;
-                    record.identities
+                    changed_identities.push(SpillVerificationIdentities {
+                        event: identities.event,
+                        session: identities.session,
+                        parent_session: identities.parent_session,
+                        root_session: identities.root_session,
+                        session_relationship: identities.session_relationship,
+                        event_origin: identities.event_origin,
+                        session_source_ordinal: 0,
+                    })?;
+                    note_candidate_lineage_spill();
+                    identities
                 } else {
                     query::stored_verification_identities(searcher, address, fields)?
                 };
@@ -561,6 +605,7 @@ fn verify_candidate_event_identities(
     if changed_documents != expected_changed_documents {
         return Err(IndexError::InvalidStoredDocumentField("event_id"));
     }
+    projection_verifier.finish(searcher, fields, changed_segments)?;
     Ok(parent_sessions)
 }
 
@@ -698,6 +743,30 @@ fn note_candidate_identity_document() {
 #[cfg(not(test))]
 fn note_candidate_identity_document() {}
 
+#[cfg(test)]
+fn note_candidate_projection_document() {
+    CANDIDATE_PROJECTION_DOCUMENTS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+fn note_candidate_projection_document() {}
+
+#[cfg(test)]
+pub(super) fn note_candidate_lineage_decode() {
+    CANDIDATE_LINEAGE_DECODES.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+pub(super) fn note_candidate_lineage_decode() {}
+
+#[cfg(test)]
+pub(super) fn note_candidate_lineage_spill() {
+    CANDIDATE_LINEAGE_SPILLS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(not(test))]
+pub(super) fn note_candidate_lineage_spill() {}
+
 fn verification_worker_budget(document_count: u64) -> usize {
     let available = std::thread::available_parallelism()
         .map(usize::from)
@@ -785,6 +854,9 @@ pub(crate) fn reset_verification_activity() {
     LOGICAL_PASSES.with(|count| count.set(0));
     CANDIDATE_IDENTITY_TERMS.with(|count| count.set(0));
     CANDIDATE_IDENTITY_DOCUMENTS.with(|count| count.set(0));
+    CANDIDATE_PROJECTION_DOCUMENTS.with(|count| count.set(0));
+    CANDIDATE_LINEAGE_DECODES.with(|count| count.set(0));
+    CANDIDATE_LINEAGE_SPILLS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
@@ -805,5 +877,18 @@ pub(crate) fn candidate_identity_verification_activity() -> (usize, usize) {
     (
         CANDIDATE_IDENTITY_TERMS.with(Cell::get),
         CANDIDATE_IDENTITY_DOCUMENTS.with(Cell::get),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_projection_verification_activity() -> usize {
+    CANDIDATE_PROJECTION_DOCUMENTS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_lineage_verification_activity() -> (usize, usize) {
+    (
+        CANDIDATE_LINEAGE_DECODES.with(Cell::get),
+        CANDIDATE_LINEAGE_SPILLS.with(Cell::get),
     )
 }

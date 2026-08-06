@@ -311,6 +311,22 @@ fn project_event(
     active: &ActiveSource,
     event: ContinueEventRow,
 ) -> ContinueSourceBackedResult<CoreRecord> {
+    project_bound_event(
+        &active.source,
+        active.session_id,
+        active.source_revision_digest,
+        &active.prepared.session,
+        event,
+    )
+}
+
+fn project_bound_event(
+    source: &SourceKey,
+    session_id: StableEntityId,
+    source_revision_digest: [u8; 32],
+    session: &super::normalize::ContinueSessionRow,
+    event: ContinueEventRow,
+) -> ContinueSourceBackedResult<CoreRecord> {
     let native_item_id = event.native_item_id.as_deref().filter(|value| {
         !value.trim().is_empty() && value.len() <= 384 && !value.chars().any(char::is_control)
     });
@@ -323,18 +339,18 @@ fn project_event(
         NativeItemKey::revision_scoped_position(
             CONTINUE_NATIVE_EVENT_POSITION_KIND,
             TypedKey::U64(event.identity.history_ordinal),
-            TypedKey::bytes(active.source_revision_digest.to_vec())?,
+            TypedKey::bytes(source_revision_digest.to_vec())?,
         )?
     };
     let event_id = derive_event_id(EventIdentityInput {
-        source: &active.source,
-        session_id: active.session_id,
+        source,
+        session_id,
         logical_item_kind: CONTINUE_LOGICAL_EVENT_KIND,
         native_item_key: &native_item_key,
         subrecord_selector: None,
     })?;
     let native_event_id = TypedKey::composite(vec![
-        TypedKey::utf8(&active.prepared.session.identity.0)?,
+        TypedKey::utf8(&session.identity.0)?,
         TypedKey::U64(event.identity.history_ordinal),
     ])?;
     let body = continue_lexical_body(&event);
@@ -343,11 +359,9 @@ fn project_event(
     }
     let occurred_at_unix_ms = event
         .occurred_at
-        .or(active.prepared.session.started_at)
+        .or(session.started_at)
         .map(|timestamp| timestamp.timestamp_millis());
-    let workspace = active
-        .prepared
-        .session
+    let workspace = session
         .workspace_directory
         .as_deref()
         .map(|value| bounded_chars(value, MAX_CONTINUE_LEXICAL_METADATA_CHARS));
@@ -367,9 +381,9 @@ fn project_event(
         .transpose()?;
     let mut record = CoreRecord::new_selected(
         event_id,
-        active.session_id,
-        active.session_id,
-        active.source.clone(),
+        session_id,
+        session_id,
+        source.clone(),
         event.identity.history_ordinal,
         event_type,
         AgentType::Primary.as_str(),
@@ -377,7 +391,7 @@ fn project_event(
         CONTINUE_SOURCE_BACKED_PARSER_REVISION,
         body,
     )?;
-    record.provider_session_id = Some(active.prepared.session.identity.0.clone());
+    record.provider_session_id = Some(session.identity.0.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = occurred_at_unix_ms;
     record.role = Some(role.to_owned());

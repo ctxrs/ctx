@@ -2,8 +2,9 @@ use std::{collections::HashSet, fs, path::PathBuf, time::Instant};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
-    EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, StableEntityId, TypedKey,
+    EventCopyProofKind, EventIdentityInput, EventOrigin, EventRole, EventType, NativeItemKey,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SessionRelationshipKind,
+    SourceAnchor, SourceKey, SourceObservation, StableEntityId, TypedKey,
 };
 use ctx_history_index::{
     current_semantic_generation_policy, CoreEventRecord, GenerationWriter, SourceEventRole,
@@ -465,7 +466,7 @@ fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_t
     )?;
     let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
     assert_eq!(SOURCE_CONTRACT_VERSION, 11);
-    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 17);
+    assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 18);
     assert_eq!(index.semantic_eligible_event_count()?, 5);
     assert_eq!(generation.core_generation_id, index.generation_id());
     assert_eq!(generation.sources.len(), 2);
@@ -477,6 +478,77 @@ fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_t
             .sum::<u64>(),
         5
     );
+    Ok(())
+}
+
+#[test]
+fn copied_events_never_enter_the_source_backed_semantic_projection() -> Result<()> {
+    let fixture = Fixture::new(2)?;
+    let original = fixture.record(0, 1, "semantic copy canary")?;
+    let mut copied = fixture.record(1, 1, "semantic copy canary")?;
+    copied.set_session_relationship(
+        SessionRelationshipKind::Forked,
+        Some(original.session_id),
+        original.session_id,
+    )?;
+    copied.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+    copied.validate_contract()?;
+
+    let root = fixture.data_root.join("index-copied-semantic-exclusion");
+    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+        .into_writer()
+        .map_err(crate::semantic::committed_generation_recovery_error)?;
+    for (source_index, record) in [(0_usize, original.clone()), (1, copied.clone())] {
+        let fixture_source = &fixture.sources[source_index];
+        writer.begin_source(fixture_source.source.clone())?;
+        writer.add_core_record(record)?;
+        let observation = SourceObservation::new(
+            fixture_source.source.clone(),
+            "fixture-copied-semantic-exclusion",
+            vec![u8::try_from(source_index + 1)?],
+        )?;
+        writer.certify_source(CertifiedSource::certify(
+            observation.clone(),
+            observation,
+            "fixture-parser-v1",
+            [u8::try_from(source_index + 1)?; 32],
+            ScannedSourceCounts {
+                complete_records: 1,
+                retained_records: 1,
+                indexed_documents: 1,
+                certified_bytes: 50,
+                ..ScannedSourceCounts::default()
+            },
+        )?)?;
+    }
+    writer.commit(|_| true)?;
+    let index = VerifiedIndex::open(root)?;
+
+    assert_eq!(index.manifest().indexed_documents, 2);
+    assert_eq!(index.semantic_eligible_event_count()?, 1);
+    let semantic = index.core_semantic_event_page(None, 2)?;
+    assert_eq!(semantic.items.len(), 1);
+    assert_eq!(semantic.items[0].event_id, original.event_id);
+    assert_eq!(
+        index
+            .core_source_event_page(&fixture.sources[1].source, None, 1)?
+            .items[0]
+            .event_origin,
+        copied.event_origin
+    );
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
+    assert_eq!(outcome.records_decoded, 2);
+    assert_eq!(outcome.records_embedded, 1);
+    assert_eq!(builder.calls, vec![original.event_id.as_uuid()]);
+    assert_eq!(active_events(&store)?, 1);
     Ok(())
 }
 

@@ -5,6 +5,24 @@ fn verify_searcher_with_options(
     instrument: bool,
     synchronize_first_wave: bool,
 ) -> Result<VerificationRunMetrics> {
+    with_verification_scratch_budget(|| {
+        verify_searcher_with_options_and_budget(
+            searcher,
+            manifest,
+            requested_worker_budget,
+            instrument,
+            synchronize_first_wave,
+        )
+    })
+}
+
+fn verify_searcher_with_options_and_budget(
+    searcher: &Searcher,
+    manifest: &GenerationManifest,
+    requested_worker_budget: usize,
+    instrument: bool,
+    synchronize_first_wave: bool,
+) -> Result<VerificationRunMetrics> {
     #[cfg(test)]
     LOGICAL_PASSES.with(|count| count.set(count.get() + 1));
     verify_searcher_structure(searcher, manifest)?;
@@ -16,8 +34,26 @@ fn verify_searcher_with_options(
             .iter()
             .map(tantivy::SegmentReader::max_doc),
     )?;
-    let tasks = segment_verification_tasks(searcher, requested_worker_budget.max(1))?;
+    let (tasks, _task_scratch) =
+        segment_verification_tasks(searcher, requested_worker_budget.max(1))?;
     let worker_budget = requested_worker_budget.max(1).min(tasks.len().max(1));
+    let worker_scratch_bytes = worker_budget
+        .checked_mul(
+            VERIFICATION_SPILL_BUFFER_BYTES
+                .checked_mul(2)
+                .and_then(|bytes| bytes.checked_add(VERIFICATION_SPILL_RECORD_BYTES))
+                .ok_or(IndexError::CountOverflow)?,
+        )
+        .ok_or(IndexError::CountOverflow)?;
+    let task_heap_bytes = tasks
+        .capacity()
+        .checked_mul(std::mem::size_of::<SegmentVerificationTask>())
+        .ok_or(IndexError::CountOverflow)?;
+    let runtime_heap_bytes = worker_scratch_bytes;
+    let _runtime_scratch = reserve_verification_scratch(
+        0,
+        u64::try_from(runtime_heap_bytes).map_err(|_| IndexError::CountOverflow)?,
+    )?;
     let executor = if worker_budget == 1 {
         Executor::single_thread()
     } else {
@@ -50,22 +86,8 @@ fn verify_searcher_with_options(
     metrics.verification_spill_bytes = verification_spill.logical_bytes();
     metrics.verification_tracked_heap_bytes = verification_spill
         .segment_offsets_heap_bytes()?
-        .checked_add(
-            worker_budget
-                .checked_mul(
-                    VERIFICATION_SPILL_BUFFER_BYTES
-                        .checked_mul(2)
-                        .and_then(|bytes| bytes.checked_add(VERIFICATION_SPILL_RECORD_BYTES))
-                        .ok_or(IndexError::CountOverflow)?,
-                )
-                .ok_or(IndexError::CountOverflow)?,
-        )
-        .and_then(|bytes| {
-            tasks
-                .capacity()
-                .checked_mul(std::mem::size_of::<SegmentVerificationTask>())
-                .and_then(|task_bytes| bytes.checked_add(task_bytes))
-        })
+        .checked_add(runtime_heap_bytes)
+        .and_then(|bytes| bytes.checked_add(task_heap_bytes))
         .ok_or(IndexError::CountOverflow)?;
 
     for wave_start in (0..tasks.len()).step_by(worker_budget) {
@@ -152,6 +174,7 @@ fn verify_searcher_with_options(
         &verification_spill,
         &mut projection_deltas,
     )?;
+    verify_lineage(searcher, fields, &verification_spill)?;
     verify_remaining_query_projections(searcher, fields, &mut projection_deltas)?;
     verify_query_projection_completion(searcher, &projection_deltas)?;
     verify_manifest_aggregates(manifest, source_aggregates)?;
@@ -223,7 +246,10 @@ fn verify_segment(
         parent_session_documents = parent_session_documents
             .checked_add(u64::from(record.identities.parent_session.is_some()))
             .ok_or(IndexError::CountOverflow)?;
-        let body_projection = crate::project_body_search(record.core_record.content)?;
+        let body_projection = crate::index_document::project_indexed_body_search(
+            &record.core_record.event_origin,
+            record.core_record.content,
+        )?;
         body_tokens = body_tokens
             .checked_add(verify_body_projection(
                 &body_search,
@@ -236,9 +262,12 @@ fn verify_segment(
         identity_writer.write_record(
             doc_id,
             SpillVerificationIdentities {
+                event: record.identities.event,
                 session: record.identities.session,
                 parent_session: record.identities.parent_session,
                 root_session: record.identities.root_session,
+                session_relationship: record.identities.session_relationship,
+                event_origin: record.identities.event_origin,
                 session_source_ordinal: source_ordinal,
             },
             projection_delta,
@@ -258,7 +287,7 @@ fn verify_segment(
 fn segment_verification_tasks(
     searcher: &Searcher,
     worker_budget: usize,
-) -> Result<Vec<SegmentVerificationTask>> {
+) -> Result<(Vec<SegmentVerificationTask>, ScratchReservation)> {
     const MAX_VERIFICATION_TASK_HEAP_BYTES: usize = 16 * 1024 * 1024;
     let total_max_docs = searcher
         .segment_readers()
@@ -291,6 +320,10 @@ fn segment_verification_tasks(
             maximum_bytes: MAX_VERIFICATION_TASK_HEAP_BYTES as u64,
         });
     }
+    let reservation = reserve_verification_scratch(
+        0,
+        u64::try_from(task_heap_bytes).map_err(|_| IndexError::CountOverflow)?,
+    )?;
     let mut tasks = Vec::with_capacity(task_count);
     append_segment_verification_tasks(
         &mut tasks,
@@ -300,7 +333,7 @@ fn segment_verification_tasks(
             .map(tantivy::SegmentReader::max_doc),
         documents_per_task,
     );
-    Ok(tasks)
+    Ok((tasks, reservation))
 }
 
 #[cfg(test)]
@@ -394,6 +427,23 @@ fn expected_query_projection_delta(
         fields.root_session_id,
         &core.root_session_id.to_string(),
     ));
+    add(Term::from_field_text(
+        fields.session_relationship_kind,
+        core.session_relationship.as_str(),
+    ));
+    add(Term::from_field_text(
+        fields.event_origin_kind,
+        core.event_origin.kind_str(),
+    ));
+    if let ctx_history_core::EventOrigin::CopiedFromAncestor {
+        ancestor_event_id, ..
+    } = &core.event_origin
+    {
+        add(Term::from_field_text(
+            fields.origin_event_identity_digest,
+            &hex(&ancestor_event_id.digest()),
+        ));
+    }
     add(Term::from_field_text(
         fields.source_key,
         &record.source_owner,
@@ -510,6 +560,136 @@ fn expected_query_projection_delta(
     Ok(delta)
 }
 
+struct IncrementalProjectionVerifier {
+    deltas: ProjectionDeltas,
+    _spill: VerificationSpill,
+    body_analyzer: tantivy::tokenizer::TextAnalyzer,
+    expected_body_tokens: u64,
+}
+
+impl IncrementalProjectionVerifier {
+    fn new(searcher: &Searcher, changed_segments: &[usize]) -> Result<Self> {
+        let spill = VerificationSpill::create(
+            searcher
+                .segment_readers()
+                .iter()
+                .enumerate()
+                .map(|(segment_ord, segment)| {
+                    if changed_segments.binary_search(&segment_ord).is_ok() {
+                        segment.max_doc()
+                    } else {
+                        0
+                    }
+                }),
+        )?;
+        let deltas = spill.load_projection_deltas()?;
+        Ok(Self {
+            deltas,
+            _spill: spill,
+            body_analyzer: crate::analyzer::body_analyzer(),
+            expected_body_tokens: 0,
+        })
+    }
+
+    fn verify_document(
+        &mut self,
+        searcher: &Searcher,
+        fields: crate::Fields,
+        address: DocAddress,
+        record: query::VerificationRecord,
+    ) -> Result<()> {
+        note_candidate_projection_document();
+        let segment = searcher.segment_reader(address.segment_ord);
+        verify_query_fast_fields(segment, address.doc_id, &record)?;
+        let delta = expected_query_projection_delta(fields, &record)?;
+        let body_search = segment.inverted_index(fields.body_search)?;
+        let body_projection = crate::index_document::project_indexed_body_search(
+            &record.core_record.event_origin,
+            record.core_record.content,
+        )?;
+        self.expected_body_tokens = self
+            .expected_body_tokens
+            .checked_add(verify_body_projection(
+                &body_search,
+                &mut self.body_analyzer,
+                fields.body_search,
+                body_projection.as_deref(),
+                address.doc_id,
+            )?)
+            .ok_or(IndexError::CountOverflow)?;
+        self.deltas.set_expected(address, delta)
+    }
+
+    fn finish(
+        mut self,
+        searcher: &Searcher,
+        fields: crate::Fields,
+        changed_segments: &[usize],
+    ) -> Result<()> {
+        if live_body_token_count_for_segments(
+            searcher,
+            fields.body_search,
+            changed_segments.iter().copied(),
+        )? != self.expected_body_tokens
+        {
+            return Err(IndexError::InvalidStoredDocumentField("body_search"));
+        }
+        for field in incremental_query_projection_fields(fields) {
+            for &segment_ord in changed_segments {
+                let segment = searcher
+                    .segment_readers()
+                    .get(segment_ord)
+                    .ok_or(IndexError::InvalidStoredDocumentField("query_projection"))?;
+                let inverted = segment.inverted_index(field)?;
+                let mut terms = inverted.terms().stream()?;
+                while terms.advance() {
+                    let digest = query_projection_digest(field, terms.key());
+                    for_each_live_posting(
+                        &inverted,
+                        terms.value(),
+                        segment_ord,
+                        segment,
+                        |address| self.accumulate(address, &digest),
+                    )?;
+                }
+            }
+        }
+        for &segment_ord in changed_segments {
+            let segment = searcher
+                .segment_readers()
+                .get(segment_ord)
+                .ok_or(IndexError::InvalidStoredDocumentField("query_projection"))?;
+            for doc_id in 0..segment.max_doc() {
+                if !segment.is_deleted(doc_id)
+                    && !self
+                        .deltas
+                        .is_complete(DocAddress::new(segment_ord as u32, doc_id))?
+                {
+                    return Err(IndexError::InvalidStoredDocumentField("query_projection"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn accumulate(&mut self, address: DocAddress, digest: &[u8; 32]) -> Result<()> {
+        self.deltas.accumulate(address, digest)
+    }
+}
+
+fn incremental_query_projection_fields(fields: crate::Fields) -> [Field; 28] {
+    let remaining = remaining_query_projection_fields(fields);
+    let mut all = [fields.event_id; 28];
+    all[..4].copy_from_slice(&[
+        fields.event_id,
+        fields.session_id,
+        fields.parent_session_id,
+        fields.root_session_id,
+    ]);
+    all[4..].copy_from_slice(&remaining);
+    all
+}
+
 fn query_projection_digest(field: Field, serialized_value: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"ctx.core-query-projection-v1\0");
@@ -599,9 +779,12 @@ fn verify_remaining_query_projections(
     Ok(())
 }
 
-fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 21] {
+fn remaining_query_projection_fields(fields: crate::Fields) -> [Field; 24] {
     [
         fields.event_identity_digest,
+        fields.session_relationship_kind,
+        fields.event_origin_kind,
+        fields.origin_event_identity_digest,
         fields.source_key,
         fields.provider,
         fields.source_format,
@@ -691,8 +874,20 @@ fn verify_body_projection(
 }
 
 fn live_body_token_count(searcher: &Searcher, field: Field) -> Result<u64> {
+    live_body_token_count_for_segments(searcher, field, 0..searcher.segment_readers().len())
+}
+
+fn live_body_token_count_for_segments(
+    searcher: &Searcher,
+    field: Field,
+    segment_ordinals: impl IntoIterator<Item = usize>,
+) -> Result<u64> {
     let mut total = 0_u64;
-    for segment in searcher.segment_readers() {
+    for segment_ord in segment_ordinals {
+        let segment = searcher
+            .segment_readers()
+            .get(segment_ord)
+            .ok_or(IndexError::InvalidStoredDocumentField("body_search"))?;
         let inverted = segment.inverted_index(field)?;
         let mut terms = inverted.terms().stream()?;
         while terms.advance() {

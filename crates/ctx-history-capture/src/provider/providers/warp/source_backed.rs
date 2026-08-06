@@ -699,16 +699,23 @@ fn core_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         session_id,
-        root_session_id,
+        session_id,
         source.clone(),
         event.native_order.provider_event_index,
         event.event_type.as_str(),
         agent_type.as_str(),
-        is_primary,
+        true,
         WARP_SOURCE_BACKED_PARSER_REVISION,
         body,
     )?;
-    record.parent_session_id = parent_session_id;
+    if let Some(parent_session_id) = parent_session_id {
+        let kind = if is_primary {
+            ctx_history_core::SessionRelationshipKind::RelatedUnknown
+        } else {
+            ctx_history_core::SessionRelationshipKind::Delegated
+        };
+        record.set_session_relationship(kind, Some(parent_session_id), root_session_id)?;
+    }
     record.provider_session_id = Some(event.identity.conversation_id);
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = event.occurred_at.map(|value| value.timestamp_millis());

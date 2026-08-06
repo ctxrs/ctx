@@ -49,8 +49,7 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str =
-    "opencode-family-source-backed-v7-indexed-streaming-file-invocation-lexical-prefix";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v8-session-origin";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -562,7 +561,7 @@ fn scan_session_evidence(
     source: &SourceKey,
 ) -> OpenCodeSourceBackedResult<SessionScanState> {
     let mut content_hasher = Sha256::new();
-    content_hasher.update(b"ctx-opencode-family-logical-content-v2\0");
+    content_hasher.update(b"ctx-opencode-family-logical-content-v3\0");
     let session_by_id_sql = format!("{} where id = ?1", session_source_sql(schema));
     let mut session_by_id = connection.prepare(&session_by_id_sql)?;
     let mut parent_by_id = connection.prepare(&session_parent_sql(schema))?;

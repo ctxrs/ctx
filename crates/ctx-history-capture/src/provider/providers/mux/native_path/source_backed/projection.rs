@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
-    derive_event_id, CoreContentPolicyStatus, CoreRecord, EventIdentityInput, NativeItemKey,
-    SourceKey, TypedKey,
+    derive_event_id, CoreContentPolicyStatus, CoreRecord, EventIdentityInput, EventOrigin,
+    NativeItemKey, SessionRelationshipKind, SourceKey, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde_json::Value;
@@ -195,7 +195,14 @@ impl MuxProjector {
             .collect::<Vec<_>>();
         let structured_content = (!touched_files.is_empty() || !tools.is_empty())
             .then(|| serde_json::json!({"tools": tools, "file_touches": touched_files}));
-        let agent_type = if self.binding.parent_session_id.is_some() {
+        let relationship = if self.binding.metadata.lineage_ambiguous {
+            SessionRelationshipKind::RelatedUnknown
+        } else {
+            SessionRelationshipKind::Delegated
+        };
+        let agent_type = if self.binding.parent_session_id.is_some()
+            && relationship == SessionRelationshipKind::Delegated
+        {
             "subagent"
         } else {
             "primary"
@@ -203,17 +210,28 @@ impl MuxProjector {
         let mut record = CoreRecord::new_selected(
             event_id,
             self.binding.session_id,
-            self.binding.root_session_id,
+            self.binding.session_id,
             self.source.clone(),
             event_sequence,
             event.event_type.as_str(),
             agent_type,
-            self.binding.parent_session_id.is_none(),
+            true,
             PARSER_REVISION,
             body,
         )
         .map_err(contract)?;
-        record.parent_session_id = self.binding.parent_session_id;
+        if let Some(parent_session_id) = self.binding.parent_session_id {
+            record
+                .set_session_relationship(
+                    relationship,
+                    Some(parent_session_id),
+                    self.binding.root_session_id,
+                )
+                .map_err(contract)?;
+            if relationship == SessionRelationshipKind::Delegated {
+                record.event_origin = EventOrigin::UniqueToSession;
+            }
+        }
         record.provider_session_id = Some(self.binding.metadata.provider_session_id.clone());
         record.native_event_id = Some(native_event_id);
         record.occurred_at_unix_ms = Some(event.occurred_at.timestamp_millis());
@@ -432,6 +450,190 @@ fn contract(error: impl std::fmt::Display) -> CaptureError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn project_relationship_fixture(parent: Option<&str>) -> CoreRecord {
+        let temp = tempfile::tempdir().unwrap();
+        let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+        let provider_session_id = if parent.is_some() {
+            "mux-child"
+        } else {
+            "mux-root"
+        };
+        let source = super::super::source_key(provider_session_id).unwrap();
+        let session_id = super::super::session_identity(&source, provider_session_id).unwrap();
+        let parent_session_id = parent
+            .map(super::super::related_session_identity)
+            .transpose()
+            .unwrap();
+        let binding = MuxBinding {
+            metadata: crate::provider::providers::mux::metadata::MuxBoundedSessionMetadata {
+                provider_session_id: provider_session_id.to_owned(),
+                parent_provider_session_id: parent.map(str::to_owned),
+                root_provider_session_id: parent.map(str::to_owned),
+                lineage_ambiguous: false,
+                started_at: "2026-08-05T12:00:00Z".to_owned(),
+                cwd: Some("/workspace/mux".to_owned()),
+                model: Some("mux-test".to_owned()),
+                metadata_revision: "mux-test-metadata-v1".to_owned(),
+                metadata_failure: None,
+            },
+            session_id,
+            parent_session_id,
+            root_session_id: parent_session_id.unwrap_or(session_id),
+            primary_stream: MuxStreamKind::Chat,
+            chat: None,
+            partial: None,
+            metadata_file: None,
+            source_revision_digest: [7; 32],
+        };
+        let mut projector = MuxProjector::new(
+            source,
+            authority,
+            binding,
+            JsonlFamilyProjectionMode::Cold,
+            None,
+        )
+        .unwrap();
+        let value = serde_json::json!({
+            "id": "mux-child-event",
+            "workspaceId": provider_session_id,
+            "role": "user",
+            "createdAt": "2026-08-05T12:00:01Z",
+            "parts": [{"type": "text", "text": "exact child-owned Mux event"}]
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let mut emitted = Vec::new();
+        projector
+            .project_record(
+                MuxStreamKind::Chat,
+                JsonlRecordRef::for_test(&bytes, 0),
+                &mut |record| {
+                    emitted.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(emitted.len(), 1);
+        emitted.pop().unwrap()
+    }
+
+    #[test]
+    fn delegated_tasks_are_unique_while_root_events_stay_unknown() {
+        let child = project_relationship_fixture(Some("mux-parent"));
+        assert_eq!(
+            child.session_relationship,
+            SessionRelationshipKind::Delegated
+        );
+        assert_eq!(child.event_origin, EventOrigin::UniqueToSession);
+        assert!(!child.is_primary);
+        assert_eq!(
+            child.content.meaningful_text(),
+            "exact child-owned Mux event"
+        );
+        assert!(child.native_event_id.is_some());
+
+        let root = project_relationship_fixture(None);
+        assert_eq!(root.session_relationship, SessionRelationshipKind::Root);
+        assert_eq!(root.event_origin, EventOrigin::Unknown);
+        assert!(root.is_primary);
+        assert_eq!(
+            root.content.meaningful_text(),
+            "exact child-owned Mux event"
+        );
+        assert!(root.native_event_id.is_some());
+    }
+
+    #[test]
+    fn provider_p1_lineage_contradictory_aliases_are_related_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let native = crate::provider::providers::mux::source::MuxSessionSource {
+            session_dir: temp.path().join("mux-child"),
+            chat_path: None,
+            partial_path: None,
+            metadata_path: None,
+            provider_session_id: "mux-child".to_owned(),
+            parent_provider_session_id: None,
+        };
+        let metadata =
+            crate::provider::providers::mux::metadata::mux_bounded_session_metadata_from_bytes(
+                &native,
+                "mux-test-metadata-v2",
+                "2026-08-05T12:00:00Z".parse().unwrap(),
+                Some(
+                    &serde_json::to_vec(&serde_json::json!({
+                        "workspaceId": "mux-child",
+                        "parentWorkspaceId": "mux-parent",
+                        "parentTaskId": "contradictory-parent",
+                        "rootWorkspaceId": "mux-parent",
+                        "rootTaskId": "contradictory-root"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        assert!(metadata.lineage_ambiguous);
+        assert_eq!(
+            metadata.parent_provider_session_id.as_deref(),
+            Some("mux-parent")
+        );
+        assert_eq!(
+            metadata.root_provider_session_id.as_deref(),
+            Some("mux-parent")
+        );
+
+        let source = super::super::source_key(&metadata.provider_session_id).unwrap();
+        let session_id =
+            super::super::session_identity(&source, &metadata.provider_session_id).unwrap();
+        let parent_session_id = super::super::related_session_identity("mux-parent").unwrap();
+        let binding = MuxBinding {
+            metadata,
+            session_id,
+            parent_session_id: Some(parent_session_id),
+            root_session_id: parent_session_id,
+            primary_stream: MuxStreamKind::Chat,
+            chat: None,
+            partial: None,
+            metadata_file: None,
+            source_revision_digest: [8; 32],
+        };
+        let authority = Arc::new(ProviderSourceRoot::open(temp.path()).unwrap());
+        let mut projector = MuxProjector::new(
+            source,
+            authority,
+            binding,
+            JsonlFamilyProjectionMode::Cold,
+            None,
+        )
+        .unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "id": "ambiguous-lineage-event",
+            "workspaceId": "mux-child",
+            "role": "user",
+            "createdAt": "2026-08-05T12:00:01Z",
+            "parts": [{"type": "text", "text": "ambiguous Mux lineage"}]
+        }))
+        .unwrap();
+        let mut emitted = Vec::new();
+        projector
+            .project_record(
+                MuxStreamKind::Chat,
+                JsonlRecordRef::for_test(&bytes, 0),
+                &mut |record| {
+                    emitted.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let record = emitted.pop().unwrap();
+        assert_eq!(
+            record.session_relationship,
+            SessionRelationshipKind::RelatedUnknown
+        );
+        assert_eq!(record.event_origin, EventOrigin::Unknown);
+        assert!(record.is_primary);
+        assert_eq!(record.agent_type, "primary");
+    }
 
     #[test]
     fn successful_textual_result_over_16k_is_complete() {

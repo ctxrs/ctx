@@ -69,9 +69,9 @@ ctx_rust_test(
 )
 
 ctx_rust_test(
-    name = "migration_fault_tests",
+    name = "republish_fault_tests",
     srcs = RUST_SRCS,
-    crate_name = "ctx_history_index_migration_faults",
+    crate_name = "ctx_history_index_republish_faults",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(
@@ -91,7 +91,7 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
     tags = [
         "fault-injection",
-        "migration",
+        "republish",
         "safe-presubmit",
     ],
 )
@@ -99,9 +99,9 @@ ctx_rust_test(
 # Hermetic generated-index structural/disk gate. The release benchmark below
 # uses the same harness but keeps noisy wall/CPU/RSS thresholds off ordinary CI.
 ctx_rust_test(
-    name = "migration_disk_qualification_tests",
+    name = "republish_disk_qualification_tests",
     srcs = RUST_SRCS,
-    crate_name = "ctx_history_index_migration_disk_qualification",
+    crate_name = "ctx_history_index_republish_disk_qualification",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(
@@ -111,7 +111,7 @@ ctx_rust_test(
     args = [
         "--ignored",
         "--exact",
-        "tests::migration_qualification::generated_small_and_large_disk_qualification",
+        "tests::republish_qualification::generated_small_and_large_disk_qualification",
         "--nocapture",
         "--test-threads=1",
     ],
@@ -127,7 +127,7 @@ ctx_rust_test(
     size = "large",
     tags = [
         "linux-only",
-        "migration",
+        "republish",
         "safe-presubmit",
     ],
     target_compatible_with = ["@platforms//os:linux"],
@@ -135,12 +135,12 @@ ctx_rust_test(
 )
 
 # Dedicated controlled-host report. Invoke with --config=release,
-# --nocache_test_results, and CTX_MIGRATION_QUALIFICATION_ENFORCE_PERF=1 for the
+# --nocache_test_results, and CTX_REPUBLISH_QUALIFICATION_ENFORCE_PERF=1 for the
 # blocking release run.
 ctx_rust_test(
-    name = "migration_release_benchmark",
+    name = "republish_release_benchmark",
     srcs = RUST_SRCS,
-    crate_name = "ctx_history_index_migration_release_benchmark",
+    crate_name = "ctx_history_index_republish_release_benchmark",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(
@@ -150,7 +150,7 @@ ctx_rust_test(
     args = [
         "--ignored",
         "--exact",
-        "tests::migration_qualification::release_benchmark_report",
+        "tests::republish_qualification::release_benchmark_report",
         "--nocapture",
         "--test-threads=1",
     ],
@@ -167,7 +167,7 @@ ctx_rust_test(
     tags = [
         "linux-only",
         "manual",
-        "migration",
+        "republish",
         "no-cache",
         "release",
     ],

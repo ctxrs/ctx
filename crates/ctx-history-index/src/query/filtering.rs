@@ -11,6 +11,13 @@ pub(super) fn filtered_event_query(
     fields: Fields,
 ) -> Result<Box<dyn Query>> {
     let mut clauses = vec![(Occur::Must, body_query)];
+    clauses.push((
+        Occur::MustNot,
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.event_origin_kind, "copied_from_ancestor"),
+            IndexRecordOption::Basic,
+        )),
+    ));
     if let Some(query) = source_identity_query {
         add_filter_clause(&mut clauses, query);
     }
@@ -103,16 +110,10 @@ pub(super) fn filtered_event_query(
     if filters.agent_scope == AgentScope::Primary && filters.session_id.is_none() {
         add_filter_clause(
             &mut clauses,
-            Box::new(BooleanQuery::union(vec![
-                Box::new(TermQuery::new(
-                    Term::from_field_u64(fields.is_primary, 1),
-                    IndexRecordOption::Basic,
-                )),
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.agent_type, "primary"),
-                    IndexRecordOption::Basic,
-                )),
-            ])),
+            Box::new(TermQuery::new(
+                Term::from_field_u64(fields.is_primary, 1),
+                IndexRecordOption::Basic,
+            )),
         );
     }
     if let Some(excluded) = &filters.exclude_session_tree {

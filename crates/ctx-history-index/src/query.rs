@@ -17,7 +17,7 @@ use records::{
 
 pub(crate) use verification::{
     stored_verification_identities, stored_verification_record, validate_verification_projection,
-    CompactIdentity, IdentityFieldRole, VerificationRecord,
+    CompactEventOrigin, CompactIdentity, IdentityFieldRole, VerificationRecord,
 };
 
 #[cfg(test)]
@@ -29,8 +29,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES,
-    MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreRecord, EventOrigin, SessionRelationshipKind, SourceKey, StableEntityId, StableEntityKind,
+    TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{

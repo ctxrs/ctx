@@ -11,6 +11,25 @@ pub(crate) use search::{
 pub(crate) use shared::{active_generation_race_error_json, is_active_generation_race};
 pub(crate) use show::{mcp_show_event, mcp_show_session, run_show};
 
+pub(crate) fn event_origin_json(origin: &ctx_history_core::EventOrigin) -> serde_json::Value {
+    match origin {
+        ctx_history_core::EventOrigin::Unknown => serde_json::json!({"kind": "unknown"}),
+        ctx_history_core::EventOrigin::UniqueToSession => {
+            serde_json::json!({"kind": "unique_to_session"})
+        }
+        ctx_history_core::EventOrigin::CopiedFromAncestor {
+            ancestor_session_id,
+            ancestor_event_id,
+            proof,
+        } => serde_json::json!({
+            "kind": "copied_from_ancestor",
+            "ancestor_session_id": ancestor_session_id.as_uuid(),
+            "ancestor_event_id": ancestor_event_id.as_uuid(),
+            "proof": proof,
+        }),
+    }
+}
+
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 

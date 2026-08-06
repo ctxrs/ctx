@@ -18,6 +18,20 @@ discovery/import source shapes; stored event metadata may use the corresponding
 per-file adapter format, such as
 `codex_session_jsonl` for files discovered under `codex_session_jsonl_tree`.
 
+Each provider row also has `lineage_support`. `session_relationship` is either
+`exact_relationship` or `unknown`. `event_origin` distinguishes `exact_copy`,
+`certified_prefix`, `explicit_no_copy`, and `unknown`. These values describe
+what the shipped adapter admits into Core, not every feature the upstream tool
+may expose. `unknown` does not mean unique, and similar transcript text never
+upgrades it. A provider remains `unknown` until its adapter emits the typed
+contract from stable structural data.
+
+Custom History has a separate opt-in described in
+[`custom-history-import-format.md`](custom-history-import-format.md). A durable
+`provider_native_v1` source can state an exact relationship and exact copied
+event selectors. Legacy files, unstable IDs, command-only plugins, and generic
+ordered-prefix claims remain unknown.
+
 General history support does not imply exact MCP tool-call attribution. That
 event-local capability has its own provider + route + source format + format
 version authority in

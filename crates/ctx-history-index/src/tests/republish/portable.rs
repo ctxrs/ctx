@@ -16,7 +16,7 @@ fn portable_copy_preserves_permissions_and_writer_availability() {
     fs::set_permissions(&source_file, permissions).unwrap();
     let guard = PortableCloneTestGuard::set(PortableCloneTestOptions::default(), |_, _| Ok(()));
 
-    let writer = GenerationWriter::open(predecessor.root(), WriterOptions::default())
+    let writer = open_republish_writer(predecessor.root())
         .unwrap()
         .into_writer()
         .unwrap();
@@ -35,7 +35,6 @@ fn portable_copy_preserves_permissions_and_writer_availability() {
     );
     assert_eq!(held_reader.count_term("evidence").unwrap(), 3);
     let current = VerifiedIndex::open(predecessor.root()).unwrap();
-    assert!(!current.uses_allowlisted_predecessor_contract());
     assert_eq!(current.count_term("evidence").unwrap(), 3);
 }
 
@@ -58,9 +57,6 @@ fn portable_copy_failure_is_previsibility_and_retryable() {
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
         pointer_before
     );
-    assert!(VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
     assert_eq!(
         VerifiedIndex::open(predecessor.root())
             .unwrap()
@@ -70,14 +66,11 @@ fn portable_copy_failure_is_previsibility_and_retryable() {
     );
     drop(guard);
     drop(
-        GenerationWriter::open(predecessor.root(), WriterOptions::default())
+        open_republish_writer(predecessor.root())
             .unwrap()
             .into_writer()
             .unwrap(),
     );
-    assert!(!VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
 }
 
 #[test]
@@ -93,7 +86,7 @@ fn portable_copy_rejects_insufficient_headroom_before_copying() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationInsufficientHeadroom {
+        IndexError::CurrentRepublishInsufficientHeadroom {
             available: 0,
             required
         } if required > 0
@@ -102,9 +95,6 @@ fn portable_copy_rejects_insufficient_headroom_before_copying() {
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
         pointer_before
     );
-    assert!(VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
 }
 
 #[test]
@@ -120,15 +110,14 @@ fn portable_copy_retains_committed_postvisibility_outcome() {
         Ok(())
     });
 
-    let outcome = GenerationWriter::open(predecessor.root(), WriterOptions::default()).unwrap();
-    assert!(outcome.committed_migration_recovery().is_some());
+    let outcome = open_republish_writer(predecessor.root()).unwrap();
+    assert!(outcome.committed_republish_recovery().is_some());
     let writer = outcome.into_writer().unwrap();
-    assert_ne!(
+    assert_eq!(
         writer.base_manifest().unwrap().generation_id().unwrap(),
         predecessor.generation_id()
     );
     let current = VerifiedIndex::open(predecessor.root()).unwrap();
-    assert!(!current.uses_allowlisted_predecessor_contract());
     assert_eq!(current.count_term("evidence").unwrap(), 3);
 }
 
@@ -145,7 +134,7 @@ fn portable_copy_rejects_unmanaged_files_without_publishing() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationSourceTopology("unexpected directory entry")
+        IndexError::CurrentRepublishSourceTopology("unexpected directory entry")
     ));
     assert_eq!(
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
@@ -163,13 +152,13 @@ fn portable_copy_rejects_unmanaged_files_without_publishing() {
 #[test]
 fn portable_clone_enforces_the_entry_cap_during_enumeration() {
     let predecessor = GoldenPredecessor::copy();
-    fill_generation_past_migration_entry_cap(&active_generation_path(predecessor.root()));
+    fill_generation_past_republish_entry_cap(&active_generation_path(predecessor.root()));
     let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
     let _guard = PortableCloneTestGuard::set(PortableCloneTestOptions::default(), |_, _| Ok(()));
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationFileLimit {
+        IndexError::CurrentRepublishFileLimit {
             actual: 4_097,
             maximum: 4_096
         }
@@ -201,8 +190,8 @@ fn portable_copy_rejects_symlinks_without_following_them() {
     assert!(matches!(
         open_writer_error(predecessor.root()),
         IndexError::ChecksumMismatch
-            | IndexError::PredecessorMigrationSourceTopology(
-                "symlink, reparse point, or remote-provider file in migration source"
+            | IndexError::CurrentRepublishSourceTopology(
+                "symlink, reparse point, or remote-provider file in republish source"
             )
     ));
     assert_eq!(
@@ -239,8 +228,8 @@ fn portable_copy_fails_closed_when_source_directory_name_is_swapped() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationSourceTopology(
-            "migration directory changed after authentication"
+        IndexError::CurrentRepublishSourceTopology(
+            "republish directory changed after authentication"
         )
     ));
     assert_eq!(
@@ -291,8 +280,8 @@ fn portable_cleanup_never_deletes_a_replacement_generation() {
             Ok(())
         },
     );
-    let _migration = MigrationTestHookGuard::set(|stage, _| {
-        if stage == MigrationStage::BeforeCandidateCommit {
+    let _republish = RepublishTestHookGuard::set(|stage, _| {
+        if stage == RepublishStage::BeforeCandidateCommit {
             return Err(io::Error::other("injected failure before cleanup").into());
         }
         Ok(())
@@ -354,7 +343,7 @@ fn portable_copy_detects_growth_without_writing_past_authenticated_length() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationSourceTopology("source file grew while cloning")
+        IndexError::CurrentRepublishSourceTopology("source file grew while cloning")
     ));
     assert_eq!(
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),

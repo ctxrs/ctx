@@ -8,8 +8,8 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
-    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput, SourceAnchor,
-    SourceKey, StableEntityId, SubrecordSelector, TypedKey,
+    NativeItemKey, NativeSessionKey, PositionStability, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, SourceKey, StableEntityId, SubrecordSelector, TypedKey,
 };
 use ctx_history_index::BaseEventIdentityLookup;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ const NATIVE_EVENT_REUSED_TOOL_CALL_POSITION_KIND: &str =
     "mistral-vibe-duplicate-tool-call-id-ordinal";
 const LOGICAL_SESSION_KIND: &str = "mistral-vibe-session";
 const LOGICAL_EVENT_KIND: &str = "mistral-vibe-event";
-const PARSER_REVISION: &str = "mistral-vibe-source-backed-v10";
+const PARSER_REVISION: &str = "mistral-vibe-source-backed-v11";
 const EVENT_IDENTITY_REVISION: &str = "mistral-vibe-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.mistral-vibe.fallback-event-fingerprint.v1\0";
 const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.mistral-vibe.source-revision.v1\0";
@@ -84,7 +84,6 @@ struct Binding {
     cwd: Option<String>,
     branch: Option<String>,
     revision_digest: [u8; 32],
-    is_primary: bool,
 }
 
 impl JsonlFamilyAdapter for MistralVibeJsonlAdapter {
@@ -190,7 +189,6 @@ impl JsonlFamilyAdapter for MistralVibeJsonlAdapter {
                 cwd: draft.cwd.clone(),
                 branch: draft.branch.clone(),
                 revision_digest: draft.revision_digest,
-                is_primary: draft.parent_provider_session_id.is_none(),
             };
             leaves.push(JsonlFamilyLeaf::observe(
                 draft.source.clone(),
@@ -377,25 +375,28 @@ fn core_record(
                 "provider_native_tool_result": linkage,
             })
         });
-    let agent_type = if binding.is_primary {
-        AgentType::Primary
-    } else {
-        AgentType::Subagent
-    };
     let mut record = CoreRecord::new_selected(
         event_id,
         binding.session_id,
-        binding.root_session_id,
+        binding.session_id,
         source.clone(),
         ordinal,
         event_type.as_str(),
-        agent_type.as_str(),
-        binding.is_primary,
+        AgentType::Primary.as_str(),
+        true,
         PARSER_REVISION,
         body,
     )
     .map_err(contract)?;
-    record.parent_session_id = binding.parent_session_id;
+    if let Some(parent_session_id) = binding.parent_session_id {
+        record
+            .set_session_relationship(
+                SessionRelationshipKind::Forked,
+                Some(parent_session_id),
+                binding.root_session_id,
+            )
+            .map_err(contract)?;
+    }
     record.provider_session_id = Some(binding.provider_session_id.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(
@@ -706,7 +707,6 @@ mod tests {
                 cwd: None,
                 branch: None,
                 revision_digest: [0; 32],
-                is_primary: true,
             },
         )
     }

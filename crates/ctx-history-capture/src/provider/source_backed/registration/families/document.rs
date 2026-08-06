@@ -169,7 +169,7 @@ mod tests {
         ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
         ROVODEV_SOURCE_FORMAT,
     };
-    use ctx_history_index::{CoreEventRecord, VerifiedIndex, WriterOptions};
+    use ctx_history_index::{CoreEventRecord, IndexError, VerifiedIndex, WriterOptions};
     use std::{fs, path::Path};
 
     #[test]
@@ -263,54 +263,47 @@ mod tests {
     }
 
     #[test]
-    fn rovodev_parent_appearance_and_disappearance_invalidate_leaf_lineage() {
+    fn rovodev_dangling_parent_graph_fails_closed_and_preserves_verified_generation() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let root = temp.path().join("sessions");
         write_rovodev_session(&root, "leaf", Some("middle"));
         let index = temp.path().join("index");
         let registry = rovodev_registry(&root);
 
-        let cold =
-            refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
-        let cold_leaf_root = rovodev_events(&index, &cold)
-            .into_iter()
-            .find(|event| event.provider_session_id.as_deref() == Some("leaf"))
-            .unwrap()
-            .root_session_id;
+        assert!(matches!(
+            refresh_source_backed_generation(&index, &registry, WriterOptions::default()),
+            Err(SourceBackedCoordinatorError::Index(
+                IndexError::InvalidSessionRelationshipGraph("related session does not exist")
+            ))
+        ));
+        assert!(VerifiedIndex::open(&index).is_err());
 
         write_rovodev_session(&root, "root", None);
         write_rovodev_session(&root, "middle", Some("root"));
-        let appeared =
+        let published =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
-        let appeared_events = rovodev_events(&index, &appeared);
-        let leaf = appeared_events
+        let published_events = rovodev_events(&index, &published);
+        let leaf = published_events
             .iter()
             .find(|event| event.provider_session_id.as_deref() == Some("leaf"))
             .unwrap();
-        let lineage_root = appeared_events
+        let lineage_root = published_events
             .iter()
             .find(|event| event.provider_session_id.as_deref() == Some("root"))
             .unwrap();
-        assert_ne!(leaf.root_session_id, cold_leaf_root);
         assert_eq!(leaf.root_session_id, lineage_root.session_id);
 
         fs::remove_dir_all(root.join("middle")).unwrap();
         fs::remove_dir_all(root.join("root")).unwrap();
-        let disappeared =
-            refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
-        let disappeared_leaf_root = rovodev_events(&index, &disappeared)
-            .into_iter()
-            .find(|event| event.provider_session_id.as_deref() == Some("leaf"))
-            .unwrap()
-            .root_session_id;
-        assert_eq!(disappeared_leaf_root, cold_leaf_root);
-
-        let replay =
-            refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
-        assert_eq!(
-            replay.commit.generation_id,
-            disappeared.commit.generation_id
-        );
+        assert!(matches!(
+            refresh_source_backed_generation(&index, &registry, WriterOptions::default()),
+            Err(SourceBackedCoordinatorError::Index(
+                IndexError::InvalidSessionRelationshipGraph("related session does not exist")
+            ))
+        ));
+        let retained = VerifiedIndex::open(&index).unwrap();
+        assert_eq!(retained.generation_id(), published.commit.generation_id);
+        assert_eq!(rovodev_events(&index, &published), published_events);
     }
 
     #[test]

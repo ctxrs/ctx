@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use ctx_history_core::{EventOrigin, SessionRelationshipKind};
 use ctx_history_index::{
     EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
 };
@@ -108,6 +109,8 @@ pub(in crate::commands::source_index) struct SearchEventMetadata {
     pub(in crate::commands::source_index) session_id: Uuid,
     pub(in crate::commands::source_index) parent_session_id: Option<Uuid>,
     pub(in crate::commands::source_index) root_session_id: Uuid,
+    pub(in crate::commands::source_index) session_relationship: SessionRelationshipKind,
+    pub(in crate::commands::source_index) event_origin: EventOrigin,
     pub(in crate::commands::source_index) provider: String,
     pub(in crate::commands::source_index) source_format: String,
     pub(in crate::commands::source_index) provider_session_id: Option<String>,
@@ -129,6 +132,8 @@ impl From<&EventRecord> for SearchEventMetadata {
             session_id: event.session_id.as_uuid(),
             parent_session_id: event.parent_session_id.map(|id| id.as_uuid()),
             root_session_id: event.root_session_id.as_uuid(),
+            session_relationship: event.session_relationship,
+            event_origin: event.event_origin.clone(),
             provider: event.provider.clone(),
             source_format: event.source_format.clone(),
             provider_session_id: event.provider_session_id.clone(),

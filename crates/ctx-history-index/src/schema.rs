@@ -15,6 +15,9 @@ pub(crate) struct Fields {
     pub(crate) session_id_low: Field,
     pub(crate) parent_session_id: Field,
     pub(crate) root_session_id: Field,
+    pub(crate) session_relationship_kind: Field,
+    pub(crate) event_origin_kind: Field,
+    pub(crate) origin_event_identity_digest: Field,
     pub(crate) source_key: Field,
     pub(crate) provider: Field,
     pub(crate) source_format: Field,
@@ -59,6 +62,9 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_u64_field("session_id_low", FAST);
     builder.add_text_field("parent_session_id", STRING);
     builder.add_text_field("root_session_id", STRING);
+    builder.add_text_field("session_relationship_kind", STRING);
+    builder.add_text_field("event_origin_kind", STRING);
+    builder.add_text_field("origin_event_identity_digest", STRING);
     builder.add_text_field("source_key", STRING | FAST);
     builder.add_text_field("provider", STRING);
     builder.add_text_field("source_format", STRING);
@@ -103,6 +109,9 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         session_id_low: required_field(schema, "session_id_low")?,
         parent_session_id: required_field(schema, "parent_session_id")?,
         root_session_id: required_field(schema, "root_session_id")?,
+        session_relationship_kind: required_field(schema, "session_relationship_kind")?,
+        event_origin_kind: required_field(schema, "event_origin_kind")?,
+        origin_event_identity_digest: required_field(schema, "origin_event_identity_digest")?,
         source_key: required_field(schema, "source_key")?,
         provider: required_field(schema, "provider")?,
         source_format: required_field(schema, "source_format")?,
@@ -154,6 +163,21 @@ mod tests {
         assert!(entry.is_indexed());
         assert!(!entry.is_stored());
         assert_eq!(entry.field_type().value_type(), tantivy::schema::Type::Str);
+    }
+
+    #[test]
+    fn lineage_fields_are_exact_indexed_and_not_stored() {
+        let schema = lexical_schema();
+        for name in [
+            "session_relationship_kind",
+            "event_origin_kind",
+            "origin_event_identity_digest",
+        ] {
+            let entry = schema.get_field_entry(schema.get_field(name).unwrap());
+            assert!(entry.is_indexed(), "{name} is not indexed");
+            assert!(!entry.is_stored(), "{name} duplicates stored Core");
+            assert_eq!(entry.field_type().value_type(), tantivy::schema::Type::Str);
+        }
     }
 
     #[test]

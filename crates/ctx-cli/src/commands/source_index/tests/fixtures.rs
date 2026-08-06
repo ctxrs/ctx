@@ -73,6 +73,8 @@ fn fixture_event(
         session_id,
         parent_session_id: None,
         root_session_id: session_id,
+        session_relationship: SessionRelationshipKind::Root,
+        event_origin: EventOrigin::Unknown,
         source,
         provider: provider.as_str().to_owned(),
         source_format: source_format.to_owned(),
@@ -95,17 +97,26 @@ fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEvent
     let mut core_record = CoreRecord::new_selected(
         event.event_id,
         event.session_id,
-        event.root_session_id,
+        event.session_id,
         event.source.clone(),
         event.event_sequence,
         event.event_type.clone(),
         event.agent_type.clone(),
-        event.is_primary,
+        true,
         "source-index-test-v1",
         body,
     )
     .unwrap();
-    core_record.parent_session_id = event.parent_session_id;
+    if let Some(parent_session_id) = event.parent_session_id {
+        core_record
+            .set_session_relationship(
+                event.session_relationship,
+                Some(parent_session_id),
+                event.root_session_id,
+            )
+            .unwrap();
+    }
+    core_record.event_origin = event.event_origin.clone();
     core_record.provider_session_id = event.provider_session_id.clone();
     core_record.native_event_id = event.native_event_id.clone();
     core_record.occurred_at_unix_ms = event.occurred_at_unix_ms;
@@ -114,8 +125,11 @@ fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEvent
     core_record.branch = event.branch.clone();
     core_record.cwd = event.cwd.clone();
     core_record.validate_contract().unwrap();
+    let mut projected_event = event.clone();
+    projected_event.session_relationship = core_record.session_relationship;
+    projected_event.event_origin = core_record.event_origin.clone();
     CoreEventRecord {
-        event: event.clone(),
+        event: projected_event,
         core_record,
     }
 }

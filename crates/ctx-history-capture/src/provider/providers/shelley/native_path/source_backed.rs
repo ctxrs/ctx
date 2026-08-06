@@ -13,7 +13,8 @@ use std::{
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentType, CertifiedSource, CoreRecord, EventIdentityInput,
     NativeItemKey, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    SessionIdentityInput, SessionRelationshipKind, SourceAnchor, SourceKey, StableEntityId,
+    TypedKey,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -772,19 +773,30 @@ fn build_record(
     let mut record = CoreRecord::new_selected(
         event_id,
         lineage.session_id,
-        lineage.root_session_id,
+        lineage.session_id,
         source.clone(),
         value.provider_event_index,
         event_type.as_str(),
         lineage.agent_type.clone(),
-        lineage.is_primary,
+        true,
         SHELLEY_SOURCE_PARSER_REVISION,
         body,
     )
     .map_err(|error| {
         ShelleySourceBackedError::Capture(CaptureError::InvalidPayload(error.to_string()))
     })?;
-    record.parent_session_id = lineage.parent_session_id;
+    if let Some(parent_session_id) = lineage.parent_session_id {
+        let kind = if lineage.is_primary {
+            SessionRelationshipKind::RelatedUnknown
+        } else {
+            SessionRelationshipKind::Delegated
+        };
+        record
+            .set_session_relationship(kind, Some(parent_session_id), lineage.root_session_id)
+            .map_err(|error| {
+                ShelleySourceBackedError::Capture(CaptureError::InvalidPayload(error.to_string()))
+            })?;
+    }
     record.provider_session_id = Some(value.message.conversation_id.clone());
     record.native_event_id = Some(native_event_id);
     record.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());

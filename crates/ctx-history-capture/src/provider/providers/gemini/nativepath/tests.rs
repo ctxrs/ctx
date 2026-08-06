@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::{EventRole, EventType, RepositoryAbstentionReason};
+use ctx_history_core::{
+    EventOrigin, EventRole, EventType, RepositoryAbstentionReason, SessionRelationshipKind,
+    TypedKey,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 

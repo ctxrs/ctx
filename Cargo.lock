@@ -839,6 +839,7 @@ dependencies = [
  "ctx-history-core",
  "ctx-semantic-model",
  "libc",
+ "memmap2",
  "serde",
  "serde_json",
  "sha2",

@@ -15,6 +15,7 @@ crc32fast = "1.5"
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-semantic-model = { path = "../ctx-semantic-model" }
 libc.workspace = true
+memmap2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
