@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+};
 
 use ctx_history_core::SessionRelationshipKind;
 use tantivy::{schema::IndexRecordOption, DocAddress, DocSet, Searcher, Term, TERMINATED};
@@ -46,6 +49,7 @@ pub(super) fn verify_incremental_lineage(
         }
         if candidate != base && base.is_some() {
             resolver.verify_inverse_session_references(session)?;
+            resolver.verify_descendant_copy_references(session)?;
         }
         Ok(())
     })?;
@@ -201,6 +205,61 @@ impl<'a> IncrementalResolver<'a> {
             sessions.for_each_unique(|session| self.verify_session_chain(session))?;
         }
         Ok(())
+    }
+
+    fn verify_descendant_copy_references(&mut self, changed: CompactIdentity) -> Result<()> {
+        let mut frontier = IdentityKeySpill::create()?;
+        frontier.push(changed)?;
+        note_candidate_lineage_spill();
+        for _ in 0..MAX_LINEAGE_DEPTH {
+            let mut next = IdentityKeySpill::create()?;
+            frontier.for_each_unique(|session| {
+                self.verify_copies_in_session(session)?;
+                self.collect_direct_descendants(session, &mut next)
+            })?;
+            if next.is_empty() {
+                return Ok(());
+            }
+            frontier = next;
+        }
+        Err(IndexError::InvalidSessionRelationshipGraph(
+            "session relationship depth exceeds bound",
+        ))
+    }
+
+    fn verify_copies_in_session(&mut self, session: CompactIdentity) -> Result<()> {
+        let session_term =
+            Term::from_field_text(self.fields.session_id, &session.as_uuid().to_string());
+        let copied_term =
+            Term::from_field_text(self.fields.event_origin_kind, "copied_from_ancestor");
+        let searcher = self.searcher;
+        let fields = self.fields;
+        for_each_term_intersection(
+            searcher,
+            fields.session_id,
+            &session_term,
+            fields.event_origin_kind,
+            &copied_term,
+            |address| self.verify_copy_chain(indexed_identities(searcher, address, fields)?),
+        )
+    }
+
+    fn collect_direct_descendants(
+        &mut self,
+        parent: CompactIdentity,
+        descendants: &mut IdentityKeySpill,
+    ) -> Result<()> {
+        let term =
+            Term::from_field_text(self.fields.parent_session_id, &parent.as_uuid().to_string());
+        let searcher = self.searcher;
+        let fields = self.fields;
+        for_each_term_posting(searcher, fields.parent_session_id, &term, |address| {
+            let child = indexed_identities(searcher, address, fields)?.session;
+            self.verify_session_chain(child)?;
+            descendants.push(child)?;
+            note_candidate_lineage_spill();
+            Ok(())
+        })
     }
 
     fn verify_changed_event(
@@ -734,6 +793,47 @@ fn for_each_term_posting(
             continue;
         };
         for_each_live_posting(&inverted, &term_info, segment_ord, segment, &mut visit)?;
+    }
+    Ok(())
+}
+
+fn for_each_term_intersection(
+    searcher: &Searcher,
+    left_field: tantivy::schema::Field,
+    left_term: &Term,
+    right_field: tantivy::schema::Field,
+    right_term: &Term,
+    mut visit: impl FnMut(DocAddress) -> Result<()>,
+) -> Result<()> {
+    for (segment_ord, segment) in searcher.segment_readers().iter().enumerate() {
+        let left_inverted = segment.inverted_index(left_field)?;
+        let Some(left_info) = left_inverted.get_term_info(left_term)? else {
+            continue;
+        };
+        let right_inverted = segment.inverted_index(right_field)?;
+        let Some(right_info) = right_inverted.get_term_info(right_term)? else {
+            continue;
+        };
+        let mut left =
+            left_inverted.read_postings_from_terminfo(&left_info, IndexRecordOption::Basic)?;
+        let mut right =
+            right_inverted.read_postings_from_terminfo(&right_info, IndexRecordOption::Basic)?;
+        let segment_ord = u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?;
+        let mut left_doc = left.doc();
+        let mut right_doc = right.doc();
+        while left_doc != TERMINATED && right_doc != TERMINATED {
+            match left_doc.cmp(&right_doc) {
+                Ordering::Less => left_doc = left.seek(right_doc),
+                Ordering::Greater => right_doc = right.seek(left_doc),
+                Ordering::Equal => {
+                    if !segment.is_deleted(left_doc) {
+                        visit(DocAddress::new(segment_ord, left_doc))?;
+                    }
+                    left_doc = left.advance();
+                    right_doc = right.advance();
+                }
+            }
+        }
     }
     Ok(())
 }

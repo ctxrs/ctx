@@ -144,6 +144,193 @@ fn direct_copy_chain_resolves_to_one_noncopy_original() {
 }
 
 #[test]
+fn changed_intermediate_edge_revalidates_unchanged_descendant_copy() {
+    let temp = tempdir().unwrap();
+    let root_source = source("inverse-copy-root.jsonl");
+    let ancestor_source = source("inverse-copy-ancestor.jsonl");
+    let intermediate_source = source("inverse-copy-intermediate.jsonl");
+    let copy_source = source("inverse-copy-descendant.jsonl");
+
+    let root = document_for_session(&root_source, "root", 1, "root");
+    let mut ancestor =
+        document_for_session(&ancestor_source, "ancestor-a", 1, "ancestor A");
+    ancestor
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(root.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    let mut intermediate =
+        document_for_session(&intermediate_source, "intermediate-b", 1, "intermediate B");
+    intermediate
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(ancestor.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    let mut copy = document_for_session(&copy_source, "descendant-c", 1, "copied in C");
+    copy.set_session_relationship(
+        SessionRelationshipKind::Forked,
+        Some(intermediate.session_id),
+        root.session_id,
+    )
+    .unwrap();
+    copy.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: ancestor.session_id,
+        ancestor_event_id: ancestor.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (source, record) in [
+        (&root_source, root.clone()),
+        (&ancestor_source, ancestor),
+        (&intermediate_source, intermediate),
+        (&copy_source, copy),
+    ] {
+        initial.begin_source(source.clone()).unwrap();
+        initial.add_core_record(record).unwrap();
+        initial
+            .certify_source(certificate(source, 1, 1))
+            .unwrap();
+    }
+    let baseline = initial.commit(|_| true).unwrap();
+
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    replacement
+        .begin_source(intermediate_source.clone())
+        .unwrap();
+    let mut reparented = document_for_session(
+        &intermediate_source,
+        "intermediate-b",
+        1,
+        "intermediate B",
+    );
+    reparented
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(root.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    replacement.add_core_record(reparented).unwrap();
+    replacement
+        .certify_source(certificate(&intermediate_source, 2, 1))
+        .unwrap();
+
+    assert!(matches!(
+        replacement.commit(|_| true),
+        Err(IndexError::InvalidEventOriginGraph(
+            "declared origin session is not an ancestor"
+        ))
+    ));
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        baseline.generation_id
+    );
+}
+
+#[test]
+fn changed_edge_revalidates_copies_in_transitive_descendants() {
+    let temp = tempdir().unwrap();
+    let root_source = source("transitive-copy-root.jsonl");
+    let ancestor_source = source("transitive-copy-ancestor.jsonl");
+    let changed_source = source("transitive-copy-changed.jsonl");
+    let child_source = source("transitive-copy-child.jsonl");
+    let copy_source = source("transitive-copy-leaf.jsonl");
+
+    let root = document_for_session(&root_source, "root", 1, "root");
+    let mut ancestor = document_for_session(&ancestor_source, "ancestor", 1, "ancestor");
+    ancestor
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(root.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    let mut changed = document_for_session(&changed_source, "changed", 1, "changed");
+    changed
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(ancestor.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    let mut child = document_for_session(&child_source, "child", 1, "child");
+    child
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(changed.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    let mut copy = document_for_session(&copy_source, "copy", 1, "copy");
+    copy.set_session_relationship(
+        SessionRelationshipKind::Forked,
+        Some(child.session_id),
+        root.session_id,
+    )
+    .unwrap();
+    copy.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: ancestor.session_id,
+        ancestor_event_id: ancestor.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (source, record) in [
+        (&root_source, root.clone()),
+        (&ancestor_source, ancestor),
+        (&changed_source, changed),
+        (&child_source, child),
+        (&copy_source, copy),
+    ] {
+        initial.begin_source(source.clone()).unwrap();
+        initial.add_core_record(record).unwrap();
+        initial
+            .certify_source(certificate(source, 1, 1))
+            .unwrap();
+    }
+    initial.commit(|_| true).unwrap();
+
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    replacement.begin_source(changed_source.clone()).unwrap();
+    let mut reparented = document_for_session(&changed_source, "changed", 1, "changed");
+    reparented
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(root.session_id),
+            root.session_id,
+        )
+        .unwrap();
+    replacement.add_core_record(reparented).unwrap();
+    replacement
+        .certify_source(certificate(&changed_source, 2, 1))
+        .unwrap();
+
+    assert!(matches!(
+        replacement.commit(|_| true),
+        Err(IndexError::InvalidEventOriginGraph(
+            "declared origin session is not an ancestor"
+        ))
+    ));
+}
+
+#[test]
 fn cyclic_session_relationships_cannot_publish() {
     let temp = tempdir().unwrap();
     let source = source("session-cycle.jsonl");

@@ -24,6 +24,9 @@ pub(super) const VERIFICATION_SPILL_RECORD_BYTES: usize =
 const MAX_VERIFICATION_LAYOUT_HEAP_BYTES: usize = 16 * 1024 * 1024;
 const IDENTITY_SORT_RUN_RECORDS: usize = 4_096;
 
+type IdentitySortRun = (u64, usize);
+type IdentitySortHeapEntry = Reverse<([u8; COMPACT_IDENTITY_BYTES], usize)>;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct ProjectionAccumulator([u8; QUERY_PROJECTION_ACCUMULATOR_BYTES]);
 
@@ -138,8 +141,18 @@ impl IdentityKeySpill {
         &self,
         mut visit: impl FnMut(CompactIdentity) -> Result<()>,
     ) -> Result<()> {
+        let run_count = identity_sort_run_count(self.records)?;
+        let layout_bytes = identity_sort_layout_heap_bytes(run_count)?;
+        if layout_bytes > MAX_VERIFICATION_LAYOUT_HEAP_BYTES {
+            return Err(IndexError::VerificationScratchLimitExceeded {
+                required_bytes: u64::try_from(layout_bytes)
+                    .map_err(|_| IndexError::CountOverflow)?,
+                maximum_bytes: u64::try_from(MAX_VERIFICATION_LAYOUT_HEAP_BYTES)
+                    .map_err(|_| IndexError::CountOverflow)?,
+            });
+        }
         let runs_file = tempfile::tempfile()?;
-        let mut runs = Vec::<(u64, usize)>::new();
+        let mut runs = Vec::<IdentitySortRun>::with_capacity(run_count);
         let mut input_ordinal = 0_u64;
         let mut run_offset = 0_u64;
         while input_ordinal < self.records {
@@ -166,17 +179,6 @@ impl IdentityKeySpill {
                 .len()
                 .checked_mul(COMPACT_IDENTITY_BYTES)
                 .ok_or(IndexError::CountOverflow)?;
-            let layout_bytes = runs
-                .len()
-                .checked_add(1)
-                .and_then(|count| count.checked_mul(std::mem::size_of::<(u64, usize)>() * 3))
-                .ok_or(IndexError::CountOverflow)?;
-            if layout_bytes > MAX_VERIFICATION_LAYOUT_HEAP_BYTES {
-                return Err(IndexError::VerificationScratchLimitExceeded {
-                    required_bytes: layout_bytes as u64,
-                    maximum_bytes: MAX_VERIFICATION_LAYOUT_HEAP_BYTES as u64,
-                });
-            }
             for digest in &identities {
                 write_spill_all_at(&runs_file, digest, run_offset)?;
                 run_offset = run_offset
@@ -190,9 +192,12 @@ impl IdentityKeySpill {
                 identities.len(),
             ));
         }
+        if runs.len() != run_count {
+            return Err(IndexError::CountOverflow);
+        }
 
         let mut positions = vec![0_usize; runs.len()];
-        let mut heap = BinaryHeap::<Reverse<([u8; 32], usize)>>::new();
+        let mut heap = BinaryHeap::<IdentitySortHeapEntry>::with_capacity(run_count);
         for (run, (offset, count)) in runs.iter().copied().enumerate() {
             if count != 0 {
                 heap.push(Reverse((read_identity_at(&runs_file, offset)?, run)));
@@ -220,6 +225,30 @@ impl IdentityKeySpill {
         }
         Ok(())
     }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.records == 0
+    }
+}
+
+fn identity_sort_run_count(records: u64) -> Result<usize> {
+    let records_per_run =
+        u64::try_from(IDENTITY_SORT_RUN_RECORDS).map_err(|_| IndexError::CountOverflow)?;
+    let runs = records
+        .checked_add(records_per_run - 1)
+        .ok_or(IndexError::CountOverflow)?
+        / records_per_run;
+    usize::try_from(runs).map_err(|_| IndexError::CountOverflow)
+}
+
+fn identity_sort_layout_heap_bytes(run_count: usize) -> Result<usize> {
+    let retained_bytes_per_run = std::mem::size_of::<IdentitySortRun>()
+        .checked_add(std::mem::size_of::<usize>())
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<IdentitySortHeapEntry>()))
+        .ok_or(IndexError::CountOverflow)?;
+    run_count
+        .checked_mul(retained_bytes_per_run)
+        .ok_or(IndexError::CountOverflow)
 }
 
 fn read_identity_at(file: &File, offset: u64) -> Result<[u8; COMPACT_IDENTITY_BYTES]> {
@@ -812,6 +841,25 @@ mod tests {
             } if required_bytes == (one_segment_bytes * 2) as u64
                 && maximum_bytes == one_segment_bytes as u64
         ));
+    }
+
+    #[test]
+    fn identity_sort_layout_accounts_for_every_retained_run_structure() {
+        let expected = std::mem::size_of::<IdentitySortRun>()
+            + std::mem::size_of::<usize>()
+            + std::mem::size_of::<IdentitySortHeapEntry>();
+        assert_eq!(identity_sort_layout_heap_bytes(1).unwrap(), expected);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(expected, 64);
+    }
+
+    #[test]
+    fn identity_sort_layout_admits_twelve_million_spill_records() {
+        let run_count = identity_sort_run_count(12_000_000).unwrap();
+        assert!(
+            identity_sort_layout_heap_bytes(run_count).unwrap()
+                <= MAX_VERIFICATION_LAYOUT_HEAP_BYTES
+        );
     }
 
     #[test]
