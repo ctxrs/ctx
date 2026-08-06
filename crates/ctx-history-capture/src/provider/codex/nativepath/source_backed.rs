@@ -39,7 +39,9 @@ use super::{
         opened_file_prefix_sha256, CodexLineageFactBudgetV0, CodexLineageFactsV0,
         CodexParseDisposition, CodexScanCounters, CODEX_LINEAGE_EXHAUSTED_SENTINEL,
     },
-    rows::{CodexProviderEventIdentityV0, CodexSourceBackedRowV0},
+    rows::{
+        CodexProviderEventIdentityKindV0, CodexProviderEventIdentityV0, CodexSourceBackedRowV0,
+    },
     source::{CodexCatalogSource, CodexFileObservation, CodexSourceIdentity},
     CodexAppendProof, CodexCheckpointGeneration, CodexNativeCheckpoint, CodexNativeOwnedPage,
     CodexNativeScanner, CodexSessionRow, CodexSourceScan,
@@ -67,7 +69,7 @@ const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v9";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v16-aggregate-content-admission";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-record-v17-session-copy-lineage";
 #[cfg(test)]
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 #[cfg(test)]

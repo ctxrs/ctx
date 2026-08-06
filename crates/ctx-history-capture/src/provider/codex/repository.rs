@@ -83,6 +83,8 @@ fn exact_linked_result_context(
         return None;
     }
     Some(CodexRepositoryResultEvidence {
+        origin_call_id: Some(origin_call_id.clone()),
+        result_call_id: Some(result_call_id.clone()),
         origin_occurred_at_unix_ms: context.origin_occurred_at_unix_ms,
         command: Some(command),
         command_too_large: false,

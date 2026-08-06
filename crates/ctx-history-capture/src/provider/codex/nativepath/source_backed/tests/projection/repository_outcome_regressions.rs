@@ -93,9 +93,7 @@ fn codex_commit_receipt_with_trailing_command_and_many_refs_publishes_certified_
 }
 
 #[test]
-fn codex_post_fork_execution_survives_an_unavailable_older_ancestor() {
-    use ctx_history_core::RepositoryVcsObservationKind;
-
+fn codex_post_fork_execution_fails_closed_on_an_unavailable_older_ancestor() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -128,17 +126,10 @@ fn codex_post_fork_execution_survives_an_unavailable_older_ancestor() {
         ],
     );
 
-    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
-    let source = codex_source_key(child).unwrap();
-    let session = codex_session_identity(&source, child).unwrap();
-    let verified = VerifiedIndex::open(&index).unwrap();
-    let result = outcome_for_sequence(&verified, session, 2);
-    let RepositoryVcsObservationKind::Outcome(outcome) =
-        &result.repository_vcs_observations[0].kind
-    else {
-        panic!("expected exact post-fork commit outcome");
-    };
-    assert_eq!(outcome.produced_object_ids[0].hex, oid);
-    assert_eq!(outcome.linkage.origin_call_id, call_id);
-    assert!(result.repository_abstentions.is_empty());
+    assert!(matches!(
+        ingest_codex_source_backed_v0(&sessions, &index),
+        Err(CodexSourceBackedErrorV0::Index(
+            IndexError::InvalidSessionRelationshipGraph(_)
+        ))
+    ));
 }

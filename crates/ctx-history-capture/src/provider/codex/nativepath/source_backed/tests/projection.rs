@@ -187,7 +187,10 @@ fn codex_exact_commit_result_publishes_scoped_outcome_and_complete_raw_output() 
 
 #[test]
 fn codex_forked_history_attributes_one_canonical_execution_origin() {
-    use ctx_history_core::{RepositoryAbstentionReason, RepositoryVcsObservationKind};
+    use ctx_history_core::{
+        EventCopyProofKind, EventOrigin, RepositoryAbstentionReason, RepositoryVcsObservationKind,
+        SessionRelationshipKind,
+    };
 
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -208,6 +211,7 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
         "call-canonical-execution",
         Value::String(format!("[main 518dedb] exact\n{copied_oid}\n")),
     );
+    let copied_looking_message = message("assistant", "ordinary identical copied-looking text");
     write_session(
         &sessions,
         parent_native_session_id,
@@ -215,6 +219,7 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
             copied_call.clone(),
             copied_result.clone(),
             "{malformed unrelated record".to_owned(),
+            copied_looking_message.clone(),
         ],
     );
     write_forked_session(
@@ -233,6 +238,7 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
                 "call-child-execution",
                 Value::String(format!("[main aaaaaaa] child\n{child_oid}\n")),
             ),
+            copied_looking_message,
         ],
     );
 
@@ -246,6 +252,20 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
     let parent_result = outcome_for_sequence(&verified, parent_session, 2);
     assert_eq!(parent_result.repository_vcs_observations.len(), 1);
     let copied_child_result = outcome_for_sequence(&verified, child_session, 2);
+    assert_eq!(
+        copied_child_result.session_relationship,
+        SessionRelationshipKind::Forked
+    );
+    assert!(copied_child_result.is_primary);
+    assert_eq!(
+        copied_child_result.event_origin,
+        EventOrigin::CopiedFromAncestor {
+            ancestor_session_id: parent_session,
+            ancestor_event_id: parent_result.event_id,
+            proof: EventCopyProofKind::NativeCallResultIdentity,
+        }
+    );
+    assert_ne!(copied_child_result.event_id, parent_result.event_id);
     assert!(copied_child_result.repository_vcs_observations.is_empty());
     assert!(copied_child_result
         .repository_abstentions
@@ -264,6 +284,72 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
     };
     assert_eq!(outcome.produced_object_ids[0].hex, child_oid);
     assert_eq!(outcome.linkage.origin_call_id, "call-child-execution");
+    assert_eq!(unique_child_result.event_origin, EventOrigin::Unknown);
+
+    let copied_child_call = outcome_for_sequence(&verified, child_session, 1);
+    assert_eq!(copied_child_call.event_origin, EventOrigin::Unknown);
+    let copied_looking_child_message = outcome_for_sequence(&verified, child_session, 5);
+    assert_eq!(
+        copied_looking_child_message.event_origin,
+        EventOrigin::Unknown
+    );
+
+    let copied_event_id = copied_child_result.event_id;
+    let copied_body = copied_child_result.content.normalized_body.clone();
+    drop(verified);
+    let replay = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(replay.counters.replayed_sources, 2);
+    let replayed = VerifiedIndex::open(&index).unwrap();
+    let hydrated = replayed
+        .core_record_by_id(copied_event_id.as_uuid())
+        .unwrap()
+        .expect("copied child event must remain directly hydratable");
+    assert_eq!(hydrated.event_id, copied_event_id);
+    assert_eq!(hydrated.content.normalized_body, copied_body);
+    assert_eq!(hydrated.event_origin, copied_child_result.event_origin);
+}
+
+#[test]
+fn codex_copied_result_without_call_id_owned_event_identity_stays_unknown() {
+    use ctx_history_core::EventOrigin;
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent_native_session_id = "019fa000-0000-7000-8000-000000000910";
+    let child_native_session_id = "019fa000-0000-7000-8000-000000000911";
+    let call = exec_call("call-id-owned-result", "printf exact", temp.path());
+    let result = serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "id": "provider-owned-result-id",
+            "call_id": "call-id-owned-result",
+            "status": "success",
+            "output": "exact result"
+        }
+    })
+    .to_string();
+    write_session(
+        &sessions,
+        parent_native_session_id,
+        &[call.clone(), result.clone()],
+    );
+    write_forked_session(
+        &sessions,
+        child_native_session_id,
+        parent_native_session_id,
+        &[call, result],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let child_source = codex_source_key(child_native_session_id).unwrap();
+    let child_session = codex_session_identity(&child_source, child_native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let copied_result = outcome_for_sequence(&verified, child_session, 2);
+    assert_eq!(copied_result.event_origin, EventOrigin::Unknown);
 }
 
 #[test]
@@ -412,9 +498,7 @@ fn codex_discovery_prefix_rewrite_and_append_rolls_back_refresh() {
 }
 
 #[test]
-fn codex_forked_history_abstains_when_parent_origin_is_unavailable() {
-    use ctx_history_core::RepositoryAbstentionReason;
-
+fn codex_forked_history_fails_closed_when_parent_session_is_unavailable() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index = temp.path().join("global-index");
@@ -441,21 +525,17 @@ fn codex_forked_history_abstains_when_parent_origin_is_unavailable() {
         ],
     );
 
-    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
-    let source = codex_source_key(child_native_session_id).unwrap();
-    let session = codex_session_identity(&source, child_native_session_id).unwrap();
-    let verified = VerifiedIndex::open(&index).unwrap();
-    let result = outcome_for_sequence(&verified, session, 2);
-    assert!(result.repository_vcs_observations.is_empty());
-    assert!(result.repository_abstentions.iter().any(|abstention| {
-        abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
-            && abstention.detail.as_deref() == Some("provider_execution_origin_lineage_unproven")
-    }));
+    assert!(matches!(
+        ingest_codex_source_backed_v0(&sessions, &index),
+        Err(CodexSourceBackedErrorV0::Index(
+            IndexError::InvalidSessionRelationshipGraph(_)
+        ))
+    ));
 }
 
 #[test]
 fn codex_forked_history_limits_malformed_lineage_ambiguity_to_matching_call_id() {
-    use ctx_history_core::RepositoryAbstentionReason;
+    use ctx_history_core::{EventOrigin, RepositoryAbstentionReason};
 
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -469,7 +549,10 @@ fn codex_forked_history_limits_malformed_lineage_ambiguity_to_matching_call_id()
     write_session(
         &sessions,
         parent_native_session_id,
-        &[format!(r#"{{"call_id":"{call_id}", malformed"#)],
+        &[
+            format!(r#"{{"call_id":"{call_id}", malformed"#),
+            message("assistant", "existing parent session"),
+        ],
     );
     write_forked_session(
         &sessions,
@@ -495,6 +578,7 @@ fn codex_forked_history_limits_malformed_lineage_ambiguity_to_matching_call_id()
     let child_session = codex_session_identity(&child_source, child_native_session_id).unwrap();
     let verified = VerifiedIndex::open(&index).unwrap();
     let result = outcome_for_sequence(&verified, child_session, 2);
+    assert_eq!(result.event_origin, EventOrigin::Unknown);
     assert!(result.repository_vcs_observations.is_empty());
     assert!(result.repository_abstentions.iter().any(|abstention| {
         abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined

@@ -39,7 +39,11 @@ fn checkpoint_replay_preserves_incomplete_tail_lineage_ambiguity() {
         r#"{"type":"response_item","payload":{"type":"function_call","call_id":"unterminated"#;
     fs::write(
         session_path(&sessions, parent),
-        format!("{}\n{incomplete}", session_meta(parent)),
+        format!(
+            "{}\n{}\n{incomplete}",
+            session_meta(parent),
+            message("user", "parent session anchor")
+        ),
     )
     .unwrap();
 
@@ -79,7 +83,14 @@ fn fully_escaped_duplicate_lineage_fields_cannot_publish_a_unique_child_outcome(
     let parent = "019fa000-0000-7000-8000-000000000202";
     let child = "019fa000-0000-7000-8000-000000000203";
     let malformed = r#"{"\u0074\u0079\u0070\u0065":"\u0072\u0065\u0073\u0070\u006f\u006e\u0073\u0065\u005f\u0069\u0074\u0065\u006d","\u0070\u0061\u0079\u006c\u006f\u0061\u0064":{"\u0074\u0079\u0070\u0065":"\u0066\u0075\u006e\u0063\u0074\u0069\u006f\u006e\u005f\u0063\u0061\u006c\u006c","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"first","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"second"}}"#;
-    write_session(&sessions, parent, &[malformed.to_owned()]);
+    write_session(
+        &sessions,
+        parent,
+        &[
+            message("user", "parent session anchor"),
+            malformed.to_owned(),
+        ],
+    );
     write_forked_session(
         &sessions,
         child,
@@ -131,7 +142,11 @@ fn escaped_duplicate_envelope_type_with_non_string_first_cannot_hide_ancestor_ca
     let malformed = format!(
         r#"{{"\u0074\u0079\u0070\u0065":{{}},"\u0074\u0079\u0070\u0065":"\u0072\u0065\u0073\u0070\u006f\u006e\u0073\u0065\u005f\u0069\u0074\u0065\u006d","\u0070\u0061\u0079\u006c\u006f\u0061\u0064":{{"\u0074\u0079\u0070\u0065":"\u0066\u0075\u006e\u0063\u0074\u0069\u006f\u006e\u005f\u0063\u0061\u006c\u006c","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"{call_id}"}}}}"#
     );
-    write_session(&sessions, parent, &[malformed]);
+    write_session(
+        &sessions,
+        parent,
+        &[message("user", "parent session anchor"), malformed],
+    );
     write_forked_session(
         &sessions,
         child,
@@ -169,7 +184,11 @@ fn escaped_duplicate_payload_type_with_non_string_first_cannot_hide_ancestor_res
     let malformed = format!(
         r#"{{"\u0074\u0079\u0070\u0065":"\u0072\u0065\u0073\u0070\u006f\u006e\u0073\u0065\u005f\u0069\u0074\u0065\u006d","\u0070\u0061\u0079\u006c\u006f\u0061\u0064":{{"\u0074\u0079\u0070\u0065":[],"\u0074\u0079\u0070\u0065":"\u0066\u0075\u006e\u0063\u0074\u0069\u006f\u006e\u005f\u0063\u0061\u006c\u006c\u005f\u006f\u0075\u0074\u0070\u0075\u0074","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"{call_id}","output":"ancestor"}}}}"#
     );
-    write_session(&sessions, parent, &[malformed]);
+    write_session(
+        &sessions,
+        parent,
+        &[message("user", "parent session anchor"), malformed],
+    );
     write_forked_session(
         &sessions,
         child,
@@ -208,7 +227,11 @@ fn attributed_malformed_call_does_not_suppress_an_unrelated_unique_call() {
     let malformed = format!(
         r#"{{"type":"response_item","payload":{{"type":null,"type":"function_call","call_id":"{ambiguous_call}"}}}}"#
     );
-    write_session(&sessions, parent, &[malformed]);
+    write_session(
+        &sessions,
+        parent,
+        &[message("user", "parent session anchor"), malformed],
+    );
     write_forked_session(
         &sessions,
         child,
@@ -267,7 +290,11 @@ fn fully_escaped_duplicate_call_id_after_non_string_cannot_publish_a_unique_chil
     let malformed = format!(
         r#"{{"\u0074\u0079\u0070\u0065":"\u0072\u0065\u0073\u0070\u006f\u006e\u0073\u0065\u005f\u0069\u0074\u0065\u006d","\u0070\u0061\u0079\u006c\u006f\u0061\u0064":{{"\u0074\u0079\u0070\u0065":"\u0066\u0075\u006e\u0063\u0074\u0069\u006f\u006e\u005f\u0063\u0061\u006c\u006c","\u0063\u0061\u006c\u006c\u005f\u0069\u0064":7,"\u0063\u0061\u006c\u006c\u005f\u0069\u0064":"{call_id}"}}}}"#
     );
-    write_session(&sessions, parent, &[malformed]);
+    write_session(
+        &sessions,
+        parent,
+        &[message("user", "parent session anchor"), malformed],
+    );
     write_forked_session(
         &sessions,
         child,
@@ -306,7 +333,11 @@ fn completed_parent_checkpoint_tail_rebuilds_child_and_replays_without_stale_amb
     let parent_path = session_path(&sessions, parent);
     fs::write(
         &parent_path,
-        format!("{}\n{incomplete}", session_meta(parent)),
+        format!(
+            "{}\n{}\n{incomplete}",
+            session_meta(parent),
+            message("user", "parent session anchor")
+        ),
     )
     .unwrap();
     write_forked_session(

@@ -13,10 +13,10 @@ use crate::provider::codex::nativepath::reader::CodexLineageFactPresenceV0;
 // cannot bypass the new lineage authority.
 const LINEAGE_DEPENDENCY_DOMAIN: &[u8] = b"ctx/codex-lineage-dependency/v3\0";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CodexOutcomeOriginV0 {
     UniqueToSession,
-    CopiedFromAncestor,
+    CopiedFromAncestor { ancestor_native_session_id: String },
     Unproven,
 }
 
@@ -432,7 +432,9 @@ impl CodexOutcomeLineageAuthorityV0 {
             };
             match parent_facts.presence(origin_call_id, result_call_id) {
                 CodexLineageFactPresenceV0::Present => {
-                    return Ok(CodexOutcomeOriginV0::CopiedFromAncestor)
+                    return Ok(CodexOutcomeOriginV0::CopiedFromAncestor {
+                        ancestor_native_session_id: parent_node.native_session_id.clone(),
+                    })
                 }
                 CodexLineageFactPresenceV0::Unproven => return Ok(CodexOutcomeOriginV0::Unproven),
                 CodexLineageFactPresenceV0::Absent => {}
@@ -900,7 +902,9 @@ mod tests {
             authority
                 .classify("child-b", "copied", "copied", None, 0, 0)
                 .unwrap(),
-            CodexOutcomeOriginV0::CopiedFromAncestor
+            CodexOutcomeOriginV0::CopiedFromAncestor {
+                ancestor_native_session_id: "root-b".to_owned(),
+            }
         );
         assert!(matches!(
             authority.classify("child-a", "copied", "copied", None, 0, 0),
@@ -988,7 +992,9 @@ mod tests {
                 authority
                     .classify(child, &marker, &marker, None, 0, 0)
                     .unwrap(),
-                CodexOutcomeOriginV0::CopiedFromAncestor
+                CodexOutcomeOriginV0::CopiedFromAncestor {
+                    ancestor_native_session_id: root.clone(),
+                }
             );
             authority
                 .register(child, authority.new_fact_set(child).unwrap())

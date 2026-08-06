@@ -6,7 +6,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
     EventRole, EventType, FileChangeKind, McpExchangeContent, McpToolCallAttribution,
-    RepositoryFileObservationKind,
+    RepositoryFileObservationKind, SessionRelationshipKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -66,6 +66,7 @@ pub(crate) struct CodexSessionRow {
     pub(crate) native_session_id: String,
     pub(crate) parent_native_session_id: Option<String>,
     pub(crate) root_native_session_id: Option<String>,
+    pub(crate) session_relationship: SessionRelationshipKind,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) cwd: Option<String>,
     pub(crate) originator: Option<String>,
@@ -161,7 +162,9 @@ impl CodexSourceBackedRowV0 {
                     )))
             });
         let repository_result_bytes = self.repository_result.as_ref().map_or(0, |evidence| {
-            evidence.command.as_ref().map_or(0, String::capacity)
+            evidence.origin_call_id.as_ref().map_or(0, String::capacity)
+                + evidence.result_call_id.as_ref().map_or(0, String::capacity)
+                + evidence.command.as_ref().map_or(0, String::capacity)
                 + evidence
                     .declared_workdir
                     .as_ref()

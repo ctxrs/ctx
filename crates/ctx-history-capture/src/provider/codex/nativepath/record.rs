@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use super::rows::{CodexSessionGitMetadata, CodexSessionRow};
 use crate::common::time::parse_rfc3339_utc;
-use crate::provider::codex::catalog::{codex_parent_session_id, codex_source_kind};
+use crate::provider::codex::catalog::{codex_session_relationship, codex_source_kind};
 use crate::provider::codex::events::{CodexExitCodeParser, CodexWallTimeParser};
 use crate::{OutputOutcome, OutputOutcomeMetadata};
 
@@ -723,10 +723,16 @@ struct CodexSessionMetaPayload {
     session_id: Option<String>,
     parent_thread_id: Option<String>,
     forked_from_id: Option<String>,
+    history_base: Option<CodexHistoryBase>,
     agent_nickname: Option<String>,
     agent_role: Option<String>,
     model_provider: Option<String>,
     git: Option<CodexSessionGitMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexHistoryBase {
+    thread_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -748,9 +754,15 @@ pub(super) fn parse_session_meta(line: &[u8]) -> Option<CodexSessionRow> {
         .as_deref()
         .or(envelope.timestamp.as_deref())
         .and_then(parse_rfc3339_utc)?;
-    let parent_native_session_id = codex_parent_session_id(&payload.source)
-        .or_else(|| payload.parent_thread_id.and_then(nonempty))
-        .or_else(|| payload.forked_from_id.and_then(nonempty));
+    let (parent_native_session_id, session_relationship) = codex_session_relationship(
+        &payload.source,
+        payload.parent_thread_id.as_deref(),
+        payload.forked_from_id.as_deref(),
+        payload
+            .history_base
+            .as_ref()
+            .map(|history_base| history_base.thread_id.as_str()),
+    );
     let root_native_session_id = payload
         .session_id
         .and_then(nonempty)
@@ -760,6 +772,7 @@ pub(super) fn parse_session_meta(line: &[u8]) -> Option<CodexSessionRow> {
         native_session_id,
         parent_native_session_id,
         root_native_session_id,
+        session_relationship,
         started_at,
         cwd: payload.cwd.and_then(nonempty),
         originator: payload.originator.and_then(nonempty),
@@ -919,6 +932,109 @@ mod lineage_tests {
         assert_eq!(
             codex_lineage_record_evidence(&probe),
             CodexLineageRecordEvidence::UnattributedAmbiguity
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_relationship_tests {
+    use super::*;
+    use ctx_history_core::SessionRelationshipKind;
+
+    fn parse(payload: Value) -> CodexSessionRow {
+        parse_session_meta(
+            serde_json::json!({
+                "timestamp": "2026-08-05T12:00:00Z",
+                "type": "session_meta",
+                "payload": payload,
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("fixture session metadata must parse")
+    }
+
+    #[test]
+    fn explicit_subagent_parentage_wins_over_matching_fork_metadata() {
+        let parent = "019fa000-0000-7000-8000-000000000901";
+        let row = parse(serde_json::json!({
+            "id": "019fa000-0000-7000-8000-000000000902",
+            "timestamp": "2026-08-05T12:00:00Z",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent}}},
+            "parent_thread_id": parent,
+            "forked_from_id": parent,
+        }));
+        assert_eq!(row.parent_native_session_id.as_deref(), Some(parent));
+        assert_eq!(row.session_relationship, SessionRelationshipKind::Delegated);
+    }
+
+    #[test]
+    fn fork_and_history_base_have_distinct_exact_relationships() {
+        let fork_parent = "019fa000-0000-7000-8000-000000000903";
+        let fork = parse(serde_json::json!({
+            "id": "019fa000-0000-7000-8000-000000000904",
+            "timestamp": "2026-08-05T12:00:00Z",
+            "source": "cli",
+            "forked_from_id": fork_parent,
+        }));
+        assert_eq!(fork.parent_native_session_id.as_deref(), Some(fork_parent));
+        assert_eq!(fork.session_relationship, SessionRelationshipKind::Forked);
+
+        let history_parent = "019fa000-0000-7000-8000-000000000905";
+        let resumed = parse(serde_json::json!({
+            "id": "019fa000-0000-7000-8000-000000000906",
+            "timestamp": "2026-08-05T12:00:00Z",
+            "source": "cli",
+            "history_base": {
+                "thread_id": history_parent,
+                "end_ordinal_exclusive": 7,
+                "end_byte_offset": 4096,
+            },
+        }));
+        assert_eq!(
+            resumed.parent_native_session_id.as_deref(),
+            Some(history_parent)
+        );
+        assert_eq!(
+            resumed.session_relationship,
+            SessionRelationshipKind::ResumedFrom
+        );
+    }
+
+    #[test]
+    fn conflicting_control_parent_authority_is_related_unknown() {
+        let source_parent = "019fa000-0000-7000-8000-000000000907";
+        let row = parse(serde_json::json!({
+            "id": "019fa000-0000-7000-8000-000000000908",
+            "timestamp": "2026-08-05T12:00:00Z",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": source_parent}}},
+            "parent_thread_id": "019fa000-0000-7000-8000-000000000909",
+        }));
+        assert_eq!(row.parent_native_session_id.as_deref(), Some(source_parent));
+        assert_eq!(
+            row.session_relationship,
+            SessionRelationshipKind::RelatedUnknown
+        );
+    }
+
+    #[test]
+    fn conflicting_fork_and_history_authority_is_related_unknown() {
+        let fork_parent = "019fa000-0000-7000-8000-000000000910";
+        let row = parse(serde_json::json!({
+            "id": "019fa000-0000-7000-8000-000000000911",
+            "timestamp": "2026-08-05T12:00:00Z",
+            "source": "cli",
+            "forked_from_id": fork_parent,
+            "history_base": {
+                "thread_id": "019fa000-0000-7000-8000-000000000912",
+                "end_ordinal_exclusive": 7,
+                "end_byte_offset": 4096,
+            },
+        }));
+        assert_eq!(row.parent_native_session_id.as_deref(), Some(fork_parent));
+        assert_eq!(
+            row.session_relationship,
+            SessionRelationshipKind::RelatedUnknown
         );
     }
 }
