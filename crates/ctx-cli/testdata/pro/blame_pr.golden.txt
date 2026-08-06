@@ -1,3 +1,7 @@
+Producer proven
+  2 pull request relationships evaluated on this page · 2 proven · 0 possible ·
+  0 conflicting · 0 none
+
 Pull request  ctxrs/ctx#42
 Repository    ctxrs/ctx
 Selector      https://gitlab.example.com/ctxrs/ctx/-/merge_requests/42

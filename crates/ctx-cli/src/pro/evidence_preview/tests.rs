@@ -11,8 +11,9 @@ use ctx_history_core::{
 };
 use ctx_history_index::{CoreEventRecord, EventRecord};
 use ctx_pro_host_protocol::{
-    BlameResult, EvidenceCitation, GitSnapshot, NumberedEvidence, ResolvedBlameTarget,
-    ResourceKind, ResourceRef, WorktreeStatus,
+    BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameResult,
+    EvidenceCitation, GitSnapshot, NumberedEvidence, ResolvedBlameTarget, ResourceKind,
+    ResourceRef, WorktreeStatus,
 };
 use sha2::{Digest, Sha256};
 
@@ -49,6 +50,20 @@ fn repository() -> ResourceRef {
         ResourceKind::Repository,
         REPOSITORY_ID,
     )
+}
+
+fn empty_outcome(unit: BlameCoverageUnit) -> BlameOutcome {
+    BlameOutcome {
+        attribution: BlameAttribution::None,
+        coverage: BlameCoverage {
+            unit,
+            evaluated: 0,
+            proven: 0,
+            possible: 0,
+            conflicting: 0,
+            none: 0,
+        },
+    }
 }
 
 fn source(provider: &str, seed: u8) -> SourceKey {
@@ -322,6 +337,7 @@ fn file_result(path: &str, evidence: Vec<NumberedEvidence>) -> BlameResult {
             head_oid: OID.to_owned(),
             worktree_status: WorktreeStatus::Clean,
         }),
+        outcome: empty_outcome(BlameCoverageUnit::CommittedLine),
         matches: Vec::new(),
         evidence,
         next: None,
@@ -1309,10 +1325,16 @@ fn duplicate_verifiers_unverified_records_and_non_file_targets_omit() {
             repository: repository(),
         },
     ] {
+        let unit = match &target {
+            ResolvedBlameTarget::Commit { .. } => BlameCoverageUnit::CommitFact,
+            ResolvedBlameTarget::PullRequest { .. } => BlameCoverageUnit::PullRequestRelationship,
+            ResolvedBlameTarget::File { .. } => unreachable!(),
+        };
         let result = BlameResult {
             snapshot: protocol_snapshot(),
             target,
             git_snapshot: None,
+            outcome: empty_outcome(unit),
             matches: Vec::new(),
             evidence: vec![evidence.clone()],
             next: None,

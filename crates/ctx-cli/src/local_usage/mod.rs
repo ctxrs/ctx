@@ -1,9 +1,6 @@
 use std::{collections::BTreeSet, path::Path, time::Duration};
 
-use ctx_pro_host_protocol::{
-    BlameMatch, BlameResult, BlameTarget, CommitPredicate, FactState, ProductionRelationship,
-    PullRequestBlameRelationship,
-};
+use ctx_pro_host_protocol::{BlameAttribution, BlameResult, BlameTarget};
 use serde_json::Value;
 
 use crate::cli::{CommandRoot, DaemonCommand, ShowTarget};
@@ -673,162 +670,27 @@ fn unique_blame_json_citation_count(structured: Option<&Value>) -> u64 {
 }
 
 pub(crate) fn classify_blame(result: &BlameResult) -> ProOutcome {
-    let mut possible = false;
-    for item in &result.matches {
-        match item {
-            BlameMatch::File(value) => {
-                for production in &value.production {
-                    match classify_production(production.relationship, production.state) {
-                        ProOutcome::Produced => return ProOutcome::Produced,
-                        ProOutcome::Possible => possible = true,
-                        ProOutcome::None | ProOutcome::Error | ProOutcome::NotApplicable => {}
-                    }
-                }
-            }
-            BlameMatch::Commit(value) => {
-                match classify_commit_predicate(value.predicate, value.state) {
-                    ProOutcome::Produced => return ProOutcome::Produced,
-                    ProOutcome::Possible => possible = true,
-                    ProOutcome::None | ProOutcome::Error | ProOutcome::NotApplicable => {}
-                }
-            }
-            BlameMatch::PullRequest(value) => match &value.relationship {
-                PullRequestBlameRelationship::Commit(commit) => {
-                    possible = true;
-                    for production in &commit.production {
-                        match classify_production(production.relationship, production.state) {
-                            ProOutcome::Produced => return ProOutcome::Produced,
-                            ProOutcome::Possible => possible = true,
-                            ProOutcome::None | ProOutcome::Error | ProOutcome::NotApplicable => {}
-                        }
-                    }
-                }
-                PullRequestBlameRelationship::Activity(activity)
-                    if matches!(activity.state, FactState::Asserted | FactState::Ambiguous) =>
-                {
-                    possible = true;
-                }
-                PullRequestBlameRelationship::Activity(_) => {}
-            },
-        }
-    }
-    if possible {
-        ProOutcome::Possible
-    } else {
-        ProOutcome::None
-    }
+    pro_outcome_from_attribution(result.outcome.attribution)
 }
 
 fn classify_blame_json(structured: Option<&Value>) -> ProOutcome {
-    let Some(matches) = structured
-        .and_then(|value| value.get("matches"))
-        .and_then(Value::as_array)
-    else {
-        return ProOutcome::None;
-    };
-    let mut possible = false;
-    for item in matches {
-        match item.get("kind").and_then(Value::as_str) {
-            Some("file") => {
-                if production_outcome(item.pointer("/value/production"), &mut possible) {
-                    return ProOutcome::Produced;
-                }
-            }
-            Some("commit") => {
-                let predicate = item
-                    .pointer("/value/predicate")
-                    .cloned()
-                    .and_then(|value| serde_json::from_value::<CommitPredicate>(value).ok());
-                let state = item
-                    .pointer("/value/state")
-                    .cloned()
-                    .and_then(|value| serde_json::from_value::<FactState>(value).ok());
-                if let (Some(predicate), Some(state)) = (predicate, state) {
-                    match classify_commit_predicate(predicate, state) {
-                        ProOutcome::Produced => return ProOutcome::Produced,
-                        ProOutcome::Possible => possible = true,
-                        ProOutcome::None | ProOutcome::Error | ProOutcome::NotApplicable => {}
-                    }
-                }
-            }
-            Some("pull_request") => {
-                let relationship = item.pointer("/value/relationship");
-                match relationship
-                    .and_then(|value| value.get("kind"))
-                    .and_then(Value::as_str)
-                {
-                    Some("commit") => {
-                        possible = true;
-                        if production_outcome(
-                            relationship.and_then(|value| value.pointer("/value/production")),
-                            &mut possible,
-                        ) {
-                            return ProOutcome::Produced;
-                        }
-                    }
-                    Some("activity")
-                        if relationship
-                            .and_then(|value| value.pointer("/value/state"))
-                            .and_then(Value::as_str)
-                            .is_some_and(|state| matches!(state, "asserted" | "ambiguous")) =>
-                    {
-                        possible = true;
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-    if possible {
-        ProOutcome::Possible
-    } else {
-        ProOutcome::None
+    match structured
+        .and_then(|value| value.pointer("/outcome/attribution"))
+        .and_then(Value::as_str)
+    {
+        Some("proven") => ProOutcome::Produced,
+        Some("possible" | "conflicting") => ProOutcome::Possible,
+        Some("none") | None => ProOutcome::None,
+        Some(_) => ProOutcome::None,
     }
 }
 
-fn classify_commit_predicate(predicate: CommitPredicate, state: FactState) -> ProOutcome {
-    match state {
-        FactState::Asserted if predicate == CommitPredicate::ProducedBy => ProOutcome::Produced,
-        FactState::Asserted | FactState::Ambiguous => ProOutcome::Possible,
-        FactState::Contradicted | FactState::Superseded => ProOutcome::None,
-    }
-}
-
-fn production_outcome(production: Option<&Value>, possible: &mut bool) -> bool {
-    let Some(production) = production.and_then(Value::as_array) else {
-        return false;
-    };
-    for attribution in production {
-        let relationship = attribution
-            .get("relationship")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<ProductionRelationship>(value).ok());
-        let state = attribution
-            .get("state")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<FactState>(value).ok());
-        if let (Some(relationship), Some(state)) = (relationship, state) {
-            match classify_production(relationship, state) {
-                ProOutcome::Produced => return true,
-                ProOutcome::Possible => *possible = true,
-                ProOutcome::None | ProOutcome::Error | ProOutcome::NotApplicable => {}
-            }
-        }
-    }
-    false
-}
-
-fn classify_production(relationship: ProductionRelationship, state: FactState) -> ProOutcome {
-    match (relationship, state) {
-        (ProductionRelationship::ProducedBy, FactState::Asserted) => ProOutcome::Produced,
-        (
-            ProductionRelationship::ProducedBy | ProductionRelationship::PossiblyProducedBy,
-            FactState::Asserted | FactState::Ambiguous,
-        ) => ProOutcome::Possible,
-        (
-            ProductionRelationship::ProducedBy | ProductionRelationship::PossiblyProducedBy,
-            FactState::Contradicted | FactState::Superseded,
-        ) => ProOutcome::None,
+const fn pro_outcome_from_attribution(attribution: BlameAttribution) -> ProOutcome {
+    match attribution {
+        BlameAttribution::Proven => ProOutcome::Produced,
+        // Local usage v2 has one non-definitive bucket. Conflicting producer
+        // evidence belongs with possible leads and must never count as proven.
+        BlameAttribution::Possible | BlameAttribution::Conflicting => ProOutcome::Possible,
+        BlameAttribution::None => ProOutcome::None,
     }
 }

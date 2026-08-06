@@ -6,7 +6,8 @@ use std::{
 use clap::Parser as _;
 use ctx_history_core::RepositoryFileInvocationKind;
 use ctx_pro_host_protocol::{
-    BlameResult, CommitBlameMatch, CommitFactType, CommitPredicate, FactConfidence, FactState,
+    BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameResult,
+    CommitBlameMatch, CommitFactType, CommitPredicate, FactConfidence, FactState,
     ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
 
@@ -18,6 +19,43 @@ fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
             core_generation_id: "a".repeat(64),
             materializer_revision: "materializer-v1".to_owned(),
         },
+    }
+}
+
+fn outcome(
+    unit: BlameCoverageUnit,
+    proven: u32,
+    possible: u32,
+    conflicting: u32,
+    none: u32,
+) -> BlameOutcome {
+    let evaluated = proven + possible + conflicting + none;
+    let attribution = if conflicting > 0 {
+        BlameAttribution::Conflicting
+    } else if evaluated > 0 && proven == evaluated {
+        BlameAttribution::Proven
+    } else if proven > 0 || possible > 0 {
+        BlameAttribution::Possible
+    } else {
+        BlameAttribution::None
+    };
+    BlameOutcome {
+        attribution,
+        coverage: BlameCoverage {
+            unit,
+            evaluated,
+            proven,
+            possible,
+            conflicting,
+            none,
+        },
+    }
+}
+
+fn current(result: BlameResult) -> crate::pro::HostedBlameResult {
+    crate::pro::HostedBlameResult {
+        result,
+        freshness: crate::pro::BlameResultFreshness::Current,
     }
 }
 
@@ -66,32 +104,32 @@ fn blame_routes_recognized_human_errors_to_pro_recovery_without_changing_machine
         ),
         (
             "pro_not_installed: no helper at /private/helper",
-            "ctx Pro is not set up",
+            "The signed ctx Pro helper is not installed",
             Some("ctx pro"),
         ),
         (
             "entitlement_expired: private grant detail at /private/grant",
-            "ctx Pro is locked",
+            "ctx Pro access has expired",
             Some("ctx pro manage"),
         ),
         (
             "key_store_unavailable: private vault detail at /private/vault",
-            "The secure key store is unavailable",
+            "The secure key store required by ctx Pro is unavailable",
             Some("ctx pro"),
         ),
         (
             "key_store_unavailable: interrupted Pro deletion must be completed at /private/vault",
-            "A previous ctx Pro deletion is incomplete",
-            Some("ctx pro uninstall --delete-data"),
+            "The secure key store required by ctx Pro is unavailable",
+            Some("ctx pro"),
         ),
         (
             "protocol_mismatch: private helper detail at /private/helper",
-            "The ctx Pro helper needs repair",
+            "The installed ctx Pro helper is incompatible with this ctx version",
             Some("ctx pro"),
         ),
         (
             "invalid_response: malformed helper frame at /private/helper",
-            "ctx Pro returned an invalid response",
+            "The ctx Pro helper returned an invalid response",
             Some("ctx pro"),
         ),
         (
@@ -457,14 +495,22 @@ fn commit_and_pr_results_skip_hydration_for_text_and_json() {
                     },
                     BlameTarget::File { .. } => panic!("unexpected file target"),
                 };
-                Ok(BlameResult {
+                let unit = match &target {
+                    ResolvedBlameTarget::Commit { .. } => BlameCoverageUnit::CommitFact,
+                    ResolvedBlameTarget::PullRequest { .. } => {
+                        BlameCoverageUnit::PullRequestRelationship
+                    }
+                    ResolvedBlameTarget::File { .. } => unreachable!(),
+                };
+                Ok(current(BlameResult {
                     snapshot: protocol_snapshot(),
                     target,
                     git_snapshot: None,
+                    outcome: outcome(unit, 0, 0, 0, 0),
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
-                })
+                }))
             },
             |_, _| panic!("non-file blame performed an evidence hydration read"),
         )
@@ -509,7 +555,7 @@ fn file_hydration_is_automatic_for_text_and_json_and_empty_context_is_nonfatal()
             &mut usage,
             &mut ui,
             |_, _, _, _| {
-                Ok(BlameResult {
+                Ok(current(BlameResult {
                     snapshot: protocol_snapshot(),
                     target: ResolvedBlameTarget::File {
                         path: "src/lib.rs".to_owned(),
@@ -524,10 +570,11 @@ fn file_hydration_is_automatic_for_text_and_json_and_empty_context_is_nonfatal()
                         head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
                         worktree_status: ctx_pro_host_protocol::WorktreeStatus::Clean,
                     }),
+                    outcome: outcome(BlameCoverageUnit::CommittedLine, 0, 0, 0, 0),
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
-                })
+                }))
             },
             |_, _| {
                 reads.set(reads.get() + 1);
@@ -558,13 +605,14 @@ fn output_failure_does_not_retain_blame_result_or_citation_counts() {
         display: id.to_owned(),
     };
     let commit = resource("commit:abc1234", ResourceKind::Commit);
-    let result = BlameResult {
+    let result = current(BlameResult {
         snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: resource("repository:ctx", ResourceKind::Repository),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
         matches: vec![ctx_pro_host_protocol::BlameMatch::Commit(
             CommitBlameMatch {
                 fact_id: "fact:1".to_owned(),
@@ -583,7 +631,7 @@ fn output_failure_does_not_retain_blame_result_or_citation_counts() {
         )],
         evidence: Vec::new(),
         next: None,
-    };
+    });
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
     let mut ui = sink_ui();
@@ -609,13 +657,14 @@ fn successful_blame_observes_structured_results_and_empty_pages() {
         display: id.to_owned(),
     };
     let commit = resource("commit:abc1234", ResourceKind::Commit);
-    let mut result = BlameResult {
+    let mut result = current(BlameResult {
         snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: resource("repository:ctx", ResourceKind::Repository),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
         matches: vec![ctx_pro_host_protocol::BlameMatch::Commit(
             CommitBlameMatch {
                 fact_id: "fact:1".to_owned(),
@@ -634,7 +683,7 @@ fn successful_blame_observes_structured_results_and_empty_pages() {
         )],
         evidence: Vec::new(),
         next: None,
-    };
+    });
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
     let mut ui = sink_ui();
@@ -653,10 +702,11 @@ fn successful_blame_observes_structured_results_and_empty_pages() {
     );
     assert!(
         blame_json_output_bytes(&result, None).unwrap()
-            > serde_json::to_vec(&result).unwrap().len()
+            > serde_json::to_vec(&result.result).unwrap().len()
     );
 
-    result.matches.clear();
+    result.result.matches.clear();
+    result.result.outcome = outcome(BlameCoverageUnit::CommitFact, 0, 0, 0, 0);
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
     let mut expected_ui = sink_ui();
     let expected_bytes = print_blame_result(&result, false, &mut expected_ui).unwrap();
@@ -680,17 +730,18 @@ fn human_byte_accounting_is_plain_and_invariant_across_color_modes() {
         kind,
         display: id.to_owned(),
     };
-    let result = BlameResult {
+    let result = current(BlameResult {
         snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: resource("commit:abc1234", ResourceKind::Commit),
             repository: resource("repository:ctx", ResourceKind::Repository),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 0, 0, 0, 0),
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
-    };
+    });
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut observations = Vec::new();
     for color in [crate::ui::ColorMode::Never, crate::ui::ColorMode::Always] {
@@ -728,7 +779,7 @@ fn automatic_evidence_context_bytes_are_included_in_local_usage_accounting() {
         kind,
         display: id.to_owned(),
     };
-    let result = BlameResult {
+    let result = current(BlameResult {
         snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::File {
             path: "src/lib.rs".to_owned(),
@@ -739,10 +790,11 @@ fn automatic_evidence_context_bytes_are_included_in_local_usage_accounting() {
             head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             worktree_status: ctx_pro_host_protocol::WorktreeStatus::Clean,
         }),
+        outcome: outcome(BlameCoverageUnit::CommittedLine, 0, 0, 0, 0),
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
-    };
+    });
     let previews = crate::pro::evidence_preview::EvidencePreviewModel {
         previews: vec![crate::pro::evidence_preview::EvidencePreview {
             citation_numbers: vec![1],
@@ -786,13 +838,14 @@ fn referral_cta_requires_nonempty_interactive_human_success() {
         display: id.to_owned(),
     };
     let commit = resource("commit:abc1234", ResourceKind::Commit);
-    let mut result = BlameResult {
+    let mut result = current(BlameResult {
         snapshot: protocol_snapshot(),
         target: ResolvedBlameTarget::Commit {
             commit: commit.clone(),
             repository: resource("repository:ctx", ResourceKind::Repository),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
         matches: vec![ctx_pro_host_protocol::BlameMatch::Commit(
             CommitBlameMatch {
                 fact_id: "fact:1".to_owned(),
@@ -811,12 +864,13 @@ fn referral_cta_requires_nonempty_interactive_human_success() {
         )],
         evidence: Vec::new(),
         next: None,
-    };
+    });
 
     assert!(referral_cta_eligible(&result, false, true));
     assert!(!referral_cta_eligible(&result, true, true));
     assert!(!referral_cta_eligible(&result, false, false));
-    result.matches.clear();
+    result.result.matches.clear();
+    result.result.outcome = outcome(BlameCoverageUnit::CommitFact, 0, 0, 0, 0);
     assert!(!referral_cta_eligible(&result, false, true));
 }
 

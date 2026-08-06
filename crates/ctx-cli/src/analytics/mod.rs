@@ -19,7 +19,7 @@ pub(crate) use operation::*;
 mod product;
 pub(crate) use product::*;
 mod sender;
-pub(crate) use sender::send_batch;
+pub(crate) use sender::{quiet_delivery_failure_output, send_batch};
 
 #[cfg(test)]
 mod tests;

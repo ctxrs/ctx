@@ -51,7 +51,7 @@ fn main() {
                 "--fingerprint-rust takes no value"
             );
             println!(
-                "/// Lowercase SHA-256 of `testdata/v1/inventory.json`'s canonical inventory.\n\
+                "/// Lowercase SHA-256 of `testdata/v2/inventory.json`'s canonical inventory.\n\
                  pub const PROTOCOL_FINGERPRINT: &str =\n    \"{digest}\";"
             );
             return;

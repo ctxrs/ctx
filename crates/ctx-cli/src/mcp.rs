@@ -443,6 +443,14 @@ fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
     if !arguments.is_object() {
+        if name == "blame" {
+            return (
+                Ok(McpHandled::plain(tool_error_result(
+                    crate::pro::invalid_blame_request(),
+                ))),
+                usage_invocation,
+            );
+        }
         return (
             Err(json_rpc_error(
                 -32602,
@@ -454,6 +462,11 @@ fn handle_tools_call(
     }
 
     if let Err(error) = validate_argument_keys(&arguments, allowed_arguments) {
+        let error = if name == "blame" {
+            crate::pro::invalid_blame_request()
+        } else {
+            error
+        };
         return (
             Ok(McpHandled::plain(tool_error_result(error))),
             usage_invocation,

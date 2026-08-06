@@ -66,7 +66,7 @@ pub(crate) fn apply_core_source_delta_page_request_frame_wire_bytes_from_request
 ///
 /// UUIDs have a fixed 36-byte JSON representation. Callers that must admit a
 /// request before its transport sequence is available use `u64::MAX`; every
-/// actual Protocol V1 sequence is then no larger than the admitted frame.
+/// actual Protocol V2 sequence is then no larger than the admitted frame.
 pub fn apply_core_source_delta_page_request_frame_wire_bytes(
     sequence: u64,
     request: &ApplyCoreSourceDeltaPageRequest,
@@ -93,7 +93,7 @@ pub(crate) fn core_source_delta_page_applied_frame_wire_bytes_from_response_byte
 ///
 /// UUIDs have a fixed 36-byte JSON representation. Callers that must admit a
 /// response before its transport sequence is available use `u64::MAX`; every
-/// actual Protocol V1 sequence is then no larger than the admitted frame.
+/// actual Protocol V2 sequence is then no larger than the admitted frame.
 pub fn core_source_delta_page_applied_frame_wire_bytes(
     sequence: u64,
     response: &CoreSourceDeltaPageApplied,
@@ -216,7 +216,7 @@ pub enum HelperMessage {
     CoreEventDeltaPagesApplied(CoreEventDeltaPagesApplied),
 }
 
-/// Independently selectable helper behavior that exists in Protocol V1.
+/// Independently selectable helper behavior that exists in Protocol V2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -241,7 +241,7 @@ impl Capability {
     }
 }
 
-/// Exact Protocol V1 handshake. There is no compatibility range negotiation.
+/// Exact Protocol V2 handshake. There is no compatibility range negotiation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelloRequest {

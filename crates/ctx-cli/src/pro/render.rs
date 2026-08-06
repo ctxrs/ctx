@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::ui::{canonical_human_output_bytes, Document, RenderContext, Ui};
 
 use super::evidence_preview::EvidencePreviewModel;
+use super::{diagnostic::BlameNextAction, BlameResultFreshness, HostedBlameResult};
 
 mod commit;
 mod evidence;
@@ -16,23 +17,61 @@ mod relationships;
 mod target;
 
 #[must_use]
-pub(crate) fn blame_result_json(
-    result: &BlameResult,
+pub(crate) fn blame_result_json<T: BlameOutput>(
+    output: &T,
     previews: Option<&EvidencePreviewModel>,
 ) -> Value {
+    let result = output.result();
     let evidence_context = BlameEvidenceContext::for_result(result, previews);
-    blame_result_json_with_context(result, &evidence_context)
+    blame_result_json_with_context(output, &evidence_context)
 }
 
-fn blame_result_json_with_context(
-    result: &BlameResult,
+fn blame_result_json_with_context<T: BlameOutput>(
+    output: &T,
     evidence_context: &BlameEvidenceContext,
 ) -> Value {
-    let mut value = serde_json::to_value(result).unwrap_or(Value::Null);
+    let mut value = serde_json::to_value(output.result()).unwrap_or(Value::Null);
     if let Some(object) = value.as_object_mut() {
         object.insert("evidence_context".to_owned(), evidence_context.json_value());
+        if let Some(freshness) = output.freshness() {
+            object.insert(
+                "freshness".to_owned(),
+                serde_json::json!({ "state": freshness }),
+            );
+        }
+        if let Some(action) = successful_next_action(output) {
+            object.insert(
+                "next_action".to_owned(),
+                serde_json::to_value(action).unwrap_or(Value::Null),
+            );
+        }
     }
     value
+}
+
+pub(crate) trait BlameOutput {
+    fn result(&self) -> &BlameResult;
+    fn freshness(&self) -> Option<BlameResultFreshness>;
+}
+
+impl BlameOutput for BlameResult {
+    fn result(&self) -> &BlameResult {
+        self
+    }
+
+    fn freshness(&self) -> Option<BlameResultFreshness> {
+        None
+    }
+}
+
+impl BlameOutput for HostedBlameResult {
+    fn result(&self) -> &BlameResult {
+        &self.result
+    }
+
+    fn freshness(&self) -> Option<BlameResultFreshness> {
+        Some(self.freshness)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +151,7 @@ impl BlameEvidenceContext {
 /// Emits one blame result and returns its canonical, color-independent byte
 /// count. Machine output intentionally bypasses the terminal UI.
 pub(crate) fn print_blame_result(
-    result: &BlameResult,
+    result: &HostedBlameResult,
     json_output: bool,
     ui: &mut Ui,
 ) -> Result<usize> {
@@ -121,7 +160,7 @@ pub(crate) fn print_blame_result(
 }
 
 pub(crate) fn print_blame_result_with_evidence_preview(
-    result: &BlameResult,
+    result: &HostedBlameResult,
     json_output: bool,
     previews: &EvidencePreviewModel,
     ui: &mut Ui,
@@ -131,7 +170,7 @@ pub(crate) fn print_blame_result_with_evidence_preview(
 }
 
 fn print_blame_result_with_context(
-    result: &BlameResult,
+    result: &HostedBlameResult,
     json_output: bool,
     evidence_context: &BlameEvidenceContext,
     ui: &mut Ui,
@@ -152,12 +191,25 @@ fn print_blame_result_with_context(
     Ok(plain_bytes)
 }
 
-fn render_blame_document(
-    result: &BlameResult,
+fn render_blame_document<T: BlameOutput>(
+    output: &T,
     context: &RenderContext,
     evidence_context: &BlameEvidenceContext,
 ) -> Document {
-    human::render(result, context, evidence_context)
+    human::render(
+        output.result(),
+        output.freshness(),
+        successful_next_action(output).as_ref(),
+        context,
+        evidence_context,
+    )
+}
+
+fn successful_next_action<T: BlameOutput>(output: &T) -> Option<BlameNextAction> {
+    (output.freshness() == Some(BlameResultFreshness::Current)
+        && output.result().outcome.attribution == ctx_pro_host_protocol::BlameAttribution::None)
+        .then(|| BlameNextAction::core_search_for_resolved(&output.result().target))
+        .flatten()
 }
 
 #[cfg(test)]

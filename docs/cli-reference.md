@@ -533,10 +533,24 @@ to committed HEAD lines. Only file blame negotiates the helper's Git-read
 capability.
 
 Every successful response is the typed protocol `BlameResult`: a resolved
-file, commit, or PR target; typed matches; one complete deduplicated,
-contiguously numbered evidence table; and an optional continuation. A page
+file, commit, or PR target; an `outcome` whose attribution is `proven`,
+`possible`, `conflicting`, or `none`; typed matches; one complete deduplicated,
+contiguously numbered evidence table; and an optional continuation. Human output
+leads with `Producer proven`, `Possible producer found`, `Producer evidence
+conflicts`, or `No producer proven`. Producer conflict remains successful;
+target, repository, and commit-rewrite ambiguity fail.
+
+File and PR output reports per-page evaluated coverage counts for all four
+states. Counts describe the returned committed lines, commit facts, or PR
+relationships and never trigger a total-result scan or a `partial` state. A page
 never clips evidence for a returned match. Continuation cursors are opaque and
 bound to the request and graph state.
+
+JSON and MCP always include freshness. Human output hides routine currentness
+and warns when the result uses stale committed
+history. A stale positive attribution may succeed; a stale no-attribution result
+fails because the miss would not be definitive. Mixed stale coverage also fails
+when even one evaluated unit is `none`.
 
 Commit output groups assertions as `Produced by`, `Possible producers`, and
 `Also recorded`; inspection or reference evidence never appears as production.
@@ -550,13 +564,25 @@ committer time, PR creation or merge time, materialization time, or proof of
 completion. Missing fact times remain quiet, and timestamps never change the
 existing semantic ordering, cursors, or pagination.
 
+`ctx blame --format json` failures are compact typed JSON, never raw Rust error
+text. MCP uses the identical object as `structuredContent` and sets
+`isError: true`; human errors lead with the outcome, one trusted detail, and at
+most one action. The object preserves matching `error` and `error_code`, plus a
+closed `reason`, trusted `message`, `retryable`, and applicable freshness,
+single argv action, or bounded candidates.
+
 Stable Pro failure codes include `pro_not_installed`, `commercial_unavailable`,
-`entitlement_expired`, `helper_upgrade_required`, `key_store_unavailable`,
+`entitlement_required`, `entitlement_expired`, `entitlement_invalid`,
+`helper_upgrade_required`, `key_store_unavailable`,
 `key_store_locked`, `not_materialized`, `protocol_mismatch`, `repository_unavailable`,
-`resource_not_found`,
+`resource_not_found`, `operation_unavailable`,
 `line_out_of_range`, `stale_snapshot`, `stale_fact`, `ambiguous`,
 `corrupt_graph`, `invalid_request`, `invalid_response`,
 `helper_crashed`, and `helper_timeout`.
+
+Core search is an explicit advisory only for a current result with no producer,
+a current target that is not indexed, or an unavailable blame operation. Blame
+never performs Core search automatically.
 
 `key_store_locked` and `key_store_unavailable` are the only stable public names
 for selected credential-store failures. Pre-release `credential_vault_*`

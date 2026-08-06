@@ -5,7 +5,8 @@ pub(crate) fn blame(
     target: BlameTarget,
     limit: u32,
     cursor: Option<String>,
-) -> Result<BlameResult> {
+) -> Result<HostedBlameResult> {
+    let diagnostic_target = target.clone();
     blame_with_policy(
         data_root,
         target,
@@ -13,6 +14,7 @@ pub(crate) fn blame(
         cursor,
         DEFAULT_BLAME_FRESHNESS_POLICY,
     )
+    .map_err(|error| errors::blame_boundary_error(error, &diagnostic_target))
 }
 
 pub(super) fn blame_with_policy(
@@ -21,22 +23,75 @@ pub(super) fn blame_with_policy(
     limit: u32,
     cursor: Option<String>,
     policy: BlameFreshnessPolicy,
-) -> Result<BlameResult> {
+) -> Result<HostedBlameResult> {
     let expected_active_generation = prepare_blame_freshness(data_root, policy)?;
-    let result = blame_once(
+    let active_before = expected_active_generation.clone().map_or_else(
+        || {
+            crate::semantic::pin_active_verified_generation(data_root)
+                .map(|pin| pin.generation_id().to_owned())
+        },
+        Ok,
+    )?;
+    let attempt = blame_once(
         data_root,
         target,
         limit,
         cursor,
         expected_active_generation.as_deref(),
     )?;
+    let active_after = crate::semantic::pin_active_verified_generation(data_root)?
+        .generation_id()
+        .to_owned();
     if let Some(expected_generation) = expected_active_generation {
-        let active_generation = crate::semantic::pin_active_verified_generation(data_root)?
-            .generation_id()
-            .to_owned();
-        ensure_active_core_generation_is_unchanged(&expected_generation, &active_generation)?;
+        ensure_active_core_generation_is_unchanged(&expected_generation, &active_after)?;
     }
-    Ok(result)
+    let current =
+        attempt.served_generation == active_before && attempt.served_generation == active_after;
+    match attempt.result {
+        Ok(result) => {
+            let freshness = classify_blame_freshness(&result, &active_before, &active_after)?;
+            Ok(HostedBlameResult { result, freshness })
+        }
+        Err(error) if !current && is_generation_bound_negative(&error) => {
+            Err(stale_negative_diagnostic())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn classify_blame_freshness(
+    result: &BlameResult,
+    active_before: &str,
+    active_after: &str,
+) -> Result<BlameResultFreshness> {
+    let served_generation = match &result.snapshot {
+        QuerySnapshotExpectation::Core { receipt } => &receipt.core_generation_id,
+    };
+    classify_blame_snapshot_freshness(
+        served_generation,
+        &result.outcome,
+        active_before,
+        active_after,
+    )
+}
+
+pub(super) fn classify_blame_snapshot_freshness(
+    served_generation: &str,
+    outcome: &ctx_pro_host_protocol::BlameOutcome,
+    active_before: &str,
+    active_after: &str,
+) -> Result<BlameResultFreshness> {
+    if served_generation == active_before && served_generation == active_after {
+        return Ok(BlameResultFreshness::Current);
+    }
+    if outcome.attribution == ctx_pro_host_protocol::BlameAttribution::None
+        || outcome.coverage.none > 0
+    {
+        bail!(
+            "stale_source: the committed Pro generation cannot prove an absent producer while Core is newer"
+        );
+    }
+    Ok(BlameResultFreshness::StaleCommitted)
 }
 
 pub(super) fn ensure_active_core_generation_is_unchanged(
@@ -53,13 +108,18 @@ pub(super) fn ensure_active_core_generation_is_unchanged(
     Ok(())
 }
 
-pub(super) fn blame_once(
+struct BlameAttempt {
+    served_generation: String,
+    result: Result<BlameResult>,
+}
+
+fn blame_once(
     data_root: &Path,
     target: BlameTarget,
     limit: u32,
     cursor: Option<String>,
     expected_active_core_generation_id: Option<&str>,
-) -> Result<BlameResult> {
+) -> Result<BlameAttempt> {
     let capabilities = required_blame_capabilities(&target);
     let mut client = ProClient::connect(data_root, &capabilities)?;
     let status = helper_status(&mut client)?;
@@ -81,15 +141,48 @@ pub(super) fn blame_once(
     let request_context = request.clone();
     let result = match client.exchange(HostMessage::Blame(request), BLAME_TIMEOUT)? {
         HelperMessage::Blame(result) => {
-            validate_blame_response(&request_context, &result)?;
-            result
+            validate_blame_response(&request_context, &result).map(|()| result)
         }
-        HelperMessage::Error(error) => return Err(protocol_error(error)),
-        _ => bail!("invalid_response: helper returned a non-blame response"),
+        HelperMessage::Error(error) => Err(protocol_blame_error(error, &request_context.target)),
+        _ => Err(anyhow!(
+            "invalid_response: helper returned a non-blame response"
+        )),
     };
     let status_after = helper_status(&mut client)?;
     ensure_committed_pro_receipt_is_unchanged(&expected_receipt, &status_after)?;
-    Ok(result)
+    Ok(BlameAttempt {
+        served_generation: expected_receipt.core_generation_id,
+        result,
+    })
+}
+
+pub(super) fn is_generation_bound_negative(error: &anyhow::Error) -> bool {
+    use crate::pro::diagnostic::BlameDiagnosticReason;
+
+    crate::pro::blame_diagnostic(error).is_some_and(|diagnostic| {
+        matches!(
+            diagnostic.reason,
+            BlameDiagnosticReason::TargetNotIndexed
+                | BlameDiagnosticReason::RepositorySelectorNotIndexed
+                | BlameDiagnosticReason::RepositoryNotBound
+                | BlameDiagnosticReason::RepositoryAmbiguous
+                | BlameDiagnosticReason::TargetOrRepositoryAmbiguous
+                | BlameDiagnosticReason::TargetAmbiguous
+                | BlameDiagnosticReason::CommitRewriteAmbiguous
+                | BlameDiagnosticReason::OperationNotCovered
+                | BlameDiagnosticReason::FileBlameNotCovered
+                | BlameDiagnosticReason::CommitBlameNotCovered
+                | BlameDiagnosticReason::PullRequestBlameNotCovered
+        )
+    })
+}
+
+pub(super) fn stale_negative_diagnostic() -> anyhow::Error {
+    anyhow::Error::new(
+        crate::pro::diagnostic::BlameDiagnostic::for_stable_error_code("stale_source")
+            .expect("stale_source is a stable Pro blame diagnostic")
+            .with_stale_committed(),
+    )
 }
 
 pub(super) fn blame_core_generation(

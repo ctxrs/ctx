@@ -495,6 +495,32 @@ fn stable_machine_errors_are_exact_json_without_untrusted_detail_or_ansi() {
 }
 
 #[test]
+fn blame_machine_errors_are_typed_without_expanding_unrelated_pro_errors() {
+    let mut output = Vec::new();
+    write_blame_error_json(
+        &mut output,
+        &anyhow!("invalid_request: private path /home/alice/repository"),
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["error"], "invalid_request");
+    assert_eq!(value["reason"], "request_invalid");
+    assert_eq!(value["retryable"], false);
+    assert!(!String::from_utf8_lossy(&output).contains("alice"));
+
+    let mut unrelated = Vec::new();
+    assert!(write_stable_error_json(
+        &mut unrelated,
+        &anyhow!("invalid_request: private referral detail")
+    )
+    .unwrap());
+    assert_eq!(
+        unrelated,
+        b"{\"error\":\"invalid_request\",\"error_code\":\"invalid_request\"}\n"
+    );
+}
+
+#[test]
 fn unrelated_errors_keep_their_existing_contract() {
     let error = anyhow!("authentication_required: sign in");
     let context =

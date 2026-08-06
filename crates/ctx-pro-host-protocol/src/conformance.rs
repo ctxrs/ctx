@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 fn inventory() -> Value {
-    serde_json::from_str(include_str!("../testdata/v1/inventory.json")).expect("protocol inventory")
+    serde_json::from_str(include_str!("../testdata/v2/inventory.json")).expect("protocol inventory")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -451,9 +451,10 @@ fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
 }
 
 #[test]
-fn inventory_freezes_the_blame_result_snapshot_binding() {
+fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract() {
     let value = inventory();
     let canonical = &value["canonical_inventory"];
+    assert_eq!(canonical["protocol_version"], serde_json::json!(2));
     let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(
         value["golden_vectors"]["helper_frames"]["blame"]
             .as_str()
@@ -468,6 +469,123 @@ fn inventory_freezes_the_blame_result_snapshot_binding() {
         "BlameResult",
         &serde_json::to_value(result).expect("blame response JSON"),
     );
+    assert_eq!(
+        canonical["dto_fields"]["BlameResult"]["required"],
+        serde_json::json!([
+            "snapshot",
+            "target",
+            "git_snapshot",
+            "outcome",
+            "matches",
+            "evidence",
+            "next"
+        ])
+    );
+    assert_eq!(
+        canonical["dto_fields"]["BlameCoverage"]["required"],
+        serde_json::json!([
+            "unit",
+            "evaluated",
+            "proven",
+            "possible",
+            "conflicting",
+            "none"
+        ])
+    );
+    assert_eq!(
+        canonical["enums"]["blame_attribution"],
+        serde_json::json!(["proven", "possible", "conflicting", "none"])
+    );
+    let diagnostic_reasons = [
+        BlameDiagnosticReason::TargetNotIndexed,
+        BlameDiagnosticReason::RepositorySelectorNotIndexed,
+        BlameDiagnosticReason::RepositoryNotBound,
+        BlameDiagnosticReason::CheckoutUnavailable,
+        BlameDiagnosticReason::GitUnavailable,
+        BlameDiagnosticReason::RepositoryAmbiguous,
+        BlameDiagnosticReason::TargetAmbiguous,
+        BlameDiagnosticReason::CommitRewriteAmbiguous,
+        BlameDiagnosticReason::FileBlameNotCovered,
+        BlameDiagnosticReason::CommitBlameNotCovered,
+        BlameDiagnosticReason::PullRequestBlameNotCovered,
+    ]
+    .map(|reason| serde_json::to_value(reason).expect("blame diagnostic reason JSON"));
+    assert_eq!(
+        canonical["enums"]["blame_diagnostic_reason"],
+        serde_json::json!(diagnostic_reasons)
+    );
+    let diagnostic_candidate_kinds = [
+        BlameDiagnosticCandidate::Repository {
+            selector: "workspace:ctx".to_owned(),
+        },
+        BlameDiagnosticCandidate::Commit {
+            repository: "workspace:ctx".to_owned(),
+            oid: "a".repeat(40),
+        },
+    ]
+    .map(|candidate| {
+        serde_json::to_value(candidate).expect("blame diagnostic candidate JSON")["kind"].clone()
+    });
+    assert_eq!(
+        canonical["enums"]["blame_diagnostic_candidate_kind"],
+        serde_json::json!(diagnostic_candidate_kinds)
+    );
+    assert_eq!(
+        canonical["bounds"]["blame_diagnostic_candidates"],
+        serde_json::json!(5)
+    );
+
+    let error = read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(
+        value["golden_vectors"]["helper_frames"]["error"]
+            .as_str()
+            .expect("error response frame"),
+    )))
+    .expect("error response");
+    let HelperMessage::Error(error) = error.message else {
+        panic!("error response kind");
+    };
+    let error = serde_json::to_value(error).expect("protocol error JSON");
+    assert_inventory_fields_match_actual(canonical, "ProtocolError", &error);
+    assert!(error["details"].is_null());
+
+    let details = BlameDiagnosticDetails {
+        reason: BlameDiagnosticReason::RepositoryAmbiguous,
+        candidates: vec![
+            BlameDiagnosticCandidate::Repository {
+                selector: "forge:github.com/ctxrs/ctx".to_owned(),
+            },
+            BlameDiagnosticCandidate::Repository {
+                selector: "workspace:ctx".to_owned(),
+            },
+        ],
+        candidates_truncated: false,
+    };
+    assert_inventory_fields_match_actual(
+        canonical,
+        "BlameDiagnosticDetails",
+        &serde_json::to_value(&details).expect("blame diagnostic details JSON"),
+    );
+    for (name, candidate) in [
+        (
+            "BlameDiagnosticCandidate.repository",
+            BlameDiagnosticCandidate::Repository {
+                selector: "workspace:ctx".to_owned(),
+            },
+        ),
+        (
+            "BlameDiagnosticCandidate.commit",
+            BlameDiagnosticCandidate::Commit {
+                repository: "workspace:ctx".to_owned(),
+                oid: "a".repeat(40),
+            },
+        ),
+    ] {
+        assert_inventory_fields_match_actual(
+            canonical,
+            name,
+            &serde_json::to_value(candidate).expect("blame diagnostic candidate JSON"),
+        );
+    }
 }
 
 #[test]

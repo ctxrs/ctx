@@ -224,7 +224,7 @@ fn mcp_blame_rejects_non_launch_targets_and_invalid_bounds() {
         ),
         (
             "limit",
-            json!({"target": {"kind": "commit", "oid": "abc"}, "limit": 9}),
+            json!({"target": {"kind": "commit", "oid": "abcd"}, "limit": 9}),
             "limit must be between 1 and 8",
         ),
     ];
@@ -287,6 +287,21 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
         "pro-query-fixture-v1"
     );
     assert_eq!(structured["target"]["kind"], "commit");
+    assert_eq!(
+        structured["outcome"],
+        json!({
+            "attribution": "proven",
+            "coverage": {
+                "unit": "commit_fact",
+                "evaluated": 1,
+                "proven": 1,
+                "possible": 0,
+                "conflicting": 0,
+                "none": 0,
+            },
+        })
+    );
+    assert_eq!(structured["freshness"]["state"], "current");
     assert_eq!(structured["matches"][0]["kind"], "commit");
     assert_eq!(structured["evidence"].as_array().map(Vec::len), Some(1));
     assert!(structured.get("payload_type").is_none());
@@ -310,6 +325,16 @@ fn missing_blame_resource_matches_cli_json_error_code() {
     initialize_current_query_store(&root);
     let helper = root.join("ctx-pro-blame-missing-resource");
     write_blame_error_helper(&helper, "resource_not_found");
+    let mut cli = ctx(&temp);
+    let cli_output = cli
+        .env("CTX_PRO_HELPER", &helper)
+        .args(["blame", "commit", "0123456789abcdef", "--format=json"])
+        .output()
+        .unwrap();
+    assert!(!cli_output.status.success());
+    assert!(cli_output.stdout.is_empty());
+    let cli_diagnostic: Value = serde_json::from_slice(&cli_output.stderr).unwrap();
+
     let responses = mcp_roundtrip_with_env(
         &temp,
         &[
@@ -331,13 +356,23 @@ fn missing_blame_resource_matches_cli_json_error_code() {
     );
     let result = &responses[1]["result"];
     assert_eq!(result["isError"], true, "{result:#}");
-    let diagnostic = "No indexed Pro resource matches the requested blame target.";
-    assert_eq!(result["structuredContent"]["error"], diagnostic);
+    assert_eq!(result["structuredContent"], cli_diagnostic);
     assert_eq!(
         result["structuredContent"]["error_code"],
         "resource_not_found"
     );
-    assert_eq!(result["content"][0]["text"], diagnostic);
+    assert_eq!(result["structuredContent"]["reason"], "target_not_indexed");
+    let expected_text = result["structuredContent"]
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| result["structuredContent"]["error"].as_str())
+        .unwrap();
+    assert!(result["content"][0]["text"]
+        .as_str()
+        .is_some_and(|text| text.starts_with(expected_text)));
+    assert!(!serde_json::to_string(result)
+        .unwrap()
+        .contains("/secret/graph/path"));
 }
 
 #[cfg(unix)]
@@ -391,7 +426,7 @@ fn mcp_blame_fails_intact_when_helper_page_exceeds_aggregate_cap() {
 
 #[cfg(unix)]
 #[test]
-fn mcp_pr_activity_does_not_claim_commit_membership() {
+fn mcp_pr_activity_reports_proven_activity_without_claiming_commit_membership() {
     let temp = tempdir();
     let root = data_root(&temp);
     initialize_current_query_store(&root);
@@ -420,6 +455,20 @@ fn mcp_pr_activity_does_not_claim_commit_membership() {
         &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
     );
     let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(
+        structured["outcome"],
+        json!({
+            "attribution": "proven",
+            "coverage": {
+                "unit": "pull_request_relationship",
+                "evaluated": 1,
+                "proven": 1,
+                "possible": 0,
+                "conflicting": 0,
+                "none": 0,
+            },
+        })
+    );
     assert_eq!(
         structured["matches"][0]["value"]["relationship"]["kind"], "activity",
         "{structured:#}"

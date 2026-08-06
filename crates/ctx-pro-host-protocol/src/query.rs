@@ -9,7 +9,7 @@ use super::{
 };
 
 #[path = "query_pull_request_selector.rs"]
-mod pull_request_selector;
+pub(crate) mod pull_request_selector;
 use pull_request_selector::{pull_request_selector_kind, PullRequestSelectorKind};
 
 /// Exact completed authority that a cited blame request requires the derived graph to match.
@@ -79,7 +79,10 @@ impl BlameTarget {
                 }
                 (path, repository)
             }
-            Self::Commit { oid, repository } => (oid, repository),
+            Self::Commit { oid, repository } => {
+                validate_commit_selector(oid)?;
+                (oid, repository)
+            }
             Self::PullRequest {
                 selector,
                 repository,
@@ -377,11 +380,120 @@ pub struct NumberedEvidence {
     pub citation: EvidenceCitation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlameAttribution {
+    Proven,
+    Possible,
+    Conflicting,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlameCoverageUnit {
+    CommittedLine,
+    CommitFact,
+    PullRequestRelationship,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameCoverage {
+    pub unit: BlameCoverageUnit,
+    pub evaluated: u32,
+    pub proven: u32,
+    pub possible: u32,
+    pub conflicting: u32,
+    pub none: u32,
+}
+
+impl BlameCoverage {
+    const fn empty(unit: BlameCoverageUnit) -> Self {
+        Self {
+            unit,
+            evaluated: 0,
+            proven: 0,
+            possible: 0,
+            conflicting: 0,
+            none: 0,
+        }
+    }
+
+    fn add(&mut self, attribution: BlameAttribution, evaluated: u32) -> Result<(), ProtocolError> {
+        self.evaluated = self
+            .evaluated
+            .checked_add(evaluated)
+            .ok_or_else(|| ProtocolError::new(ErrorClass::Bounds, "blame page count overflowed"))?;
+        let count = match attribution {
+            BlameAttribution::Proven => &mut self.proven,
+            BlameAttribution::Possible => &mut self.possible,
+            BlameAttribution::Conflicting => &mut self.conflicting,
+            BlameAttribution::None => &mut self.none,
+        };
+        *count = count.checked_add(evaluated).ok_or_else(|| {
+            ProtocolError::new(ErrorClass::Bounds, "blame page coverage overflowed")
+        })?;
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let counted = self
+            .proven
+            .checked_add(self.possible)
+            .and_then(|count| count.checked_add(self.conflicting))
+            .and_then(|count| count.checked_add(self.none))
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorClass::Bounds, "blame coverage count overflowed")
+            })?;
+        if counted != self.evaluated {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame coverage counts must sum to the evaluated page count",
+            ));
+        }
+        Ok(())
+    }
+
+    const fn aggregate_attribution(&self) -> BlameAttribution {
+        if self.conflicting > 0 {
+            BlameAttribution::Conflicting
+        } else if self.evaluated > 0 && self.proven == self.evaluated {
+            BlameAttribution::Proven
+        } else if self.proven > 0 || self.possible > 0 {
+            BlameAttribution::Possible
+        } else {
+            BlameAttribution::None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlameOutcome {
+    pub attribution: BlameAttribution,
+    pub coverage: BlameCoverage,
+}
+
+impl BlameOutcome {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        self.coverage.validate()?;
+        if self.attribution != self.coverage.aggregate_attribution() {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame attribution must be the conservative aggregate of page coverage",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlameResult {
     pub snapshot: QuerySnapshotExpectation,
     pub target: ResolvedBlameTarget,
     pub git_snapshot: Option<GitSnapshot>,
+    pub outcome: BlameOutcome,
     pub matches: Vec<BlameMatch>,
     pub evidence: Vec<NumberedEvidence>,
     pub next: Option<BlameContinuation>,
@@ -393,6 +505,7 @@ struct BlameResultWire {
     snapshot: QuerySnapshotExpectation,
     target: ResolvedBlameTarget,
     git_snapshot: Option<GitSnapshot>,
+    outcome: BlameOutcome,
     matches: Vec<BlameMatch>,
     evidence: Vec<NumberedEvidence>,
     next: Option<BlameContinuation>,
@@ -408,6 +521,7 @@ impl<'de> Deserialize<'de> for BlameResult {
             snapshot: wire.snapshot,
             target: wire.target,
             git_snapshot: wire.git_snapshot,
+            outcome: wire.outcome,
             matches: wire.matches,
             evidence: wire.evidence,
             next: wire.next,
@@ -422,6 +536,7 @@ impl<'de> Deserialize<'de> for BlameResult {
 impl BlameResult {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         self.snapshot.validate()?;
+        self.outcome.validate()?;
         if self.matches.len() > MAX_BLAME_RESULTS as usize {
             return Err(ProtocolError::new(
                 ErrorClass::Bounds,
@@ -458,6 +573,17 @@ impl BlameResult {
                 None,
             ) => {}
         }
+        let expected_unit = match &self.target {
+            ResolvedBlameTarget::File { .. } => BlameCoverageUnit::CommittedLine,
+            ResolvedBlameTarget::Commit { .. } => BlameCoverageUnit::CommitFact,
+            ResolvedBlameTarget::PullRequest { .. } => BlameCoverageUnit::PullRequestRelationship,
+        };
+        if self.outcome.coverage.unit != expected_unit {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame coverage unit does not match the resolved target kind",
+            ));
+        }
         self.target.validate()?;
         if let Some(next) = &self.next {
             validate_cursor(Some(&next.cursor))?;
@@ -487,7 +613,121 @@ impl BlameResult {
                 "blame result contains unreferenced evidence",
             ));
         }
+        if self.outcome != self.derived_page_outcome()? {
+            return Err(ProtocolError::new(
+                ErrorClass::Corrupt,
+                "blame outcome must exactly match the returned page evidence",
+            ));
+        }
         Ok(())
+    }
+
+    /// Derives semantics only from the bounded matches returned on this page.
+    /// Continuations remain independent pages and are never scanned here.
+    fn derived_page_outcome(&self) -> Result<BlameOutcome, ProtocolError> {
+        let mut coverage = BlameCoverage::empty(match &self.target {
+            ResolvedBlameTarget::File { .. } => BlameCoverageUnit::CommittedLine,
+            ResolvedBlameTarget::Commit { .. } => BlameCoverageUnit::CommitFact,
+            ResolvedBlameTarget::PullRequest { .. } => BlameCoverageUnit::PullRequestRelationship,
+        });
+        match &self.target {
+            ResolvedBlameTarget::File { .. } => {
+                let mut prior_end = None;
+                for item in &self.matches {
+                    let BlameMatch::File(item) = item else {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "file blame coverage contains a non-file match",
+                        ));
+                    };
+                    if prior_end.is_some_and(|end| item.lines.start <= end) {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "file blame matches must have ordered, non-overlapping line ranges",
+                        ));
+                    }
+                    let lines = item
+                        .lines
+                        .end
+                        .checked_sub(item.lines.start)
+                        .and_then(|span| span.checked_add(1))
+                        .ok_or_else(|| {
+                            ProtocolError::new(
+                                ErrorClass::Bounds,
+                                "file blame line count overflowed",
+                            )
+                        })?;
+                    coverage.add(production_attribution(&item.production), lines)?;
+                    prior_end = Some(item.lines.end);
+                }
+            }
+            ResolvedBlameTarget::Commit { .. } => {
+                let mut fact_ids = BTreeSet::new();
+                let mut asserted_producers = BTreeSet::new();
+                for item in &self.matches {
+                    let BlameMatch::Commit(item) = item else {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "commit blame coverage contains a non-commit match",
+                        ));
+                    };
+                    if !fact_ids.insert(item.fact_id.as_str()) {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "commit blame page contains duplicate fact units",
+                        ));
+                    }
+                    if item.predicate == CommitPredicate::ProducedBy
+                        && item.state == FactState::Asserted
+                    {
+                        if let Some(producer) = &item.object {
+                            asserted_producers.insert((producer.kind, producer.id.as_str()));
+                        }
+                    }
+                }
+                let conflicting_producers = asserted_producers.len() >= 2;
+                for item in &self.matches {
+                    let BlameMatch::Commit(item) = item else {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "commit blame coverage contains a non-commit match",
+                        ));
+                    };
+                    coverage.add(commit_fact_attribution(item, conflicting_producers), 1)?;
+                }
+            }
+            ResolvedBlameTarget::PullRequest { .. } => {
+                let mut fact_ids = BTreeSet::new();
+                for item in &self.matches {
+                    let BlameMatch::PullRequest(item) = item else {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "pull request blame coverage contains a non-pull-request match",
+                        ));
+                    };
+                    let (fact_id, attribution) = match &item.relationship {
+                        PullRequestBlameRelationship::Activity(activity) => {
+                            (activity.fact_id.as_str(), fact_attribution(activity.state))
+                        }
+                        PullRequestBlameRelationship::Commit(commit) => (
+                            commit.fact_id.as_str(),
+                            production_attribution(&commit.production),
+                        ),
+                    };
+                    if !fact_ids.insert(fact_id) {
+                        return Err(ProtocolError::new(
+                            ErrorClass::Corrupt,
+                            "pull request blame page contains duplicate fact units",
+                        ));
+                    }
+                    coverage.add(attribution, 1)?;
+                }
+            }
+        }
+        Ok(BlameOutcome {
+            attribution: coverage.aggregate_attribution(),
+            coverage,
+        })
     }
 
     pub fn validate_for_request(&self, request: &BlameRequest) -> Result<(), ProtocolError> {
@@ -650,6 +890,51 @@ impl BlameResult {
     }
 }
 
+fn production_attribution(attributions: &[AgentAttribution]) -> BlameAttribution {
+    let asserted_producers = attributions
+        .iter()
+        .filter(|attribution| {
+            attribution.relationship == ProductionRelationship::ProducedBy
+                && attribution.state == FactState::Asserted
+        })
+        .map(|attribution| attribution.producing_session.id.as_str())
+        .collect::<BTreeSet<_>>();
+    match asserted_producers.len() {
+        2.. => BlameAttribution::Conflicting,
+        1 => BlameAttribution::Proven,
+        _ if attributions.iter().any(|attribution| {
+            attribution.relationship == ProductionRelationship::PossiblyProducedBy
+                && attribution.state == FactState::Ambiguous
+        }) =>
+        {
+            BlameAttribution::Possible
+        }
+        _ => BlameAttribution::None,
+    }
+}
+
+const fn fact_attribution(state: FactState) -> BlameAttribution {
+    match state {
+        FactState::Asserted => BlameAttribution::Proven,
+        FactState::Ambiguous => BlameAttribution::Possible,
+        FactState::Contradicted | FactState::Superseded => BlameAttribution::None,
+    }
+}
+
+const fn commit_fact_attribution(
+    fact: &CommitBlameMatch,
+    conflicting_producers: bool,
+) -> BlameAttribution {
+    match (fact.predicate, fact.state) {
+        (CommitPredicate::ProducedBy, FactState::Asserted) if conflicting_producers => {
+            BlameAttribution::Conflicting
+        }
+        (CommitPredicate::ProducedBy, FactState::Asserted) => BlameAttribution::Proven,
+        (CommitPredicate::PossiblyProducedBy, FactState::Ambiguous) => BlameAttribution::Possible,
+        _ => BlameAttribution::None,
+    }
+}
+
 impl ResolvedBlameTarget {
     fn validate(&self) -> Result<(), ProtocolError> {
         match self {
@@ -744,28 +1029,39 @@ impl AgentAttribution {
         if let Some(resource) = &self.owning_root {
             resource.validate()?;
         }
-        match self.relationship {
-            ProductionRelationship::ProducedBy
-                if self.state != FactState::Asserted
-                    || self.confidence == FactConfidence::Ambiguous =>
-            {
-                return Err(ProtocolError::new(
-                    ErrorClass::Corrupt,
-                    "asserted production has inconsistent state or confidence",
-                ));
-            }
-            ProductionRelationship::PossiblyProducedBy
-                if self.state != FactState::Ambiguous
-                    || self.confidence != FactConfidence::Ambiguous =>
-            {
-                return Err(ProtocolError::new(
-                    ErrorClass::Corrupt,
-                    "possible production must preserve ambiguous state and confidence",
-                ));
-            }
-            _ => {}
-        }
+        validate_production_semantics(self.relationship, self.state, self.confidence)?;
         validate_evidence_numbers(&self.evidence_numbers, available, referenced)
+    }
+}
+
+fn validate_production_semantics(
+    relationship: ProductionRelationship,
+    state: FactState,
+    confidence: FactConfidence,
+) -> Result<(), ProtocolError> {
+    match (relationship, state, confidence) {
+        (
+            ProductionRelationship::ProducedBy,
+            FactState::Asserted,
+            FactConfidence::Explicit
+            | FactConfidence::High
+            | FactConfidence::Medium
+            | FactConfidence::Low
+            | FactConfidence::Unknown,
+        )
+        | (
+            ProductionRelationship::PossiblyProducedBy,
+            FactState::Ambiguous,
+            FactConfidence::Ambiguous,
+        ) => Ok(()),
+        (ProductionRelationship::ProducedBy, _, _) => Err(ProtocolError::new(
+            ErrorClass::Corrupt,
+            "asserted production has inconsistent state or confidence",
+        )),
+        (ProductionRelationship::PossiblyProducedBy, _, _) => Err(ProtocolError::new(
+            ErrorClass::Corrupt,
+            "possible production must preserve ambiguous state and confidence",
+        )),
     }
 }
 
@@ -815,6 +1111,22 @@ impl CommitBlameMatch {
                 ErrorClass::Corrupt,
                 "commit fact is missing a required object",
             ));
+        }
+        let production_relationship = match self.predicate {
+            CommitPredicate::ProducedBy => Some(ProductionRelationship::ProducedBy),
+            CommitPredicate::PossiblyProducedBy => Some(ProductionRelationship::PossiblyProducedBy),
+            CommitPredicate::AmendedBy
+            | CommitPredicate::CherryPickedFrom
+            | CommitPredicate::Reverts
+            | CommitPredicate::PushedBy
+            | CommitPredicate::InspectedBy
+            | CommitPredicate::ReferencedBy => None,
+        };
+        if let (Some(relationship), Some(producing_session)) =
+            (production_relationship, self.object.as_ref())
+        {
+            validate_resource_kind(producing_session, ResourceKind::Session)?;
+            validate_production_semantics(relationship, self.state, self.confidence)?;
         }
         validate_evidence_numbers(&self.evidence_numbers, available, referenced)
     }
@@ -890,6 +1202,16 @@ fn validate_cursor(cursor: Option<&str>) -> Result<(), ProtocolError> {
         return Err(ProtocolError::new(
             ErrorClass::Bounds,
             format!("blame cursor must contain 1 to {MAX_BLAME_CURSOR_BYTES} ASCII bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_commit_selector(value: &str) -> Result<(), ProtocolError> {
+    if !(4..=64).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ProtocolError::new(
+            ErrorClass::InvalidRequest,
+            "commit selector must contain 4 to 64 ASCII hexadecimal characters",
         ));
     }
     Ok(())

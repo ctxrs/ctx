@@ -11,7 +11,7 @@ use crate::{
     cli::Cli,
     ui::{
         diagnostic, scan_color_mode, scan_machine_output_hint, Action, ColorMode, Diagnostic,
-        DiagnosticLevel, Document, Field, RenderContext, Ui,
+        DiagnosticLevel, Document, Field, Line, RenderContext, Ui,
     },
 };
 
@@ -50,6 +50,14 @@ fn write_adapted_clap_output(
     machine_output: bool,
     ui: &mut Ui,
 ) -> Result<()> {
+    if error.use_stderr() && raw_argv_selects_blame_json(arguments) {
+        let diagnostic =
+            crate::pro::diagnostic::BlameDiagnostic::for_stable_error_code("invalid_request")
+                .context("resolve trusted blame invalid-request diagnostic")?;
+        let encoded = serde_json::to_string(&diagnostic)?;
+        ui.write_stderr(&Document::from_line(Line::text(encoded)))?;
+        return Ok(());
+    }
     if !machine_output {
         let context = if error.use_stderr() {
             ui.stderr_context()
@@ -70,6 +78,83 @@ fn write_adapted_clap_output(
     } else {
         super::write_human_clap_output(error, ui)
     }
+}
+
+fn raw_argv_selects_blame_json(arguments: &[OsString]) -> bool {
+    let mut index = 1;
+    while let Some(raw_argument) = arguments.get(index) {
+        let Some(argument) = raw_argument.to_str() else {
+            let bytes = raw_argument.as_encoded_bytes();
+            if bytes.starts_with(b"--data-root=") || bytes.starts_with(b"--color=") {
+                index += 1;
+                continue;
+            }
+            return false;
+        };
+        match argument {
+            "--" => return false,
+            "--data-root" | "--color" => {
+                let Some(value) = arguments.get(index + 1) else {
+                    return false;
+                };
+                if value.as_encoded_bytes().starts_with(b"-") {
+                    return false;
+                }
+                index += 2;
+            }
+            "--quiet" => index += 1,
+            value if value.starts_with("--data-root=") || value.starts_with("--color=") => {
+                index += 1;
+            }
+            value if value.starts_with('-') => return false,
+            "blame" => return blame_json_format_selected(arguments, index + 1),
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn blame_json_format_selected(arguments: &[OsString], mut index: usize) -> bool {
+    let mut selected = false;
+    while let Some(raw_argument) = arguments.get(index) {
+        let Some(argument) = raw_argument.to_str() else {
+            index += 1;
+            continue;
+        };
+        match argument {
+            "--" => break,
+            "--data-root" | "--color" => {
+                let Some(value) = arguments.get(index + 1) else {
+                    return false;
+                };
+                if value.as_encoded_bytes().starts_with(b"-") {
+                    return false;
+                }
+                index += 2;
+                continue;
+            }
+            value if value.starts_with("--data-root=") || value.starts_with("--color=") => {}
+            "--format" => {
+                let Some(value) = arguments.get(index + 1).and_then(|value| value.to_str()) else {
+                    return false;
+                };
+                if value != "json" {
+                    return false;
+                }
+                selected = true;
+                index += 1;
+            }
+            value if value.starts_with("--format=") => {
+                if value.strip_prefix("--format=") != Some("json") {
+                    return false;
+                }
+                selected = true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    selected
 }
 
 fn human_clap_document(

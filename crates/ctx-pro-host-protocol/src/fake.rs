@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::entitlement::{base64url, decode_base64url, AUTHORIZATION_CHALLENGE_BYTES};
-use crate::error::{ErrorClass, ProtocolError};
+use crate::error::{BlameDiagnosticDetails, BlameDiagnosticReason, ErrorClass, ProtocolError};
 use crate::lifecycle::{
     ConfirmGraphKeyDeletionRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
     PrepareGraphKeyDeletionRequest, GRAPH_KEY_DELETION_CHALLENGE_BYTES,
@@ -11,7 +11,10 @@ use crate::message::{
     HelperMessage, HostEnvelope, HostMessage, MaterializedCoverage, ProAccessState,
     ProAccessStatus, StatusResult,
 };
-use crate::query::{BlameRequest, BlameTarget, ResolvedBlameTarget};
+use crate::query::{
+    BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameRequest, BlameTarget,
+    ResolvedBlameTarget,
+};
 use crate::{
     BlameResult, GitSnapshot, ResourceKind, ResourceRef, WorktreeStatus, PROTOCOL_FINGERPRINT,
     PROTOCOL_VERSION,
@@ -42,7 +45,7 @@ impl FakeBlameFailure {
     }
 }
 
-/// Deterministic in-process Protocol V1 helper used by public conformance tests.
+/// Deterministic in-process Protocol V2 helper used by public conformance tests.
 #[derive(Debug)]
 pub struct FakeHelper {
     helper_version: String,
@@ -57,7 +60,7 @@ pub struct FakeHelper {
 
 impl Default for FakeHelper {
     fn default() -> Self {
-        Self::new("fake-helper-v1")
+        Self::new("fake-helper-v2")
     }
 }
 
@@ -142,7 +145,7 @@ impl FakeHelper {
             }
             _ if !self.negotiated => HelperMessage::Error(ProtocolError::new(
                 ErrorClass::ProtocolMismatch,
-                "exact Protocol V1 hello must be the first request",
+                "exact Protocol V2 hello must be the first request",
             )),
             _ => HelperMessage::Error(ProtocolError::new(
                 ErrorClass::ProtocolMismatch,
@@ -255,7 +258,15 @@ impl FakeHelper {
             return HelperMessage::Error(error);
         }
         if let Some(failure) = self.blame_failure {
-            return HelperMessage::Error(ProtocolError::new(failure.class(), failure.message()));
+            let mut error = ProtocolError::new(failure.class(), failure.message());
+            if failure == FakeBlameFailure::RepositoryUnavailable {
+                error = error.with_blame_details(BlameDiagnosticDetails {
+                    reason: BlameDiagnosticReason::RepositoryNotBound,
+                    candidates: Vec::new(),
+                    candidates_truncated: false,
+                });
+            }
+            return HelperMessage::Error(error);
         }
         let repository = |selector: Option<String>| ResourceRef {
             id: selector
@@ -310,10 +321,26 @@ impl FakeHelper {
                 None,
             ),
         };
+        let coverage_unit = match &target {
+            ResolvedBlameTarget::File { .. } => BlameCoverageUnit::CommittedLine,
+            ResolvedBlameTarget::Commit { .. } => BlameCoverageUnit::CommitFact,
+            ResolvedBlameTarget::PullRequest { .. } => BlameCoverageUnit::PullRequestRelationship,
+        };
         HelperMessage::Blame(BlameResult {
             snapshot: request.expected_snapshot,
             target,
             git_snapshot,
+            outcome: BlameOutcome {
+                attribution: BlameAttribution::None,
+                coverage: BlameCoverage {
+                    unit: coverage_unit,
+                    evaluated: 0,
+                    proven: 0,
+                    possible: 0,
+                    conflicting: 0,
+                    none: 0,
+                },
+            },
             matches: Vec::new(),
             evidence: Vec::new(),
             next: None,
