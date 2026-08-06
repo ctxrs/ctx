@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn semantic_policy_persisted_bytes_and_model_authority_are_frozen() {
-        const EXPECTED: &str = "{\"eligibility_revision\":2,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_meaningful_text_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
+        const EXPECTED: &str = "{\"eligibility_revision\":3,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_meaningful_text_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
         let policy = current_semantic_generation_policy();
         let contract = ctx_semantic_model::semantic_model_contract();
         let persisted = serde_json::to_string(&policy).unwrap();
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(persisted, EXPECTED);
         assert_eq!(
             policy.canonical_sha256().unwrap(),
-            "821211bd0eb0f0a73427c9c1e325a5503e765393f33b41f21d4a57323ed1fff0"
+            "edfec4554ed1da01aa3451dbc7d4328c7a8a2c5d974acb65ca7397be1dbc5848"
         );
         assert_eq!(
             policy.embedding.contract_revision,
