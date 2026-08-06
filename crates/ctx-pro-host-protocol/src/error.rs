@@ -1,7 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::{MAX_BLAME_DIAGNOSTIC_CANDIDATES, MAX_BLAME_TARGET_BYTES};
+use crate::MAX_BLAME_DIAGNOSTIC_CANDIDATES;
+
+const MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES: usize = 160;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,19 +132,21 @@ impl BlameDiagnosticDetails {
             }
             BlameDiagnosticReason::TargetAmbiguous => {
                 validate_ambiguity_candidates(&self.candidates)?;
-                let Some(kind) = self.candidates[0].target_discriminant() else {
-                    return Err(invalid_blame_details(
-                        "target ambiguity cannot contain repository candidates",
-                    ));
-                };
-                if !self
-                    .candidates
-                    .iter()
-                    .all(|candidate| candidate.target_discriminant() == Some(kind))
-                {
-                    return Err(invalid_blame_details(
-                        "target ambiguity candidates must have one target kind",
-                    ));
+                if let Some(first) = self.candidates.first() {
+                    let Some(kind) = first.target_discriminant() else {
+                        return Err(invalid_blame_details(
+                            "target ambiguity cannot contain repository candidates",
+                        ));
+                    };
+                    if !self
+                        .candidates
+                        .iter()
+                        .all(|candidate| candidate.target_discriminant() == Some(kind))
+                    {
+                        return Err(invalid_blame_details(
+                            "target ambiguity candidates must have one target kind",
+                        ));
+                    }
                 }
             }
             BlameDiagnosticReason::CommitRewriteAmbiguous => {
@@ -273,40 +277,103 @@ impl ProtocolError {
         }
         Ok(())
     }
+
+    /// Applies the stricter typed-detail contract required by blame errors.
+    ///
+    /// Generic protocol operations may continue to use a null `details` field.
+    /// Blame needs typed reasons for resource, ambiguity, and operation classes
+    /// so the client never guesses a public diagnosis from a broad error class.
+    pub fn validate_blame_details(&self) -> Result<(), ProtocolError> {
+        self.validate()?;
+        if self.details.is_none()
+            && matches!(
+                self.class,
+                ErrorClass::MissingSource
+                    | ErrorClass::MissingRepository
+                    | ErrorClass::ResourceNotFound
+                    | ErrorClass::Ambiguous
+                    | ErrorClass::OperationUnavailable
+            )
+        {
+            return Err(invalid_blame_details(
+                "blame error class requires typed diagnostic details",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn validate_ambiguity_candidates(
     candidates: &[BlameDiagnosticCandidate],
 ) -> Result<(), ProtocolError> {
-    if candidates.len() < 2 {
+    if candidates.len() == 1 {
         return Err(invalid_blame_details(
-            "ambiguity requires at least two disclosed candidates",
+            "ambiguity must disclose either zero candidates or at least two",
         ));
     }
     Ok(())
 }
 
 fn validate_logical_repository(value: &str) -> Result<(), ProtocolError> {
-    let unsafe_absolute = value.starts_with('/')
-        || value.starts_with('\\')
-        || value.starts_with('~')
-        || value.starts_with("file:")
-        || value.contains("://")
-        || value.contains('@')
-        || value
-            .split('/')
-            .any(|component| matches!(component, "." | ".."))
-        || value.as_bytes().get(1).is_some_and(|byte| *byte == b':');
-    if value.trim().is_empty()
-        || value.len() > MAX_BLAME_TARGET_BYTES
+    let Some((host, path)) = value
+        .strip_prefix("forge:")
+        .and_then(|identity| identity.split_once('/'))
+    else {
+        return Err(invalid_blame_details(
+            "blame diagnostic repository candidate must use the public forge namespace",
+        ));
+    };
+    if value.is_empty()
+        || value.len() > MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES
+        || value.trim() != value
         || value.chars().any(char::is_control)
-        || unsafe_absolute
+        || !valid_public_forge_host(host)
+        || !valid_forge_path(path)
     {
         return Err(invalid_blame_details(
-            "blame diagnostic repository candidate is not a safe logical selector",
+            "blame diagnostic repository candidate is not a canonical safe public forge identity",
         ));
     }
     Ok(())
+}
+
+fn valid_public_forge_host(host: &str) -> bool {
+    let reserved = matches!(
+        host,
+        "localhost" | "local" | "private" | "workspace" | "internal"
+    ) || [
+        ".localhost",
+        ".local",
+        ".private",
+        ".workspace",
+        ".internal",
+    ]
+    .iter()
+    .any(|suffix| host.ends_with(suffix));
+    !host.is_empty()
+        && host.contains('.')
+        && host.bytes().any(|byte| byte.is_ascii_alphabetic())
+        && !host.bytes().any(|byte| byte.is_ascii_uppercase())
+        && !reserved
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+fn valid_forge_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.split('/').all(|component| {
+            !component.is_empty()
+                && !matches!(component, "." | "..")
+                && component.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+                })
+        })
 }
 
 fn invalid_blame_details(message: &'static str) -> ProtocolError {
@@ -349,7 +416,7 @@ mod tests {
                 BlameDiagnosticReason::RepositoryAmbiguous,
                 vec![
                     repository("forge:github.com/a/repo"),
-                    repository("workspace:repo"),
+                    repository("forge:github.com/b/repo"),
                 ],
             ));
         error.validate().unwrap();
@@ -363,13 +430,23 @@ mod tests {
     }
 
     #[test]
-    fn typed_details_are_required_and_unknown_fields_remain_rejected() {
+    fn generic_details_are_nullable_but_the_field_and_shape_remain_strict() {
         let missing = serde_json::json!({
             "class": "internal",
             "message": "detail",
             "retryable": false
         });
         assert!(serde_json::from_value::<ProtocolError>(missing).is_err());
+
+        let nullable = serde_json::json!({
+            "class": "internal",
+            "message": "detail",
+            "retryable": false,
+            "details": null
+        });
+        let decoded = serde_json::from_value::<ProtocolError>(nullable).unwrap();
+        assert!(decoded.details.is_none());
+        assert!(serde_json::to_value(decoded).unwrap()["details"].is_null());
 
         let mut unknown =
             serde_json::to_value(ProtocolError::new(ErrorClass::Internal, "detail")).unwrap();
@@ -378,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_contract_is_bounded_sorted_typed_and_path_safe() {
+    fn candidate_contract_is_bounded_sorted_typed_and_public_forge_only() {
         let mut candidates = (0..MAX_BLAME_DIAGNOSTIC_CANDIDATES)
             .map(|index| repository(&format!("forge:github.com/a/repo-{index}")))
             .collect::<Vec<_>>();
@@ -389,7 +466,7 @@ mod tests {
         };
         valid.validate().unwrap();
 
-        candidates.push(repository("workspace:overflow"));
+        candidates.push(repository("forge:github.com/a/repo-overflow"));
         assert_eq!(
             details(BlameDiagnosticReason::RepositoryAmbiguous, candidates)
                 .validate()
@@ -397,7 +474,7 @@ mod tests {
                 .class,
             ErrorClass::Corrupt
         );
-        let duplicate = repository("workspace:duplicate");
+        let duplicate = repository("forge:github.com/a/duplicate");
         assert!(details(
             BlameDiagnosticReason::RepositoryAmbiguous,
             vec![duplicate.clone(), duplicate],
@@ -406,24 +483,85 @@ mod tests {
         .is_err());
         assert!(details(
             BlameDiagnosticReason::RepositoryAmbiguous,
-            vec![repository("workspace:z"), repository("workspace:a")],
+            vec![
+                repository("forge:github.com/z/repo"),
+                repository("forge:github.com/a/repo"),
+            ],
         )
         .validate()
         .is_err());
+
         for selector in [
+            "private:repository",
+            "local:repository",
+            "workspace:repository",
+            "internal:repository",
             "/private/repo",
             "C:/private/repo",
             "../../private/repo",
             "file:/private/repo",
             "https://user:token@example/repo",
+            "forge:GitHub.com/ctxrs/ctx",
+            "forge:github.com",
+            "forge:github.com/",
+            "forge:localhost/ctxrs/ctx",
+            "forge:git.internal/ctxrs/ctx",
+            "forge:127.0.0.1/ctxrs/ctx",
+            "forge:github.com/ctxrs/ctx?token=secret",
+            "forge:github.com/ctxrs/ctx#fragment",
+            "forge:github.com/ctxrs/token=secret",
+            " forge:github.com/ctxrs/ctx",
+            "forge:github.com/ctxrs/ctx ",
+            "forge:github.com/ctxrs/\nsecret",
         ] {
-            assert!(details(
-                BlameDiagnosticReason::RepositoryAmbiguous,
-                vec![repository(selector), repository("workspace:safe")],
-            )
-            .validate()
-            .is_err());
+            assert!(
+                repository(selector).validate().is_err(),
+                "accepted {selector:?}"
+            );
         }
+
+        let prefix = "forge:github.com/";
+        let at_bound = format!(
+            "{prefix}{}",
+            "a".repeat(MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES - prefix.len())
+        );
+        assert_eq!(at_bound.len(), MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES);
+        repository(&at_bound).validate().unwrap();
+        repository(&format!("{at_bound}a")).validate().unwrap_err();
+
+        for oid in ["a".repeat(40), "b".repeat(64)] {
+            BlameDiagnosticCandidate::Commit {
+                repository: "forge:github.com/ctxrs/ctx".to_owned(),
+                oid,
+            }
+            .validate()
+            .unwrap();
+        }
+        for oid in ["a".repeat(39), "b".repeat(65), "A".repeat(40)] {
+            BlameDiagnosticCandidate::Commit {
+                repository: "forge:github.com/ctxrs/ctx".to_owned(),
+                oid,
+            }
+            .validate()
+            .unwrap_err();
+        }
+    }
+
+    #[test]
+    fn ambiguity_may_safely_omit_candidates_but_never_disclose_one() {
+        for reason in [
+            BlameDiagnosticReason::RepositoryAmbiguous,
+            BlameDiagnosticReason::TargetAmbiguous,
+            BlameDiagnosticReason::CommitRewriteAmbiguous,
+        ] {
+            details(reason, Vec::new()).validate().unwrap();
+        }
+        details(
+            BlameDiagnosticReason::RepositoryAmbiguous,
+            vec![repository("forge:github.com/a/repo")],
+        )
+        .validate()
+        .unwrap_err();
     }
 
     #[test]
@@ -431,7 +569,7 @@ mod tests {
         let no_candidates = details(BlameDiagnosticReason::FileBlameNotCovered, Vec::new());
         ProtocolError::new(ErrorClass::OperationUnavailable, "detail")
             .with_blame_details(no_candidates.clone())
-            .validate()
+            .validate_blame_details()
             .unwrap();
         assert!(ProtocolError::new(ErrorClass::Ambiguous, "detail")
             .with_blame_details(no_candidates)
@@ -440,12 +578,12 @@ mod tests {
 
         let candidates = vec![
             repository("forge:github.com/a/repo"),
-            repository("workspace:repo"),
+            repository("forge:github.com/b/repo"),
         ];
         let ambiguous = details(BlameDiagnosticReason::RepositoryAmbiguous, candidates);
         ProtocolError::new(ErrorClass::Ambiguous, "detail")
             .with_blame_details(ambiguous.clone())
-            .validate()
+            .validate_blame_details()
             .unwrap();
         let commits = details(
             BlameDiagnosticReason::CommitRewriteAmbiguous,
@@ -456,11 +594,30 @@ mod tests {
         );
         ProtocolError::new(ErrorClass::Ambiguous, "detail")
             .with_blame_details(commits)
-            .validate()
+            .validate_blame_details()
             .unwrap();
         assert!(ProtocolError::new(ErrorClass::ResourceNotFound, "detail")
             .with_blame_details(ambiguous)
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn blame_boundary_requires_typed_details_without_changing_generic_errors() {
+        for class in [
+            ErrorClass::MissingSource,
+            ErrorClass::MissingRepository,
+            ErrorClass::ResourceNotFound,
+            ErrorClass::Ambiguous,
+            ErrorClass::OperationUnavailable,
+        ] {
+            let generic = ProtocolError::new(class, "private helper detail");
+            generic.validate().unwrap();
+            generic.validate_blame_details().unwrap_err();
+        }
+
+        ProtocolError::new(ErrorClass::Internal, "private helper detail")
+            .validate_blame_details()
+            .unwrap();
     }
 }

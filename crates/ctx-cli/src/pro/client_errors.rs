@@ -107,6 +107,7 @@ mod tests {
             (ErrorClass::LineOutOfRange, "line_out_of_range"),
             (ErrorClass::StaleSnapshot, "stale_snapshot"),
             (ErrorClass::Ambiguous, "ambiguous"),
+            (ErrorClass::OperationUnavailable, "operation_unavailable"),
             (ErrorClass::Corrupt, "corrupt_graph"),
             (ErrorClass::InvalidRequest, "invalid_request"),
             (ErrorClass::Bounds, "invalid_request"),
@@ -141,6 +142,35 @@ mod tests {
         assert!(!format!("{error:?}").contains("token=secret"));
         assert!(!serialized.contains("/home/"));
         assert!(!serialized.contains("token=secret"));
+    }
+
+    #[test]
+    fn blame_boundary_rejects_missing_typed_details_without_helper_disclosure() {
+        let target = BlameTarget::Commit {
+            oid: "abcd".to_owned(),
+            repository: None,
+        };
+        for class in [
+            ErrorClass::MissingSource,
+            ErrorClass::MissingRepository,
+            ErrorClass::ResourceNotFound,
+            ErrorClass::Ambiguous,
+            ErrorClass::OperationUnavailable,
+        ] {
+            let error = protocol_blame_error(
+                ProtocolError::new(class, "helper detail at /home/alice/private: token=secret")
+                    .with_retryable(true),
+                &target,
+            );
+            let diagnostic = blame_diagnostic(&error).unwrap();
+            let serialized = serde_json::to_string(&diagnostic).unwrap();
+
+            assert_eq!(stable_error_code(&error), Some("invalid_response"));
+            assert_eq!(diagnostic.error_code, "invalid_response");
+            assert!(!diagnostic.retryable);
+            assert!(!serialized.contains("alice"));
+            assert!(!serialized.contains("token=secret"));
+        }
     }
 
     #[test]

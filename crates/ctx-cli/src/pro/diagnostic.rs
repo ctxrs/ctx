@@ -2,12 +2,15 @@ use std::{error::Error, fmt};
 
 use ctx_pro_host_protocol::{
     BlameDiagnosticCandidate as ProtocolCandidate, BlameDiagnosticReason as ProtocolReason,
-    BlameTarget, ErrorClass, ProtocolError,
+    BlameTarget, ErrorClass, ProtocolError, MAX_BLAME_TARGET_BYTES,
+};
+#[cfg(test)]
+use ctx_pro_host_protocol::{
+    BlameDiagnosticDetails as ProtocolDetails, MAX_BLAME_DIAGNOSTIC_CANDIDATES,
 };
 use serde::Serialize;
 
-pub(crate) const MAX_BLAME_DIAGNOSTIC_CANDIDATES: usize = 5;
-const MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES: usize = 160;
+const CHECK_STATUS_ARGV: &[&str] = &["ctx", "status"];
 
 pub(crate) const RESOURCE_NOT_FOUND_DIAGNOSTIC: &str =
     "No indexed Pro resource matches the requested blame target.";
@@ -33,6 +36,8 @@ pub(crate) struct BlameDiagnostic {
     pub(crate) candidates: Vec<BlameDiagnosticCandidate>,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) candidates_truncated: bool,
+    #[serde(skip)]
+    blame_details_valid: bool,
 }
 
 impl fmt::Display for BlameDiagnostic {
@@ -136,46 +141,43 @@ struct DiagnosticMapping {
 
 impl BlameDiagnostic {
     pub(crate) fn from_protocol_error(error: ProtocolError) -> Self {
+        if error.validate().is_err() {
+            return Self::invalid_response();
+        }
+        let blame_details_valid = error.validate_blame_details().is_ok();
         let details = protocol_diagnostic_details(&error);
         let mapping = protocol_class_mapping(error.class);
-        Self::from_mapping(mapping, error.retryable, details)
+        let mut diagnostic = Self::from_mapping(mapping, error.retryable, details);
+        diagnostic.blame_details_valid = blame_details_valid;
+        diagnostic
     }
 
     pub(crate) fn for_stable_error_code(code: &'static str) -> Option<Self> {
         let mapping = stable_code_mapping(code)?;
-        let freshness = (code == "stale_source").then_some(BlameDiagnosticFreshness {
-            state: BlameFreshnessState::StaleCommitted,
-        });
         Some(Self::from_mapping(
             mapping,
             legacy_retryable(code),
-            ProtocolDiagnosticDetails {
-                freshness,
-                ..ProtocolDiagnosticDetails::default()
-            },
+            ProtocolDiagnosticDetails::default(),
         ))
     }
 
+    #[must_use]
+    pub(crate) fn with_stale_committed(mut self) -> Self {
+        self.freshness = Some(BlameDiagnosticFreshness {
+            state: BlameFreshnessState::StaleCommitted,
+        });
+        self
+    }
+
     pub(crate) fn with_core_search_for(mut self, target: &BlameTarget) -> Self {
+        if !self.blame_details_valid {
+            return Self::invalid_response();
+        }
         if matches!(
             self.reason,
             BlameDiagnosticReason::TargetNotIndexed | BlameDiagnosticReason::OperationNotCovered
         ) {
-            let term = match target {
-                BlameTarget::File { path, .. } => path,
-                BlameTarget::Commit { oid, .. } => oid,
-                BlameTarget::PullRequest { selector, .. } => selector,
-            };
-            self.next_action = Some(BlameNextAction {
-                kind: BlameNextActionKind::SearchCore,
-                argv: vec![
-                    "ctx".to_owned(),
-                    "search".to_owned(),
-                    term.clone(),
-                    "--refresh".to_owned(),
-                    "off".to_owned(),
-                ],
-            });
+            self.next_action = BlameNextAction::core_search_for(target);
         }
         self
     }
@@ -185,8 +187,6 @@ impl BlameDiagnostic {
         retryable: bool,
         details: ProtocolDiagnosticDetails,
     ) -> Self {
-        let (candidates, candidates_truncated) =
-            sanitize_candidates(details.candidates, details.candidates_truncated);
         Self {
             error: mapping.error_code,
             error_code: mapping.error_code,
@@ -198,14 +198,50 @@ impl BlameDiagnostic {
                 .next_action
                 .or(mapping.next_action)
                 .map(|(kind, argv)| BlameNextAction::trusted(kind, argv)),
-            candidates,
-            candidates_truncated,
+            candidates: details.candidates,
+            candidates_truncated: details.candidates_truncated,
+            blame_details_valid: true,
         }
+    }
+
+    fn invalid_response() -> Self {
+        Self::from_mapping(
+            protocol_class_mapping(ErrorClass::Sequence),
+            false,
+            ProtocolDiagnosticDetails::default(),
+        )
     }
 }
 
 impl BlameNextAction {
+    pub(crate) fn check_status() -> Self {
+        Self {
+            kind: BlameNextActionKind::CheckStatus,
+            argv: CHECK_STATUS_ARGV
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+        }
+    }
+
+    pub(crate) fn core_search_for(target: &BlameTarget) -> Option<Self> {
+        let term = safe_core_search_term(target)?;
+        Some(Self {
+            kind: BlameNextActionKind::SearchCore,
+            argv: vec![
+                "ctx".to_owned(),
+                "search".to_owned(),
+                term.to_owned(),
+                "--refresh".to_owned(),
+                "off".to_owned(),
+            ],
+        })
+    }
+
     fn trusted(kind: BlameNextActionKind, argv: &[&str]) -> Self {
+        if kind == BlameNextActionKind::CheckStatus {
+            return Self::check_status();
+        }
         Self {
             kind,
             argv: argv.iter().map(|value| (*value).to_owned()).collect(),
@@ -263,26 +299,17 @@ fn protocol_diagnostic_details(error: &ProtocolError) -> ProtocolDiagnosticDetai
         ProtocolReason::FileBlameNotCovered => (
             BlameDiagnosticReason::FileBlameNotCovered,
             "This Pro graph does not cover file blame.",
-            Some((
-                BlameNextActionKind::CheckStatus,
-                &["ctx", "pro", "status"] as &[_],
-            )),
+            Some((BlameNextActionKind::CheckStatus, CHECK_STATUS_ARGV)),
         ),
         ProtocolReason::CommitBlameNotCovered => (
             BlameDiagnosticReason::CommitBlameNotCovered,
             "This Pro graph does not cover commit blame.",
-            Some((
-                BlameNextActionKind::CheckStatus,
-                &["ctx", "pro", "status"] as &[_],
-            )),
+            Some((BlameNextActionKind::CheckStatus, CHECK_STATUS_ARGV)),
         ),
         ProtocolReason::PullRequestBlameNotCovered => (
             BlameDiagnosticReason::PullRequestBlameNotCovered,
             "This Pro graph does not cover pull request blame.",
-            Some((
-                BlameNextActionKind::CheckStatus,
-                &["ctx", "pro", "status"] as &[_],
-            )),
+            Some((BlameNextActionKind::CheckStatus, CHECK_STATUS_ARGV)),
         ),
     };
     ProtocolDiagnosticDetails {
@@ -387,7 +414,7 @@ fn protocol_class_mapping(class: ErrorClass) -> DiagnosticMapping {
             "operation_unavailable",
             BlameDiagnosticReason::OperationNotCovered,
             "This ctx Pro graph does not cover the requested blame operation.",
-            Some((BlameNextActionKind::CheckStatus, &["ctx", "pro", "status"])),
+            Some((BlameNextActionKind::CheckStatus, CHECK_STATUS_ARGV)),
         ),
         ErrorClass::Corrupt => mapping(
             "corrupt_graph",
@@ -482,7 +509,7 @@ fn stable_code_mapping(code: &'static str) -> Option<DiagnosticMapping> {
             code,
             BlameDiagnosticReason::ProjectionStale,
             "ctx Pro blame data is not current.",
-            Some((BlameNextActionKind::CheckStatus, &["ctx", "pro", "status"])),
+            Some((BlameNextActionKind::CheckStatus, CHECK_STATUS_ARGV)),
         ),
         "needs_rebuild" => mapping(
             code,
@@ -512,7 +539,7 @@ fn stable_code_mapping(code: &'static str) -> Option<DiagnosticMapping> {
             code,
             BlameDiagnosticReason::OperationNotCovered,
             "This ctx Pro installation does not currently cover the requested blame operation.",
-            Some((BlameNextActionKind::CheckStatus, &["ctx", "pro", "status"])),
+            Some((BlameNextActionKind::CheckStatus, CHECK_STATUS_ARGV)),
         ),
         "stale_fact" => mapping(
             code,
@@ -609,82 +636,41 @@ fn legacy_retryable(code: &str) -> bool {
     matches!(code, "stale_source" | "stale_snapshot" | "helper_timeout")
 }
 
-fn sanitize_candidates(
-    candidates: Vec<BlameDiagnosticCandidate>,
-    already_truncated: bool,
-) -> (Vec<BlameDiagnosticCandidate>, bool) {
-    let mut sanitized = Vec::with_capacity(candidates.len());
-    let mut truncated = already_truncated;
-    for candidate in candidates {
-        let Some(candidate) = sanitize_candidate(candidate) else {
-            truncated = true;
-            continue;
-        };
-        sanitized.push(candidate);
-    }
-    sanitized.sort();
-    sanitized.dedup();
-    if sanitized.len() > MAX_BLAME_DIAGNOSTIC_CANDIDATES {
-        sanitized.truncate(MAX_BLAME_DIAGNOSTIC_CANDIDATES);
-        truncated = true;
-    }
-    (sanitized, truncated)
-}
-
-fn sanitize_candidate(candidate: BlameDiagnosticCandidate) -> Option<BlameDiagnosticCandidate> {
-    match candidate {
-        BlameDiagnosticCandidate::Repository { selector } => {
-            Some(BlameDiagnosticCandidate::Repository {
-                selector: sanitize_repository(&selector)?,
-            })
+fn safe_core_search_term(target: &BlameTarget) -> Option<&str> {
+    match target {
+        BlameTarget::File { path, .. } if safe_repository_relative_path(path) => Some(path),
+        BlameTarget::Commit { oid, .. }
+            if (4..=64).contains(&oid.len())
+                && oid.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Some(oid)
         }
-        BlameDiagnosticCandidate::Commit { repository, oid } => {
-            Some(BlameDiagnosticCandidate::Commit {
-                repository: sanitize_repository(&repository)?,
-                oid: sanitize_commit_oid(&oid)?,
-            })
-        }
+        BlameTarget::PullRequest { selector, .. } if target.validate().is_ok() => Some(selector),
+        _ => None,
     }
 }
 
-fn sanitize_repository(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > MAX_BLAME_DIAGNOSTIC_CANDIDATE_BYTES
-        || value.chars().any(char::is_control)
-        || looks_like_private_local_path(value)
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-._/:".contains(character))
-    {
-        return None;
-    }
-    Some(value.to_owned())
-}
-
-fn sanitize_commit_oid(value: &str) -> Option<String> {
-    (matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
-    .then(|| value.to_owned())
-}
-
-fn looks_like_private_local_path(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    let bytes = value.as_bytes();
-    value.starts_with(['/', '\\', '~'])
-        || lower.starts_with("file:")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'))
-        || value
-            .split(['/', '\\'])
-            .any(|segment| segment == "." || segment == "..")
-        || lower.contains("/home/")
-        || lower.contains("/users/")
-        || lower.contains("\\users\\")
+fn safe_repository_relative_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let lowercase = path.to_ascii_lowercase();
+    !path.is_empty()
+        && path.len() <= MAX_BLAME_TARGET_BYTES
+        && path.trim() == path
+        && !path.starts_with(['/', '\\', '~'])
+        && !lowercase.starts_with("$home/")
+        && !lowercase
+            .strip_prefix('$')
+            .is_some_and(|remainder| remainder.starts_with("{home}/"))
+        && !lowercase.starts_with("%userprofile%/")
+        && !lowercase.starts_with("%homepath%/")
+        && !lowercase.starts_with("%homedrive%")
+        && !lowercase.starts_with("file:")
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && !bytes.get(1).is_some_and(|byte| *byte == b':')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
 }
 
 const fn is_false(value: &bool) -> bool {
@@ -706,7 +692,11 @@ mod tests {
         assert_eq!(value["next_action"]["kind"], "check_status");
         assert_eq!(
             value["next_action"]["argv"],
-            serde_json::json!(["ctx", "pro", "status"])
+            serde_json::json!(["ctx", "status"])
+        );
+        assert_eq!(
+            diagnostic.next_action,
+            Some(BlameNextAction::check_status())
         );
         assert_ne!(value["message"], value["error"]);
     }
@@ -723,51 +713,118 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_sanitized_deduplicated_sorted_and_bounded() {
-        let candidates = vec![
-            repository("z/repo"),
-            repository("/home/alice/private"),
-            repository("e/repo"),
-            repository("d/repo"),
-            repository("c/repo"),
-            repository("b/repo"),
-            repository("a/repo"),
-            repository("a/repo"),
-            repository("token=malicious"),
-            BlameDiagnosticCandidate::Commit {
-                repository: "safe/repo".to_owned(),
-                oid: "a".repeat(40),
-            },
-        ];
-        let details = ProtocolDiagnosticDetails {
-            candidates,
-            ..ProtocolDiagnosticDetails::default()
-        };
-        let diagnostic = BlameDiagnostic::from_mapping(
-            protocol_class_mapping(ErrorClass::Ambiguous),
-            false,
-            details,
+    fn validated_candidates_and_truncation_are_preserved_exactly() {
+        let candidates = (0..MAX_BLAME_DIAGNOSTIC_CANDIDATES)
+            .map(|index| protocol_repository(&format!("forge:github.com/acme/repo-{index}")))
+            .collect::<Vec<_>>();
+        let error = ProtocolError::new(ErrorClass::Ambiguous, "ignored helper message")
+            .with_blame_details(protocol_details(
+                ProtocolReason::RepositoryAmbiguous,
+                candidates.clone(),
+                true,
+            ));
+        let diagnostic = BlameDiagnostic::from_protocol_error(error)
+            .with_core_search_for(&valid_commit_target());
+        let expected = candidates
+            .into_iter()
+            .map(|candidate| match candidate {
+                ProtocolCandidate::Repository { selector } => {
+                    BlameDiagnosticCandidate::Repository { selector }
+                }
+                ProtocolCandidate::Commit { repository, oid } => {
+                    BlameDiagnosticCandidate::Commit { repository, oid }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(diagnostic.error_code, "ambiguous");
+        assert_eq!(
+            diagnostic.reason,
+            BlameDiagnosticReason::RepositoryAmbiguous
         );
-        assert_eq!(diagnostic.candidates.len(), MAX_BLAME_DIAGNOSTIC_CANDIDATES);
+        assert_eq!(diagnostic.candidates, expected);
         assert!(diagnostic.candidates_truncated);
-        assert!(diagnostic
-            .candidates
-            .iter()
-            .all(|candidate| !format!("{candidate:?}").contains("alice")));
-        assert!(diagnostic
-            .candidates
-            .iter()
-            .all(|candidate| !format!("{candidate:?}").contains("malicious")));
-        assert!(diagnostic
-            .candidates
-            .windows(2)
-            .all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
-    fn stale_source_exposes_only_the_bounded_freshness_state() {
+    fn invalid_typed_details_fail_closed_without_client_cleanup_or_helper_detail() {
+        let safe = protocol_repository("forge:github.com/acme/repo");
+        let malformed = [
+            vec![
+                protocol_repository("workspace:private-repository"),
+                safe.clone(),
+            ],
+            vec![
+                protocol_repository("forge:github.com/acme/repo"),
+                protocol_repository("forge:github.com/acme/repo "),
+            ],
+            vec![safe.clone(), safe.clone()],
+            vec![safe.clone()],
+            vec![
+                protocol_repository("forge:github.com/acme/repo?token=secret"),
+                safe.clone(),
+            ],
+            (0..=MAX_BLAME_DIAGNOSTIC_CANDIDATES)
+                .map(|index| protocol_repository(&format!("forge:github.com/acme/repo-{index}")))
+                .collect(),
+        ];
+
+        for candidates in malformed {
+            let error = ProtocolError::new(
+                ErrorClass::Ambiguous,
+                "helper failed at /home/alice/private: token=secret",
+            )
+            .with_retryable(true)
+            .with_blame_details(protocol_details(
+                ProtocolReason::RepositoryAmbiguous,
+                candidates,
+                false,
+            ));
+            let diagnostic = BlameDiagnostic::from_protocol_error(error)
+                .with_core_search_for(&valid_commit_target());
+            let serialized = serde_json::to_string(&diagnostic).unwrap();
+
+            assert_eq!(diagnostic.error_code, "invalid_response");
+            assert_eq!(
+                diagnostic.reason,
+                BlameDiagnosticReason::HelperResponseInvalid
+            );
+            assert!(!diagnostic.retryable);
+            assert!(diagnostic.candidates.is_empty());
+            assert!(!diagnostic.candidates_truncated);
+            assert!(!serialized.contains("alice"));
+            assert!(!serialized.contains("token=secret"));
+        }
+    }
+
+    #[test]
+    fn zero_candidate_ambiguity_is_preserved_as_safe_omission() {
+        let error =
+            ProtocolError::new(ErrorClass::Ambiguous, "ignored helper message").with_blame_details(
+                protocol_details(ProtocolReason::RepositoryAmbiguous, Vec::new(), false),
+            );
+        let diagnostic = BlameDiagnostic::from_protocol_error(error)
+            .with_core_search_for(&valid_commit_target());
+        assert_eq!(diagnostic.error_code, "ambiguous");
+        assert_eq!(
+            diagnostic.reason,
+            BlameDiagnosticReason::RepositoryAmbiguous
+        );
+        assert!(diagnostic.candidates.is_empty());
+        assert!(!diagnostic.candidates_truncated);
+    }
+
+    #[test]
+    fn stale_committed_requires_the_explicit_host_established_builder() {
         let diagnostic = BlameDiagnostic::for_stable_error_code("stale_source").unwrap();
-        let value = serde_json::to_value(&diagnostic).unwrap();
+        assert!(diagnostic.freshness.is_none());
+        assert!(serde_json::to_value(&diagnostic)
+            .unwrap()
+            .get("freshness")
+            .is_none());
+
+        let established = diagnostic.with_stale_committed();
+        let value = serde_json::to_value(&established).unwrap();
         assert_eq!(
             value["freshness"],
             serde_json::json!({"state": "stale_committed"})
@@ -777,9 +834,133 @@ mod tests {
         assert!(value.get("catch_up_active").is_none());
     }
 
-    fn repository(selector: &str) -> BlameDiagnosticCandidate {
-        BlameDiagnosticCandidate::Repository {
+    #[test]
+    fn core_search_action_accepts_only_target_specific_safe_terms() {
+        for target in [
+            BlameTarget::File {
+                path: "src/my file.rs".to_owned(),
+                repository: None,
+                lines: None,
+            },
+            BlameTarget::Commit {
+                oid: "aBcD".to_owned(),
+                repository: None,
+            },
+            BlameTarget::Commit {
+                oid: "a".repeat(64),
+                repository: None,
+            },
+            BlameTarget::PullRequest {
+                selector: "42".to_owned(),
+                repository: Some("forge:github.com/ctxrs/ctx".to_owned()),
+            },
+            BlameTarget::PullRequest {
+                selector: "https://github.com/ctxrs/ctx/pull/42".to_owned(),
+                repository: None,
+            },
+        ] {
+            let expected = match &target {
+                BlameTarget::File { path, .. } => path,
+                BlameTarget::Commit { oid, .. } => oid,
+                BlameTarget::PullRequest { selector, .. } => selector,
+            };
+            assert_eq!(
+                BlameNextAction::core_search_for(&target).unwrap().argv,
+                vec!["ctx", "search", expected, "--refresh", "off"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn core_search_action_omits_malicious_or_malformed_target_terms() {
+        let mut invalid_files = vec![
+            "/home/alice/private.rs".to_owned(),
+            "/Users/alice/private.rs".to_owned(),
+            "C:/Users/alice/private.rs".to_owned(),
+            r"C:\Users\alice\private.rs".to_owned(),
+            "../private.rs".to_owned(),
+            "src/../private.rs".to_owned(),
+            "./src/lib.rs".to_owned(),
+            "src//lib.rs".to_owned(),
+            "src/".to_owned(),
+            "~/.ssh/id_ed25519".to_owned(),
+            "$HOME/.ssh/id_ed25519".to_owned(),
+            concat!("$", "{HOME}/.ssh/id_ed25519").to_owned(),
+            "%USERPROFILE%/secret".to_owned(),
+            "%HOMEDRIVE%%HOMEPATH%/secret".to_owned(),
+            "file:/home/alice/private.rs".to_owned(),
+            " src/lib.rs".to_owned(),
+            "src/lib.rs ".to_owned(),
+            "src/\nsecret.rs".to_owned(),
+        ];
+        invalid_files.push("a".repeat(MAX_BLAME_TARGET_BYTES + 1));
+        for path in invalid_files {
+            let target = BlameTarget::File {
+                path,
+                repository: None,
+                lines: None,
+            };
+            assert!(BlameNextAction::core_search_for(&target).is_none());
+        }
+
+        for oid in [
+            "abc".to_owned(),
+            "a".repeat(65),
+            "abcdg".to_owned(),
+            "abcd\n".to_owned(),
+            "/home/alice/secret".to_owned(),
+        ] {
+            let target = BlameTarget::Commit {
+                oid,
+                repository: None,
+            };
+            assert!(BlameNextAction::core_search_for(&target).is_none());
+        }
+
+        for (selector, repository) in [
+            ("42", None),
+            ("0", Some("forge:github.com/ctxrs/ctx")),
+            ("01", Some("forge:github.com/ctxrs/ctx")),
+            ("https://GitHub.com/ctxrs/ctx/pull/42", None),
+            ("https://github.com/ctxrs/ctx/pull/42?token=secret", None),
+            ("https://github.com/ctxrs/ctx/pull/42#fragment", None),
+            ("https://user:token@github.com/ctxrs/ctx/pull/42", None),
+            (" https://github.com/ctxrs/ctx/pull/42", None),
+            ("https://github.com/ctxrs/ctx/pull/42\n", None),
+        ] {
+            let target = BlameTarget::PullRequest {
+                selector: selector.to_owned(),
+                repository: repository.map(str::to_owned),
+            };
+            assert!(BlameNextAction::core_search_for(&target).is_none());
+        }
+    }
+
+    fn protocol_details(
+        reason: ProtocolReason,
+        candidates: Vec<ProtocolCandidate>,
+        candidates_truncated: bool,
+    ) -> ProtocolDetails {
+        ProtocolDetails {
+            reason,
+            candidates,
+            candidates_truncated,
+        }
+    }
+
+    fn protocol_repository(selector: &str) -> ProtocolCandidate {
+        ProtocolCandidate::Repository {
             selector: selector.to_owned(),
+        }
+    }
+
+    fn valid_commit_target() -> BlameTarget {
+        BlameTarget::Commit {
+            oid: "abcd".to_owned(),
+            repository: None,
         }
     }
 }
