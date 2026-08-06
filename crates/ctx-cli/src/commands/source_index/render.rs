@@ -56,6 +56,7 @@ struct SearchJsonInput<'input, 'event> {
     collection: &'input SearchCollection,
     filters: &'input EventSearchFilters,
     presentations: &'input [SearchPresentation<'event>],
+    copied_lineages: &'input [Value],
     metrics: SearchRenderMetrics<'input>,
 }
 
@@ -65,6 +66,7 @@ struct SearchRenderMetrics<'a> {
     query_duration: Duration,
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn search_json<'event>(
     request: &SourceSearchRequest,
@@ -77,6 +79,45 @@ pub(super) fn search_json<'event>(
     refresh_source_count: usize,
     query_duration: Duration,
 ) -> Result<Value> {
+    let copied_lineages = (0..collection.result_window.hits.len())
+        .map(|_| {
+            json!({
+                "schema_version": 1,
+                "observed_count": 0,
+                "returned": 0,
+                "occurrences": [],
+                "relationship_counts": {},
+                "truncated": false,
+            })
+        })
+        .collect::<Vec<_>>();
+    search_json_with_lineages(
+        request,
+        data_root,
+        index,
+        collection,
+        filters,
+        presentations,
+        &copied_lineages,
+        refresh_status,
+        refresh_source_count,
+        query_duration,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn search_json_with_lineages<'event>(
+    request: &SourceSearchRequest,
+    data_root: &Path,
+    index: &VerifiedIndex,
+    collection: &SearchCollection,
+    filters: &EventSearchFilters,
+    presentations: &[SearchPresentation<'event>],
+    copied_lineages: &[Value],
+    refresh_status: &str,
+    refresh_source_count: usize,
+    query_duration: Duration,
+) -> Result<Value> {
     render_search_json(SearchJsonInput {
         request,
         data_root,
@@ -84,6 +125,7 @@ pub(super) fn search_json<'event>(
         collection,
         filters,
         presentations,
+        copied_lineages,
         metrics: SearchRenderMetrics {
             refresh_status,
             refresh_source_count,
@@ -100,6 +142,7 @@ fn render_search_json(input: SearchJsonInput<'_, '_>) -> Result<Value> {
         collection,
         filters,
         presentations,
+        copied_lineages,
         metrics,
     } = input;
     let normalized_query = NormalizedSearchQuery::from_request(request);
@@ -112,13 +155,21 @@ fn render_search_json(input: SearchJsonInput<'_, '_>) -> Result<Value> {
             collection.result_window.hits.len()
         ));
     }
+    if copied_lineages.len() != collection.result_window.hits.len() {
+        return Err(anyhow!(
+            "pinned Core lookup returned {} copied-lineage values for {} hits",
+            copied_lineages.len(),
+            collection.result_window.hits.len()
+        ));
+    }
     let results = collection
         .result_window
         .hits
         .iter()
         .zip(presentations)
+        .zip(copied_lineages)
         .enumerate()
-        .map(|(offset, (hit, presentation))| {
+        .map(|(offset, ((hit, presentation), copied_lineage))| {
             if presentation.event.event_id != hit.event.event_id {
                 return Err(anyhow!(
                     "pinned Core lookup returned an out-of-order search presentation for event {}",
@@ -132,6 +183,7 @@ fn render_search_json(input: SearchJsonInput<'_, '_>) -> Result<Value> {
                 &normalized_query,
                 offset.saturating_add(1),
                 &command_prefix,
+                copied_lineage,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -196,6 +248,7 @@ fn search_result_json(
     query: &NormalizedSearchQuery,
     rank: usize,
     command_prefix: &str,
+    copied_lineage: &Value,
 ) -> Result<Value> {
     let (snippet, snippet_truncated) = search_snippet(presentation);
     let event = &presentation.event;
@@ -247,6 +300,7 @@ fn search_result_json(
         "root_ctx_session_id": event.root_session_id,
         "session_relationship": event.session_relationship,
         "event_origin": super::event_origin_json(&event.event_origin),
+        "copied_lineage": copied_lineage,
         "branch": event.branch,
         "agent_type": event.agent_type,
         "is_primary": event.is_primary,
@@ -605,7 +659,7 @@ fn original_range_for_folded_match(
     None
 }
 
-fn follow_up_command_prefix(data_root: &Path) -> String {
+pub(super) fn follow_up_command_prefix(data_root: &Path) -> String {
     if managed_data_root().is_ok_and(|default_root| default_root == data_root) {
         return "ctx".to_owned();
     }
@@ -701,6 +755,7 @@ fn render_show_text(value: &Value) -> String {
             ));
         }
     }
+    append_copied_lineage_text(&mut output, value);
     for event in value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
         let role = event["role"]
             .as_str()
@@ -736,6 +791,7 @@ fn render_show_markdown(value: &Value) -> String {
             value["ctx_session_id"].as_str().unwrap_or("unknown")
         ),
     };
+    append_copied_lineage_markdown(&mut output, value);
     for event in value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
         let role = event["role"]
             .as_str()
@@ -754,6 +810,75 @@ fn render_show_markdown(value: &Value) -> String {
         output.push('\n');
     }
     output
+}
+
+fn append_copied_lineage_text(output: &mut String, value: &Value) {
+    let lineage = &value["copied_lineage"];
+    let observed = lineage["observed_count"].as_u64().unwrap_or(0);
+    if observed == 0 {
+        return;
+    }
+    let truncated = lineage["truncated"].as_bool().unwrap_or(true);
+    let summary = if truncated {
+        format!("copied_to: at least {observed} sessions\n")
+    } else {
+        format!("copied_to: {observed} sessions\n")
+    };
+    output.push_str(&summary);
+    let command_prefix = value["_command_prefix"].as_str().unwrap_or("ctx");
+    for occurrence in lineage["occurrences"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .take(20)
+    {
+        let session = occurrence["ctx_session_id"].as_str().unwrap_or("unknown");
+        let event = occurrence["ctx_event_id"].as_str().unwrap_or("unknown");
+        let relationship = occurrence["session_relationship"]
+            .as_str()
+            .unwrap_or("inherited");
+        let depth = occurrence["depth"].as_u64().unwrap_or(0);
+        output.push_str(&format!(
+            "inherited: session={session} event={event} relationship={relationship} depth={depth}\n"
+        ));
+        output.push_str(&format!("next: {command_prefix} show session {session}\n"));
+    }
+    output.push('\n');
+}
+
+fn append_copied_lineage_markdown(output: &mut String, value: &Value) {
+    let lineage = &value["copied_lineage"];
+    let observed = lineage["observed_count"].as_u64().unwrap_or(0);
+    if observed == 0 {
+        return;
+    }
+    let truncated = lineage["truncated"].as_bool().unwrap_or(true);
+    let count = if truncated {
+        format!("at least {observed}")
+    } else {
+        observed.to_string()
+    };
+    output.push_str(&format!("\n## Inherited by {count} sessions\n"));
+    let command_prefix = value["_command_prefix"].as_str().unwrap_or("ctx");
+    for occurrence in lineage["occurrences"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .take(20)
+    {
+        let session = occurrence["ctx_session_id"].as_str().unwrap_or("unknown");
+        let event = occurrence["ctx_event_id"].as_str().unwrap_or("unknown");
+        let relationship = occurrence["session_relationship"]
+            .as_str()
+            .unwrap_or("inherited");
+        let depth = occurrence["depth"].as_u64().unwrap_or(0);
+        output.push_str(&format!(
+            "\n- `{relationship}` session `{session}`, event `{event}`, depth {depth}\n"
+        ));
+        output.push_str(&format!("  - `{command_prefix} show session {session}`\n"));
+    }
 }
 
 pub(super) fn timestamp_json(timestamp: Option<i64>) -> Option<String> {

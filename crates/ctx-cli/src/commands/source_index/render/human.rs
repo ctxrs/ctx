@@ -8,8 +8,11 @@ pub(super) fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-pub(super) fn short_id(value: &str) -> String {
-    value.chars().take(8).collect()
+pub(super) fn compact_or_legacy_short_id(value: &str) -> String {
+    if uuid::Uuid::parse_str(value).is_ok() {
+        return value.chars().take(8).collect();
+    }
+    value.to_owned()
 }
 
 pub(super) fn push_heading(document: &mut Document, text: &str, token: Token) {

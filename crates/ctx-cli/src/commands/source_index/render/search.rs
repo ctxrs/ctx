@@ -8,7 +8,8 @@ use crate::{
 };
 
 use super::human::{
-    display_width, push_action, push_field, push_heading, push_prefixed, push_wrapped, short_id,
+    compact_or_legacy_short_id, display_width, push_action, push_field, push_heading,
+    push_prefixed, push_wrapped,
 };
 
 const CARD_INDENT: usize = 3;
@@ -191,7 +192,7 @@ fn render_result(
     let ctx_session = result["ctx_session_id"].as_str().unwrap_or("unknown");
     let separator = if context.unicode() { " · " } else { " | " };
     let session = provider_session.map_or_else(
-        || format!("{provider}{separator}session {}", short_id(ctx_session)),
+        || format!("{provider}{separator}session {ctx_session}"),
         |provider_session| format!("{provider}{separator}{provider_session}"),
     );
     push_field(
@@ -225,6 +226,8 @@ fn render_result(
             Token::Label,
         );
     }
+
+    render_copied_lineage(document, context, result);
 
     if verbose {
         render_verbose_fields(document, context, result);
@@ -264,13 +267,97 @@ fn render_result(
     }
 }
 
+fn render_copied_lineage(document: &mut Document, context: &RenderContext, result: &Value) {
+    let lineage = &result["copied_lineage"];
+    let observed = lineage["observed_count"].as_u64().unwrap_or(0);
+    if observed == 0 {
+        return;
+    }
+    let truncated = lineage["truncated"].as_bool().unwrap_or(true);
+    let relationship_summary = lineage["relationship_counts"]
+        .as_object()
+        .map(|counts| {
+            counts
+                .iter()
+                .filter_map(|(relationship, count)| {
+                    count
+                        .as_u64()
+                        .filter(|count| *count != 0)
+                        .map(|count| format!("{relationship} {count}"))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|summary| !summary.is_empty());
+    let noun = if observed == 1 { "session" } else { "sessions" };
+    let mut summary = if truncated {
+        format!("at least {observed} {noun}")
+    } else {
+        format!("{observed} {noun}")
+    };
+    if let Some(relationships) = relationship_summary {
+        summary.push_str(&format!(" ({relationships})"));
+    }
+    push_field(
+        document,
+        context,
+        CARD_INDENT,
+        "Copied",
+        CARD_LABEL_WIDTH,
+        &summary,
+        if truncated {
+            Token::Warning
+        } else {
+            Token::Text
+        },
+    );
+
+    let command_prefix = result["suggested_next_commands"]
+        .as_array()
+        .and_then(|commands| commands.first())
+        .and_then(Value::as_str)
+        .and_then(|command| command.split_once(" show ").map(|(prefix, _)| prefix))
+        .unwrap_or("ctx");
+    let occurrences = lineage["occurrences"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for occurrence in occurrences.iter().take(3) {
+        let Some(session_id) = occurrence["ctx_session_id"].as_str() else {
+            continue;
+        };
+        let relationship = occurrence["session_relationship"]
+            .as_str()
+            .unwrap_or("inherited");
+        push_action(
+            document,
+            context,
+            CARD_INDENT.saturating_add(2),
+            relationship,
+            &format!("{command_prefix} show session {session_id}"),
+        );
+    }
+    if !truncated {
+        let returned = lineage["returned"].as_u64().unwrap_or(0);
+        if observed > returned {
+            push_wrapped(
+                document,
+                context,
+                CARD_INDENT.saturating_add(2),
+                &format!("+{} more", observed - returned),
+                Token::Label,
+            );
+        }
+    }
+}
+
 fn render_event_summary(
     document: &mut Document,
     context: &RenderContext,
     event_id: &str,
     timestamp: Option<&str>,
 ) {
-    let event_id = short_id(event_id);
+    let event_id = compact_or_legacy_short_id(event_id);
     let (time, time_token) = timestamp
         .filter(|timestamp| !timestamp.is_empty())
         .map_or(("time unavailable", Token::Label), |timestamp| {

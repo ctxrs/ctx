@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_index::{CoreEventRecord, IndexError, SessionRecord, VerifiedIndex};
-use ctx_history_refresh::verify_generation_query_authority;
+use ctx_history_refresh::{verify_generation_query_authority, GenerationQueryAuthorityError};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -10,6 +10,8 @@ use crate::{
     transcript::normalize_uuid_prefix,
     ui::{diagnostic, Action, Diagnostic, DiagnosticLevel, Field, RenderContext, Ui},
 };
+
+use super::compact_ref::{CompactRefNamespace, CompactRefResolveError, CompactRefResolver};
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
@@ -95,46 +97,79 @@ impl MissingLookupError {
     }
 }
 
+#[cfg(test)]
 pub(super) fn resolve_core_event(index: &VerifiedIndex, id: &str) -> Result<CoreEventRecord> {
-    if let Ok(uuid) = Uuid::parse_str(id.trim()) {
-        return index.core_event_by_id(uuid)?.ok_or_else(|| {
-            MissingLookupError::exact(MissingLookupKind::Event, uuid.to_string()).into()
-        });
+    let references = CompactRefResolver::new(index, None);
+    resolve_core_event_with_refs(&references, id)
+}
+
+pub(super) fn resolve_core_event_with_refs(
+    references: &CompactRefResolver<'_>,
+    id: &str,
+) -> Result<CoreEventRecord> {
+    let event_id = resolve_compact_id_for_lookup(references, CompactRefNamespace::Event, id)?;
+    references
+        .current_index()
+        .core_event_by_id(event_id)?
+        .ok_or_else(|| missing_resolved_lookup(MissingLookupKind::Event, id, event_id).into())
+}
+
+#[cfg(test)]
+pub(super) fn resolve_session(index: &VerifiedIndex, id: &str) -> Result<SessionRecord> {
+    let references = CompactRefResolver::new(index, None);
+    resolve_session_with_refs(&references, id)
+}
+
+pub(super) fn resolve_session_with_refs(
+    references: &CompactRefResolver<'_>,
+    id: &str,
+) -> Result<SessionRecord> {
+    let session_id = resolve_compact_id_for_lookup(references, CompactRefNamespace::Session, id)?;
+    references
+        .current_index()
+        .session_by_id(session_id)?
+        .ok_or_else(|| missing_resolved_lookup(MissingLookupKind::Session, id, session_id).into())
+}
+
+fn resolve_compact_id_for_lookup(
+    references: &CompactRefResolver<'_>,
+    namespace: CompactRefNamespace,
+    id: &str,
+) -> Result<Uuid> {
+    if let Ok(id) = Uuid::parse_str(id.trim()) {
+        return Ok(id);
     }
-    let prefix = validate_ctx_id(id, "event")?;
-    match index.events_by_id_prefix(&prefix)?.as_slice() {
-        [] => Err(MissingLookupError::prefix(MissingLookupKind::Event, prefix).into()),
-        [event] => index
-            .core_event_by_id(event.event_id.as_uuid())?
-            .ok_or_else(|| {
-                anyhow!(
-                    "event {} disappeared from the pinned Core generation",
-                    event.event_id
-                )
-            }),
-        matches => Err(anyhow!(
-            "event id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_event_id",
-            matches[0].event_id,
-            matches[1].event_id
-        )),
+    match references.resolve_id(namespace, id) {
+        Ok(id) => Ok(id),
+        Err(error) => match error.downcast_ref::<CompactRefResolveError>() {
+            Some(CompactRefResolveError::ExactNotFound { id, .. }) => {
+                let kind = match namespace {
+                    CompactRefNamespace::Event => MissingLookupKind::Event,
+                    CompactRefNamespace::Session => MissingLookupKind::Session,
+                };
+                Err(MissingLookupError::exact(kind, id.to_string()).into())
+            }
+            Some(CompactRefResolveError::NotFound { reference, .. }) => {
+                let kind = match namespace {
+                    CompactRefNamespace::Event => MissingLookupKind::Event,
+                    CompactRefNamespace::Session => MissingLookupKind::Session,
+                };
+                Err(MissingLookupError::prefix(kind, reference).into())
+            }
+            _ => Err(error),
+        },
     }
 }
 
-pub(super) fn resolve_session(index: &VerifiedIndex, id: &str) -> Result<SessionRecord> {
-    if let Ok(uuid) = Uuid::parse_str(id.trim()) {
-        return index.session_by_id(uuid)?.ok_or_else(|| {
-            MissingLookupError::exact(MissingLookupKind::Session, uuid.to_string()).into()
-        });
-    }
-    let prefix = validate_ctx_id(id, "session")?;
-    match index.sessions_by_id_prefix(&prefix)?.as_slice() {
-        [] => Err(MissingLookupError::prefix(MissingLookupKind::Session, prefix).into()),
-        [session] => Ok(session.clone()),
-        matches => Err(anyhow!(
-            "session id prefix {prefix:?} is ambiguous; first matches are {} and {}; use a longer ctx_session_id",
-            matches[0].session_id,
-            matches[1].session_id
-        )),
+fn missing_resolved_lookup(
+    kind: MissingLookupKind,
+    requested: &str,
+    resolved: Uuid,
+) -> MissingLookupError {
+    if Uuid::parse_str(requested.trim()).is_ok() {
+        MissingLookupError::exact(kind, resolved.to_string())
+    } else {
+        MissingLookupError::prefix(kind, requested.trim().to_ascii_lowercase())
     }
 }
 
@@ -207,6 +242,18 @@ pub(crate) fn active_generation_race_error_json() -> Value {
         "failure_kind": ACTIVE_GENERATION_RACE_FAILURE_KIND,
         "detail": ACTIVE_GENERATION_RACE_DETAIL,
         "retryable": true,
+    })
+}
+
+pub(crate) fn generation_query_authority_error_json(
+    error: &GenerationQueryAuthorityError,
+) -> Value {
+    let detail = error.to_string();
+    json!({
+        "error": detail.clone(),
+        "error_code": error.error_code(),
+        "detail": detail,
+        "retryable": error.retryable(),
     })
 }
 

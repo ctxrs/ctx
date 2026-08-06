@@ -231,7 +231,7 @@ fn search_snippets_use_mcp_invocation_arguments_but_exclude_response_and_call_id
 }
 
 #[test]
-fn copied_lineage_is_hidden_from_mcp_search_but_visible_in_show_and_query_events() {
+fn copied_text_stays_unranked_while_search_and_show_return_full_id_lineage() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let ancestor = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 97, 1);
@@ -256,6 +256,61 @@ fn copied_lineage_is_hidden_from_mcp_search_but_visible_in_show_and_query_events
     let (searched, _) = mcp_search(search, temp.path()).unwrap();
     assert!(searched["results"].as_array().unwrap().is_empty());
 
+    let mut canonical_search = request(RefreshArg::Off);
+    canonical_search.query = "ancestor body".to_owned();
+    canonical_search.events = true;
+    canonical_search.limit = 10;
+    let (canonical_results, _, compact_results) =
+        mcp_search_with_compact(canonical_search, temp.path()).unwrap();
+    let lineage = &canonical_results["results"][0]["copied_lineage"];
+    let lineage = lineage.as_object().unwrap();
+    for required in [
+        "schema_version",
+        "observed_count",
+        "returned",
+        "occurrences",
+        "relationship_counts",
+        "truncated",
+    ] {
+        assert!(lineage.contains_key(required), "missing {required}");
+    }
+    assert_eq!(lineage["observed_count"], 1);
+    assert_eq!(lineage["returned"], 1);
+    assert_eq!(lineage["truncated"], false);
+    assert_eq!(
+        lineage["occurrences"][0]["ctx_event_id"],
+        copied.event_id.as_uuid().to_string()
+    );
+    assert_eq!(
+        lineage["occurrences"][0]["ctx_session_id"],
+        copied.session_id.as_uuid().to_string()
+    );
+    assert!(lineage.get("more_available").is_none());
+    let compact_result = &compact_results["results"][0];
+    for reference in [
+        compact_result["ctx_event_id"].as_str().unwrap(),
+        compact_result["ctx_session_id"].as_str().unwrap(),
+        compact_result["copied_lineage"]["occurrences"][0]["ctx_event_id"]
+            .as_str()
+            .unwrap(),
+        compact_result["copied_lineage"]["occurrences"][0]["ctx_session_id"]
+            .as_str()
+            .unwrap(),
+    ] {
+        assert!((8..=32).contains(&reference.len()), "{reference}");
+        assert!(!reference.contains('-'), "{reference}");
+    }
+    assert_ne!(
+        compact_result["ctx_event_id"],
+        canonical_results["results"][0]["ctx_event_id"]
+    );
+    assert!(compact_result["suggested_next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .all(|command| !command.contains(&ancestor.event_id.as_uuid().to_string())));
+
     let shown = mcp_show_event(
         temp.path(),
         &copied.event_id.as_uuid().to_string(),
@@ -272,6 +327,11 @@ fn copied_lineage_is_hidden_from_mcp_search_but_visible_in_show_and_query_events
         event_origin_json(&copied.event_origin)
     );
     assert_eq!(shown_event["text"], COPIED_SEARCH_CANARY);
+    assert_eq!(shown["copied_lineage"]["observed_count"], 1);
+    assert_eq!(
+        shown["copied_lineage"]["occurrences"][0]["ctx_event_id"],
+        copied.event_id.as_uuid().to_string()
+    );
 
     let queried =
         crate::mcp::query_events_for_test(&json!({"content": "full", "limit": 100}), temp.path())

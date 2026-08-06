@@ -9,7 +9,7 @@ use ctx_history_core::{
 };
 use ctx_history_index::{
     CoreEventPageBudget, CoreEventRecord, SessionEventCursor, SessionRecord, VerifiedIndex,
-    MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
+    MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS, SHOW_COPIED_EVENT_LINEAGE_POLICY,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -29,14 +29,20 @@ use crate::{
 };
 
 use super::{
-    render::{render_show_document, write_show_value},
+    compact_presentation::{reference_needs_retained_peer, CompactPresentation},
+    compact_ref::CompactRefResolver,
+    copied_lineage::copied_lineage_value,
+    render::{follow_up_command_prefix, render_show_document, write_show_value},
     shared::{
-        open_index, render_active_generation_race, resolve_core_event, resolve_lookup_for_output,
-        resolve_session, validate_ctx_id, validate_session_selector, ActiveGenerationRaceCommand,
+        index_root, open_index, render_active_generation_race, resolve_core_event_with_refs,
+        resolve_lookup_for_output, resolve_session_with_refs, validate_ctx_id,
+        validate_session_selector, ActiveGenerationRaceCommand,
     },
 };
 
+#[cfg(test)]
 pub(crate) use mcp::{mcp_show_event, mcp_show_session};
+pub(crate) use mcp::{mcp_show_event_with_compact, mcp_show_session_with_compact};
 use render::event_window_json;
 #[cfg(test)]
 pub(super) use render::{event_window_value, render_event_values};
@@ -124,8 +130,19 @@ fn run_show_inner(
     let index = open_index(&data_root)?;
     match args.target {
         ShowTarget::Event(args) => {
+            let compact = CompactPresentation::open_if_needed(
+                &index,
+                &index_root(&data_root),
+                matches!(args.format, OutputFormat::Text | OutputFormat::Markdown)
+                    || reference_needs_retained_peer(&args.id),
+            )?;
+            let pinned_references = CompactRefResolver::new(&index, None);
+            let input_resolver = compact
+                .as_ref()
+                .map(CompactPresentation::resolver)
+                .unwrap_or(pinned_references);
             let selected = resolve_lookup_for_output(
-                resolve_core_event(&index, &args.id),
+                resolve_core_event_with_refs(&input_resolver, &args.id),
                 args.format == OutputFormat::Text,
                 r#"ctx search "<query>" --verbose"#,
                 ui,
@@ -139,19 +156,41 @@ fn run_show_inner(
                 CLI_PRESENTATION_MAX_OUTPUT_BYTES,
             )?;
             telemetry.events_returned = Some(count_bucket(events.len() as u64));
-            let value = event_window_json(
+            let mut value = event_window_json(
                 &selected,
                 &events,
                 args.format,
                 CLI_PRESENTATION_MAX_OUTPUT_BYTES,
             )?;
+            value["copied_lineage"] = copied_lineage_value(
+                &index,
+                selected.event_id.as_uuid(),
+                SHOW_COPIED_EVENT_LINEAGE_POLICY,
+            )?;
             let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let result_count = events.len();
             let content_bytes = serde_json::to_vec(&value["events"])?.len();
+            let compact_value = matches!(args.format, OutputFormat::Text | OutputFormat::Markdown)
+                .then(|| {
+                    let mut projected = compact
+                        .as_ref()
+                        .expect("human and Markdown show open compact presentation")
+                        .project(&value)?;
+                    projected["_command_prefix"] =
+                        Value::String(follow_up_command_prefix(&data_root));
+                    Ok::<_, anyhow::Error>(projected)
+                })
+                .transpose()?;
+            let output_value = compact_value.as_ref().unwrap_or(&value);
             let output_bytes = if args.format == OutputFormat::Text {
-                write_show_document(&value, selected.event_id.as_uuid(), ui)?
+                write_show_document(output_value, selected.event_id.as_uuid(), ui)?
             } else {
-                write_show_value(value, args.format, None, selected.event_id.as_uuid())?
+                write_show_value(
+                    compact_value.unwrap_or(value),
+                    args.format,
+                    None,
+                    selected.event_id.as_uuid(),
+                )?
             };
             local_usage.set_result_observation(
                 ResultObservationAction::OpenEvent,
@@ -164,9 +203,23 @@ fn run_show_inner(
         }
         ShowTarget::Session(args) => {
             let human_output = args.format == OutputFormat::Text && args.out.is_none();
+            let compact = CompactPresentation::open_if_needed(
+                &index,
+                &index_root(&data_root),
+                matches!(args.format, OutputFormat::Text | OutputFormat::Markdown)
+                    || args
+                        .id
+                        .as_deref()
+                        .is_some_and(reference_needs_retained_peer),
+            )?;
+            let pinned_references = CompactRefResolver::new(&index, None);
+            let input_resolver = compact
+                .as_ref()
+                .map(CompactPresentation::resolver)
+                .unwrap_or(pinned_references);
             let session = resolve_lookup_for_output(
-                resolve_show_session(
-                    &index,
+                resolve_show_session_with_refs(
+                    &input_resolver,
                     args.id.as_deref(),
                     args.provider_session.as_deref(),
                     args.provider.map(ProviderArg::capture_provider),
@@ -182,6 +235,11 @@ fn run_show_inner(
                 args.format,
                 args.max_events,
                 args.out,
+                matches!(args.format, OutputFormat::Text | OutputFormat::Markdown).then(|| {
+                    compact
+                        .as_ref()
+                        .expect("human and Markdown show open compact presentation")
+                }),
                 ui,
             )?;
             telemetry.events_returned = Some(count_bucket(result.events_returned as u64));
@@ -207,6 +265,7 @@ pub(super) struct SessionStreamResult {
     pub(super) output_bytes: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn stream_cli_session(
     index: &VerifiedIndex,
     session: &SessionRecord,
@@ -214,6 +273,7 @@ pub(super) fn stream_cli_session(
     format: OutputFormat,
     max_events: Option<usize>,
     out: Option<PathBuf>,
+    compact: Option<&CompactPresentation<'_>>,
     ui: &mut Ui,
 ) -> Result<SessionStreamResult> {
     let writes_stdout = out.is_none();
@@ -228,6 +288,7 @@ pub(super) fn stream_cli_session(
         max_events,
         human_context,
         writes_stdout,
+        compact,
     )?;
     let mut selector = SessionEventSelector::new(mode);
     let mut cursor: Option<SessionEventCursor> = None;
@@ -249,7 +310,7 @@ pub(super) fn stream_cli_session(
                     truncated = true;
                     break 'pages;
                 }
-                renderer.emit(selected)?;
+                renderer.emit(selected, compact)?;
             }
         }
         if terminal {
@@ -257,7 +318,7 @@ pub(super) fn stream_cli_session(
                 if max_events.is_some_and(|maximum| renderer.events_returned() >= maximum) {
                     truncated = true;
                 } else {
-                    renderer.emit(selected)?;
+                    renderer.emit(selected, compact)?;
                 }
             }
             break;
@@ -345,6 +406,7 @@ impl<'a> SessionStreamRenderer<'a> {
         max_events: Option<usize>,
         human_context: Option<RenderContext>,
         writes_stdout: bool,
+        compact: Option<&CompactPresentation<'_>>,
     ) -> Result<Self> {
         let metadata =
             session_transcript_value(session, mode, format, Vec::new(), false, max_events);
@@ -359,7 +421,7 @@ impl<'a> SessionStreamRenderer<'a> {
             page_output_bytes: 0,
             last_event_id: session.session_id.as_uuid(),
         };
-        renderer.write_header()?;
+        renderer.write_header(compact)?;
         Ok(renderer)
     }
 
@@ -371,7 +433,11 @@ impl<'a> SessionStreamRenderer<'a> {
         self.page_output_bytes = 0;
     }
 
-    fn emit(&mut self, event: CoreEventRecord) -> Result<()> {
+    fn emit(
+        &mut self,
+        event: CoreEventRecord,
+        compact: Option<&CompactPresentation<'_>>,
+    ) -> Result<()> {
         let event_id = event.event_id.as_uuid();
         let value = render_event_value(&event);
         let event_json = serde_json::to_vec(&value)?;
@@ -379,6 +445,14 @@ impl<'a> SessionStreamRenderer<'a> {
             .content_bytes
             .saturating_add(usize::from(self.events_returned > 0))
             .saturating_add(event_json.len());
+        let compact_value = matches!(self.format, OutputFormat::Text | OutputFormat::Markdown)
+            .then(|| {
+                compact
+                    .ok_or_else(|| anyhow!("human transcript rendering requires compact refs"))?
+                    .project(&value)
+            })
+            .transpose()?;
+        let display_value = compact_value.as_ref().unwrap_or(&value);
         let fragment = match self.format {
             OutputFormat::Text if self.human_context.is_some() => {
                 let context = self
@@ -389,15 +463,15 @@ impl<'a> SessionStreamRenderer<'a> {
                     &json!({
                         "_stream_part": "session_event",
                         "position": self.events_returned.saturating_add(1),
-                        "event": value,
+                        "event": display_value,
                     }),
                     context,
                 )
                 .render(context)
                 .into_bytes()
             }
-            OutputFormat::Text => render_stream_text_event(&value).into_bytes(),
-            OutputFormat::Markdown => render_stream_markdown_event(&value).into_bytes(),
+            OutputFormat::Text => render_stream_text_event(display_value).into_bytes(),
+            OutputFormat::Markdown => render_stream_markdown_event(display_value).into_bytes(),
             OutputFormat::Json => {
                 let mut fragment = Vec::with_capacity(event_json.len().saturating_add(1));
                 if self.events_returned > 0 {
@@ -525,14 +599,22 @@ impl<'a> SessionStreamRenderer<'a> {
         })
     }
 
-    fn write_header(&mut self) -> Result<()> {
+    fn write_header(&mut self, compact: Option<&CompactPresentation<'_>>) -> Result<()> {
+        let compact_metadata = matches!(self.format, OutputFormat::Text | OutputFormat::Markdown)
+            .then(|| {
+                compact
+                    .ok_or_else(|| anyhow!("human transcript rendering requires compact refs"))?
+                    .project(&self.metadata)
+            })
+            .transpose()?;
+        let display_metadata = compact_metadata.as_ref().unwrap_or(&self.metadata);
         match self.format {
             OutputFormat::Text if self.human_context.is_some() => {
                 let context = self
                     .human_context
                     .as_ref()
                     .ok_or_else(|| anyhow!("human transcript rendering requires a context"))?;
-                let mut header = self.metadata.clone();
+                let mut header = display_metadata.clone();
                 header["_stream_part"] = Value::String("session_header".to_owned());
                 self.output.write_all(
                     render_show_document(&header, context)
@@ -542,11 +624,11 @@ impl<'a> SessionStreamRenderer<'a> {
             }
             OutputFormat::Text => {
                 self.output
-                    .write_all(render_stream_text_header(&self.metadata).as_bytes())?;
+                    .write_all(render_stream_text_header(display_metadata).as_bytes())?;
             }
             OutputFormat::Markdown => {
                 self.output
-                    .write_all(render_stream_markdown_header(&self.metadata).as_bytes())?;
+                    .write_all(render_stream_markdown_header(display_metadata).as_bytes())?;
             }
             OutputFormat::Json => write_stream_json_header(&mut self.output, &self.metadata)?,
             OutputFormat::Jsonl => {}
@@ -694,15 +776,27 @@ pub(super) fn validate_show_target(target: &ShowTarget) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn resolve_show_session(
     index: &VerifiedIndex,
     id: Option<&str>,
     provider_session_id: Option<&str>,
     provider: Option<CaptureProvider>,
 ) -> Result<SessionRecord> {
+    let references = super::compact_ref::CompactRefResolver::new(index, None);
+    resolve_show_session_with_refs(&references, id, provider_session_id, provider)
+}
+
+pub(super) fn resolve_show_session_with_refs(
+    references: &super::compact_ref::CompactRefResolver<'_>,
+    id: Option<&str>,
+    provider_session_id: Option<&str>,
+    provider: Option<CaptureProvider>,
+) -> Result<SessionRecord> {
+    let index = references.current_index();
     validate_session_selector(id, provider_session_id)?;
     let session = match (id, provider_session_id) {
-        (Some(id), None) => resolve_session(index, id)?,
+        (Some(id), None) => resolve_session_with_refs(references, id)?,
         (None, Some(provider_session_id)) => select_show_provider_session(
             provider_session_id,
             index.sessions_by_provider_session_id(

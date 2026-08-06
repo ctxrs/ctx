@@ -88,6 +88,20 @@ pub(crate) fn initialize_generation_only_core(data_root: &Path) -> String {
     core_receipt.generation_id
 }
 
+pub(crate) fn republish_active_generation_metadata(
+    data_root: &Path,
+    generation_id: &str,
+    metadata: Vec<u8>,
+) {
+    let index_root = data_root.join("search").join("lexical");
+    GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap()
+        .republish_current_publication_metadata(generation_id, metadata)
+        .unwrap();
+}
+
 pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message: &str) -> PathBuf {
     fs::create_dir_all(root).unwrap();
     let path = root.join(format!("rollout-{session_id}.jsonl"));

@@ -1,3 +1,6 @@
+mod compact_presentation;
+mod compact_ref;
+mod copied_lineage;
 mod locate;
 mod render;
 mod search;
@@ -5,11 +8,18 @@ mod shared;
 mod show;
 
 pub(crate) use locate::run_locate;
+#[cfg(test)]
+use search::mcp_search;
 pub(crate) use search::{
-    mcp_search, run_search, validate_explicit_semantic_scope, SourceSearchRequest,
+    mcp_search_with_compact, run_search, validate_explicit_semantic_scope, SourceSearchRequest,
 };
-pub(crate) use shared::{active_generation_race_error_json, is_active_generation_race};
-pub(crate) use show::{mcp_show_event, mcp_show_session, run_show};
+pub(crate) use shared::{
+    active_generation_race_error_json, generation_query_authority_error_json,
+    is_active_generation_race,
+};
+#[cfg(test)]
+pub(crate) use show::mcp_show_event;
+pub(crate) use show::{mcp_show_event_with_compact, mcp_show_session_with_compact, run_show};
 
 pub(crate) fn event_origin_json(origin: &ctx_history_core::EventOrigin) -> serde_json::Value {
     match origin {

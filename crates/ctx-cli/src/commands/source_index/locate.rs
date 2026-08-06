@@ -13,9 +13,14 @@ use crate::{
 };
 
 use super::{
+    compact_presentation::{reference_needs_retained_peer, CompactPresentation},
+    compact_ref::CompactRefResolver,
     render::{pretty_json_stdout_bytes, render_locate_document, timestamp_json},
-    shared::{open_index, resolve_core_event, validate_ctx_id, validate_session_selector},
-    show::resolve_show_session,
+    shared::{
+        index_root, open_index, resolve_core_event_with_refs, validate_ctx_id,
+        validate_session_selector,
+    },
+    show::resolve_show_session_with_refs,
 };
 
 pub(crate) fn run_locate(
@@ -26,11 +31,26 @@ pub(crate) fn run_locate(
 ) -> Result<()> {
     validate_locate_target(&args.target)?;
     let index = open_index(&data_root)?;
-    let (value, json_output) = match args.target {
+    let (value, compact_value, json_output) = match args.target {
         LocateTarget::Session(args) => {
-            let provider = args.provider.map(|provider| provider.capture_provider());
-            let session = resolve_show_session(
+            let json_output = args.format.is_json();
+            let compact = CompactPresentation::open_if_needed(
                 &index,
+                &index_root(&data_root),
+                !json_output
+                    || args
+                        .id
+                        .as_deref()
+                        .is_some_and(reference_needs_retained_peer),
+            )?;
+            let pinned_references = CompactRefResolver::new(&index, None);
+            let input_resolver = compact
+                .as_ref()
+                .map(CompactPresentation::resolver)
+                .unwrap_or(pinned_references);
+            let provider = args.provider.map(|provider| provider.capture_provider());
+            let session = resolve_show_session_with_refs(
+                &input_resolver,
                 args.id.as_deref(),
                 args.provider_session.as_deref(),
                 provider,
@@ -45,26 +65,53 @@ pub(crate) fn run_locate(
                         session.session_id
                     )
                 })?;
-            (
-                locate_session_value(&session, &first_event),
-                args.format.is_json(),
-            )
+            let value = locate_session_value(&session, &first_event);
+            let compact_value = (!json_output)
+                .then(|| {
+                    compact
+                        .as_ref()
+                        .expect("human locate opens compact presentation")
+                        .project(&value)
+                })
+                .transpose()?;
+            (value, compact_value, json_output)
         }
         LocateTarget::Event(args) => {
-            let event = resolve_core_event(&index, &args.id)?;
-            (locate_event_value(&event), args.format.is_json())
+            let json_output = args.format.is_json();
+            let compact = CompactPresentation::open_if_needed(
+                &index,
+                &index_root(&data_root),
+                !json_output || reference_needs_retained_peer(&args.id),
+            )?;
+            let pinned_references = CompactRefResolver::new(&index, None);
+            let input_resolver = compact
+                .as_ref()
+                .map(CompactPresentation::resolver)
+                .unwrap_or(pinned_references);
+            let event = resolve_core_event_with_refs(&input_resolver, &args.id)?;
+            let value = locate_event_value(&event);
+            let compact_value = (!json_output)
+                .then(|| {
+                    compact
+                        .as_ref()
+                        .expect("human locate opens compact presentation")
+                        .project(&value)
+                })
+                .transpose()?;
+            (value, compact_value, json_output)
         }
     };
 
     let content_bytes = serde_json::to_vec(&value)?.len();
+    let render_value = compact_value.as_ref().unwrap_or(&value);
     let output_bytes = if json_output {
         let output_bytes = pretty_json_stdout_bytes(&value)?;
         print_json(value)?;
         output_bytes
     } else {
-        let document = render_locate_document(&value, ui.stdout_context());
+        let document = render_locate_document(render_value, ui.stdout_context());
         let output_bytes =
-            canonical_human_output_bytes(|context| render_locate_document(&value, context));
+            canonical_human_output_bytes(|context| render_locate_document(render_value, context));
         ui.write_stdout(&document)?;
         output_bytes
     };

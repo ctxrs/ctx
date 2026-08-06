@@ -848,7 +848,11 @@ returns the strongest matching span from each session, plus
 that session also matched. Use `--session <ctx-session-id>` after a default
 search has identified a session to inspect; scoped session search returns dense
 event hits. Session/event commands accept full ctx IDs or unambiguous ctx ID
-prefixes of at least eight hex characters. Use `--events` without `--session`
+prefixes of at least eight hex characters. Human search, show, locate, Markdown,
+and MCP text render the shortest unambiguous lowercase no-dash prefix from 8
+through 32 characters. Uniqueness is checked against the command's pinned Core
+generation and its retained peer; JSON, JSONL, MCP structured content, cursors,
+and stored data keep full UUIDs. Use `--events` without `--session`
 for dense event-level results across sessions. Lexical search matches any word
 in an ordinary multi-word query and ranks results matching more query words
 ahead of partial matches. Repeat
@@ -879,10 +883,15 @@ diagnostic score, which can be non-monotonic after query-coverage and
 session-diversity shaping.
 Human output states `relevance order` and its primary-session or
 primary-plus-subagent scope in the result heading. Its compact `Event` row pairs
-the short event ID with the exact matched-event UTC RFC 3339 millisecond time;
+the dynamic event reference with the exact matched-event UTC RFC 3339 millisecond time;
 timestamps never re-sort results. `--verbose` additionally renders the stored
 event sequence and available workspace/working-directory, branch, agent, and
 parent/root lineage without repeating equal values.
+Canonical search hits also summarize bounded copied-event lineage after ranking
+is complete: at most three inherited-session follow-ups, an exact total when
+the reverse walk completes, or an `at least` lower bound when work is capped.
+`ctx show event` automatically renders up to 20 occurrence details. There is no
+lineage flag or exhaustive cursor.
 Custom history imports can be filtered by canonical
 `--history-source provider_key/source_id`, or by exact `--provider-key`,
 `--source-id`, and `--source-format` values. The plugin/source alias is for

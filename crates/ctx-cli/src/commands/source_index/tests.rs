@@ -38,11 +38,10 @@ mod tests {
         cli::{Cli, CommandRoot},
         commands::{
             locate::{LocateArgs, LocateEventArgs, LocateTarget},
-            test_support_query_authority::{
-                publish_empty_generation, republish_active_as_legacy_v1,
-                EmptyPublicationAuthority,
-            },
             show::{ShowEventArgs, ShowSessionArgs},
+            test_support_query_authority::{
+                publish_empty_generation, republish_active_as_legacy_v1, EmptyPublicationAuthority,
+            },
         },
         local_usage::CliUsage,
         output::{JsonOutputFormat, OutputFormat},
@@ -79,10 +78,7 @@ mod tests {
 
     include!("tests/fixtures.rs");
 
-    fn assert_query_authority_error(
-        error: &anyhow::Error,
-        expected_code: &str,
-    ) {
+    fn assert_query_authority_error(error: &anyhow::Error, expected_code: &str) {
         let authority = error
             .downcast_ref::<ctx_history_refresh::GenerationQueryAuthorityError>()
             .expect("query gateway must preserve the typed publication-authority error");
@@ -95,7 +91,10 @@ mod tests {
         let nonempty = tempdir().unwrap();
         write_test_generation(nonempty.path());
         let generation_id = republish_active_as_legacy_v1(nonempty.path());
-        assert_eq!(open_index(nonempty.path()).unwrap().generation_id(), generation_id);
+        assert_eq!(
+            open_index(nonempty.path()).unwrap().generation_id(),
+            generation_id
+        );
         assert_eq!(
             crate::semantic::pin_active_verified_generation(nonempty.path())
                 .unwrap()
@@ -104,10 +103,8 @@ mod tests {
         );
 
         let empty = tempdir().unwrap();
-        let generation_id = publish_empty_generation(
-            empty.path(),
-            EmptyPublicationAuthority::AuthoritativeV2,
-        );
+        let generation_id =
+            publish_empty_generation(empty.path(), EmptyPublicationAuthority::AuthoritativeV2);
         let opened = open_index(empty.path()).unwrap();
         assert_eq!(opened.generation_id(), generation_id);
         assert_eq!(opened.document_count(), 0);
@@ -120,8 +117,8 @@ mod tests {
     }
 
     #[test]
-    fn query_authority_search_and_shared_gateways_reject_uncertified_and_invalid_empty_generations(
-    ) {
+    fn query_authority_search_and_shared_gateways_reject_uncertified_and_invalid_empty_generations()
+    {
         for authority in [
             EmptyPublicationAuthority::Missing,
             EmptyPublicationAuthority::LegacyV1,
@@ -156,6 +153,64 @@ mod tests {
                 Err(error) => error,
             };
             assert_query_authority_error(&error, "publication_authority_invalid");
+        }
+    }
+
+    #[test]
+    fn retained_compact_peer_enforces_generation_query_authority() {
+        let legacy_nonempty = tempdir().unwrap();
+        write_test_generation(legacy_nonempty.path());
+        let peer_generation = republish_active_as_legacy_v1(legacy_nonempty.path());
+        let successor = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 94, 1),
+            "legacy nonempty retained peer successor",
+        );
+        append_fixture_session(legacy_nonempty.path(), &[successor], 94);
+        let current = open_index(legacy_nonempty.path()).unwrap();
+        assert_ne!(current.generation_id(), peer_generation);
+        super::compact_presentation::CompactPresentation::open(
+            &current,
+            &index_root(legacy_nonempty.path()),
+        )
+        .unwrap();
+
+        let authoritative_empty = tempdir().unwrap();
+        let peer_generation = publish_empty_generation(
+            authoritative_empty.path(),
+            EmptyPublicationAuthority::AuthoritativeV2,
+        );
+        write_test_generation(authoritative_empty.path());
+        let current = open_index(authoritative_empty.path()).unwrap();
+        assert_ne!(current.generation_id(), peer_generation);
+        super::compact_presentation::CompactPresentation::open(
+            &current,
+            &index_root(authoritative_empty.path()),
+        )
+        .unwrap();
+
+        for (authority, error_code) in [
+            (EmptyPublicationAuthority::Missing, "source_unavailable"),
+            (EmptyPublicationAuthority::LegacyV1, "source_unavailable"),
+            (
+                EmptyPublicationAuthority::Malformed,
+                "publication_authority_invalid",
+            ),
+            (
+                EmptyPublicationAuthority::UnknownVersion,
+                "publication_authority_invalid",
+            ),
+        ] {
+            let temp = tempdir().unwrap();
+            publish_empty_generation(temp.path(), authority);
+            write_test_generation(temp.path());
+            let current = open_index(temp.path()).unwrap();
+            let error = super::compact_presentation::CompactPresentation::open(
+                &current,
+                &index_root(temp.path()),
+            )
+            .err()
+            .expect("invalid retained peer must fail before compact resolution");
+            assert_query_authority_error(&error, error_code);
         }
     }
 
@@ -974,6 +1029,77 @@ mod tests {
     }
 
     #[test]
+    fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_reads() {
+        let temp = tempdir().unwrap();
+        write_test_generation(temp.path());
+        let machine_pin = open_index(temp.path()).unwrap();
+        let compact_pin = open_index(temp.path()).unwrap();
+        let human_pin = open_index(temp.path()).unwrap();
+        let session_id = machine_pin
+            .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"))
+            .unwrap()[0]
+            .session_id
+            .as_uuid();
+
+        let second = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 92, 1),
+            "second generation",
+        );
+        append_fixture_session(temp.path(), &[second], 92);
+        let third = fixture_core_event(
+            &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 93, 1),
+            "third generation",
+        );
+        append_fixture_session(temp.path(), &[third], 93);
+
+        let mut machine_request = request(RefreshArg::Off);
+        machine_request.session = Some(session_id.to_string());
+        machine_request.events = true;
+        let (value, collection, pinned) = search_existing_generation(
+            &machine_request,
+            machine_pin,
+            temp.path(),
+            0.35,
+            "existing_generation",
+            1,
+        )
+        .unwrap();
+        assert_eq!(collection.result_window.hits.len(), 1);
+        assert_eq!(
+            value["results"][0]["ctx_session_id"],
+            session_id.to_string()
+        );
+        assert_ne!(
+            pinned.generation_id(),
+            open_index(temp.path()).unwrap().generation_id()
+        );
+
+        let mut compact_request = request(RefreshArg::Off);
+        compact_request.session = Some(session_id.simple().to_string()[..8].to_owned());
+        compact_request.events = true;
+        let compact_error = search_existing_generation(
+            &compact_request,
+            compact_pin,
+            temp.path(),
+            0.35,
+            "existing_generation",
+            1,
+        )
+        .err()
+        .expect("expired compact input must request a concurrent-generation retry");
+        assert!(super::shared::is_active_generation_race(&compact_error));
+
+        let human_error = super::compact_presentation::CompactPresentation::open_if_needed(
+            &human_pin,
+            &index_root(temp.path()),
+            true,
+        )
+        .err()
+        .expect("expired human presentation must request a concurrent-generation retry");
+        assert!(super::shared::is_active_generation_race(&human_error));
+    }
+
+    #[test]
     fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations() {
         let temp = tempdir().unwrap();
         let body = format!("{} {TEST_QUERY}", "x".repeat(96 * 1024));
@@ -1726,6 +1852,7 @@ mod tests {
             OutputFormat::Json,
             None,
             None,
+            None,
             &mut ui,
         )
         .unwrap();
@@ -1768,6 +1895,7 @@ mod tests {
             OutputFormat::Json,
             Some(1),
             None,
+            None,
             &mut ui,
         )
         .unwrap();
@@ -1805,6 +1933,7 @@ mod tests {
             &session,
             TranscriptMode::Lite,
             OutputFormat::Jsonl,
+            None,
             None,
             None,
             &mut ui,

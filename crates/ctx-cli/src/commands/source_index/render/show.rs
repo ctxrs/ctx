@@ -37,6 +37,7 @@ pub(in crate::commands::source_index) fn render_show_document(
         document.append(render_session_header_document(value, context));
     } else {
         render_event_header(&mut document, context, value);
+        render_copied_lineage(&mut document, context, value);
     }
 
     let events = value["events"].as_array().map(Vec::as_slice).unwrap_or(&[]);
@@ -56,6 +57,120 @@ pub(in crate::commands::source_index) fn render_show_document(
         ));
     }
     document
+}
+
+fn render_copied_lineage(document: &mut Document, context: &RenderContext, value: &Value) {
+    let lineage = &value["copied_lineage"];
+    let observed = lineage["observed_count"].as_u64().unwrap_or(0);
+    if observed == 0 {
+        return;
+    }
+    let truncated = lineage["truncated"].as_bool().unwrap_or(true);
+    document.push_blank();
+    let noun = if observed == 1 { "session" } else { "sessions" };
+    let heading = if truncated {
+        format!("Inherited by at least {observed} {noun}")
+    } else {
+        format!("Inherited by {observed} {noun}")
+    };
+    push_heading(
+        document,
+        &heading,
+        if truncated {
+            Token::Warning
+        } else {
+            Token::Heading
+        },
+    );
+
+    if let Some(counts) = lineage["relationship_counts"].as_object() {
+        let summary = counts
+            .iter()
+            .filter_map(|(relationship, count)| {
+                count
+                    .as_u64()
+                    .filter(|count| *count != 0)
+                    .map(|count| format!("{relationship} {count}"))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !summary.is_empty() {
+            push_wrapped(document, context, 2, &summary, Token::Label);
+        }
+    }
+
+    let command_prefix = value["_command_prefix"].as_str().unwrap_or("ctx");
+    let occurrences = lineage["occurrences"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for (position, occurrence) in occurrences.iter().take(20).enumerate() {
+        let relationship = occurrence["session_relationship"]
+            .as_str()
+            .unwrap_or("inherited");
+        document.push_blank();
+        push_prefixed(
+            document,
+            context,
+            0,
+            &format!("{}. ", position + 1),
+            Token::Accent,
+            relationship,
+            Token::Heading,
+        );
+        for (label, key) in [
+            ("Session", "ctx_session_id"),
+            ("Event", "ctx_event_id"),
+            ("Copied from session", "copied_from_ctx_session_id"),
+            ("Copied from event", "copied_from_ctx_event_id"),
+            ("Parent", "parent_ctx_session_id"),
+            ("Root", "root_ctx_session_id"),
+        ] {
+            if let Some(reference) = occurrence[key].as_str() {
+                push_field(
+                    document,
+                    context,
+                    EVENT_INDENT,
+                    label,
+                    LINEAGE_EVENT_LABEL_WIDTH,
+                    reference,
+                    Token::Reference,
+                );
+            }
+        }
+        if let Some(depth) = occurrence["depth"].as_u64() {
+            push_field(
+                document,
+                context,
+                EVENT_INDENT,
+                "Depth",
+                LINEAGE_EVENT_LABEL_WIDTH,
+                &depth.to_string(),
+                Token::Text,
+            );
+        }
+        if let Some(session_id) = occurrence["ctx_session_id"].as_str() {
+            super::human::push_action(
+                document,
+                context,
+                EVENT_INDENT,
+                "Open session",
+                &format!("{command_prefix} show session {session_id}"),
+            );
+        }
+    }
+    let returned = lineage["returned"]
+        .as_u64()
+        .unwrap_or(occurrences.len() as u64);
+    if !truncated && observed > returned {
+        push_wrapped(
+            document,
+            context,
+            2,
+            &format!("+{} more", observed - returned),
+            Token::Label,
+        );
+    }
 }
 
 pub(in crate::commands::source_index) fn render_session_header_document(

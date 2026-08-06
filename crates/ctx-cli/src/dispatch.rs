@@ -162,6 +162,8 @@ pub(crate) fn run_cli() -> Result<()> {
     let machine_output = command_machine_readable_output(&cli.command, json_output);
     let blame_error_json = command_uses_blame_error_json(&cli.command, json_output);
     let stable_pro_error_json = command_uses_stable_pro_error_json(&cli.command, json_output);
+    let query_authority_error_json =
+        command_uses_query_authority_error_json(&cli.command, json_output);
     let _analytics_delivery_failure_output =
         analytics::quiet_delivery_failure_output(machine_output);
     if let CommandRoot::Referral(args) = &cli.command {
@@ -429,6 +431,19 @@ pub(crate) fn run_cli() -> Result<()> {
                 Some(RenderedJsonError.into())
             } else if stable_pro_error_json && render_stable_pro_error_json(error)? {
                 Some(RenderedJsonError.into())
+            } else if let Some(authority_error) = error
+                .downcast_ref::<ctx_history_refresh::GenerationQueryAuthorityError>()
+                .filter(|_| query_authority_error_json)
+            {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(
+                        &crate::commands::source_index::generation_query_authority_error_json(
+                            authority_error,
+                        )
+                    )?
+                );
+                Some(RenderedJsonError.into())
             } else if let Some(error) =
                 error.downcast_ref::<presentation_limit::PresentationOutputLimitError>()
             {
@@ -607,6 +622,14 @@ fn command_uses_stable_pro_error_json(command: &CommandRoot, json_output: bool) 
 
 fn command_uses_blame_error_json(command: &CommandRoot, json_output: bool) -> bool {
     json_output && matches!(command, CommandRoot::Blame(_))
+}
+
+fn command_uses_query_authority_error_json(command: &CommandRoot, json_output: bool) -> bool {
+    json_output
+        && matches!(
+            command,
+            CommandRoot::Search(_) | CommandRoot::Show(_) | CommandRoot::Locate(_)
+        )
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {

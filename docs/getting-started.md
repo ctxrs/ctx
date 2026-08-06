@@ -162,7 +162,11 @@ results matching more of those words ahead of partial matches. Repeated
 Use `ctx_event_id` with `ctx show event` when you need a hit plus surrounding
 events. Use `ctx_session_id` with `ctx show session` when you need the
 transcript. Commands accept full ctx IDs or unambiguous ID prefixes of at least
-eight hex characters. Search also accepts filters such as `--provider`,
+eight hex characters. Rendered text uses the shortest unambiguous 8-to-32
+character no-dash reference across the pinned and retained Core generations;
+machine output retains full UUIDs. A canonical search hit can list sessions
+that inherited the event, and `ctx show event` expands the bounded copied-event
+lineage automatically. Search also accepts filters such as `--provider`,
 `--workspace`, `--since`, `--event-type`, `--file`, `--include-subagents`,
 `--include-current-session`, `--term`, `--limit`, and
 `--refresh background|off|wait`.

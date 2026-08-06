@@ -230,6 +230,7 @@ fn render_search_text(value: &Value) -> String {
                 out.push_str(&format!("   next: {command}\n"));
             }
         }
+        push_search_copied_lineage(&mut out, result);
     }
     push_omitted_line(
         &mut out,
@@ -239,6 +240,62 @@ fn render_search_text(value: &Value) -> String {
     );
     push_more_results_footer(&mut out, value);
     out
+}
+
+fn push_search_copied_lineage(out: &mut String, result: &Value) {
+    let Some(lineage) = result.get("copied_lineage") else {
+        return;
+    };
+    let observed = lineage
+        .get("observed_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if observed == 0 {
+        return;
+    }
+    let truncated = lineage
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if truncated {
+        out.push_str(&format!("   copied_to: at least {observed} sessions\n"));
+    } else {
+        out.push_str(&format!("   copied_to: {observed} sessions\n"));
+    }
+    let command_prefix = result
+        .get("suggested_next_commands")
+        .and_then(Value::as_array)
+        .and_then(|commands| commands.first())
+        .and_then(Value::as_str)
+        .and_then(|command| command.split_once(" show ").map(|(prefix, _)| prefix))
+        .unwrap_or("ctx");
+    let occurrences = lineage
+        .get("occurrences")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for occurrence in occurrences.iter().take(3) {
+        let Some(session_id) = occurrence.get("ctx_session_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let relationship = occurrence
+            .get("session_relationship")
+            .and_then(Value::as_str)
+            .unwrap_or("inherited");
+        let depth = occurrence.get("depth").and_then(Value::as_u64).unwrap_or(0);
+        out.push_str(&format!(
+            "   inherited: session={session_id}, relationship={relationship}, depth={depth}\n"
+        ));
+        out.push_str(&format!(
+            "   next: {command_prefix} show session {session_id}\n"
+        ));
+    }
+    if !truncated {
+        let returned = lineage.get("returned").and_then(Value::as_u64).unwrap_or(0);
+        if observed > returned {
+            out.push_str(&format!("   +{} more\n", observed - returned));
+        }
+    }
 }
 
 fn push_more_results_footer(out: &mut String, value: &Value) {
@@ -532,6 +589,7 @@ fn render_event_window_text(value: &Value) -> String {
         out.push_str("\nselected event\n");
         push_event_summary(&mut out, 1, event);
     }
+    push_event_copied_lineage(&mut out, value);
 
     let selected_event_id = value.get("ctx_event_id").and_then(Value::as_str);
     let window_events = events
@@ -546,6 +604,78 @@ fn render_event_window_text(value: &Value) -> String {
         push_omitted_line(&mut out, window_events.len(), MCP_TEXT_MAX_EVENTS, "events");
     }
     out
+}
+
+fn push_event_copied_lineage(out: &mut String, value: &Value) {
+    let Some(lineage) = value.get("copied_lineage") else {
+        return;
+    };
+    let observed = lineage
+        .get("observed_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if observed == 0 {
+        return;
+    }
+    let truncated = lineage
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    out.push_str("\ncopied lineage\n");
+    if truncated {
+        out.push_str(&format!("inherited_sessions: at least {observed}\n"));
+    } else {
+        out.push_str(&format!("inherited_sessions: {observed}\n"));
+    }
+    if let Some(counts) = lineage.get("relationship_counts") {
+        push_object_summary(
+            out,
+            "relationships",
+            counts,
+            &[
+                ("delegated", "delegated"),
+                ("forked", "forked"),
+                ("resumed_from", "resumed_from"),
+                ("workflow_child", "workflow_child"),
+                ("related_unknown", "related_unknown"),
+            ],
+        );
+    }
+    for occurrence in lineage
+        .get("occurrences")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .take(20)
+    {
+        let session = occurrence
+            .get("ctx_session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let event = occurrence
+            .get("ctx_event_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let relationship = occurrence
+            .get("session_relationship")
+            .and_then(Value::as_str)
+            .unwrap_or("inherited");
+        let depth = occurrence.get("depth").and_then(Value::as_u64).unwrap_or(0);
+        out.push_str(&format!(
+            "inherited: session={session}, event={event}, relationship={relationship}, depth={depth}\n"
+        ));
+        out.push_str(&format!(
+            "continue: call show_session with ctx_session_id={}\n",
+            Value::String(session.to_owned())
+        ));
+    }
+    if !truncated {
+        let returned = lineage.get("returned").and_then(Value::as_u64).unwrap_or(0);
+        if observed > returned {
+            out.push_str(&format!("+{} more\n", observed - returned));
+        }
+    }
 }
 
 fn push_event_summary(out: &mut String, index: usize, event: &Value) {
@@ -695,6 +825,41 @@ mod tests {
             render_tool_text(&value),
             "ctx search\nquery: journal replay\nresults: 1\n\n1. Replay decision\n   ctx_session_id: session-1\n   ctx_event_id: event-2\n   provider: codex\n   timestamp: 2026-07-22T12:00:00Z\n   snippet: Use the canonical journal checkpoint.\n   next: ctx show event event-2\n"
         );
+    }
+
+    #[test]
+    fn copied_lineage_text_uses_compact_follow_up_references() {
+        let value = json!({
+            "payload_type": "event_window",
+            "ctx_event_id": "aaaaaaaa",
+            "ctx_session_id": "bbbbbbbb",
+            "event": {
+                "ctx_event_id": "aaaaaaaa",
+                "event_type": "message",
+                "text": "canonical"
+            },
+            "events": [],
+            "copied_lineage": {
+                "schema_version": 1,
+                "observed_count": 1,
+                "returned": 1,
+                "occurrences": [{
+                    "ctx_event_id": "cccccccc",
+                    "ctx_session_id": "dddddddd",
+                    "session_relationship": "forked",
+                    "depth": 1
+                }],
+                "relationship_counts": {"forked": 1},
+                "truncated": false
+            }
+        });
+
+        let rendered = render_tool_text(&value);
+        assert!(rendered
+            .contains("inherited: session=dddddddd, event=cccccccc, relationship=forked, depth=1"));
+        assert!(rendered.contains("continue: call show_session with ctx_session_id=\"dddddddd\""));
+        assert!(!rendered.contains("event=e:"));
+        assert!(!rendered.contains("session=s:"));
     }
 
     #[test]

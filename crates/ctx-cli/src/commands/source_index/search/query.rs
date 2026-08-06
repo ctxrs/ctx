@@ -19,7 +19,7 @@ use crate::{
     RefreshArg, SearchArgs, SearchBackendArg,
 };
 
-use super::super::shared::resolve_session;
+use super::super::{compact_ref::CompactRefResolver, shared::resolve_session_with_refs};
 
 const LEGACY_ACTIVE_SESSION_PROVIDER_ENV: &str = "CODEX_THREAD_ID";
 const LEGACY_ACTIVE_SESSION_PROVIDER: CaptureProvider = CaptureProvider::Codex;
@@ -293,15 +293,27 @@ pub(super) fn unsupported_semantic_scope(
     ))
 }
 
+#[cfg(test)]
 pub(in crate::commands::source_index) fn index_search_filters(
     request: &SourceSearchRequest,
     index: &VerifiedIndex,
+) -> Result<EventSearchFilters> {
+    let references = CompactRefResolver::new(index, None);
+    index_search_filters_with_refs(request, index, &references)
+}
+
+pub(in crate::commands::source_index) fn index_search_filters_with_refs(
+    request: &SourceSearchRequest,
+    index: &VerifiedIndex,
+    references: &CompactRefResolver<'_>,
 ) -> Result<EventSearchFilters> {
     let source_identity = normalized_source_identity_filters(request)?;
     let session_id = request
         .session
         .as_deref()
-        .map(|id| resolve_session(index, id).map(|session| session.session_id.as_uuid()))
+        .map(|id| {
+            resolve_session_with_refs(references, id).map(|session| session.session_id.as_uuid())
+        })
         .transpose()?;
     let event_type = request
         .event_type
