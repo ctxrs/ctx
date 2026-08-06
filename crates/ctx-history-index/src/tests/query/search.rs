@@ -116,6 +116,137 @@ fn copied_events_are_excluded_before_search_windows_and_unknowns_remain_searchab
 }
 
 #[test]
+fn primary_scope_uses_typed_relationship_instead_of_agent_type_metadata() {
+    let temp = tempdir().unwrap();
+    let source = source("primary-scope-authority.jsonl");
+    let primary =
+        document_for_session(&source, "primary-session", 1, "primaryauthorityneedle root");
+    let related = |session: &str,
+                   sequence,
+                   relationship: SessionRelationshipKind,
+                   agent_type: &str,
+                   body: &str| {
+        let mut record = document_for_session(&source, session, sequence, body);
+        record
+            .set_session_relationship(relationship, Some(primary.session_id), primary.session_id)
+            .unwrap();
+        record.agent_type = agent_type.to_owned();
+        record.validate_contract().unwrap();
+        record
+    };
+    let delegated = related(
+        "delegated-session",
+        2,
+        SessionRelationshipKind::Delegated,
+        "primary",
+        "primaryauthorityneedle primaryauthorityneedle nonprimaryexplicitneedle",
+    );
+    let workflow = related(
+        "workflow-session",
+        3,
+        SessionRelationshipKind::WorkflowChild,
+        "primary",
+        "primaryauthorityneedle primaryauthorityneedle nonprimaryexplicitneedle",
+    );
+    let forked = related(
+        "forked-session",
+        4,
+        SessionRelationshipKind::Forked,
+        "subagent",
+        "primaryauthorityneedle fork",
+    );
+    let resumed = related(
+        "resumed-session",
+        5,
+        SessionRelationshipKind::ResumedFrom,
+        "subagent",
+        "primaryauthorityneedle resume",
+    );
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [
+        primary.clone(),
+        delegated.clone(),
+        workflow.clone(),
+        forked.clone(),
+        resumed.clone(),
+    ] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 5)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let primary_scope = EventSearchFilters {
+        agent_scope: AgentScope::Primary,
+        ..EventSearchFilters::default()
+    };
+
+    let lexical = index
+        .search_event_candidates_with_filters("primaryauthorityneedle", &primary_scope, 3)
+        .unwrap();
+    let expected_primary = HashSet::from([primary.event_id, forked.event_id, resumed.event_id]);
+    assert_eq!(lexical.len(), 3);
+    assert_eq!(
+        candidate_ids(&lexical).into_iter().collect::<HashSet<_>>(),
+        expected_primary
+    );
+
+    let semantic = index.semantic_filter_projection(&primary_scope).unwrap();
+    assert_eq!(
+        semantic.event_ids().collect::<HashSet<_>>(),
+        expected_primary
+            .iter()
+            .map(|event_id| event_id.as_uuid())
+            .collect()
+    );
+
+    let explicit_agent_type = index
+        .search_event_candidates_with_filters(
+            "nonprimaryexplicitneedle",
+            &EventSearchFilters {
+                agent_type: Some("primary".to_owned()),
+                agent_scope: AgentScope::All,
+                ..EventSearchFilters::default()
+            },
+            2,
+        )
+        .unwrap();
+    assert_eq!(
+        candidate_ids(&explicit_agent_type)
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([delegated.event_id, workflow.event_id])
+    );
+
+    for expected in [&delegated, &workflow] {
+        let explicit_session = index
+            .search_event_candidates_with_filters(
+                "nonprimaryexplicitneedle",
+                &EventSearchFilters {
+                    session_id: Some(expected.session_id.as_uuid()),
+                    agent_scope: AgentScope::Primary,
+                    ..EventSearchFilters::default()
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(candidate_ids(&explicit_session), vec![expected.event_id]);
+
+        let direct = index
+            .core_record_by_id(expected.event_id.as_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.session_relationship, expected.session_relationship);
+        assert_eq!(direct.agent_type, "primary");
+        assert!(!direct.is_primary);
+    }
+}
+
+#[test]
 fn many_copied_bodies_add_no_postings_or_score_order_changes() {
     const COPIES: u64 = 64;
     const NEEDLE: &str = "copybodystatsneedle";
