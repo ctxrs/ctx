@@ -50,7 +50,7 @@ pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 /// This identity is part of the Core record contract fingerprint so a change
 /// to the accumulator cannot be interpreted under older generation semantics.
 pub const CORE_RECORD_ACCUMULATOR_IDENTITY: &[u8] = b"ctx-core-record-event-binding-v1\0";
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 10;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 11;
 pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 5;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 4;
 pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 6;
@@ -958,6 +958,15 @@ impl CoreRecord {
                         if format.is_none_or(|format| object_id.format != format) {
                             return Err(CoreRecordError::InvalidGitObjectId);
                         }
+                    }
+                    if let Some(operation) = &outcome.commit_operation {
+                        operation.validate_scoped_identity(
+                            &self.source,
+                            self.event_id,
+                            self.session_id,
+                            binding,
+                            &outcome.linkage,
+                        )?;
                     }
                 }
                 RepositoryVcsObservationKind::PullRequestAssociation(association)
