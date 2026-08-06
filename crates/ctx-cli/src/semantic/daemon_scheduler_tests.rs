@@ -50,9 +50,9 @@ use super::{
     read_daemon_job_status, read_pro_status, record_daemon_job_retry, record_source_refresh_retry,
     restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
-    run_pending_core_refresh, run_pro_catch_up_with_retry, write_daemon_job_status,
-    DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
-    SourceBackedProCoreAuthority, DAEMON_BACKGROUND_REFRESH_MAX_REST,
+    run_pending_core_pro_catch_up_with, run_pending_core_refresh, run_pro_catch_up_with_retry,
+    write_daemon_job_status, DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
+    SourceBackedProCatchUpRun, SourceBackedProCoreAuthority, DAEMON_BACKGROUND_REFRESH_MAX_REST,
     DAEMON_BACKGROUND_REFRESH_MIN_REST,
 };
 
@@ -1006,7 +1006,7 @@ fn pro_catch_up_requests_immediate_drain_after_work_or_a_successful_yield() {
 #[test]
 fn durable_finalization_pending_bypasses_same_generation_attempt_guard() {
     let temp = tempfile::tempdir().unwrap();
-    let generation = publish_empty_core_generation(temp.path());
+    let generation = publish_semantic_catch_up_generation(temp.path(), 1);
     persist_pro_status(
         temp.path(),
         &json!({
@@ -1057,7 +1057,7 @@ fn durable_finalization_pending_bypasses_same_generation_attempt_guard() {
 #[test]
 fn fresh_restart_pins_durable_finalizing_target_before_newer_active_core() {
     let temp = tempfile::tempdir().unwrap();
-    let finalizing_generation = publish_empty_core_generation(temp.path());
+    let finalizing_generation = publish_semantic_catch_up_generation(temp.path(), 1);
     persist_pro_status(
         temp.path(),
         &json!({
@@ -1089,7 +1089,7 @@ fn fresh_restart_pins_durable_finalizing_target_before_newer_active_core() {
         }),
     )
     .unwrap();
-    let active_generation = publish_semantic_catch_up_generation(temp.path(), 1);
+    let active_generation = publish_semantic_catch_up_generation(temp.path(), 2);
     assert_ne!(active_generation, finalizing_generation);
 
     let (scheduled_generation, scheduled_pin) = pin_scheduled_pro_target(temp.path())
@@ -1100,6 +1100,118 @@ fn fresh_restart_pins_durable_finalizing_target_before_newer_active_core() {
     assert!(newer_active_pro_generation_is_pending(temp.path(), &finalizing_generation).unwrap());
     let queued = super::core_pro_catch_up_iteration(false, true);
     assert!(queued.continue_immediately);
+}
+
+#[test]
+fn completing_old_finalizing_target_selects_newer_active_core_on_next_scheduler_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let finalizing_generation = publish_semantic_catch_up_generation(temp.path(), 1);
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "pending",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": finalizing_generation,
+            "receipt_core_generation_id": null,
+            "finalization_progress": {
+                "materialization_id": "a".repeat(64),
+                "core_generation_id": finalizing_generation,
+                "finish_request_digest": "c".repeat(64),
+                "materializer_revision": "materializer-v1",
+                "phase": "emit_replay",
+                "cursor_sha256": "b".repeat(64),
+            },
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+            "reason": "finalizing",
+            "consecutive_failures": 0,
+            "retry_after_ms": null,
+            "retry_not_before_at_ms": null,
+        }),
+    )
+    .unwrap();
+    let active_generation = publish_semantic_catch_up_generation(temp.path(), 2);
+    assert_ne!(active_generation, finalizing_generation);
+
+    fn completed_status(generation: &str, attempts: u64) -> Value {
+        json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "completed",
+            "pending": false,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": generation,
+            "attempts": attempts,
+            "last_attempt_at_ms": 2,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+        })
+    }
+
+    let mut runtime = DaemonRuntime::default();
+    let mut selected = Vec::new();
+    let old = run_pending_core_pro_catch_up_with(
+        temp.path(),
+        &mut runtime,
+        None,
+        |data_root, _runtime, generation, authority| {
+            assert_eq!(generation, finalizing_generation);
+            assert_eq!(authority.generation_id(), finalizing_generation);
+            selected.push(generation.to_owned());
+            let status = completed_status(generation, 2);
+            persist_pro_status(data_root, &status)?;
+            Ok(SourceBackedProCatchUpRun {
+                status,
+                did_work: true,
+                continuation_pending: false,
+            })
+        },
+    )
+    .unwrap()
+    .expect("old finalizing target scheduler turn");
+    assert!(old.continue_immediately);
+    assert!(runtime.sidecar_drain.pro_attempted_generation.is_none());
+
+    let newer = run_pending_core_pro_catch_up_with(
+        temp.path(),
+        &mut runtime,
+        None,
+        |data_root, _runtime, generation, authority| {
+            assert_eq!(generation, active_generation);
+            assert_eq!(authority.generation_id(), active_generation);
+            selected.push(generation.to_owned());
+            let status = completed_status(generation, 1);
+            persist_pro_status(data_root, &status)?;
+            Ok(SourceBackedProCatchUpRun {
+                status,
+                did_work: true,
+                continuation_pending: false,
+            })
+        },
+    )
+    .unwrap()
+    .expect("newer active Core scheduler turn");
+
+    assert!(newer.did_work);
+    assert_eq!(selected, [finalizing_generation, active_generation.clone()]);
+    assert_eq!(
+        runtime.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(active_generation.as_str())
+    );
+    assert_eq!(
+        read_pro_status(temp.path()).unwrap()["core_generation_id"],
+        active_generation
+    );
 }
 
 #[test]

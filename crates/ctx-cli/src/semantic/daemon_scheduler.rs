@@ -221,6 +221,28 @@ fn run_pending_core_pro_catch_up(
     runtime: &mut DaemonRuntime,
     source_refresh: Option<&CoreRefreshEngine>,
 ) -> Result<Option<DaemonIteration>> {
+    run_pending_core_pro_catch_up_with(
+        data_root,
+        runtime,
+        source_refresh,
+        run_pro_catch_up_with_retry,
+    )
+}
+
+fn run_pending_core_pro_catch_up_with<RunPro>(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    source_refresh: Option<&CoreRefreshEngine>,
+    run_pro: RunPro,
+) -> Result<Option<DaemonIteration>>
+where
+    RunPro: for<'a> FnOnce(
+        &Path,
+        &mut DaemonRuntime,
+        &str,
+        SourceBackedProCoreAuthority<'a>,
+    ) -> Result<SourceBackedProCatchUpRun>,
+{
     if !daemon_mode_runs_core_pro_catch_up(runtime.config.daemon.mode) {
         return Ok(None);
     }
@@ -298,7 +320,7 @@ fn run_pending_core_pro_catch_up(
         runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
         return Ok(None);
     }
-    let run = run_pro_catch_up_with_retry(data_root, runtime, generation, authority)?;
+    let run = run_pro(data_root, runtime, generation, authority)?;
     let completed_scheduled_target = scheduled_target == Some(generation)
         && run.status.get("status").and_then(Value::as_str) == Some("completed");
     let newer_active_pending = if completed_scheduled_target {

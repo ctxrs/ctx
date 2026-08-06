@@ -804,13 +804,26 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
     assert_eq!(
         canonical["status_contract"]["axes"],
         serde_json::json!([
-            "core_projection_currentness",
-            "materialized_target_coverage",
-            "repository_coverage",
+            "target_core_projection_currentness",
+            "target_finalization_progress",
+            "active_committed_graph_coverage",
+            "active_committed_repository_coverage",
             "access",
             "supported_operations",
-            "available_operations"
+            "active_committed_available_operations"
         ])
+    );
+    assert_eq!(
+        canonical["status_contract"]["field_semantics"],
+        serde_json::json!({
+            "target": [
+                "currentness", "requested_core_generation_id", "finalization_progress"
+            ],
+            "active_committed_graph": [
+                "core_receipt", "coverage", "repository_coverage", "available_operations"
+            ],
+            "finalizing": "target_progress_may_be_finalizing_while_a_distinct_prior_active_committed_graph_remains_queryable",
+        })
     );
     assert_eq!(
         canonical["status_contract"]["repository_coverage_axes"],
@@ -839,7 +852,11 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
     );
     assert_eq!(
         canonical["status_contract"]["operation_prerequisites"]["global"],
-        serde_json::json!(["current_complete_projection", "entitlement", "graph_key"])
+        serde_json::json!([
+            "active_committed_complete_projection",
+            "entitlement",
+            "graph_key"
+        ])
     );
     assert_eq!(
         canonical["status_contract"]["operation_prerequisites"]["file_blame"],

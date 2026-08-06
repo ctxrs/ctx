@@ -461,10 +461,19 @@ pub(super) fn inventory() -> Value {
         },
         "status_contract": {
             "axes": [
-                "core_projection_currentness", "materialized_target_coverage",
-                "repository_coverage", "access", "supported_operations",
-                "available_operations"
+                "target_core_projection_currentness", "target_finalization_progress",
+                "active_committed_graph_coverage", "active_committed_repository_coverage",
+                "access", "supported_operations", "active_committed_available_operations"
             ],
+            "field_semantics": {
+                "target": [
+                    "currentness", "requested_core_generation_id", "finalization_progress"
+                ],
+                "active_committed_graph": [
+                    "core_receipt", "coverage", "repository_coverage", "available_operations"
+                ],
+                "finalizing": "target_progress_may_be_finalizing_while_a_distinct_prior_active_committed_graph_remains_queryable"
+            },
             "repository_coverage_axes": [
                 "repository_candidate_events", "logical_binding_events",
                 "certified_live_root_access_events", "file_evidence_events",
@@ -488,7 +497,7 @@ pub(super) fn inventory() -> Value {
                 "complete": "receipt_event_count_is_positive_and_logical_binding_events_is_positive"
             },
             "operation_prerequisites": {
-                "global": ["current_complete_projection", "entitlement", "graph_key"],
+                "global": ["active_committed_complete_projection", "entitlement", "graph_key"],
                 "file_blame": [
                     "local_repository", "certified_live_root_access_events", "file_evidence_events",
                     "exact_commit_evidence_events"
@@ -496,8 +505,8 @@ pub(super) fn inventory() -> Value {
                 "commit_blame": ["exact_commit_evidence_events"],
                 "pull_request_blame": ["exact_pull_request_evidence_events"]
             },
-            "availability": "available_is_a_supported_subset_that_satisfies_each_operation_prerequisite_and_ready_operations_may_be_conservatively_omitted",
-            "terminal_quiet": "current_empty_or_abstained_is_terminal_and_advertises_no_available_blame_operation"
+            "availability": "active_committed_available_is_a_supported_subset_that_satisfies_each_operation_prerequisite_and_ready_operations_may_be_conservatively_omitted",
+            "terminal_quiet": "active_committed_empty_or_abstained_is_terminal_and_advertises_no_available_blame_operation"
         },
         "representative_frames": {
             "host_status": frame_hex(&status),

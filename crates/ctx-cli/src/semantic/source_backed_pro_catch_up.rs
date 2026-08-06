@@ -632,21 +632,23 @@ mod tests {
         open_verified_index(&source_backed_index_root(data_root)).unwrap()
     }
 
-    fn index_with_certified_source(data_root: &Path) -> VerifiedIndex {
+    fn index_with_certified_source_at(
+        data_root: &Path,
+        source_path: &str,
+        observation_byte: u8,
+    ) -> VerifiedIndex {
         let source = SourceKey::derive(
             "codex",
             "codex_session_jsonl",
             "session",
             1,
-            SourceAnchor::provider_native(
-                "session-file",
-                TypedKey::utf8("continuation-newer-core.jsonl").unwrap(),
-            )
-            .unwrap(),
+            SourceAnchor::provider_native("session-file", TypedKey::utf8(source_path).unwrap())
+                .unwrap(),
         )
         .unwrap();
         let observation =
-            SourceObservation::new(source.clone(), "regular-file-v1", vec![1]).unwrap();
+            SourceObservation::new(source.clone(), "regular-file-v1", vec![observation_byte])
+                .unwrap();
         let mut writer = GenerationWriter::open(
             source_backed_index_root(data_root),
             WriterOptions::default(),
@@ -661,7 +663,7 @@ mod tests {
                     observation.clone(),
                     observation,
                     "continuation-test-parser-v1",
-                    [7; 32],
+                    [observation_byte; 32],
                     ScannedSourceCounts::default(),
                 )
                 .unwrap(),
@@ -801,7 +803,7 @@ mod tests {
     #[test]
     fn lost_pending_response_keeps_exact_target_after_core_advances() {
         let temp = tempfile::tempdir().unwrap();
-        let index = empty_index(temp.path());
+        let index = index_with_certified_source_at(temp.path(), "continuation-old-core.jsonl", 1);
         let generation = index.generation_id().to_owned();
         let lost = run_with(
             temp.path(),
@@ -821,7 +823,7 @@ mod tests {
             Some(generation.as_str())
         );
 
-        let newer = index_with_certified_source(temp.path());
+        let newer = index_with_certified_source_at(temp.path(), "continuation-newer-core.jsonl", 2);
         assert_ne!(newer.generation_id(), generation);
         let retained = pin_retained_generation(temp.path(), &generation).unwrap();
         assert_eq!(retained.generation_id(), generation);
