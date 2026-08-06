@@ -465,6 +465,37 @@ fn origin_and_endpoint_follow_directed_ancestry_not_side_branches() {
 }
 
 #[test]
+fn convergent_directed_roots_require_ambiguity_and_suppress_origin() {
+    let mut lineage = complete_lineage();
+    let first_root = lineage.origin.take().unwrap();
+    lineage.endpoint = None;
+    lineage.edges.push(edge(
+        "operation:convergent",
+        CommitLineageOperationKind::CherryPick,
+        commit("second-root", '3'),
+        lineage.requested.clone(),
+    ));
+    lineage.edges.sort_by(CommitLineageEdge::stable_cmp);
+    lineage.bounds.returned_events = 2;
+    lineage.bounds.examined_events = 2;
+
+    let error = validate(&lineage).unwrap_err();
+    assert_eq!(
+        error.message,
+        "complete asserted commit lineage with multiple directed roots must report ambiguity"
+    );
+
+    lineage.ambiguous = true;
+    validate(&lineage).unwrap();
+
+    lineage.origin = Some(first_root);
+    assert!(
+        validate(&lineage).is_err(),
+        "ambiguous convergent roots cannot claim one root as the origin"
+    );
+}
+
+#[test]
 fn partial_or_ambiguous_lineage_suppresses_origin_and_endpoint() {
     let mut partial = complete_lineage();
     partial.complete = false;
@@ -511,6 +542,49 @@ fn incomplete_bounds_require_nonzero_or_unknown_omission_and_reached_limit() {
     assert!(validate(&lineage).is_err());
     lineage.bounds.omission = CommitLineageOmission::Exact(0);
     assert!(validate(&lineage).is_err());
+}
+
+#[test]
+fn evidence_gap_partial_bounds_require_truthful_non_limit_state() {
+    assert_eq!(
+        serde_json::to_value(CommitLineageTruncationReason::EvidenceGap).unwrap(),
+        serde_json::json!("evidence_gap")
+    );
+
+    let mut lineage = complete_lineage();
+    lineage.origin = None;
+    lineage.endpoint = None;
+    lineage.complete = false;
+    lineage.bounds.omission = CommitLineageOmission::Unknown;
+    lineage.bounds.truncation_reason = Some(CommitLineageTruncationReason::EvidenceGap);
+    validate(&lineage).unwrap();
+
+    let mut complete = lineage.clone();
+    complete.complete = true;
+    assert!(
+        validate(&complete).is_err(),
+        "complete lineage cannot report an evidence gap"
+    );
+
+    let mut no_omission = lineage.clone();
+    no_omission.bounds.omission = CommitLineageOmission::Exact(0);
+    assert!(
+        validate(&no_omission).is_err(),
+        "evidence gaps must report omitted lineage"
+    );
+
+    let mut stale_returned_count = lineage.clone();
+    stale_returned_count.bounds.returned_events = 2;
+    assert!(
+        validate(&stale_returned_count).is_err(),
+        "evidence gaps cannot weaken exact returned-operation accounting"
+    );
+
+    lineage.bounds.examined_events = MAX_COMMIT_LINEAGE_EXAMINED_EVENTS;
+    assert!(
+        validate(&lineage).is_err(),
+        "an exhausted examined-event bound must use its exact limit reason"
+    );
 }
 
 #[test]

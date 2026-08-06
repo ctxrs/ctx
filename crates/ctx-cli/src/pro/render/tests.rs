@@ -664,6 +664,11 @@ fn plural_mappings_render_as_one_deterministic_operation_with_copyable_ids() {
     assert!(rendered.contains(&"4".repeat(40)), "{rendered}");
     assert!(rendered.contains("1 operation"), "{rendered}");
     assert!(rendered.contains("2 mappings"), "{rendered}");
+    assert!(
+        rendered.contains("operation yielded 2 mappings"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("2 mapped commits"), "{rendered}");
 
     for width in [32, 48, 80, 120] {
         let width_rendered = render_plain(&result, width);

@@ -11,7 +11,7 @@ Lineage · complete · 1 operation
     Mapping 2
       source        commit 2222222222222222222222222222222222222222 (sha1)
       result        commit 4444444444444444444444444444444444444444 (sha1)
-    outcome       operation yielded 2 mapped commits
+    outcome       operation yielded 2 mappings
     actor         session rebaser
     proof         repository verified
     observed      2024-07-14T23:33:20.000Z

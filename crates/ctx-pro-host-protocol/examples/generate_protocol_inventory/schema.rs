@@ -93,6 +93,9 @@ pub(super) fn inventory() -> Value {
             "proof_classes": ["record_exact", "repository_verified", "forge_verified"],
             "states": ["asserted", "ambiguous", "contradicted"],
             "omission_kinds": ["exact", "at_least", "unknown"],
+            "truncation_reasons": [
+                "returned_event_limit", "examined_event_limit", "evidence_gap"
+            ],
             "endpoint_kinds": ["current_at_ref", "current_for_pr"],
             "stable_edge_order": [
                 "operation_id", "operation_kind", "logical_repository_id",
@@ -105,6 +108,7 @@ pub(super) fn inventory() -> Value {
             "returned_event_count": "distinct_operation_ids_across_edges_and_yields",
             "asserted_yield_proof": "repository_verified",
             "connectivity": "all_operations_connect_to_requested_and_claimed_origins_and_endpoints_follow_directed_reachability",
+            "root_ambiguity": "multiple_directed_roots_to_requested_require_ambiguous_and_suppress_origin",
             "match_pagination": "independent"
         },
         "host_message_kinds": [

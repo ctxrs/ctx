@@ -284,6 +284,7 @@ impl CommitLineageOmission {
 pub enum CommitLineageTruncationReason {
     ReturnedEventLimit,
     ExaminedEventLimit,
+    EvidenceGap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +343,14 @@ impl CommitLineageBounds {
             {
                 return Err(corrupt(
                     "examined-event truncation requires the examined-event limit to be reached",
+                ));
+            }
+            Some(CommitLineageTruncationReason::EvidenceGap)
+                if self.returned_events == self.returned_event_limit
+                    || self.examined_events == self.examined_event_limit =>
+            {
+                return Err(corrupt(
+                    "evidence-gap truncation requires protocol event limits not to be reached",
                 ));
             }
             _ => {}
@@ -578,6 +587,18 @@ impl CommitLineage {
         if has_non_asserted && !self.ambiguous {
             return Err(corrupt(
                 "commit lineage with ambiguous or contradicted events must report ambiguity",
+            ));
+        }
+
+        let directed_roots_to_requested = self
+            .indegree_zero_commits()
+            .into_iter()
+            .filter(|root| self.directed_reachable(root, &self.requested))
+            .count();
+        if self.complete && !has_non_asserted && directed_roots_to_requested > 1 && !self.ambiguous
+        {
+            return Err(corrupt(
+                "complete asserted commit lineage with multiple directed roots must report ambiguity",
             ));
         }
 

@@ -425,7 +425,7 @@ const fn state_token(state: CommitLineageState) -> Token {
 fn yield_outcome(state: CommitLineageState, mapping_count: usize) -> String {
     match state {
         CommitLineageState::Asserted if mapping_count > 1 => {
-            format!("operation yielded {mapping_count} mapped commits")
+            format!("operation yielded {mapping_count} mappings")
         }
         CommitLineageState::Asserted => "operation yielded this commit".to_owned(),
         CommitLineageState::Ambiguous => "operation yield is ambiguous".to_owned(),
