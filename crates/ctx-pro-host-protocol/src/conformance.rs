@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, io::Cursor};
 
+use ctx_history_core::CoreDiscoveryExclusion;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -334,6 +335,11 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
                 "component_bound": "decoded_utf8_bytes",
                 "maximum_component_bytes": 65_536
             },
+            "discovery_exclusion": {
+                "wire_path": "CoreRecord.content.discovery_exclusion",
+                "presence": "optional_omitted_when_absent_explicit_null_rejected",
+                "reasons": ["ctx_retrieval_derived"]
+            },
             "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
             "repository_file_invocation_evidence_set": "strictly_sorted_unique_typed_request_intent_bound_to_repository_and_normalized_body"
         })
@@ -425,6 +431,97 @@ fn inventory_freezes_mcp_tool_call_wire_contract() {
         .unwrap()
         .insert("mcp_tool_call".to_owned(), Value::Null);
     assert!(serde_json::from_value::<CoreRecord>(explicit_null).is_err());
+}
+
+#[test]
+fn inventory_freezes_discovery_exclusion_framed_wire_contract() {
+    let value = inventory();
+    let canonical = &value["canonical_inventory"];
+    assert_eq!(
+        canonical["enums"]["core_discovery_exclusion"],
+        serde_json::json!(["ctx_retrieval_derived"])
+    );
+    assert_eq!(
+        canonical["dto_fields"]["CoreContent"],
+        serde_json::json!({
+            "required": [
+                "policy_revision",
+                "policy_status",
+                "normalized_body",
+                "structured_content"
+            ],
+            "optional": ["discovery_exclusion", "mcp_exchange"]
+        })
+    );
+
+    let bytes = unhex(
+        value["golden_vectors"]["host_frames"]["apply_core_event_delta_page"]
+            .as_str()
+            .expect("event delta frame"),
+    );
+    let envelope = read_frame::<_, HostEnvelope>(&mut Cursor::new(&bytes)).unwrap();
+    let HostMessage::ApplyCoreEventDeltaPage(request) = &envelope.message else {
+        panic!("event delta request kind");
+    };
+    request.page.validate().expect("positive exclusion page");
+    let [CoreEventDelta::Added(record)] = request.page.deltas.as_slice() else {
+        panic!("single added Core record");
+    };
+    assert_eq!(
+        record.content.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert!(!record.content.is_discovery_eligible());
+
+    let mut round_trip = Vec::new();
+    write_frame(&mut round_trip, &envelope).unwrap();
+    assert_eq!(round_trip, bytes);
+
+    let raw: Value = serde_json::from_slice(&bytes[FRAME_HEADER_BYTES..]).unwrap();
+    assert_eq!(
+        raw["message"]["body"]["page"]["deltas"][0]["value"]["content"]["discovery_exclusion"],
+        "ctx_retrieval_derived"
+    );
+
+    let mut missing = raw.clone();
+    missing["message"]["body"]["page"]["deltas"][0]["value"]["content"]
+        .as_object_mut()
+        .unwrap()
+        .remove("discovery_exclusion");
+    let mut missing_frame = Vec::new();
+    write_frame(&mut missing_frame, &missing).unwrap();
+    let missing_envelope = read_frame::<_, HostEnvelope>(&mut Cursor::new(&missing_frame)).unwrap();
+    let HostMessage::ApplyCoreEventDeltaPage(missing_request) = missing_envelope.message else {
+        panic!("event delta request kind");
+    };
+    missing_request
+        .page
+        .validate()
+        .expect("absent exclusion page");
+    let [CoreEventDelta::Added(missing_record)] = missing_request.page.deltas.as_slice() else {
+        panic!("single added Core record");
+    };
+    assert!(missing_record.content.discovery_exclusion.is_none());
+    assert!(missing_record.content.is_discovery_eligible());
+    assert!(!serde_json::to_value(&missing_record.content)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("discovery_exclusion"));
+
+    for invalid in [Value::Null, Value::String("future_reason".to_owned())] {
+        let mut invalid_envelope = raw.clone();
+        invalid_envelope["message"]["body"]["page"]["deltas"][0]["value"]["content"]
+            .as_object_mut()
+            .unwrap()
+            .insert("discovery_exclusion".to_owned(), invalid.clone());
+        let mut invalid_frame = Vec::new();
+        write_frame(&mut invalid_frame, &invalid_envelope).unwrap();
+        assert!(matches!(
+            read_frame::<_, HostEnvelope>(&mut Cursor::new(&invalid_frame)),
+            Err(FrameError::InvalidJson(_))
+        ));
+    }
 }
 
 #[test]

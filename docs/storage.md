@@ -197,6 +197,15 @@ existing event type: separate invocation records are calls, while a combined
 Codex terminal `tool_output` remains an output and is not also classified as a
 call.
 
+Capture can separately mark a complete record as ctx-retrieval-derived when
+every body-contributing atom is an exactly recognized direct ctx retrieval call
+or its uniquely linked, successful, payload-only result. Such records remain in
+the stored Core generation for show and enumeration, but their bodies do not
+enter ranked lexical or semantic discovery or term statistics. This policy is
+fail-open: errors, warnings, stderr, mixed content, unknown status, unsupported
+aliases, and ambiguous linkage remain discoverable. The marker is not
+redaction, omission, deletion, or a Local Pro fact.
+
 The provider call ID, response status/failure/timing, and structured response
 payload are not copied into search terms. Response text with a
 `normalized_body` disposition retains its existing body-search behavior exactly

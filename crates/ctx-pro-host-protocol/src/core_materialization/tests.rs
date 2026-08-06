@@ -160,6 +160,7 @@ fn record(source: &SourceKey, sequence: u64, body: String, two_repositories: boo
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: Some(body),
             structured_content: None,
+            discovery_exclusion: None,
             mcp_exchange: None,
         },
         mcp_tool_call: None,
