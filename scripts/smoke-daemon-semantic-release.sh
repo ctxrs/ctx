@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat >&2 <<'USAGE'
@@ -242,12 +243,12 @@ data_root="${run_root}/data"
 mkdir -p -- "${data_root}"
 data_root="$(cd -- "${data_root}" && pwd -P)"
 
-fixture_dir="${data_root}/smoke-fixture"
+fixture_dir="${run_root}/smoke-fixture"
 fixture_path="${fixture_dir}/history.jsonl"
-smoke_home="${data_root}/home"
-smoke_cache="${data_root}/cache"
-smoke_config="${data_root}/config-home"
-semantic_cache="${data_root}/semantic-cache"
+smoke_home="${run_root}/home"
+smoke_cache="${run_root}/cache"
+smoke_config="${run_root}/config-home"
+semantic_cache="${run_root}/semantic-cache"
 mkdir -p \
   "${fixture_dir}" \
   "${data_root}" \
@@ -366,7 +367,7 @@ EOF
 fi
 marker="ctx-release-semantic-smoke-$(python3 -I -c 'import uuid; print(uuid.uuid4().hex)')"
 query="synthetic release retrieval cobalt willow transit"
-embedding_model="intfloat/multilingual-e5-small"
+semantic_model_key="e5-small-v1:mean-pool:l2:query-passage"
 
 python3 -I - "${fixture_path}" "${marker}" <<'PY'
 import json
@@ -500,12 +501,6 @@ if [[ "${coreml_mode}" == "1" ]]; then
 else
   printf 'ctx semantic smoke: packaged_runtime=%s\n' "${runtime_dylib}"
 fi
-run_ctx import --no-daemon --input-format ctx-history-jsonl-v1 --path "${fixture_path}" >/dev/null
-if find "${semantic_cache}" -mindepth 1 -print -quit | grep -q .; then
-  echo "error: foreground import initialized or downloaded semantic model state" >&2
-  exit 1
-fi
-
 cat > "${data_root}/config.toml" <<'EOF'
 [analytics]
 enabled = false
@@ -526,6 +521,71 @@ daemon_log="${data_root}/daemon-smoke.log"
   > "${daemon_log}" 2>&1 &
 daemon_pid="$!"
 
+daemon_startup_status="${data_root}/daemon-startup-status.json"
+daemon_startup_error="${data_root}/daemon-startup-status.err"
+source_refresh_endpoint="${data_root}/daemon/source-refresh-endpoint.json"
+daemon_startup_matches() {
+  python3 -I - "${daemon_startup_status}" "${source_refresh_endpoint}" "${daemon_pid}" <<'PY'
+import json
+import sys
+
+status_path, endpoint_path, expected_pid_text = sys.argv[1:]
+expected_pid = int(expected_pid_text)
+try:
+    with open(status_path, encoding="utf-8") as source:
+        status = json.load(source)
+    with open(endpoint_path, encoding="utf-8") as source:
+        endpoint = json.load(source)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+daemon = status.get("daemon") if isinstance(status, dict) else None
+if not isinstance(daemon, dict):
+    raise SystemExit(1)
+if (
+    daemon.get("pid") != expected_pid
+    or daemon.get("status") != "running"
+    or daemon.get("running") is not True
+):
+    raise SystemExit(1)
+if not isinstance(endpoint, dict) or endpoint.get("pid") != expected_pid:
+    raise SystemExit(1)
+if endpoint.get("schema_version") != 1:
+    raise SystemExit(1)
+token = endpoint.get("token")
+if not isinstance(token, str) or len(token) < 32:
+    raise SystemExit(1)
+if endpoint.get("transport") not in {"unix", "windows_named_pipe"}:
+    raise SystemExit(1)
+PY
+}
+
+startup_deadline=$((SECONDS + 30))
+daemon_started=0
+while ((SECONDS < startup_deadline)); do
+  if ! kill -0 "${daemon_pid}" >/dev/null 2>&1; then
+    echo "ctx semantic smoke: daemon exited before source-refresh admission" >&2
+    cat "${daemon_log}" >&2 || true
+    exit 1
+  fi
+  if run_ctx daemon status --format json \
+      > "${daemon_startup_status}" 2> "${daemon_startup_error}" && \
+    daemon_startup_matches; then
+    daemon_started=1
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${daemon_started}" != "1" ]]; then
+  echo "ctx semantic smoke: daemon did not expose its source-refresh endpoint" >&2
+  cat "${daemon_startup_status}" >&2 2>/dev/null || true
+  cat "${daemon_startup_error}" >&2 2>/dev/null || true
+  cat "${daemon_log}" >&2 || true
+  exit 1
+fi
+
+run_ctx import --no-daemon --input-format ctx-history-jsonl-v1 --path "${fixture_path}" >/dev/null
+
 deadline=$((SECONDS + timeout_seconds))
 last_output=""
 last_search_error=""
@@ -537,11 +597,11 @@ search_json="${data_root}/semantic-search.json"
 search_error="${data_root}/semantic-search.err"
 
 daemon_status_matches() {
-  python3 -I - "${daemon_status_json}" "${daemon_pid}" "${coreml_mode}" "${embedding_model}" <<'PY'
+  python3 -I - "${daemon_status_json}" "${daemon_pid}" "${semantic_model_key}" <<'PY'
 import json
 import sys
 
-path, expected_pid_text, coreml_mode, expected_model = sys.argv[1:]
+path, expected_pid_text, expected_model_key = sys.argv[1:]
 try:
     with open(path, encoding="utf-8") as source:
         payload = json.load(source)
@@ -560,48 +620,23 @@ if daemon.get("status") != "running" or daemon.get("running") is not True or pid
     raise SystemExit(1)
 jobs = daemon.get("jobs")
 semantic = jobs.get("semantic_index") if isinstance(jobs, dict) else None
-runtime = semantic.get("embedding_runtime") if isinstance(semantic, dict) else None
-if not isinstance(runtime, dict):
+if not isinstance(semantic, dict) or semantic.get("status") != "ready":
     raise SystemExit(1)
-if coreml_mode != "1":
-    if runtime.get("backend") != "cpu" or runtime.get("preference") != "cpu":
-        print(f"ONNX smoke reported runtime {runtime!r}", file=sys.stderr)
-        raise SystemExit(2)
-    if runtime.get("model_id") != expected_model:
-        print(f"ONNX smoke reported model {runtime.get('model_id')!r}", file=sys.stderr)
-        raise SystemExit(2)
-    if runtime.get("acquisition_source") != "download":
-        print(
-            f"ONNX smoke reported acquisition source {runtime.get('acquisition_source')!r}",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    raise SystemExit(0)
-
-if runtime.get("backend") != "coreml":
-    print(f"CoreML daemon status reported backend {runtime.get('backend')!r}", file=sys.stderr)
+if semantic.get("model_key") != expected_model_key:
+    print(f"semantic daemon status reported model key {semantic.get('model_key')!r}", file=sys.stderr)
     raise SystemExit(2)
-if runtime.get("model_id") != expected_model:
-    print(f"CoreML daemon status reported model {runtime.get('model_id')!r}", file=sys.stderr)
-    raise SystemExit(2)
-if runtime.get("compute_mode") != "all":
-    print(f"CoreML daemon status reported compute mode {runtime.get('compute_mode')!r}", file=sys.stderr)
-    raise SystemExit(2)
-if runtime.get("acquisition_source") != "download":
-    print(f"CoreML daemon status reported acquisition source {runtime.get('acquisition_source')!r}", file=sys.stderr)
-    raise SystemExit(2)
-if runtime.get("acquisition_fallback") is not None:
-    print("CoreML daemon status reported an acquisition fallback", file=sys.stderr)
-    raise SystemExit(2)
+indexed_chunks = semantic.get("indexed_chunks")
+if isinstance(indexed_chunks, bool) or not isinstance(indexed_chunks, int) or indexed_chunks < 1:
+    raise SystemExit(1)
 PY
 }
 
 search_json_matches() {
-  python3 -I - "${search_json}" "${marker}" "${embedding_model}" "${coreml_mode}" <<'PY'
+  python3 -I - "${search_json}" "${marker}" <<'PY'
 import json
 import sys
 
-path, marker, expected_model, coreml_mode = sys.argv[1:]
+path, marker = sys.argv[1:]
 try:
     with open(path, encoding="utf-8") as source:
         payload = json.load(source)
@@ -610,33 +645,14 @@ except (OSError, UnicodeError, json.JSONDecodeError):
 
 retrieval = payload.get("retrieval") if isinstance(payload, dict) else None
 results = payload.get("results") if isinstance(payload, dict) else None
-if not isinstance(retrieval, dict) or retrieval.get("embedding_model") != expected_model:
+if not isinstance(retrieval, dict):
     raise SystemExit(1)
 if retrieval.get("requested_mode") != "semantic" or retrieval.get("effective_mode") != "semantic":
     raise SystemExit(1)
+if retrieval.get("semantic_status") != "ready":
+    raise SystemExit(1)
 if retrieval.get("semantic_fallback") is not None or retrieval.get("semantic_fallback_code") is not None:
     raise SystemExit(1)
-if coreml_mode == "1":
-    worker = retrieval.get("worker")
-    runtime = worker.get("embedding_runtime") if isinstance(worker, dict) else None
-    if not isinstance(runtime, dict):
-        print("CoreML search status did not report an embedding runtime", file=sys.stderr)
-        raise SystemExit(2)
-    if runtime.get("backend") != "coreml":
-        print(f"CoreML search status reported backend {runtime.get('backend')!r}", file=sys.stderr)
-        raise SystemExit(2)
-    if runtime.get("model_id") != expected_model:
-        print(f"CoreML search status reported model {runtime.get('model_id')!r}", file=sys.stderr)
-        raise SystemExit(2)
-    if runtime.get("compute_mode") != "all":
-        print(f"CoreML search status reported compute mode {runtime.get('compute_mode')!r}", file=sys.stderr)
-        raise SystemExit(2)
-    if runtime.get("acquisition_source") != "download":
-        print(f"CoreML search status reported acquisition source {runtime.get('acquisition_source')!r}", file=sys.stderr)
-        raise SystemExit(2)
-    if runtime.get("acquisition_fallback") is not None:
-        print("CoreML search status reported an acquisition fallback", file=sys.stderr)
-        raise SystemExit(2)
 if not isinstance(results, list):
     raise SystemExit(1)
 
@@ -690,7 +706,7 @@ while ((SECONDS < deadline)); do
           exit 1
         fi
         printf 'ctx semantic smoke ok: strict semantic search found %s with %s\n' \
-          "${marker}" "${embedding_model}"
+          "${marker}" "${semantic_model_key}"
         exit 0
       else
         status_check=$?

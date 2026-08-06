@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 0002
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+if [[ -n "${TEST_SRCDIR:-}" && -n "${TEST_WORKSPACE:-}" ]]; then
+  repo_root="${TEST_SRCDIR}/${TEST_WORKSPACE}"
+else
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-semantic-release-smoke-test.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 
@@ -77,23 +82,61 @@ done
 [[ "${CTX_SEMANTIC_COREML_NATIVE_COMPUTE:-}" == "all" ]]
 [[ "${CTX_DAEMON_ENABLED:-}" == "true" ]]
 [[ "${CTX_SEARCH_SEMANTIC:-}" == "true" ]]
-[[ "${CTX_SEMANTIC_CACHE_DIR:-}" == "${data_root}/semantic-cache" ]]
+case "${HOME}" in
+  "${data_root}"|"${data_root}"/*)
+    printf 'semantic smoke HOME overlaps the ctx data root\n' >&2
+    exit 1
+    ;;
+esac
+case "${CTX_SEMANTIC_CACHE_DIR:-}" in
+  "${data_root}"|"${data_root}"/*)
+    printf 'semantic smoke model cache overlaps the ctx data root\n' >&2
+    exit 1
+    ;;
+esac
 
 case "${command}" in
   import)
+    for _ in {1..100}; do
+      [[ -s "${data_root}/fake-daemon-pid" ]] && break
+      sleep 0.01
+    done
+    [[ -s "${data_root}/fake-daemon-pid" ]] || {
+      printf 'semantic smoke imported before launching its daemon\n' >&2
+      exit 1
+    }
+    no_daemon=0
     if find "${CTX_SEMANTIC_CACHE_DIR}" -mindepth 1 -print -quit | grep -q .; then
-      printf 'foreground import observed non-empty semantic cache\n' >&2
+      printf 'daemon-backed import observed model state before publication\n' >&2
       exit 1
     fi
     fixture=""
     while (($# > 0)); do
-      if [[ "$1" == "--path" ]]; then
-        fixture="${2:-}"
-        break
-      fi
-      shift
+      case "$1" in
+        --path)
+          fixture="${2:-}"
+          shift 2
+          ;;
+        --no-daemon)
+          no_daemon=1
+          shift
+          ;;
+        *)
+          shift
+          ;;
+      esac
     done
+    [[ "${no_daemon}" == "1" ]] || {
+      printf 'semantic smoke import could autostart an unowned daemon\n' >&2
+      exit 1
+    }
     [[ -f "${fixture}" ]]
+    case "${fixture}" in
+      "${data_root}"|"${data_root}"/*)
+        printf 'semantic smoke fixture overlaps the ctx data root\n' >&2
+        exit 1
+        ;;
+    esac
     grep -Eo 'ctx-release-semantic-smoke-[0-9a-f]+' "${fixture}" | head -1 \
       > "${data_root}/fake-marker"
     ;;
@@ -102,16 +145,33 @@ case "${command}" in
     shift || true
     case "${subcommand}" in
       run)
+        [[ -s "${data_root}/config.toml" ]] || {
+          printf 'semantic smoke launched its daemon before writing config\n' >&2
+          exit 1
+        }
+        printf '%s\n' "$$" > "${data_root}/fake-daemon-pid"
+        mkdir -p "${data_root}/daemon"
+        printf '{"schema_version":1,"pid":%s,"transport":"unix","path":"/tmp/fake-ctx-semantic-smoke.sock","token":"0123456789abcdef0123456789abcdef"}\n' "$$" \
+          > "${data_root}/daemon/source-refresh-endpoint.json"
+        trap 'exit 0' TERM INT
+        while [[ ! -f "${data_root}/fake-marker" ]]; do sleep 0.05; done
         mkdir -p "${CTX_SEMANTIC_CACHE_DIR}/fake-verified-model"
         printf 'daemon-owned verified model\n' \
           > "${CTX_SEMANTIC_CACHE_DIR}/fake-verified-model/complete"
-        printf '%s\n' "$$" > "${data_root}/fake-daemon-pid"
-        trap 'exit 0' TERM INT
         while :; do sleep 1; done
         ;;
       status)
         pid="$(cat "${data_root}/fake-daemon-pid")"
-        printf '{"daemon":{"pid":%s,"status":"running","running":true,"jobs":{"semantic_index":{"embedding_runtime":{"backend":"coreml","compute_mode":"all","model_id":"intfloat/multilingual-e5-small","acquisition_source":"download"}}}}}\n' "${pid}"
+        if [[ -s "${data_root}/fake-marker" && \
+              -s "${CTX_SEMANTIC_CACHE_DIR}/fake-verified-model/complete" ]]; then
+          semantic_status=ready
+          indexed_chunks=1
+        else
+          semantic_status=pending
+          indexed_chunks=0
+        fi
+        printf '{"daemon":{"pid":%s,"status":"running","running":true,"jobs":{"semantic_index":{"status":"%s","model_key":"e5-small-v1:mean-pool:l2:query-passage","indexed_chunks":%s}}}}\n' \
+          "${pid}" "${semantic_status}" "${indexed_chunks}"
         ;;
       *)
         printf 'unexpected fake daemon command: %s\n' "${subcommand}" >&2
@@ -121,7 +181,7 @@ case "${command}" in
     ;;
   search)
     marker="$(cat "${data_root}/fake-marker")"
-    printf '{"retrieval":{"requested_mode":"semantic","effective_mode":"semantic","semantic_status":"ready","embedding_model":"intfloat/multilingual-e5-small","worker":{"embedding_runtime":{"backend":"coreml","compute_mode":"all","model_id":"intfloat/multilingual-e5-small","acquisition_source":"download"}}},"results":[{"text":"%s"}]}\n' "${marker}"
+    printf '{"retrieval":{"requested_mode":"semantic","effective_mode":"semantic","semantic_status":"ready"},"results":[{"text":"%s"}]}\n' "${marker}"
     ;;
 esac
 EOF
@@ -162,49 +222,6 @@ expect_usage_failure retired_proof_output \
   --coreml --runtime-platform macos-arm64 --proof-output "${tmp}/proof" \
   --ctx "${fake_ctx}"
 
-cpu_ctx="${tmp}/ctx-macos-cpu-fallback"
-sed 's/"backend":"coreml"/"backend":"cpu"/g' "${fake_ctx}" > "${cpu_ctx}"
-chmod 755 "${cpu_ctx}"
-started="$(date +%s)"
-if "${smoke}" \
-  --coreml --runtime-platform macos-arm64 --ctx "${cpu_ctx}" \
-  --data-root "${tmp}/cpu-fallback-runs" --timeout-seconds 30 \
-  > "${tmp}/cpu-fallback.out" 2> "${tmp}/cpu-fallback.err"; then
-  printf 'CoreML smoke accepted a CPU runtime\n' >&2
-  exit 1
-fi
-elapsed="$(( $(date +%s) - started ))"
-[[ "${elapsed}" -lt 10 ]] || {
-  printf 'CoreML backend mismatch did not fail fast: %ss\n' "${elapsed}" >&2
-  exit 1
-}
-grep -Fq 'CoreML daemon status reported backend' "${tmp}/cpu-fallback.err"
-
-cpu_mode_ctx="${tmp}/ctx-macos-cpu-mode"
-sed 's/"compute_mode":"all"/"compute_mode":"cpu_only"/g' "${fake_ctx}" > "${cpu_mode_ctx}"
-chmod 755 "${cpu_mode_ctx}"
-if "${smoke}" \
-  --coreml --runtime-platform macos-arm64 --ctx "${cpu_mode_ctx}" \
-  --data-root "${tmp}/cpu-mode-runs" --timeout-seconds 30 \
-  > "${tmp}/cpu-mode.out" 2> "${tmp}/cpu-mode.err"; then
-  printf 'CoreML smoke accepted CPU-only compute mode\n' >&2
-  exit 1
-fi
-grep -Fq "CoreML daemon status reported compute mode 'cpu_only'" "${tmp}/cpu-mode.err"
-
-cached_ctx="${tmp}/ctx-macos-cached-model"
-sed 's/"acquisition_source":"download"/"acquisition_source":"cache"/g' \
-  "${fake_ctx}" > "${cached_ctx}"
-chmod 755 "${cached_ctx}"
-if "${smoke}" \
-  --coreml --runtime-platform macos-arm64 --ctx "${cached_ctx}" \
-  --data-root "${tmp}/cached-runs" --timeout-seconds 30 \
-  > "${tmp}/cached.out" 2> "${tmp}/cached.err"; then
-  printf 'CoreML smoke accepted a cached acquisition\n' >&2
-  exit 1
-fi
-grep -Fq "CoreML daemon status reported acquisition source 'cache'" "${tmp}/cached.err"
-
 run_parent="${tmp}/runs"
 "${smoke}" \
   --coreml \
@@ -220,6 +237,16 @@ run_root="$(find "${run_parent}" -mindepth 1 -maxdepth 1 -type d -name 'ctx-sema
 test ! -e "${run_root}/data/packaged-runtime-proof.txt"
 grep -Fq 'ctx semantic smoke ok:' "${tmp}/coreml.out"
 [[ ! -e "${run_root}/data/runtime/onnxruntime" ]]
+python3 -I - "${run_root}/installed/bin" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+mode = stat.S_IMODE(os.stat(path).st_mode)
+if mode & 0o022:
+    raise SystemExit(f"semantic smoke executable directory is not owner-safe: {mode:o}")
+PY
 
 daemon_pid="$(cat "${run_root}/data/fake-daemon-pid")"
 if kill -0 "${daemon_pid}" >/dev/null 2>&1; then

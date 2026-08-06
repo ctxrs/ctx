@@ -225,9 +225,9 @@ and private relevance evals justify flipping the default.
 - Done on this branch: cache discovery was broadened, and daemon-owned model
   acquisition now handles a missing cache during semantic opt-in.
 - Done on this branch: the release semantic smoke starts from an isolated empty
-  model cache, proves foreground fixture import leaves it empty, and requires
-  the daemon runtime to report `acquisition_source = download` before strict
-  semantic retrieval can pass.
+  model cache, publishes its fixture through the daemon-owned Core refresh
+  path, and requires strict semantic retrieval to succeed from the freshly
+  populated cache before it can pass.
 - Keep env-var precedence, but broaden default discovery:
   - `$HF_HOME`;
   - `$CTX_SEMANTIC_CACHE_DIR`;
