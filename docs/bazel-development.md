@@ -309,6 +309,6 @@ Construction requires the corresponding Bazel Rust/C++ toolchains and native
 runners. The Windows route selects a dedicated
 `x86_64-pc-windows-gnu` target graph; it does not reuse or relabel the normal
 MSVC graph, and its native authority must provide the contracted MinGW linker
-and runtime. The stable FreeBSD route name fails closed until the separately
-owned crate/toolchain graph repair lands. Host-Cargo builds remain diagnostic
-rather than authoritative.
+and runtime. The FreeBSD route uses its native Bazel host with the pinned
+`rules_rust` host-detection patch and the checked-in FreeBSD lock factor.
+Host-Cargo builds remain diagnostic rather than authoritative.

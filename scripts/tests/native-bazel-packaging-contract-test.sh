@@ -238,6 +238,20 @@ for required in \
   }
 done
 
+[[ "$(tr -d '[:space:]' <"${source_root}/.bazelversion")" == "7.7.1" ]] || {
+  echo 'native release checksum contract expects Bazel 7.7.1' >&2
+  exit 1
+}
+for required in \
+  'bazel_binary_sha256=115a1b62be95f29e5821d4dddffba1b058905a48019b499919c285e7f708d5e2' \
+  'bazel_binary_sha256=71df04ec724f1b577f1f47ec9a6b81d13f39683f6c3215cacf45fdaf40b2c5c1'; do
+  grep -Fq -- "${required}" "${wrapper}" || {
+    printf 'native Linux release wrapper has a stale Bazel checksum: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
+
 for required in \
   'release_bundle.py' \
   'verify-bundle' \

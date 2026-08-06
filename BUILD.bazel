@@ -830,6 +830,7 @@ sh_test(
     srcs = ["scripts/tests/native-bazel-packaging-contract-test.sh"],
     data = [
         ".bazelrc",
+        ".bazelversion",
         ".buildkite/pipeline.yml",
         "MODULE.bazel",
         "MODULE.bazel.lock",
@@ -841,6 +842,7 @@ sh_test(
         "scripts/release/run-linux-bazel-release-controller.sh",
         "scripts/release/write-linux-bazel-controller-receipt.py",
         "scripts/package-public-cli-bazel-release.sh",
+        "scripts/public-cli-runtime-authority.sh",
         "scripts/stage-github-release-assets.sh",
         "scripts/stage-semantic-release-handoff.sh",
         "//tools/bazel:release_routes.bzl",
