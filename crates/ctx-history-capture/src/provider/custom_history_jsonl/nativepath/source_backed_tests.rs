@@ -4,7 +4,9 @@ use std::{
     path::Path,
 };
 
-use ctx_history_core::{CaptureProvider, CoreRecord, TypedKey};
+use ctx_history_core::{
+    CaptureProvider, CoreRecord, EventCopyProofKind, EventOrigin, SessionRelationshipKind, TypedKey,
+};
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 use serde_json::{json, Value};
 
@@ -25,6 +27,15 @@ fn manifest() -> Value {
     json!({
         "record_type": "manifest",
         "schema_version": "ctx-history-jsonl-v1",
+        "producer": "source-backed-test",
+    })
+}
+
+fn lineage_manifest() -> Value {
+    json!({
+        "record_type": "manifest",
+        "schema_version": "ctx-history-jsonl-v1",
+        "lineage_contract": "provider_native_v1",
         "producer": "source-backed-test",
     })
 }
@@ -261,7 +272,12 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     assert_eq!(body(&cold_documents[0]), long);
     assert!(body(&cold_documents[0]).ends_with("custom-tail-sentinel"));
     assert_eq!(cold_documents[0].agent_type, "subagent");
-    assert!(!cold_documents[0].is_primary);
+    assert!(cold_documents[0].is_primary);
+    assert_eq!(
+        cold_documents[0].session_relationship,
+        SessionRelationshipKind::RelatedUnknown
+    );
+    assert_eq!(cold_documents[0].event_origin, EventOrigin::Unknown);
     assert!(!serde_json::to_string(&cold_documents[0])
         .unwrap()
         .contains("/provider/demo/session.jsonl"));
@@ -318,6 +334,143 @@ fn cold_noop_and_append_emit_stable_ids_in_bounded_pages() {
     assert_eq!(body(&append_documents[0]), "appended event");
     assert!(append_documents[0].repository_file_observations.is_empty());
     assert!(revalidate_custom_history_source_backed(&input, &append.certificate).unwrap());
+}
+
+#[test]
+fn provider_native_lineage_contract_projects_exact_relationship_and_copy() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("lineage.jsonl");
+    let mut root = session("root", None, true);
+    root["native_session_id"] = json!("native-root");
+    root["session_relationship"] = json!("root");
+    let mut child = session("fork", Some("root"), true);
+    child["native_session_id"] = json!("native-fork");
+    child["root_session_id"] = json!("root");
+    child["session_relationship"] = json!("forked");
+    let root_event = event(0, "native-event-0", "root", "original");
+    let mut copied = event(0, "native-fork-event-0", "fork", "copied");
+    copied["copied_from"] = json!({
+        "ancestor_native_session_id": "native-root",
+        "ancestor_event_id": "native-event-0",
+        "proof": "native_copied_from_field",
+    });
+    write_records(
+        &path,
+        &[
+            lineage_manifest(),
+            source(),
+            root,
+            child,
+            root_event,
+            copied,
+        ],
+    );
+
+    let input = CustomHistorySourceBackedInput::explicit(&path, [31; 32]);
+    let (outcome, documents, _) = collect(&input, None);
+    present(outcome);
+    assert_eq!(documents.len(), 2);
+    let original = &documents[0];
+    let copy = &documents[1];
+    assert_eq!(copy.session_relationship, SessionRelationshipKind::Forked);
+    assert!(copy.is_primary);
+    assert_eq!(
+        copy.event_origin,
+        EventOrigin::CopiedFromAncestor {
+            ancestor_session_id: original.session_id,
+            ancestor_event_id: original.event_id,
+            proof: EventCopyProofKind::NativeCopiedFromField,
+        }
+    );
+}
+
+#[test]
+fn legacy_or_unstable_copy_claims_remain_unknown() {
+    for (manifest, remove_stable_child_ids, typed_relationship_expected) in [
+        (manifest(), false, false),
+        (lineage_manifest(), true, true),
+        (lineage_manifest(), false, true),
+    ] {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("unknown.jsonl");
+        let mut root = session("root", None, true);
+        root["native_session_id"] = json!("native-root");
+        root["session_relationship"] = json!("root");
+        let mut child = session("fork", Some("root"), true);
+        child["native_session_id"] = json!("native-fork");
+        child["root_session_id"] = json!("root");
+        child["session_relationship"] = json!("forked");
+        let root_event = event(0, "native-event-0", "root", "original");
+        let mut copied = event(0, "native-fork-event-0", "fork", "copied");
+        copied["copied_from"] = json!({
+            "ancestor_native_session_id": "native-root",
+            "ancestor_event_id": "native-event-0",
+            "proof": "native_event_identity",
+        });
+        if remove_stable_child_ids {
+            child.as_object_mut().unwrap().remove("native_session_id");
+            copied.as_object_mut().unwrap().remove("event_id");
+        }
+        write_records(
+            &path,
+            &[manifest, source(), root, child, root_event, copied],
+        );
+
+        let input = CustomHistorySourceBackedInput::explicit(&path, [32; 32]);
+        let (outcome, documents, _) = collect(&input, None);
+        present(outcome);
+        let copy = &documents[1];
+        assert_eq!(copy.event_origin, EventOrigin::Unknown);
+        assert_eq!(
+            copy.session_relationship,
+            if typed_relationship_expected {
+                SessionRelationshipKind::Forked
+            } else {
+                SessionRelationshipKind::RelatedUnknown
+            }
+        );
+    }
+}
+
+#[test]
+fn copy_claim_requires_a_fully_typed_ancestor_chain() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("partially-typed-chain.jsonl");
+    let mut root = session("root", None, true);
+    root["native_session_id"] = json!("native-root");
+    root["session_relationship"] = json!("root");
+    let mut middle = session("middle", Some("root"), true);
+    middle["native_session_id"] = json!("native-middle");
+    middle["root_session_id"] = json!("root");
+    let mut child = session("fork", Some("middle"), true);
+    child["native_session_id"] = json!("native-fork");
+    child["root_session_id"] = json!("root");
+    child["session_relationship"] = json!("forked");
+    let root_event = event(0, "native-event-0", "root", "original");
+    let mut copied = event(0, "native-fork-event-0", "fork", "copied");
+    copied["copied_from"] = json!({
+        "ancestor_native_session_id": "native-root",
+        "ancestor_event_id": "native-event-0",
+        "proof": "native_copied_from_field",
+    });
+    write_records(
+        &path,
+        &[
+            lineage_manifest(),
+            source(),
+            root,
+            middle,
+            child,
+            root_event,
+            copied,
+        ],
+    );
+
+    let input = CustomHistorySourceBackedInput::explicit(&path, [33; 32]);
+    let (outcome, documents, _) = collect(&input, None);
+    present(outcome);
+    assert_eq!(documents.len(), 2);
+    assert_eq!(documents[1].event_origin, EventOrigin::Unknown);
 }
 
 #[test]

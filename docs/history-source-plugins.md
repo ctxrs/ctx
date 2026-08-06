@@ -43,6 +43,7 @@ Manifest example:
       "source_id": "default",
       "source_format": "example-agent-jsonl-v1",
       "path": "/path/owned/by/example-agent/history.jsonl",
+      "lineage_contract": "provider_native_v1",
       "enabled": true,
       "refresh": "manual"
     }
@@ -55,6 +56,12 @@ identifiers. `path` may be absolute or relative to the manifest directory and
 must identify a regular provider-owned file. Its `ctx-history-jsonl-v1` source
 record must match the declared `provider_key`, `source_id`, and
 `source_format`.
+
+`lineage_contract` is optional. When present it must be
+`provider_native_v1` and must exactly match the durable JSONL manifest record.
+Only a regular provider-owned path may declare it. Command-only manifests
+cannot claim typed relationship or copied-event authority and are rejected if
+they try.
 
 Legacy manifests may still declare a `command` argv array so users receive a
 typed compatibility diagnostic. They are not importable, are never executed by

@@ -138,6 +138,12 @@ fn validate_provider_owned_source(
                         record.schema_version
                     );
                 }
+                if record.lineage_contract != source.lineage_contract {
+                    bail!(
+                        "history source plugin {} lineage_contract does not match its durable source",
+                        source.label()
+                    );
+                }
                 manifest_seen = true;
             }
             CtxHistoryJsonlRecord::Source(record) => {
@@ -190,6 +196,7 @@ mod tests {
             source_id: "default".to_owned(),
             source_format: "example-v1".to_owned(),
             source_path: Some(path),
+            lineage_contract: None,
             enabled: true,
             refresh: super::super::HistorySourcePluginRefresh::Manual,
         }
@@ -236,5 +243,46 @@ mod tests {
         let error = prepare_source_backed_history_source(source, false).unwrap_err();
         assert!(error.to_string().contains(COMMAND_ONLY_UNSUPPORTED_REASON));
         assert!(!temp.path().join("history-source-plugin-sources").exists());
+    }
+
+    #[test]
+    fn durable_source_lineage_contract_must_match_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "record_type":"manifest",
+                "schema_version":"ctx-history-jsonl-v1",
+                "lineage_contract":"provider_native_v1"
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "record_type":"source",
+                "provider_key":"example",
+                "source_id":"default",
+                "source_format":"example-v1"
+            })
+        )
+        .unwrap();
+
+        let error = prepare_source_backed_history_source(source(path.clone()), false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("lineage_contract does not match"),
+            "{error:#}"
+        );
+
+        let mut matched = source(path);
+        matched.lineage_contract =
+            Some(ctx_history_core::CtxHistoryJsonlLineageContract::ProviderNativeV1);
+        assert!(prepare_source_backed_history_source(matched, false).is_ok());
     }
 }

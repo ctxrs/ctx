@@ -1,6 +1,32 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "scope": "local agent history search",
+  "lineage_capability_values": {
+    "session_relationship": [
+      "exact_relationship",
+      "unknown"
+    ],
+    "event_origin": [
+      "exact_copy",
+      "certified_prefix",
+      "explicit_no_copy",
+      "unknown"
+    ]
+  },
+  "custom_history_lineage_support": {
+    "legacy": {
+      "session_relationship": "unknown",
+      "event_origin": "unknown"
+    },
+    "provider_native_v1": {
+      "session_relationship": "exact_relationship",
+      "event_origin": "exact_copy"
+    },
+    "command_only_plugin": {
+      "session_relationship": "unknown",
+      "event_origin": "unknown"
+    }
+  },
   "providers": [
     {
       "id": "codex",
@@ -31,6 +57,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -72,6 +102,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -111,6 +145,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -150,6 +188,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -191,6 +233,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -231,6 +277,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -272,6 +322,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -312,6 +366,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -352,6 +410,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -393,6 +455,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -440,6 +506,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -487,6 +557,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -529,6 +603,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -575,6 +653,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -623,6 +705,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -663,6 +749,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -703,6 +793,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -743,6 +837,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -784,6 +882,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -825,6 +927,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -866,6 +972,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -907,6 +1017,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -947,6 +1061,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -988,6 +1106,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1029,6 +1151,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1070,6 +1196,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1111,6 +1241,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1151,6 +1285,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1190,6 +1328,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1230,6 +1372,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1270,6 +1416,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1310,6 +1460,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1351,6 +1505,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1396,6 +1554,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1444,6 +1606,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1484,6 +1650,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1524,6 +1694,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1564,6 +1738,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1604,6 +1782,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": true,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1644,6 +1826,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,
@@ -1684,6 +1870,10 @@
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
       "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
       "fidelity": {
         "user_prompts": true,
         "assistant_messages": true,

@@ -23,6 +23,7 @@ struct ProjectionCatalog {
     summary: ProviderImportSummary,
     manifest_line: Option<usize>,
     manifest_failure: Option<(ProviderSourceFailureKind, String)>,
+    lineage_contract: Option<CtxHistoryJsonlLineageContract>,
     sources: BTreeMap<String, CustomSourceCatalogEntry>,
     sessions: BTreeMap<CustomSessionKey, CustomSessionCatalogEntry>,
     events: BTreeMap<CustomEventKey, CustomEventCatalogEntry>,
@@ -40,6 +41,7 @@ impl ProjectionCatalog {
             summary: ProviderImportSummary::default(),
             manifest_line: None,
             manifest_failure: None,
+            lineage_contract: None,
             sources: BTreeMap::new(),
             sessions: BTreeMap::new(),
             events: BTreeMap::new(),
@@ -223,6 +225,7 @@ fn visit_record(
                     format!("duplicate manifest record at line {}", line.line_number),
                 ));
             }
+            catalog.lineage_contract = manifest.lineage_contract;
         }
         CtxHistoryJsonlRecord::Source(source) => {
             let failures_before = catalog.summary.failed;
@@ -248,6 +251,10 @@ fn visit_record(
             }
         }
         CtxHistoryJsonlRecord::Session(session) => {
+            ensure_retained_key_bound(
+                CustomHistorySourceBackedBound::NativeSessionIdBytes,
+                session.native_session_id.as_deref(),
+            )?;
             ensure_retained_key_bound(
                 CustomHistorySourceBackedBound::ParentSessionIdBytes,
                 session.parent_session_id.as_deref(),
@@ -283,6 +290,7 @@ fn visit_record(
                 catalog.budget.admit_metadata(retained_metadata_bytes(&[
                     session.source_id.len().saturating_mul(2),
                     session.session_id.len().saturating_mul(2),
+                    session.native_session_id.as_ref().map_or(0, String::len),
                     session.parent_session_id.as_ref().map_or(0, String::len),
                     session.root_session_id.as_ref().map_or(0, String::len),
                     agent_type.len(),
@@ -294,16 +302,31 @@ fn visit_record(
                         line_number: line.line_number,
                         source_id: session.source_id,
                         session_id: session.session_id,
+                        native_session_id: session.native_session_id,
                         parent_session_id: session.parent_session_id,
                         root_session_id: session.root_session_id,
+                        session_relationship: session.session_relationship,
                         agent_type,
-                        is_primary: session.is_primary,
                         cwd,
                     },
                 );
             }
         }
         CtxHistoryJsonlRecord::Event(event) => {
+            ensure_retained_key_bound(
+                CustomHistorySourceBackedBound::EventIdBytes,
+                event.event_id.as_deref(),
+            )?;
+            if let Some(copied_from) = &event.copied_from {
+                ensure_retained_key_bound(
+                    CustomHistorySourceBackedBound::NativeSessionIdBytes,
+                    Some(&copied_from.ancestor_native_session_id),
+                )?;
+                ensure_retained_key_bound(
+                    CustomHistorySourceBackedBound::EventIdBytes,
+                    Some(&copied_from.ancestor_event_id),
+                )?;
+            }
             let failures_before = catalog.summary.failed;
             validate_custom_history_identifier(
                 &mut catalog.summary,
@@ -330,9 +353,18 @@ fn visit_record(
                 );
             }
             if catalog.summary.failed == failures_before {
+                let event_id = event.event_id.clone();
+                let copied_from = event.copied_from.clone();
                 catalog.budget.admit_metadata(retained_metadata_bytes(&[
                     event.source_id.len(),
                     event.session_id.len(),
+                    event.event_id.as_ref().map_or(0, String::len),
+                    event.copied_from.as_ref().map_or(0, |selector| {
+                        selector
+                            .ancestor_native_session_id
+                            .len()
+                            .saturating_add(selector.ancestor_event_id.len())
+                    }),
                 ]))?;
                 let body = lexical_body(&event);
                 #[cfg(test)]
@@ -349,7 +381,7 @@ fn visit_record(
                         source_id: event.source_id,
                         session_id: event.session_id,
                         event_index: event.event_index,
-                        event_id: event.event_id,
+                        event_id: event_id.clone(),
                         event_type: event.event_type.as_str().to_owned(),
                         role: event.role.map(|role| role.as_str().to_owned()),
                         occurred_at_unix_ms: event.occurred_at.timestamp_millis(),
@@ -365,6 +397,8 @@ fn visit_record(
                     CustomEventCatalogEntry {
                         line_number: line.line_number,
                         line,
+                        event_id,
+                        copied_from,
                     },
                 );
             }
@@ -526,10 +560,12 @@ fn finish_projection(
     if let Some((kind, detail)) = catalog.manifest_failure {
         return Err(CustomHistorySourceBackedError::StructuralManifest { kind, detail });
     }
+    apply_session_lineage_contract(&mut catalog);
     catalog.touch_keys.clear();
     catalog.edge_keys.clear();
 
     let mut session_roots;
+    let copied_origins;
     {
         let resolution =
             session_catalog(&catalog.sources, &catalog.sessions, &mut catalog.summary)?;
@@ -557,6 +593,13 @@ fn finish_projection(
         for (line_number, error) in invalid_events {
             push_provider_import_failure(&mut catalog.summary, line_number, error);
         }
+
+        copied_origins = validate_copied_origins(
+            catalog.lineage_contract,
+            &catalog.sessions,
+            &catalog.events,
+            &mut catalog.summary,
+        );
 
         let mut valid_touches = Vec::with_capacity(catalog.touches.len());
         for touch in catalog.touches.drain(..) {
@@ -715,6 +758,7 @@ fn finish_projection(
         sessions: catalog.sessions,
         session_roots,
         events: catalog.events,
+        copied_origins,
         event_spool,
         observed_prior_prefix_digest,
         retained_records_before_prior_prefix,
@@ -727,6 +771,229 @@ fn finish_projection(
         },
         content_digest,
     })
+}
+
+fn apply_session_lineage_contract(catalog: &mut ProjectionCatalog) {
+    if catalog.lineage_contract.is_none() {
+        for session in catalog.sessions.values_mut() {
+            session.session_relationship = None;
+        }
+        for event in catalog.events.values_mut() {
+            event.copied_from = None;
+        }
+        return;
+    }
+
+    for session in catalog.sessions.values_mut() {
+        let Some(kind) = session.session_relationship else {
+            continue;
+        };
+        let valid = match kind {
+            SessionRelationshipKind::Root => {
+                session.parent_session_id.is_none()
+                    && session
+                        .root_session_id
+                        .as_deref()
+                        .is_none_or(|root| root == session.session_id)
+            }
+            SessionRelationshipKind::Delegated
+            | SessionRelationshipKind::Forked
+            | SessionRelationshipKind::ResumedFrom
+            | SessionRelationshipKind::WorkflowChild
+            | SessionRelationshipKind::RelatedUnknown => {
+                session
+                    .parent_session_id
+                    .as_deref()
+                    .is_some_and(|parent| parent != session.session_id)
+                    && session
+                        .root_session_id
+                        .as_deref()
+                        .is_none_or(|root| root != session.session_id)
+            }
+        };
+        if !valid {
+            push_provider_import_failure(
+                &mut catalog.summary,
+                session.line_number,
+                "session_relationship conflicts with parent_session_id/root_session_id".to_owned(),
+            );
+            session.session_relationship = None;
+        }
+    }
+}
+
+fn validate_copied_origins(
+    lineage_contract: Option<CtxHistoryJsonlLineageContract>,
+    sessions: &BTreeMap<CustomSessionKey, CustomSessionCatalogEntry>,
+    events: &BTreeMap<CustomEventKey, CustomEventCatalogEntry>,
+    summary: &mut ProviderImportSummary,
+) -> BTreeMap<CustomEventKey, ValidatedCopiedFrom> {
+    if lineage_contract.is_none() {
+        return BTreeMap::new();
+    }
+
+    let mut native_sessions = BTreeMap::<(String, String), Option<String>>::new();
+    for session in sessions.values() {
+        let Some(native_session_id) = session.native_session_id.as_ref() else {
+            continue;
+        };
+        if !stable_lineage_identifier(native_session_id) {
+            continue;
+        }
+        let entry = native_sessions
+            .entry((session.source_id.clone(), native_session_id.clone()))
+            .or_insert_with(|| Some(session.session_id.clone()));
+        if entry.as_deref() != Some(&session.session_id) {
+            *entry = None;
+        }
+    }
+
+    let mut native_events = BTreeMap::<(String, String, String), Option<(u64, usize)>>::new();
+    for (key, event) in events {
+        let Some(event_id) = event.event_id.as_ref() else {
+            continue;
+        };
+        if !stable_lineage_identifier(event_id) {
+            continue;
+        }
+        let entry = native_events
+            .entry((key.0.clone(), key.1.clone(), event_id.clone()))
+            .or_insert(Some((key.2, event.line_number)));
+        if entry.is_some_and(|(event_index, _)| event_index != key.2) {
+            *entry = None;
+        }
+    }
+
+    let mut admitted = BTreeMap::new();
+    for (key, event) in events {
+        let Some(selector) = event.copied_from.as_ref() else {
+            continue;
+        };
+        if !stable_lineage_identifier(&selector.ancestor_native_session_id)
+            || !stable_lineage_identifier(&selector.ancestor_event_id)
+        {
+            push_provider_import_failure(
+                summary,
+                event.line_number,
+                "copied_from native selectors must be non-empty bounded identifiers".to_owned(),
+            );
+            continue;
+        }
+        let child_session_key = (key.0.clone(), key.1.clone());
+        let child_session = sessions.get(&child_session_key);
+        let child_native_session_is_exact = child_session
+            .and_then(|session| session.native_session_id.as_ref())
+            .and_then(|native_session_id| {
+                native_sessions.get(&(key.0.clone(), native_session_id.clone()))
+            })
+            .and_then(Option::as_deref)
+            == Some(key.1.as_str());
+        let child_event_is_exact = event.event_id.as_ref().is_some_and(|event_id| {
+            native_events
+                .get(&(key.0.clone(), key.1.clone(), event_id.clone()))
+                .and_then(|entry| *entry)
+                .is_some_and(|(event_index, _)| event_index == key.2)
+        });
+        let ancestor_session_id = native_sessions
+            .get(&(key.0.clone(), selector.ancestor_native_session_id.clone()))
+            .and_then(Option::as_deref);
+        let ancestor_event = ancestor_session_id.and_then(|ancestor_session_id| {
+            native_events
+                .get(&(
+                    key.0.clone(),
+                    ancestor_session_id.to_owned(),
+                    selector.ancestor_event_id.clone(),
+                ))
+                .and_then(|entry| *entry)
+                .map(|(event_index, _)| (ancestor_session_id, event_index))
+        });
+        let has_typed_relationship = child_session
+            .and_then(|session| session.session_relationship)
+            .is_some();
+        let proof_identity_is_exact = !matches!(
+            selector.proof,
+            CtxHistoryJsonlCopyProofKind::NativeEventIdentity
+        ) || event.event_id.as_deref()
+            == Some(selector.ancestor_event_id.as_str());
+        let ancestor_event = ancestor_event.filter(|(ancestor_session_id, _)| {
+            session_has_ancestor(sessions, &child_session_key, ancestor_session_id)
+        });
+
+        let Some((ancestor_session_id, ancestor_event_index)) = ancestor_event.filter(|_| {
+            child_native_session_is_exact
+                && child_event_is_exact
+                && has_typed_relationship
+                && proof_identity_is_exact
+        }) else {
+            push_provider_import_failure(
+                summary,
+                event.line_number,
+                "copied_from requires unique stable child/ancestor native session and event IDs, a typed ancestor relationship, and proof-consistent identity"
+                    .to_owned(),
+            );
+            continue;
+        };
+        let proof = match selector.proof {
+            CtxHistoryJsonlCopyProofKind::NativeEventIdentity => {
+                EventCopyProofKind::NativeEventIdentity
+            }
+            CtxHistoryJsonlCopyProofKind::NativeCopiedFromField => {
+                EventCopyProofKind::NativeCopiedFromField
+            }
+            CtxHistoryJsonlCopyProofKind::NativeCallResultIdentity => {
+                EventCopyProofKind::NativeCallResultIdentity
+            }
+        };
+        admitted.insert(
+            key.clone(),
+            ValidatedCopiedFrom {
+                ancestor_session_id: ancestor_session_id.to_owned(),
+                ancestor_event_id: selector.ancestor_event_id.clone(),
+                ancestor_event_index,
+                proof,
+            },
+        );
+    }
+    admitted
+}
+
+fn stable_lineage_identifier(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn session_has_ancestor(
+    sessions: &BTreeMap<CustomSessionKey, CustomSessionCatalogEntry>,
+    child: &CustomSessionKey,
+    ancestor_session_id: &str,
+) -> bool {
+    let mut current = child.clone();
+    for _ in 0..sessions.len() {
+        let Some(session) = sessions.get(&current) else {
+            return false;
+        };
+        if !matches!(
+            session.session_relationship,
+            Some(
+                SessionRelationshipKind::Delegated
+                    | SessionRelationshipKind::Forked
+                    | SessionRelationshipKind::ResumedFrom
+                    | SessionRelationshipKind::WorkflowChild
+                    | SessionRelationshipKind::RelatedUnknown
+            )
+        ) {
+            return false;
+        }
+        let Some(parent) = session.parent_session_id.as_ref() else {
+            return false;
+        };
+        if parent == ancestor_session_id {
+            return true;
+        }
+        current = (child.0.clone(), parent.clone());
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

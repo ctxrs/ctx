@@ -874,8 +874,8 @@ def validate_contract(
     checker_source_overrides: Mapping[str, str] | None = None,
     authority_overrides: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    if support.get("schema_version") != 1:
-        fail("provider support matrix schema_version must be 1")
+    if support.get("schema_version") != 2:
+        fail("provider support matrix schema_version must be 2")
     if capability.get("schema_version") != 3 or capability.get("capability_revision") != 3:
         fail("capability schema_version and capability_revision must both be 3")
     if capability.get("capability") != "exact_mcp_tool_call_attribution":

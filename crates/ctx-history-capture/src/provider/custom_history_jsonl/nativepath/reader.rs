@@ -6,7 +6,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    derive_event_id, CoreRecord, EventIdentityInput, NativeItemKey, SourceKey, TypedKey,
+    derive_event_id, CoreRecord, EventIdentityInput, EventOrigin, NativeItemKey, SourceKey,
+    TypedKey,
 };
 
 #[cfg(test)]
@@ -15,8 +16,9 @@ use super::source_backed::{
     custom_event_typed_key_parts, custom_session_identity, CustomHistorySourceBackedError,
     CustomHistorySourceBackedPage, CustomHistorySourceBackedResult, CustomSessionCatalogEntry,
     CustomSessionKey, CustomSourceCatalogEntry, ParsedProjection, SpooledCustomEvent,
-    CUSTOM_EVENT_KEY_NAMESPACE, CUSTOM_LOGICAL_EVENT_KIND, CUSTOM_PAGE_MAX_DOCUMENTS,
-    CUSTOM_PAGE_MAX_RETAINED_BYTES, CUSTOM_SOURCE_BACKED_PARSER_REVISION,
+    ValidatedCopiedFrom, CUSTOM_EVENT_KEY_NAMESPACE, CUSTOM_LOGICAL_EVENT_KIND,
+    CUSTOM_PAGE_MAX_DOCUMENTS, CUSTOM_PAGE_MAX_RETAINED_BYTES,
+    CUSTOM_SOURCE_BACKED_PARSER_REVISION,
 };
 use crate::provider::custom_history_jsonl::{
     custom_history_internal_session_id, CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES,
@@ -136,6 +138,7 @@ pub(super) fn emit_projection_pages(
             &projection.session_roots,
             source_record,
             session,
+            projection.copied_origins.get(&key),
             &mut event,
         )?;
         let record_bytes = record
@@ -186,6 +189,7 @@ fn core_record(
     session_roots: &BTreeMap<CustomSessionKey, String>,
     source_record: &CustomSourceCatalogEntry,
     session: &CustomSessionCatalogEntry,
+    copied_from: Option<&ValidatedCopiedFrom>,
     event: &mut SpooledCustomEvent,
 ) -> CustomHistorySourceBackedResult<CoreRecord> {
     let session_id = custom_session_identity(
@@ -256,11 +260,9 @@ fn core_record(
     )
     .map_err(core_contract)?;
     if let Some(parent_session_id) = parent_session_id {
-        let kind = if session.is_primary {
-            ctx_history_core::SessionRelationshipKind::RelatedUnknown
-        } else {
-            ctx_history_core::SessionRelationshipKind::Delegated
-        };
+        let kind = session
+            .session_relationship
+            .unwrap_or(ctx_history_core::SessionRelationshipKind::RelatedUnknown);
         record
             .set_session_relationship(kind, Some(parent_session_id), root_session_id)
             .map_err(core_contract)?;
@@ -271,6 +273,33 @@ fn core_record(
         &session.session_id,
     ));
     record.native_event_id = Some(native_event_id);
+    if let Some(copied_from) = copied_from {
+        let ancestor_session_id = custom_session_identity(
+            source,
+            &source_record.provider_key,
+            &event.source_id,
+            &copied_from.ancestor_session_id,
+        )?;
+        let ancestor_native_item_key = NativeItemKey::native_id(
+            CUSTOM_EVENT_KEY_NAMESPACE,
+            custom_event_typed_key_parts(
+                Some(&copied_from.ancestor_event_id),
+                copied_from.ancestor_event_index,
+            )?,
+        )?;
+        let ancestor_event_id = derive_event_id(EventIdentityInput {
+            source,
+            session_id: ancestor_session_id,
+            logical_item_kind: CUSTOM_LOGICAL_EVENT_KIND,
+            native_item_key: &ancestor_native_item_key,
+            subrecord_selector: None,
+        })?;
+        record.event_origin = EventOrigin::CopiedFromAncestor {
+            ancestor_session_id,
+            ancestor_event_id,
+            proof: copied_from.proof,
+        };
+    }
     record.occurred_at_unix_ms = Some(event.occurred_at_unix_ms);
     record.role = event.role.clone();
     record.cwd = session.cwd.clone();

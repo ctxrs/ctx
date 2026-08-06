@@ -23,6 +23,13 @@ ALLOWED_FIDELITY = {
     "imported",
     "partial",
 }
+ALLOWED_SESSION_RELATIONSHIP_SUPPORT = {"exact_relationship", "unknown"}
+ALLOWED_EVENT_ORIGIN_SUPPORT = {
+    "exact_copy",
+    "certified_prefix",
+    "explicit_no_copy",
+    "unknown",
+}
 REQUIRED_FIDELITY_FIELDS = {
     "user_prompts",
     "assistant_messages",
@@ -302,6 +309,35 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
         if not isinstance(provider.get(bool_field), bool):
             fail(f"providers[{provider_id}].{bool_field} must be boolean")
 
+    lineage = expect_type(
+        provider.get("lineage_support"),
+        dict,
+        f"providers[{provider_id}].lineage_support",
+    )
+    if set(lineage) != {"session_relationship", "event_origin"}:
+        fail(
+            f"providers[{provider_id}].lineage_support must contain exactly "
+            "session_relationship and event_origin"
+        )
+    relationship = require_non_empty_string(
+        lineage.get("session_relationship"),
+        f"providers[{provider_id}].lineage_support.session_relationship",
+    )
+    if relationship not in ALLOWED_SESSION_RELATIONSHIP_SUPPORT:
+        fail(
+            f"providers[{provider_id}].lineage_support.session_relationship "
+            f"has unsupported value: {relationship}"
+        )
+    event_origin = require_non_empty_string(
+        lineage.get("event_origin"),
+        f"providers[{provider_id}].lineage_support.event_origin",
+    )
+    if event_origin not in ALLOWED_EVENT_ORIGIN_SUPPORT:
+        fail(
+            f"providers[{provider_id}].lineage_support.event_origin "
+            f"has unsupported value: {event_origin}"
+        )
+
     fidelity = expect_type(provider.get("fidelity"), dict, f"providers[{provider_id}].fidelity")
     missing_fidelity = REQUIRED_FIDELITY_FIELDS.difference(fidelity)
     if missing_fidelity:
@@ -324,9 +360,43 @@ def main() -> int:
         matrix = json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
         expect_type(matrix, dict, "provider support matrix")
         scan_private_text(matrix, "provider support matrix")
-        if matrix.get("schema_version") != 1:
-            fail("schema_version must be 1")
+        if matrix.get("schema_version") != 2:
+            fail("schema_version must be 2")
         require_non_empty_string(matrix.get("scope"), "scope")
+        capability_values = expect_type(
+            matrix.get("lineage_capability_values"),
+            dict,
+            "lineage_capability_values",
+        )
+        relationship_values = require_string_list(
+            capability_values.get("session_relationship"),
+            "lineage_capability_values.session_relationship",
+        )
+        event_origin_values = require_string_list(
+            capability_values.get("event_origin"),
+            "lineage_capability_values.event_origin",
+        )
+        if (
+            set(capability_values) != {"session_relationship", "event_origin"}
+            or set(relationship_values) != ALLOWED_SESSION_RELATIONSHIP_SUPPORT
+            or set(event_origin_values) != ALLOWED_EVENT_ORIGIN_SUPPORT
+        ):
+            fail("lineage_capability_values must list the exact supported values")
+        if matrix.get("custom_history_lineage_support") != {
+            "legacy": {
+                "session_relationship": "unknown",
+                "event_origin": "unknown",
+            },
+            "provider_native_v1": {
+                "session_relationship": "exact_relationship",
+                "event_origin": "exact_copy",
+            },
+            "command_only_plugin": {
+                "session_relationship": "unknown",
+                "event_origin": "unknown",
+            },
+        }:
+            fail("custom_history_lineage_support does not match admitted custom contracts")
         providers = expect_type(matrix.get("providers"), list, "providers")
         if not providers:
             fail("providers must not be empty")

@@ -11,15 +11,17 @@ The same JSONL schema can be imported from an explicit local file path:
 ctx import --input-format ctx-history-jsonl-v1 --path ./history.jsonl
 ```
 
-or from a local history-source plugin command:
+or from a history-source plugin manifest that selects a durable provider-owned
+file:
 
 ```bash
 ctx import --history-source my-agent/default
 ```
 
 ctx does not discover a fixed storage location for this format. File imports
-are explicit paths. Plugin imports run local commands declared by a local
-manifest; see `docs/history-source-plugins.md`.
+are explicit paths. Plugin imports register a provider-owned path declared by a
+local manifest; command-only sources are not importable. See
+`docs/history-source-plugins.md`.
 
 Each line is one JSON object. Every object has a `record_type` field with one
 of:
@@ -44,11 +46,21 @@ Required fields:
 
 - `schema_version`: must be `"ctx-history-jsonl-v1"`.
 
+Optional fields:
+
+- `lineage_contract`: `provider_native_v1` to opt into typed relationship and
+  copied-event selectors.
+
 Example:
 
 ```json
-{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1","metadata":{"exporter":"example"}}
+{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1","lineage_contract":"provider_native_v1","metadata":{"exporter":"example"}}
 ```
+
+Omitting `lineage_contract` preserves the original v1 behavior. Parent/root
+identities remain available, but their relationship kind is
+`related_unknown`, and every event origin remains `unknown`. Lineage fields in
+a legacy file do not strengthen those claims.
 
 ## Source
 
@@ -100,6 +112,8 @@ Optional fields:
 
 - `parent_session_id`
 - `root_session_id`
+- `session_relationship`: `root`, `delegated`, `forked`, `resumed_from`,
+  `workflow_child`, or `related_unknown`.
 - `native_session_id`
 - `cwd`
 - `ended_at`
@@ -109,8 +123,11 @@ Optional fields:
 - `status`
 - `metadata`
 
-Use `parent_session_id` and `root_session_id` to model subagents, forks,
-handoffs, or resumed tasks when the exporter knows those relationships.
+With `lineage_contract: provider_native_v1`, use `session_relationship` with
+`parent_session_id` and `root_session_id` to state the provider's typed
+relationship. `root` has no parent. Every other relationship requires a
+parent. ctx derives primary/subagent filtering from the typed relationship;
+legacy `is_primary` is not relationship authority.
 
 Example:
 
@@ -132,6 +149,7 @@ Required fields:
 Optional fields:
 
 - `event_id`
+- `copied_from`
 - `native_cursor`
 - `event_type`
 - `role`
@@ -144,6 +162,33 @@ Optional fields:
 re-imports. `payload` is open JSON; `preview` should be a bounded searchable
 summary when payloads are large. ctx preserves `payload` as the event body and
 keeps `preview` as event metadata.
+
+`copied_from` is accepted only under `provider_native_v1`. Its fields are:
+
+- `ancestor_native_session_id`: the provider's stable native ID for an
+  ancestor session in the same source;
+- `ancestor_event_id`: the provider's stable native ID for one event in that
+  ancestor;
+- `proof`: `native_event_identity`, `native_copied_from_field`, or
+  `native_call_result_identity`.
+
+The child and ancestor sessions must each have unique `native_session_id`
+values, both events must have unique stable `event_id` values, and the typed
+parent chain must contain the selected ancestor. `native_event_identity` also
+requires the child `event_id` to equal the selected ancestor event ID. A
+missing, duplicate, non-ancestor, unstable, or proof-inconsistent selector
+leaves event origin `unknown`. Similar text, timestamps, roles, tool names, and
+payload content are never copy authority. Selectors contain identities only;
+do not put transcript content, prompts, paths, or other private payloads in
+them. Generic Custom History cannot declare `certified_ordered_prefix`; that
+classification requires a built-in adapter that validates its provider's
+complete ordered-prefix contract.
+
+Example copied event:
+
+```json
+{"record_type":"event","source_id":"laptop-main","session_id":"run-2","event_index":0,"event_id":"native-child-event-1","copied_from":{"ancestor_native_session_id":"native-run-1","ancestor_event_id":"native-event-1","proof":"native_copied_from_field"},"event_type":"message","role":"user","occurred_at":"2026-06-23T12:10:01Z","payload":{"text":"Find the failing test."}}
+```
 
 Example:
 
@@ -218,6 +263,7 @@ for an authoritative daemon-owned publication receipt.
 Import copies policy-selected normalized content into Core. Plugin imports do
 not copy command output, write the old Store database, or synthesize a
 `NativePath` body. Command-only plugin manifests are typed unsupported in 1.0.
+They cannot declare `lineage_contract` or copied-event authority.
 
 If an import is interrupted, run the same command again. The shared custom
 JSONL route performs another idempotent scan of the provider-owned source.

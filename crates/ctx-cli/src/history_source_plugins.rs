@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use ctx_history_core::CtxHistoryJsonlLineageContract;
 use serde::Deserialize;
 
 mod source_backed;
@@ -34,6 +35,7 @@ pub struct HistorySourcePluginSource {
     pub source_id: String,
     pub source_format: String,
     pub source_path: Option<PathBuf>,
+    pub lineage_contract: Option<CtxHistoryJsonlLineageContract>,
     pub enabled: bool,
     pub refresh: HistorySourcePluginRefresh,
 }
@@ -96,6 +98,8 @@ struct HistorySourcePluginSourceManifest {
     source_format: String,
     #[serde(default, rename = "path")]
     source_path: Option<PathBuf>,
+    #[serde(default)]
+    lineage_contract: Option<CtxHistoryJsonlLineageContract>,
     #[serde(default)]
     command: Vec<String>,
     #[serde(default)]
@@ -267,6 +271,13 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
                 source.id
             ));
         }
+        if source.lineage_contract.is_some() && source.source_path.is_none() {
+            return Err(anyhow!(
+                "history source plugin manifest {} source {} cannot declare lineage_contract without a durable provider-owned path",
+                path.display(),
+                source.id
+            ));
+        }
         if source.source_path.is_some()
             && (source.working_dir.is_some()
                 || !source.env.is_empty()
@@ -305,6 +316,7 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
             source_id,
             source_format: source.source_format,
             source_path,
+            lineage_contract: source.lineage_contract,
             enabled: source.enabled,
             refresh: source.refresh,
         });
@@ -485,5 +497,32 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].label(), "example/default");
         assert!(sources[0].source_path.is_none());
+    }
+
+    #[test]
+    fn command_only_manifest_cannot_claim_lineage_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join(PLUGIN_MANIFEST_FILE);
+        fs::write(
+            &manifest,
+            r#"{
+                "schema_version": 1,
+                "name": "example",
+                "history_sources": [{
+                    "id": "default",
+                    "source_format": "ctx_history_jsonl_v1",
+                    "command": ["example-export"],
+                    "lineage_contract": "provider_native_v1"
+                }]
+            }"#,
+        )
+        .unwrap();
+        let error = read_plugin_manifest(&manifest).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot declare lineage_contract without a durable provider-owned path"),
+            "{error:#}"
+        );
     }
 }
