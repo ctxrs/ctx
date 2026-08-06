@@ -10,6 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use ctx_semantic_model::semantic_model_contract;
 use memmap2::{Mmap, MmapOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

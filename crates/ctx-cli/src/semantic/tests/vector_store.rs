@@ -1,10 +1,9 @@
 use super::super::{
-    runtime_limits::SEMANTIC_EXACT_TOP_K_MAX,
     vector_store_schema::{
         semantic_vector_failure_kind, SemanticVectorFailureKind, SEMANTIC_VECTOR_BACKEND_FLAT_F32,
         SEMANTIC_VECTOR_SCHEMA_VERSION,
     },
-    vector_store_search::scan_exact_generation,
+    vector_store_search::{scan_exact_generation, SEMANTIC_EXACT_TOP_K_MAX},
 };
 use super::*;
 

@@ -75,6 +75,7 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-index:lib",
     "//crates/ctx-history-refresh:lib",
     "//crates/ctx-pro-host-protocol:lib",
+    "//crates/ctx-semantic-model:lib",
 ]
 
 CTX_CLI_TEST_DEPS = [
@@ -83,6 +84,7 @@ CTX_CLI_TEST_DEPS = [
     "//crates/ctx-history-index:lib",
     "//crates/ctx-history-refresh:test_support_lib",
     "//crates/ctx-pro-host-protocol:lib",
+    "//crates/ctx-semantic-model:test_support_lib",
 ]
 
 CTX_CLI_COMPILE_DATA = [
@@ -256,7 +258,10 @@ ctx_rust_test(
     ],
     crate_name = "raw_output_policy_tests",
     crate_root = "tests/raw_output_policy.rs",
-    data = glob(["src/**/*.rs"]) + ["build.rs"],
+    data = glob(["src/**/*.rs"]) + [
+        "build.rs",
+        "//crates/ctx-semantic-model:build.rs",
+    ],
     edition = crate_edition(),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_flags = CTX_CLI_RUSTC_FLAGS,

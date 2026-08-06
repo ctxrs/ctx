@@ -1,17 +1,5 @@
-pub(super) const SEMANTIC_EXACT_TOP_K_MAX: usize = 4_096;
-pub(super) const SEMANTIC_EXACT_QUERY_CONCURRENCY: usize = 2;
-pub(super) const SEMANTIC_CHUNK_TARGET_CHARS: usize =
-    ctx_history_index::SEMANTIC_CHUNK_TARGET_CHARS;
-pub(crate) const SEMANTIC_CHUNK_OVERLAP_CHARS: usize =
-    ctx_history_index::SEMANTIC_CHUNK_OVERLAP_CHARS;
-pub(super) const SEMANTIC_SOURCE_MAX_CHARS: usize = ctx_history_index::SEMANTIC_SOURCE_MAX_CHARS;
-#[cfg(ctx_semantic_fastembed)]
-pub(super) const SEMANTIC_EMBED_THREADS_MAX: usize = 8;
-#[cfg(ctx_semantic_fastembed)]
-pub(super) const SEMANTIC_EMBED_BATCH_MAX: usize = 512;
 pub(crate) const SEMANTIC_WORKER_BATCH_MAX: usize = 1_000_000;
 pub(super) const SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS: u64 = 15;
-pub(super) const SEMANTIC_VECTOR_BUSY_TIMEOUT_MS: u64 = 30_000;
 pub(super) const DAEMON_DIR: &str = "daemon";
 pub(super) const DAEMON_JOBS_DIR: &str = "jobs";
 pub(super) const DAEMON_LOCK_FILE: &str = "daemon.lock";

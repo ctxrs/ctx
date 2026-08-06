@@ -19,7 +19,7 @@ macro_rules! allow {
 
 const GATE: TestOwner = TestOwner::behavioral(
     "tests/raw_output_policy.rs::production_raw_output_inventory_is_closed",
-    &["build.rs"],
+    &["build.rs", "crates/ctx-semantic-model/build.rs"],
     &["compare_policy", "scan_package", "is_closed"],
 );
 const UNIT: TestOwner = TestOwner::behavioral(
@@ -185,7 +185,8 @@ const INTERACTIVE_PICKER: &str =
     "TTY-only interactive picker with explicit prompt framing and behavioral coverage";
 const MACHINE_BODY: &str = "command emits a preformatted protocol body verbatim";
 
-const BUILD: &str = "build.rs";
+const CLI_BUILD: &str = "build.rs";
+const MODEL_BUILD: &str = "crates/ctx-semantic-model/build.rs";
 const ANALYTICS_SENDER: &str = "src/analytics/sender.rs";
 const BLAME: &str = "src/commands/blame.rs";
 const INDEX_COMMAND: &str = "src/commands/index.rs";
@@ -221,7 +222,7 @@ const WINDOWS_HELPER: &str = "src/upgrade/install/transaction/windows/helper.rs"
 
 pub(super) const ALLOWLIST: &[AllowEntry] = &[
     allow!(
-        BUILD,
+        CLI_BUILD,
         "main#1@3d618d0d6e1305c1",
         PrintMacro,
         MachineProtocol,
@@ -229,56 +230,56 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         GATE
     ),
     allow!(
-        BUILD,
-        "main#2@0947514f54f72ef8",
+        CLI_BUILD,
+        "main#2@885cbe6e55e728c7",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
         GATE
     ),
     allow!(
-        BUILD,
-        "main#3@885cbe6e55e728c7",
+        CLI_BUILD,
+        "main#3@cfdf571c6929ef24",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
         GATE
     ),
     allow!(
-        BUILD,
-        "main#4@cfdf571c6929ef24",
+        CLI_BUILD,
+        "main#4@56760ef03ecfb333",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
         GATE
     ),
     allow!(
-        BUILD,
-        "main#5@56760ef03ecfb333",
+        CLI_BUILD,
+        "main#5@0acadf523050c898",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
         GATE
     ),
     allow!(
-        BUILD,
-        "main#6@0acadf523050c898",
+        CLI_BUILD,
+        "main#6@17e10d71b62c3756",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
         GATE
     ),
     allow!(
-        BUILD,
-        "main#7@17e10d71b62c3756",
+        MODEL_BUILD,
+        "main#1@0947514f54f72ef8",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
         GATE
     ),
     allow!(
-        BUILD,
-        "main#8@7eb64b1c42785964",
+        MODEL_BUILD,
+        "main#2@90a37aff9068bc84",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,

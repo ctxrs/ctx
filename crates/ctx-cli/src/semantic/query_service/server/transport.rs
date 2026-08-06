@@ -14,12 +14,13 @@ use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::{env, fs};
 
 use anyhow::{anyhow, Context, Result};
+use ctx_semantic_model::SharedSemanticRuntime;
 use uuid::Uuid;
 
 use crate::semantic::{
     daemon_wakeup::DaemonWakeup, health_search::create_private_dir_all,
-    model_runtime::SharedSemanticRuntime, paths_status::daemon_root_path,
-    source_backed_refresh_adapter, source_backed_refresh_coordinator::CoreRefreshEngine,
+    paths_status::daemon_root_path, source_backed_refresh_adapter,
+    source_backed_refresh_coordinator::CoreRefreshEngine,
 };
 
 #[cfg(unix)]

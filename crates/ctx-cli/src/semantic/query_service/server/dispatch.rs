@@ -1,15 +1,16 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::{anyhow, Context, Result};
+use ctx_semantic_model::{
+    semantic_model_cache_available, semantic_model_key, SharedSemanticRuntime,
+};
 use serde_json::{json, Value};
 
 use crate::output::compact_json;
 use crate::semantic::{
     daemon_wakeup::DaemonWakeup,
-    health_search::{semantic_model_cache_available, semantic_worker_cache_dir},
-    model_contract::semantic_model_key,
-    model_runtime::SharedSemanticRuntime,
     paths_status::{daemon_source_backed_refresh_job_path, read_daemon_job_status},
+    semantic_model_config,
     source_backed_refresh_adapter::wire,
     source_backed_refresh_coordinator::CoreRefreshEngine,
 };
@@ -210,14 +211,16 @@ pub(in crate::semantic) fn handle_daemon_query_stream_inner<S: std::io::Write>(
         return Err(anyhow!("daemon query text is empty"));
     }
     let started = Instant::now();
-    let cache_dir = semantic_worker_cache_dir(data_root);
-    if !runtime.is_loaded() && !semantic_model_cache_available(&cache_dir) {
+    let model_config = semantic_model_config(data_root);
+    if !runtime.is_loaded()
+        && !semantic_model_cache_available(model_config.paths().model_cache_dir())
+    {
         return Err(anyhow!(
             "semantic model cache is not available to daemon query service"
         ));
     }
-    runtime.ensure_loaded_from_cache(&cache_dir)?;
-    let (embedding, embedding_runtime) = runtime.embed_query(&cache_dir, text.to_owned())?;
+    runtime.ensure_loaded_from_cache(&model_config)?;
+    let (embedding, embedding_runtime) = runtime.embed_query(&model_config, text.to_owned())?;
     let query_embed_ms = started.elapsed().as_millis() as u64;
     writeln!(
         stream,

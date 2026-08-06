@@ -7,6 +7,8 @@ load(":release_routes_test.bzl", "release_route_analysis_test_suite")
 
 exports_files([
     "check-cli-build-cfg.sh",
+    "check-semantic-model-build-cfg.sh",
+    "check-semantic-model-dependency-boundary.sh",
     "check_freebsd_ort_exit_contract.py",
     "check_freebsd_ort_exit_contract_test.py",
     "check_rust_target_inventory.py",

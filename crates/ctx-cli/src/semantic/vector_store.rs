@@ -45,9 +45,8 @@ use uuid::Uuid;
 
 mod source_projection;
 pub(super) use source_projection::{
-    semantic_core_content_is_control, source_backed_semantic_vector_path,
-    SourceBackedGenerationPin, SourceBackedSemanticDocumentBuilder, SourceBackedSemanticEmbedder,
-    SourceBackedSemanticOutcome,
+    semantic_core_content_is_control, source_backed_semantic_vector_path, SemanticBatchEmbedder,
+    SemanticDocumentBuilder, SourceBackedGenerationPin, SourceBackedSemanticOutcome,
 };
 pub(super) mod control;
 pub(super) mod flat_scan;

@@ -23,8 +23,9 @@ use crate::{
     output::{print_json, JsonOutputFormat},
     semantic::{
         coordinate_source_backed_refresh, semantic_query_service_supported,
-        PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable,
-        SourceBackedRefreshMode, SourceBackedRefreshObservation, SourceBackedSemanticNotReady,
+        PinnedSourceBackedGeneration, SemanticNotReady, SemanticQueryAdapter,
+        SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
+        SourceBackedRefreshObservation,
     },
     ui::{
         canonical_human_output_bytes, diagnostic, Action, Diagnostic, DiagnosticLevel, Document,
@@ -510,7 +511,7 @@ pub(super) fn collect_search_hits_with_backend(
     semantic_weight: f32,
     filters: &EventSearchFilters,
 ) -> Result<SearchCollection> {
-    let mut semantic_pin = None;
+    let mut semantic_query = SemanticQueryAdapter::default();
     collect_search_hits_with_backend_using(
         request,
         index,
@@ -518,24 +519,7 @@ pub(super) fn collect_search_hits_with_backend(
         semantic_weight,
         filters,
         |index, data_root, query, filters, candidate_limit| {
-            if semantic_pin.is_none() {
-                semantic_pin = Some(
-                    PinnedSourceBackedGeneration::pin_semantic_query_for_source_generation(
-                        index, data_root,
-                    )?,
-                );
-            }
-            let pin = semantic_pin
-                .as_mut()
-                .ok_or_else(|| anyhow!("source-backed semantic query pin is unavailable"))?;
-            PinnedSourceBackedGeneration::semantic_candidates_for_pinned_source_generation(
-                index,
-                data_root,
-                query,
-                filters,
-                candidate_limit,
-                pin,
-            )
+            semantic_query.search(index, data_root, query, filters, candidate_limit)
         },
     )
 }
@@ -605,15 +589,12 @@ where
     }
     if !request.semantic_enabled || !request.semantic_daemon_enabled {
         let not_ready = if request.semantic_enabled {
-            SourceBackedSemanticNotReady::new(
+            SemanticNotReady::new(
                 "semantic_daemon_disabled",
                 "local semantic retrieval is unavailable because the ctx daemon is disabled",
             )
         } else {
-            SourceBackedSemanticNotReady::new(
-                "semantic_disabled",
-                "local semantic retrieval is disabled",
-            )
+            SemanticNotReady::new("semantic_disabled", "local semantic retrieval is disabled")
         };
         if requested_backend == SearchBackendArg::Semantic {
             return Err(anyhow::Error::new(not_ready));
@@ -738,7 +719,7 @@ where
 }
 
 fn semantic_fallback_diagnostics(error: &anyhow::Error) -> SemanticFallbackDiagnostics {
-    if let Some(not_ready) = error.downcast_ref::<SourceBackedSemanticNotReady>() {
+    if let Some(not_ready) = error.downcast_ref::<SemanticNotReady>() {
         return SemanticFallbackDiagnostics {
             code: not_ready.code(),
             detail: not_ready.detail().to_owned(),

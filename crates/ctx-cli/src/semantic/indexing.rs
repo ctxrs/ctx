@@ -1,15 +1,13 @@
 use std::path::Path;
 
+use ctx_semantic_model::semantic_e5_passage_text;
 use sha2::{Digest, Sha256};
 
-use super::{
-    model_contract::{SEMANTIC_PASSAGE_PREFIX, SEMANTIC_QUERY_PREFIX},
-    runtime_limits::{
-        SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_CHUNK_TARGET_CHARS, SEMANTIC_SOURCE_MAX_CHARS,
-    },
-    vector_store::SemanticChunkDocument,
-    SemanticEventDocument,
-};
+use super::{vector_store::SemanticChunkDocument, SemanticEventDocument};
+
+const SEMANTIC_CHUNK_TARGET_CHARS: usize = ctx_history_index::SEMANTIC_CHUNK_TARGET_CHARS;
+const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = ctx_history_index::SEMANTIC_CHUNK_OVERLAP_CHARS;
+const SEMANTIC_SOURCE_MAX_CHARS: usize = ctx_history_index::SEMANTIC_SOURCE_MAX_CHARS;
 
 pub(super) fn semantic_source_text(text: &str) -> String {
     text.chars().take(SEMANTIC_SOURCE_MAX_CHARS).collect()
@@ -64,23 +62,6 @@ pub(super) fn semantic_embedded_chunk_text(doc: &SemanticEventDocument, body: &s
         format!("{header}\n\n{body}")
     };
     semantic_e5_passage_text(&text)
-}
-
-pub(super) fn semantic_e5_prefixed_text(prefix: &str, text: &str) -> String {
-    let text = text.trim_start();
-    if text.starts_with(prefix) {
-        text.to_owned()
-    } else {
-        format!("{prefix}{text}")
-    }
-}
-
-pub(super) fn semantic_e5_passage_text(text: &str) -> String {
-    semantic_e5_prefixed_text(SEMANTIC_PASSAGE_PREFIX, text)
-}
-
-pub(super) fn semantic_e5_query_text_value(text: &str) -> String {
-    semantic_e5_prefixed_text(SEMANTIC_QUERY_PREFIX, text)
 }
 
 pub(super) fn semantic_document_header(doc: &SemanticEventDocument) -> String {
@@ -189,4 +170,45 @@ pub(super) fn semantic_text_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use ctx_history_core::{EventRole, EventType};
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn document_hash_keeps_one_e5_passage_prefix() {
+        let document = SemanticEventDocument {
+            event_id: Uuid::nil(),
+            session_id: None,
+            seq: 1,
+            occurred_at_ms: 0,
+            event_type: EventType::Message,
+            role: Some(EventRole::User),
+            rank_bucket: String::new(),
+            provider: None,
+            source_format: None,
+            agent_type: None,
+            session_is_primary: None,
+            cwd: None,
+            record_title: None,
+            record_kind: None,
+            record_workspace: None,
+            text: "daemon failed to restart".to_owned(),
+        };
+        let embedded = semantic_embedded_document_text(&document, &document.text);
+
+        assert_eq!(
+            embedded,
+            "passage: semantic_document: v2\nevent_type: message\nrole: user\n\ndaemon failed to restart"
+        );
+        assert_eq!(embedded.matches("passage: ").count(), 1);
+        assert_eq!(
+            semantic_document_hash(&document, &document.text, "semantic-policy-fixture"),
+            "a8729176eca6ebc96f9e683d5528b81c740aef0248b0e5820f1f78e03a73cedb"
+        );
+    }
 }

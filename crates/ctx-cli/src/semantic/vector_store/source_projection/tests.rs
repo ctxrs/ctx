@@ -28,7 +28,7 @@ struct CoreBuilder {
     fail_after: Option<usize>,
 }
 
-impl SourceBackedSemanticDocumentBuilder for CoreBuilder {
+impl SemanticDocumentBuilder for CoreBuilder {
     fn build_document(
         &mut self,
         record: &CoreEventRecord,
@@ -71,7 +71,7 @@ struct MarkerEmbedder {
     chunks: usize,
 }
 
-impl SourceBackedSemanticEmbedder for MarkerEmbedder {
+impl SemanticBatchEmbedder for MarkerEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         self.chunks = self.chunks.saturating_add(chunks.len());
         Ok(chunks

@@ -1,6 +1,24 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_env = "gnu"
+    ),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "freebsd", target_arch = "x86_64")
+))]
+use ctx_semantic_model::test_support::{
+    load_missing_semantic_onnxruntime as load_missing_semantic_onnxruntime_for_test,
+    map_daemon_coreml_load_error, write_test_semantic_cache,
+};
+
 fn test_embedding(first: f32, second: f32) -> Vec<f32> {
     let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
     let norm = first.mul_add(first, second * second).sqrt();
@@ -86,30 +104,7 @@ fn test_chunk_at(
     }
 }
 
-#[cfg(ctx_semantic_fastembed)]
-fn write_test_semantic_cache(root: &Path) -> Result<()> {
-    write_test_semantic_cache_variant(root, SemanticOrtModelVariant::CpuFp32)
-}
-
-#[cfg(ctx_semantic_fastembed)]
-fn write_test_semantic_cache_variant(root: &Path, variant: SemanticOrtModelVariant) -> Result<()> {
-    let snapshot = root
-        .join(SEMANTIC_HF_MODEL_CACHE_DIR)
-        .join("snapshots")
-        .join(SEMANTIC_MODEL_REVISION);
-    fs::create_dir_all(&snapshot)?;
-    for file in variant.required_files() {
-        let path = snapshot.join(file.path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::File::create(path)?.set_len(file.size)?;
-    }
-    Ok(())
-}
-
 mod lifecycle;
 mod locking;
-mod search_daemon;
 mod vector_store;
 mod workflow;

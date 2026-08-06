@@ -6,40 +6,13 @@ load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 CTX_CLI_RUSTC_FLAGS = [
     "--check-cfg=cfg(ctx_pro_test_helper)",
     "--check-cfg=cfg(ctx_release_qualification)",
-    "--check-cfg=cfg(ctx_semantic_fastembed)",
     "--check-cfg=cfg(ctx_cli_test_support_fixtures)",
     "--check-cfg=cfg(ctx_cli_test_support_pro)",
     "--check-cfg=cfg(ctx_cli_test_support_upgrade)",
     "--check-cfg=cfg(ctx_cli_bazel_test)",
     "--cfg=ctx_cli_bazel_test",
     "--check-cfg=cfg(test)",
-] + select({
-    "@rules_rust//rust/platform:aarch64-apple-darwin": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "@rules_rust//rust/platform:x86_64-apple-darwin": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "//tools/bazel/platforms:x86_64-pc-windows-gnu": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "@rules_rust//rust/platform:x86_64-unknown-freebsd": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "@rules_rust//rust/platform:x86_64-unknown-nixos-gnu": [
-        "--cfg=ctx_semantic_fastembed",
-    ],
-    "//conditions:default": [],
-})
+]
 
 _CTX_CLI_TEST_SUPPORT = {
     "base": struct(

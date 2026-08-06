@@ -107,7 +107,7 @@ pub(super) fn tool_error_result(err: Error) -> Value {
             "structuredContent": structured,
         });
     }
-    if let Some(error) = err.downcast_ref::<crate::semantic::SourceBackedSemanticNotReady>() {
+    if let Some(error) = err.downcast_ref::<crate::semantic::SemanticNotReady>() {
         let structured = error.structured();
         return json!({
             "isError": true,

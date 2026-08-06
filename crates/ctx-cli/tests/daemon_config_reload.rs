@@ -1,6 +1,20 @@
 mod support;
 
-#[cfg(all(unix, ctx_semantic_fastembed))]
+#[cfg(all(
+    unix,
+    any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            target_env = "gnu"
+        ),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "freebsd", target_arch = "x86_64")
+    )
+))]
 mod unix {
     use std::{
         fs,

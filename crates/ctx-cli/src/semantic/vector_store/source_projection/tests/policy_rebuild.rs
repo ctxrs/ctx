@@ -1,4 +1,5 @@
 use super::*;
+use ctx_semantic_model::semantic_model_contract_descriptor;
 
 #[test]
 fn descriptor_only_model_change_rebuilds_every_vector_from_unchanged_core() -> Result<()> {
@@ -13,7 +14,7 @@ fn descriptor_only_model_change_rebuilds_every_vector_from_unchanged_core() -> R
     let baseline_contract = baseline_generation.contract_fingerprint.clone();
     store.reset_flat_active_event_snapshot_count();
 
-    let descriptor = crate::semantic::model_contract::semantic_model_contract_descriptor();
+    let descriptor = semantic_model_contract_descriptor();
     let revised_descriptor =
         descriptor.replacen("max_sequence_length=512", "max_sequence_length=513", 1);
     assert_ne!(descriptor, revised_descriptor);

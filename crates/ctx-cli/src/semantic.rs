@@ -49,48 +49,43 @@ use crate::output::compact_json;
 #[cfg(test)]
 use crate::{DaemonRunArgs, DaemonStartModeArg, DaemonTriggerCommandArg};
 
-mod model_contract;
-#[cfg(test)]
-use model_contract::*;
 #[allow(unused_imports)]
-pub(crate) use model_contract::{
-    semantic_managed_model_snapshot_dir, semantic_provisioning_coreml_asset_matches,
+pub(crate) use ctx_semantic_model::{
+    prepare_platform_semantic_acceleration, semantic_managed_model_snapshot_dir,
+    semantic_native_accelerator_target, semantic_provisioning_coreml_asset_matches,
     semantic_provisioning_model_contract_matches, semantic_provisioning_model_path_count,
-    semantic_provisioning_model_path_matches, semantic_required_model_file_count,
-    semantic_required_model_file_matches, SemanticOrtModelVariant,
+    semantic_provisioning_model_path_matches, semantic_query_service_supported,
+    semantic_required_model_file_count, semantic_required_model_file_matches,
+    SemanticNativeAcceleratorTarget, SemanticOrtModelVariant,
 };
+#[cfg(test)]
+#[allow(unused_imports)]
+use ctx_semantic_model::{
+    semantic_model_cache_available, semantic_model_key, SemanticDaemonCpuFallbackRequired,
+    SemanticDaemonModelAcquisition, SemanticModelLoadDeferred, SharedSemanticRuntime,
+    SEMANTIC_DIMENSIONS,
+};
+mod model_config;
+pub(crate) use model_config::{
+    semantic_model_config, semantic_runtime_cache_dir, semantic_worker_cache_dir,
+};
+mod resource_policy;
 mod runtime_limits;
 #[allow(unused_imports)]
-pub(crate) use runtime_limits::{
-    DAEMON_IDLE_EXIT_SECONDS_CAP, SEMANTIC_CHUNK_OVERLAP_CHARS, SEMANTIC_WORKER_BATCH_MAX,
-};
+pub(crate) use runtime_limits::{DAEMON_IDLE_EXIT_SECONDS_CAP, SEMANTIC_WORKER_BATCH_MAX};
 mod document;
 pub(in crate::semantic) use document::SemanticEventDocument;
 mod vector_store;
 #[cfg(test)]
 use vector_store::*;
+mod query_index;
+pub(crate) use query_index::SemanticNotReady;
+mod query_adapter;
+pub(crate) use query_adapter::SemanticQueryAdapter;
 mod query_service;
+pub(crate) use query_service::wait_for_daemon_query_service;
 #[cfg(test)]
 use query_service::*;
-pub(crate) use query_service::{
-    semantic_query_service_supported, wait_for_daemon_query_service, SourceBackedSemanticNotReady,
-};
-#[cfg(any(target_os = "macos", test))]
-mod model_acquisition;
-#[cfg(any(target_os = "macos", test))]
-mod model_bundle;
-mod resource_policy;
-#[cfg(test)]
-use resource_policy::*;
-mod cache_paths;
-mod model_runtime;
-#[cfg(test)]
-use model_runtime::*;
-#[allow(unused_imports)]
-pub(crate) use model_runtime::{
-    prepare_platform_semantic_acceleration, semantic_native_accelerator_target,
-    SemanticNativeAcceleratorTarget,
-};
 mod paths_status;
 #[cfg(test)]
 use paths_status::*;
@@ -145,53 +140,25 @@ pub(crate) use daemon_autostart::{
     replacement_helper_owns_daemon_handoff, DaemonHandoff, DaemonUpgradeHandoff,
 };
 mod health_search;
-pub(crate) use health_search::semantic_worker_cache_dir;
 #[cfg(test)]
 use health_search::*;
-pub(crate) fn semantic_runtime_cache_dir(data_root: &std::path::Path) -> std::path::PathBuf {
-    let model_cache_dir = semantic_worker_cache_dir(data_root);
-    semantic_runtime_cache_dir_for_model_cache(&model_cache_dir)
-}
-
-fn semantic_runtime_cache_dir_for_model_cache(
-    model_cache_dir: &std::path::Path,
-) -> std::path::PathBuf {
-    if model_cache_dir.file_name().and_then(|name| name.to_str()) == Some("semantic-model-cache") {
-        return model_cache_dir
-            .parent()
-            .map(|parent| parent.join("runtime"))
-            .unwrap_or_else(|| model_cache_dir.join("semantic-runtime"));
-    }
-    model_cache_dir.join("semantic-runtime")
-}
-
-#[cfg(test)]
-mod cache_dir_contract_tests {
-    use super::semantic_runtime_cache_dir_for_model_cache;
-    use std::path::Path;
-
-    #[test]
-    fn semantic_runtime_cache_tracks_the_selected_model_cache() {
-        assert_eq!(
-            semantic_runtime_cache_dir_for_model_cache(Path::new("/data/semantic-model-cache")),
-            Path::new("/data/runtime")
-        );
-        assert_eq!(
-            semantic_runtime_cache_dir_for_model_cache(Path::new("/override/cache")),
-            Path::new("/override/cache/semantic-runtime")
-        );
-        assert_eq!(
-            semantic_runtime_cache_dir_for_model_cache(Path::new("/override/semantic-model-cache")),
-            Path::new("/override/runtime")
-        );
-    }
-}
 mod indexing;
 #[cfg(test)]
-use indexing::*;
-#[cfg(all(test, ctx_semantic_fastembed))]
-mod fastembed_policy_tests;
-#[cfg(test)]
 mod query_service_transport_tests;
-#[cfg(all(test, ctx_semantic_fastembed))]
+#[cfg(all(
+    test,
+    any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            target_env = "gnu"
+        ),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "freebsd", target_arch = "x86_64")
+    )
+))]
 mod tests;

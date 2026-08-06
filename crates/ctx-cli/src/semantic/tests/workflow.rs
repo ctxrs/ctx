@@ -1,65 +1,6 @@
 use super::*;
 
 #[test]
-fn e5_embedding_text_uses_query_and_passage_prefixes_once() {
-    assert_eq!(
-        semantic_e5_query_text_value("find a daemon failure"),
-        "query: find a daemon failure"
-    );
-    assert_eq!(
-        semantic_e5_query_text_value("  query: find a daemon failure"),
-        "query: find a daemon failure"
-    );
-    assert_eq!(
-        semantic_e5_passage_text("daemon failed to restart"),
-        "passage: daemon failed to restart"
-    );
-    assert_eq!(
-        semantic_e5_passage_text("  passage: daemon failed to restart"),
-        "passage: daemon failed to restart"
-    );
-}
-
-#[cfg(ctx_semantic_fastembed)]
-#[test]
-fn fixed_shape_settings_are_strict() {
-    assert_eq!(semantic_fixed_shape_from_values(None, None).unwrap(), None);
-    assert_eq!(
-        semantic_fixed_shape_from_values(Some("16"), Some("512")).unwrap(),
-        Some((16, 512))
-    );
-    for values in [
-        (Some("16"), None),
-        (None, Some("512")),
-        (Some("0"), Some("512")),
-        (Some("wat"), Some("512")),
-        (Some("16"), Some("-1")),
-    ] {
-        assert!(semantic_fixed_shape_from_values(values.0, values.1).is_err());
-    }
-}
-
-#[cfg(ctx_semantic_fastembed)]
-#[test]
-fn fixed_batch_padding_preserves_complete_batches() -> Result<()> {
-    let make = |count| {
-        (0..count)
-            .map(|index| format!("passage: {index}"))
-            .collect::<Vec<_>>()
-    };
-    assert!(pad_texts_to_exact_batch(make(0), 4)?.is_empty());
-    assert_eq!(pad_texts_to_exact_batch(make(4), 4)?.len(), 4);
-    let padded = pad_texts_to_exact_batch(make(5), 4)?;
-    assert_eq!(padded.len(), 8);
-    assert_eq!(&padded[..5], make(5));
-    assert!(padded[5..]
-        .iter()
-        .all(|text| text == SEMANTIC_PASSAGE_PREFIX));
-    assert!(pad_texts_to_exact_batch(make(1), 0).is_err());
-    Ok(())
-}
-
-#[test]
 fn daemon_job_json_keeps_outcomes_without_live_worker_snapshots() {
     let job = daemon_semantic_job_json("budget_exhausted", None, 1234, Some(7), None);
 
@@ -139,7 +80,19 @@ fn restored_daemon_retry_deadline_is_clamped_to_runtime_maximum() {
     assert_eq!(backoff.consecutive_failures, 99);
 }
 
-#[cfg(ctx_semantic_fastembed)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_env = "gnu"
+    ),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "freebsd", target_arch = "x86_64")
+))]
 #[test]
 fn verified_cache_missing_runtime_reports_model_load_failed() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -171,7 +124,19 @@ fn verified_cache_missing_runtime_reports_model_load_failed() -> Result<()> {
     Ok(())
 }
 
-#[cfg(ctx_semantic_fastembed)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_env = "gnu"
+    ),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "freebsd", target_arch = "x86_64")
+))]
 #[test]
 fn auto_coreml_load_failure_acquires_cpu_and_preserves_fallback_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -260,10 +225,7 @@ fn semantic_failure_classes_control_retry_backoff() {
         ))),
         SemanticFailureClass::Retryable
     );
-    let pressure = SemanticModelLoadDeferred {
-        available_memory_bytes: 1,
-        required_available_memory_bytes: 2,
-    };
+    let pressure = SemanticModelLoadDeferred::for_test(1, 2);
     assert_eq!(
         classify_semantic_failure(&anyhow::Error::new(pressure)),
         SemanticFailureClass::ResourcePressure
@@ -283,7 +245,19 @@ fn semantic_failure_classes_control_retry_backoff() {
     }
 }
 
-#[cfg(ctx_semantic_fastembed)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_env = "gnu"
+    ),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "freebsd", target_arch = "x86_64")
+))]
 #[test]
 fn daemon_retry_backoff_is_capped() {
     let mut backoff = DaemonRetryBackoff::default();

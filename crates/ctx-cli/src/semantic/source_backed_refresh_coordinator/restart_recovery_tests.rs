@@ -9,11 +9,11 @@ use super::*;
 use std::sync::{Arc, Mutex};
 
 use ctx_history_index::WriterOptions;
+use ctx_semantic_model::SharedSemanticRuntime;
 
 use crate::{
     commands::import::load_explicit_source_catalog_authority,
     semantic::{
-        model_runtime::SharedSemanticRuntime,
         paths_status::{
             daemon_source_backed_refresh_job_path, read_daemon_job_status, write_daemon_job_status,
         },

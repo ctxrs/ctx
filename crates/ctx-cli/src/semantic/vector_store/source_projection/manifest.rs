@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use ctx_history_core::{core_record_contract_fingerprint, StableEntityKind, IDENTITY_VERSION};
 use ctx_history_index::{current_semantic_generation_policy_hash, CoreEventRecord};
+use ctx_semantic_model::semantic_model_contract_descriptor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
 use crate::semantic::{
-    model_contract::semantic_model_contract_descriptor,
     vector_store::flat_segments::{
         FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
     },

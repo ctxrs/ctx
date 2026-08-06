@@ -13,6 +13,7 @@ publish = false
 base64.workspace = true
 crc32fast = "1.5"
 ctx-history-core = { path = "../ctx-history-core" }
+ctx-semantic-model = { path = "../ctx-semantic-model" }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -4,11 +4,10 @@ use std::{
 };
 
 use anyhow::Result;
+use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 use uuid::Uuid;
 
 use super::{
-    model_contract::SEMANTIC_DIMENSIONS,
-    runtime_limits::{SEMANTIC_EXACT_QUERY_CONCURRENCY, SEMANTIC_EXACT_TOP_K_MAX},
     vector_store::{
         flat_scan::{
             ActiveChunk, ExactFlatF32Scan, FlatScanConfig, FlatScanLocation, FlatScanSkipReason,
@@ -18,6 +17,9 @@ use super::{
     },
     vector_store_schema::{SemanticVectorStoreError, SEMANTIC_VECTOR_BACKEND_FLAT_F32},
 };
+
+const SEMANTIC_EXACT_QUERY_CONCURRENCY: usize = 2;
+pub(super) const SEMANTIC_EXACT_TOP_K_MAX: usize = 4_096;
 
 static EXACT_QUERY_LIMITER: LazyLock<ExactQueryLimiter> = LazyLock::new(ExactQueryLimiter::default);
 

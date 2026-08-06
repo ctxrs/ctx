@@ -81,6 +81,15 @@
       "targets": {"lib:ctx_history_refresh": "//crates/ctx-history-refresh:lib"},
       "native_unit": "//crates/ctx-history-refresh:unit_tests"
     },
+    "ctx-semantic-model": {
+      "manifest": "crates/ctx-semantic-model/Cargo.toml",
+      "targets": {
+        "custom-build:build-script-build": "//:semantic_model_build_cfg_parity_check",
+        "lib:ctx_semantic_model": "//crates/ctx-semantic-model:lib"
+      },
+      "native_unit": "//crates/ctx-semantic-model:unit_tests",
+      "feature_variants": ["//crates/ctx-semantic-model:test_support_lib"]
+    },
     "ctx-pro-host-protocol": {
       "manifest": "crates/ctx-pro-host-protocol/Cargo.toml",
       "targets": {

@@ -1019,7 +1019,7 @@ mod tests {
         )
         .unwrap_err();
         let not_ready = missing
-            .downcast_ref::<SourceBackedSemanticNotReady>()
+            .downcast_ref::<SemanticNotReady>()
             .expect("semantic-only errors remain typed");
         assert_eq!(not_ready.code(), "semantic_store_missing");
         assert!(not_ready.detail().contains("flat-F32"));
@@ -1208,7 +1208,7 @@ mod tests {
             let error = resolve_source_search_backend(&semantic_request, &config)
                 .expect_err("semantic-only lexical scopes must fail before search");
             let not_ready = error
-                .downcast_ref::<SourceBackedSemanticNotReady>()
+                .downcast_ref::<SemanticNotReady>()
                 .expect("unsupported scope must retain the typed semantic error contract");
             assert_eq!(not_ready.code(), "semantic_content_scope_unsupported");
             assert!(not_ready.detail().contains(match content_scope {
@@ -1255,7 +1255,7 @@ mod tests {
         let error = resolve_source_search_backend(&request, &config)
             .expect_err("semantic-only exact non-message searches must fail before search");
         let not_ready = error
-            .downcast_ref::<SourceBackedSemanticNotReady>()
+            .downcast_ref::<SemanticNotReady>()
             .expect("event type rejection must retain the typed semantic error contract");
         assert_eq!(not_ready.code(), "semantic_event_type_unsupported");
         assert!(not_ready.detail().contains("'tool_call'"));
@@ -1340,7 +1340,7 @@ mod tests {
         let error = super::search::resolve_source_search_backend(&semantic, &config)
             .expect_err("semantic-only must still fail when the daemon is disabled");
         let not_ready = error
-            .downcast_ref::<SourceBackedSemanticNotReady>()
+            .downcast_ref::<SemanticNotReady>()
             .expect("semantic-only daemon failure must remain typed");
         assert_eq!(not_ready.code(), "semantic_daemon_disabled");
     }
@@ -1371,8 +1371,8 @@ mod tests {
             .expect_err("MCP semantic-only must fail when the daemon is disabled");
         assert_eq!(
             error
-                .downcast_ref::<SourceBackedSemanticNotReady>()
-                .map(SourceBackedSemanticNotReady::code),
+                .downcast_ref::<SemanticNotReady>()
+                .map(SemanticNotReady::code),
             Some("semantic_daemon_disabled")
         );
     }

@@ -506,10 +506,13 @@ pub(super) fn validate_vector(vector: &[f32], dimensions: usize) -> FlatResult<(
 }
 
 pub(super) fn validate_model_contract(contract: &FlatModelContract) -> FlatResult<()> {
+    let required_normalization = semantic_model_contract().normalization();
     if contract.contract_version == 0
         || contract.dimensions == 0
         || contract.dimensions > MAX_DIMENSIONS
-        || !contract.normalization.eq_ignore_ascii_case("l2")
+        || !contract
+            .normalization
+            .eq_ignore_ascii_case(required_normalization)
     {
         return Err(FlatStoreError::InvalidInput(
             "model contract version/dimensions/normalization are invalid".to_owned(),
