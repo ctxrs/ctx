@@ -573,8 +573,8 @@ fn copied_result_event_origin(
     let (ancestor_event_id, _) =
         event_identity_for_occurrence(&ancestor_source, ancestor_session_id, &parts, 0)?;
     Ok(Some(ctx_history_core::EventOrigin::CopiedFromAncestor {
-        ancestor_session_id,
-        ancestor_event_id,
+        ancestor_session_id: Box::new(ancestor_session_id),
+        ancestor_event_id: Box::new(ancestor_event_id),
         proof: ctx_history_core::EventCopyProofKind::NativeCallResultIdentity,
     }))
 }

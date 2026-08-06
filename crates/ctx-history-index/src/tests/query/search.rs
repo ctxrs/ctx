@@ -28,8 +28,8 @@ fn copied_events_are_excluded_before_search_windows_and_unknowns_remain_searchab
         )
         .unwrap();
     copied.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: original.session_id,
-        ancestor_event_id: original.event_id,
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
     copied.validate_contract().unwrap();
@@ -149,8 +149,8 @@ fn many_copied_bodies_add_no_postings_or_score_order_changes() {
                 )
                 .unwrap();
             copied.event_origin = EventOrigin::CopiedFromAncestor {
-                ancestor_session_id: first.session_id,
-                ancestor_event_id: first.event_id,
+                ancestor_session_id: Box::new(first.session_id),
+                ancestor_event_id: Box::new(first.event_id),
                 proof: EventCopyProofKind::NativeCopiedFromField,
             };
             copied.validate_contract().unwrap();

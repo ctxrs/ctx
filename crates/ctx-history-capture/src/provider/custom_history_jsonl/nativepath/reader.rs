@@ -295,8 +295,8 @@ fn core_record(
             subrecord_selector: None,
         })?;
         record.event_origin = EventOrigin::CopiedFromAncestor {
-            ancestor_session_id,
-            ancestor_event_id,
+            ancestor_session_id: Box::new(ancestor_session_id),
+            ancestor_event_id: Box::new(ancestor_event_id),
             proof: copied_from.proof,
         };
     }

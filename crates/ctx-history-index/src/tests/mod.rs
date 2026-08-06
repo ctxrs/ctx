@@ -484,11 +484,11 @@ fn multisegment_fixture(
 }
 
 mod integrity_certification;
-mod migration;
-#[cfg(target_os = "linux")]
-mod migration_qualification;
 mod pinned_generation;
 mod publication_metadata;
 mod query;
 mod recovery;
+mod republish;
+#[cfg(target_os = "linux")]
+mod republish_qualification;
 mod writer;

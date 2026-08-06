@@ -213,8 +213,8 @@ fn unrelated_append_does_not_replay_retained_copy_lineage() {
         )
         .unwrap();
         copy.event_origin = EventOrigin::CopiedFromAncestor {
-            ancestor_session_id: original.session_id,
-            ancestor_event_id: original.event_id,
+            ancestor_session_id: Box::new(original.session_id),
+            ancestor_event_id: Box::new(original.event_id),
             proof: EventCopyProofKind::NativeEventIdentity,
         };
         initial.add_core_record(copy).unwrap();

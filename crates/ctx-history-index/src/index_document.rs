@@ -941,8 +941,8 @@ mod tests {
         })
         .unwrap();
         record.event_origin = EventOrigin::CopiedFromAncestor {
-            ancestor_session_id,
-            ancestor_event_id,
+            ancestor_session_id: Box::new(ancestor_session_id),
+            ancestor_event_id: Box::new(ancestor_event_id),
             proof: EventCopyProofKind::NativeCopiedFromField,
         };
         let expected_event_id = record.event_id.to_string();

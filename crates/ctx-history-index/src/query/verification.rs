@@ -85,8 +85,8 @@ impl From<&EventOrigin> for CompactEventOrigin {
                 ancestor_event_id,
                 ..
             } => Self::CopiedFromAncestor {
-                ancestor_session: (*ancestor_session_id).into(),
-                ancestor_event: (*ancestor_event_id).into(),
+                ancestor_session: (**ancestor_session_id).into(),
+                ancestor_event: (**ancestor_event_id).into(),
             },
         }
     }
@@ -211,11 +211,11 @@ fn validate_event_origin_projection(
     else {
         return Ok(());
     };
-    validate_related_session_identity(*ancestor_session_id)?;
+    validate_related_session_identity(**ancestor_session_id)?;
     ancestor_event_id.validate_contract()?;
     if ancestor_event_id.entity_kind() != StableEntityKind::Event
-        || *ancestor_session_id == session_id
-        || *ancestor_event_id == event_id
+        || **ancestor_session_id == session_id
+        || **ancestor_event_id == event_id
     {
         return Err(IndexError::InvalidStoredDocumentField("core_record"));
     }

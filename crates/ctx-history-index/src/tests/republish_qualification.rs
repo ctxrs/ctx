@@ -1,13 +1,14 @@
-//! Executable same-epoch migration qualification.
+//! Executable same-epoch republish qualification.
 //!
 //! Hermetic disk gate:
-//! `bazel test //crates/ctx-history-index:migration_disk_qualification_tests --test_output=streamed`.
+//! `bazel test //crates/ctx-history-index:republish_disk_qualification_tests --test_output=streamed`.
 //! Controlled release A/B (only on an idle, fixed host/filesystem):
-//! `bazel test //crates/ctx-history-index:migration_release_benchmark --config=release --test_output=streamed --nocache_test_results --test_env=CTX_MIGRATION_QUALIFICATION_ENFORCE_PERF=1`.
+//! `bazel test //crates/ctx-history-index:republish_release_benchmark --config=release --test_output=streamed --nocache_test_results --test_env=CTX_REPUBLISH_QUALIFICATION_ENFORCE_PERF=1`.
 //! The release command blocks above 5% only after proving byte-identical output;
 //! disk always uses the absolute predecessor-generation denominator `F`.
 
 use super::*;
+use crate::publication::CurrentRepublishOutcome;
 
 use std::{
     cell::RefCell,
@@ -24,7 +25,7 @@ use std::{
 
 use crate::{
     durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard},
-    publication::{CloneTestHookGuard, CloneTestOptions, MigrationStage, MigrationTestHookGuard},
+    publication::{CloneTestHookGuard, CloneTestOptions, RepublishStage, RepublishTestHookGuard},
 };
 
 mod process;
@@ -33,15 +34,15 @@ mod topology;
 use process::wait4_operation;
 use topology::{first_payload_pair, verify_clone_topology, CloneTopologyProof};
 
-const QUALIFICATION_CASE_ENV: &str = "CTX_MIGRATION_QUALIFICATION_CASE";
-const QUALIFICATION_ROOT_ENV: &str = "CTX_MIGRATION_QUALIFICATION_ROOT";
-const QUALIFICATION_OUTPUT_ENV: &str = "CTX_MIGRATION_QUALIFICATION_OUTPUT";
-const QUALIFICATION_REPORT_ENV: &str = "CTX_MIGRATION_QUALIFICATION_REPORT";
-const QUALIFICATION_CLONE_MODE_ENV: &str = "CTX_MIGRATION_QUALIFICATION_CLONE_MODE";
-const ENFORCE_PERF_ENV: &str = "CTX_MIGRATION_QUALIFICATION_ENFORCE_PERF";
-const RELEASE_DOCUMENTS_ENV: &str = "CTX_MIGRATION_QUALIFICATION_DOCUMENTS";
-const RELEASE_BODY_BYTES_ENV: &str = "CTX_MIGRATION_QUALIFICATION_BODY_BYTES";
-const RELEASE_SAMPLES_ENV: &str = "CTX_MIGRATION_QUALIFICATION_SAMPLES";
+const QUALIFICATION_CASE_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_CASE";
+const QUALIFICATION_ROOT_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_ROOT";
+const QUALIFICATION_OUTPUT_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_OUTPUT";
+const QUALIFICATION_REPORT_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_REPORT";
+const QUALIFICATION_CLONE_MODE_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_CLONE_MODE";
+const ENFORCE_PERF_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_ENFORCE_PERF";
+const RELEASE_DOCUMENTS_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_DOCUMENTS";
+const RELEASE_BODY_BYTES_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_BODY_BYTES";
+const RELEASE_SAMPLES_ENV: &str = "CTX_REPUBLISH_QUALIFICATION_SAMPLES";
 const RELEASE_DEFAULT_DOCUMENTS: usize = 16_384;
 const RELEASE_DEFAULT_BODY_BYTES: usize = 4_096;
 const EXPECTED_AMPLIFICATION_HUNDREDTHS: u128 = 367;
@@ -49,21 +50,21 @@ const BLOCKING_AMPLIFICATION_MULTIPLIER: u128 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QualificationCase {
-    Migration,
+    Republish,
     CurrentRepublish,
 }
 
 impl QualificationCase {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Migration => "migration",
+            Self::Republish => "republish",
             Self::CurrentRepublish => "current_republish",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "migration" => Some(Self::Migration),
+            "republish" => Some(Self::Republish),
             "current_republish" => Some(Self::CurrentRepublish),
             _ => None,
         }
@@ -132,13 +133,13 @@ fn validate_disk_gate(input: &DiskGateInput) -> std::result::Result<DiskGateResu
     }
     if !input.unexplained_paths.is_empty() {
         return Err(format!(
-            "unexplained migration paths: {}",
+            "unexplained republish paths: {}",
             input.unexplained_paths.join(", ")
         ));
     }
     if input.accounted_allocated_bytes != input.peak_allocated_bytes {
         return Err(format!(
-            "unexplained migration bytes: peak={} accounted={}",
+            "unexplained republish bytes: peak={} accounted={}",
             input.peak_allocated_bytes, input.accounted_allocated_bytes
         ));
     }
@@ -146,7 +147,7 @@ fn validate_disk_gate(input: &DiskGateInput) -> std::result::Result<DiskGateResu
     let predecessor = u128::from(input.predecessor_f_bytes);
     if peak > predecessor.saturating_mul(BLOCKING_AMPLIFICATION_MULTIPLIER) {
         return Err(format!(
-            "migration disk amplification exceeds blocking >5F limit: {peak}/{predecessor}"
+            "republish disk amplification exceeds blocking >5F limit: {peak}/{predecessor}"
         ));
     }
     Ok(DiskGateResult {
@@ -183,25 +184,25 @@ fn validate_output_identity(output: &OutputIdentity) -> std::result::Result<(), 
 
 fn comparable_regressions(
     current: &PerformanceSample,
-    migration: &PerformanceSample,
+    republish: &PerformanceSample,
 ) -> std::result::Result<BTreeMap<&'static str, f64>, String> {
     validate_output_identity(&current.output)?;
-    validate_output_identity(&migration.output)?;
-    if current.output.sha256 != migration.output.sha256
-        || current.output.actual_bytes != migration.output.actual_bytes
+    validate_output_identity(&republish.output)?;
+    if current.output.sha256 != republish.output.sha256
+        || current.output.actual_bytes != republish.output.actual_bytes
     {
         return Err(
-            "the 5% performance gate requires byte-identical current/migration payloads".to_owned(),
+            "the 5% performance gate requires byte-identical current/republish payloads".to_owned(),
         );
     }
     let mut regressions = BTreeMap::new();
     for (name, baseline, candidate) in [
-        ("wall", current.wall_seconds, migration.wall_seconds),
-        ("cpu", current.cpu_seconds, migration.cpu_seconds),
+        ("wall", current.wall_seconds, republish.wall_seconds),
+        ("cpu", current.cpu_seconds, republish.cpu_seconds),
         (
             "peak_rss",
             current.peak_rss_bytes as f64,
-            migration.peak_rss_bytes as f64,
+            republish.peak_rss_bytes as f64,
         ),
     ] {
         if !baseline.is_finite() || !candidate.is_finite() || baseline <= 0.0 || candidate < 0.0 {
@@ -515,7 +516,7 @@ impl DiskTracker {
 }
 
 fn deterministic_body(bytes: usize, sequence: u64) -> String {
-    let prefix = "same-epoch migration qualification ";
+    let prefix = "same-epoch republish qualification ";
     assert!(bytes >= prefix.len());
     let mut body = String::with_capacity(bytes);
     body.push_str(prefix);
@@ -532,7 +533,7 @@ fn deterministic_body(bytes: usize, sequence: u64) -> String {
 }
 
 fn build_generated_predecessor(root: &Path, corpus: CorpusSpec) {
-    let source = source("migration-qualification.jsonl");
+    let source = source("republish-qualification.jsonl");
     let options = WriterOptions {
         indexer_threads: 1,
         memory_bytes: INDEX_MEMORY_MIN_PER_THREAD,
@@ -643,12 +644,11 @@ fn clone_guard(mode: CloneMode) -> Option<CloneTestHookGuard> {
     })
 }
 
-fn completed_pointer(outcome: PredecessorMigrationOutcome) -> ActiveGenerationPointer {
+fn completed_pointer(outcome: CurrentRepublishOutcome) -> ActiveGenerationPointer {
     match outcome {
-        PredecessorMigrationOutcome::Unchanged(pointer)
-        | PredecessorMigrationOutcome::Migrated(pointer)
-        | PredecessorMigrationOutcome::CommittedVisible { pointer, .. } => pointer,
-        PredecessorMigrationOutcome::CommittedRecoveryRequired { recovery } => {
+        CurrentRepublishOutcome::Published(pointer)
+        | CurrentRepublishOutcome::CommittedVisible { pointer, .. } => pointer,
+        CurrentRepublishOutcome::CommittedRecoveryRequired { recovery } => {
             panic!("qualification operation requires committed recovery: {recovery:?}")
         }
     }
@@ -656,7 +656,7 @@ fn completed_pointer(outcome: PredecessorMigrationOutcome) -> ActiveGenerationPo
 
 fn execute_qualification_operation(case: QualificationCase, root: &Path) {
     match case {
-        QualificationCase::Migration | QualificationCase::CurrentRepublish => {
+        QualificationCase::Republish | QualificationCase::CurrentRepublish => {
             let lease = GenerationWriter::open(root, WriterOptions::default())
                 .unwrap()
                 .into_writer()
@@ -666,7 +666,7 @@ fn execute_qualification_operation(case: QualificationCase, root: &Path) {
                 republish_current_for_qualification(root, &pointer, &WriterOptions::default())
                     .unwrap();
             let current = completed_pointer(outcome);
-            best_effort_post_migration_cleanup(root, &current);
+            best_effort_post_republish_cleanup(root, &current);
             drop(lease);
         }
     }
@@ -745,9 +745,9 @@ fn qualification_subprocess_worker() {
     let report_path = PathBuf::from(env::var_os(QUALIFICATION_REPORT_ENV).unwrap());
     let _clone_guard = clone_guard(clone_mode);
     let tracker = Rc::new(RefCell::new(DiskTracker::new(&root).unwrap()));
-    let migration_tracker = Rc::clone(&tracker);
-    let migration_hook = MigrationTestHookGuard::set(move |_stage: MigrationStage, _path| {
-        migration_tracker.borrow_mut().sample();
+    let republish_tracker = Rc::clone(&tracker);
+    let republish_hook = RepublishTestHookGuard::set(move |_stage: RepublishStage, _path| {
+        republish_tracker.borrow_mut().sample();
         Ok(())
     });
     let atomic_tracker = Rc::clone(&tracker);
@@ -761,7 +761,7 @@ fn qualification_subprocess_worker() {
     execute_qualification_operation(case, &root);
     tracker.borrow_mut().sample();
     drop(atomic_hook);
-    drop(migration_hook);
+    drop(republish_hook);
     let output = materialize_output_identity(&root, &output_path);
     let topology = verify_clone_topology(&root, clone_mode).unwrap();
 
@@ -847,7 +847,7 @@ fn run_prepared_disk_case(
     let report_path = output_root.join(format!("{}-report.json", case.as_str()));
     let completed = Command::new(env::current_exe().unwrap())
         .arg("--exact")
-        .arg("tests::migration_qualification::qualification_subprocess_worker")
+        .arg("tests::republish_qualification::qualification_subprocess_worker")
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(QUALIFICATION_CASE_ENV, case.as_str())
@@ -901,23 +901,23 @@ fn run_paired_cases(
     let temp = tempdir().unwrap();
     let base = temp.path().join("physical-base");
     build_generated_predecessor(&base, corpus);
-    let migration_root = temp.path().join("migration-root");
+    let republish_root = temp.path().join("republish-root");
     let current_root = temp.path().join("current-root");
-    copy_tree(&base, &migration_root);
+    copy_tree(&base, &republish_root);
     copy_tree(&base, &current_root);
-    let migration_before_path = temp.path().join("migration-preflight-payload.jsonl");
+    let republish_before_path = temp.path().join("republish-preflight-payload.jsonl");
     let current_before_path = temp.path().join("current-preflight-payload.jsonl");
-    let migration_before = materialize_output_identity(&migration_root, &migration_before_path);
+    let republish_before = materialize_output_identity(&republish_root, &republish_before_path);
     let current_before = materialize_output_identity(&current_root, &current_before_path);
     require_same_output(
-        (&migration_before, &migration_before_path),
+        (&republish_before, &republish_before_path),
         (&current_before, &current_before_path),
-        "pre-measurement migration/current comparison",
+        "pre-measurement republish/current comparison",
     );
     order.map(|case| {
         let (root, before, before_path) = match case {
-            QualificationCase::Migration => {
-                (&migration_root, &migration_before, &migration_before_path)
+            QualificationCase::Republish => {
+                (&republish_root, &republish_before, &republish_before_path)
             }
             QualificationCase::CurrentRepublish => {
                 (&current_root, &current_before, &current_before_path)
@@ -942,7 +942,7 @@ fn run_prepared_performance_case(
     let stderr = File::create(&stderr_path).unwrap();
     let child = Command::new(env::current_exe().unwrap())
         .arg("--exact")
-        .arg("tests::migration_qualification::qualification_performance_subprocess_worker")
+        .arg("tests::republish_qualification::qualification_performance_subprocess_worker")
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(QUALIFICATION_CASE_ENV, case.as_str())
@@ -1041,7 +1041,7 @@ fn aggregate(samples: &[PerformanceSample]) -> PerformanceSample {
 }
 
 #[test]
-#[ignore = "deterministic generated-index migration disk qualification; owned by nightly"]
+#[ignore = "deterministic generated-index republish disk qualification; owned by nightly"]
 fn generated_small_and_large_disk_qualification() {
     let cases = [
         (
@@ -1062,11 +1062,11 @@ fn generated_small_and_large_disk_qualification() {
         ),
     ];
     for (label, clone_mode, corpus) in cases {
-        let report = run_case(QualificationCase::Migration, clone_mode, corpus);
+        let report = run_case(QualificationCase::Republish, clone_mode, corpus);
         assert!(json_f64(&report, "disk_amplification") <= 5.0);
         let topology = &report["clone_topology"];
         eprintln!(
-            "migration_disk_qualification label={label} documents={} body_bytes={} F={} peak={} multiplier={:.4} expected_3_67f={} output_bytes={} output_sha256={} payload_files={} shared_payload_files={} shared_payload_bytes={}",
+            "republish_disk_qualification label={label} documents={} body_bytes={} F={} peak={} multiplier={:.4} expected_3_67f={} output_bytes={} output_sha256={} payload_files={} shared_payload_files={} shared_payload_bytes={}",
             corpus.documents,
             corpus.body_bytes,
             json_u64(&report, "predecessor_f_bytes"),
@@ -1083,7 +1083,7 @@ fn generated_small_and_large_disk_qualification() {
 }
 
 #[test]
-#[ignore = "controlled-host migration/current A/B benchmark; invoke the release target"]
+#[ignore = "controlled-host republish/current A/B benchmark; invoke the release target"]
 fn release_benchmark_report() {
     let sample_count = env_usize(RELEASE_SAMPLES_ENV, 3);
     assert!(
@@ -1107,23 +1107,23 @@ fn release_benchmark_report() {
         );
     }
     let mut current_reports = Vec::new();
-    let mut migration_reports = Vec::new();
+    let mut republish_reports = Vec::new();
     for sample in 0..sample_count {
         let order = if sample % 2 == 0 {
             [
                 QualificationCase::CurrentRepublish,
-                QualificationCase::Migration,
+                QualificationCase::Republish,
             ]
         } else {
             [
-                QualificationCase::Migration,
+                QualificationCase::Republish,
                 QualificationCase::CurrentRepublish,
             ]
         };
         for report in run_paired_cases(order, clone_mode, corpus) {
             let case = QualificationCase::parse(report["case"].as_str().unwrap()).unwrap();
             match case {
-                QualificationCase::Migration => migration_reports.push(report),
+                QualificationCase::Republish => republish_reports.push(report),
                 QualificationCase::CurrentRepublish => current_reports.push(report),
             }
         }
@@ -1132,16 +1132,16 @@ fn release_benchmark_report() {
         .iter()
         .map(report_sample)
         .collect::<Vec<_>>();
-    let migration_samples = migration_reports
+    let republish_samples = republish_reports
         .iter()
         .map(report_sample)
         .collect::<Vec<_>>();
     let paired_samples = current_samples
         .iter()
-        .zip(&migration_samples)
+        .zip(&republish_samples)
         .enumerate()
-        .map(|(pair, (current, migration))| {
-            let regressions = comparable_regressions(current, migration).unwrap();
+        .map(|(pair, (current, republish))| {
+            let regressions = comparable_regressions(current, republish).unwrap();
             serde_json::json!({
                 "pair": pair + 1,
                 "current": {
@@ -1153,46 +1153,46 @@ fn release_benchmark_report() {
                     ),
                     "peak_rss_bytes": current.peak_rss_bytes,
                 },
-                "migration": {
-                    "wall_seconds": migration.wall_seconds,
-                    "cpu_seconds": migration.cpu_seconds,
+                "republish": {
+                    "wall_seconds": republish.wall_seconds,
+                    "cpu_seconds": republish.cpu_seconds,
                     "dedicated_child_cpu_seconds": json_f64(
-                        &migration_reports[pair],
+                        &republish_reports[pair],
                         "isolated_process_cpu_seconds",
                     ),
-                    "peak_rss_bytes": migration.peak_rss_bytes,
+                    "peak_rss_bytes": republish.peak_rss_bytes,
                 },
-                "migration_regression": regressions,
-                "output_bytes": migration.output.actual_bytes,
-                "output_sha256": migration.output.sha256,
-                "migration_clone_topology": migration_reports[pair]["clone_topology"],
+                "republish_regression": regressions,
+                "output_bytes": republish.output.actual_bytes,
+                "output_sha256": republish.output.sha256,
+                "republish_clone_topology": republish_reports[pair]["clone_topology"],
                 "current_clone_topology": current_reports[pair]["clone_topology"],
             })
         })
         .collect::<Vec<_>>();
     let current = aggregate(&current_samples);
-    let migration = aggregate(&migration_samples);
-    let regressions = comparable_regressions(&current, &migration).unwrap();
+    let republish = aggregate(&republish_samples);
+    let regressions = comparable_regressions(&current, &republish).unwrap();
     if enforce {
         for (metric, regression) in &regressions {
             assert!(
                 *regression <= 0.05,
-                "controlled byte-identical migration {metric} regression {:.2}% exceeds 5%",
+                "controlled byte-identical republish {metric} regression {:.2}% exceeds 5%",
                 regression * 100.0
             );
         }
     }
     let report = serde_json::json!({
         "schema_version": 2,
-        "qualification": "same_epoch_core_predecessor_migration",
+        "qualification": "same_epoch_core_predecessor_republish",
         "samples_per_path": sample_count,
         "documents": corpus.documents,
         "body_bytes_per_document": corpus.body_bytes,
         "clone_mode": clone_mode.as_str(),
         "payload_byte_identical": true,
         "exact_output_bytes_compared_before_measurement": true,
-        "total_output_bytes": migration.output.actual_bytes,
-        "output_sha256": migration.output.sha256,
+        "total_output_bytes": republish.output.actual_bytes,
+        "output_sha256": republish.output.sha256,
         "measurement_scope": "dedicated isolated child per operation; output/accounting/topology outside wall/cpu/RSS; wall/cpu bracket operation; RSS from wait4 ru_maxrss; child setup/report symmetric",
         "paired_samples": paired_samples,
         "current_median": {
@@ -1200,31 +1200,31 @@ fn release_benchmark_report() {
             "cpu_seconds": current.cpu_seconds,
             "peak_rss_bytes": current.peak_rss_bytes,
         },
-        "migration_median": {
-            "wall_seconds": migration.wall_seconds,
-            "cpu_seconds": migration.cpu_seconds,
-            "peak_rss_bytes": migration.peak_rss_bytes,
+        "republish_median": {
+            "wall_seconds": republish.wall_seconds,
+            "cpu_seconds": republish.cpu_seconds,
+            "peak_rss_bytes": republish.peak_rss_bytes,
         },
-        "migration_regression": regressions,
+        "republish_regression": regressions,
         "five_percent_perf_gate_enforced": enforce,
         "five_percent_gate_semantics": "only exact-byte-identical production hard-link wall/cpu/interval-process-peak-rss",
         "disk_semantics": "absolute multiplier against predecessor generation F; expected <=3.67F; block only >5F",
-        "forced_copy_qualification": "reported separately by migration_disk_qualification_tests; excluded from the 5% gate",
+        "forced_copy_qualification": "reported separately by republish_disk_qualification_tests; excluded from the 5% gate",
     });
     let report_bytes = serde_json::to_vec_pretty(&report).unwrap();
     if let Some(outputs) = env::var_os("TEST_UNDECLARED_OUTPUTS_DIR") {
-        let path = PathBuf::from(outputs).join("migration-qualification-report.json");
+        let path = PathBuf::from(outputs).join("republish-qualification-report.json");
         fs::write(path, &report_bytes).unwrap();
     }
     eprintln!(
-        "MIGRATION_QUALIFICATION_REPORT {}",
+        "REPUBLISH_QUALIFICATION_REPORT {}",
         String::from_utf8(report_bytes).unwrap()
     );
 }
 
 fn migrate_and_prove_topology(root: &Path, clone_mode: CloneMode) -> CloneTopologyProof {
     let clone_guard = clone_guard(clone_mode);
-    execute_qualification_operation(QualificationCase::Migration, root);
+    execute_qualification_operation(QualificationCase::Republish, root);
     drop(clone_guard);
     verify_clone_topology(root, clone_mode).unwrap()
 }
@@ -1362,10 +1362,10 @@ fn performance_gate_rejects_non_identical_payloads_before_five_percent() {
         cpu_seconds: 1.0,
         peak_rss_bytes: 100,
     };
-    let mut migration = current.clone();
-    migration.output.sha256 = "migration".to_owned();
-    migration.wall_seconds = 1.01;
-    assert!(comparable_regressions(&current, &migration).is_err());
+    let mut republish = current.clone();
+    republish.output.sha256 = "republish".to_owned();
+    republish.wall_seconds = 1.01;
+    assert!(comparable_regressions(&current, &republish).is_err());
 }
 
 #[test]

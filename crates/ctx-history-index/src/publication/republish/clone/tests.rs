@@ -42,7 +42,7 @@ fn clone_resource_bounds_fail_before_copying() {
     admit_clone_resource(&mut files, &mut bytes, 4, 1, 4).unwrap();
     assert!(matches!(
         admit_clone_resource(&mut files, &mut bytes, 0, 1, 4),
-        Err(IndexError::PredecessorMigrationFileLimit {
+        Err(IndexError::CurrentRepublishFileLimit {
             actual: 2,
             maximum: 1
         })
@@ -52,7 +52,7 @@ fn clone_resource_bounds_fail_before_copying() {
     let mut bytes = 0;
     assert!(matches!(
         admit_clone_resource(&mut files, &mut bytes, 5, 1, 4),
-        Err(IndexError::PredecessorMigrationByteLimit {
+        Err(IndexError::CurrentRepublishByteLimit {
             actual: 5,
             maximum: 4
         })
@@ -65,7 +65,7 @@ fn managed_paths_must_be_single_relative_components() {
     for path in ["../meta.json", "nested/meta.json", "/meta.json"] {
         assert!(matches!(
             validate_single_component(Path::new(path)),
-            Err(IndexError::PredecessorMigrationSourceTopology(_))
+            Err(IndexError::CurrentRepublishSourceTopology(_))
         ));
     }
 }

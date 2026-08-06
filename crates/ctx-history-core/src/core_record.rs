@@ -367,8 +367,8 @@ pub enum EventOrigin {
     Unknown,
     UniqueToSession,
     CopiedFromAncestor {
-        ancestor_session_id: StableEntityId,
-        ancestor_event_id: StableEntityId,
+        ancestor_session_id: Box<StableEntityId>,
+        ancestor_event_id: Box<StableEntityId>,
         proof: EventCopyProofKind,
     },
 }
@@ -390,7 +390,7 @@ impl EventOrigin {
                 ancestor_session_id,
                 ancestor_event_id,
                 proof,
-            } => Some((*ancestor_session_id, *ancestor_event_id, *proof)),
+            } => Some((**ancestor_session_id, **ancestor_event_id, *proof)),
             Self::Unknown | Self::UniqueToSession => None,
         }
     }
@@ -745,13 +745,13 @@ impl CoreRecord {
         else {
             return Ok(());
         };
-        validate_related_session_identity(*ancestor_session_id)?;
+        validate_related_session_identity(**ancestor_session_id)?;
         ancestor_event_id
             .validate_contract()
             .map_err(|_| CoreRecordError::InvalidEventOrigin)?;
         if ancestor_event_id.entity_kind() != StableEntityKind::Event
-            || *ancestor_session_id == self.session_id
-            || *ancestor_event_id == self.event_id
+            || **ancestor_session_id == self.session_id
+            || **ancestor_event_id == self.event_id
         {
             return Err(CoreRecordError::InvalidEventOrigin);
         }

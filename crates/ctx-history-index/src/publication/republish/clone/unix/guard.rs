@@ -7,7 +7,7 @@ use super::{
     BoundDirectory, CloneStage,
 };
 
-pub(in crate::publication::migration) struct CandidateGuard {
+pub(in crate::publication::republish) struct CandidateGuard {
     pub(super) root_path: PathBuf,
     pub(super) root: BoundDirectory,
     pub(super) generations_name: PathBuf,
@@ -18,7 +18,7 @@ pub(in crate::publication::migration) struct CandidateGuard {
 }
 
 impl CandidateGuard {
-    pub(in crate::publication::migration) fn validate_binding(&self) -> Result<()> {
+    pub(in crate::publication::republish) fn validate_binding(&self) -> Result<()> {
         validate_path_binding(&self.root_path, self.root.identity)?;
         validate_child_binding(
             &self.root.file,
@@ -33,7 +33,7 @@ impl CandidateGuard {
         )
     }
 
-    pub(in crate::publication::migration) fn discard(self) {
+    pub(in crate::publication::republish) fn discard(self) {
         if clone_checkpoint(CloneStage::BeforeCleanup, &self.destination_name).is_err()
             || self.validate_binding().is_err()
         {

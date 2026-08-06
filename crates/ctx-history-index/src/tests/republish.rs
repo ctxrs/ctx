@@ -12,20 +12,25 @@ use crate::publication::{CloneMetrics, CloneStage, CloneTestHookGuard, CloneTest
 use crate::{
     durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard},
     publication::{
-        republish_current_for_qualification, MigrationStage, MigrationTestHookGuard,
+        republish_current_for_qualification, CurrentRepublishOutcome,
         PointerReconciliationTestHookGuard, PortableCloneMetrics, PortableCloneStage,
-        PortableCloneTestGuard, PortableCloneTestOptions, PredecessorMigrationOutcome,
+        PortableCloneTestGuard, PortableCloneTestOptions, RepublishRecovery, RepublishStage,
+        RepublishTestHookGuard,
     },
 };
 
 const PUBLICATION_METADATA: &[u8] = b"source-catalog-frontier-receipt-v1";
 const GOLDEN_GENERATION_ID: &str =
     "a71ac367a8192609dc5b739e8f68e83124ee369e7cb3975a88e873eafe9f0283";
-const SUBPROCESS_MODE_ENV: &str = "CTX_PREDECESSOR_MIGRATION_CHILD";
-const SUBPROCESS_ROOT_ENV: &str = "CTX_PREDECESSOR_MIGRATION_ROOT";
-const SUBPROCESS_MARKER_ENV: &str = "CTX_PREDECESSOR_MIGRATION_MARKER";
-const SUBPROCESS_CONTINUE_ENV: &str = "CTX_PREDECESSOR_MIGRATION_CONTINUE";
-const SUBPROCESS_RESULT_ENV: &str = "CTX_PREDECESSOR_MIGRATION_RESULT";
+const RETIRED_CORE_FINGERPRINT: &str =
+    "7552eee7cae0695a98f202b02f52cbf5680845cb7bacea4ed754e283bc15f051";
+const RETIRED_SOURCE_GENERATION_POLICY_HASH: &str =
+    "e728b5d7b76d04248e9dccc91fc11d915fcbcd714b445090725ba0604b8e8b37";
+const SUBPROCESS_MODE_ENV: &str = "CTX_CURRENT_REPUBLISH_CHILD";
+const SUBPROCESS_ROOT_ENV: &str = "CTX_CURRENT_REPUBLISH_ROOT";
+const SUBPROCESS_MARKER_ENV: &str = "CTX_CURRENT_REPUBLISH_MARKER";
+const SUBPROCESS_CONTINUE_ENV: &str = "CTX_CURRENT_REPUBLISH_CONTINUE";
+const SUBPROCESS_RESULT_ENV: &str = "CTX_CURRENT_REPUBLISH_RESULT";
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(20);
 
 mod portable;
@@ -51,7 +56,7 @@ impl GoldenPredecessor {
                 .add_core_record(document(
                     &source,
                     sequence,
-                    &format!("golden current migration evidence {sequence}"),
+                    &format!("golden current republish evidence {sequence}"),
                 ))
                 .unwrap();
         }
@@ -116,7 +121,35 @@ fn open_writer_error(root: &Path) -> IndexError {
     }
 }
 
-fn open_republish_writer(root: &Path) -> Result<GenerationWriterOpenOutcome> {
+enum RepublishWriterOpenOutcome {
+    Ready(GenerationWriter),
+    CommittedVisible {
+        writer: GenerationWriter,
+        recovery: RepublishRecovery,
+    },
+    CommittedRecoveryRequired {
+        recovery: RepublishRecovery,
+    },
+}
+
+impl RepublishWriterOpenOutcome {
+    fn committed_republish_recovery(&self) -> Option<&RepublishRecovery> {
+        match self {
+            Self::CommittedVisible { recovery, .. }
+            | Self::CommittedRecoveryRequired { recovery } => Some(recovery),
+            Self::Ready(_) => None,
+        }
+    }
+
+    fn into_writer(self) -> std::result::Result<GenerationWriter, RepublishRecovery> {
+        match self {
+            Self::Ready(writer) | Self::CommittedVisible { writer, .. } => Ok(writer),
+            Self::CommittedRecoveryRequired { recovery } => Err(recovery),
+        }
+    }
+}
+
+fn open_republish_writer(root: &Path) -> Result<RepublishWriterOpenOutcome> {
     let lease = GenerationWriter::open(root, WriterOptions::default())?
         .into_writer()
         .map_err(|_| IndexError::WriterInvariant("unexpected committed recovery"))?;
@@ -126,20 +159,20 @@ fn open_republish_writer(root: &Path) -> Result<GenerationWriterOpenOutcome> {
     let outcome = republish_current_for_qualification(root, &pointer, &WriterOptions::default());
     drop(lease);
     match outcome? {
-        PredecessorMigrationOutcome::Unchanged(_) => Err(IndexError::WriterInvariant(
-            "current-format qualification unexpectedly skipped republish",
-        )),
-        PredecessorMigrationOutcome::Migrated(_) => {
-            GenerationWriter::open(root, WriterOptions::default())
-        }
-        PredecessorMigrationOutcome::CommittedVisible { recovery, .. } => {
+        CurrentRepublishOutcome::Published(_) => {
             let writer = GenerationWriter::open(root, WriterOptions::default())?
                 .into_writer()
                 .map_err(|_| IndexError::WriterInvariant("unexpected committed recovery"))?;
-            Ok(GenerationWriterOpenOutcome::RecoveredCommittedMigration { writer, recovery })
+            Ok(RepublishWriterOpenOutcome::Ready(writer))
         }
-        PredecessorMigrationOutcome::CommittedRecoveryRequired { recovery } => {
-            Ok(GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired { recovery })
+        CurrentRepublishOutcome::CommittedVisible { recovery, .. } => {
+            let writer = GenerationWriter::open(root, WriterOptions::default())?
+                .into_writer()
+                .map_err(|_| IndexError::WriterInvariant("unexpected committed recovery"))?;
+            Ok(RepublishWriterOpenOutcome::CommittedVisible { writer, recovery })
+        }
+        CurrentRepublishOutcome::CommittedRecoveryRequired { recovery } => {
+            Ok(RepublishWriterOpenOutcome::CommittedRecoveryRequired { recovery })
         }
     }
 }
@@ -180,7 +213,7 @@ fn checked_in_predecessor_fixture_has_exact_provenance_and_hashes() {
     );
     assert_eq!(
         provenance["core_record_contract_fingerprint"],
-        SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
+        RETIRED_CORE_FINGERPRINT
     );
     assert_eq!(provenance["generation_id"], GOLDEN_GENERATION_ID);
     let manifest: GenerationManifest = serde_json::from_slice(
@@ -194,11 +227,11 @@ fn checked_in_predecessor_fixture_has_exact_provenance_and_hashes() {
     .unwrap();
     assert_eq!(
         manifest.core_record_contract_fingerprint,
-        SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
+        RETIRED_CORE_FINGERPRINT
     );
     assert_eq!(
         manifest.policy_schema_hash,
-        SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH
+        RETIRED_SOURCE_GENERATION_POLICY_HASH
     );
 
     let mut declared = BTreeSet::new();
@@ -239,8 +272,8 @@ fn schema_17_fixture_is_rejected_then_rebuilt_only_from_source_authority() {
         ));
     }
 
-    let _no_clone = MigrationTestHookGuard::set(|stage, _| {
-        panic!("schema-17 rebuild entered clone migration at {stage:?}")
+    let _no_clone = RepublishTestHookGuard::set(|stage, _| {
+        panic!("schema-17 rebuild entered clone republish at {stage:?}")
     });
     let mut writer = GenerationWriter::open(predecessor.root(), WriterOptions::default())
         .unwrap()
@@ -288,25 +321,25 @@ fn schema_17_fixture_is_rejected_then_rebuilt_only_from_source_authority() {
 }
 
 #[test]
-fn every_prepublication_migration_failure_keeps_the_predecessor_pointer_and_queries() {
+fn every_prepublication_republish_failure_keeps_the_base_pointer_and_queries() {
     let stages = [
-        MigrationStage::AfterCandidateCreation,
-        MigrationStage::BeforeCandidateCommit,
-        MigrationStage::AfterCandidateCommit,
-        MigrationStage::BeforeCandidateSync,
-        MigrationStage::AfterCandidateSync,
-        MigrationStage::BeforeCandidateVerification,
-        MigrationStage::AfterCandidateVerification,
-        MigrationStage::BeforePointerPublication,
+        RepublishStage::AfterCandidateCreation,
+        RepublishStage::BeforeCandidateCommit,
+        RepublishStage::AfterCandidateCommit,
+        RepublishStage::BeforeCandidateSync,
+        RepublishStage::AfterCandidateSync,
+        RepublishStage::BeforeCandidateVerification,
+        RepublishStage::AfterCandidateVerification,
+        RepublishStage::BeforePointerPublication,
     ];
 
     for fault_stage in stages {
         let predecessor = GoldenPredecessor::copy();
         let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
-        let fault = MigrationTestHookGuard::set(move |stage, _| {
+        let fault = RepublishTestHookGuard::set(move |stage, _| {
             if stage == fault_stage {
                 return Err(std::io::Error::other(format!(
-                    "injected predecessor migration fault at {stage:?}"
+                    "injected predecessor republish fault at {stage:?}"
                 ))
                 .into());
             }
@@ -342,11 +375,11 @@ fn every_prepublication_migration_failure_keeps_the_predecessor_pointer_and_quer
 }
 
 #[test]
-fn corrupt_migration_candidate_never_changes_or_damages_the_predecessor() {
+fn corrupt_republish_candidate_never_changes_or_damages_the_predecessor() {
     let predecessor = GoldenPredecessor::copy();
     let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
-    let fault = MigrationTestHookGuard::set(|stage, path| {
-        if stage == MigrationStage::BeforeCandidateVerification {
+    let fault = RepublishTestHookGuard::set(|stage, path| {
+        if stage == RepublishStage::BeforeCandidateVerification {
             fs::write(path.unwrap().join("meta.json"), b"corrupt candidate meta")?;
         }
         Ok(())
@@ -446,8 +479,8 @@ fn schema_18_rejects_the_retired_predecessor_fingerprint_policy_pair() {
     let mut manifest = load_publication_for_metas(generation.root(), &metas)
         .unwrap()
         .manifest;
-    manifest.core_record_contract_fingerprint = SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT.to_owned();
-    manifest.policy_schema_hash = SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH.to_owned();
+    manifest.core_record_contract_fingerprint = RETIRED_CORE_FINGERPRINT.to_owned();
+    manifest.policy_schema_hash = RETIRED_SOURCE_GENERATION_POLICY_HASH.to_owned();
     publish_unchecked_generation(generation.root(), &index, manifest, &[], Vec::new());
 
     let pointer_before = fs::read(generation.root().join("active-generation.json")).unwrap();
@@ -466,7 +499,7 @@ fn schema_18_rejects_the_retired_predecessor_fingerprint_policy_pair() {
         assert!(matches!(
             error,
             IndexError::CoreRecordContractMismatch { ref actual, .. }
-                if actual == SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
+                if actual == RETIRED_CORE_FINGERPRINT
         ));
     }
     assert_eq!(
@@ -487,7 +520,7 @@ fn unexpected_regular_file_is_not_cloned_and_keeps_predecessor_queryable() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationSourceTopology("unexpected directory entry")
+        IndexError::CurrentRepublishSourceTopology("unexpected directory entry")
     ));
     assert_eq!(
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
@@ -522,8 +555,8 @@ fn symlink_in_predecessor_generation_is_rejected_before_clone() {
     assert!(matches!(
         open_writer_error(predecessor.root()),
         IndexError::ChecksumMismatch
-            | IndexError::PredecessorMigrationSourceTopology(
-                "symlinked or non-directory migration source"
+            | IndexError::CurrentRepublishSourceTopology(
+                "symlinked or non-directory republish source"
             )
     ));
     assert_eq!(
@@ -548,8 +581,8 @@ fn symlinked_active_generation_directory_is_rejected_without_following_it() {
     assert!(matches!(
         open_writer_error(predecessor.root()),
         IndexError::ChecksumMismatch
-            | IndexError::PredecessorMigrationSourceTopology(
-                "symlinked or non-directory migration source"
+            | IndexError::CurrentRepublishSourceTopology(
+                "symlinked or non-directory republish source"
             )
     ));
     assert_eq!(
@@ -581,8 +614,8 @@ fn active_generation_replacement_race_is_detected_by_descriptor_identity() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationSourceTopology(
-            "active generation directory changed during migration"
+        IndexError::CurrentRepublishSourceTopology(
+            "active generation directory changed during republish"
         )
     ));
     assert_eq!(
@@ -613,7 +646,7 @@ fn managed_metadata_path_escape_is_rejected_before_clone() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationSourceTopology("managed path escapes generation directory")
+        IndexError::CurrentRepublishSourceTopology("managed path escapes generation directory")
     ));
     assert_eq!(
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
@@ -641,7 +674,7 @@ fn oversized_managed_metadata_hits_the_real_clone_byte_bound_before_copy() {
     assert!(
         matches!(
             error,
-            IndexError::PredecessorMigrationByteLimit {
+            IndexError::CurrentRepublishByteLimit {
                 actual: error_actual,
                 maximum: error_maximum
             } if error_actual == actual && error_maximum == maximum
@@ -661,7 +694,7 @@ fn oversized_managed_metadata_hits_the_real_clone_byte_bound_before_copy() {
     );
 }
 
-fn fill_generation_past_migration_entry_cap(generation: &Path) {
+fn fill_generation_past_republish_entry_cap(generation: &Path) {
     const OVERFLOW_ENTRY_COUNT: usize = 4_097;
     let existing = fs::read_dir(generation).unwrap().count();
     assert!(existing < OVERFLOW_ENTRY_COUNT);
@@ -681,12 +714,12 @@ fn fill_generation_past_migration_entry_cap(generation: &Path) {
 #[test]
 fn native_clone_enforces_the_entry_cap_during_enumeration() {
     let predecessor = GoldenPredecessor::copy();
-    fill_generation_past_migration_entry_cap(&active_generation_path(predecessor.root()));
+    fill_generation_past_republish_entry_cap(&active_generation_path(predecessor.root()));
     let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationFileLimit {
+        IndexError::CurrentRepublishFileLimit {
             actual: 4_097,
             maximum: 4_096
         }
@@ -732,7 +765,7 @@ fn forced_copy_fallback_is_bounded_instrumented_and_migrates() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn forced_copy_write_failures_preserve_predecessor_pointer_and_queries() {
+fn forced_copy_write_failures_preserve_base_pointer_and_queries() {
     for raw_error in [libc::ENOSPC, libc::EIO] {
         let predecessor = GoldenPredecessor::copy();
         let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
@@ -804,7 +837,7 @@ fn native_copy_detects_growth_without_writing_past_authenticated_length() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationSourceTopology("source file grew while cloning")
+        IndexError::CurrentRepublishSourceTopology("source file grew while cloning")
     ));
     assert_eq!(
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
@@ -830,18 +863,18 @@ fn native_copy_detects_growth_without_writing_past_authenticated_length() {
 #[test]
 fn native_candidate_replacement_is_rejected_and_cleanup_preserves_replacement() {
     for replacement_stage in [
-        MigrationStage::AfterCandidateCreation,
-        MigrationStage::BeforeCandidateCommit,
-        MigrationStage::BeforeCandidateSync,
-        MigrationStage::BeforeCandidateVerification,
-        MigrationStage::BeforePointerPublication,
+        RepublishStage::AfterCandidateCreation,
+        RepublishStage::BeforeCandidateCommit,
+        RepublishStage::BeforeCandidateSync,
+        RepublishStage::BeforeCandidateVerification,
+        RepublishStage::BeforePointerPublication,
     ] {
         let predecessor = GoldenPredecessor::copy();
         let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
         let replacement = std::rc::Rc::new(std::cell::RefCell::new(None::<(PathBuf, PathBuf)>));
         let replacement_for_hook = std::rc::Rc::clone(&replacement);
         let mut replaced = false;
-        let hook = MigrationTestHookGuard::set(move |stage, path| {
+        let hook = RepublishTestHookGuard::set(move |stage, path| {
             if stage == replacement_stage && !replaced {
                 let candidate = path.unwrap().to_path_buf();
                 let displaced = candidate.with_file_name(format!(
@@ -862,8 +895,8 @@ fn native_candidate_replacement_is_rejected_and_cleanup_preserves_replacement() 
 
         assert!(matches!(
             open_writer_error(predecessor.root()),
-            IndexError::PredecessorMigrationSourceTopology(
-                "active generation directory changed during migration"
+            IndexError::CurrentRepublishSourceTopology(
+                "active generation directory changed during republish"
             )
         ));
         assert_eq!(
@@ -904,7 +937,7 @@ fn insufficient_clone_headroom_is_rejected_before_writes() {
 
     assert!(matches!(
         open_writer_error(predecessor.root()),
-        IndexError::PredecessorMigrationInsufficientHeadroom {
+        IndexError::CurrentRepublishInsufficientHeadroom {
             available: 0,
             required
         } if required > 0
@@ -937,7 +970,7 @@ fn pointer_directory_fsync_error_returns_committed_visible_status_and_restarts_c
 
     let outcome = open_republish_writer(predecessor.root()).unwrap();
     let recovery = outcome
-        .committed_migration_recovery()
+        .committed_republish_recovery()
         .expect("visible pointer durability uncertainty must be reported as committed")
         .clone();
     let writer = outcome.into_writer().unwrap();
@@ -950,10 +983,9 @@ fn pointer_directory_fsync_error_returns_committed_visible_status_and_restarts_c
     drop(fault);
 
     let current = VerifiedIndex::open(predecessor.root()).unwrap();
-    assert!(!current.uses_allowlisted_predecessor_contract());
     assert_eq!(current.count_term("evidence").unwrap(), 3);
     let restarted = GenerationWriter::open(predecessor.root(), WriterOptions::default()).unwrap();
-    assert!(restarted.committed_migration_recovery().is_none());
+    assert!(matches!(restarted, GenerationWriterOpenOutcome::Ready(_)));
     drop(restarted.into_writer().unwrap());
 }
 
@@ -977,15 +1009,12 @@ fn malformed_pointer_reload_after_visibility_is_repaired_as_committed_outcome() 
     });
 
     let outcome = open_republish_writer(predecessor.root())
-        .expect("visible migration must not be reported as an ordinary error");
+        .expect("visible republish must not be reported as an ordinary error");
     assert!(matches!(
         &outcome,
-        GenerationWriterOpenOutcome::RecoveredCommittedMigration { .. }
+        RepublishWriterOpenOutcome::CommittedVisible { .. }
     ));
     drop(outcome.into_writer().unwrap());
-    assert!(!VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
     drop(reconciliation_fault);
     drop(atomic_fault);
 }
@@ -1012,7 +1041,7 @@ fn unreadable_pointer_reconciliation_and_failed_repair_require_committed_recover
     let reconciliation_fault = PointerReconciliationTestHookGuard::set(|_| {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "injected unreadable successor pointer",
+            "injected unreadable replacement pointer",
         )
         .into())
     });
@@ -1020,16 +1049,12 @@ fn unreadable_pointer_reconciliation_and_failed_repair_require_committed_recover
     let outcome = open_republish_writer(predecessor.root())
         .expect("postvisibility unknown state must be a committed outcome");
     let recovery = match outcome {
-        GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired { recovery } => recovery,
+        RepublishWriterOpenOutcome::CommittedRecoveryRequired { recovery } => recovery,
         _ => panic!("failed pointer repair unexpectedly produced a usable writer"),
     };
     assert_eq!(recovery.generation_id(), predecessor.generation_id());
     assert!(recovery.detail().contains("pointer reload failed"));
     assert!(recovery.detail().contains("pointer repair failed"));
-    assert!(!VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
-
     drop(reconciliation_fault);
     drop(atomic_fault);
     let restarted = GenerationWriter::open(predecessor.root(), WriterOptions::default()).unwrap();
@@ -1057,24 +1082,21 @@ fn atomic_pointer_rename_failure_is_previsibility_and_preserves_predecessor_byte
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
         pointer_before
     );
-    assert!(!VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
     drop(fault);
 }
 
 #[test]
 fn post_publication_cleanup_failure_is_best_effort_and_restart_keeps_current_authority() {
     let predecessor = GoldenPredecessor::copy();
-    let fault = MigrationTestHookGuard::set(|stage, _| {
-        if stage == MigrationStage::PostPublicationCleanup {
+    let fault = RepublishTestHookGuard::set(|stage, _| {
+        if stage == RepublishStage::PostPublicationCleanup {
             return Err(io::Error::other("injected post-publication cleanup failure").into());
         }
         Ok(())
     });
 
     let outcome = open_republish_writer(predecessor.root()).unwrap();
-    assert!(outcome.committed_migration_recovery().is_none());
+    assert!(outcome.committed_republish_recovery().is_none());
     let writer = outcome.into_writer().unwrap();
     drop(writer);
     drop(fault);
@@ -1098,9 +1120,9 @@ fn post_publication_cleanup_failure_is_best_effort_and_restart_keeps_current_aut
 
 fn subprocess_paths(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     (
-        root.join("migration-child.marker"),
-        root.join("migration-child.continue"),
-        root.join("migration-child.result"),
+        root.join("republish-child.marker"),
+        root.join("republish-child.continue"),
+        root.join("republish-child.result"),
     )
 }
 
@@ -1113,7 +1135,7 @@ fn pause_subprocess(marker: &Path, continue_path: &Path, witness: &str) -> io::R
 }
 
 #[test]
-fn predecessor_migration_subprocess_worker() {
+fn predecessor_republish_subprocess_worker() {
     let Ok(mode) = env::var(SUBPROCESS_MODE_ENV) else {
         return;
     };
@@ -1122,13 +1144,13 @@ fn predecessor_migration_subprocess_worker() {
     let continue_path = PathBuf::from(env::var_os(SUBPROCESS_CONTINUE_ENV).unwrap());
     let result = PathBuf::from(env::var_os(SUBPROCESS_RESULT_ENV).unwrap());
 
-    let mut migration_guard = None;
+    let mut republish_guard = None;
     let mut atomic_guard = None;
-    if let Some(stage_name) = mode.strip_prefix("pause-migration:") {
+    if let Some(stage_name) = mode.strip_prefix("pause-republish:") {
         let stage_name = stage_name.to_owned();
         let marker = marker.clone();
         let continue_path = continue_path.clone();
-        migration_guard = Some(MigrationTestHookGuard::set(move |stage, _| {
+        republish_guard = Some(RepublishTestHookGuard::set(move |stage, _| {
             if format!("{stage:?}") == stage_name {
                 pause_subprocess(&marker, &continue_path, &stage_name)?;
             }
@@ -1179,12 +1201,12 @@ fn predecessor_migration_subprocess_worker() {
             Ok(())
         }));
     } else {
-        panic!("unknown predecessor migration child mode {mode}");
+        panic!("unknown predecessor republish child mode {mode}");
     }
 
     let detail = match open_republish_writer(&root) {
         Ok(outcome) => {
-            let recovered = outcome.committed_migration_recovery().is_some();
+            let recovered = outcome.committed_republish_recovery().is_some();
             let generation_id = outcome
                 .into_writer()
                 .unwrap()
@@ -1199,17 +1221,17 @@ fn predecessor_migration_subprocess_worker() {
     };
     fs::write(result, detail).unwrap();
     drop(atomic_guard);
-    drop(migration_guard);
+    drop(republish_guard);
 }
 
-fn spawn_migration_subprocess(root: &Path, mode: &str) -> Child {
+fn spawn_republish_subprocess(root: &Path, mode: &str) -> Child {
     let (marker, continue_path, result) = subprocess_paths(root);
     for path in [&marker, &continue_path, &result] {
         let _ = fs::remove_file(path);
     }
     Command::new(env::current_exe().unwrap())
         .arg("--exact")
-        .arg("tests::migration::predecessor_migration_subprocess_worker")
+        .arg("tests::republish::predecessor_republish_subprocess_worker")
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(SUBPROCESS_MODE_ENV, mode)
@@ -1230,14 +1252,14 @@ fn wait_for_subprocess_marker(child: &mut Child, marker: &Path) {
             return;
         }
         if let Some(status) = child.try_wait().unwrap() {
-            panic!("migration child exited before checkpoint: {status}");
+            panic!("republish child exited before checkpoint: {status}");
         }
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("timed out waiting for migration child checkpoint");
+    panic!("timed out waiting for republish child checkpoint");
 }
 
-fn kill_migration_subprocess(child: &mut Child) {
+fn kill_republish_subprocess(child: &mut Child) {
     child.kill().unwrap();
     assert!(!child.wait().unwrap().success());
 }
@@ -1245,8 +1267,8 @@ fn kill_migration_subprocess(child: &mut Child) {
 #[test]
 fn subprocess_process_death_around_commit_sync_and_pointer_rename_recovers_correct_authority() {
     for (mode, successor_visible) in [
-        ("pause-migration:AfterCandidateCommit", false),
-        ("pause-migration:AfterCandidateSync", false),
+        ("pause-republish:AfterCandidateCommit", false),
+        ("pause-republish:AfterCandidateSync", false),
         ("pause-after-pointer-temp-sync", false),
         ("pause-after-pointer-replace", true),
     ] {
@@ -1254,15 +1276,14 @@ fn subprocess_process_death_around_commit_sync_and_pointer_rename_recovers_corre
         let held_reader = VerifiedIndex::open(predecessor.root()).unwrap();
         let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
         let (marker, _, _) = subprocess_paths(predecessor.root());
-        let mut child = spawn_migration_subprocess(predecessor.root(), mode);
+        let mut child = spawn_republish_subprocess(predecessor.root(), mode);
         wait_for_subprocess_marker(&mut child, &marker);
-        kill_migration_subprocess(&mut child);
+        kill_republish_subprocess(&mut child);
 
         let pointer_after = fs::read(predecessor.root().join("active-generation.json")).unwrap();
         assert_eq!(pointer_after != pointer_before, successor_visible, "{mode}");
         assert_eq!(held_reader.count_term("evidence").unwrap(), 3);
-        let before_restart = VerifiedIndex::open(predecessor.root()).unwrap();
-        assert!(!before_restart.uses_allowlisted_predecessor_contract());
+        VerifiedIndex::open(predecessor.root()).unwrap();
 
         drop(
             open_republish_writer(predecessor.root())
@@ -1271,7 +1292,6 @@ fn subprocess_process_death_around_commit_sync_and_pointer_rename_recovers_corre
                 .unwrap(),
         );
         let after_restart = VerifiedIndex::open(predecessor.root()).unwrap();
-        assert!(!after_restart.uses_allowlisted_predecessor_contract());
         assert_eq!(after_restart.count_term("evidence").unwrap(), 3);
     }
 }
@@ -1280,7 +1300,7 @@ fn subprocess_process_death_around_commit_sync_and_pointer_rename_recovers_corre
 fn subprocess_pointer_enospc_is_prepublication_failure_and_retry_migrates() {
     let predecessor = GoldenPredecessor::copy();
     let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
-    let mut child = spawn_migration_subprocess(predecessor.root(), "fail-pointer-write-enospc");
+    let mut child = spawn_republish_subprocess(predecessor.root(), "fail-pointer-write-enospc");
     assert!(child.wait().unwrap().success());
     let (_, _, result) = subprocess_paths(predecessor.root());
     assert!(fs::read_to_string(result).unwrap().starts_with("ERROR"));
@@ -1288,31 +1308,24 @@ fn subprocess_pointer_enospc_is_prepublication_failure_and_retry_migrates() {
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
         pointer_before
     );
-    assert!(!VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
     drop(
         open_republish_writer(predecessor.root())
             .unwrap()
             .into_writer()
             .unwrap(),
     );
-    assert!(!VerifiedIndex::open(predecessor.root())
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
 }
 
 #[test]
 fn subprocess_post_rename_fsync_failure_is_committed_and_restart_reads_successor() {
     let predecessor = GoldenPredecessor::copy();
-    let mut child = spawn_migration_subprocess(predecessor.root(), "fail-pointer-directory-sync");
+    let mut child = spawn_republish_subprocess(predecessor.root(), "fail-pointer-directory-sync");
     assert!(child.wait().unwrap().success());
     let (_, _, result) = subprocess_paths(predecessor.root());
     let result = fs::read_to_string(result).unwrap();
     assert!(result.starts_with("COMMITTED "), "{result}");
     assert!(result.ends_with(" true"), "{result}");
     let current = VerifiedIndex::open(predecessor.root()).unwrap();
-    assert!(!current.uses_allowlisted_predecessor_contract());
     drop(
         GenerationWriter::open(predecessor.root(), WriterOptions::default())
             .unwrap()

@@ -235,11 +235,12 @@ fn event_origin_has_an_exact_fail_closed_wire_shape() {
     let ancestor_event_id = related_event_id(ancestor_session_id, 41);
     let mut record = record();
     record.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id,
-        ancestor_event_id,
+        ancestor_session_id: Box::new(ancestor_session_id),
+        ancestor_event_id: Box::new(ancestor_event_id),
         proof: EventCopyProofKind::NativeCopiedFromField,
     };
     let encoded = record.encode_stored().unwrap();
+    assert_eq!(CoreRecord::decode_stored(&encoded).unwrap(), record);
     let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(
         wire["event_origin"],
@@ -269,8 +270,8 @@ fn event_origin_has_an_exact_fail_closed_wire_shape() {
 fn copied_origin_rejects_self_references() {
     let mut record = record();
     record.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: record.session_id,
-        ancestor_event_id: record.event_id,
+        ancestor_session_id: Box::new(record.session_id),
+        ancestor_event_id: Box::new(record.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
     assert!(matches!(

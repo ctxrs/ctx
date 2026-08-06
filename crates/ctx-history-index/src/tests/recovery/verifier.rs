@@ -205,8 +205,8 @@ fn complete_verifier_rejects_injected_copied_body_postings() {
         )
         .unwrap();
     copied.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: original.session_id,
-        ancestor_event_id: original.event_id,
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
         proof: EventCopyProofKind::NativeCopiedFromField,
     };
     copied.validate_contract().unwrap();

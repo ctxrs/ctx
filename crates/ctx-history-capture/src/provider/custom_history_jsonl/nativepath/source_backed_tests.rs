@@ -377,8 +377,8 @@ fn provider_native_lineage_contract_projects_exact_relationship_and_copy() {
     assert_eq!(
         copy.event_origin,
         EventOrigin::CopiedFromAncestor {
-            ancestor_session_id: original.session_id,
-            ancestor_event_id: original.event_id,
+            ancestor_session_id: Box::new(original.session_id),
+            ancestor_event_id: Box::new(original.event_id),
             proof: EventCopyProofKind::NativeCopiedFromField,
         }
     );

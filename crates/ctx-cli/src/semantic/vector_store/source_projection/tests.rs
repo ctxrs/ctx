@@ -492,8 +492,8 @@ fn copied_events_never_enter_the_source_backed_semantic_projection() -> Result<(
         original.session_id,
     )?;
     copied.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: original.session_id,
-        ancestor_event_id: original.event_id,
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
     copied.validate_contract()?;

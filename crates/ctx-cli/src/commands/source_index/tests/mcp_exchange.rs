@@ -240,8 +240,8 @@ fn copied_lineage_is_hidden_from_mcp_search_but_visible_in_show_and_query_events
     copied.root_session_id = ancestor.session_id;
     copied.session_relationship = SessionRelationshipKind::Forked;
     copied.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: ancestor.session_id,
-        ancestor_event_id: ancestor.event_id,
+        ancestor_session_id: Box::new(ancestor.session_id),
+        ancestor_event_id: Box::new(ancestor.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
     let ancestor = fixture_core_event(&ancestor, "ancestor body");

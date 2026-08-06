@@ -41,9 +41,9 @@ fn subprocess_continuous_readers_query_across_atomic_predecessor_swap() {
         thread::yield_now();
     }
     let (marker, continue_path, result) = subprocess_paths(predecessor.root());
-    let mut child = spawn_migration_subprocess(
+    let mut child = spawn_republish_subprocess(
         predecessor.root(),
-        "pause-migration:BeforePointerPublication",
+        "pause-republish:BeforePointerPublication",
     );
     wait_for_subprocess_marker(&mut child, &marker);
     let before_continue = before_swap_reads.load(std::sync::atomic::Ordering::Acquire);

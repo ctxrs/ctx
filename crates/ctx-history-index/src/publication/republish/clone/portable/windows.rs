@@ -188,7 +188,7 @@ pub(super) fn directory_entries(
             .checked_add(1)
             .ok_or(IndexError::CountOverflow)?;
         if actual > maximum {
-            return Err(IndexError::PredecessorMigrationFileLimit { actual, maximum });
+            return Err(IndexError::CurrentRepublishFileLimit { actual, maximum });
         }
         entries.push(entry.file_name());
     }
@@ -210,7 +210,7 @@ pub(super) fn object_identity(file: &File) -> io::Result<ObjectIdentity> {
     if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "migration path is a Windows reparse point",
+            "republish path is a Windows reparse point",
         ));
     }
     Ok(ObjectIdentity {
@@ -288,7 +288,7 @@ pub(super) fn discard_destination(
     for name in directory_entries(
         destination,
         destination_path,
-        super::MAX_MIGRATION_DIRECTORY_ENTRIES,
+        super::MAX_REPUBLISH_DIRECTORY_ENTRIES,
     )
     .map_err(|error| io::Error::other(error.to_string()))?
     {

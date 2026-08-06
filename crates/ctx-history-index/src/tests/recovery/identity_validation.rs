@@ -52,8 +52,8 @@ fn copied_event_resolves_exactly_to_its_declared_ancestor() {
     )
     .unwrap();
     copy.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: original.session_id,
-        ancestor_event_id: original.event_id,
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
 
@@ -81,8 +81,8 @@ fn copied_event_with_a_missing_target_cannot_publish() {
     )
     .unwrap();
     copy.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: missing.session_id,
-        ancestor_event_id: missing.event_id,
+        ancestor_session_id: Box::new(missing.session_id),
+        ancestor_event_id: Box::new(missing.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
 
@@ -190,8 +190,8 @@ fn direct_copy_chain_resolves_to_one_noncopy_original() {
         )
         .unwrap();
     middle.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: original.session_id,
-        ancestor_event_id: original.event_id,
+        ancestor_session_id: Box::new(original.session_id),
+        ancestor_event_id: Box::new(original.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
     let mut leaf = document_for_session(&source, "leaf", 3, "leaf copy");
@@ -202,8 +202,8 @@ fn direct_copy_chain_resolves_to_one_noncopy_original() {
     )
     .unwrap();
     leaf.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: middle.session_id,
-        ancestor_event_id: middle.event_id,
+        ancestor_session_id: Box::new(middle.session_id),
+        ancestor_event_id: Box::new(middle.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
 
@@ -253,8 +253,8 @@ fn changed_intermediate_edge_revalidates_unchanged_descendant_copy() {
     )
     .unwrap();
     copy.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: ancestor.session_id,
-        ancestor_event_id: ancestor.event_id,
+        ancestor_session_id: Box::new(ancestor.session_id),
+        ancestor_event_id: Box::new(ancestor.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
 
@@ -349,8 +349,8 @@ fn changed_edge_revalidates_copies_in_transitive_descendants() {
     )
     .unwrap();
     copy.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: ancestor.session_id,
-        ancestor_event_id: ancestor.event_id,
+        ancestor_session_id: Box::new(ancestor.session_id),
+        ancestor_event_id: Box::new(ancestor.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
 

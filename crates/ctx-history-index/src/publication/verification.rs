@@ -146,6 +146,7 @@ pub(crate) fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest
 }
 
 /// Verifies the complete publication authority carried by one immutable searcher.
+#[cfg(test)]
 pub(crate) fn verify_complete_searcher(
     searcher: &Searcher,
     manifest: &GenerationManifest,
@@ -216,6 +217,7 @@ impl PhysicalIntegrityAudit {
 /// `topology_authority` is the caller's already-decoded publication topology.
 /// `None` is reserved for a new root or a source-authoritative cold rebuild whose
 /// incompatible pointer must remain opaque until the candidate replaces it.
+#[cfg(test)]
 pub(crate) fn physical_integrity_digest(
     index: &tantivy::Index,
     generation_path: &Path,

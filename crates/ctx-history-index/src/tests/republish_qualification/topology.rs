@@ -127,7 +127,7 @@ pub(super) fn verify_clone_topology(
             shared_payload_bytes = shared_payload_bytes.saturating_add(predecessor_metadata.len());
         } else if mode == CloneMode::HardLink {
             return Err(format!(
-                "requested hard-link migration silently copied payload {}",
+                "requested hard-link republish silently copied payload {}",
                 relative.display()
             ));
         }
@@ -140,13 +140,13 @@ pub(super) fn verify_clone_topology(
         {
             let candidate_relative = candidate_inodes[inode];
             return Err(format!(
-                "forced-copy migration shares payload inode {inode:?}: predecessor={} candidate={}",
+                "forced-copy republish shares payload inode {inode:?}: predecessor={} candidate={}",
                 predecessor_relative.display(),
                 candidate_relative.display()
             ));
         }
         if shared_payload_files != 0 {
-            return Err("forced-copy migration retained shared payload inodes".to_owned());
+            return Err("forced-copy republish retained shared payload inodes".to_owned());
         }
     }
 

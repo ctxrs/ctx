@@ -260,8 +260,8 @@ fn codex_forked_history_attributes_one_canonical_execution_origin() {
     assert_eq!(
         copied_child_result.event_origin,
         EventOrigin::CopiedFromAncestor {
-            ancestor_session_id: parent_session,
-            ancestor_event_id: parent_result.event_id,
+            ancestor_session_id: Box::new(parent_session),
+            ancestor_event_id: Box::new(parent_result.event_id),
             proof: EventCopyProofKind::NativeCallResultIdentity,
         }
     );

@@ -4,9 +4,9 @@ use crate::Result;
 
 use super::super::super::generation::CandidateGeneration;
 
-pub(in crate::publication::migration) struct MigrationCandidate {
-    pub(in crate::publication::migration) directory_name: String,
-    pub(in crate::publication::migration) index: Index,
+pub(in crate::publication::republish) struct RepublishCandidate {
+    pub(in crate::publication::republish) directory_name: String,
+    pub(in crate::publication::republish) index: Index,
     authentication: CandidateAuthentication,
 }
 
@@ -17,7 +17,7 @@ pub(super) enum CandidateAuthentication {
     Portable(super::portable::CandidateGuard),
 }
 
-impl MigrationCandidate {
+impl RepublishCandidate {
     pub(super) fn new(
         candidate: CandidateGeneration,
         authentication: CandidateAuthentication,
@@ -29,7 +29,7 @@ impl MigrationCandidate {
         }
     }
 
-    pub(in crate::publication::migration) fn validate_binding(&self) -> Result<()> {
+    pub(in crate::publication::republish) fn validate_binding(&self) -> Result<()> {
         match &self.authentication {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             CandidateAuthentication::DescriptorClone(guard) => guard.validate_binding(),
@@ -38,7 +38,7 @@ impl MigrationCandidate {
         }
     }
 
-    pub(in crate::publication::migration) fn discard(self) {
+    pub(in crate::publication::republish) fn discard(self) {
         let Self {
             index,
             authentication,

@@ -97,20 +97,20 @@ pub enum IndexError {
         "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
     )]
     CoreRecordContractMismatch { expected: String, actual: String },
-    #[error("allowlisted predecessor Core record contains successor-only member {member}")]
-    PredecessorCoreRecordShapeMismatch { member: &'static str },
-    #[error("predecessor migration source topology is not authenticated: {0}")]
-    PredecessorMigrationSourceTopology(&'static str),
-    #[error("predecessor migration source has too many clone files: {actual}, maximum {maximum}")]
-    PredecessorMigrationFileLimit { actual: usize, maximum: usize },
+    #[cfg(test)]
+    #[error("current publication republish source topology is unsupported: {0}")]
+    CurrentRepublishSourceTopology(&'static str),
+    #[cfg(test)]
+    #[error("current publication republish exceeds the file limit: {actual}/{maximum}")]
+    CurrentRepublishFileLimit { actual: usize, maximum: usize },
+    #[cfg(test)]
+    #[error("current publication republish exceeds the byte limit: {actual}/{maximum}")]
+    CurrentRepublishByteLimit { actual: u64, maximum: u64 },
+    #[cfg(test)]
     #[error(
-        "predecessor migration source is too large to clone: {actual} bytes, maximum {maximum}"
+        "current publication republish needs {required} bytes of headroom, but only {available} are available"
     )]
-    PredecessorMigrationByteLimit { actual: u64, maximum: u64 },
-    #[error(
-        "predecessor migration has insufficient filesystem headroom: {available} bytes available, {required} required"
-    )]
-    PredecessorMigrationInsufficientHeadroom { available: u64, required: u64 },
+    CurrentRepublishInsufficientHeadroom { required: u64, available: u64 },
     #[error(
         "Core record revisions do not match the active generation policy: normalization {normalization}/{expected_normalization}, content {content}/{expected_content}"
     )]
@@ -440,10 +440,8 @@ pub enum IndexError {
 /// A predecessor migration whose atomic pointer replacement became visible,
 /// but whose durability or subsequent pointer reconciliation was uncertain.
 ///
-/// This is a committed outcome, not a failed migration: the successor is query
-/// authority. [`GenerationWriterOpenOutcome`](crate::GenerationWriterOpenOutcome)
-/// distinguishes a recovered usable writer from a state that still requires
-/// fix-forward recovery.
+/// This compatibility result remains public for downstream callers even though
+/// current writer opens no longer construct it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedPredecessorMigrationRecovery {
     generation_id: String,
@@ -451,13 +449,6 @@ pub struct CommittedPredecessorMigrationRecovery {
 }
 
 impl CommittedPredecessorMigrationRecovery {
-    pub(crate) fn new(generation_id: String, detail: String) -> Self {
-        Self {
-            generation_id,
-            detail,
-        }
-    }
-
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }

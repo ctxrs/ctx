@@ -21,8 +21,8 @@ use super::super::super::{
 };
 use super::{
     admit_clone_resource, validate_single_component, MANAGED_FILE, MAX_MANAGED_METADATA_BYTES,
-    MAX_MIGRATION_CLONE_BYTES, MAX_MIGRATION_CLONE_FILES, MAX_MIGRATION_DIRECTORY_ENTRIES,
-    MIGRATION_HEADROOM_RESERVE_BYTES, TANTIVY_LOCK_FILES,
+    MAX_REPUBLISH_CLONE_BYTES, MAX_REPUBLISH_CLONE_FILES, MAX_REPUBLISH_DIRECTORY_ENTRIES,
+    REPUBLISH_HEADROOM_RESERVE_BYTES, TANTIVY_LOCK_FILES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,8 +114,8 @@ impl BoundDirectory {
             .map_err(source_topology_open_error)?;
         require_directory(entry_kind(&named.metadata()?)?)?;
         if platform::object_identity(&named)? != self.identity {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
-                "migration directory changed after authentication",
+            return Err(IndexError::CurrentRepublishSourceTopology(
+                "republish directory changed after authentication",
             ));
         }
         Ok(())
@@ -124,8 +124,8 @@ impl BoundDirectory {
     fn validate_path_binding(&self) -> Result<()> {
         let named = Self::open_path(&self.path)?;
         if named.identity != self.identity {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
-                "migration directory path changed after authentication",
+            return Err(IndexError::CurrentRepublishSourceTopology(
+                "republish directory path changed after authentication",
             ));
         }
         Ok(())
@@ -181,7 +181,7 @@ struct ClonePlan {
     required_headroom: u64,
 }
 
-pub(super) fn create_authenticated_migration_candidate(
+pub(super) fn create_authenticated_republish_candidate(
     root: &Path,
     predecessor_pointer: &ActiveGenerationPointer,
     predecessor_index: &Index,
@@ -198,7 +198,7 @@ pub(super) fn create_authenticated_migration_candidate(
     let available = available_bytes(&generations)?;
     record_plan_metrics(&plan, available);
     if available < plan.required_headroom {
-        return Err(IndexError::PredecessorMigrationInsufficientHeadroom {
+        return Err(IndexError::CurrentRepublishInsufficientHeadroom {
             available,
             required: plan.required_headroom,
         });
@@ -278,11 +278,11 @@ fn authenticated_clone_plan(
     let mut total_bytes = 0_u64;
     source.validate_child_binding(generations, source_name)?;
     for name in
-        platform::directory_entries(&source.file, &source.path, MAX_MIGRATION_DIRECTORY_ENTRIES)?
+        platform::directory_entries(&source.file, &source.path, MAX_REPUBLISH_DIRECTORY_ENTRIES)?
     {
         let name_text = name
             .to_str()
-            .ok_or(IndexError::PredecessorMigrationSourceTopology(
+            .ok_or(IndexError::CurrentRepublishSourceTopology(
                 "non-UTF-8 directory entry",
             ))?;
         let relative = PathBuf::from(&name);
@@ -294,8 +294,8 @@ fn authenticated_clone_plan(
                 &mut total_files,
                 &mut total_bytes,
                 opened.identity.bytes,
-                MAX_MIGRATION_CLONE_FILES,
-                MAX_MIGRATION_CLONE_BYTES,
+                MAX_REPUBLISH_CLONE_FILES,
+                MAX_REPUBLISH_CLONE_BYTES,
             )?;
             planned.insert(
                 relative.clone(),
@@ -307,7 +307,7 @@ fn authenticated_clone_plan(
             );
         } else if name_text == MANAGED_FILE {
             if opened.identity.bytes > MAX_MANAGED_METADATA_BYTES {
-                return Err(IndexError::PredecessorMigrationByteLimit {
+                return Err(IndexError::CurrentRepublishByteLimit {
                     actual: opened.identity.bytes,
                     maximum: MAX_MANAGED_METADATA_BYTES,
                 });
@@ -317,8 +317,8 @@ fn authenticated_clone_plan(
                 &mut total_files,
                 &mut total_bytes,
                 opened.identity.bytes,
-                MAX_MIGRATION_CLONE_FILES,
-                MAX_MIGRATION_CLONE_BYTES,
+                MAX_REPUBLISH_CLONE_FILES,
+                MAX_REPUBLISH_CLONE_BYTES,
             )?;
             planned.insert(
                 relative.clone(),
@@ -331,36 +331,39 @@ fn authenticated_clone_plan(
         } else if TANTIVY_LOCK_FILES.contains(&name_text) && opened.identity.bytes == 0 {
             continue;
         } else {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "unexpected directory entry",
             ));
         }
     }
     source.validate_child_binding(generations, source_name)?;
     if seen_active != active || !managed_seen {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "active or managed file missing",
         ));
     }
 
-    let managed = planned.get(Path::new(MANAGED_FILE)).ok_or(
-        IndexError::PredecessorMigrationSourceTopology("managed file missing"),
-    )?;
+    let managed =
+        planned
+            .get(Path::new(MANAGED_FILE))
+            .ok_or(IndexError::CurrentRepublishSourceTopology(
+                "managed file missing",
+            ))?;
     let managed_bytes = read_planned_file(source, managed, MAX_MANAGED_METADATA_BYTES)?;
     let managed_paths: Vec<PathBuf> = serde_json::from_slice(&managed_bytes)
-        .map_err(|_| IndexError::PredecessorMigrationSourceTopology("invalid managed metadata"))?;
+        .map_err(|_| IndexError::CurrentRepublishSourceTopology("invalid managed metadata"))?;
     for path in &managed_paths {
         validate_single_component(path)?;
     }
     let managed_set = managed_paths.iter().cloned().collect::<BTreeSet<_>>();
     if managed_set.len() != managed_paths.len() || managed_set != active {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "managed metadata does not match active files",
         ));
     }
 
     let required_headroom = total_bytes
-        .checked_add(MIGRATION_HEADROOM_RESERVE_BYTES)
+        .checked_add(REPUBLISH_HEADROOM_RESERVE_BYTES)
         .ok_or(IndexError::CountOverflow)?;
     Ok(ClonePlan {
         files: planned.into_values().collect(),
@@ -394,7 +397,7 @@ fn open_bound_file(directory: &BoundDirectory, relative: &Path) -> Result<Opened
 fn open_planned_file(directory: &BoundDirectory, planned: &PlannedFile) -> Result<File> {
     let opened = open_bound_file(directory, &planned.path)?;
     if opened.identity != planned.identity {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "source file changed after authentication",
         ));
     }
@@ -407,14 +410,14 @@ fn read_planned_file(
     maximum: u64,
 ) -> Result<Vec<u8>> {
     if planned.identity.bytes > maximum {
-        return Err(IndexError::PredecessorMigrationByteLimit {
+        return Err(IndexError::CurrentRepublishByteLimit {
             actual: planned.identity.bytes,
             maximum,
         });
     }
     let mut file = open_planned_file(directory, planned)?;
     let allocation = usize::try_from(planned.identity.bytes).map_err(|_| {
-        IndexError::PredecessorMigrationByteLimit {
+        IndexError::CurrentRepublishByteLimit {
             actual: planned.identity.bytes,
             maximum,
         }
@@ -424,7 +427,7 @@ fn read_planned_file(
         .take(planned.identity.bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 != planned.identity.bytes {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "source file size changed while reading",
         ));
     }
@@ -451,7 +454,7 @@ fn clone_files(
             platform::create_regular_file_at(&destination.file, &destination.path, &planned.path)?;
 
         let remaining_allowance = plan.logical_bytes.checked_sub(copied_bytes).ok_or(
-            IndexError::PredecessorMigrationByteLimit {
+            IndexError::CurrentRepublishByteLimit {
                 actual: copied_bytes,
                 maximum: plan.logical_bytes,
             },
@@ -466,17 +469,17 @@ fn clone_files(
         destination_file.set_permissions(planned.permissions.clone())?;
         destination_file.sync_all()?;
         if copied != planned.identity.bytes {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "copy byte count does not match authenticated source",
             ));
         }
         copied_bytes = copied_bytes
             .checked_add(copied)
             .ok_or(IndexError::CountOverflow)?;
-        if copied_bytes > MAX_MIGRATION_CLONE_BYTES || copied_bytes > plan.logical_bytes {
-            return Err(IndexError::PredecessorMigrationByteLimit {
+        if copied_bytes > MAX_REPUBLISH_CLONE_BYTES || copied_bytes > plan.logical_bytes {
+            return Err(IndexError::CurrentRepublishByteLimit {
                 actual: copied_bytes,
-                maximum: plan.logical_bytes.min(MAX_MIGRATION_CLONE_BYTES),
+                maximum: plan.logical_bytes.min(MAX_REPUBLISH_CLONE_BYTES),
             });
         }
 
@@ -485,7 +488,7 @@ fn clone_files(
         if destination_opened.identity.bytes != planned.identity.bytes
             || destination_opened.identity.permissions != planned.identity.permissions
         {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "copied file metadata does not match authenticated source",
             ));
         }
@@ -511,7 +514,7 @@ fn copy_with_digest<R: Read, W: Write>(
     aggregate_allowance: u64,
 ) -> Result<(u64, [u8; 32])> {
     if expected_bytes > aggregate_allowance {
-        return Err(IndexError::PredecessorMigrationByteLimit {
+        return Err(IndexError::CurrentRepublishByteLimit {
             actual: expected_bytes,
             maximum: aggregate_allowance,
         });
@@ -525,7 +528,7 @@ fn copy_with_digest<R: Read, W: Write>(
             .map_err(|_| IndexError::CountOverflow)?;
         let read = source.read(&mut buffer[..read_limit])?;
         if read == 0 {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "source file truncated while cloning",
             ));
         }
@@ -537,7 +540,7 @@ fn copy_with_digest<R: Read, W: Write>(
     }
     let mut growth_probe = [0_u8; 1];
     if source.read(&mut growth_probe)? != 0 {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "source file grew while cloning",
         ));
     }
@@ -559,7 +562,7 @@ fn digest_exact_file(
             .map_err(|_| IndexError::CountOverflow)?;
         let read = file.read(&mut buffer[..read_limit])?;
         if read == 0 {
-            return Err(IndexError::PredecessorMigrationSourceTopology(
+            return Err(IndexError::CurrentRepublishSourceTopology(
                 "copied file truncated during verification",
             ));
         }
@@ -570,13 +573,13 @@ fn digest_exact_file(
     }
     let mut growth_probe = [0_u8; 1];
     if file.read(&mut growth_probe)? != 0 {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "copied file grew during verification",
         ));
     }
     let actual = FileIdentity::from_file(&file)?;
     if &actual != expected {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "copied file changed during verification",
         ));
     }
@@ -590,7 +593,7 @@ fn validate_open_and_named_file(
     file: &File,
 ) -> Result<()> {
     if FileIdentity::from_file(file)? != planned.identity {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "source file changed while cloning",
         ));
     }
@@ -605,7 +608,7 @@ fn validate_named_file(
     let named = platform::open_regular_file_at(&directory.file, &directory.path, relative)
         .map_err(source_topology_open_error)?;
     if FileIdentity::from_file(&named)? != *expected {
-        return Err(IndexError::PredecessorMigrationSourceTopology(
+        return Err(IndexError::CurrentRepublishSourceTopology(
             "named file changed after authentication",
         ));
     }
@@ -627,11 +630,11 @@ fn entry_kind(metadata: &Metadata) -> Result<EntryKind> {
 fn require_regular(kind: EntryKind) -> Result<()> {
     match kind {
         EntryKind::Regular => Ok(()),
-        EntryKind::LinkOrReparse => Err(IndexError::PredecessorMigrationSourceTopology(
-            "symlink, reparse point, or remote-provider file in migration source",
+        EntryKind::LinkOrReparse => Err(IndexError::CurrentRepublishSourceTopology(
+            "symlink, reparse point, or remote-provider file in republish source",
         )),
         EntryKind::Directory | EntryKind::Special => Err(
-            IndexError::PredecessorMigrationSourceTopology("non-regular directory entry"),
+            IndexError::CurrentRepublishSourceTopology("non-regular directory entry"),
         ),
     }
 }
@@ -639,19 +642,19 @@ fn require_regular(kind: EntryKind) -> Result<()> {
 fn require_directory(kind: EntryKind) -> Result<()> {
     match kind {
         EntryKind::Directory => Ok(()),
-        EntryKind::LinkOrReparse => Err(IndexError::PredecessorMigrationSourceTopology(
-            "symlinked, reparse-point, or remote-provider migration directory",
+        EntryKind::LinkOrReparse => Err(IndexError::CurrentRepublishSourceTopology(
+            "symlinked, reparse-point, or remote-provider republish directory",
         )),
-        EntryKind::Regular | EntryKind::Special => Err(
-            IndexError::PredecessorMigrationSourceTopology("migration path is not a directory"),
-        ),
+        EntryKind::Regular | EntryKind::Special => Err(IndexError::CurrentRepublishSourceTopology(
+            "republish path is not a directory",
+        )),
     }
 }
 
 fn source_topology_open_error(error: io::Error) -> IndexError {
     if platform::is_nofollow_rejection(&error) {
-        IndexError::PredecessorMigrationSourceTopology(
-            "symlink, reparse point, or remote-provider file in migration source",
+        IndexError::CurrentRepublishSourceTopology(
+            "symlink, reparse point, or remote-provider file in republish source",
         )
     } else {
         IndexError::Io(error)
@@ -836,7 +839,7 @@ mod tests {
         ] {
             assert!(matches!(
                 require_regular(kind),
-                Err(IndexError::PredecessorMigrationSourceTopology(_))
+                Err(IndexError::CurrentRepublishSourceTopology(_))
             ));
         }
     }
@@ -847,7 +850,7 @@ mod tests {
         let mut destination = Vec::new();
         assert!(matches!(
             copy_with_digest(&mut source, &mut destination, 4, 4),
-            Err(IndexError::PredecessorMigrationSourceTopology(
+            Err(IndexError::CurrentRepublishSourceTopology(
                 "source file grew while cloning"
             ))
         ));
@@ -857,7 +860,7 @@ mod tests {
         let mut destination = Vec::new();
         assert!(matches!(
             copy_with_digest(&mut source, &mut destination, 5, 4),
-            Err(IndexError::PredecessorMigrationByteLimit {
+            Err(IndexError::CurrentRepublishByteLimit {
                 actual: 5,
                 maximum: 4
             })

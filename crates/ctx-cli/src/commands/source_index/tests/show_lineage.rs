@@ -85,8 +85,8 @@ fn copied_event_show_list_and_search_models_share_typed_lineage() {
     copied.root_session_id = ancestor.session_id;
     copied.session_relationship = SessionRelationshipKind::Forked;
     copied.event_origin = EventOrigin::CopiedFromAncestor {
-        ancestor_session_id: ancestor.session_id,
-        ancestor_event_id: ancestor.event_id,
+        ancestor_session_id: Box::new(ancestor.session_id),
+        ancestor_event_id: Box::new(ancestor.event_id),
         proof: EventCopyProofKind::NativeEventIdentity,
     };
     let copied = fixture_core_event(&copied, "copied body remains directly visible");
