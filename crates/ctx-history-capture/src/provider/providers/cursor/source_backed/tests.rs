@@ -1341,13 +1341,14 @@ mod fidelity_identity_tests {
         write_transcript(&transcript, &[first]);
         let registry = registry(&root);
         let index = temp.path().join("index");
+        let source = source_key("native-session").unwrap();
 
-        reset_cursor_projected_records();
+        reset_cursor_projected_records(&source);
         reset_cursor_signature_records();
         reset_cursor_base_identity_probes();
         let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
         assert_eq!(cold.commit.indexed_documents, 1);
-        assert_eq!(cursor_projected_records(), 1);
+        assert_eq!(take_cursor_projected_records(&source), 1);
         assert_eq!(cursor_base_identity_probes(), 0);
         assert_eq!(
             cursor_signature_records(),
@@ -1357,14 +1358,14 @@ mod fidelity_identity_tests {
         let cold_ids = indexed_event_ids(&index, "native-session");
 
         append_transcript(&transcript, &second);
-        reset_cursor_projected_records();
+        reset_cursor_projected_records(&source);
         reset_cursor_signature_records();
         reset_cursor_base_identity_probes();
         let appended =
             refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
         assert_eq!(appended.commit.indexed_documents, 2);
         assert_eq!(
-            cursor_projected_records(),
+            take_cursor_projected_records(&source),
             1,
             "Cursor append work must remain bounded to the validated suffix"
         );
@@ -1378,13 +1379,13 @@ mod fidelity_identity_tests {
         assert_ids_preserved(&cold_ids, &appended_ids);
 
         append_transcript(&transcript, &second);
-        reset_cursor_projected_records();
+        reset_cursor_projected_records(&source);
         reset_cursor_signature_records();
         reset_cursor_base_identity_probes();
         let first_duplicate =
             refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
         assert_eq!(first_duplicate.commit.indexed_documents, 3);
-        assert_eq!(cursor_projected_records(), 1);
+        assert_eq!(take_cursor_projected_records(&source), 1);
         assert_eq!(cursor_signature_records(), 0);
         assert_eq!(cursor_base_identity_probes(), 2);
         let first_duplicate_ids = indexed_event_ids(&index, "native-session");
@@ -1392,13 +1393,13 @@ mod fidelity_identity_tests {
         assert_all_ids_distinct(&first_duplicate_ids);
 
         append_transcript(&transcript, &second);
-        reset_cursor_projected_records();
+        reset_cursor_projected_records(&source);
         reset_cursor_signature_records();
         reset_cursor_base_identity_probes();
         let second_duplicate =
             refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
         assert_eq!(second_duplicate.commit.indexed_documents, 4);
-        assert_eq!(cursor_projected_records(), 1);
+        assert_eq!(take_cursor_projected_records(&source), 1);
         assert_eq!(cursor_signature_records(), 0);
         assert_eq!(cursor_base_identity_probes(), 3);
         let second_duplicate_ids = indexed_event_ids(&index, "native-session");

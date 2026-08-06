@@ -33,6 +33,45 @@ impl fmt::Display for SourceBackedRefreshDaemonUnavailable {
 
 impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
 
+#[derive(Debug)]
+pub(crate) struct SourceBackedRefreshPendingPublication {
+    request_id: String,
+    request_state: String,
+    source_count: usize,
+}
+
+impl SourceBackedRefreshPendingPublication {
+    pub(crate) fn new(request_id: String, request_state: String, source_count: usize) -> Self {
+        Self {
+            request_id,
+            request_state,
+            source_count,
+        }
+    }
+
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) fn request_state(&self) -> &str {
+        &self.request_state
+    }
+
+    pub(crate) fn source_count(&self) -> usize {
+        self.source_count
+    }
+}
+
+impl fmt::Display for SourceBackedRefreshPendingPublication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "daemon source refresh was queued but no published generation exists; retry with --refresh wait",
+        )
+    }
+}
+
+impl std::error::Error for SourceBackedRefreshPendingPublication {}
+
 #[allow(dead_code)] // Request metadata is retained for CLI/status integrations.
 pub(crate) struct SourceBackedRefreshObservation {
     pub(crate) mode: SourceBackedRefreshMode,
@@ -503,28 +542,46 @@ fn coordinate_source_backed_refresh_with_catalog(
         validate_source_refresh_status_response_authority(&response, &accepted_request_id)?;
         accepted_request_id
     };
-    source_refresh_protocol_state(&response)?;
+    let protocol = source_refresh_protocol_status(&response)?;
 
     if mode == SourceBackedRefreshMode::Background {
         if let Some(report_progress) = report_progress {
             let status = source_refresh_progress_status(response.clone())?;
             report_progress(&status).context("render daemon-owned source refresh progress")?;
         }
-        let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!(
-                "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
+        let request_state = protocol.request_state();
+        match request_state {
+            RefreshRequestState::Published => {
+                return published_refresh_observation(
+                    data_root,
+                    &response,
+                    request_id,
+                    mode,
+                    explicit_source_catalog,
+                );
+            }
+            RefreshRequestState::Failed => {
+                return failed_refresh_response(&response, protocol.into_terminal_outcome());
+            }
+            RefreshRequestState::AdmissionPending
+            | RefreshRequestState::Queued
+            | RefreshRequestState::Running => {}
+        }
+        let source_count = response_source_count(&response);
+        let Some(pin) = pin_published_generation(data_root)? else {
+            return Err(SourceBackedRefreshPendingPublication::new(
+                request_id,
+                refresh_request_state_name(request_state).to_owned(),
+                source_count,
             )
-        })?;
+            .into());
+        };
         return Ok(SourceBackedRefreshObservation {
             mode,
-            status: response
-                .get("request_state")
-                .and_then(Value::as_str)
-                .unwrap_or("queued")
-                .to_owned(),
+            status: refresh_request_state_name(request_state).to_owned(),
             request_id: Some(request_id),
             daemon_available: true,
-            source_count: response_source_count(&response),
+            source_count,
             request_previous_generation: None,
             request_generation_changed: false,
             scanned_routes: None,
@@ -701,63 +758,13 @@ fn wait_for_published_generation_inner(
         }
         match protocol_state {
             RefreshRequestState::Published => {
-                let expected = response
-                    .get("published_generation")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        anyhow!("published daemon source refresh has no generation ID")
-                    })?;
-                let pin = pin_retained_generation(data_root, expected).with_context(|| {
-                    format!(
-                        "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
-                    )
-                })?;
-                let publication_receipt = published_refresh_receipt(&response, &pin)?;
-                validate_status_publication_authority(&publication_receipt, &pin)?;
-                let receipt = published_request_outcome(&response, &pin)?;
-                let source_count =
-                    published_source_count(&response, &receipt, pin.verified_index())?;
-                if let Some(expected_catalog) = expected_catalog {
-                    if !explicit_catalog_request_is_accounted_for(
-                        expected_catalog,
-                        receipt.published_explicit_source_catalog.as_ref(),
-                        &receipt.catalog_route_bindings,
-                        &receipt.route_results,
-                    ) {
-                        bail!(
-                            "daemon published an unexpected explicit source catalog authority: expected {:?}, published {:?}",
-                            expected_catalog,
-                            receipt.published_explicit_source_catalog,
-                        );
-                    }
-                }
-                let request_generation_changed = response
-                    .get("generation_changed")
-                    .and_then(Value::as_bool)
-                    .ok_or_else(|| {
-                        anyhow!("published daemon source refresh has no request generation outcome")
-                    })?;
-                let request_previous_generation =
-                    optional_generation(response.get("previous_generation"))?;
-                let scanned_routes = response
-                    .get("scanned_routes")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .ok_or_else(|| {
-                        anyhow!("published daemon source refresh has no scanned route count")
-                    })?;
-                return Ok(SourceBackedRefreshObservation {
+                return published_refresh_observation(
+                    data_root,
+                    &response,
+                    request_id,
                     mode,
-                    status: "published".to_owned(),
-                    request_id: Some(request_id),
-                    daemon_available: true,
-                    source_count,
-                    request_previous_generation,
-                    request_generation_changed,
-                    scanned_routes: Some(scanned_routes),
-                    receipt: Some(receipt),
-                    pin,
-                });
+                    expected_catalog,
+                );
             }
             RefreshRequestState::Failed => {
                 return failed_refresh_response(&response, protocol.into_terminal_outcome());
@@ -769,6 +776,66 @@ fn wait_for_published_generation_inner(
             }
         }
     }
+}
+
+fn published_refresh_observation(
+    data_root: &Path,
+    response: &Value,
+    request_id: String,
+    mode: SourceBackedRefreshMode,
+    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
+) -> Result<SourceBackedRefreshObservation> {
+    let expected = response
+        .get("published_generation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("published daemon source refresh has no generation ID"))?;
+    let pin = pin_retained_generation(data_root, expected).with_context(|| {
+        format!(
+            "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
+        )
+    })?;
+    let publication_receipt = published_refresh_receipt(response, &pin)?;
+    validate_status_publication_authority(&publication_receipt, &pin)?;
+    let receipt = published_request_outcome(response, &pin)?;
+    let source_count = published_source_count(response, &receipt, pin.verified_index())?;
+    if let Some(expected_catalog) = expected_catalog {
+        if !explicit_catalog_request_is_accounted_for(
+            expected_catalog,
+            receipt.published_explicit_source_catalog.as_ref(),
+            &receipt.catalog_route_bindings,
+            &receipt.route_results,
+        ) {
+            bail!(
+                "daemon published an unexpected explicit source catalog authority: expected {:?}, published {:?}",
+                expected_catalog,
+                receipt.published_explicit_source_catalog,
+            );
+        }
+    }
+    let request_generation_changed = response
+        .get("generation_changed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow!("published daemon source refresh has no request generation outcome")
+        })?;
+    let request_previous_generation = optional_generation(response.get("previous_generation"))?;
+    let scanned_routes = response
+        .get("scanned_routes")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| anyhow!("published daemon source refresh has no scanned route count"))?;
+    Ok(SourceBackedRefreshObservation {
+        mode,
+        status: "published".to_owned(),
+        request_id: Some(request_id),
+        daemon_available: true,
+        source_count,
+        request_previous_generation,
+        request_generation_changed,
+        scanned_routes: Some(scanned_routes),
+        receipt: Some(receipt),
+        pin,
+    })
 }
 
 fn published_request_outcome(
@@ -956,6 +1023,16 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
 
 fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
     Ok(source_refresh_protocol_status(response)?.request_state())
+}
+
+fn refresh_request_state_name(state: RefreshRequestState) -> &'static str {
+    match state {
+        RefreshRequestState::AdmissionPending => "admission_pending",
+        RefreshRequestState::Queued => "queued",
+        RefreshRequestState::Running => "running",
+        RefreshRequestState::Published => "published",
+        RefreshRequestState::Failed => "failed",
+    }
 }
 
 fn source_refresh_protocol_status(response: &Value) -> Result<RefreshStatusKind> {

@@ -122,7 +122,7 @@ pub(crate) use source_backed_refresh_coordinator::{
     coordinate_source_backed_refresh_with_progress, pin_active_verified_generation,
     published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshStatus,
     SourceBackedCurrentSourceProgress, SourceBackedRefreshDaemonUnavailable,
-    SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    SourceBackedRefreshMode, SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
 };
 mod daemon_scheduler;
 #[cfg(test)]
