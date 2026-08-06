@@ -342,10 +342,12 @@ sh_test(
     name = "bazel_wrapper_tests",
     srcs = ["scripts/tests/bazelw-test.sh"],
     data = [
+        ".bazelrc",
         ".bazelversion",
         "scripts/bazelw",
         "scripts/ci-common.sh",
         "scripts/tests/fixtures/fake-bazel.sh",
+        "scripts/tests/fixtures/fake-build-governor.sh",
         "scripts/tests/fixtures/fake-df.sh",
     ],
 )

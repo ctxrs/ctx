@@ -108,6 +108,34 @@ CTX_TEST_THREADS=2 \
 The values above are an example, not required machine defaults. Prefer the
 wrapper defaults unless the host or concurrent workload needs an override.
 
+Hosts may opt into a generic external build governor by placing an executable
+at `${XDG_CONFIG_HOME:-$HOME/.config}/ctx/build-governor` or setting the
+absolute `CTX_HOST_BUILD_GOVERNOR` path. Build-capable and other non-light
+commands are invoked as `<governor> bazel <command> -- <exact Bazel argv>`;
+query, informational, and shutdown commands bypass admission. The wrapper
+fails with status 125 when a configured governor is not executable. The
+governor sets `CTX_HOST_BUILD_GOVERNOR_ACTIVE=1` for the managed command so
+nested wrapper calls do not reacquire a lease. The wrapper accepts that marker
+only when its lease ID matches the current systemd lease cgroup; a forged marker
+or an explicitly empty governor path fails with status 125. A governed host
+defaults Bazel jobs and local CPU resources to 16 while preserving explicit
+resource overrides.
+
+## Optional remote execution
+
+The repository defines one opt-in REAPI profile: `--config=ctx-reapi`. It sends
+every remotely eligible spawn action to the configured executor and disables
+local fallback. Connection and authentication settings remain external to the
+repository and must be supplied by the Bazel invocation or machine
+configuration.
+
+After those external settings are available, use the profile with an ordinary
+wrapper command:
+
+```bash
+scripts/bazelw test //crates/ctx-cli:unit_tests --config=ctx-reapi
+```
+
 ## Focused, affected, and complete checks
 
 ```bash
