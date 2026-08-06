@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn commit(id: &str, digit: char) -> ExactCommitRef {

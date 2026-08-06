@@ -305,7 +305,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "4ceed9bd755b30e7eb4636a69e9167e944034155472c54256240f8a72e114f07",
+            "fingerprint": "67bab9f428c639820a173fabb2e27aa173aa0979d81ded77ad48c6613b8d1ca5",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -318,7 +318,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
                 "identity": "ctx-core-record-event-binding-v1\0",
                 "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))"
             },
-            "repository_contract_revision": 9,
+            "repository_contract_revision": 11,
             "repository_observation_revision": 5,
             "bounded_shell_subset_revision": 4,
             "repository_association_policy_revision": 6,
@@ -342,9 +342,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         value["golden_vectors"]["core_record_digests"],
         serde_json::json!({
             "core_record_sha256":
-                "a03593841e89f0fee75b9e2936e602aef50aec201980ecd1be18dc3c0f19d0c2",
+                "632bd132676656a075891f01faeea1986ef22e76c58b4a1729088bb6e413f5ea",
             "core_record_leaf_sha256":
-                "49fbae1890c2ca9b3d94b8a7081aa122ed5c0fedca5aed92cec662df7b8819de"
+                "c9db771bea9cd66d7d4751378e53d77a11b0b750b0406109c665ccd06067d55a"
         })
     );
 

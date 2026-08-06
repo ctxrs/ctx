@@ -284,6 +284,7 @@ fn commit_result(matches: Vec<BlameMatch>, outcome: BlameOutcome) -> BlameResult
             citation: citation(&"a".repeat(64)),
         }],
         next: None,
+        lineage: None,
     }
 }
 
@@ -350,6 +351,7 @@ fn pull_request_result(matches: Vec<BlameMatch>, outcome: BlameOutcome) -> Blame
             citation: citation(&"a".repeat(64)),
         }],
         next: None,
+        lineage: None,
     }
 }
 
