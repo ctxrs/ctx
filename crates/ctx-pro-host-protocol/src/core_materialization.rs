@@ -10,9 +10,10 @@ mod control;
 mod page_builder;
 pub(crate) mod validation;
 pub use control::{
-    BeginCoreMaterializationRequest, CoreMaterializationBegan,
-    CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
-    CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
+    BeginCoreMaterializationRequest, ContinueCoreMaterializationRequest, CoreMaterializationBegan,
+    CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinalizationPending,
+    CoreMaterializationFinalizationPhase, CoreMaterializationFinalizationProgress,
+    CoreMaterializationFinished, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
     FinishCoreMaterializationRequest,
 };
 pub use page_builder::CoreEventDeltaPageBuilder;

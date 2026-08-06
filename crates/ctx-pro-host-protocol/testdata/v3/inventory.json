@@ -1,0 +1,1153 @@
+{
+  "canonical_inventory": {
+    "bounds": {
+      "blame_attributions_per_match": 100,
+      "blame_cursor_bytes": 256,
+      "blame_diagnostic_candidates": 5,
+      "blame_evidence": 3200,
+      "blame_results": 100,
+      "blame_target_bytes": 8192,
+      "citations_per_fact": 32,
+      "commit_lineage_examined_events": 1000,
+      "commit_lineage_returned_events": 100,
+      "core_control_wire_bytes": 67108864,
+      "core_event_delta_page_content_bytes": 16777216,
+      "core_event_delta_page_items": 256,
+      "core_event_delta_page_wire_bytes": 71303168,
+      "core_event_delta_pages": 16,
+      "core_event_delta_pages_prepared_output_bytes": 134217728,
+      "core_event_delta_pages_request_wire_bytes": 71303168,
+      "core_event_state_page_items": 256,
+      "core_event_state_page_wire_bytes": 4194304,
+      "core_materializer_revision_bytes": 256,
+      "core_source_acknowledgement_page_items": 256,
+      "core_source_delta_page_items": 256,
+      "core_source_delta_page_wire_bytes": 4194304,
+      "core_source_states": 16384,
+      "journal_finish_workers": 8,
+      "mcp_tool_call_attribution_component_bytes": 65536
+    },
+    "capabilities": [
+      "entitlement_authorization",
+      "graph_key_deletion",
+      "status",
+      "core_materialization",
+      "query",
+      "git_read"
+    ],
+    "commit_lineage_contract": {
+      "asserted_yield_proof": "repository_verified",
+      "commit_identity": "canonical_logical_repository_id_plus_object_format_plus_full_oid",
+      "connectivity": "all_operations_connect_to_requested_and_claimed_origins_and_endpoints_follow_directed_reachability",
+      "endpoint_kinds": [
+        "current_at_ref",
+        "current_for_pr"
+      ],
+      "match_pagination": "independent",
+      "omission_kinds": [
+        "exact",
+        "at_least",
+        "unknown"
+      ],
+      "operation_grouping": "edges_and_yields_share_operation_id_and_consistent_metadata",
+      "operation_id": "canonical_lowercase_sha256_digest",
+      "operation_kinds": [
+        "amend",
+        "rebase",
+        "cherry_pick"
+      ],
+      "proof_classes": [
+        "record_exact",
+        "repository_verified",
+        "forge_verified"
+      ],
+      "relation_classes": [
+        "replacement",
+        "derivation"
+      ],
+      "returned_event_count": "distinct_operation_ids_across_edges_and_yields",
+      "root_ambiguity": "multiple_directed_roots_to_requested_require_ambiguous_and_suppress_origin",
+      "stable_edge_order": [
+        "operation_id",
+        "operation_kind",
+        "logical_repository_id",
+        "source_object_format",
+        "source_oid",
+        "result_object_format",
+        "result_oid"
+      ],
+      "stable_yield_order": [
+        "operation_id",
+        "yield_id",
+        "actor_id"
+      ],
+      "states": [
+        "asserted",
+        "ambiguous",
+        "contradicted"
+      ],
+      "truncation_reasons": [
+        "returned_event_limit",
+        "examined_event_limit",
+        "evidence_gap"
+      ]
+    },
+    "core_materialization": {
+      "authority": "one_generation_pinned_core_snapshot_delta_feed",
+      "contract_version": 3,
+      "event_delta_batching": {
+        "acknowledgement": "one_ordered_count_exact_page_acknowledgement_per_requested_page",
+        "aggregate_input": "exact_compact_request_json_is_at_most_sixty_eight_mib_while_every_page_retains_its_existing_bounds",
+        "prepared_output": "helper_prepared_output_accounting_is_at_most_one_hundred_twenty_eight_mib",
+        "request": "one_to_sixteen_pages_partitioned_into_one_contiguous_sub_batch_per_source_each_sharing_one_materialize_index_with_sub_batches_following_strictly_increasing_materialize_index_order_and_terminal_source_boundaries_and_each_source_retaining_strict_event_order"
+      },
+      "incremental": "each_source_delta_page_drives_zero_through_terminal_bounded_acknowledgement_pages_whose_exact_ordered_changed_or_removed_subset_is_collected_within_current_plus_retained_store_source_bounds_then_event_state_pages_drive_bounded_added_replaced_and_tombstoned_event_delta_pages",
+      "initial": "the_helper_reconciles_every_present_source_because_it_has_no_prior_event_state",
+      "integrity": "strict_source_acknowledgement_and_event_page_sequence_content_generation_and_transactional_staging_without_hash_chains",
+      "publication": "explicit_terminal_counts_at_most_one_prior_receipt_cas_and_one_bounded_durable_finalization_quantum_per_finish_or_continue_request",
+      "records": "complete_core_records_are_read_only_from_the_pinned_core_source_event_page_api_and_only_added_or_replaced_events_cross_the_protocol",
+      "removal": "source_removal_is_resumable_as_bounded_event_tombstone_pages_and_deletes_source_control_state only_on_its_terminal_page",
+      "replacement": "prior_event_removal_and_replacement_record_insertion_are_atomic_in_one_bounded_event_delta_page",
+      "replay": "source_delta_requests_acknowledgement_pages_finish_and_continue_are_independently_idempotent_and_an_exact_completed_generation_may_skip_all_delta_and_event_pages",
+      "repository_data": "repository_bindings_abstentions_file_invocation_evidence_and_file_and_vcs_observations_exist_only_inside_core_records",
+      "sequence": [
+        "begin_core_materialization",
+        "apply_core_source_delta_page",
+        "core_event_state_page",
+        "apply_core_event_delta_pages",
+        "finish_core_materialization",
+        "continue_core_materialization"
+      ],
+      "source_acknowledgements": "request_and_response_share_an_explicit_acknowledgement_page_index_present_reconciliations_exist_only_on_page_zero_nonterminal_input_source_pages_complete_in_one_acknowledgement_page_each_response_marks_terminal_changed_removed_counts_cover_only_that_page_and_all_source_acknowledgements_finish_before_any_event_page"
+    },
+    "core_record_contract": {
+      "accumulator": {
+        "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))",
+        "identity": "ctx-core-record-event-binding-v1\u0000"
+      },
+      "bounded_shell_subset_revision": 4,
+      "discovery_exclusion": {
+        "presence": "optional_omitted_when_absent_explicit_null_rejected",
+        "reasons": [
+          "ctx_retrieval_derived"
+        ],
+        "wire_path": "CoreRecord.content.discovery_exclusion"
+      },
+      "fingerprint": "0610be9a5810ce742b505dc4c3b3db24e9ab795126a6b62e0ef2172e04a85cc3",
+      "leaf": {
+        "added_path": "CoreEventDelta.added.value",
+        "algorithm": "sha256(domain_then_canonical_event_id_then_u64_be_exact_canonical_core_record_json_length_then_exact_canonical_core_record_json)",
+        "domain": "ctx-core-record-leaf-v1\u0000",
+        "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
+        "paired_helper": "ctx_pro_host_protocol::core_record_digests",
+        "replaced_path": "CoreEventDelta.replaced.value.record"
+      },
+      "mcp_tool_call_attribution": {
+        "component_bound": "decoded_utf8_bytes",
+        "maximum_component_bytes": 65536,
+        "presence": "optional_omitted_when_absent_explicit_null_rejected",
+        "shape": "exact_server_and_tool_string_pair",
+        "wire_path": "CoreRecord.mcp_tool_call"
+      },
+      "mcp_tool_call_attribution_revision": 1,
+      "repository_association_policy_revision": 6,
+      "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
+      "repository_contract_revision": 11,
+      "repository_file_invocation_evidence_set": "strictly_sorted_unique_typed_request_intent_bound_to_repository_and_normalized_body",
+      "repository_local_root_authorization_fingerprint_revision": 1,
+      "repository_observation_revision": 5,
+      "repository_outcome_capture_revision": 5,
+      "repository_pull_request_association_capture_revision": 3,
+      "session_lineage_revision": 1
+    },
+    "dto_fields": {
+      "AgentAttribution": {
+        "optional": [],
+        "required": [
+          "id",
+          "relationship",
+          "producing_session",
+          "parent_session",
+          "direct_actor",
+          "owning_root",
+          "fact_occurred_at_ms",
+          "confidence",
+          "state",
+          "evidence_numbers"
+        ]
+      },
+      "ApplyCoreEventDeltaPageRequest": {
+        "optional": [],
+        "required": [
+          "page"
+        ]
+      },
+      "ApplyCoreEventDeltaPagesRequest": {
+        "optional": [],
+        "required": [
+          "pages"
+        ]
+      },
+      "ApplyCoreSourceDeltaPageRequest": {
+        "optional": [],
+        "required": [
+          "page",
+          "acknowledgement_page_index"
+        ]
+      },
+      "BeginCoreMaterializationRequest": {
+        "optional": [],
+        "required": [
+          "head",
+          "expected_prior_receipt"
+        ]
+      },
+      "BlameCoverage": {
+        "optional": [],
+        "required": [
+          "unit",
+          "evaluated",
+          "proven",
+          "possible",
+          "conflicting",
+          "none"
+        ]
+      },
+      "BlameDiagnosticCandidate.commit": {
+        "optional": [],
+        "required": [
+          "kind",
+          "repository",
+          "oid"
+        ]
+      },
+      "BlameDiagnosticCandidate.repository": {
+        "optional": [],
+        "required": [
+          "kind",
+          "selector"
+        ]
+      },
+      "BlameDiagnosticDetails": {
+        "optional": [],
+        "required": [
+          "reason",
+          "candidates",
+          "candidates_truncated"
+        ]
+      },
+      "BlameOutcome": {
+        "optional": [],
+        "required": [
+          "attribution",
+          "coverage"
+        ]
+      },
+      "BlameResult": {
+        "optional": [],
+        "required": [
+          "snapshot",
+          "target",
+          "git_snapshot",
+          "outcome",
+          "matches",
+          "evidence",
+          "next",
+          "lineage"
+        ]
+      },
+      "CommitBlameMatch": {
+        "optional": [],
+        "required": [
+          "fact_id",
+          "fact_type",
+          "predicate",
+          "subject",
+          "object",
+          "parent_session",
+          "fact_occurred_at_ms",
+          "confidence",
+          "state",
+          "direct_actor",
+          "owning_root",
+          "evidence_numbers"
+        ]
+      },
+      "CommitLineage": {
+        "optional": [],
+        "required": [
+          "requested",
+          "edges",
+          "yielded_by",
+          "origin",
+          "endpoint",
+          "complete",
+          "ambiguous",
+          "bounds"
+        ]
+      },
+      "CommitLineageBounds": {
+        "optional": [],
+        "required": [
+          "returned_events",
+          "returned_event_limit",
+          "examined_events",
+          "examined_event_limit",
+          "omission",
+          "truncation_reason"
+        ]
+      },
+      "CommitLineageEdge": {
+        "optional": [],
+        "required": [
+          "operation_id",
+          "kind",
+          "relation_class",
+          "source",
+          "result",
+          "actor",
+          "proof_class",
+          "state",
+          "observed_at_ms",
+          "evidence_numbers"
+        ]
+      },
+      "CommitLineageYield": {
+        "optional": [],
+        "required": [
+          "yield_id",
+          "operation_id",
+          "logical_repository_id",
+          "actor",
+          "proof_class",
+          "state",
+          "observed_at_ms",
+          "evidence_numbers"
+        ]
+      },
+      "ContinueCoreMaterializationRequest": {
+        "optional": [],
+        "required": [
+          "expected_progress"
+        ]
+      },
+      "CoreContent": {
+        "optional": [
+          "discovery_exclusion",
+          "mcp_exchange"
+        ],
+        "required": [
+          "policy_revision",
+          "policy_status",
+          "normalized_body",
+          "structured_content"
+        ]
+      },
+      "CoreEventDeltaPage": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "reconciliation",
+          "page_index",
+          "terminal",
+          "deltas"
+        ]
+      },
+      "CoreEventDeltaPageApplied": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "source",
+          "page_index",
+          "additions",
+          "replacements",
+          "tombstones",
+          "terminal",
+          "replayed"
+        ]
+      },
+      "CoreEventDeltaPagesApplied": {
+        "optional": [],
+        "required": [
+          "pages"
+        ]
+      },
+      "CoreEventReplacement": {
+        "optional": [],
+        "required": [
+          "prior_core_record_sha256",
+          "record"
+        ]
+      },
+      "CoreEventState": {
+        "optional": [],
+        "required": [
+          "event_id",
+          "core_record_sha256",
+          "requires_replacement"
+        ]
+      },
+      "CoreEventStatePage": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "reconciliation",
+          "page_index",
+          "after_event_id",
+          "states",
+          "terminal",
+          "replayed"
+        ]
+      },
+      "CoreEventStatePageRequest": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "reconciliation",
+          "page_index",
+          "after_event_id",
+          "maximum_items"
+        ]
+      },
+      "CoreEventTombstone": {
+        "optional": [],
+        "required": [
+          "event_id",
+          "prior_core_record_sha256"
+        ]
+      },
+      "CoreGenerationHead": {
+        "optional": [],
+        "required": [
+          "contract_version",
+          "core_generation_id",
+          "generation_manifest_version",
+          "identity_version",
+          "core_record_version",
+          "core_record_contract_fingerprint",
+          "normalization_revision",
+          "content_policy_revision",
+          "repository_contract_revision",
+          "lexical_schema_version",
+          "lexical_analyzer_version",
+          "policy_schema_hash",
+          "source_snapshot_sha256",
+          "source_count",
+          "event_count"
+        ]
+      },
+      "CoreMaterializationBegan": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "materializer_revision",
+          "expected_prior_receipt",
+          "replayed"
+        ]
+      },
+      "CoreMaterializationFinalizationPending": {
+        "optional": [],
+        "required": [
+          "progress",
+          "replayed"
+        ]
+      },
+      "CoreMaterializationFinalizationProgress": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "phase",
+          "cursor_sha256"
+        ]
+      },
+      "CoreMaterializationFinished": {
+        "optional": [],
+        "required": [
+          "receipt",
+          "replayed"
+        ]
+      },
+      "CoreMaterializationReceipt": {
+        "optional": [],
+        "required": [
+          "core_generation_id",
+          "core_record_contract_fingerprint",
+          "source_snapshot_sha256",
+          "materializer_revision",
+          "source_count",
+          "event_count"
+        ]
+      },
+      "CoreMaterializationReceiptIdentity": {
+        "optional": [],
+        "required": [
+          "core_generation_id",
+          "materializer_revision"
+        ]
+      },
+      "CoreRecord": {
+        "optional": [
+          "mcp_tool_call"
+        ],
+        "required": [
+          "record_version",
+          "event_id",
+          "session_id",
+          "parent_session_id",
+          "root_session_id",
+          "session_relationship",
+          "event_origin",
+          "source",
+          "provider_session_id",
+          "native_event_id",
+          "event_sequence",
+          "occurred_at_unix_ms",
+          "event_type",
+          "role",
+          "agent_type",
+          "is_primary",
+          "workspace",
+          "branch",
+          "cwd",
+          "parser_revision",
+          "normalization_revision",
+          "content",
+          "metadata",
+          "repository_candidate_evidence",
+          "repository_bindings",
+          "repository_abstentions",
+          "repository_file_invocation_evidence",
+          "repository_file_observations",
+          "repository_vcs_observations"
+        ]
+      },
+      "CoreSourceDeltaPage": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "page_index",
+          "terminal",
+          "deltas"
+        ]
+      },
+      "CoreSourceDeltaPageApplied": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "core_generation_id",
+          "page_index",
+          "acknowledgement_page_index",
+          "acknowledgement_terminal",
+          "changed_sources",
+          "removed_sources",
+          "reconcile_sources",
+          "replayed"
+        ]
+      },
+      "CoreSourceReconciliation": {
+        "optional": [],
+        "required": [
+          "materialize_index",
+          "delta"
+        ]
+      },
+      "CoreSourceRemoval": {
+        "optional": [],
+        "required": [
+          "source"
+        ]
+      },
+      "CoreSourceState": {
+        "optional": [],
+        "required": [
+          "source",
+          "core_record_accumulator",
+          "event_count"
+        ]
+      },
+      "EventOrigin.copied_from_ancestor": {
+        "optional": [],
+        "required": [
+          "kind",
+          "ancestor_session_id",
+          "ancestor_event_id",
+          "proof"
+        ]
+      },
+      "EventOrigin.unique_to_session": {
+        "optional": [],
+        "required": [
+          "kind"
+        ]
+      },
+      "EventOrigin.unknown": {
+        "optional": [],
+        "required": [
+          "kind"
+        ]
+      },
+      "EvidenceCitation": {
+        "optional": [],
+        "required": [
+          "core_generation_id",
+          "source",
+          "session_id",
+          "event_id",
+          "event_sequence",
+          "byte_range",
+          "evidence_sha256"
+        ]
+      },
+      "ExactCommitRef": {
+        "optional": [],
+        "required": [
+          "resource",
+          "logical_repository_id",
+          "object_format",
+          "oid"
+        ]
+      },
+      "FinishCoreMaterializationRequest": {
+        "optional": [],
+        "required": [
+          "materialization_id",
+          "head",
+          "expected_prior_receipt",
+          "source_delta_pages",
+          "changed_sources",
+          "removed_sources",
+          "event_delta_pages",
+          "event_mutations"
+        ]
+      },
+      "GitObjectId": {
+        "optional": [],
+        "required": [
+          "format",
+          "hex"
+        ]
+      },
+      "JournalFinishActivity": {
+        "optional": [],
+        "required": [
+          "worker_limit",
+          "peak_workers",
+          "started_after_preparation"
+        ]
+      },
+      "McpToolCallAttribution": {
+        "optional": [],
+        "required": [
+          "server",
+          "tool"
+        ]
+      },
+      "ProAccessStatus": {
+        "optional": [],
+        "required": [
+          "entitlement",
+          "graph_key",
+          "local_repository"
+        ]
+      },
+      "ProStorageEvidence": {
+        "optional": [],
+        "required": [
+          "graph_manifest_schema",
+          "flat_format_version",
+          "materializer_checkpoint_version",
+          "journal_pack_format_version",
+          "legacy_journals_written",
+          "journal_pages_written",
+          "journal_packs_written",
+          "journal_finish_activity"
+        ]
+      },
+      "ProtocolError": {
+        "optional": [],
+        "required": [
+          "class",
+          "message",
+          "retryable",
+          "details"
+        ]
+      },
+      "PullRequestActivity": {
+        "optional": [],
+        "required": [
+          "fact_id",
+          "action",
+          "session",
+          "direct_actor",
+          "owning_root",
+          "fact_occurred_at_ms",
+          "confidence",
+          "state",
+          "evidence_numbers"
+        ]
+      },
+      "PullRequestCommit": {
+        "optional": [],
+        "required": [
+          "fact_id",
+          "relationship",
+          "commit",
+          "fact_occurred_at_ms",
+          "production",
+          "evidence_numbers"
+        ]
+      },
+      "QuerySnapshotExpectation.core": {
+        "optional": [],
+        "required": [
+          "kind",
+          "receipt"
+        ]
+      },
+      "RepositoryCandidate": {
+        "optional": [],
+        "required": [
+          "kind",
+          "path"
+        ]
+      },
+      "RepositoryCandidateEvidence": {
+        "optional": [],
+        "required": [
+          "repository_observation_revision",
+          "bounded_shell_subset_revision",
+          "association_policy_revision",
+          "outcome_capture_revision",
+          "candidates"
+        ]
+      },
+      "RepositoryCoverage": {
+        "optional": [],
+        "required": [
+          "repository_candidate_events",
+          "logical_binding_events",
+          "certified_live_root_access_events",
+          "file_evidence_events",
+          "exact_commit_evidence_events",
+          "exact_pull_request_evidence_events"
+        ]
+      },
+      "RepositoryFileInvocationEvidence": {
+        "optional": [],
+        "required": [
+          "operation_ordinal",
+          "repository_binding_id",
+          "relative_path",
+          "prior_relative_path",
+          "kind",
+          "tool_name",
+          "normalized_text_range"
+        ]
+      },
+      "RepositoryFileInvocationTextRange": {
+        "optional": [],
+        "required": [
+          "start",
+          "end"
+        ]
+      },
+      "RepositoryOutcomeLinkage": {
+        "optional": [],
+        "required": [
+          "provider",
+          "origin_call_id",
+          "result_call_id",
+          "origin_event_sequence",
+          "continuation_call_id_sha256",
+          "result_record_sha256"
+        ]
+      },
+      "RepositoryPullRequestAssociationObservation": {
+        "optional": [],
+        "required": [
+          "pull_request",
+          "merged_as",
+          "contains_commits",
+          "linkage",
+          "association_capture_revision"
+        ]
+      },
+      "RepositoryPullRequestIdentity": {
+        "optional": [],
+        "required": [
+          "forge_repository",
+          "number",
+          "provider_id"
+        ]
+      },
+      "RepositoryVcsObservation": {
+        "optional": [],
+        "required": [
+          "repository_binding_id",
+          "kind",
+          "object_id",
+          "parent_object_ids",
+          "reference",
+          "relative_path"
+        ]
+      },
+      "RepositoryVcsObservationKind.pull_request_association": {
+        "optional": [],
+        "required": [
+          "pull_request_association"
+        ]
+      },
+      "ScopedCommitEndpoint.current_at_ref": {
+        "optional": [],
+        "required": [
+          "kind",
+          "commit",
+          "scope",
+          "observation_id",
+          "observed_at_ms",
+          "evidence_numbers"
+        ]
+      },
+      "ScopedCommitEndpoint.current_for_pr": {
+        "optional": [],
+        "required": [
+          "kind",
+          "commit",
+          "scope",
+          "observation_id",
+          "observed_at_ms",
+          "evidence_numbers"
+        ]
+      },
+      "StatusRequest": {
+        "optional": [],
+        "required": [
+          "requested_core_generation_id"
+        ]
+      },
+      "StatusResult": {
+        "optional": [],
+        "required": [
+          "currentness",
+          "requested_core_generation_id",
+          "core_receipt",
+          "coverage",
+          "repository_coverage",
+          "core_preparation_peak_workers",
+          "access",
+          "supported_operations",
+          "available_operations",
+          "finalization_progress",
+          "storage_evidence"
+        ]
+      }
+    },
+    "enums": {
+      "blame_attribution": [
+        "proven",
+        "possible",
+        "conflicting",
+        "none"
+      ],
+      "blame_coverage_unit": [
+        "committed_line",
+        "commit_fact",
+        "pull_request_relationship"
+      ],
+      "blame_diagnostic_candidate_kind": [
+        "repository",
+        "commit"
+      ],
+      "blame_diagnostic_reason": [
+        "target_not_indexed",
+        "repository_selector_not_indexed",
+        "repository_not_bound",
+        "checkout_unavailable",
+        "git_unavailable",
+        "repository_ambiguous",
+        "target_ambiguous",
+        "commit_rewrite_ambiguous",
+        "file_blame_not_covered",
+        "commit_blame_not_covered",
+        "pull_request_blame_not_covered"
+      ],
+      "core_discovery_exclusion": [
+        "ctx_retrieval_derived"
+      ],
+      "core_event_delta_kind": [
+        "added",
+        "replaced",
+        "tombstoned"
+      ],
+      "core_materialization_finalization_phase": [
+        "sealing_inputs",
+        "emit_replay",
+        "emit_flat",
+        "emit_event_index",
+        "emit_sources",
+        "validate_candidate",
+        "ready_to_activate"
+      ],
+      "core_projection_currentness": [
+        "not_materialized",
+        "partial",
+        "finalizing",
+        "stale",
+        "needs_rebuild",
+        "current"
+      ],
+      "core_source_delta_kind": [
+        "present",
+        "removed"
+      ],
+      "error_class": [
+        "entitlement_expired",
+        "key_store_unavailable",
+        "key_store_locked",
+        "not_materialized",
+        "protocol_mismatch",
+        "missing_source",
+        "missing_repository",
+        "resource_not_found",
+        "stale_fact",
+        "line_out_of_range",
+        "stale_snapshot",
+        "ambiguous",
+        "operation_unavailable",
+        "corrupt",
+        "invalid_request",
+        "bounds",
+        "rebuild_required",
+        "sequence",
+        "internal"
+      ],
+      "event_copy_proof_kind": [
+        "native_event_identity",
+        "native_copied_from_field",
+        "native_call_result_identity",
+        "certified_ordered_prefix"
+      ],
+      "event_origin_kind": [
+        "unknown",
+        "unique_to_session",
+        "copied_from_ancestor"
+      ],
+      "materialized_coverage": [
+        "not_materialized",
+        "partial",
+        "complete",
+        "empty",
+        "abstained"
+      ],
+      "pro_access_state": [
+        "available",
+        "locked",
+        "unavailable"
+      ],
+      "pro_operation": [
+        "file_blame",
+        "commit_blame",
+        "pull_request_blame"
+      ],
+      "query_snapshot_expectation_kind": [
+        "core"
+      ],
+      "repository_candidate_kind": [
+        "session_cwd",
+        "declared_tool_workdir",
+        "derived_effective_cwd",
+        "command_specific_repository_path",
+        "file_activity_path",
+        "vcs_activity_path",
+        "outcome_operation_repository_path",
+        "outcome_output_repository_path"
+      ],
+      "repository_file_invocation_kind": [
+        "read",
+        "create",
+        "modify",
+        "delete",
+        "rename",
+        "write"
+      ],
+      "resource_kind": [
+        "repository",
+        "checkout",
+        "worktree",
+        "branch",
+        "commit",
+        "file",
+        "pull_request",
+        "issue",
+        "remote",
+        "release",
+        "command",
+        "check",
+        "session",
+        "agent",
+        "run"
+      ],
+      "session_relationship_kind": [
+        "root",
+        "delegated",
+        "forked",
+        "resumed_from",
+        "workflow_child",
+        "related_unknown"
+      ]
+    },
+    "fingerprint": {
+      "algorithm": "sha256",
+      "encoding": "lowercase_hex",
+      "runtime_value": "<sha256-of-this-canonical-inventory>",
+      "scope": "exact_compact_utf8_bytes_of_this_inventory_without_a_fingerprint_value"
+    },
+    "framing": {
+      "byte_order": "big_endian",
+      "header_bytes": 12,
+      "length_bytes": 4,
+      "magic_ascii": "CTXPRO",
+      "maximum_payload_bytes": 83886080,
+      "payload": "strict_json",
+      "version_bytes": 2
+    },
+    "helper_message_kinds": [
+      "hello",
+      "authorized",
+      "graph_key_deletion_prepared",
+      "graph_key_deleted",
+      "status",
+      "core_materialization_began",
+      "core_source_delta_page_applied",
+      "core_event_state_page",
+      "core_event_delta_page_applied",
+      "core_materialization_finished",
+      "core_materialization_finalization_pending",
+      "blame",
+      "error",
+      "core_event_delta_pages_applied"
+    ],
+    "host_message_kinds": [
+      "hello",
+      "authorize",
+      "prepare_graph_key_deletion",
+      "confirm_graph_key_deletion",
+      "status",
+      "begin_core_materialization",
+      "apply_core_source_delta_page",
+      "core_event_state_page",
+      "apply_core_event_delta_page",
+      "finish_core_materialization",
+      "continue_core_materialization",
+      "blame",
+      "apply_core_event_delta_pages"
+    ],
+    "inventory_schema": 1,
+    "protocol_version": 3,
+    "representative_frames": {
+      "helper_protocol_mismatch": "43545850524f0003000000ca7b2273657175656e6365223a302c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a226572726f72222c22626f6479223a7b22636c617373223a2270726f746f636f6c5f6d69736d61746368222c226d657373616765223a2265786163742050726f746f636f6c205633206d69736d61746368222c22726574727961626c65223a66616c73652c2264657461696c73223a6e756c6c7d7d7d",
+      "host_status": "43545850524f0003000000c97b2273657175656e6365223a302c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22737461747573222c22626f6479223a7b227265717565737465645f636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d7d7d"
+    },
+    "status_contract": {
+      "availability": "available_is_a_supported_subset_that_satisfies_each_operation_prerequisite_and_ready_operations_may_be_conservatively_omitted",
+      "axes": [
+        "core_projection_currentness",
+        "materialized_target_coverage",
+        "repository_coverage",
+        "access",
+        "supported_operations",
+        "available_operations"
+      ],
+      "coverage_bound": "repository_candidate_events_is_at_most_receipt_event_count_and every_specialized_axis_is_a_subset_of_logical_binding_events_which_is_a_subset_of_repository_candidate_events",
+      "operation_prerequisites": {
+        "commit_blame": [
+          "exact_commit_evidence_events"
+        ],
+        "file_blame": [
+          "local_repository",
+          "certified_live_root_access_events",
+          "file_evidence_events",
+          "exact_commit_evidence_events"
+        ],
+        "global": [
+          "current_complete_projection",
+          "entitlement",
+          "graph_key"
+        ],
+        "pull_request_blame": [
+          "exact_pull_request_evidence_events"
+        ]
+      },
+      "repository_coverage_axes": [
+        "repository_candidate_events",
+        "logical_binding_events",
+        "certified_live_root_access_events",
+        "file_evidence_events",
+        "exact_commit_evidence_events",
+        "exact_pull_request_evidence_events"
+      ],
+      "storage_evidence": {
+        "flat_format_version": 2,
+        "graph_manifest_schema": 3,
+        "journal_pack_format_version": 3,
+        "legacy_journals_written": 0,
+        "materializer_checkpoint": {
+          "current_publication": 5,
+          "event_index_cross_version_reads": "forbidden",
+          "legacy_control_load": 4
+        }
+      },
+      "terminal_coverage": {
+        "abstained": "receipt_event_count_is_positive_and_logical_binding_events_is_zero",
+        "complete": "receipt_event_count_is_positive_and_logical_binding_events_is_positive",
+        "empty": "receipt_event_count_is_zero_and_all_repository_coverage_axes_are_zero"
+      },
+      "terminal_quiet": "current_empty_or_abstained_is_terminal_and_advertises_no_available_blame_operation"
+    }
+  },
+  "canonical_sha256": "d3e185f6f76e4e043bd1860d26807f479bcd9e68c2d13ce1e3dce8167d3839a2",
+  "golden_vectors": {
+    "core_record_digests": {
+      "core_record_leaf_sha256": "f068e6f140d7e03c215fd0233171a15edaddc2c89456a3403c194a62f677af08",
+      "core_record_sha256": "24578fd6c6577ff86d143ea86d1d96ef079a1d2b544808dae3e9018f1c4ddaf4"
+    },
+    "helper_frames": {
+      "authorized": "43545850524f0003000000fd7b2273657175656e6365223a312c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22617574686f72697a6564222c22626f6479223a7b227374617465223a22747269616c222c22726566726573685f7265717569726564223a66616c73652c22657870697265735f61745f756e6978223a3137352c226163636573735f646561646c696e655f756e6978223a3230302c2267726163655f646561646c696e655f756e6978223a3235302c226361706162696c6974696573223a5b2267726170685f72656164225d7d7d7d",
+      "blame": "43545850524f0003000011897b2273657175656e6365223a31312c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22626c616d65222c22626f6479223a7b22736e617073686f74223a7b226b696e64223a22636f7265222c2272656365697074223a7b22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226d6174657269616c697a65725f7265766973696f6e223a22676f6c64656e2d636f72652d6d6174657269616c697a65722d7631227d7d2c22746172676574223a7b226b696e64223a22636f6d6d6974222c22636f6d6d6974223a7b226964223a22636f6d6d69743a676f6c64656e2d726573756c74222c226b696e64223a22636f6d6d6974222c22646973706c6179223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333227d2c227265706f7369746f7279223a7b226964223a227265706f7369746f72793a63747872732d637478222c226b696e64223a227265706f7369746f7279222c22646973706c6179223a2263747872732f637478227d7d2c226769745f736e617073686f74223a6e756c6c2c226f7574636f6d65223a7b226174747269627574696f6e223a226e6f6e65222c22636f766572616765223a7b22756e6974223a22636f6d6d69745f66616374222c226576616c7561746564223a302c2270726f76656e223a302c22706f737369626c65223a302c22636f6e666c696374696e67223a302c226e6f6e65223a307d7d2c226d617463686573223a5b5d2c2265766964656e6365223a5b7b226e756d626572223a312c226369746174696f6e223a7b22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c2273657373696f6e5f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a2253657373696f6e222c22646967657374223a5b3139372c33332c3230362c34372c3137352c3230382c39302c3139312c34352c3135372c3230392c3234342c35332c37392c38312c382c3132322c3235312c3139362c3130392c3231372c34382c3134382c3131302c36312c3133312c3139352c3235342c36312c3132342c34302c38345d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2263353231636532662d616664302d386162662d616439642d643166343335346635313038227d2c226576656e745f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a224576656e74222c22646967657374223a5b3231362c39392c3230332c3133322c3130372c3231312c3139322c3131332c3233352c3231392c38332c33382c3139362c37362c3133372c3130362c34342c3133362c34392c31362c3133372c3139392c3232312c3137392c31322c31362c39352c37342c32342c31352c38302c3231305d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2264383633636238342d366264332d383037312d616264622d353332366334346338393661227d2c226576656e745f73657175656e6365223a312c22627974655f72616e6765223a6e756c6c2c2265766964656e63655f736861323536223a6e756c6c7d7d5d2c226e657874223a6e756c6c2c226c696e65616765223a7b22726571756573746564223a7b227265736f75726365223a7b226964223a22636f6d6d69743a676f6c64656e2d726573756c74222c226b696e64223a22636f6d6d6974222c22646973706c6179223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333227d2c226c6f676963616c5f7265706f7369746f72795f6964223a2263747872732f637478222c226f626a6563745f666f726d6174223a2273686131222c226f6964223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333227d2c226564676573223a5b7b226f7065726174696f6e5f6964223a2264646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464222c226b696e64223a22726562617365222c2272656c6174696f6e5f636c617373223a227265706c6163656d656e74222c22736f75726365223a7b227265736f75726365223a7b226964223a22636f6d6d69743a676f6c64656e2d736f75726365222c226b696e64223a22636f6d6d6974222c22646973706c6179223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131227d2c226c6f676963616c5f7265706f7369746f72795f6964223a2263747872732f637478222c226f626a6563745f666f726d6174223a2273686131222c226f6964223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131227d2c22726573756c74223a7b227265736f75726365223a7b226964223a22636f6d6d69743a676f6c64656e2d726573756c74222c226b696e64223a22636f6d6d6974222c22646973706c6179223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333227d2c226c6f676963616c5f7265706f7369746f72795f6964223a2263747872732f637478222c226f626a6563745f666f726d6174223a2273686131222c226f6964223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333227d2c226163746f72223a7b226964223a2273657373696f6e3a63353231636532662d616664302d386162662d616439642d643166343335346635313038222c226b696e64223a2273657373696f6e222c22646973706c6179223a22676f6c64656e2d73657373696f6e227d2c2270726f6f665f636c617373223a227265706f7369746f72795f7665726966696564222c227374617465223a226173736572746564222c226f627365727665645f61745f6d73223a313730303030303030303030302c2265766964656e63655f6e756d62657273223a5b315d7d5d2c227969656c6465645f6279223a5b5d2c226f726967696e223a7b227265736f75726365223a7b226964223a22636f6d6d69743a676f6c64656e2d736f75726365222c226b696e64223a22636f6d6d6974222c22646973706c6179223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131227d2c226c6f676963616c5f7265706f7369746f72795f6964223a2263747872732f637478222c226f626a6563745f666f726d6174223a2273686131222c226f6964223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131227d2c22656e64706f696e74223a7b226b696e64223a2263757272656e745f61745f726566222c22636f6d6d6974223a7b227265736f75726365223a7b226964223a22636f6d6d69743a676f6c64656e2d726573756c74222c226b696e64223a22636f6d6d6974222c22646973706c6179223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333227d2c226c6f676963616c5f7265706f7369746f72795f6964223a2263747872732f637478222c226f626a6563745f666f726d6174223a2273686131222c226f6964223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333227d2c2273636f7065223a7b226964223a226272616e63683a63747872732d6374783a6d61696e222c226b696e64223a226272616e6368222c22646973706c6179223a226d61696e227d2c226f62736572766174696f6e5f6964223a226f62736572766174696f6e3a676f6c64656e2d6d61696e222c226f627365727665645f61745f6d73223a313730303030303030303030302c2265766964656e63655f6e756d62657273223a5b315d7d2c22636f6d706c657465223a747275652c22616d626967756f7573223a66616c73652c22626f756e6473223a7b2272657475726e65645f6576656e7473223a312c2272657475726e65645f6576656e745f6c696d6974223a3130302c226578616d696e65645f6576656e7473223a312c226578616d696e65645f6576656e745f6c696d6974223a313030302c226f6d697373696f6e223a7b226b696e64223a226578616374222c22636f756e74223a307d2c227472756e636174696f6e5f726561736f6e223a6e756c6c7d7d7d7d7d",
+      "core_event_delta_page_applied": "43545850524f00030000042e7b2273657175656e6365223a382c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f6576656e745f64656c74615f706167655f6170706c696564222c22626f6479223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22706167655f696e646578223a302c226164646974696f6e73223a312c227265706c6163656d656e7473223a302c22746f6d6273746f6e6573223a302c227465726d696e616c223a747275652c227265706c61796564223a66616c73657d7d7d",
+      "core_event_delta_pages_applied": "43545850524f00030000043c7b2273657175656e6365223a31332c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f6576656e745f64656c74615f70616765735f6170706c696564222c22626f6479223a7b227061676573223a5b7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22706167655f696e646578223a302c226164646974696f6e73223a312c227265706c6163656d656e7473223a302c22746f6d6273746f6e6573223a302c227465726d696e616c223a747275652c227265706c61796564223a66616c73657d5d7d7d7d",
+      "core_event_state_page": "43545850524f0003000004d57b2273657175656e6365223a372c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f6576656e745f73746174655f70616765222c22626f6479223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227265636f6e63696c696174696f6e223a7b226d6174657269616c697a655f696e646578223a302c2264656c7461223a7b226b696e64223a2270726573656e74222c2276616c7565223a7b22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22636f72655f7265636f72645f616363756d756c61746f72223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031222c226576656e745f636f756e74223a317d7d7d2c22706167655f696e646578223a302c2261667465725f6576656e745f6964223a6e756c6c2c22737461746573223a5b5d2c227465726d696e616c223a747275652c227265706c61796564223a66616c73657d7d7d",
+      "core_materialization_began": "43545850524f0003000001907b2273657175656e6365223a352c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f6d6174657269616c697a6174696f6e5f626567616e222c22626f6479223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226d6174657269616c697a65725f7265766973696f6e223a22676f6c64656e2d636f72652d6d6174657269616c697a65722d7631222c2265787065637465645f7072696f725f72656365697074223a6e756c6c2c227265706c61796564223a66616c73657d7d7d",
+      "core_materialization_finalization_pending": "43545850524f0003000001c07b2273657175656e6365223a31302c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f6d6174657269616c697a6174696f6e5f66696e616c697a6174696f6e5f70656e64696e67222c22626f6479223a7b2270726f6772657373223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227068617365223a22656d69745f666c6174222c22637572736f725f736861323536223a2265656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565656565227d2c227265706c61796564223a66616c73657d7d7d",
+      "core_materialization_finished": "43545850524f00030000020c7b2273657175656e6365223a392c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f6d6174657269616c697a6174696f6e5f66696e6973686564222c22626f6479223a7b2272656365697074223a7b22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22636f72655f7265636f72645f636f6e74726163745f66696e6765727072696e74223a2230363130626539613538313063653734326235303564633463336233646232346539616237393531323661366236326530656632313732653034613835636333222c22736f757263655f736e617073686f745f736861323536223a2235333137333138653730326565653062366239396635646264646639313938646535313766306135313533306138363339353737623838383339653036373835222c226d6174657269616c697a65725f7265766973696f6e223a22676f6c64656e2d636f72652d6d6174657269616c697a65722d7631222c22736f757263655f636f756e74223a312c226576656e745f636f756e74223a317d2c227265706c61796564223a66616c73657d7d7d",
+      "core_source_delta_page_applied": "43545850524f0003000007f37b2273657175656e6365223a362c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f736f757263655f64656c74615f706167655f6170706c696564222c22626f6479223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22706167655f696e646578223a302c2261636b6e6f776c656467656d656e745f706167655f696e646578223a302c2261636b6e6f776c656467656d656e745f7465726d696e616c223a747275652c226368616e6765645f736f7572636573223a312c2272656d6f7665645f736f7572636573223a312c227265636f6e63696c655f736f7572636573223a5b7b226d6174657269616c697a655f696e646578223a302c2264656c7461223a7b226b696e64223a2270726573656e74222c2276616c7565223a7b22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22636f72655f7265636f72645f616363756d756c61746f72223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031222c226576656e745f636f756e74223a317d7d7d2c7b226d6174657269616c697a655f696e646578223a312c2264656c7461223a7b226b696e64223a2272656d6f766564222c2276616c7565223a7b22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c322c325d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b32382c3136372c3132342c33352c3230332c3230322c3134312c3234322c32302c31332c3134332c3132322c32342c33362c3135312c3137392c34352c34372c3134332c38382c3133302c3232392c3132392c31352c3135372c38332c3130352c332c3235312c3133352c3135362c3137345d2c22736f757263655f646967657374223a5b32382c3136372c3132342c33352c3230332c3230322c3134312c3234322c32302c31332c3134332c3132322c32342c33362c3135312c3137392c34352c34372c3134332c38382c3133302c3232392c3132392c31352c3135372c38332c3130352c332c3235312c3133352c3135362c3137345d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2231636137376332332d636263612d386466322d393430642d386637613138323439376233227d7d7d7d7d5d2c227265706c61796564223a66616c73657d7d7d",
+      "error": "43545850524f0003000000c67b2273657175656e6365223a31322c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a226572726f72222c22626f6479223a7b22636c617373223a2270726f746f636f6c5f6d69736d61746368222c226d657373616765223a22676f6c64656e2070726f746f636f6c206572726f72222c22726574727961626c65223a66616c73652c2264657461696c73223a6e756c6c7d7d7d",
+      "graph_key_deleted": "43545850524f0003000000817b2273657175656e6365223a332c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a2267726170685f6b65795f64656c65746564222c22626f6479223a7b2264656c65746564223a747275657d7d7d",
+      "graph_key_deletion_prepared": "43545850524f0003000000e97b2273657175656e6365223a322c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a2267726170685f6b65795f64656c6574696f6e5f7072657061726564222c22626f6479223a7b226368616c6c656e67655f62617365363475726c223a2242675947426759474267594742675947426759474267594742675947426759474267594742675947426759222c22657870697265735f61745f756e6978223a3230302c226b65795f70726573656e74223a747275657d7d7d",
+      "hello": "43545850524f0003000001bd7b2273657175656e6365223a302c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a2268656c6c6f222c22626f6479223a7b2270726f746f636f6c5f76657273696f6e223a332c2270726f746f636f6c5f66696e6765727072696e74223a2264336531383566366637366534653034336264313836306432363830376634373962636439653638633264313363653165336463653831363764333833396132222c2268656c7065725f76657273696f6e223a22676f6c64656e2d68656c706572222c226361706162696c6974696573223a5b22656e7469746c656d656e745f617574686f72697a6174696f6e222c2267726170685f6b65795f64656c6574696f6e222c22737461747573222c22636f72655f6d6174657269616c697a6174696f6e222c227175657279222c226769745f72656164225d2c22617574686f72697a6174696f6e5f6368616c6c656e67655f62617365363475726c223a2242415145424151454241514542415145424151454241514542415145424151454241514542415145424151227d7d7d",
+      "status": "43545850524f0003000005bc7b2273657175656e6365223a342c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22737461747573222c22626f6479223a7b2263757272656e746e657373223a2263757272656e74222c227265717565737465645f636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22636f72655f72656365697074223a7b22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22636f72655f7265636f72645f636f6e74726163745f66696e6765727072696e74223a2230363130626539613538313063653734326235303564633463336233646232346539616237393531323661366236326530656632313732653034613835636333222c22736f757263655f736e617073686f745f736861323536223a2235333137333138653730326565653062366239396635646264646639313938646535313766306135313533306138363339353737623838383339653036373835222c226d6174657269616c697a65725f7265766973696f6e223a22676f6c64656e2d636f72652d6d6174657269616c697a65722d7631222c22736f757263655f636f756e74223a312c226576656e745f636f756e74223a317d2c22636f766572616765223a22636f6d706c657465222c227265706f7369746f72795f636f766572616765223a7b227265706f7369746f72795f63616e6469646174655f6576656e7473223a312c226c6f676963616c5f62696e64696e675f6576656e7473223a312c226365727469666965645f6c6976655f726f6f745f6163636573735f6576656e7473223a312c2266696c655f65766964656e63655f6576656e7473223a312c2265786163745f636f6d6d69745f65766964656e63655f6576656e7473223a312c2265786163745f70756c6c5f726571756573745f65766964656e63655f6576656e7473223a317d2c22636f72655f7072657061726174696f6e5f7065616b5f776f726b657273223a342c22616363657373223a7b22656e7469746c656d656e74223a22617661696c61626c65222c2267726170685f6b6579223a22617661696c61626c65222c226c6f63616c5f7265706f7369746f7279223a22617661696c61626c65227d2c22737570706f727465645f6f7065726174696f6e73223a5b2266696c655f626c616d65222c22636f6d6d69745f626c616d65222c2270756c6c5f726571756573745f626c616d65225d2c22617661696c61626c655f6f7065726174696f6e73223a5b2266696c655f626c616d65222c22636f6d6d69745f626c616d65222c2270756c6c5f726571756573745f626c616d65225d2c2266696e616c697a6174696f6e5f70726f6772657373223a6e756c6c2c2273746f726167655f65766964656e6365223a7b2267726170685f6d616e69666573745f736368656d61223a332c22666c61745f666f726d61745f76657273696f6e223a322c226d6174657269616c697a65725f636865636b706f696e745f76657273696f6e223a352c226a6f75726e616c5f7061636b5f666f726d61745f76657273696f6e223a332c226c65676163795f6a6f75726e616c735f7772697474656e223a302c226a6f75726e616c5f70616765735f7772697474656e223a322c226a6f75726e616c5f7061636b735f7772697474656e223a312c226a6f75726e616c5f66696e6973685f6163746976697479223a7b22776f726b65725f6c696d6974223a312c227065616b5f776f726b657273223a312c22737461727465645f61667465725f7072657061726174696f6e223a747275657d7d7d7d7d"
+    },
+    "host_frames": {
+      "apply_core_event_delta_page": "43545850524f0003000011867b2273657175656e6365223a382c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a226170706c795f636f72655f6576656e745f64656c74615f70616765222c22626f6479223a7b2270616765223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227265636f6e63696c696174696f6e223a7b226d6174657269616c697a655f696e646578223a302c2264656c7461223a7b226b696e64223a2270726573656e74222c2276616c7565223a7b22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22636f72655f7265636f72645f616363756d756c61746f72223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031222c226576656e745f636f756e74223a317d7d7d2c22706167655f696e646578223a302c227465726d696e616c223a747275652c2264656c746173223a5b7b226b696e64223a226164646564222c2276616c7565223a7b227265636f72645f76657273696f6e223a322c226576656e745f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a224576656e74222c22646967657374223a5b3231362c39392c3230332c3133322c3130372c3231312c3139322c3131332c3233352c3231392c38332c33382c3139362c37362c3133372c3130362c34342c3133362c34392c31362c3133372c3139392c3232312c3137392c31322c31362c39352c37342c32342c31352c38302c3231305d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2264383633636238342d366264332d383037312d616264622d353332366334346338393661227d2c2273657373696f6e5f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a2253657373696f6e222c22646967657374223a5b3139372c33332c3230362c34372c3137352c3230382c39302c3139312c34352c3135372c3230392c3234342c35332c37392c38312c382c3132322c3235312c3139362c3130392c3231372c34382c3134382c3131302c36312c3133312c3139352c3235342c36312c3132342c34302c38345d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2263353231636532662d616664302d386162662d616439642d643166343335346635313038227d2c22706172656e745f73657373696f6e5f6964223a6e756c6c2c22726f6f745f73657373696f6e5f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a2253657373696f6e222c22646967657374223a5b3139372c33332c3230362c34372c3137352c3230382c39302c3139312c34352c3135372c3230392c3234342c35332c37392c38312c382c3132322c3235312c3139362c3130392c3231372c34382c3134382c3131302c36312c3133312c3139352c3235342c36312c3132342c34302c38345d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2263353231636532662d616664302d386162662d616439642d643166343335346635313038227d2c2273657373696f6e5f72656c6174696f6e73686970223a22726f6f74222c226576656e745f6f726967696e223a7b226b696e64223a22756e6b6e6f776e227d2c22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c2270726f76696465725f73657373696f6e5f6964223a22676f6c64656e2d73657373696f6e222c226e61746976655f6576656e745f6964223a6e756c6c2c226576656e745f73657175656e6365223a312c226f636375727265645f61745f756e69785f6d73223a313730303030303030303030302c226576656e745f74797065223a226d657373616765222c22726f6c65223a22617373697374616e74222c226167656e745f74797065223a227072696d617279222c2269735f7072696d617279223a747275652c22776f726b7370616365223a6e756c6c2c226272616e6368223a6e756c6c2c22637764223a6e756c6c2c227061727365725f7265766973696f6e223a22676f6c64656e2d7061727365722d7631222c226e6f726d616c697a6174696f6e5f7265766973696f6e223a312c22636f6e74656e74223a7b22706f6c6963795f7265766973696f6e223a332c22706f6c6963795f737461747573223a2273656c6563746564222c226e6f726d616c697a65645f626f6479223a22636f6d706c65746520676f6c64656e20436f726520626f6479222c22737472756374757265645f636f6e74656e74223a6e756c6c2c22646973636f766572795f6578636c7573696f6e223a226374785f72657472696576616c5f64657269766564227d2c226d65746164617461223a7b7d2c227265706f7369746f72795f63616e6469646174655f65766964656e6365223a7b227265706f7369746f72795f6f62736572766174696f6e5f7265766973696f6e223a352c22626f756e6465645f7368656c6c5f7375627365745f7265766973696f6e223a342c226173736f63696174696f6e5f706f6c6963795f7265766973696f6e223a362c226f7574636f6d655f636170747572655f7265766973696f6e223a352c2263616e64696461746573223a5b7b226b696e64223a2273657373696f6e5f637764222c2270617468223a222f676f6c64656e2f7265706f227d2c7b226b696e64223a2266696c655f61637469766974795f70617468222c2270617468223a222f676f6c64656e2f7265706f2f7372632f6c69622e7273227d5d7d2c227265706f7369746f72795f62696e64696e6773223a5b5d2c227265706f7369746f72795f61627374656e74696f6e73223a5b5d2c227265706f7369746f72795f66696c655f696e766f636174696f6e5f65766964656e6365223a5b5d2c227265706f7369746f72795f66696c655f6f62736572766174696f6e73223a5b5d2c227265706f7369746f72795f7663735f6f62736572766174696f6e73223a5b5d7d7d5d7d7d7d7d",
+      "apply_core_event_delta_pages": "43545850524f00030000118b7b2273657175656e6365223a31322c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a226170706c795f636f72655f6576656e745f64656c74615f7061676573222c22626f6479223a7b227061676573223a5b7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227265636f6e63696c696174696f6e223a7b226d6174657269616c697a655f696e646578223a302c2264656c7461223a7b226b696e64223a2270726573656e74222c2276616c7565223a7b22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22636f72655f7265636f72645f616363756d756c61746f72223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031222c226576656e745f636f756e74223a317d7d7d2c22706167655f696e646578223a302c227465726d696e616c223a747275652c2264656c746173223a5b7b226b696e64223a226164646564222c2276616c7565223a7b227265636f72645f76657273696f6e223a322c226576656e745f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a224576656e74222c22646967657374223a5b3231362c39392c3230332c3133322c3130372c3231312c3139322c3131332c3233352c3231392c38332c33382c3139362c37362c3133372c3130362c34342c3133362c34392c31362c3133372c3139392c3232312c3137392c31322c31362c39352c37342c32342c31352c38302c3231305d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2264383633636238342d366264332d383037312d616264622d353332366334346338393661227d2c2273657373696f6e5f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a2253657373696f6e222c22646967657374223a5b3139372c33332c3230362c34372c3137352c3230382c39302c3139312c34352c3135372c3230392c3234342c35332c37392c38312c382c3132322c3235312c3139362c3130392c3231372c34382c3134382c3131302c36312c3133312c3139352c3235342c36312c3132342c34302c38345d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2263353231636532662d616664302d386162662d616439642d643166343335346635313038227d2c22706172656e745f73657373696f6e5f6964223a6e756c6c2c22726f6f745f73657373696f6e5f6964223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a2253657373696f6e222c22646967657374223a5b3139372c33332c3230362c34372c3137352c3230382c39302c3139312c34352c3135372c3230392c3234342c35332c37392c38312c382c3132322c3235312c3139362c3130392c3231372c34382c3134382c3131302c36312c3133312c3139352c3235342c36312c3132342c34302c38345d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b3232382c3133362c3230322c3138312c32362c35312c39362c35302c342c32312c3135342c3132302c31382c3139342c3131352c39342c32362c36312c3135312c33302c3139302c3230342c31392c3131362c32342c33342c3130332c3130392c36332c37372c3131342c3231325d2c2275756964223a2263353231636532662d616664302d386162662d616439642d643166343335346635313038227d2c2273657373696f6e5f72656c6174696f6e73686970223a22726f6f74222c226576656e745f6f726967696e223a7b226b696e64223a22756e6b6e6f776e227d2c22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c2270726f76696465725f73657373696f6e5f6964223a22676f6c64656e2d73657373696f6e222c226e61746976655f6576656e745f6964223a6e756c6c2c226576656e745f73657175656e6365223a312c226f636375727265645f61745f756e69785f6d73223a313730303030303030303030302c226576656e745f74797065223a226d657373616765222c22726f6c65223a22617373697374616e74222c226167656e745f74797065223a227072696d617279222c2269735f7072696d617279223a747275652c22776f726b7370616365223a6e756c6c2c226272616e6368223a6e756c6c2c22637764223a6e756c6c2c227061727365725f7265766973696f6e223a22676f6c64656e2d7061727365722d7631222c226e6f726d616c697a6174696f6e5f7265766973696f6e223a312c22636f6e74656e74223a7b22706f6c6963795f7265766973696f6e223a332c22706f6c6963795f737461747573223a2273656c6563746564222c226e6f726d616c697a65645f626f6479223a22636f6d706c65746520676f6c64656e20436f726520626f6479222c22737472756374757265645f636f6e74656e74223a6e756c6c2c22646973636f766572795f6578636c7573696f6e223a226374785f72657472696576616c5f64657269766564227d2c226d65746164617461223a7b7d2c227265706f7369746f72795f63616e6469646174655f65766964656e6365223a7b227265706f7369746f72795f6f62736572766174696f6e5f7265766973696f6e223a352c22626f756e6465645f7368656c6c5f7375627365745f7265766973696f6e223a342c226173736f63696174696f6e5f706f6c6963795f7265766973696f6e223a362c226f7574636f6d655f636170747572655f7265766973696f6e223a352c2263616e64696461746573223a5b7b226b696e64223a2273657373696f6e5f637764222c2270617468223a222f676f6c64656e2f7265706f227d2c7b226b696e64223a2266696c655f61637469766974795f70617468222c2270617468223a222f676f6c64656e2f7265706f2f7372632f6c69622e7273227d5d7d2c227265706f7369746f72795f62696e64696e6773223a5b5d2c227265706f7369746f72795f61627374656e74696f6e73223a5b5d2c227265706f7369746f72795f66696c655f696e766f636174696f6e5f65766964656e6365223a5b5d2c227265706f7369746f72795f66696c655f6f62736572766174696f6e73223a5b5d2c227265706f7369746f72795f7663735f6f62736572766174696f6e73223a5b5d7d7d5d7d5d7d7d7d",
+      "apply_core_source_delta_page": "43545850524f0003000004ab7b2273657175656e6365223a362c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a226170706c795f636f72655f736f757263655f64656c74615f70616765222c22626f6479223a7b2270616765223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22706167655f696e646578223a302c227465726d696e616c223a747275652c2264656c746173223a5b7b226b696e64223a2270726573656e74222c2276616c7565223a7b22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22636f72655f7265636f72645f616363756d756c61746f72223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031222c226576656e745f636f756e74223a317d7d5d7d2c2261636b6e6f776c656467656d656e745f706167655f696e646578223a307d7d7d",
+      "authorize": "43545850524f0003000003f47b2273657175656e6365223a312c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22617574686f72697a65222c22626f6479223a7b22656e7469746c656d656e74223a7b226772616e74223a7b22736368656d615f76657273696f6e223a312c22697373756572223a2268747470733a2f2f636f6d6d65726369616c2e6374782e7273222c226b65795f6964223a22666978747572652d7631222c226772616e745f6964223a226772616e742d31222c227375626a656374223a22757365722d31222c226163636f756e745f6964223a226163636f756e742d31222c2270726f64756374223a226374782d6c6f63616c2d70726f222c226163636573735f6b696e64223a22747269616c222c22696e7374616c6c6174696f6e5f6b65795f7468756d627072696e74223a2241514542415145424151454241514542415145424151454241514542415145424151454241514542415145222c226973737565645f61745f756e6978223a3130302c226e6f745f6265666f72655f756e6978223a39302c22726566726573685f61667465725f756e6978223a3135302c226163636573735f646561646c696e655f756e6978223a3230302c2267726163655f646561646c696e655f756e6978223a3235302c22657870697265735f61745f756e6978223a3137352c226d696e696d756d5f68656c7065725f70726f746f636f6c223a332c227265766f636174696f6e5f65706f6368223a302c226361706162696c6974696573223a5b2267726170685f72656164222c2267726170685f7772697465225d7d2c227369676e61747572655f62617365363475726c223a224167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167227d2c22696e7374616c6c6174696f6e5f7075626c69635f6b65795f62617365363475726c223a2241774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d222c226368616c6c656e67655f62617365363475726c223a2242415145424151454241514542415145424151454241514542415145424151454241514542415145424151222c2270726f6f665f7369676e61747572655f62617365363475726c223a224251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251227d7d7d",
+      "begin_core_materialization": "43545850524f0003000003287b2273657175656e6365223a352c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22626567696e5f636f72655f6d6174657269616c697a6174696f6e222c22626f6479223a7b2268656164223a7b22636f6e74726163745f76657273696f6e223a332c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c2267656e65726174696f6e5f6d616e69666573745f76657273696f6e223a342c226964656e746974795f76657273696f6e223a312c22636f72655f7265636f72645f76657273696f6e223a322c22636f72655f7265636f72645f636f6e74726163745f66696e6765727072696e74223a2230363130626539613538313063653734326235303564633463336233646232346539616237393531323661366236326530656632313732653034613835636333222c226e6f726d616c697a6174696f6e5f7265766973696f6e223a312c22636f6e74656e745f706f6c6963795f7265766973696f6e223a332c227265706f7369746f72795f636f6e74726163745f7265766973696f6e223a31312c226c65786963616c5f736368656d615f76657273696f6e223a332c226c65786963616c5f616e616c797a65725f76657273696f6e223a322c22706f6c6963795f736368656d615f68617368223a2263636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c22736f757263655f736e617073686f745f736861323536223a2235333137333138653730326565653062366239396635646264646639313938646535313766306135313533306138363339353737623838383339653036373835222c22736f757263655f636f756e74223a312c226576656e745f636f756e74223a317d2c2265787065637465645f7072696f725f72656365697074223a6e756c6c7d7d7d",
+      "blame": "43545850524f00030000018b7b2273657175656e6365223a31312c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22626c616d65222c22626f6479223a7b22746172676574223a7b226b696e64223a22636f6d6d6974222c226f6964223a2233333333333333333333333333333333222c227265706f7369746f7279223a2263747872732f637478227d2c226c696d6974223a31302c22637572736f72223a6e756c6c2c2265787065637465645f736e617073686f74223a7b226b696e64223a22636f7265222c2272656365697074223a7b22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c226d6174657269616c697a65725f7265766973696f6e223a22676f6c64656e2d636f72652d6d6174657269616c697a65722d7631227d7d7d7d7d",
+      "confirm_graph_key_deletion": "43545850524f0003000004177b2273657175656e6365223a332c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f6e6669726d5f67726170685f6b65795f64656c6574696f6e222c22626f6479223a7b22617574686f72697a6174696f6e223a7b22656e7469746c656d656e74223a7b226772616e74223a7b22736368656d615f76657273696f6e223a312c22697373756572223a2268747470733a2f2f636f6d6d65726369616c2e6374782e7273222c226b65795f6964223a22666978747572652d7631222c226772616e745f6964223a226772616e742d31222c227375626a656374223a22757365722d31222c226163636f756e745f6964223a226163636f756e742d31222c2270726f64756374223a226374782d6c6f63616c2d70726f222c226163636573735f6b696e64223a22747269616c222c22696e7374616c6c6174696f6e5f6b65795f7468756d627072696e74223a2241514542415145424151454241514542415145424151454241514542415145424151454241514542415145222c226973737565645f61745f756e6978223a3130302c226e6f745f6265666f72655f756e6978223a39302c22726566726573685f61667465725f756e6978223a3135302c226163636573735f646561646c696e655f756e6978223a3230302c2267726163655f646561646c696e655f756e6978223a3235302c22657870697265735f61745f756e6978223a3137352c226d696e696d756d5f68656c7065725f70726f746f636f6c223a332c227265766f636174696f6e5f65706f6368223a302c226361706162696c6974696573223a5b2267726170685f72656164222c2267726170685f7772697465225d7d2c227369676e61747572655f62617365363475726c223a224167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167494341674943416749434167227d2c22696e7374616c6c6174696f6e5f7075626c69635f6b65795f62617365363475726c223a2241774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d4441774d222c226368616c6c656e67655f62617365363475726c223a2242415145424151454241514542415145424151454241514542415145424151454241514542415145424151222c2270726f6f665f7369676e61747572655f62617365363475726c223a224251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251554642515546425155464251227d7d7d7d",
+      "continue_core_materialization": "43545850524f0003000001ae7b2273657175656e6365223a31302c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f6e74696e75655f636f72655f6d6174657269616c697a6174696f6e222c22626f6479223a7b2265787065637465645f70726f6772657373223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227068617365223a22656d69745f7265706c6179222c22637572736f725f736861323536223a2264646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464227d7d7d7d",
+      "core_event_state_page": "43545850524f0003000004bc7b2273657175656e6365223a372c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22636f72655f6576656e745f73746174655f70616765222c22626f6479223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c227265636f6e63696c696174696f6e223a7b226d6174657269616c697a655f696e646578223a302c2264656c7461223a7b226b696e64223a2270726573656e74222c2276616c7565223a7b22736f75726365223a7b2270726f7669646572223a22676f6c64656e222c22736f757263655f666f726d6174223a22676f6c64656e5f6a736f6e6c222c22736368656d615f76617269616e74223a22676f6c64656e2d7631222c2270726f76696465725f6964656e746974795f76657273696f6e223a312c22616e63686f72223a7b22436174616c6f674c696e65616765223a5b312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c312c315d7d2c226964656e74697479223a7b22636f6e74726163745f76657273696f6e223a312c22656e746974795f6b696e64223a22536f75726365222c22646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f646967657374223a5b3137352c3230382c3234342c33362c3138302c3138382c36332c3231382c3132392c3137302c32392c36342c36352c3231362c3131372c3138312c38372c322c3134342c32302c3130352c3131332c3131302c3134382c3130302c3131362c36352c39332c3230322c3232342c3131312c3138375d2c22736f757263655f64657363726970746f725f646967657374223a5b302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c302c305d2c2275756964223a2261666430663432342d623462632d386664612d383161612d316434303431643837356235227d7d2c22636f72655f7265636f72645f616363756d756c61746f72223a2230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303031222c226576656e745f636f756e74223a317d7d7d2c22706167655f696e646578223a302c2261667465725f6576656e745f6964223a6e756c6c2c226d6178696d756d5f6974656d73223a3235367d7d7d",
+      "finish_core_materialization": "43545850524f0003000003ea7b2273657175656e6365223a392c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a2266696e6973685f636f72655f6d6174657269616c697a6174696f6e222c22626f6479223a7b226d6174657269616c697a6174696f6e5f6964223a2239333031306138653365643731386163616133386332366134316332333064376336396162383362663335643465623831383263306539356539353166646539222c2268656164223a7b22636f6e74726163745f76657273696f6e223a332c22636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c2267656e65726174696f6e5f6d616e69666573745f76657273696f6e223a342c226964656e746974795f76657273696f6e223a312c22636f72655f7265636f72645f76657273696f6e223a322c22636f72655f7265636f72645f636f6e74726163745f66696e6765727072696e74223a2230363130626539613538313063653734326235303564633463336233646232346539616237393531323661366236326530656632313732653034613835636333222c226e6f726d616c697a6174696f6e5f7265766973696f6e223a312c22636f6e74656e745f706f6c6963795f7265766973696f6e223a332c227265706f7369746f72795f636f6e74726163745f7265766973696f6e223a31312c226c65786963616c5f736368656d615f76657273696f6e223a332c226c65786963616c5f616e616c797a65725f76657273696f6e223a322c22706f6c6963795f736368656d615f68617368223a2263636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c22736f757263655f736e617073686f745f736861323536223a2235333137333138653730326565653062366239396635646264646639313938646535313766306135313533306138363339353737623838383339653036373835222c22736f757263655f636f756e74223a312c226576656e745f636f756e74223a317d2c2265787065637465645f7072696f725f72656365697074223a6e756c6c2c22736f757263655f64656c74615f7061676573223a312c226368616e6765645f736f7572636573223a312c2272656d6f7665645f736f7572636573223a312c226576656e745f64656c74615f7061676573223a322c226576656e745f6d75746174696f6e73223a327d7d7d",
+      "hello": "43545850524f0003000001677b2273657175656e6365223a302c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a2268656c6c6f222c22626f6479223a7b2270726f746f636f6c5f76657273696f6e223a332c2270726f746f636f6c5f66696e6765727072696e74223a2264336531383566366637366534653034336264313836306432363830376634373962636439653638633264313363653165336463653831363764333833396132222c22686f73745f76657273696f6e223a22676f6c64656e2d686f7374222c226361706162696c6974696573223a5b22656e7469746c656d656e745f617574686f72697a6174696f6e222c2267726170685f6b65795f64656c6574696f6e222c22737461747573222c22636f72655f6d6174657269616c697a6174696f6e222c227175657279222c226769745f72656164225d7d7d7d",
+      "prepare_graph_key_deletion": "43545850524f0003000000c77b2273657175656e6365223a322c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22707265706172655f67726170685f6b65795f64656c6574696f6e222c22626f6479223a7b22696e7374616c6c6174696f6e5f6b65795f7468756d627072696e74223a2241514542415145424151454241514542415145424151454241514542415145424151454241514542415145227d7d7d",
+      "status": "43545850524f0003000000c97b2273657175656e6365223a342c22726571756573745f6964223a2230303030303030302d303030302d303030302d303030302d303030303030303030303031222c226d657373616765223a7b226b696e64223a22737461747573222c22626f6479223a7b227265717565737465645f636f72655f67656e65726174696f6e5f6964223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d7d7d"
+    }
+  }
+}

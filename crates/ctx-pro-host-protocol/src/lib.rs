@@ -1,4 +1,4 @@
-//! Exact, bounded Protocol V2 between the OSS `ctx` host and a local Pro helper.
+//! Exact, bounded Protocol V3 between the OSS `ctx` host and a local Pro helper.
 //!
 //! The public crate is the only wire authority. Private products consume this
 //! crate and its generated inventory at one exact source revision.
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub use ctx_history_core::{CoreRecord, SourceKey, StableEntityId};
 
 pub const FRAME_MAGIC: &[u8; 6] = b"CTXPRO";
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 include!("protocol_fingerprint.rs");
 pub const FRAME_HEADER_BYTES: usize = FRAME_MAGIC.len() + 2 + 4;
 pub const MAX_FRAME_PAYLOAD_BYTES: usize = 80 * 1024 * 1024;
@@ -21,8 +21,8 @@ pub const MAX_CITATIONS_PER_FACT: usize = 32;
 pub const MAX_BLAME_TARGET_BYTES: usize = 8 * 1024;
 pub const MAX_COMMIT_LINEAGE_RETURNED_EVENTS: u32 = 100;
 pub const MAX_COMMIT_LINEAGE_EXAMINED_EVENTS: u32 = 1_000;
-/// Canonical generated Protocol V2 inventory shipped by this exact crate revision.
-pub const PROTOCOL_INVENTORY_JSON: &str = include_str!("../testdata/v2/inventory.json");
+/// Canonical generated Protocol V3 inventory shipped by this exact crate revision.
+pub const PROTOCOL_INVENTORY_JSON: &str = include_str!("../testdata/v3/inventory.json");
 /// Canonical entitlement vectors shipped by this exact crate revision.
 pub const ENTITLEMENT_GOLDEN_JSON: &str = include_str!("../testdata/entitlement/v1/golden.json");
 
@@ -92,17 +92,19 @@ pub use core_materialization::{
     core_materialization_id, core_record_digests, core_record_digests_from_encoded,
     core_record_leaf_sha256, core_record_sha256, core_source_snapshot_sha256,
     ApplyCoreEventDeltaPageRequest, ApplyCoreEventDeltaPagesRequest,
-    ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, CoreEventDelta,
-    CoreEventDeltaPage, CoreEventDeltaPageAcknowledgementIdentity, CoreEventDeltaPageApplied,
+    ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest,
+    ContinueCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage,
+    CoreEventDeltaPageAcknowledgementIdentity, CoreEventDeltaPageApplied,
     CoreEventDeltaPageBuilder, CoreEventDeltaPagesAcknowledgementIdentity,
     CoreEventDeltaPagesApplied, CoreEventReplacement, CoreEventState, CoreEventStatePage,
     CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
-    CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinished,
-    CoreMaterializationReceipt, CoreMaterializationReceiptIdentity, CoreRecordDigests,
-    CoreSourceDelta, CoreSourceDeltaPage, CoreSourceDeltaPageAcknowledgementIdentity,
-    CoreSourceDeltaPageApplied, CoreSourceReconciliation, CoreSourceRemoval, CoreSourceState,
-    FinishCoreMaterializationRequest, CORE_MATERIALIZATION_CONTRACT_VERSION,
-    MAX_CORE_CONTROL_WIRE_BYTES, MAX_CORE_EVENT_DELTA_PAGES,
+    CoreMaterializationBeginAcknowledgementIdentity, CoreMaterializationFinalizationPending,
+    CoreMaterializationFinalizationPhase, CoreMaterializationFinalizationProgress,
+    CoreMaterializationFinished, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
+    CoreRecordDigests, CoreSourceDelta, CoreSourceDeltaPage,
+    CoreSourceDeltaPageAcknowledgementIdentity, CoreSourceDeltaPageApplied,
+    CoreSourceReconciliation, CoreSourceRemoval, CoreSourceState, FinishCoreMaterializationRequest,
+    CORE_MATERIALIZATION_CONTRACT_VERSION, MAX_CORE_CONTROL_WIRE_BYTES, MAX_CORE_EVENT_DELTA_PAGES,
     MAX_CORE_EVENT_DELTA_PAGES_PREPARED_OUTPUT_BYTES,
     MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES, MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
     MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,

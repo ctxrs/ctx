@@ -36,7 +36,7 @@ pub(super) fn inventory() -> Value {
         request_id,
         message: HelperMessage::Error(ProtocolError::new(
             ErrorClass::ProtocolMismatch,
-            "exact Protocol V2 mismatch",
+            "exact Protocol V3 mismatch",
         )),
     };
     json!({
@@ -116,13 +116,15 @@ pub(super) fn inventory() -> Value {
             "confirm_graph_key_deletion", "status",
             "begin_core_materialization", "apply_core_source_delta_page",
             "core_event_state_page", "apply_core_event_delta_page",
-            "finish_core_materialization", "blame", "apply_core_event_delta_pages"
+            "finish_core_materialization", "continue_core_materialization", "blame",
+            "apply_core_event_delta_pages"
         ],
         "helper_message_kinds": [
             "hello", "authorized", "graph_key_deletion_prepared", "graph_key_deleted",
             "status", "core_materialization_began", "core_source_delta_page_applied",
             "core_event_state_page", "core_event_delta_page_applied",
-            "core_materialization_finished", "blame", "error",
+            "core_materialization_finished", "core_materialization_finalization_pending",
+            "blame", "error",
             "core_event_delta_pages_applied"
         ],
         "capabilities": wire_names(&capabilities, Capability::wire_name),
@@ -148,7 +150,12 @@ pub(super) fn inventory() -> Value {
             ],
             "blame_diagnostic_candidate_kind": ["repository", "commit"],
             "core_projection_currentness": [
-                "not_materialized", "partial", "stale", "needs_rebuild", "current"
+                "not_materialized", "partial", "finalizing", "stale", "needs_rebuild",
+                "current"
+            ],
+            "core_materialization_finalization_phase": [
+                "sealing_inputs", "emit_replay", "emit_flat", "emit_event_index",
+                "emit_sources", "validate_candidate", "ready_to_activate"
             ],
             "materialized_coverage": [
                 "not_materialized", "partial", "complete", "empty", "abstained"
@@ -183,7 +190,7 @@ pub(super) fn inventory() -> Value {
             "StatusResult": fields(&[
                 "currentness", "requested_core_generation_id", "core_receipt", "coverage",
                 "repository_coverage", "core_preparation_peak_workers", "access", "supported_operations",
-                "available_operations", "storage_evidence"
+                "available_operations", "finalization_progress", "storage_evidence"
             ], &[]),
             "RepositoryCoverage": fields(&[
                 "repository_candidate_events", "logical_binding_events",
@@ -261,6 +268,12 @@ pub(super) fn inventory() -> Value {
                 "materialization_id", "head", "expected_prior_receipt", "source_delta_pages",
                 "changed_sources", "removed_sources", "event_delta_pages", "event_mutations"
             ], &[]),
+            "ContinueCoreMaterializationRequest": fields(&["expected_progress"], &[]),
+            "CoreMaterializationFinalizationProgress": fields(&[
+                "materialization_id", "core_generation_id", "phase", "cursor_sha256"
+            ], &[]),
+            "CoreMaterializationFinalizationPending": fields(
+                &["progress", "replayed"], &[]),
             "CoreMaterializationFinished": fields(&["receipt", "replayed"], &[]),
             "QuerySnapshotExpectation.core": fields(&["kind", "receipt"], &[]),
             "ProtocolError": fields(
@@ -423,7 +436,7 @@ pub(super) fn inventory() -> Value {
             "sequence": [
                 "begin_core_materialization", "apply_core_source_delta_page",
                 "core_event_state_page", "apply_core_event_delta_pages",
-                "finish_core_materialization"
+                "finish_core_materialization", "continue_core_materialization"
             ],
             "authority": "one_generation_pinned_core_snapshot_delta_feed",
             "initial": "the_helper_reconciles_every_present_source_because_it_has_no_prior_event_state",
@@ -439,8 +452,8 @@ pub(super) fn inventory() -> Value {
             },
             "records": "complete_core_records_are_read_only_from_the_pinned_core_source_event_page_api_and_only_added_or_replaced_events_cross_the_protocol",
             "repository_data": "repository_bindings_abstentions_file_invocation_evidence_and_file_and_vcs_observations_exist_only_inside_core_records",
-            "publication": "explicit_terminal_counts_at_most_one_prior_receipt_cas_and_a_small_final_control_transaction",
-            "replay": "source_delta_requests_and_acknowledgement_pages_are_independently_idempotent_and_an_exact_completed_generation_may_skip_all_delta_and_event_pages",
+            "publication": "explicit_terminal_counts_at_most_one_prior_receipt_cas_and_one_bounded_durable_finalization_quantum_per_finish_or_continue_request",
+            "replay": "source_delta_requests_acknowledgement_pages_finish_and_continue_are_independently_idempotent_and_an_exact_completed_generation_may_skip_all_delta_and_event_pages",
             "integrity": "strict_source_acknowledgement_and_event_page_sequence_content_generation_and_transactional_staging_without_hash_chains"
         },
         "status_contract": {
@@ -454,6 +467,17 @@ pub(super) fn inventory() -> Value {
                 "certified_live_root_access_events", "file_evidence_events",
                 "exact_commit_evidence_events", "exact_pull_request_evidence_events"
             ],
+            "storage_evidence": {
+                "graph_manifest_schema": 3,
+                "flat_format_version": 2,
+                "materializer_checkpoint": {
+                    "legacy_control_load": 4,
+                    "current_publication": 5,
+                    "event_index_cross_version_reads": "forbidden"
+                },
+                "journal_pack_format_version": 3,
+                "legacy_journals_written": 0
+            },
             "coverage_bound": "repository_candidate_events_is_at_most_receipt_event_count_and every_specialized_axis_is_a_subset_of_logical_binding_events_which_is_a_subset_of_repository_candidate_events",
             "terminal_coverage": {
                 "empty": "receipt_event_count_is_zero_and_all_repository_coverage_axes_are_zero",

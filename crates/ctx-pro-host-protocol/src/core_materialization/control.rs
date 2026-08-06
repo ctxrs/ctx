@@ -242,6 +242,119 @@ impl FinishCoreMaterializationRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreMaterializationFinalizationPhase {
+    SealingInputs,
+    EmitReplay,
+    EmitFlat,
+    EmitEventIndex,
+    EmitSources,
+    ValidateCandidate,
+    ReadyToActivate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreMaterializationFinalizationProgress {
+    pub materialization_id: String,
+    pub core_generation_id: String,
+    pub phase: CoreMaterializationFinalizationPhase,
+    pub cursor_sha256: String,
+}
+
+impl CoreMaterializationFinalizationProgress {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_sha256(&self.materialization_id, "Core materialization ID")?;
+        validate_sha256(&self.core_generation_id, "Core generation ID")?;
+        validate_sha256(&self.cursor_sha256, "Core finalization cursor")?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "Core materialization finalization progress exceeds its wire bound",
+        )
+    }
+
+    pub fn validate_for_finish(
+        &self,
+        request: &FinishCoreMaterializationRequest,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        request.validate()?;
+        if self.materialization_id != request.materialization_id
+            || self.core_generation_id != request.head.core_generation_id
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core finalization progress belongs to a different Finish request",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueCoreMaterializationRequest {
+    pub expected_progress: CoreMaterializationFinalizationProgress,
+}
+
+impl ContinueCoreMaterializationRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.expected_progress.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "continue Core materialization request exceeds its wire bound",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreMaterializationFinalizationPending {
+    pub progress: CoreMaterializationFinalizationProgress,
+    pub replayed: bool,
+}
+
+impl CoreMaterializationFinalizationPending {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.progress.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "Core materialization finalization pending response exceeds its wire bound",
+        )
+    }
+
+    pub fn validate_for_finish(
+        &self,
+        request: &FinishCoreMaterializationRequest,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        self.progress.validate_for_finish(request)
+    }
+
+    pub fn validate_for_continue(
+        &self,
+        request: &ContinueCoreMaterializationRequest,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        request.validate()?;
+        if self.progress.materialization_id != request.expected_progress.materialization_id
+            || self.progress.core_generation_id != request.expected_progress.core_generation_id
+            || self.progress.phase < request.expected_progress.phase
+            || self.progress == request.expected_progress
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core finalization response did not advance the expected owner and cursor",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoreMaterializationFinished {

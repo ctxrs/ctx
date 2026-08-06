@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 fn inventory() -> Value {
-    serde_json::from_str(include_str!("../testdata/v2/inventory.json")).expect("protocol inventory")
+    serde_json::from_str(include_str!("../testdata/v3/inventory.json")).expect("protocol inventory")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -62,6 +62,7 @@ fn host_kind(message: &HostMessage) -> &'static str {
         HostMessage::CoreEventStatePage(_) => "core_event_state_page",
         HostMessage::ApplyCoreEventDeltaPage(_) => "apply_core_event_delta_page",
         HostMessage::FinishCoreMaterialization(_) => "finish_core_materialization",
+        HostMessage::ContinueCoreMaterialization(_) => "continue_core_materialization",
         HostMessage::Blame(_) => "blame",
         HostMessage::ApplyCoreEventDeltaPages(_) => "apply_core_event_delta_pages",
     }
@@ -79,6 +80,9 @@ fn helper_kind(message: &HelperMessage) -> &'static str {
         HelperMessage::CoreEventStatePage(_) => "core_event_state_page",
         HelperMessage::CoreEventDeltaPageApplied(_) => "core_event_delta_page_applied",
         HelperMessage::CoreMaterializationFinished(_) => "core_materialization_finished",
+        HelperMessage::CoreMaterializationFinalizationPending(_) => {
+            "core_materialization_finalization_pending"
+        }
         HelperMessage::Blame(_) => "blame",
         HelperMessage::Error(_) => "error",
         HelperMessage::CoreEventDeltaPagesApplied(_) => "core_event_delta_pages_applied",
@@ -172,7 +176,8 @@ fn inventory_freezes_core_capability_and_exact_message_sequence() {
             "apply_core_source_delta_page",
             "core_event_state_page",
             "apply_core_event_delta_pages",
-            "finish_core_materialization"
+            "finish_core_materialization",
+            "continue_core_materialization"
         ])
     );
     let encoded = serde_json::to_string(canonical).unwrap();
@@ -194,6 +199,7 @@ fn inventory_freezes_core_capability_and_exact_message_sequence() {
             "core_event_state_page",
             "apply_core_event_delta_page",
             "finish_core_materialization",
+            "continue_core_materialization",
             "blame",
             "apply_core_event_delta_pages"
         ])
@@ -211,6 +217,7 @@ fn inventory_freezes_core_capability_and_exact_message_sequence() {
             "core_event_state_page",
             "core_event_delta_page_applied",
             "core_materialization_finished",
+            "core_materialization_finalization_pending",
             "blame",
             "error",
             "core_event_delta_pages_applied"
@@ -618,7 +625,7 @@ fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
 fn inventory_freezes_blame_outcome_diagnostics_and_commit_lineage() {
     let value = inventory();
     let canonical = &value["canonical_inventory"];
-    assert_eq!(canonical["protocol_version"], serde_json::json!(2));
+    assert_eq!(canonical["protocol_version"], serde_json::json!(3));
     let envelope = read_frame::<_, HelperEnvelope>(&mut Cursor::new(unhex(
         value["golden_vectors"]["helper_frames"]["blame"]
             .as_str()
@@ -815,6 +822,20 @@ fn inventory_freezes_reviewed_status_axes_and_incremental_ack_subset() {
             "exact_commit_evidence_events",
             "exact_pull_request_evidence_events"
         ])
+    );
+    assert_eq!(
+        canonical["status_contract"]["storage_evidence"],
+        serde_json::json!({
+            "graph_manifest_schema": 3,
+            "flat_format_version": 2,
+            "materializer_checkpoint": {
+                "legacy_control_load": 4,
+                "current_publication": 5,
+                "event_index_cross_version_reads": "forbidden",
+            },
+            "journal_pack_format_version": 3,
+            "legacy_journals_written": 0,
+        })
     );
     assert_eq!(
         canonical["status_contract"]["operation_prerequisites"]["global"],

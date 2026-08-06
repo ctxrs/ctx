@@ -71,6 +71,7 @@ fn status_axes_preserve_terminal_empty_without_advertising_blame() {
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        finalization_progress: None,
         storage_evidence: None,
     };
     quiet.validate().unwrap();
@@ -106,6 +107,7 @@ fn status_currentness_is_bound_to_requested_and_receipt_generations() {
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        finalization_progress: None,
         storage_evidence: None,
     };
     stale.validate().unwrap();
@@ -120,6 +122,46 @@ fn status_currentness_is_bound_to_requested_and_receipt_generations() {
 }
 
 #[test]
+fn finalizing_status_binds_durable_progress_without_displacing_prior_receipt() {
+    let requested = "d".repeat(64);
+    let progress = CoreMaterializationFinalizationProgress {
+        materialization_id: "e".repeat(64),
+        core_generation_id: requested.clone(),
+        phase: CoreMaterializationFinalizationPhase::EmitFlat,
+        cursor_sha256: "f".repeat(64),
+    };
+    let mut status = StatusResult {
+        currentness: CoreProjectionCurrentness::Finalizing,
+        requested_core_generation_id: Some(requested),
+        core_receipt: Some(receipt('a')),
+        coverage: MaterializedCoverage::Partial,
+        repository_coverage: RepositoryCoverage::default(),
+        core_preparation_peak_workers: 4,
+        access: access(ProAccessState::Available),
+        supported_operations: operations(),
+        available_operations: BTreeSet::new(),
+        finalization_progress: Some(progress),
+        storage_evidence: None,
+    };
+    status.validate().unwrap();
+
+    status.requested_core_generation_id = Some("c".repeat(64));
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+    status.requested_core_generation_id = Some("d".repeat(64));
+    status.finalization_progress = None;
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+
+    status.currentness = CoreProjectionCurrentness::Partial;
+    status.finalization_progress = Some(CoreMaterializationFinalizationProgress {
+        materialization_id: "e".repeat(64),
+        core_generation_id: "d".repeat(64),
+        phase: CoreMaterializationFinalizationPhase::EmitFlat,
+        cursor_sha256: "f".repeat(64),
+    });
+    assert_eq!(status.validate().unwrap_err().class, ErrorClass::Sequence);
+}
+
+#[test]
 fn available_operations_are_a_supported_ready_subset() {
     let mut status = StatusResult {
         currentness: CoreProjectionCurrentness::Current,
@@ -131,6 +173,7 @@ fn available_operations_are_a_supported_ready_subset() {
         access: access(ProAccessState::Available),
         supported_operations: BTreeSet::from([ProOperation::CommitBlame]),
         available_operations: BTreeSet::from([ProOperation::FileBlame]),
+        finalization_progress: None,
         storage_evidence: None,
     };
     assert_eq!(
@@ -193,6 +236,7 @@ fn repository_coverage_is_zero_without_and_bounded_by_a_receipt() {
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        finalization_progress: None,
         storage_evidence: None,
     };
     status.validate().unwrap();
@@ -247,6 +291,7 @@ fn impossible_terminal_status_and_coverage_lattice_vectors_fail_closed() {
         access: access(ProAccessState::Available),
         supported_operations: operations(),
         available_operations: BTreeSet::new(),
+        finalization_progress: None,
         storage_evidence: None,
     };
 
@@ -370,7 +415,7 @@ fn storage_evidence_is_strict_and_required_nullable() {
     let evidence = ProStorageEvidence {
         graph_manifest_schema: 3,
         flat_format_version: 2,
-        materializer_checkpoint_version: 4,
+        materializer_checkpoint_version: 5,
         journal_pack_format_version: 3,
         legacy_journals_written: 0,
         journal_pages_written: 2,
@@ -397,6 +442,7 @@ fn storage_evidence_is_strict_and_required_nullable() {
         access: access(ProAccessState::Unavailable),
         supported_operations: BTreeSet::new(),
         available_operations: BTreeSet::new(),
+        finalization_progress: None,
         storage_evidence: None,
     };
     let mut value = serde_json::to_value(status).unwrap();
@@ -408,6 +454,13 @@ fn storage_evidence_is_strict_and_required_nullable() {
         .remove("core_preparation_peak_workers");
     assert!(serde_json::from_value::<StatusResult>(missing_peak).is_err());
     assert_eq!(value["storage_evidence"], serde_json::Value::Null);
+    assert_eq!(value["finalization_progress"], serde_json::Value::Null);
+    let mut missing_progress = value.clone();
+    missing_progress
+        .as_object_mut()
+        .unwrap()
+        .remove("finalization_progress");
+    assert!(serde_json::from_value::<StatusResult>(missing_progress).is_err());
     value.as_object_mut().unwrap().remove("storage_evidence");
     assert!(serde_json::from_value::<StatusResult>(value).is_err());
 
@@ -421,6 +474,7 @@ fn storage_evidence_is_strict_and_required_nullable() {
         access: access(ProAccessState::Unavailable),
         supported_operations: BTreeSet::new(),
         available_operations: BTreeSet::new(),
+        finalization_progress: None,
         storage_evidence: None,
     })
     .unwrap();
@@ -464,5 +518,34 @@ fn storage_evidence_is_strict_and_required_nullable() {
         },
     ] {
         assert!(activity.validate(1).is_err(), "activity={activity:?}");
+    }
+}
+
+#[test]
+fn storage_evidence_accepts_only_legacy_control_v4_and_current_v5() {
+    let evidence = ProStorageEvidence {
+        graph_manifest_schema: 3,
+        flat_format_version: 2,
+        materializer_checkpoint_version: 5,
+        journal_pack_format_version: 3,
+        legacy_journals_written: 0,
+        journal_pages_written: 2,
+        journal_packs_written: 1,
+        journal_finish_activity: JournalFinishActivity {
+            worker_limit: 1,
+            peak_workers: 1,
+            started_after_preparation: true,
+        },
+    };
+
+    for checkpoint_version in [4, 5] {
+        let mut accepted = evidence.clone();
+        accepted.materializer_checkpoint_version = checkpoint_version;
+        accepted.validate().unwrap();
+    }
+    for checkpoint_version in [0, 3, 6, u16::MAX] {
+        let mut rejected = evidence.clone();
+        rejected.materializer_checkpoint_version = checkpoint_version;
+        assert_eq!(rejected.validate().unwrap_err().class, ErrorClass::Sequence);
     }
 }
