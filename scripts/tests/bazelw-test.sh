@@ -33,6 +33,11 @@ export CTX_TOTAL_MEMORY_GB=128
 # thread count forwarded by an outer Bazel test invocation.
 unset RUST_TEST_THREADS
 unset CTX_HOST_BUILD_GOVERNOR CTX_HOST_BUILD_GOVERNOR_ACTIVE
+
+if grep -Eq '\[\[[[:space:]]+-v[[:space:]]' "${wrapper}"; then
+  echo 'bazel wrapper must remain compatible with the Bash 3.2 shipped by macOS' >&2
+  exit 1
+fi
 unset CTX_BUILD_GOVERNOR_LEASE_ID CTX_BUILD_GOVERNOR_LEASE_CLASS XDG_CONFIG_HOME
 export HOME="${test_root}/home"
 export TMPDIR="${test_root}/tmp"
