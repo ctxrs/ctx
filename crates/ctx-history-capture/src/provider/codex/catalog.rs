@@ -39,6 +39,8 @@ pub(crate) struct CatalogSession {
     pub(crate) source_path: String,
     pub(crate) external_session_id: Option<String>,
     pub(crate) parent_external_session_id: Option<String>,
+    pub(crate) session_relationship: SessionRelationshipKind,
+    pub(crate) advisory_session_id: Option<String>,
     pub(crate) agent_type: AgentType,
     pub(crate) role_hint: Option<String>,
     pub(crate) external_agent_id: Option<String>,
@@ -524,6 +526,12 @@ fn catalog_codex_session_opened(
         source_path: path.display().to_string(),
         external_session_id,
         parent_external_session_id,
+        session_relationship,
+        advisory_session_id: payload
+            .and_then(|payload| payload.get("session_id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned),
         agent_type,
         role_hint,
         external_agent_id: payload

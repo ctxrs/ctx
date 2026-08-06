@@ -903,15 +903,39 @@ fn hash_opened_file_range(
 }
 
 pub(super) fn validate_catalog_owner(
-    catalog_owner: Option<&str>,
-    scanned_owner: &str,
-) -> Result<()> {
-    if catalog_owner.is_some_and(|catalog_owner| catalog_owner != scanned_owner) {
+    source: &CodexCatalogSource,
+    mut scanned_owner: CodexSessionRow,
+) -> Result<CodexSessionRow> {
+    let catalog_owner = source.catalog_native_session_id.as_deref();
+    let catalog_root = source.catalog_root_native_session_id.as_deref();
+    if catalog_owner != Some(scanned_owner.native_session_id.as_str())
+        || source.catalog_parent_native_session_id != scanned_owner.parent_native_session_id
+        || source.catalog_session_relationship != scanned_owner.session_relationship
+        || source.catalog_advisory_session_id != scanned_owner.advisory_session_id
+        || catalog_root.is_none()
+        || scanned_owner
+            .root_native_session_id
+            .as_deref()
+            .is_some_and(|scanned_root| Some(scanned_root) != catalog_root)
+    {
         return Err(CaptureError::InvalidPayload(
-            "Codex catalog owner changed before NativePath admission".to_owned(),
+            "Codex normalized catalog owner changed before NativePath admission".to_owned(),
         ));
     }
-    Ok(())
+    scanned_owner.root_native_session_id = catalog_root.map(str::to_owned);
+    Ok(scanned_owner)
+}
+
+pub(super) fn validate_checkpoint_catalog_owner(
+    source: &CodexCatalogSource,
+    scanned_owner: CodexSessionRow,
+) -> Result<CodexSessionRow> {
+    if scanned_owner.root_native_session_id.is_none() {
+        return Err(CaptureError::InvalidPayload(
+            "Codex checkpoint owner is not normalized".to_owned(),
+        ));
+    }
+    validate_catalog_owner(source, scanned_owner)
 }
 
 pub(super) fn source_changed_during_scan() -> CaptureError {

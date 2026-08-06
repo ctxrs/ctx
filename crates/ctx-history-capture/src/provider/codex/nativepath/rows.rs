@@ -65,6 +65,7 @@ where
 pub(crate) struct CodexSessionRow {
     pub(crate) native_session_id: String,
     pub(crate) parent_native_session_id: Option<String>,
+    pub(crate) advisory_session_id: Option<String>,
     pub(crate) root_native_session_id: Option<String>,
     pub(crate) session_relationship: SessionRelationshipKind,
     pub(crate) started_at: DateTime<Utc>,

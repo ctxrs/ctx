@@ -362,7 +362,16 @@ fn ingest_codex_sources_with_options_v0(
     indexer_threads: usize,
     cold_options: ColdParallelOptionsV0,
 ) -> CodexSourceBackedResultV0<()> {
-    let outcome_lineage = Arc::new(CodexOutcomeLineageAuthorityV0::from_sources(&sources)?);
+    let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources)?;
+    if !normalized.rejections.is_empty() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(
+                "Codex lineage source graph contains rejected components".to_owned(),
+            ),
+        ));
+    }
+    sources = normalized.sources;
+    let outcome_lineage = Arc::new(normalized.authority);
     counters.catalog_sources =
         u64::try_from(sources.len()).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
     counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
@@ -466,7 +475,16 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
-    let outcome_lineage = CodexOutcomeLineageAuthorityV0::from_sources(&sources)?;
+    let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources)?;
+    if !normalized.rejections.is_empty() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(
+                "Codex lineage source graph contains rejected components".to_owned(),
+            ),
+        ));
+    }
+    let sources = normalized.sources;
+    let outcome_lineage = normalized.authority;
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let base_event_lookup = writer.base_event_identity_lookup();
     for (source, source_key, native_session_id) in sources {

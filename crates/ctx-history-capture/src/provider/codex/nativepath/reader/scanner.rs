@@ -149,6 +149,7 @@ impl CodexNativeScanner {
         source.opened = Some(Arc::clone(&opened));
         if let Some(proof) = proof {
             proof.validate_source(&source)?;
+            validate_checkpoint_catalog_owner(&source, proof.checkpoint.owner.clone())?;
         }
 
         let before = observed_opened_file(&source, &opened)?;
@@ -175,10 +176,8 @@ impl CodexNativeScanner {
             proof.filter(|proof| proof.checkpoint.observation == before),
             validated.as_ref(),
         ) {
-            validate_catalog_owner(
-                source.catalog_native_session_id.as_deref(),
-                &proof.checkpoint.owner.native_session_id,
-            )?;
+            let replay_owner =
+                validate_checkpoint_catalog_owner(&source, proof.checkpoint.owner.clone())?;
             let incomplete_tail = proof
                 .checkpoint
                 .incomplete_tail()
@@ -197,7 +196,7 @@ impl CodexNativeScanner {
                 complete_prefix_sha256: proof.checkpoint.complete_prefix_sha256,
                 complete_prefix_end: proof.checkpoint.complete_prefix_end(),
                 next_raw_ordinal: proof.checkpoint.next_raw_ordinal(),
-                owner: Some(proof.checkpoint.owner.clone()),
+                owner: Some(replay_owner),
                 pending_tool_authorities: proof.checkpoint.pending_tool_authorities().to_vec(),
                 incomplete_tail,
                 counters: CodexScanCounters {

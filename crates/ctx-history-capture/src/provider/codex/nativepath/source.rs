@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{CaptureProvider, SessionRelationshipKind};
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::CodexNativeCheckpoint;
@@ -66,6 +66,8 @@ pub(crate) struct CodexCatalogSource {
     pub(crate) catalog_prefix_sha256: Option<[u8; 32]>,
     pub(crate) catalog_native_session_id: Option<String>,
     pub(crate) catalog_parent_native_session_id: Option<String>,
+    pub(crate) catalog_session_relationship: SessionRelationshipKind,
+    pub(crate) catalog_advisory_session_id: Option<String>,
     pub(crate) catalog_root_native_session_id: Option<String>,
     pub(crate) opened: Option<Arc<OpenedProviderSourceFile>>,
     pub(crate) authority_root: Option<ProviderSourceRoot>,
@@ -81,6 +83,8 @@ impl PartialEq for CodexCatalogSource {
             && self.catalog_prefix_sha256 == other.catalog_prefix_sha256
             && self.catalog_native_session_id == other.catalog_native_session_id
             && self.catalog_parent_native_session_id == other.catalog_parent_native_session_id
+            && self.catalog_session_relationship == other.catalog_session_relationship
+            && self.catalog_advisory_session_id == other.catalog_advisory_session_id
             && self.catalog_root_native_session_id == other.catalog_root_native_session_id
     }
 }
@@ -168,11 +172,9 @@ fn catalog_source(session: &CatalogSession) -> Result<CodexCatalogSource, &'stat
         catalog_prefix_sha256: None,
         catalog_native_session_id: session.external_session_id.clone(),
         catalog_parent_native_session_id: session.parent_external_session_id.clone(),
-        catalog_root_native_session_id: session
-            .metadata
-            .get("root_external_session_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        catalog_session_relationship: session.session_relationship,
+        catalog_advisory_session_id: session.advisory_session_id.clone(),
+        catalog_root_native_session_id: None,
         opened: None,
         authority_root: None,
         authority_relative_path: None,

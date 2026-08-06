@@ -592,6 +592,23 @@ pub(super) fn validate_owner(
             actual: owner.native_session_id.clone(),
         });
     }
+    match (
+        owner.parent_native_session_id.as_ref(),
+        owner.root_native_session_id.as_ref(),
+        owner.session_relationship,
+    ) {
+        (None, Some(root), SessionRelationshipKind::Root) if root == native_session_id => {}
+        (Some(_), Some(_), relationship)
+            if relationship != SessionRelationshipKind::Root
+                && relationship != SessionRelationshipKind::RelatedUnknown => {}
+        _ => {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload(
+                    "Codex scanner owner is not a normalized lineage tuple".to_owned(),
+                ),
+            ))
+        }
+    }
     Ok(())
 }
 

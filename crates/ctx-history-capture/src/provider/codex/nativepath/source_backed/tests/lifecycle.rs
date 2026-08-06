@@ -1252,11 +1252,13 @@ fn source_backed_incomplete_inventory_preserves_the_prior_generation() {
     .unwrap();
 
     let error = ingest_codex_source_backed_v0(&sessions, &index).unwrap_err();
-    assert!(matches!(
-        error,
-        CodexSourceBackedErrorV0::DuplicateNativeSessionId(id)
-            if id == native_session_id
-    ));
+    assert!(
+        matches!(
+            &error,
+            CodexSourceBackedErrorV0::Projection(ProjectionContractError::DuplicateInventorySource)
+        ),
+        "unexpected duplicate-lineage error: {error:?}"
+    );
     let after = VerifiedIndex::open(&index).unwrap();
     assert_eq!(after.generation_id(), before_generation);
     assert_eq!(after.document_count(), 1);

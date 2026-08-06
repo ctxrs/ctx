@@ -10,8 +10,8 @@ use crate::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
             JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
             JsonlFamilyMembershipObservation, JsonlFamilyOptimizedLeafOutcome,
-            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRootMissingMode,
-            JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
+            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRejectedLeaf,
+            JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
         },
         SourceBackedRouteErrorKind,
     },
@@ -23,6 +23,61 @@ type CodexReplayLineageV0 = (CodexCatalogSource, CodexAppendProof, String);
 const CODEX_LINEAGE_EXHAUSTED_DETAIL: &str =
     "Codex lineage working set exceeded its bounded task-local capacity";
 const CODEX_LINEAGE_UNAVAILABLE_DETAIL: &str = "Codex lineage working set is unavailable";
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexLineageNormalizationObservationV0 {
+    pub(crate) valid_sources: usize,
+    pub(crate) rejected_sources: usize,
+    pub(crate) pre_worker_counters: CodexSourceBackedCountersV0,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_CODEX_LINEAGE_NORMALIZATION_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce(CodexLineageNormalizationObservationV0)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn install_after_codex_lineage_normalization_hook_v0(
+    hook: impl FnOnce(CodexLineageNormalizationObservationV0) + 'static,
+) {
+    AFTER_CODEX_LINEAGE_NORMALIZATION_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Codex normalization hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_codex_lineage_normalization_hook_v0(valid_sources: usize, rejected_sources: usize) {
+    AFTER_CODEX_LINEAGE_NORMALIZATION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(CodexLineageNormalizationObservationV0 {
+                valid_sources,
+                rejected_sources,
+                pre_worker_counters: CodexSourceBackedCountersV0::default(),
+            });
+        }
+    });
+}
+
+fn codex_lineage_rejected_leaf_v0(
+    rejected: CodexLineageRejectedSourceV0,
+    authority_path: PathBuf,
+) -> Result<JsonlFamilyRejectedLeaf> {
+    let proof = TypedKey::bytes(serde_json::to_vec(&rejected.proof)?)
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    Ok(JsonlFamilyRejectedLeaf::bind_observed(
+        rejected.source.source_path,
+        authority_path,
+        proof,
+        1,
+    ))
+}
 
 #[derive(Default)]
 struct CodexSessionJsonlFamilyStateV0 {
@@ -390,17 +445,33 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
         // free of recursive discovery, hashing, and provider metadata parsing.
         let inventory = self.discover().map_err(codex_family_capture_error)?;
         #[cfg(test)]
-        let outcome_lineage = match self.lineage_budget_override.as_ref() {
-            Some(budget) => CodexOutcomeLineageAuthorityV0::from_sources_with_budget(
+        let normalized = match self.lineage_budget_override.as_ref() {
+            Some(budget) => CodexOutcomeLineageAuthorityV0::normalize_sources_with_budget(
                 &inventory.sources,
                 Arc::clone(budget),
             ),
-            None => CodexOutcomeLineageAuthorityV0::from_sources(&inventory.sources),
+            None => CodexOutcomeLineageAuthorityV0::normalize_sources(&inventory.sources),
         };
         #[cfg(not(test))]
-        let outcome_lineage = CodexOutcomeLineageAuthorityV0::from_sources(&inventory.sources);
-        let outcome_lineage = Arc::new(outcome_lineage.map_err(codex_family_capture_error)?);
-        let mut ordered_sources = inventory.sources.iter().collect::<Vec<_>>();
+        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&inventory.sources);
+        let normalized = normalized.map_err(codex_family_capture_error)?;
+        #[cfg(test)]
+        run_after_codex_lineage_normalization_hook_v0(
+            normalized.sources.len(),
+            normalized.rejections.len(),
+        );
+        let outcome_lineage = Arc::new(normalized.authority);
+        let normalized_sources = normalized.sources;
+        let mut rejected_leaves = Vec::with_capacity(normalized.rejections.len());
+        for rejected in normalized.rejections {
+            let authority_path = rejected.source.authority_relative_path.clone().ok_or(
+                CaptureError::SystemInvariant(
+                    "rejected Codex catalog source has no authority path",
+                ),
+            )?;
+            rejected_leaves.push(codex_lineage_rejected_leaf_v0(rejected, authority_path)?);
+        }
+        let mut ordered_sources = normalized_sources.iter().collect::<Vec<_>>();
         ordered_sources
             .sort_by_key(|(_, _, native_session_id)| outcome_lineage.depth(native_session_id));
         let mut authorities = BTreeMap::<PathBuf, Arc<ProviderSourceRoot>>::new();
@@ -437,17 +508,27 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
                 authorities.insert(authority.named_path().to_path_buf(), authority);
             }
         }
-        let family_inventory = JsonlFamilyInventory::present_multi(
-            CaptureProvider::Codex,
-            route_root,
-            authorities.into_values().collect(),
-            leaves,
-        )?;
+        let authorities = authorities.into_values().collect();
+        let family_inventory = if rejected_leaves.is_empty() {
+            JsonlFamilyInventory::present_multi(
+                CaptureProvider::Codex,
+                route_root,
+                authorities,
+                leaves,
+            )?
+        } else {
+            JsonlFamilyInventory::present_multi_with_rejected(
+                CaptureProvider::Codex,
+                route_root,
+                authorities,
+                leaves,
+                rejected_leaves,
+            )?
+        };
         let mut state = self.state.lock().map_err(|_| {
             CaptureError::InvalidPayload("Codex JSONL family state lock was poisoned".to_owned())
         })?;
-        state.plans = inventory
-            .sources
+        state.plans = normalized_sources
             .iter()
             .cloned()
             .map(|plan| (plan.1.clone(), plan))
@@ -458,7 +539,7 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
         #[cfg(test)]
         {
             state.counters.add_catalog_work(inventory.work);
-            if inventory.sources.is_empty() && !_completed_stage {
+            if normalized_sources.is_empty() && !_completed_stage {
                 state.stage_pending = true;
             }
         }
@@ -692,35 +773,53 @@ impl CodexExplicitSessionJsonlFamilyAdapterV0 {
                 CaptureError::InvalidPayload("explicit Codex JSONL path has no filename".to_owned())
             })?;
         let authority = Arc::new(ProviderSourceRoot::open(parent)?);
-        let opened = authority.open_file(&authority_path)?;
-        let observation = observe_opened_file(&plan.0.source_path, &opened)?;
-        let leaf = JsonlFamilyLeaf::bind_observed(
-            plan.1.clone(),
-            plan.0.source_path.clone(),
-            Arc::clone(&authority),
-            authority_path,
-            TypedKey::utf8(&plan.2)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
-            observation,
+        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&[plan])
+            .map_err(codex_family_capture_error)?;
+        #[cfg(test)]
+        run_after_codex_lineage_normalization_hook_v0(
+            normalized.sources.len(),
+            normalized.rejections.len(),
         );
-        let family_inventory = JsonlFamilyInventory::present(
+        let outcome_lineage = Arc::new(normalized.authority);
+        let plans = normalized.sources;
+        let mut leaves = Vec::with_capacity(plans.len());
+        if let Some(plan) = plans.first() {
+            let opened = authority.open_file(&authority_path)?;
+            let observation = observe_opened_file(&plan.0.source_path, &opened)?;
+            leaves.push(JsonlFamilyLeaf::bind_observed(
+                plan.1.clone(),
+                plan.0.source_path.clone(),
+                Arc::clone(&authority),
+                authority_path.clone(),
+                TypedKey::utf8(&plan.2)
+                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+                observation,
+            ));
+        }
+        let rejected_leaves = normalized
+            .rejections
+            .into_iter()
+            .map(|rejected| codex_lineage_rejected_leaf_v0(rejected, authority_path.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        let family_inventory = JsonlFamilyInventory::present_with_rejected(
             CaptureProvider::Codex,
             route_path,
             authority,
-            vec![leaf],
+            leaves,
+            rejected_leaves,
         )?;
-        let plans = vec![plan];
         let mut state = self.state.lock().map_err(|_| codex_family_state_error())?;
         state.plans = plans
             .iter()
             .cloned()
             .map(|plan| (plan.1.clone(), plan))
             .collect();
-        state.outcome_lineage = Some(Arc::new(
-            CodexOutcomeLineageAuthorityV0::from_sources(&plans)
-                .map_err(codex_family_capture_error)?,
-        ));
+        state.outcome_lineage = Some(outcome_lineage);
         state.counters = CodexSourceBackedCountersV0::default();
+        #[cfg(test)]
+        if plans.is_empty() && !_completed_stage {
+            state.stage_pending = true;
+        }
         Ok(family_inventory)
     }
 

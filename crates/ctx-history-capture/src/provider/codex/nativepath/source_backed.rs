@@ -19,7 +19,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
     CoreRecord, CoreRecordAnnotation, CoreRecordError, EventIdentityInput, NativeItemKey,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, StableEntityId, TypedKey,
+    SessionRelationshipKind, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
+    StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_core::{
@@ -68,9 +69,9 @@ const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
-const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v9";
+const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v10";
 const CODEX_PARSER_REVISION: &str =
-    "codex-nativepath-core-record-v20-exact-retrieval-json-authority";
+    "codex-nativepath-core-record-v21-transitive-root-normalization";
 #[cfg(test)]
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 #[cfg(test)]
@@ -399,7 +400,10 @@ mod ingestion;
 mod jsonl_family;
 mod lineage;
 
-use lineage::{map_lineage_capture_error, CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
+use lineage::{
+    map_lineage_capture_error, CodexLineageRejectedSourceV0, CodexOutcomeLineageAuthorityV0,
+    CodexOutcomeOriginV0,
+};
 
 use catalog::discover_codex_session_tree_inventory_v0;
 #[cfg(test)]
@@ -430,6 +434,8 @@ use ingestion::{
     prepare_replayed_lineage_v0, scan_codex_jsonl_family_leaf_v0, CodexJsonlFamilyLeafContextV0,
     CodexJsonlFamilyPublicationV0,
 };
+#[cfg(test)]
+pub(crate) use jsonl_family::install_after_codex_lineage_normalization_hook_v0;
 pub(crate) use jsonl_family::{
     codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,
     CodexSessionTreeJsonlFamilyAdapterV0,

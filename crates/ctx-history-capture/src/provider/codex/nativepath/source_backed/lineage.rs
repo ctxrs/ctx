@@ -1,17 +1,99 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
 };
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::provider::codex::nativepath::reader::CodexLineageFactPresenceV0;
 
-// V3 binds component-scoped lifetime and conservative capacity behavior into
-// the warm-replay proof, so checkpoints produced under the route-wide policy
-// cannot bypass the new lineage authority.
-const LINEAGE_DEPENDENCY_DOMAIN: &[u8] = b"ctx/codex-lineage-dependency/v3\0";
+// V4 binds the complete normalized lineage tuple into warm replay.
+const LINEAGE_DEPENDENCY_DOMAIN: &[u8] = b"ctx/codex-lineage-dependency/v4\0";
+const MAX_CODEX_LINEAGE_NODES: usize = 1_024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum CodexLineageRejectionReasonV0 {
+    DuplicateNativeSessionId,
+    MissingParent { parent_native_session_id: String },
+    SelfParent,
+    Cycle { canonical_native_session_id: String },
+    DepthExceeded,
+    ContradictoryDirectParentEvidence,
+    AdvisoryUnrelatedComponent { advisory_session_id: String },
+    AdvisoryIrreconcilable { advisory_session_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct CodexLineageRejectionProofV0 {
+    version: u8,
+    native_session_id: String,
+    component_native_session_id: String,
+    evidence_native_session_id: String,
+    reason: CodexLineageRejectionReasonV0,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CodexLineageRejectedSourceV0 {
+    pub(super) source: CodexCatalogSource,
+    pub(super) proof: CodexLineageRejectionProofV0,
+}
+
+pub(super) struct CodexLineageNormalizationV0 {
+    pub(super) sources: Vec<(CodexCatalogSource, SourceKey, String)>,
+    pub(super) rejections: Vec<CodexLineageRejectedSourceV0>,
+    pub(super) authority: CodexOutcomeLineageAuthorityV0,
+}
+
+#[derive(Debug, Clone)]
+struct ComponentIssueV0 {
+    evidence_native_session_id: String,
+    reason: CodexLineageRejectionReasonV0,
+}
+
+struct DisjointComponentsV0 {
+    parents: Vec<usize>,
+    ranks: Vec<u8>,
+}
+
+impl DisjointComponentsV0 {
+    fn new(len: usize) -> Self {
+        Self {
+            parents: (0..len).collect(),
+            ranks: vec![0; len],
+        }
+    }
+
+    fn find(&mut self, mut index: usize) -> usize {
+        let mut root = index;
+        while self.parents[root] != root {
+            root = self.parents[root];
+        }
+        while self.parents[index] != index {
+            let parent = self.parents[index];
+            self.parents[index] = root;
+            index = parent;
+        }
+        root
+    }
+
+    fn union(&mut self, left: usize, right: usize) {
+        let mut left = self.find(left);
+        let mut right = self.find(right);
+        if left == right {
+            return;
+        }
+        if self.ranks[left] < self.ranks[right] {
+            std::mem::swap(&mut left, &mut right);
+        }
+        self.parents[right] = left;
+        if self.ranks[left] == self.ranks[right] {
+            self.ranks[left] = self.ranks[left].saturating_add(1);
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CodexOutcomeOriginV0 {
@@ -24,15 +106,6 @@ pub(super) enum CodexOutcomeOriginV0 {
 enum ParentLinkV0 {
     Root,
     Source(usize),
-    Missing(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RelationshipStateV0 {
-    Root,
-    Acyclic,
-    Missing,
-    Cycle,
 }
 
 #[derive(Debug)]
@@ -40,8 +113,10 @@ struct LineageNodeV0 {
     native_session_id: String,
     observation: CodexFileObservation,
     parent: ParentLinkV0,
+    relationship: SessionRelationshipKind,
+    advisory_session_id: Option<String>,
+    root_native_session_id: String,
     dependency_digest: [u8; 32],
-    relationship_state: RelationshipStateV0,
     depth: usize,
     component_digest: [u8; 32],
     component: usize,
@@ -69,10 +144,33 @@ pub(super) struct CodexOutcomeLineageAuthorityV0 {
 }
 
 impl CodexOutcomeLineageAuthorityV0 {
+    pub(super) fn normalize_sources(
+        sources: &[(CodexCatalogSource, SourceKey, String)],
+    ) -> CodexSourceBackedResultV0<CodexLineageNormalizationV0> {
+        Self::normalize_sources_with_optional_budget(sources, None)
+    }
+
+    #[cfg(test)]
+    pub(super) fn normalize_sources_with_budget(
+        sources: &[(CodexCatalogSource, SourceKey, String)],
+        budget: Arc<CodexLineageFactBudgetV0>,
+    ) -> CodexSourceBackedResultV0<CodexLineageNormalizationV0> {
+        Self::normalize_sources_with_optional_budget(sources, Some(budget))
+    }
+
+    #[cfg(test)]
     pub(super) fn from_sources(
         sources: &[(CodexCatalogSource, SourceKey, String)],
     ) -> CodexSourceBackedResultV0<Self> {
-        Self::from_sources_with_optional_budget(sources, None)
+        let normalized = Self::normalize_sources(sources)?;
+        if !normalized.rejections.is_empty() {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload(
+                    "Codex lineage source graph contains rejected components".to_owned(),
+                ),
+            ));
+        }
+        Ok(normalized.authority)
     }
 
     #[cfg(test)]
@@ -80,13 +178,316 @@ impl CodexOutcomeLineageAuthorityV0 {
         sources: &[(CodexCatalogSource, SourceKey, String)],
         budget: Arc<CodexLineageFactBudgetV0>,
     ) -> CodexSourceBackedResultV0<Self> {
-        Self::from_sources_with_optional_budget(sources, Some(budget))
+        let normalized = Self::normalize_sources_with_budget(sources, budget)?;
+        if !normalized.rejections.is_empty() {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload(
+                    "Codex lineage source graph contains rejected components".to_owned(),
+                ),
+            ));
+        }
+        Ok(normalized.authority)
     }
 
-    fn from_sources_with_optional_budget(
+    fn normalize_sources_with_optional_budget(
         sources: &[(CodexCatalogSource, SourceKey, String)],
         budget_override: Option<Arc<CodexLineageFactBudgetV0>>,
+    ) -> CodexSourceBackedResultV0<CodexLineageNormalizationV0> {
+        let mut ordered = sources.to_vec();
+        ordered.sort_by(|left, right| {
+            left.2
+                .cmp(&right.2)
+                .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+        });
+        let mut groups = BTreeMap::<String, Vec<usize>>::new();
+        for (index, (_, _, native_session_id)) in ordered.iter().enumerate() {
+            groups
+                .entry(native_session_id.clone())
+                .or_default()
+                .push(index);
+        }
+
+        let mut components = DisjointComponentsV0::new(ordered.len());
+        for members in groups.values() {
+            if let Some((&first, rest)) = members.split_first() {
+                for member in rest {
+                    components.union(first, *member);
+                }
+            }
+        }
+        for (index, (source, _, _)) in ordered.iter().enumerate() {
+            if let Some(parent) = source.catalog_parent_native_session_id.as_ref() {
+                if let Some(parent_members) = groups.get(parent) {
+                    for parent_index in parent_members {
+                        components.union(index, *parent_index);
+                    }
+                }
+            }
+        }
+        let component_of = (0..ordered.len())
+            .map(|index| components.find(index))
+            .collect::<Vec<_>>();
+        let mut component_members = BTreeMap::<usize, Vec<usize>>::new();
+        for (index, component) in component_of.iter().copied().enumerate() {
+            component_members.entry(component).or_default().push(index);
+        }
+        let mut issues = HashMap::<usize, ComponentIssueV0>::new();
+        macro_rules! reject {
+            ($index:expr, $reason:expr $(,)?) => {{
+                let index = $index;
+                issues
+                    .entry(component_of[index])
+                    .or_insert_with(|| ComponentIssueV0 {
+                        evidence_native_session_id: ordered[index].2.clone(),
+                        reason: $reason,
+                    });
+            }};
+        }
+
+        for members in groups.values().filter(|members| members.len() > 1) {
+            for member in members {
+                reject!(
+                    *member,
+                    CodexLineageRejectionReasonV0::DuplicateNativeSessionId
+                );
+            }
+        }
+
+        let mut parent_indices = vec![None; ordered.len()];
+        for (index, (source, _, native_session_id)) in ordered.iter().enumerate() {
+            match (
+                source.catalog_parent_native_session_id.as_ref(),
+                source.catalog_session_relationship,
+            ) {
+                (None, SessionRelationshipKind::Root) => {}
+                (Some(_), SessionRelationshipKind::Root)
+                | (None, _)
+                | (_, SessionRelationshipKind::RelatedUnknown) => reject!(
+                    index,
+                    CodexLineageRejectionReasonV0::ContradictoryDirectParentEvidence,
+                ),
+                (Some(_), _) => {}
+            }
+            let Some(parent) = source.catalog_parent_native_session_id.as_ref() else {
+                continue;
+            };
+            if parent == native_session_id {
+                reject!(index, CodexLineageRejectionReasonV0::SelfParent);
+                continue;
+            }
+            match groups.get(parent).map(Vec::as_slice) {
+                Some([parent_index]) => parent_indices[index] = Some(*parent_index),
+                Some(_) => {}
+                None => reject!(
+                    index,
+                    CodexLineageRejectionReasonV0::MissingParent {
+                        parent_native_session_id: parent.clone(),
+                    },
+                ),
+            }
+        }
+
+        let mut colors = vec![0_u8; ordered.len()];
+        let mut roots = vec![None; ordered.len()];
+        let mut depths = vec![0_usize; ordered.len()];
+        for start in 0..ordered.len() {
+            let component = component_of[start];
+            if colors[start] == 2 || issues.contains_key(&component) {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut current = start;
+            loop {
+                match colors[current] {
+                    0 => {
+                        if path.len() == MAX_CODEX_LINEAGE_NODES {
+                            reject!(start, CodexLineageRejectionReasonV0::DepthExceeded);
+                            break;
+                        }
+                        colors[current] = 1;
+                        path.push(current);
+                        match parent_indices[current] {
+                            Some(parent) => current = parent,
+                            None => {
+                                roots[current] = Some(current);
+                                depths[current] = 0;
+                                colors[current] = 2;
+                                break;
+                            }
+                        }
+                    }
+                    1 => {
+                        let cycle_start =
+                            path.iter()
+                                .position(|candidate| *candidate == current)
+                                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+                        let canonical = path[cycle_start..]
+                            .iter()
+                            .map(|index| ordered[*index].2.as_str())
+                            .min()
+                            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+                            .to_owned();
+                        reject!(
+                            start,
+                            CodexLineageRejectionReasonV0::Cycle {
+                                canonical_native_session_id: canonical,
+                            },
+                        );
+                        break;
+                    }
+                    2 => break,
+                    _ => return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable),
+                }
+            }
+            if issues.contains_key(&component) {
+                for index in path {
+                    colors[index] = 2;
+                }
+                continue;
+            }
+            for index in path.into_iter().rev() {
+                if colors[index] == 2 {
+                    continue;
+                }
+                let parent = parent_indices[index]
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+                let root =
+                    roots[parent].ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+                let depth = depths[parent].saturating_add(1);
+                if depth >= MAX_CODEX_LINEAGE_NODES {
+                    reject!(index, CodexLineageRejectionReasonV0::DepthExceeded);
+                    break;
+                }
+                roots[index] = Some(root);
+                depths[index] = depth;
+                colors[index] = 2;
+            }
+            if issues.contains_key(&component) {
+                for member in &component_members[&component] {
+                    colors[*member] = 2;
+                }
+            }
+        }
+
+        for (index, (source, _, _)) in ordered.iter().enumerate() {
+            let component = component_of[index];
+            if issues.contains_key(&component) {
+                continue;
+            }
+            let Some(advisory) = source.catalog_advisory_session_id.as_ref() else {
+                continue;
+            };
+            let root_index =
+                roots[index].ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            if advisory == &ordered[root_index].2 || advisory == &ordered[index].2 {
+                continue;
+            }
+            let advisory_index = match groups.get(advisory).map(Vec::as_slice) {
+                Some([advisory_index]) => *advisory_index,
+                Some(_) | None => {
+                    reject!(
+                        index,
+                        CodexLineageRejectionReasonV0::AdvisoryIrreconcilable {
+                            advisory_session_id: advisory.clone(),
+                        },
+                    );
+                    continue;
+                }
+            };
+            if component_of[advisory_index] != component {
+                reject!(
+                    index,
+                    CodexLineageRejectionReasonV0::AdvisoryUnrelatedComponent {
+                        advisory_session_id: advisory.clone(),
+                    },
+                );
+                continue;
+            }
+            let mut ancestor = parent_indices[index];
+            let mut corroborated = false;
+            for _ in 0..MAX_CODEX_LINEAGE_NODES {
+                let Some(candidate) = ancestor else {
+                    break;
+                };
+                if candidate == advisory_index {
+                    corroborated = true;
+                    break;
+                }
+                ancestor = parent_indices[candidate];
+            }
+            if !corroborated {
+                reject!(
+                    index,
+                    CodexLineageRejectionReasonV0::AdvisoryIrreconcilable {
+                        advisory_session_id: advisory.clone(),
+                    },
+                );
+            }
+        }
+
+        let component_native_session_ids = component_members
+            .iter()
+            .map(|(component, members)| {
+                members
+                    .first()
+                    .map(|index| (*component, ordered[*index].2.clone()))
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+            })
+            .collect::<CodexSourceBackedResultV0<HashMap<_, _>>>()?;
+        let normalized_root_ids = roots
+            .iter()
+            .map(|root| root.map(|index| ordered[index].2.clone()))
+            .collect::<Vec<_>>();
+        let mut normalized_sources = Vec::new();
+        let mut normalized_depths = Vec::new();
+        let mut rejections = Vec::new();
+        for (index, mut plan) in ordered.into_iter().enumerate() {
+            let component = component_of[index];
+            if let Some(issue) = issues.get(&component) {
+                let component_native_session_id = component_native_session_ids
+                    .get(&component)
+                    .cloned()
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+                rejections.push(CodexLineageRejectedSourceV0 {
+                    source: plan.0,
+                    proof: CodexLineageRejectionProofV0 {
+                        version: 1,
+                        native_session_id: plan.2,
+                        component_native_session_id,
+                        evidence_native_session_id: issue.evidence_native_session_id.clone(),
+                        reason: issue.reason.clone(),
+                    },
+                });
+                continue;
+            }
+            plan.0.catalog_root_native_session_id = Some(
+                normalized_root_ids[index]
+                    .clone()
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?,
+            );
+            normalized_depths.push(depths[index]);
+            normalized_sources.push(plan);
+        }
+        let authority = Self::from_normalized_sources_with_optional_budget(
+            &normalized_sources,
+            &normalized_depths,
+            budget_override,
+        )?;
+        Ok(CodexLineageNormalizationV0 {
+            sources: normalized_sources,
+            rejections,
+            authority,
+        })
+    }
+
+    fn from_normalized_sources_with_optional_budget(
+        sources: &[(CodexCatalogSource, SourceKey, String)],
+        depths: &[usize],
+        budget_override: Option<Arc<CodexLineageFactBudgetV0>>,
     ) -> CodexSourceBackedResultV0<Self> {
+        if sources.len() != depths.len() {
+            return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
+        }
         let mut indices = HashMap::new();
         indices
             .try_reserve(sources.len())
@@ -103,22 +504,27 @@ impl CodexOutcomeLineageAuthorityV0 {
         nodes
             .try_reserve_exact(sources.len())
             .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
-        for (source, _, native_session_id) in sources {
+        for ((source, _, native_session_id), depth) in sources.iter().zip(depths) {
             let parent = match source.catalog_parent_native_session_id.as_ref() {
                 None => ParentLinkV0::Root,
                 Some(parent) => indices
                     .get(parent)
                     .copied()
                     .map(ParentLinkV0::Source)
-                    .unwrap_or_else(|| ParentLinkV0::Missing(parent.clone())),
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?,
             };
             nodes.push(LineageNodeV0 {
                 native_session_id: native_session_id.clone(),
                 observation: source.catalog_observation.clone(),
                 parent,
+                relationship: source.catalog_session_relationship,
+                advisory_session_id: source.catalog_advisory_session_id.clone(),
+                root_native_session_id: source
+                    .catalog_root_native_session_id
+                    .clone()
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?,
                 dependency_digest: [0; 32],
-                relationship_state: RelationshipStateV0::Root,
-                depth: 0,
+                depth: *depth,
                 component_digest: [0; 32],
                 component: 0,
             });
@@ -377,15 +783,11 @@ impl CodexOutcomeLineageAuthorityV0 {
         else {
             return Ok(CodexOutcomeOriginV0::Unproven);
         };
-        if current.relationship_state == RelationshipStateV0::Cycle {
-            return Ok(CodexOutcomeOriginV0::Unproven);
-        }
         // Codex event timestamps are not lineage authority: copied native rows
         // may be reordered or restamped. Only an exhaustive walk of certified
         // ancestor call/result facts can prove copied presence or unique absence.
         let mut parent = match &current.parent {
             ParentLinkV0::Root => return Ok(CodexOutcomeOriginV0::UniqueToSession),
-            ParentLinkV0::Missing(_) => return Ok(CodexOutcomeOriginV0::Unproven),
             ParentLinkV0::Source(index) => ParentLinkV0::Source(*index),
         };
         let facts = self
@@ -397,7 +799,6 @@ impl CodexOutcomeLineageAuthorityV0 {
             remaining = remaining.saturating_sub(1);
             let parent_index = match parent {
                 ParentLinkV0::Root => return Ok(CodexOutcomeOriginV0::UniqueToSession),
-                ParentLinkV0::Missing(_) => return Ok(CodexOutcomeOriginV0::Unproven),
                 ParentLinkV0::Source(index) => index,
             };
             let parent_node = self
@@ -425,9 +826,6 @@ impl CodexOutcomeLineageAuthorityV0 {
                 CodexLineageFactPresenceV0::Unproven => return Ok(CodexOutcomeOriginV0::Unproven),
                 CodexLineageFactPresenceV0::Absent => {}
             }
-            if parent_node.relationship_state == RelationshipStateV0::Cycle {
-                return Ok(CodexOutcomeOriginV0::Unproven);
-            }
             parent = parent_node.parent.clone();
         }
         Ok(CodexOutcomeOriginV0::Unproven)
@@ -443,132 +841,55 @@ impl CodexOutcomeLineageAuthorityV0 {
 }
 
 fn compute_dependency_digests(nodes: &mut [LineageNodeV0]) -> CodexSourceBackedResultV0<usize> {
-    let mut colors = Vec::new();
-    colors
-        .try_reserve_exact(nodes.len())
-        .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
-    colors.resize(nodes.len(), 0_u8);
+    let mut order = (0..nodes.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        nodes[*left].depth.cmp(&nodes[*right].depth).then_with(|| {
+            nodes[*left]
+                .native_session_id
+                .cmp(&nodes[*right].native_session_id)
+        })
+    });
     let mut work_units = 0_usize;
-
-    for start in 0..nodes.len() {
-        if colors[start] == 2 {
-            continue;
+    for index in order {
+        let mut hasher = dependency_hasher(b"normalized-node\0");
+        hash_text(&mut hasher, &nodes[index].native_session_id);
+        match &nodes[index].parent {
+            ParentLinkV0::Root => hasher.update([0]),
+            ParentLinkV0::Source(parent) => {
+                hasher.update([1]);
+                hash_text(&mut hasher, &nodes[*parent].native_session_id);
+            }
         }
-        let mut path = Vec::new();
-        path.try_reserve_exact(64)
-            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
-        let mut current = start;
-        loop {
-            if colors[current] == 0 {
-                colors[current] = 1;
-                if path.len() == path.capacity() {
-                    path.try_reserve_exact(64)
-                        .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetExhausted)?;
-                }
-                path.push(current);
-                match nodes[current].parent {
-                    ParentLinkV0::Source(parent) => {
-                        work_units = work_units.saturating_add(1);
-                        current = parent;
-                        continue;
-                    }
-                    ParentLinkV0::Root => {
-                        nodes[current].dependency_digest = digest_marker(b"root\0");
-                        let mut component = dependency_hasher(b"component\0");
-                        hash_text(&mut component, &nodes[current].native_session_id);
-                        nodes[current].component_digest = component.finalize().into();
-                        nodes[current].relationship_state = RelationshipStateV0::Root;
-                        nodes[current].depth = 0;
-                        colors[current] = 2;
-                    }
-                    ParentLinkV0::Missing(ref parent) => {
-                        let mut hasher = dependency_hasher(b"missing\0");
-                        hash_text(&mut hasher, parent);
-                        nodes[current].dependency_digest = hasher.finalize().into();
-                        let mut component = dependency_hasher(b"component\0");
-                        hash_text(&mut component, &nodes[current].native_session_id);
-                        nodes[current].component_digest = component.finalize().into();
-                        nodes[current].relationship_state = RelationshipStateV0::Missing;
-                        nodes[current].depth = 0;
-                        colors[current] = 2;
-                    }
-                }
-            } else if colors[current] == 1 {
-                let mut cycle_start = None;
-                for (position, candidate) in path.iter().enumerate() {
-                    work_units = work_units.saturating_add(1);
-                    if *candidate == current {
-                        cycle_start = Some(position);
-                        break;
-                    }
-                }
-                let cycle_start =
-                    cycle_start.ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-                let cycle = &path[cycle_start..];
-                let mut canonical = *cycle
-                    .first()
-                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-                for index in &cycle[1..] {
-                    work_units = work_units.saturating_add(1);
-                    if nodes[*index].native_session_id < nodes[canonical].native_session_id {
-                        canonical = *index;
-                    }
-                }
-                let mut hasher = dependency_hasher(b"cycle\0");
-                let mut cycle_index = canonical;
-                for _ in 0..cycle.len() {
-                    work_units = work_units.saturating_add(1);
-                    hash_text(&mut hasher, &nodes[cycle_index].native_session_id);
-                    hash_observation(&mut hasher, &nodes[cycle_index].observation);
-                    let ParentLinkV0::Source(parent) = nodes[cycle_index].parent else {
-                        return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
-                    };
-                    cycle_index = parent;
-                }
-                if cycle_index != canonical {
+        hash_text(&mut hasher, nodes[index].relationship.as_str());
+        hash_optional_text(&mut hasher, nodes[index].advisory_session_id.as_deref());
+        hash_text(&mut hasher, &nodes[index].root_native_session_id);
+        match nodes[index].parent {
+            ParentLinkV0::Root => {
+                if nodes[index].depth != 0
+                    || nodes[index].relationship != SessionRelationshipKind::Root
+                    || nodes[index].root_native_session_id != nodes[index].native_session_id
+                {
                     return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
                 }
-                let cycle_digest: [u8; 32] = hasher.finalize().into();
-                for index in cycle {
-                    work_units = work_units.saturating_add(1);
-                    nodes[*index].dependency_digest = cycle_digest;
-                    nodes[*index].component_digest = cycle_digest;
-                    nodes[*index].relationship_state = RelationshipStateV0::Cycle;
-                    nodes[*index].depth = 0;
-                    colors[*index] = 2;
+                let mut component = dependency_hasher(b"normalized-component\0");
+                hash_text(&mut component, &nodes[index].root_native_session_id);
+                nodes[index].component_digest = component.finalize().into();
+            }
+            ParentLinkV0::Source(parent) => {
+                if nodes[index].depth != nodes[parent].depth.saturating_add(1)
+                    || nodes[index].root_native_session_id != nodes[parent].root_native_session_id
+                    || nodes[index].relationship == SessionRelationshipKind::Root
+                    || nodes[index].relationship == SessionRelationshipKind::RelatedUnknown
+                {
+                    return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
                 }
+                hash_observation(&mut hasher, &nodes[parent].observation);
+                hasher.update(nodes[parent].dependency_digest);
+                nodes[index].component_digest = nodes[parent].component_digest;
             }
-            break;
         }
-
-        for index in path.into_iter().rev() {
-            work_units = work_units.saturating_add(1);
-            if colors[index] == 2 {
-                continue;
-            }
-            let ParentLinkV0::Source(parent) = nodes[index].parent else {
-                return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
-            };
-            if colors[parent] != 2 {
-                return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
-            }
-            let mut hasher = dependency_hasher(b"edge\0");
-            hash_text(&mut hasher, &nodes[parent].native_session_id);
-            hash_observation(&mut hasher, &nodes[parent].observation);
-            hasher.update(nodes[parent].dependency_digest);
-            hasher.update([nodes[parent].relationship_state as u8]);
-            nodes[index].dependency_digest = hasher.finalize().into();
-            nodes[index].component_digest = nodes[parent].component_digest;
-            nodes[index].relationship_state = match nodes[parent].relationship_state {
-                RelationshipStateV0::Root | RelationshipStateV0::Acyclic => {
-                    RelationshipStateV0::Acyclic
-                }
-                RelationshipStateV0::Missing => RelationshipStateV0::Missing,
-                RelationshipStateV0::Cycle => RelationshipStateV0::Cycle,
-            };
-            nodes[index].depth = nodes[parent].depth.saturating_add(1);
-            colors[index] = 2;
-        }
+        nodes[index].dependency_digest = hasher.finalize().into();
+        work_units = work_units.saturating_add(1);
     }
     Ok(work_units)
 }
@@ -587,6 +908,16 @@ fn digest_marker(marker: &[u8]) -> [u8; 32] {
 fn hash_text(hasher: &mut Sha256, value: &str) {
     hasher.update((value.len() as u64).to_le_bytes());
     hasher.update(value.as_bytes());
+}
+
+fn hash_optional_text(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hash_text(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
 }
 
 fn hash_observation(hasher: &mut Sha256, observation: &CodexFileObservation) {
@@ -632,6 +963,12 @@ mod tests {
                 catalog_prefix_sha256: Some([byte; 32]),
                 catalog_native_session_id: Some(id.to_owned()),
                 catalog_parent_native_session_id: parent.map(str::to_owned),
+                catalog_session_relationship: if parent.is_some() {
+                    SessionRelationshipKind::Forked
+                } else {
+                    SessionRelationshipKind::Root
+                },
+                catalog_advisory_session_id: None,
                 catalog_root_native_session_id: None,
                 opened: None,
                 authority_root: None,
@@ -642,59 +979,88 @@ mod tests {
         )
     }
 
-    #[test]
-    fn dependency_digest_walk_is_linear_for_deep_chain() {
-        let mut sources = Vec::new();
-        for index in 0..4096_usize {
-            let id = format!("node-{index}");
-            let parent = (index != 0).then(|| format!("node-{}", index - 1));
-            sources.push(source(&id, parent.as_deref(), (index % 251) as u8));
-        }
-        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
-        assert!(authority.dependency_work_units <= sources.len().saturating_mul(3));
-        assert_ne!(authority.dependency_digest("node-4095"), [0; 32]);
+    fn related_source(
+        id: &str,
+        parent: &str,
+        relationship: SessionRelationshipKind,
+        advisory: Option<&str>,
+        byte: u8,
+    ) -> (CodexCatalogSource, SourceKey, String) {
+        let mut plan = source(id, Some(parent), byte);
+        plan.0.catalog_session_relationship = relationship;
+        plan.0.catalog_advisory_session_id = advisory.map(str::to_owned);
+        plan
     }
 
     #[test]
-    fn dependency_digest_walk_is_linear_and_canonical_for_one_large_cycle() {
-        const NODES: usize = 4096;
+    fn maximum_depth_chain_normalizes_with_linear_dependency_work() {
         let mut sources = Vec::new();
-        for index in 0..NODES {
+        for index in 0..MAX_CODEX_LINEAGE_NODES {
+            let id = format!("node-{index:04}");
+            let parent = (index != 0).then(|| format!("node-{:04}", index - 1));
+            sources.push(source(&id, parent.as_deref(), (index % 251) as u8));
+        }
+        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources).unwrap();
+        assert!(normalized.rejections.is_empty());
+        assert_eq!(normalized.sources.len(), MAX_CODEX_LINEAGE_NODES);
+        assert_eq!(
+            normalized
+                .sources
+                .last()
+                .unwrap()
+                .0
+                .catalog_root_native_session_id
+                .as_deref(),
+            Some("node-0000")
+        );
+        assert_eq!(
+            normalized.authority.dependency_work_units,
+            MAX_CODEX_LINEAGE_NODES
+        );
+        assert_ne!(normalized.authority.dependency_digest("node-1023"), [0; 32]);
+    }
+
+    #[test]
+    fn over_depth_and_cycle_components_are_rejected_deterministically() {
+        let mut sources = Vec::new();
+        for index in 0..=MAX_CODEX_LINEAGE_NODES {
+            let id = format!("deep-{index:04}");
+            let parent = (index != 0).then(|| format!("deep-{:04}", index - 1));
+            sources.push(source(&id, parent.as_deref(), (index % 251) as u8));
+        }
+        for index in 0..4 {
             let id = format!("cycle-{index:04}");
-            let parent = format!("cycle-{:04}", (index + 1) % NODES);
+            let parent = format!("cycle-{:04}", (index + 1) % 4);
             sources.push(source(&id, Some(&parent), (index % 251) as u8));
         }
-        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
-        assert!(authority.dependency_work_units <= NODES.saturating_mul(7));
-        let expected = authority.dependency_digest("cycle-0000");
-        assert_ne!(expected, [0; 32]);
-        assert!((1..NODES)
-            .all(|index| authority.dependency_digest(&format!("cycle-{index:04}")) == expected));
-
+        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources).unwrap();
+        assert!(normalized.sources.is_empty());
+        assert_eq!(normalized.rejections.len(), sources.len());
+        let expected = normalized
+            .rejections
+            .iter()
+            .map(|rejection| serde_json::to_vec(&rejection.proof).unwrap())
+            .collect::<Vec<_>>();
         sources.reverse();
-        let reversed = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
-        assert_eq!(reversed.dependency_digest("cycle-0000"), expected);
-        assert!(reversed.dependency_work_units <= NODES.saturating_mul(7));
+        let reversed = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources).unwrap();
+        assert_eq!(
+            reversed
+                .rejections
+                .iter()
+                .map(|rejection| serde_json::to_vec(&rejection.proof).unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[test]
     fn terminal_lineage_states_bypass_poisoned_fact_lock() {
-        let sources = vec![
-            source("root", None, 1),
-            source("child", Some("root"), 2),
-            source("missing-parent", Some("outside-route"), 3),
-        ];
+        let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         authority.poison_facts_lock();
         assert_eq!(
             authority.classify("root", "call", "call").unwrap(),
             CodexOutcomeOriginV0::UniqueToSession
-        );
-        assert_eq!(
-            authority
-                .classify("missing-parent", "call", "call")
-                .unwrap(),
-            CodexOutcomeOriginV0::Unproven
         );
         assert!(matches!(
             authority.classify("child", "call", "call"),
@@ -719,25 +1085,196 @@ mod tests {
     }
 
     #[test]
-    fn cyclic_relationship_is_unproven_without_waiting_for_fact_registration() {
+    fn mixed_valid_and_invalid_components_publish_only_valid_sources() {
         let sources = vec![
-            source("left", Some("right"), 1),
-            source("right", Some("left"), 2),
+            source("valid-root", None, 1),
+            source("valid-child", Some("valid-root"), 2),
+            source("invalid-child", Some("absent"), 3),
+            source("invalid-grandchild", Some("invalid-child"), 4),
         ];
-        let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
+        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources).unwrap();
         assert_eq!(
-            authority.classify("left", "call", "call").unwrap(),
-            CodexOutcomeOriginV0::Unproven
+            normalized
+                .sources
+                .iter()
+                .map(|plan| plan.2.as_str())
+                .collect::<Vec<_>>(),
+            ["valid-child", "valid-root"]
         );
+        assert_eq!(normalized.rejections.len(), 2);
+        assert!(normalized.rejections.iter().all(|rejection| matches!(
+            rejection.proof.reason,
+            CodexLineageRejectionReasonV0::MissingParent { .. }
+        )));
+    }
+
+    #[test]
+    fn nested_typed_lineage_and_ancestor_advisories_share_one_transitive_root() {
+        let mut root = source("root", None, 1);
+        root.0.source_root = "/configured/automatic".to_owned();
+        let mut fork = related_source(
+            "fork",
+            "root",
+            SessionRelationshipKind::Forked,
+            Some("root"),
+            2,
+        );
+        fork.0.source_root = "/configured/explicit-a".to_owned();
+        let mut delegated = related_source(
+            "delegated",
+            "fork",
+            SessionRelationshipKind::Delegated,
+            Some("fork"),
+            3,
+        );
+        delegated.0.source_root = "/configured/explicit-b".to_owned();
+        let resumed = related_source(
+            "resumed",
+            "delegated",
+            SessionRelationshipKind::ResumedFrom,
+            Some("root"),
+            4,
+        );
+        let workflow = related_source(
+            "workflow",
+            "resumed",
+            SessionRelationshipKind::WorkflowChild,
+            Some("delegated"),
+            5,
+        );
+        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&[
+            workflow, root, delegated, resumed, fork,
+        ])
+        .unwrap();
+        assert!(normalized.rejections.is_empty());
+        assert_eq!(normalized.sources.len(), 5);
+        for (source, _, native_session_id) in &normalized.sources {
+            assert_eq!(
+                source.catalog_root_native_session_id.as_deref(),
+                Some("root"),
+                "{native_session_id} did not inherit the canonical root"
+            );
+        }
+        assert_eq!(normalized.authority.depth("root"), 0);
+        assert_eq!(normalized.authority.depth("workflow"), 4);
+    }
+
+    #[test]
+    fn valid_normalization_and_dependency_identity_are_permutation_stable() {
+        let sources = vec![
+            source("root", None, 1),
+            related_source(
+                "fork",
+                "root",
+                SessionRelationshipKind::Forked,
+                Some("fork"),
+                2,
+            ),
+            related_source(
+                "resumed",
+                "fork",
+                SessionRelationshipKind::ResumedFrom,
+                Some("root"),
+                3,
+            ),
+        ];
+        let forward = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources).unwrap();
+        let mut reversed_sources = sources;
+        reversed_sources.reverse();
+        let reversed =
+            CodexOutcomeLineageAuthorityV0::normalize_sources(&reversed_sources).unwrap();
+        assert!(forward.rejections.is_empty());
+        assert!(reversed.rejections.is_empty());
+        assert_eq!(
+            forward
+                .sources
+                .iter()
+                .map(|(source, key, native_id)| (
+                    native_id,
+                    key,
+                    source.catalog_parent_native_session_id.as_deref(),
+                    source.catalog_session_relationship,
+                    source.catalog_advisory_session_id.as_deref(),
+                    source.catalog_root_native_session_id.as_deref(),
+                ))
+                .collect::<Vec<_>>(),
+            reversed
+                .sources
+                .iter()
+                .map(|(source, key, native_id)| (
+                    native_id,
+                    key,
+                    source.catalog_parent_native_session_id.as_deref(),
+                    source.catalog_session_relationship,
+                    source.catalog_advisory_session_id.as_deref(),
+                    source.catalog_root_native_session_id.as_deref(),
+                ))
+                .collect::<Vec<_>>()
+        );
+        for native_id in ["root", "fork", "resumed"] {
+            assert_eq!(
+                forward.authority.dependency_digest(native_id),
+                reversed.authority.dependency_digest(native_id)
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_advisory_quarantines_only_its_direct_parent_component() {
+        let root_a = source("root-a", None, 1);
+        let child_a = related_source(
+            "child-a",
+            "root-a",
+            SessionRelationshipKind::Delegated,
+            Some("root-b"),
+            2,
+        );
+        let root_b = source("root-b", None, 3);
+        let normalized =
+            CodexOutcomeLineageAuthorityV0::normalize_sources(&[root_b, child_a, root_a]).unwrap();
+        assert_eq!(normalized.sources.len(), 1);
+        assert_eq!(normalized.sources[0].2, "root-b");
+        assert_eq!(normalized.rejections.len(), 2);
+        assert!(normalized.rejections.iter().all(|rejection| matches!(
+            rejection.proof.reason,
+            CodexLineageRejectionReasonV0::AdvisoryUnrelatedComponent { .. }
+        )));
+    }
+
+    #[test]
+    fn duplicate_self_and_contradictory_components_are_typed_and_all_invalid() {
+        let duplicate_left = source("duplicate", None, 1);
+        let mut duplicate_right = source("duplicate", None, 2);
+        duplicate_right.0.source_path = PathBuf::from("/tmp/duplicate-other.jsonl");
+        let duplicate_child = source("duplicate-child", Some("duplicate"), 3);
+        let self_parent = source("self", Some("self"), 4);
+        let contradictory_parent = source("contradictory-parent", None, 5);
+        let mut contradictory = source("contradictory", Some("contradictory-parent"), 6);
+        contradictory.0.catalog_session_relationship = SessionRelationshipKind::RelatedUnknown;
+        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&[
+            contradictory,
+            contradictory_parent,
+            duplicate_child,
+            duplicate_right,
+            self_parent,
+            duplicate_left,
+        ])
+        .unwrap();
+        assert!(normalized.sources.is_empty());
+        assert_eq!(normalized.rejections.len(), 6);
+        assert!(normalized.rejections.iter().any(|rejection| matches!(
+            rejection.proof.reason,
+            CodexLineageRejectionReasonV0::DuplicateNativeSessionId
+        )));
+        assert!(normalized.rejections.iter().any(|rejection| matches!(
+            rejection.proof.reason,
+            CodexLineageRejectionReasonV0::SelfParent
+        )));
     }
 
     #[test]
     fn lineage_evidence_authority_requires_certified_absence_for_unique_classification() {
-        let sources = vec![
-            source("root", None, 1),
-            source("child", Some("root"), 2),
-            source("missing-parent", Some("outside-route"), 3),
-        ];
+        let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         authority
             .register("root", authority.new_fact_set("root").unwrap())
@@ -746,12 +1283,6 @@ mod tests {
         assert_eq!(
             authority.classify("child", "call", "call").unwrap(),
             CodexOutcomeOriginV0::UniqueToSession
-        );
-        assert_eq!(
-            authority
-                .classify("missing-parent", "call", "call")
-                .unwrap(),
-            CodexOutcomeOriginV0::Unproven
         );
     }
 

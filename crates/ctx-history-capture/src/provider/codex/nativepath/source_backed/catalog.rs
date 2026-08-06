@@ -136,6 +136,10 @@ impl PartialEq for CodexExplicitSessionInventoryStateV0 {
                         == right_source.catalog_native_session_id
                     && left_source.catalog_parent_native_session_id
                         == right_source.catalog_parent_native_session_id
+                    && left_source.catalog_session_relationship
+                        == right_source.catalog_session_relationship
+                    && left_source.catalog_advisory_session_id
+                        == right_source.catalog_advisory_session_id
                     && left_source.catalog_root_native_session_id
                         == right_source.catalog_root_native_session_id
             }
@@ -254,7 +258,6 @@ fn absolute_lexical_path(path: &Path) -> CodexSourceBackedResultV0<PathBuf> {
 pub(super) fn bind_source_keys(
     sources: Vec<CodexCatalogSource>,
 ) -> CodexSourceBackedResultV0<Vec<(CodexCatalogSource, SourceKey, String)>> {
-    let mut native_ids = HashSet::new();
     let mut bound = Vec::with_capacity(sources.len());
     for source in sources {
         let native_session_id = source.catalog_native_session_id.clone().ok_or_else(|| {
@@ -262,11 +265,6 @@ pub(super) fn bind_source_keys(
                 path: source.source_path.clone(),
             }
         })?;
-        if !native_ids.insert(native_session_id.clone()) {
-            return Err(CodexSourceBackedErrorV0::DuplicateNativeSessionId(
-                native_session_id,
-            ));
-        }
         let source_key = codex_source_key(&native_session_id)?;
         bound.push((source, source_key, native_session_id));
     }
@@ -307,6 +305,8 @@ pub(crate) fn discover_codex_session_tree_inventory_from_plans_v0(
             Ok(CodexIncrementalInventorySeedV0 {
                 native_session_id: native_session_id.clone(),
                 parent_native_session_id: source.catalog_parent_native_session_id.clone(),
+                session_relationship: source.catalog_session_relationship,
+                advisory_session_id: source.catalog_advisory_session_id.clone(),
                 root_native_session_id: source.catalog_root_native_session_id.clone(),
                 observation: source.catalog_observation.clone(),
                 prefix_sha256: source
@@ -322,6 +322,8 @@ pub(crate) fn discover_codex_session_tree_inventory_from_plans_v0(
 struct CodexIncrementalInventorySeedV0 {
     native_session_id: String,
     parent_native_session_id: Option<String>,
+    session_relationship: SessionRelationshipKind,
+    advisory_session_id: Option<String>,
     root_native_session_id: Option<String>,
     observation: CodexFileObservation,
     prefix_sha256: [u8; 32],
@@ -373,6 +375,8 @@ fn incremental_seed_from_certificate(
     Some(Ok(CodexIncrementalInventorySeedV0 {
         native_session_id: native_session_id.clone(),
         parent_native_session_id: checkpoint.owner.parent_native_session_id,
+        session_relationship: checkpoint.owner.session_relationship,
+        advisory_session_id: checkpoint.owner.advisory_session_id,
         root_native_session_id: checkpoint.owner.root_native_session_id,
         observation,
         prefix_sha256: checkpoint.full_revision_sha256,
@@ -667,6 +671,8 @@ fn catalog_source_from_seed(
         catalog_prefix_sha256: Some(leaf.prefix_sha256),
         catalog_native_session_id: Some(seed.native_session_id.clone()),
         catalog_parent_native_session_id: seed.parent_native_session_id.clone(),
+        catalog_session_relationship: seed.session_relationship,
+        catalog_advisory_session_id: seed.advisory_session_id.clone(),
         catalog_root_native_session_id: seed.root_native_session_id.clone(),
         opened: None,
         authority_root: Some(leaf.authority.clone()),

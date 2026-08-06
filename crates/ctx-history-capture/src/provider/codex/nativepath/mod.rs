@@ -35,7 +35,8 @@ pub(crate) use source_backed::{
 };
 #[cfg(test)]
 pub(crate) use source_backed::{
-    install_after_codex_metadata_inventory_hook, CodexSourceBackedCountersV0,
+    install_after_codex_lineage_normalization_hook_v0, install_after_codex_metadata_inventory_hook,
+    CodexSourceBackedCountersV0,
 };
 #[cfg(test)]
 mod tests;

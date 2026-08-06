@@ -1,6 +1,9 @@
 use std::{fs::OpenOptions, io::Write};
 
+use ctx_history_core::SessionRelationshipKind;
+
 use super::*;
+use crate::provider::codex::nativepath::install_after_codex_lineage_normalization_hook_v0;
 
 fn prompt_line(session_id: &str, ts: i64, text: &str) -> Vec<u8> {
     let mut line = serde_json::to_vec(&serde_json::json!({
@@ -35,6 +38,350 @@ fn core_records(index: &VerifiedIndex) -> Vec<CoreRecord> {
         )
     });
     records
+}
+
+fn codex_lineage_rollout(
+    native_session_id: &str,
+    parent_native_session_id: Option<&str>,
+    relationship: SessionRelationshipKind,
+    advisory_session_id: Option<&str>,
+    marker: &str,
+) -> Vec<u8> {
+    let source = match (relationship, parent_native_session_id) {
+        (SessionRelationshipKind::Delegated, Some(parent)) => serde_json::json!({
+            "subagent": {"thread_spawn": {"parent_thread_id": parent}}
+        }),
+        _ => serde_json::json!("cli"),
+    };
+    let mut payload = serde_json::json!({
+        "id": native_session_id,
+        "timestamp": "2026-08-06T12:00:00Z",
+        "cwd": "/tmp/root-normalization",
+        "source": source,
+        "model_provider": "openai"
+    });
+    if let Some(parent) = parent_native_session_id {
+        match relationship {
+            SessionRelationshipKind::Delegated => {
+                payload["parent_thread_id"] = serde_json::json!(parent);
+            }
+            SessionRelationshipKind::Forked => {
+                payload["forked_from_id"] = serde_json::json!(parent);
+            }
+            SessionRelationshipKind::ResumedFrom => {
+                payload["history_base"] = serde_json::json!({
+                    "thread_id": parent,
+                    "end_ordinal_exclusive": 7,
+                    "end_byte_offset": 4096
+                });
+            }
+            relationship => panic!("unsupported Codex fixture relationship: {relationship:?}"),
+        }
+    }
+    if let Some(advisory) = advisory_session_id {
+        payload["session_id"] = serde_json::json!(advisory);
+    }
+    [
+        serde_json::json!({
+            "timestamp": "2026-08-06T12:00:00Z",
+            "type": "session_meta",
+            "payload": payload,
+        }),
+        serde_json::json!({
+            "timestamp": "2026-08-06T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": marker}]
+            }
+        }),
+    ]
+    .into_iter()
+    .flat_map(|record| {
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        line
+    })
+    .collect()
+}
+
+fn register_codex_tree(sessions: &Path) -> SourceBackedProviderRegistry {
+    register_codex_trees(&[(sessions, ProviderImportSupport::Native)])
+}
+
+fn register_codex_trees(roots: &[(&Path, ProviderImportSupport)]) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    super::super::register_codex_session_tree_routes(
+        &mut registry,
+        roots
+            .iter()
+            .map(|(root, support)| {
+                fixture_provider_source_at(
+                    CaptureProvider::Codex,
+                    "codex_session_jsonl_tree",
+                    *support,
+                    root,
+                )
+            })
+            .collect(),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    registry
+}
+
+#[test]
+fn codex_transitive_root_normalization_quarantines_before_workers() {
+    let temp = tempdir().unwrap();
+    let automatic = temp.path().join("automatic-sessions");
+    let explicit = temp.path().join("explicit-sessions");
+    fs::create_dir_all(&automatic).unwrap();
+    fs::create_dir_all(&explicit).unwrap();
+    let root = "019fa000-0000-7000-8000-000000003280";
+    let fork = "019fa000-0000-7000-8000-000000003281";
+    let delegated = "019fa000-0000-7000-8000-000000003282";
+    let resumed = "019fa000-0000-7000-8000-000000003287";
+    let invalid = "019fa000-0000-7000-8000-000000003283";
+    let invalid_child = "019fa000-0000-7000-8000-000000003284";
+    let absent = "019fa000-0000-7000-8000-000000003289";
+    for (directory, id, parent, relationship, advisory, marker) in [
+        (
+            &automatic,
+            root,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            "normalized root",
+        ),
+        (
+            &explicit,
+            fork,
+            Some(root),
+            SessionRelationshipKind::Forked,
+            Some(fork),
+            "normalized fork",
+        ),
+        (
+            &automatic,
+            delegated,
+            Some(fork),
+            SessionRelationshipKind::Delegated,
+            Some(fork),
+            "normalized delegated",
+        ),
+        (
+            &explicit,
+            resumed,
+            Some(delegated),
+            SessionRelationshipKind::ResumedFrom,
+            Some(root),
+            "normalized resumed",
+        ),
+        (
+            &explicit,
+            invalid,
+            Some(absent),
+            SessionRelationshipKind::Forked,
+            Some(absent),
+            "rejected missing",
+        ),
+        (
+            &automatic,
+            invalid_child,
+            Some(invalid),
+            SessionRelationshipKind::Delegated,
+            Some(invalid),
+            "rejected descendant",
+        ),
+    ] {
+        fs::write(
+            directory.join(format!("rollout-{id}.jsonl")),
+            codex_lineage_rollout(id, parent, relationship, advisory, marker),
+        )
+        .unwrap();
+    }
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+    let staged = Arc::new(Mutex::new(None));
+    let staged_from_hook = Arc::clone(&staged);
+    super::super::set_after_codex_session_tree_stage_hook(move |counters| {
+        *staged_from_hook.lock().unwrap() = Some(counters);
+    });
+    let registry = register_codex_trees(&[
+        (&automatic, ProviderImportSupport::Native),
+        (&explicit, ProviderImportSupport::Explicit),
+    ]);
+    let index_path = temp.path().join("index");
+    let refreshed =
+        refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let observation = observed.lock().unwrap().unwrap();
+    assert_eq!(observation.valid_sources, 4);
+    assert_eq!(observation.rejected_sources, 2);
+    assert_eq!(observation.pre_worker_counters.scanner_sources_started, 0);
+    assert_eq!(observation.pre_worker_counters.staged_documents, 0);
+    let staged = staged.lock().unwrap().unwrap();
+    assert_eq!(staged.scanner_sources_started, 4);
+    assert_eq!(staged.scanner_sources_completed, 4);
+    assert_eq!(staged.staged_documents, 4);
+    assert_eq!(refreshed.commit.indexed_documents, 4);
+    assert_eq!(refreshed.certified_source_count, 4);
+    let records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(records.len(), 4);
+    let canonical_root = records[0].root_session_id;
+    assert!(records
+        .iter()
+        .all(|record| record.root_session_id == canonical_root));
+    assert!(records.iter().all(|record| !record
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.starts_with("rejected"))));
+
+    let cold_ids = records
+        .iter()
+        .map(|record| {
+            (
+                record.content.normalized_body.clone().unwrap(),
+                record.event_id,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let warm_records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(warm_records.len(), 4);
+    assert!(warm_records
+        .iter()
+        .all(|record| record.root_session_id == canonical_root));
+    assert!(warm_records.iter().all(|record| {
+        cold_ids.get(record.content.normalized_body.as_deref().unwrap()) == Some(&record.event_id)
+    }));
+
+    let mut appended = serde_json::to_vec(&serde_json::json!({
+        "timestamp": "2026-08-06T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "normalized append"}]
+        }
+    }))
+    .unwrap();
+    appended.push(b'\n');
+    OpenOptions::new()
+        .append(true)
+        .open(automatic.join(format!("rollout-{delegated}.jsonl")))
+        .unwrap()
+        .write_all(&appended)
+        .unwrap();
+    refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let append_records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(append_records.len(), 5);
+    assert!(append_records
+        .iter()
+        .all(|record| record.root_session_id == canonical_root));
+    assert!(append_records
+        .iter()
+        .any(|record| { record.content.normalized_body.as_deref() == Some("normalized append") }));
+    assert!(append_records
+        .iter()
+        .filter(|record| { record.content.normalized_body.as_deref() != Some("normalized append") })
+        .all(|record| {
+            cold_ids.get(record.content.normalized_body.as_deref().unwrap())
+                == Some(&record.event_id)
+        }));
+
+    let new_root = "019fa000-0000-7000-8000-000000003279";
+    fs::write(
+        explicit.join(format!("rollout-{new_root}.jsonl")),
+        codex_lineage_rollout(
+            new_root,
+            None,
+            SessionRelationshipKind::Root,
+            Some(new_root),
+            "normalized new root",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        automatic.join(format!("rollout-{root}.jsonl")),
+        codex_lineage_rollout(
+            root,
+            Some(new_root),
+            SessionRelationshipKind::Forked,
+            Some(new_root),
+            "normalized root",
+        ),
+    )
+    .unwrap();
+    refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let reparented_records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(reparented_records.len(), 6);
+    let reparented_root = reparented_records[0].root_session_id;
+    assert_ne!(reparented_root, canonical_root);
+    assert!(reparented_records
+        .iter()
+        .all(|record| record.root_session_id == reparented_root));
+    assert!(reparented_records
+        .iter()
+        .filter(|record| cold_ids.contains_key(record.content.normalized_body.as_deref().unwrap()))
+        .all(|record| {
+            cold_ids.get(record.content.normalized_body.as_deref().unwrap())
+                == Some(&record.event_id)
+        }));
+}
+
+#[test]
+fn codex_all_invalid_lineage_fails_without_workers_or_publication() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let child = "019fa000-0000-7000-8000-000000003285";
+    let grandchild = "019fa000-0000-7000-8000-000000003286";
+    let absent = "019fa000-0000-7000-8000-000000003299";
+    fs::write(
+        sessions.join(format!("rollout-{child}.jsonl")),
+        codex_lineage_rollout(
+            child,
+            Some(absent),
+            SessionRelationshipKind::Forked,
+            Some(absent),
+            "all invalid one",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sessions.join(format!("rollout-{grandchild}.jsonl")),
+        codex_lineage_rollout(
+            grandchild,
+            Some(child),
+            SessionRelationshipKind::Delegated,
+            Some(child),
+            "all invalid two",
+        ),
+    )
+    .unwrap();
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+    assert!(refresh_source_backed_generation(
+        &index,
+        &register_codex_tree(&sessions),
+        WriterOptions::default(),
+    )
+    .is_err());
+    let observation = observed.lock().unwrap().unwrap();
+    assert_eq!(observation.valid_sources, 0);
+    assert_eq!(observation.rejected_sources, 2);
+    assert_eq!(observation.pre_worker_counters.scanner_sources_started, 0);
+    assert_eq!(observation.pre_worker_counters.staged_documents, 0);
+    assert!(VerifiedIndex::open(&index).is_err());
 }
 
 #[test]

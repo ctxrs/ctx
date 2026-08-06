@@ -8,7 +8,9 @@ use std::{
 };
 
 use crate::provider::codex::catalog::CatalogSession;
-use ctx_history_core::{AgentType, CaptureProvider, CoreDiscoveryExclusion, EventType};
+use ctx_history_core::{
+    AgentType, CaptureProvider, CoreDiscoveryExclusion, EventType, SessionRelationshipKind,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -122,6 +124,8 @@ fn catalog_session(path: &Path, native_session_id: &str) -> CatalogSession {
         source_path: path.display().to_string(),
         external_session_id: Some(native_session_id.to_owned()),
         parent_external_session_id: None,
+        session_relationship: SessionRelationshipKind::Root,
+        advisory_session_id: None,
         agent_type: AgentType::Primary,
         role_hint: Some("primary".to_owned()),
         external_agent_id: None,
@@ -146,6 +150,7 @@ pub(super) fn discover_one(path: &Path, native_session_id: &str) -> CodexCatalog
     assert!(discovery.rejections.is_empty());
     assert_eq!(discovery.sources.len(), 1);
     let mut source = discovery.sources.into_iter().next().unwrap();
+    source.catalog_root_native_session_id = Some(native_session_id.to_owned());
     let opened = open_provider_source_file(path).unwrap();
     source.catalog_prefix_sha256 = Some(
         super::reader::opened_file_prefix_sha256(opened.file(), source.catalog_observation.len)

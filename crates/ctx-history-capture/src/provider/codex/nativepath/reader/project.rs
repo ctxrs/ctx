@@ -74,7 +74,7 @@ impl CodexNativeScanner {
                 self.counters.typed_json_parses = self.counters.typed_json_parses.saturating_add(1);
                 match parse_session_meta(record) {
                     Some(owner) if self.owner.is_none() => {
-                        self.owner = Some(owner);
+                        self.owner = Some(validate_catalog_owner(&self.source, owner)?);
                         return Ok(CodexRecordProjection::default());
                     }
                     Some(_) => {
