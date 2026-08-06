@@ -12,6 +12,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = ROOT / "contracts" / "release-targets-v1.json"
+ADVISORY_POLICY_PATH = ROOT / "security" / "release-advisory-policy-v1.json"
 BAZEL_CONSUMER_PATH = ROOT / "tools" / "bazel" / "release_inventory.bzl"
 GENERATED_BEGIN = "# BEGIN GENERATED: contracts/release-targets-v1.json"
 GENERATED_END = "# END GENERATED: contracts/release-targets-v1.json"
@@ -125,6 +126,44 @@ def load_and_validate(path: Path = MATRIX_PATH) -> dict[str, Any]:
     return value
 
 
+def validate_advisory_policy_coverage(
+    value: dict[str, Any], path: Path = ADVISORY_POLICY_PATH
+) -> None:
+    policy = json.loads(path.read_text(encoding="utf-8"))
+    scanner = policy.get("scanner")
+    scanner_hashes = (
+        scanner.get("sha256_by_target") if isinstance(scanner, dict) else None
+    )
+    if not isinstance(scanner_hashes, dict):
+        raise ValueError("release advisory scanner target map is missing")
+    release_targets = {target["id"] for target in value["targets"]}
+    scanner_targets = set(scanner_hashes)
+    if scanner_targets != release_targets:
+        missing = sorted(release_targets - scanner_targets)
+        unexpected = sorted(scanner_targets - release_targets)
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected: " + ", ".join(unexpected))
+        raise ValueError(
+            "release advisory scanner targets do not match release matrix ("
+            + "; ".join(details)
+            + ")"
+        )
+    malformed = sorted(
+        target
+        for target, digest in scanner_hashes.items()
+        if not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    )
+    if malformed:
+        raise ValueError(
+            "release advisory scanner has malformed SHA-256 for: "
+            + ", ".join(malformed)
+        )
+
+
 def generated_bazel_consumer(value: dict[str, Any]) -> str:
     rows = [
         f'    "{target["id"]}": ("{target["bazel_platform"]}", '
@@ -158,6 +197,7 @@ def main() -> int:
         if sys.argv[1:] not in ([], ["--write-bazel-consumer"]):
             raise ValueError("usage: check-release-target-matrix.py [--write-bazel-consumer]")
         value = load_and_validate()
+        validate_advisory_policy_coverage(value)
         if BAZEL_CONSUMER_PATH.is_file():
             if sys.argv[1:]:
                 source = BAZEL_CONSUMER_PATH.read_text(encoding="utf-8")
