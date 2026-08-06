@@ -589,6 +589,7 @@ fn scheduler_retries_terminal_status_without_republishing_core() {
             current: SourceBackedRefreshCurrent::default(),
             timings: SourceBackedRefreshTimings::default(),
             route_results: Vec::new(),
+            zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
             verified_index: None,
         })

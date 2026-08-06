@@ -411,7 +411,14 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     let mut carried_unselected_route_ids = BTreeSet::new();
 
     let mut prepared_successful_route_outcomes = None;
-    let (commit, applied_removals, commit_duration, base_route_content, verified_publication) = {
+    let (
+        commit,
+        applied_removals,
+        complete_inventory_route_ids,
+        commit_duration,
+        base_route_content,
+        verified_publication,
+    ) = {
         let open = GenerationWriter::open(index_root, writer_options.clone())?;
         let mut writer = match open {
             GenerationWriterOpenOutcome::Ready(writer)
@@ -853,6 +860,15 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                 .iter()
                 .any(|owner| owner.inventory == *inventory)
         };
+        let complete_inventory_route_ids = complete_inventory_owners
+            .iter()
+            .filter_map(|owner| {
+                registry
+                    .routes
+                    .get(owner.route_index)
+                    .and_then(|route| route.metadata.route_identity.clone())
+            })
+            .collect::<BTreeSet<_>>();
         let (commit, verified_publication) = if let Some(factory) = metadata_factory.as_mut() {
             let published = writer
                 .commit_with_complete_inventory_revalidation_and_publication_metadata(
@@ -874,6 +890,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                             &logical_source_failures,
                             &record_rejections,
                             &outcomes,
+                            &complete_inventory_route_ids,
                             applied_removals.len(),
                         ))
                     },
@@ -898,6 +915,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         (
             commit,
             applied_removals,
+            complete_inventory_route_ids,
             commit_started.elapsed(),
             base_route_content,
             verified_publication,
@@ -965,6 +983,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         selected_route_ids: selected_route_ids.into_iter().collect(),
         successful_route_ids: successful_route_ids.into_iter().collect(),
         successful_route_outcomes,
+        complete_inventory_route_ids: complete_inventory_route_ids.into_iter().collect(),
         carried_unselected_route_ids: carried_unselected_route_ids.into_iter().collect(),
         carried_failed_route_ids: failed_routes
             .values()

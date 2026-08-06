@@ -1,7 +1,6 @@
 mod certification;
 mod generation;
 mod manifest;
-#[cfg(test)]
 mod republish;
 mod verification;
 
@@ -24,11 +23,14 @@ pub(crate) use manifest::{
     reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
     write_manifest,
 };
+pub(crate) use republish::{
+    best_effort_post_republish_cleanup, republish_current_with_publication_metadata,
+    CurrentRepublishOutcome,
+};
 #[cfg(test)]
 pub(crate) use republish::{
-    best_effort_post_republish_cleanup, republish_current_for_qualification,
-    CurrentRepublishOutcome, PointerReconciliationTestHookGuard, RepublishRecovery, RepublishStage,
-    RepublishTestHookGuard,
+    republish_current_for_qualification, PointerReconciliationTestHookGuard, RepublishRecovery,
+    RepublishStage, RepublishTestHookGuard,
 };
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use republish::{CloneMetrics, CloneStage, CloneTestHookGuard, CloneTestOptions};
@@ -37,16 +39,16 @@ pub(crate) use republish::{
     PortableCloneMetrics, PortableCloneStage, PortableCloneTestGuard, PortableCloneTestOptions,
 };
 pub(crate) use verification::{
-    physical_integrity_audit, verify_physical_integrity, verify_publication_candidate,
-    verify_searcher, verify_searcher_structure, PhysicalIntegrityAudit,
+    physical_integrity_audit, physical_integrity_digest, verify_complete_searcher,
+    verify_physical_integrity, verify_publication_candidate, verify_searcher,
+    verify_searcher_structure, PhysicalIntegrityAudit,
 };
 
 #[cfg(test)]
 pub(crate) use verification::{
     candidate_identity_verification_activity, candidate_lineage_verification_activity,
-    candidate_projection_verification_activity, hashed_artifact_bytes, physical_integrity_digest,
-    reset_verification_activity, verification_activity, verify_complete_searcher,
-    verify_searcher_with_metrics,
+    candidate_projection_verification_activity, hashed_artifact_bytes, reset_verification_activity,
+    verification_activity, verify_searcher_with_metrics,
 };
 
 #[cfg(test)]

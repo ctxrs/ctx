@@ -3,6 +3,57 @@
 use super::*;
 
 #[test]
+fn automatic_and_explicit_empty_routes_preserve_generation_bound_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let automatic_root = temp.path().join("automatic-codex-sessions");
+    let explicit_root = temp.path().join("explicit-codex-sessions");
+    for path in [&home, &cwd, &automatic_root, &explicit_root] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let automatic = provider_source_for_path(CaptureProvider::Codex, automatic_root);
+    let explicit = provider_source_for_path(CaptureProvider::Codex, explicit_root);
+    let upsert = crate::upsert_explicit_source(&data_root, &explicit).unwrap();
+    let discovery = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+
+    let publication = refresh_all_provider_sources(
+        &discovery,
+        DiscoveryReport {
+            sources: vec![automatic],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        Some(&upsert.authority),
+        SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
+        &mut progress,
+    )
+    .unwrap();
+
+    assert_eq!(publication.route_results.len(), 2);
+    assert_eq!(publication.zero_source_authority.len(), 2);
+    assert!(publication
+        .zero_source_authority
+        .iter()
+        .all(|authority| authority.generation_id == publication.generation_id));
+    assert!(
+        verified_generation_is_query_ready(&VerifiedIndex::open(&index_root).unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn successful_codex_route_derives_rejected_records_from_committed_core_sources() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
@@ -193,7 +244,7 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
     );
 }
 
-fn write_codex_rollout(root: &Path, native_session_id: &str, text: &str) {
+pub(super) fn write_codex_rollout(root: &Path, native_session_id: &str, text: &str) {
     fs::create_dir_all(root).unwrap();
     let session_meta = json!({
         "timestamp": "2026-07-30T12:00:00Z",

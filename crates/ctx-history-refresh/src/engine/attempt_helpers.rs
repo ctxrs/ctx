@@ -1,6 +1,13 @@
 use super::*;
 
 pub(super) fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static str> {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<ZeroSourcePublicationBlocked>()
+            .is_some()
+    }) {
+        return Some(TERMINAL_COVERAGE_ERROR_CODE);
+    }
     error.chain().find_map(|cause| {
         if let Some(route) = cause.downcast_ref::<SourceBackedRouteError>() {
             return match route.kind {
@@ -58,6 +65,19 @@ pub(super) fn source_backed_refresh_failure_outcome(
     error: &anyhow::Error,
     attempted_routes: &BTreeSet<SourceRouteIdentity>,
 ) -> SourceBackedRefreshFailureOutcome {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<ZeroSourcePublicationBlocked>()
+            .is_some()
+    }) {
+        return SourceBackedRefreshFailureOutcome::new(
+            TERMINAL_COVERAGE_ERROR_CODE,
+            "coverage",
+            true,
+            attempted_routes.clone(),
+            Some("retry_request"),
+        );
+    }
     if let Some(failed_routes) = error.chain().find_map(|cause| {
         let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } =
             cause.downcast_ref::<SourceBackedCoordinatorError>()?
@@ -544,6 +564,7 @@ mod tests {
             SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),
         );
         let mut publication = SourceBackedRefreshPublication {
+            zero_source_authority: Vec::new(),
             generation_id: "generation".to_owned(),
             published_explicit_source_catalog: None,
             unsupported_routes: 0,
@@ -581,6 +602,7 @@ mod tests {
             SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false),
         );
         let mut publication = SourceBackedRefreshPublication {
+            zero_source_authority: Vec::new(),
             generation_id: "generation".to_owned(),
             published_explicit_source_catalog: None,
             unsupported_routes: 0,
@@ -646,6 +668,12 @@ mod tests {
         let route = SourceRouteIdentity::from_sha256("aa".repeat(32)).unwrap();
         let attempted_routes = BTreeSet::from([route]);
         let cases: Vec<(anyhow::Error, &str, &str, bool)> = vec![
+            (
+                ZeroSourcePublicationBlocked::new("fixture catalog blocker").into(),
+                TERMINAL_COVERAGE_ERROR_CODE,
+                "coverage",
+                true,
+            ),
             (
                 SourceBackedRouteError::new(
                     SourceBackedRouteErrorKind::ResourceUnavailable,

@@ -58,6 +58,17 @@ pub(super) fn verified_publication_with_successful_routes(
                     let mut publication =
                         empty_test_publication(context.generation_id().to_owned());
                     publication.route_results = route_results.clone();
+                    publication.zero_source_authority = route_results
+                        .iter()
+                        .map(|result| SourceBackedZeroSourceAuthority {
+                            generation_id: context.generation_id().to_owned(),
+                            route_identity: SourceRouteIdentity::from_sha256(
+                                result.route_identity.clone(),
+                            )
+                            .expect("synthetic successful route identity"),
+                            kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                        })
+                        .collect();
                     covered_publication.apply_receipt(&mut publication);
                     let receipt = SourceBackedRefreshReceipt::from_verified_publication(
                         previous_generation.clone(),
@@ -66,6 +77,7 @@ pub(super) fn verified_publication_with_successful_routes(
                     )
                     .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                     SourceBackedPublicationMetadata {
+                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
                         request_id: request_id.clone(),
                         operation,
                         refresh_scope: scope.clone(),
@@ -79,6 +91,14 @@ pub(super) fn verified_publication_with_successful_routes(
     publication.route_results = successful_routes
         .iter()
         .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+        .collect();
+    publication.zero_source_authority = successful_routes
+        .iter()
+        .map(|route| SourceBackedZeroSourceAuthority {
+            generation_id: publication.generation_id.clone(),
+            route_identity: route.clone(),
+            kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+        })
         .collect();
     execution
         .covered_publication

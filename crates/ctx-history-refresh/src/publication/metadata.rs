@@ -1,12 +1,14 @@
 use super::*;
 use ctx_history_index::MAX_PUBLICATION_METADATA_BYTES;
 
-const SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 1;
+pub(crate) const SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 2;
+const LEGACY_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 1;
 
 /// Refresh-owned authority carried by Core's opaque CommitPayload metadata.
 /// Core deliberately knows nothing about this encoding.
 #[derive(Debug, Clone)]
 pub struct SourceBackedPublicationMetadata {
+    pub(crate) version: u64,
     pub(crate) request_id: String,
     pub(crate) operation: SourceBackedRefreshOperation,
     pub(crate) refresh_scope: SourceBackedRefreshScope,
@@ -16,6 +18,13 @@ pub struct SourceBackedPublicationMetadata {
 
 impl SourceBackedPublicationMetadata {
     pub(crate) fn encode(&self) -> ctx_history_index::Result<Vec<u8>> {
+        if self.version != SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
+            return Err(IndexError::PublicationMetadata(
+                "new Core source-refresh publications must use metadata v2".to_owned(),
+            ));
+        }
+        validate_v2_receipt(&self.receipt, None)
+            .map_err(|error| IndexError::PublicationMetadata(error.to_string()))?;
         let route_ids = receipt_route_ids(&self.receipt)
             .map_err(|error| IndexError::PublicationMetadata(error.to_string()))?;
         if self
@@ -58,7 +67,7 @@ impl SourceBackedPublicationMetadata {
         route_observations: Vec<Value>,
     ) -> ctx_history_index::Result<Vec<u8>> {
         let value = compact_json(json!({
-            "version": SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+            "version": self.version,
             "request_id": self.request_id,
             "operation": self.operation.as_str(),
             "refresh_scope": engine::refresh_scope_json(&self.refresh_scope),
@@ -92,9 +101,15 @@ impl SourceBackedPublicationMetadata {
         if fields.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected {
             bail!("Core source-refresh publication metadata has unknown or missing fields");
         }
-        if fields.get("version").and_then(Value::as_u64)
-            != Some(SOURCE_REFRESH_PUBLICATION_METADATA_VERSION)
-        {
+        let version = fields
+            .get("version")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("Core source-refresh publication metadata has no version"))?;
+        if !matches!(
+            version,
+            LEGACY_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+                | SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+        ) {
             bail!("unsupported Core source-refresh publication metadata version");
         }
         let request_id = fields
@@ -112,6 +127,18 @@ impl SourceBackedPublicationMetadata {
             .filter(|receipt| receipt.is_object())
             .cloned()
             .ok_or_else(|| anyhow!("Core source-refresh publication metadata has no receipt"))?;
+        match version {
+            LEGACY_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION => {
+                if receipt.get("zero_source_authority").is_some() {
+                    bail!("Core source-refresh metadata v1 carries v2-only authority");
+                }
+                validate_receipt_generation(&receipt, index)?;
+            }
+            SOURCE_REFRESH_PUBLICATION_METADATA_VERSION => {
+                validate_v2_receipt(&receipt, Some(index))?;
+            }
+            _ => unreachable!("metadata version checked above"),
+        }
         let observations = fields
             .get("route_observations")
             .and_then(Value::as_array)
@@ -137,6 +164,7 @@ impl SourceBackedPublicationMetadata {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         Ok(Self {
+            version,
             request_id,
             operation,
             refresh_scope,
@@ -159,6 +187,83 @@ impl SourceBackedPublicationMetadata {
             "receipt": self.receipt,
         })
     }
+
+    /// Whether this metadata proves that its exact verified generation is
+    /// query-ready. Legacy nonempty generations remain valid, while legacy
+    /// zero-source generations require a successful v2 recertification.
+    pub fn certifies_generation(&self, index: &VerifiedIndex) -> bool {
+        let source_count = self
+            .receipt
+            .get("current")
+            .and_then(|current| current.get("current_source_count"))
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok());
+        match source_count {
+            Some(1..) => true,
+            Some(0) => {
+                self.version == SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+                    && required_route_results(self.receipt.get("route_results"))
+                        .and_then(|route_results| {
+                            parse_zero_source_authority(
+                                self.receipt.get("zero_source_authority"),
+                                &route_results,
+                            )
+                        })
+                        .is_ok_and(|authority| {
+                            !authority.is_empty()
+                                && authority
+                                    .iter()
+                                    .all(|entry| entry.generation_id == index.generation_id())
+                        })
+            }
+            None => false,
+        }
+    }
+}
+
+fn validate_receipt_generation(receipt: &Value, index: &VerifiedIndex) -> Result<()> {
+    let generation_id = receipt
+        .get("published_generation")
+        .and_then(Value::as_str)
+        .filter(|generation| !generation.is_empty())
+        .ok_or_else(|| anyhow!("Core source-refresh receipt has no published generation"))?;
+    let source_count = receipt
+        .get("current")
+        .and_then(|current| current.get("current_source_count"))
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| anyhow!("Core source-refresh receipt has no current source count"))?;
+    if generation_id != index.generation_id() || source_count != index.manifest().sources.len() {
+        bail!("Core source-refresh metadata does not match its exact generation");
+    }
+    Ok(())
+}
+
+fn validate_v2_receipt(receipt: &Value, index: Option<&VerifiedIndex>) -> Result<()> {
+    let generation_id = receipt
+        .get("published_generation")
+        .and_then(Value::as_str)
+        .filter(|generation| !generation.is_empty())
+        .ok_or_else(|| anyhow!("Core source-refresh receipt has no published generation"))?;
+    let source_count = receipt
+        .get("current")
+        .and_then(|current| current.get("current_source_count"))
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| anyhow!("Core source-refresh receipt has no current source count"))?;
+    if let Some(index) = index {
+        validate_receipt_generation(receipt, index)?;
+    }
+    let route_results = required_route_results(receipt.get("route_results"))?;
+    let authority =
+        parse_zero_source_authority(receipt.get("zero_source_authority"), &route_results)?;
+    validate_zero_source_authority(
+        generation_id,
+        source_count,
+        &route_results,
+        &authority,
+        true,
+    )
 }
 
 fn receipt_route_ids(receipt: &Value) -> Result<Vec<SourceRouteIdentity>> {
@@ -181,12 +286,16 @@ fn receipt_route_ids(receipt: &Value) -> Result<Vec<SourceRouteIdentity>> {
 mod tests {
     use super::*;
 
-    fn metadata(receipt: Value) -> SourceBackedPublicationMetadata {
+    fn metadata(mut receipt: Value) -> SourceBackedPublicationMetadata {
+        let receipt = receipt.as_object_mut().expect("test receipt object");
+        receipt.insert("published_generation".to_owned(), json!("44".repeat(32)));
+        receipt.insert("current".to_owned(), json!({"current_source_count": 1}));
         SourceBackedPublicationMetadata {
+            version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
             request_id: "publication-metadata-test".to_owned(),
             operation: SourceBackedRefreshOperation::Refresh,
             refresh_scope: SourceBackedRefreshScope::All,
-            receipt,
+            receipt: Value::Object(receipt.clone()),
             route_observations: BTreeMap::new(),
         }
     }
@@ -195,10 +304,7 @@ mod tests {
     fn metadata_rejects_an_observation_outside_the_exact_receipt() {
         let receipt_route = SourceRouteIdentity::from_sha256("11".repeat(32)).unwrap();
         let outside_route = SourceRouteIdentity::from_sha256("22".repeat(32)).unwrap();
-        let routes = BTreeMap::from([(
-            receipt_route.as_str().to_owned(),
-            json!(["s", true, [], 0, 0, []]),
-        )]);
+        let routes = BTreeMap::from([(receipt_route.as_str().to_owned(), json!(["s", true]))]);
         let mut value = metadata(json!({
             "route_results": routes,
         }));
@@ -235,7 +341,7 @@ mod tests {
             .collect::<Vec<_>>();
         let routes = route_ids
             .iter()
-            .map(|route| (route.as_str().to_owned(), json!(["s", false, [], 0, 0, []])))
+            .map(|route| (route.as_str().to_owned(), json!(["s", false])))
             .collect::<serde_json::Map<_, _>>();
         let mut value = metadata(json!({
             "route_results": routes,
@@ -260,7 +366,7 @@ mod tests {
     #[test]
     fn invalid_route_identity_is_rejected_before_metadata_publication() {
         let value = metadata(json!({
-            "route_results": {"not-a-route": ["s", true, [], 0, 0, []]},
+            "route_results": {"not-a-route": ["s", true]},
         }));
         assert!(matches!(
             value.encode(),

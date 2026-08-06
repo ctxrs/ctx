@@ -67,20 +67,18 @@ pub use preparation::{
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
 #[cfg(test)]
+pub(crate) use publication::republish_current_for_qualification;
 pub(crate) use publication::{
-    best_effort_post_republish_cleanup, physical_integrity_digest,
-    republish_current_for_qualification,
-};
-pub(crate) use publication::{
-    canonical_commit_payload, create_candidate_generation, load_active_generation_pointer,
-    load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
-    physical_integrity_audit, publish_active_generation_pointer,
-    reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
-    reclaim_unreferenced_manifests, reconcile_commit_error, scrub_and_certify_physical_integrity,
+    best_effort_post_republish_cleanup, canonical_commit_payload, create_candidate_generation,
+    load_active_generation_pointer, load_publication_for_metas, meta_generation, open_slot_index,
+    payload_generation_id, physical_integrity_audit, physical_integrity_digest,
+    publish_active_generation_pointer, reclaim_inactive_generation_directories,
+    reclaim_unreferenced_certifications, reclaim_unreferenced_manifests, reconcile_commit_error,
+    republish_current_with_publication_metadata, scrub_and_certify_physical_integrity,
     searcher_generation, sync_directory, sync_generation, verify_or_certify_physical_integrity,
     verify_physical_integrity, verify_publication_candidate, verify_searcher,
-    verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
-    PhysicalIntegrityAudit, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
+    verify_searcher_structure, write_manifest, ActiveGenerationPointer, CurrentRepublishOutcome,
+    GenerationSlot, PhysicalIntegrityAudit, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
     AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,

@@ -97,16 +97,12 @@ pub enum IndexError {
         "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
     )]
     CoreRecordContractMismatch { expected: String, actual: String },
-    #[cfg(test)]
     #[error("current publication republish source topology is unsupported: {0}")]
     CurrentRepublishSourceTopology(&'static str),
-    #[cfg(test)]
     #[error("current publication republish exceeds the file limit: {actual}/{maximum}")]
     CurrentRepublishFileLimit { actual: usize, maximum: usize },
-    #[cfg(test)]
     #[error("current publication republish exceeds the byte limit: {actual}/{maximum}")]
     CurrentRepublishByteLimit { actual: u64, maximum: u64 },
-    #[cfg(test)]
     #[error(
         "current publication republish needs {required} bytes of headroom, but only {available} are available"
     )]

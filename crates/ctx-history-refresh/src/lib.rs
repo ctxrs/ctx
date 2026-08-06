@@ -44,7 +44,7 @@ use ctx_history_capture::{
 use ctx_history_core::CaptureProvider;
 use ctx_history_core::{utc_now, CertifiedSource, ScannedSourceCounts};
 use ctx_history_index::{
-    generation_incompatibility_requires_rebuild, GenerationManifest, IndexError,
+    generation_incompatibility_requires_rebuild, GenerationManifest, GenerationWriter, IndexError,
     PublicationDisposition, SourceRouteIdentity, VerifiedIndex, WriterOptions,
 };
 use serde_json::{json, Value};
@@ -84,7 +84,9 @@ pub use publication::{
     optional_generation, pin_active_verified_generation, pin_published_generation,
     pin_retained_generation, published_explicit_source_relocation_authority,
     published_refresh_receipt, published_refresh_receipt_for_index, source_backed_index_root,
-    PinnedSourceBackedGeneration, SourceBackedRefreshPublication,
+    verified_generation_is_query_ready, PinnedSourceBackedGeneration,
+    SourceBackedRefreshPublication, SourceBackedZeroSourceAuthority,
+    SourceBackedZeroSourceAuthorityKind,
 };
 pub use request::{
     AdmissionResponseBarrier, RefreshAdmission, RefreshLogicalPhase, RefreshLogicalStatus,
@@ -105,7 +107,8 @@ use orchestration::{
 use publication::{
     is_sha256_identity, open_published_generation, published_generation_id, required_generation,
     required_route_results, retained_generation_hint, verify_source_backed_publication,
-    SourceBackedRefreshCoveredPublication,
+    SourceBackedRefreshCoveredPublication, ZeroSourcePublicationBlocked,
+    SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
 };
 
 const SEARCH_DIRECTORY: &str = "search";
@@ -135,7 +138,6 @@ fn prune_null_json(value: &mut Value) {
     }
 }
 
-#[cfg(test)]
 fn committed_generation_recovery_error(
     recovery: ctx_history_index::CommittedPredecessorMigrationRecovery,
 ) -> ctx_history_index::IndexError {

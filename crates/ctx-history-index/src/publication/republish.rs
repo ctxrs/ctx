@@ -65,11 +65,33 @@ impl RepublishRecovery {
 }
 
 /// Replays atomic publication over an already-current generation for fault and
-/// disk qualification without introducing a compatibility path.
+/// disk qualification without changing its payload or owner metadata.
+#[cfg(test)]
 pub(crate) fn republish_current_for_qualification(
     root: &Path,
     pointer: &ActiveGenerationPointer,
     options: &WriterOptions,
+) -> Result<CurrentRepublishOutcome> {
+    republish_current(root, pointer, options, None)
+}
+
+/// Atomically replaces only the owner metadata of an already-current
+/// generation while preserving its exact manifest, segments, and generation
+/// identity.
+pub(crate) fn republish_current_with_publication_metadata(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    options: &WriterOptions,
+    publication_metadata: Arc<[u8]>,
+) -> Result<CurrentRepublishOutcome> {
+    republish_current(root, pointer, options, Some(publication_metadata))
+}
+
+fn republish_current(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    options: &WriterOptions,
+    replacement_publication_metadata: Option<Arc<[u8]>>,
 ) -> Result<CurrentRepublishOutcome> {
     let current_index = open_slot_index(root, pointer.active())?;
     validate_schema(&current_index.schema())?;
@@ -108,7 +130,7 @@ pub(crate) fn republish_current_for_qualification(
         &candidate_path,
         &candidate_directory_name,
         &current_metas,
-        current_publication.metadata,
+        replacement_publication_metadata.or(current_publication.metadata),
         current_publication.manifest,
         current_publication.generation_id,
     );
@@ -408,6 +430,13 @@ fn load_pointer_for_republish_reconciliation(
     })
 }
 
+#[cfg(not(test))]
+fn load_pointer_for_republish_reconciliation(
+    root: &Path,
+) -> Result<Option<ActiveGenerationPointer>> {
+    load_active_generation_pointer(root)
+}
+
 /// Cleanup after a visible republish is opportunistic. Query authority already
 /// changed atomically, so reclamation failures must never be reported as a
 /// failed republish.
@@ -424,7 +453,6 @@ pub(crate) fn best_effort_post_republish_cleanup(root: &Path, pointer: &ActiveGe
     let _ = reclaim_unreferenced_certifications(root, Some(pointer));
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepublishStage {
     BeforeCandidateCreation,
@@ -437,6 +465,11 @@ pub(crate) enum RepublishStage {
     AfterCandidateVerification,
     BeforePointerPublication,
     PostPublicationCleanup,
+}
+
+#[cfg(not(test))]
+fn republish_checkpoint(_stage: RepublishStage, _path: Option<&Path>) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

@@ -96,6 +96,7 @@ fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefr
         .unwrap();
     SourceBackedRefreshPublication {
         route_results: Vec::new(),
+        zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
         verified_index: None,
         generation_id: receipt.generation_id.clone(),
@@ -307,6 +308,7 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
             "ab".repeat(32),
             true,
         )],
+        zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
         verified_index: None,
         generation_id: receipt.generation_id,
@@ -499,6 +501,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                 .collect::<Vec<_>>();
             let mut publication = SourceBackedRefreshPublication {
                 route_results,
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
                 verified_index: None,
                 generation_id: receipt.generation_id,

@@ -2,6 +2,73 @@ use super::*;
 
 pub(crate) mod metadata;
 pub(crate) mod observation;
+pub(crate) use metadata::SOURCE_REFRESH_PUBLICATION_METADATA_VERSION;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SourceBackedZeroSourceAuthorityKind {
+    CompleteEmptyInventory,
+    ConfirmedDeletion,
+}
+
+impl SourceBackedZeroSourceAuthorityKind {
+    const fn compact_code(self) -> char {
+        match self {
+            Self::CompleteEmptyInventory => 'e',
+            Self::ConfirmedDeletion => 'd',
+        }
+    }
+
+    fn from_compact_code(value: char) -> Result<Self> {
+        match value {
+            'e' => Ok(Self::CompleteEmptyInventory),
+            'd' => Ok(Self::ConfirmedDeletion),
+            _ => bail!("Core zero-source authority has an unknown disposition"),
+        }
+    }
+}
+
+/// One route-local proof that a zero-source generation is authoritative.
+///
+/// The generation binding is repeated on every in-memory entry so covered
+/// continuations cannot accidentally carry predecessor authority into a new
+/// publication without explicitly rebinding it at the terminal fence.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SourceBackedZeroSourceAuthority {
+    pub generation_id: String,
+    pub route_identity: SourceRouteIdentity,
+    pub kind: SourceBackedZeroSourceAuthorityKind,
+}
+
+impl SourceBackedZeroSourceAuthority {
+    fn rebound_to(&self, generation_id: &str) -> Self {
+        Self {
+            generation_id: generation_id.to_owned(),
+            route_identity: self.route_identity.clone(),
+            kind: self.kind,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ZeroSourcePublicationBlocked {
+    detail: String,
+}
+
+impl ZeroSourcePublicationBlocked {
+    pub(crate) fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for ZeroSourcePublicationBlocked {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{TERMINAL_COVERAGE_ERROR_CODE}: {}", self.detail)
+    }
+}
+
+impl std::error::Error for ZeroSourcePublicationBlocked {}
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -16,6 +83,19 @@ pub fn open_verified_index(index_root: &Path) -> std::result::Result<VerifiedInd
         }
     });
     VerifiedIndex::open_pinned(index_root)
+}
+
+/// Evaluates query readiness from the committed generation and its opaque
+/// refresh metadata, independently of any later mutable refresh attempt.
+pub fn verified_generation_is_query_ready(index: &VerifiedIndex) -> Result<bool> {
+    match index.publication_metadata() {
+        Some(_) => {
+            let metadata = SourceBackedPublicationMetadata::decode(index)
+                .context("decode Core source-refresh publication authority")?;
+            Ok(metadata.certifies_generation(index))
+        }
+        None => Ok(!index.manifest().sources.is_empty()),
+    }
 }
 
 fn open_retained_verified_index(
@@ -64,6 +144,8 @@ pub struct SourceBackedRefreshPublication {
     pub current: SourceBackedRefreshCurrent,
     pub timings: SourceBackedRefreshTimings,
     pub route_results: Vec<SourceBackedRefreshRouteResult>,
+    /// Present only when the exact generation contains no certified sources.
+    pub zero_source_authority: Vec<SourceBackedZeroSourceAuthority>,
     pub catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
     /// Exact Core pin returned by the metadata-aware publication primitive.
     /// Synthetic executor tests may leave this absent.
@@ -77,6 +159,7 @@ pub struct SourceBackedRefreshPublication {
 #[derive(Debug, Clone, Default)]
 pub struct SourceBackedRefreshCoveredPublication {
     pub route_results: Vec<SourceBackedRefreshRouteResult>,
+    pub zero_source_authority: Vec<SourceBackedZeroSourceAuthority>,
     pub removed_source_count: usize,
     pub timings: SourceBackedRefreshTimings,
 }
@@ -88,6 +171,14 @@ impl SourceBackedRefreshCoveredPublication {
             .extend(self.route_results.iter().cloned());
         publication
             .route_results
+            .sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
+        publication.zero_source_authority.extend(
+            self.zero_source_authority
+                .iter()
+                .map(|authority| authority.rebound_to(&publication.generation_id)),
+        );
+        publication
+            .zero_source_authority
             .sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
         publication.current.removed_source_count = publication
             .current
@@ -400,6 +491,8 @@ pub fn published_refresh_receipt_for_index(
     let selected_route_total = required_usize(value, "selected_route_total")?;
     let successful_route_total = required_usize(value, "successful_route_total")?;
     let route_results = required_route_results(value.get("route_results"))?;
+    let zero_source_authority =
+        parse_zero_source_authority(value.get("zero_source_authority"), &route_results)?;
     let expected_catalog_lineages = published_explicit_source_catalog
         .as_ref()
         .map(ExplicitSourceCatalogAuthority::route_lineages)
@@ -457,6 +550,13 @@ pub fn published_refresh_receipt_for_index(
     {
         bail!("published daemon source refresh has an invalid route-result partition");
     }
+    validate_zero_source_authority(
+        &published_generation,
+        current.source_count,
+        &route_results,
+        &zero_source_authority,
+        false,
+    )?;
 
     let top_previous_generation = optional_generation(response.get("previous_generation"))?;
     let top_published_generation = required_generation(
@@ -506,6 +606,7 @@ pub fn published_refresh_receipt_for_index(
         published_explicit_source_catalog,
         current,
         route_results,
+        zero_source_authority,
         catalog_route_bindings,
     })
 }
@@ -621,6 +722,124 @@ pub(super) fn required_route_results(
             Ok(result)
         })
         .collect()
+}
+
+pub(super) fn zero_source_authority_json(
+    authority: &[SourceBackedZeroSourceAuthority],
+    route_results: &[SourceBackedRefreshRouteResult],
+) -> Option<Value> {
+    let generation_id = authority.first()?.generation_id.clone();
+    let authority = authority
+        .iter()
+        .map(|entry| (entry.route_identity.as_str(), entry.kind))
+        .collect::<BTreeMap<_, _>>();
+    let mut route_results = route_results.iter().collect::<Vec<_>>();
+    route_results.sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
+    // The disposition string is positionally bound to the sorted route-result
+    // identities: `e` is complete-empty inventory and `d` is confirmed
+    // deletion. This avoids repeating 64-byte route IDs and keeps the full
+    // bounded route set inside the durable receipt budget.
+    let route_kinds = route_results
+        .iter()
+        .filter_map(|result| authority.get(result.route_identity.as_str()))
+        .map(|kind| kind.compact_code())
+        .collect::<String>();
+    Some(json!({
+        "generation_id": generation_id,
+        "route_kinds": route_kinds,
+    }))
+}
+
+pub(super) fn parse_zero_source_authority(
+    value: Option<&Value>,
+    route_results: &[SourceBackedRefreshRouteResult],
+) -> Result<Vec<SourceBackedZeroSourceAuthority>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let fields = value
+        .as_object()
+        .ok_or_else(|| anyhow!("Core zero-source authority must be an object"))?;
+    if fields.keys().map(String::as_str).collect::<BTreeSet<_>>()
+        != BTreeSet::from(["generation_id", "route_kinds"])
+    {
+        bail!("Core zero-source authority has unknown or missing fields");
+    }
+    let generation_id = fields
+        .get("generation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Core zero-source authority has no generation binding"))?;
+    let route_kinds = fields
+        .get("route_kinds")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Core zero-source authority has no route entries"))?;
+    let route_kinds = route_kinds.chars().collect::<Vec<_>>();
+    if route_kinds.is_empty()
+        || route_kinds.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT
+        || route_kinds.len() != route_results.len()
+    {
+        bail!(
+            "Core zero-source authority must contain 1..={SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT} routes"
+        );
+    }
+    let mut route_results = route_results.iter().collect::<Vec<_>>();
+    route_results.sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
+    route_results
+        .into_iter()
+        .zip(route_kinds)
+        .map(|(result, kind)| {
+            Ok(SourceBackedZeroSourceAuthority {
+                generation_id: generation_id.to_owned(),
+                route_identity: SourceRouteIdentity::from_sha256(result.route_identity.clone())?,
+                kind: SourceBackedZeroSourceAuthorityKind::from_compact_code(kind)?,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn validate_zero_source_authority(
+    generation_id: &str,
+    source_count: usize,
+    route_results: &[SourceBackedRefreshRouteResult],
+    authority: &[SourceBackedZeroSourceAuthority],
+    required_for_empty: bool,
+) -> Result<()> {
+    if source_count != 0 {
+        if !authority.is_empty() {
+            bail!("nonempty Core generation carries zero-source authority");
+        }
+        return Ok(());
+    }
+    if authority.is_empty() {
+        if required_for_empty {
+            bail!("zero-source Core generation has no publication authority");
+        }
+        return Ok(());
+    }
+    if authority.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT
+        || authority
+            .iter()
+            .any(|entry| entry.generation_id != generation_id)
+    {
+        bail!("Core zero-source authority is not bound to its exact generation");
+    }
+    let authority_routes = authority
+        .iter()
+        .map(|entry| entry.route_identity.as_str())
+        .collect::<BTreeSet<_>>();
+    if authority_routes.len() != authority.len() {
+        bail!("Core zero-source authority contains a duplicate route");
+    }
+    let successful_routes = route_results
+        .iter()
+        .filter(|result| result.outcome.is_success())
+        .map(|result| result.route_identity.as_str())
+        .collect::<BTreeSet<_>>();
+    if successful_routes.len() != route_results.len() || successful_routes != authority_routes {
+        bail!("Core zero-source authority does not cover every successful terminal route");
+    }
+    Ok(())
 }
 
 fn required_route_rejection_diagnostics(
@@ -841,8 +1060,13 @@ pub fn pin_published_generation(
     data_root: &Path,
     journal: &dyn RefreshJournal,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
-    Ok(open_published_generation(data_root, journal)?
-        .map(|index| PinnedSourceBackedGeneration { index }))
+    let Some(index) = open_published_generation(data_root, journal)? else {
+        return Ok(None);
+    };
+    if !verified_generation_is_query_ready(&index)? {
+        return Ok(None);
+    }
+    Ok(Some(PinnedSourceBackedGeneration { index }))
 }
 
 pub fn pin_retained_generation(
@@ -856,6 +1080,9 @@ pub fn pin_retained_generation(
             index_root.display()
         )
     })?;
+    if !verified_generation_is_query_ready(&index)? {
+        bail!("retained Core generation {generation_id} has no zero-source publication authority");
+    }
     Ok(PinnedSourceBackedGeneration { index })
 }
 

@@ -27,6 +27,7 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
                             published_explicit_source_catalog: None,
                             current: SourceBackedRefreshCurrent::default(),
                             route_results: Vec::new(),
+                            zero_source_authority: Vec::new(),
                             catalog_route_bindings: Vec::new(),
                         };
                         serde_json::to_vec(&json!({
@@ -84,6 +85,7 @@ fn recovered_periodic_publication_restores_crash_cooldown_before_explicit_bypass
                 current: SourceBackedRefreshCurrent::default(),
                 timings: SourceBackedRefreshTimings::default(),
                 route_results: Vec::new(),
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
                 verified_index: None,
             })
@@ -159,6 +161,7 @@ fn recovered_periodic_no_op_restores_cooldown_from_original_request() -> Result<
                         published_explicit_source_catalog: None,
                         current: SourceBackedRefreshCurrent::default(),
                         route_results: Vec::new(),
+                        zero_source_authority: Vec::new(),
                         catalog_route_bindings: Vec::new(),
                     };
                     serde_json::to_vec(&json!({
@@ -181,6 +184,7 @@ fn recovered_periodic_no_op_restores_cooldown_from_original_request() -> Result<
             current: SourceBackedRefreshCurrent::default(),
             timings: SourceBackedRefreshTimings::default(),
             route_results: Vec::new(),
+            zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
             verified_index: None,
         })

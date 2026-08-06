@@ -28,9 +28,9 @@ pub(in crate::semantic) use ctx_history_refresh::RefreshEngine as CoreRefreshEng
 pub(crate) use ctx_history_refresh::{
     explicit_catalog_request_is_accounted_for, nonzero_duration_micros, open_verified_index,
     optional_generation, published_refresh_receipt_for_index, source_backed_index_root,
-    PinnedCorePublication, RefreshOutcomeClass, RefreshRequestState, RefreshStatus,
-    RefreshStatusKind, RefreshTerminalOutcome, SourceBackedCurrentSourceProgress,
-    SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
+    verified_generation_is_query_ready, PinnedCorePublication, RefreshOutcomeClass,
+    RefreshRequestState, RefreshStatus, RefreshStatusKind, RefreshTerminalOutcome,
+    SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
 };
 
 #[cfg(test)]

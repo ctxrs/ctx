@@ -1,5 +1,28 @@
 use super::*;
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct RouteLessRegistryBlockers {
+    pub(super) total: usize,
+    details: Vec<String>,
+}
+
+impl RouteLessRegistryBlockers {
+    pub(super) fn publication_error(&self) -> ZeroSourcePublicationBlocked {
+        let omitted = self.total.saturating_sub(self.details.len());
+        let omitted = if omitted == 0 {
+            String::new()
+        } else {
+            format!("; {omitted} additional route-less blocker(s) omitted")
+        };
+        ZeroSourcePublicationBlocked::new(format!(
+            "zero-source publication has {} unsupported or unavailable catalog blocker(s): {}{}",
+            self.total,
+            self.details.join("; "),
+            omitted,
+        ))
+    }
+}
+
 /// Rejects only registry issues whose unsafe root makes route-local execution
 /// incapable of establishing a safe publication boundary.
 pub(in super::super) fn reject_blocking_automatic_registry_issues(
@@ -54,7 +77,12 @@ pub(in super::super) fn automatic_registry_route_failures(
         let Some(class) = automatic_registry_issue_failure_class(source, reason) else {
             continue;
         };
-        let route_identity = automatic_registry_issue_route_identity(source)?;
+        let Ok(route_identity) = automatic_registry_issue_route_identity(source) else {
+            // Unknown registrations have no executable route identity. They
+            // remain route-less blockers and must never be assigned a
+            // fabricated identity merely to fit the route-result vector.
+            continue;
+        };
         let carried_forward = retained_generation.is_some_and(|index| {
             index
                 .manifest()
@@ -75,6 +103,43 @@ pub(in super::super) fn automatic_registry_route_failures(
         });
     }
     Ok(failures.into_values().collect())
+}
+
+pub(super) fn automatic_registry_route_less_blockers(
+    issues: &[SourceBackedAutomaticRegistryIssue],
+    route_failures: &[ctx_history_capture::SourceBackedFailedRoute],
+) -> RouteLessRegistryBlockers {
+    let represented_routes = route_failures
+        .iter()
+        .map(|failure| failure.route_identity.clone())
+        .collect::<BTreeSet<_>>();
+    let mut blockers = RouteLessRegistryBlockers::default();
+    for issue in issues {
+        let detail = match issue {
+            SourceBackedAutomaticRegistryIssue::Discovery(issue) => {
+                format!("{} {}", issue.provider.as_str(), issue.reason,)
+            }
+            SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } => {
+                if automatic_registry_issue_route_identity(source)
+                    .ok()
+                    .is_some_and(|route| represented_routes.contains(&route))
+                {
+                    continue;
+                }
+                format!(
+                    "{} {}: {}",
+                    source.provider.as_str(),
+                    source.path.display(),
+                    automatic_registry_issue_reason(reason),
+                )
+            }
+        };
+        blockers.total = blockers.total.saturating_add(1);
+        if blockers.details.len() < SOURCE_REFRESH_BUILD_ISSUE_LIMIT {
+            blockers.details.push(detail);
+        }
+    }
+    blockers
 }
 
 fn automatic_registry_issue_failure_class(

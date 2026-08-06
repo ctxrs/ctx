@@ -149,6 +149,7 @@ impl ProviderObservationFixture {
                     true,
                 )?;
                 Ok(SourceBackedRefreshPublication {
+                    zero_source_authority: Vec::new(),
                     generation_id,
                     published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
                     unsupported_routes: 0,
@@ -1159,6 +1160,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 let receipt = writer.commit(|_| true)?;
                 Ok(SourceBackedRefreshPublication {
                     route_results: Vec::new(),
+                    zero_source_authority: Vec::new(),
                     catalog_route_bindings: Vec::new(),
                     verified_index: None,
                     generation_id: receipt.generation_id,
@@ -1268,6 +1270,7 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
                     executor_route.as_str().to_owned(),
                     true,
                 )],
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
                 verified_index: None,
                 generation_id: receipt.generation_id,

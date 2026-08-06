@@ -230,6 +230,7 @@ fn typed_unknown_recovery_reenqueues_stable_uuid_and_returns_its_terminal_genera
                         current: SourceBackedRefreshCurrent::default(),
                         timings: SourceBackedRefreshTimings::default(),
                         route_results: Vec::new(),
+                        zero_source_authority: Vec::new(),
                         catalog_route_bindings: Vec::new(),
                         verified_index: None,
                     })
@@ -602,6 +603,7 @@ fn old_wait_request_keeps_exact_identity_across_restart_and_returns_exact_genera
                         current: SourceBackedRefreshCurrent::default(),
                         timings: SourceBackedRefreshTimings::default(),
                         route_results: Vec::new(),
+                        zero_source_authority: Vec::new(),
                         catalog_route_bindings: Vec::new(),
                         verified_index: None,
                     };

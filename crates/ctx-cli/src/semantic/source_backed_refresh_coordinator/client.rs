@@ -1306,6 +1306,7 @@ mod progress_poll_tests {
                     ..SourceBackedRefreshCurrent::default()
                 },
                 route_results,
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
             };
             let response = json!({
@@ -1336,6 +1337,7 @@ mod progress_poll_tests {
                     false,
                 ),
             ],
+            zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
         };
         assert_eq!(

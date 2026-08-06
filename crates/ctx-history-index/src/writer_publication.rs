@@ -30,6 +30,67 @@ struct VerifiedCandidate {
 }
 
 impl GenerationWriter {
+    /// Rebinds opaque owner metadata to an exact reused generation without
+    /// changing its logical or physical index payload.
+    pub fn republish_current_publication_metadata(
+        self,
+        expected_generation_id: &str,
+        publication_metadata: Vec<u8>,
+    ) -> Result<VerifiedIndex> {
+        if self.preflight_lock.is_none() {
+            return Err(IndexError::WriterInvariant(
+                "generation writer lost its root publication lock",
+            ));
+        }
+        let pointer = self
+            .active_pointer
+            .as_ref()
+            .ok_or(IndexError::WriterInvariant(
+                "publication metadata republish requires an active generation",
+            ))?;
+        let generation_id = self
+            .base_manifest
+            .as_ref()
+            .ok_or(IndexError::WriterInvariant(
+                "publication metadata republish requires a base manifest",
+            ))?
+            .generation_id()?;
+        if generation_id != expected_generation_id
+            || pointer.active().generation_id() != expected_generation_id
+        {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        if publication_metadata.len() > MAX_PUBLICATION_METADATA_BYTES {
+            return Err(IndexError::PublicationMetadataTooLarge {
+                actual: publication_metadata.len(),
+                maximum: MAX_PUBLICATION_METADATA_BYTES,
+            });
+        }
+        let outcome = republish_current_with_publication_metadata(
+            &self.root,
+            pointer,
+            &self.writer_options,
+            publication_metadata.into(),
+        )?;
+        let published_pointer = match outcome {
+            CurrentRepublishOutcome::Published(pointer) => pointer,
+            CurrentRepublishOutcome::CommittedVisible { recovery, .. }
+            | CurrentRepublishOutcome::CommittedRecoveryRequired { recovery } => {
+                return Err(IndexError::CommittedGenerationNeedsRecovery {
+                    generation_id: recovery.generation_id().to_owned(),
+                    stage: "publication metadata republish",
+                    detail: recovery.detail().to_owned(),
+                });
+            }
+        };
+        best_effort_post_republish_cleanup(&self.root, &published_pointer);
+        let verified = VerifiedIndex::open(&self.root)?;
+        if verified.generation_id() != expected_generation_id {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        Ok(verified)
+    }
+
     pub(super) fn writer_mut(&mut self) -> Result<&mut IndexWriter<IndexDocument>> {
         if self.writer.is_none() {
             #[cfg(test)]

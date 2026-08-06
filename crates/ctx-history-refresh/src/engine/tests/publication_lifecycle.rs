@@ -827,7 +827,7 @@ fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() 
             .commit_with_publication_metadata(
                 |_| true,
                 |context| {
-                    let publication = SourceBackedRefreshPublication {
+                    let mut publication = SourceBackedRefreshPublication {
                         generation_id: context.generation_id().to_owned(),
                         published_explicit_source_catalog: None,
                         unsupported_routes: 0,
@@ -836,9 +836,11 @@ fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() 
                         current: SourceBackedRefreshCurrent::default(),
                         timings: SourceBackedRefreshTimings::default(),
                         route_results: Vec::new(),
+                        zero_source_authority: Vec::new(),
                         catalog_route_bindings: Vec::new(),
                         verified_index: None,
                     };
+                    add_complete_empty_authority(&mut publication, route_identity(0x98));
                     let receipt = SourceBackedRefreshReceipt::from_verified_publication(
                         None,
                         context.generation_id().to_owned(),
@@ -846,6 +848,7 @@ fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() 
                     )
                     .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                     SourceBackedPublicationMetadata {
+                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
                         request_id: request_id.clone(),
                         operation,
                         refresh_scope: scope.clone(),
