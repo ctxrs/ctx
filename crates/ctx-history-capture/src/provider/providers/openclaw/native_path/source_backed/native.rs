@@ -44,6 +44,26 @@ impl OpenClawTerminalAuthority {
         *count = count.saturating_add(1).min(2);
     }
 
+    fn observe_ambiguous_terminal(&mut self) {
+        self.call_ids.clear();
+        self.exhausted = true;
+    }
+
+    fn observe_record(&mut self, record: &[u8]) {
+        let exact_json_authority = crate::common::json::raw_object_keys_are_unique(record);
+        let Ok(value) = serde_json::from_slice::<Value>(record) else {
+            self.observe_ambiguous_terminal();
+            return;
+        };
+        let result = native_tool_result(&value);
+        if !exact_json_authority && result.is_some() {
+            self.observe_ambiguous_terminal();
+        }
+        if let Some(call_id) = result.and_then(|result| result.call_id) {
+            self.observe(call_id);
+        }
+    }
+
     pub(super) fn is_unique(&self, call_id: &str) -> bool {
         if !self.complete {
             return true;
@@ -95,12 +115,7 @@ pub(super) fn terminal_authority_for_source(
     let mut authority = OpenClawTerminalAuthority::for_scan();
     while reader
         .visit_page(&mut |record| -> Result<()> {
-            let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
-                return Ok(());
-            };
-            if let Some(call_id) = native_tool_result(&value).and_then(|result| result.call_id) {
-                authority.observe(call_id);
-            }
+            authority.observe_record(record.bytes());
             Ok(())
         })?
         .is_some()
@@ -122,6 +137,17 @@ pub(super) fn terminal_authority_for_values<'a>(
         if let Some(call_id) = native_tool_result(value).and_then(|result| result.call_id) {
             authority.observe(call_id);
         }
+    }
+    authority
+}
+
+#[cfg(test)]
+pub(super) fn terminal_authority_for_records<'a>(
+    records: impl IntoIterator<Item = &'a [u8]>,
+) -> OpenClawTerminalAuthority {
+    let mut authority = OpenClawTerminalAuthority::for_scan();
+    for record in records {
+        authority.observe_record(record);
     }
     authority
 }

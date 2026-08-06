@@ -871,8 +871,8 @@ fn synthetic_adversarial_fixture_requires_source_unique_terminal_authority() {
 
     assert_eq!(scan.counters.rejected_complete_records, 0);
     assert_eq!(sink.rows.len(), 14);
-    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 20);
-    assert!(scan.counters.peak_mcp_terminal_authority_bytes > 20 * 32);
+    assert_eq!(scan.counters.peak_mcp_terminal_authority_entries, 10);
+    assert!(scan.counters.peak_mcp_terminal_authority_bytes > 10 * 32);
     for marker in [
         "AMBIGUOUS_MCP_RESULT",
         "DUPLICATE_SAME_FIRST",

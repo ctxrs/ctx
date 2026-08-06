@@ -1065,6 +1065,180 @@ fn claude_late_duplicate_result_forces_replacement_and_retracts_prior_exclusion(
 }
 
 #[test]
+fn claude_trailing_malformed_terminal_makes_an_earlier_result_searchable() {
+    let temp = tempfile::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let transcript = projects
+        .join("project")
+        .join("trailing-terminal-session.jsonl");
+    let index = temp.path().join("index");
+    let native_session_id = "trailing-terminal-session";
+    let call_id = "trailing-terminal-result";
+    let call = serde_json::json!({
+        "type": "assistant",
+        "uuid": "trailing-terminal-call",
+        "sessionId": native_session_id,
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": call_id,
+            "name": "Bash",
+            "input": {"command": "ctx search trailing-terminal"}
+        }]},
+    });
+    let result = serde_json::json!({
+        "type": "user",
+        "uuid": "trailing-terminal-first",
+        "sessionId": native_session_id,
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": "prior authoritative Claude payload",
+            "is_error": false
+        }]},
+    });
+    write_claude_transcript(&transcript, &[call, result.clone()]);
+    let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
+    serde_json::to_writer(&mut file, &result).unwrap();
+    file.write_all(b" trailing terminal bytes\n").unwrap();
+    file.sync_all().unwrap();
+
+    let registry = claude_test_registry(&projects);
+    refresh_source_backed_generation(&index, &registry, claude_test_writer_options()).unwrap();
+    let records = indexed_claude_records(&index, native_session_id);
+
+    assert_eq!(records.len(), 2);
+    let invocation = records
+        .iter()
+        .find(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains("ctx search trailing-terminal"))
+        })
+        .unwrap();
+    let retained_result = records
+        .iter()
+        .find(|record| {
+            record.content.normalized_body.as_deref() == Some("prior authoritative Claude payload")
+        })
+        .unwrap();
+    assert_eq!(
+        invocation.content.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(retained_result.content.discovery_exclusion, None);
+}
+
+#[test]
+fn claude_appended_duplicate_member_terminal_retracts_prior_result_exclusion() {
+    let temp = tempfile::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let transcript = projects
+        .join("project")
+        .join("ambiguous-terminal-session.jsonl");
+    let index = temp.path().join("index");
+    let native_session_id = "ambiguous-terminal-session";
+    let call_id = "ambiguous-terminal-result";
+    let call = serde_json::json!({
+        "type": "assistant",
+        "uuid": "ambiguous-terminal-call",
+        "sessionId": native_session_id,
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": call_id,
+            "name": "Bash",
+            "input": {"command": "ctx search ambiguous-terminal"}
+        }]},
+    });
+    let first_result = serde_json::json!({
+        "type": "user",
+        "uuid": "ambiguous-terminal-first",
+        "sessionId": native_session_id,
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": "first authoritative Claude payload",
+            "is_error": false
+        }]},
+    });
+    write_claude_transcript(&transcript, &[call, first_result]);
+    let registry = claude_test_registry(&projects);
+
+    refresh_source_backed_generation(&index, &registry, claude_test_writer_options()).unwrap();
+    let initial = indexed_claude_records(&index, native_session_id);
+    assert_eq!(initial.len(), 2);
+    assert!(initial.iter().all(|record| {
+        record.content.discovery_exclusion == Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    }));
+    let initial_invocation = initial
+        .iter()
+        .find(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains("ctx search ambiguous-terminal"))
+        })
+        .unwrap();
+    let initial_result = initial
+        .iter()
+        .find(|record| {
+            record.content.normalized_body.as_deref() == Some("first authoritative Claude payload")
+        })
+        .unwrap();
+
+    let ambiguous_result = format!(
+        r#"{{"type":"user","uuid":"ambiguous-terminal-second","sessionId":"{native_session_id}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{call_id}","content":{{"result":"discarded duplicate member","result":"ambiguous duplicate-member Claude payload"}},"is_error":false}}]}}}}"#,
+    );
+    let mut file = OpenOptions::new().append(true).open(&transcript).unwrap();
+    file.write_all(ambiguous_result.as_bytes()).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.sync_all().unwrap();
+
+    refresh_source_backed_generation(&index, &registry, claude_test_writer_options()).unwrap();
+    let corrected = indexed_claude_records(&index, native_session_id);
+    assert!(corrected.len() >= 3);
+    let corrected_invocation = corrected
+        .iter()
+        .find(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains("ctx search ambiguous-terminal"))
+        })
+        .unwrap();
+    let corrected_result = corrected
+        .iter()
+        .find(|record| {
+            record.content.normalized_body.as_deref() == Some("first authoritative Claude payload")
+        })
+        .unwrap();
+    assert_eq!(corrected_invocation.event_id, initial_invocation.event_id);
+    assert_eq!(corrected_result.event_id, initial_result.event_id);
+    assert_eq!(
+        corrected_invocation.content.discovery_exclusion,
+        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(corrected_result.content.discovery_exclusion, None);
+    let ambiguous = corrected
+        .iter()
+        .filter(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains("ambiguous duplicate-member Claude payload"))
+        })
+        .collect::<Vec<_>>();
+    assert!(!ambiguous.is_empty());
+    assert!(ambiguous
+        .iter()
+        .all(|record| record.content.discovery_exclusion.is_none()));
+}
+
+#[test]
 fn claude_ctx_retrieval_results_fail_open_for_every_unproven_or_diagnostic_envelope() {
     let payload = "searchable diagnostic payload";
     let cases = [

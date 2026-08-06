@@ -129,6 +129,12 @@ impl ClaudeResultTerminalAuthority {
                 state.in_certified_prefix && state.after_certified_prefix && state.candidates > 1
             })
     }
+
+    fn observe_ambiguous_terminal(&mut self) {
+        self.available = true;
+        self.call_ids.clear();
+        self.exhausted = true;
+    }
 }
 
 fn claude_source_backed_adapter() -> Arc<dyn JsonlFamilyAdapter> {
@@ -363,11 +369,21 @@ fn preflight_claude_result_terminals(
                 line_number: evidence.physical_ordinal().saturating_add(1),
                 record_sha256: evidence.record_digest(),
             };
-            let Ok(parsed) =
-                parse_native_record(record.bytes(), evidence.physical_ordinal(), &locator)
-            else {
-                return Ok(());
-            };
+            let exact_json_authority =
+                crate::common::json::raw_object_keys_are_unique(record.bytes());
+            let parsed =
+                match parse_native_record(record.bytes(), evidence.physical_ordinal(), &locator) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        if !exact_json_authority {
+                            authority.observe_ambiguous_terminal();
+                        }
+                        return Ok(());
+                    }
+                };
+            if !exact_json_authority && parsed.rows.iter().any(|row| row.tool_result.is_some()) {
+                authority.observe_ambiguous_terminal();
+            }
             let in_certified_prefix = certified_prefix_end
                 .is_some_and(|prefix_end| evidence.byte_end_exclusive() <= prefix_end);
             for call_id in parsed.rows.iter().filter_map(|row| {

@@ -98,6 +98,11 @@ impl CodexMcpTerminalAuthority {
         state.after_certified_prefix |= !in_certified_prefix;
     }
 
+    pub(in super::super) fn observe_ambiguous_result_terminal(&mut self) {
+        self.result_call_ids.clear();
+        self.result_exhausted = true;
+    }
+
     pub(super) fn is_unique(&self, call_id: &str) -> bool {
         !self.mcp_exhausted
             && self

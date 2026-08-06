@@ -384,6 +384,88 @@ fn openclaw_duplicate_raw_result_members_remain_searchable() {
 }
 
 #[test]
+fn openclaw_ambiguous_terminal_exhausts_source_wide_result_uniqueness() {
+    let call = serde_json::json!({
+        "type": "message",
+        "id": "ambiguous-terminal-call-record",
+        "timestamp": "2026-08-05T12:00:00Z",
+        "message": {"role": "assistant", "content": [{
+            "type": "toolCall",
+            "id": "ambiguous-terminal-call",
+            "name": "exec",
+            "arguments": {"command": "ctx search ambiguous-terminal"}
+        }]}
+    });
+    let first_result = serde_json::json!({
+        "type": "message",
+        "id": "ambiguous-terminal-first",
+        "timestamp": "2026-08-05T12:00:01Z",
+        "message": {
+            "role": "toolResult",
+            "toolCallId": "ambiguous-terminal-call",
+            "content": "first authoritative OpenClaw payload",
+            "details": {"status": "completed", "exitCode": 0}
+        }
+    });
+    let ambiguous_result = br#"{"type":"message","id":"ambiguous-terminal-second","timestamp":"2026-08-05T12:00:02Z","message":{"role":"toolResult","toolCallId":"ambiguous-terminal-call","content":"discarded duplicate member","content":"ambiguous duplicate-member OpenClaw payload","details":{"status":"completed","exitCode":0}}}"#;
+    let call_bytes = serde_json::to_vec(&call).unwrap();
+    let first_result_bytes = serde_json::to_vec(&first_result).unwrap();
+    let authority = terminal_authority_for_records([
+        call_bytes.as_slice(),
+        first_result_bytes.as_slice(),
+        ambiguous_result.as_slice(),
+    ]);
+    assert!(!authority.is_unique("ambiguous-terminal-call"));
+
+    let (_temp, mut projector) = test_projector();
+    projector.terminal_authority = authority;
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let mut records = Vec::new();
+    for (ordinal, bytes) in [
+        call_bytes.as_slice(),
+        first_result_bytes.as_slice(),
+        ambiguous_result.as_slice(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        projector
+            .project(
+                JsonlRecordRef::for_test(bytes, ordinal as u64),
+                &mut worker,
+                &mut |record| {
+                    records.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(records.len(), 3);
+    assert!(retrieval_excluded(&records[0]));
+    assert!(!retrieval_excluded(&records[1]));
+    assert!(!retrieval_excluded(&records[2]));
+    assert_eq!(
+        records[1].content.normalized_body.as_deref(),
+        Some("first authoritative OpenClaw payload")
+    );
+    assert_eq!(
+        records[2].content.normalized_body.as_deref(),
+        Some("ambiguous duplicate-member OpenClaw payload")
+    );
+
+    let trailing = [first_result_bytes.as_slice(), b" trailing terminal bytes"].concat();
+    for malformed in [trailing.as_slice(), b"{".as_slice()] {
+        let authority = terminal_authority_for_records([
+            call_bytes.as_slice(),
+            first_result_bytes.as_slice(),
+            malformed,
+        ]);
+        assert!(!authority.is_unique("ambiguous-terminal-call"));
+    }
+}
+
+#[test]
 fn openclaw_mixed_diagnostic_and_unknown_shapes_fail_open() {
     let (_temp, mut projector) = test_projector();
     let records = project_values(
@@ -1610,11 +1692,11 @@ fn terminal_ambiguity_fingerprint_invalidates_only_affected_append() {
     assert!(unique_append.is_unique("call-b"));
 
     let duplicate_append = scan(&[
-        first_call,
-        first_result,
+        first_call.clone(),
+        first_result.clone(),
         second_call,
         second_result,
-        reused_result,
+        reused_result.clone(),
     ]);
     assert_ne!(
         prefix.ambiguity_fingerprint(),
@@ -1622,6 +1704,23 @@ fn terminal_ambiguity_fingerprint_invalidates_only_affected_append() {
     );
     assert!(!duplicate_append.is_unique("call-a"));
     assert!(duplicate_append.is_unique("call-b"));
+
+    let mut malformed_bytes = Vec::new();
+    for value in [first_call, first_result] {
+        serde_json::to_writer(&mut malformed_bytes, &value).unwrap();
+        malformed_bytes.push(b'\n');
+    }
+    serde_json::to_writer(&mut malformed_bytes, &reused_result).unwrap();
+    malformed_bytes.extend_from_slice(b" trailing terminal bytes\n");
+    fs::write(&transcript_path, malformed_bytes).unwrap();
+    let opened = Arc::new(authority.open_file(Path::new("session.jsonl")).unwrap());
+    let malformed_append =
+        terminal_authority_for_source(&source, &transcript_path, opened).unwrap();
+    assert_ne!(
+        prefix.ambiguity_fingerprint(),
+        malformed_append.ambiguity_fingerprint()
+    );
+    assert!(!malformed_append.is_unique("call-a"));
 }
 
 #[test]

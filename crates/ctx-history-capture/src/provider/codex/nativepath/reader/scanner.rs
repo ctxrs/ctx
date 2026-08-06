@@ -8,6 +8,31 @@ struct McpTerminalAuthorityPreflight {
     peak_record_bytes: usize,
 }
 
+fn result_terminal_authority_is_ambiguous(record: &[u8]) -> bool {
+    // Codex treats a NUL-prefixed suffix as framing corruption, not a JSON
+    // record candidate. Preserve that dedicated append-boundary diagnosis.
+    if record.first() == Some(&0) {
+        return false;
+    }
+    if crate::common::json::raw_object_keys_are_unique(record) {
+        return false;
+    }
+    let Ok(envelope) = serde_json::from_slice::<Value>(record) else {
+        return true;
+    };
+    let Some(record_type) = envelope.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    let item_type = envelope
+        .get("payload")
+        .and_then(|payload| payload.get("type"))
+        .and_then(Value::as_str);
+    matches!(
+        codex_record_class(record_type, item_type),
+        CodexRecordClass::ExcludedResult(_)
+    )
+}
+
 fn observe_result_terminal_call_id(
     authority: &mut CodexMcpTerminalAuthority,
     record: &[u8],
@@ -94,6 +119,9 @@ fn preflight_mcp_terminal_authority(
         let record = trim_jsonl_terminator(&record_buffer[..record_read.stored_len]);
         let in_certified_prefix =
             certified_prefix_end.is_some_and(|prefix_end| offset <= prefix_end);
+        if result_terminal_authority_is_ambiguous(record) {
+            authority.observe_ambiguous_result_terminal();
+        }
         if let Some(evidence) = mcp_terminal_candidate_evidence(record) {
             authority.observe(&evidence, in_certified_prefix);
         }
