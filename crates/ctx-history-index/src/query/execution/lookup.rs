@@ -150,7 +150,12 @@ impl VerifiedIndex {
                         SESSION_EVENT_ORDER_FIELD,
                     ));
                 }
-                if !assistant.core_record.content.is_discovery_eligible() {
+                if !assistant.core_record.content.is_discovery_eligible()
+                    || matches!(
+                        assistant.core_record.event_origin,
+                        ctx_history_core::EventOrigin::CopiedFromAncestor { .. }
+                    )
+                {
                     continue;
                 }
                 let text = assistant.core_record.content.meaningful_text().trim();

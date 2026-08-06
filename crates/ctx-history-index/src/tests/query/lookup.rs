@@ -385,6 +385,88 @@ fn semantic_pairing_rejects_excluded_anchor_and_skips_excluded_assistant_content
 }
 
 #[test]
+fn semantic_pairing_skips_copied_assistant_content() {
+    let temp = tempdir().unwrap();
+    let source = source("semantic-pairing-copied-assistant.jsonl");
+    let mut ancestor = document_for_session(&source, "ancestor", 1, "copied answer must not pair");
+    ancestor.role = Some("assistant".to_owned());
+    let mut user = document_for_session(&source, "child", 1, "question");
+    let mut ordinary_assistant =
+        document_for_session(&source, "child", 2, "ordinary assistant answer");
+    ordinary_assistant.role = Some("assistant".to_owned());
+    let mut copied_assistant =
+        document_for_session(&source, "child", 3, "copied answer must not pair");
+    copied_assistant.role = Some("assistant".to_owned());
+    let mut next_user = document_for_session(&source, "child", 4, "next question");
+
+    for record in [
+        &mut user,
+        &mut ordinary_assistant,
+        &mut copied_assistant,
+        &mut next_user,
+    ] {
+        record
+            .set_session_relationship(
+                SessionRelationshipKind::Forked,
+                Some(ancestor.session_id),
+                ancestor.session_id,
+            )
+            .unwrap();
+    }
+    copied_assistant.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: Box::new(ancestor.session_id),
+        ancestor_event_id: Box::new(ancestor.event_id),
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+    for record in [
+        &ancestor,
+        &user,
+        &ordinary_assistant,
+        &copied_assistant,
+        &next_user,
+    ] {
+        record.validate_contract().unwrap();
+    }
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [
+        ancestor,
+        user.clone(),
+        ordinary_assistant.clone(),
+        copied_assistant.clone(),
+        next_user,
+    ] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 5)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let anchor = index
+        .core_event_by_id(user.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    let paired = index
+        .semantic_lite_turn_assistant(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(paired.0, "ordinary assistant answer");
+    assert_eq!(paired.1, ordinary_assistant.occurred_at_unix_ms.unwrap());
+    assert_eq!(
+        index
+            .core_record_by_id(copied_assistant.event_id.as_uuid())
+            .unwrap()
+            .unwrap(),
+        copied_assistant
+    );
+}
+
+#[test]
 fn semantic_pairing_crosses_more_than_sixty_four_tool_events_body_free() {
     const TOOL_EVENTS: u64 = 96;
 

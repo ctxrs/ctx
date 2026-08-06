@@ -46,7 +46,10 @@ fn machine_show_contract_keeps_lineage_in_existing_nested_fields() {
         session_value["session"]["root_ctx_session_id"],
         root.session_id.as_uuid().to_string()
     );
-    assert_eq!(session_value["session"]["session_relationship"], "delegated");
+    assert_eq!(
+        session_value["session"]["session_relationship"],
+        "delegated"
+    );
 
     let event_value =
         event_window_value(&event, OutputFormat::Json, vec![render_event_value(&event)]).unwrap();
@@ -120,7 +123,9 @@ fn copied_event_show_list_and_search_models_share_typed_lineage() {
         &event_window_value(&copied, OutputFormat::Json, vec![shown]).unwrap(),
         &RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
     )
-    .render(&RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)));
+    .render(&RenderContext::for_test(TestContext::pipe(
+        StreamKind::Stdout,
+    )));
     assert!(rendered.contains("Relationship"));
     assert!(rendered.contains("forked"));
     assert!(rendered.contains("Original event"));

@@ -140,12 +140,14 @@ impl SourceBackedSemanticGeneration {
     }
 
     fn includes(&self, record: &CoreEventRecord) -> bool {
-        !matches!(
-            record.core_record.event_origin,
-            EventOrigin::CopiedFromAncestor { .. }
-        ) && self
-            .semantic_policy
-            .includes_event(&record.event.event_type, record.event.role.as_deref())
+        record.core_record.content.is_discovery_eligible()
+            && !matches!(
+                record.core_record.event_origin,
+                EventOrigin::CopiedFromAncestor { .. }
+            )
+            && self
+                .semantic_policy
+                .includes_event(&record.event.event_type, record.event.role.as_deref())
     }
 
     fn source(&self, source_identity_digest: &str) -> Option<&SourceBackedSemanticSource> {

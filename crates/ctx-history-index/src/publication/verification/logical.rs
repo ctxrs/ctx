@@ -572,19 +572,15 @@ struct IncrementalProjectionVerifier {
 
 impl IncrementalProjectionVerifier {
     fn new(searcher: &Searcher, changed_segments: &[usize]) -> Result<Self> {
-        let spill = VerificationSpill::create(
-            searcher
-                .segment_readers()
-                .iter()
-                .enumerate()
-                .map(|(segment_ord, segment)| {
-                    if changed_segments.binary_search(&segment_ord).is_ok() {
-                        segment.max_doc()
-                    } else {
-                        0
-                    }
-                }),
-        )?;
+        let spill = VerificationSpill::create(searcher.segment_readers().iter().enumerate().map(
+            |(segment_ord, segment)| {
+                if changed_segments.binary_search(&segment_ord).is_ok() {
+                    segment.max_doc()
+                } else {
+                    0
+                }
+            },
+        ))?;
         let deltas = spill.load_projection_deltas()?;
         Ok(Self {
             deltas,

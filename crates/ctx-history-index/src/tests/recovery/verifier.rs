@@ -330,12 +330,10 @@ fn excluded_projection_forgery_error(
 
 #[test]
 fn complete_verifier_rejects_body_projection_for_retrieval_excluded_core() {
-    let error = excluded_projection_forgery_error(
-        "excluded-body-projection.jsonl",
-        |document, fields| {
+    let error =
+        excluded_projection_forgery_error("excluded-body-projection.jsonl", |document, fields| {
             document.add_text(fields.body_search, "forged body projection");
-        },
-    );
+        });
     assert!(matches!(
         error,
         IndexError::InvalidStoredDocumentField("body_search")
