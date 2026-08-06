@@ -2,18 +2,14 @@ diff --git a/rust/platform/triple.bzl b/rust/platform/triple.bzl
 index 22e7261..e513e71 100644
 --- a/rust/platform/triple.bzl
 +++ b/rust/platform/triple.bzl
-@@ -138,6 +138,7 @@ def get_host_triple(repository_ctx, abi = {}):
- 
+@@ -139,5 +139,6 @@ def get_host_triple(repository_ctx, abi = {}):
      supported_architectures = {
 +        "freebsd": ["x86_64"],
          "linux": ["aarch64", "x86_64", "s390x", "powerpc64le"],
          "macos": ["aarch64", "x86_64"],
          "windows": ["aarch64", "x86_64"],
      }
-@@ -160,6 +161,10 @@ def get_host_triple(repository_ctx, abi = {}):
-             abi.get(prefix, "gnu"),
-         ))
- 
+@@ -160,3 +161,7 @@ def get_host_triple(repository_ctx, abi = {}):
 +    if "freebsd" in repository_ctx.os.name:
 +        _validate_cpu_architecture(arch, supported_architectures["freebsd"])
 +        return triple("{}-unknown-freebsd".format(arch))
