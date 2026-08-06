@@ -22,6 +22,48 @@ single_version_override(
     version = "0.71.3",
 )
 
+# rules_python does not publish a FreeBSD runtime. Bind the native release
+# route to the official python311 package without affecting other platforms.
+freebsd_python_runtime = use_repo_rule(
+    "@rules_python//python/local_toolchains:repos.bzl",
+    "local_runtime_repo",
+)
+freebsd_python_runtime(
+    name = "ctx_freebsd_python_3_11",
+    dev_dependency = True,
+    interpreter_path = "/usr/local/bin/python3.11",
+    on_failure = "skip",
+)
+
+freebsd_python_toolchains = use_repo_rule(
+    "@rules_python//python/local_toolchains:repos.bzl",
+    "local_runtime_toolchains_repo",
+)
+_freebsd_x64_constraints = [
+    "@platforms//cpu:x86_64",
+    "@platforms//os:freebsd",
+]
+freebsd_python_toolchains(
+    name = "ctx_freebsd_python_toolchains",
+    default_runtimes = ["ctx_freebsd_python_3_11"],
+    dev_dependency = True,
+    exec_compatible_with = {
+        "ctx_freebsd_python_3_11": _freebsd_x64_constraints,
+    },
+    target_compatible_with = {
+        "ctx_freebsd_python_3_11": _freebsd_x64_constraints,
+    },
+    target_settings = {
+        "ctx_freebsd_python_3_11": [
+            "@ctx_freebsd_python_3_11//:is_matching_python_version",
+        ],
+    },
+)
+register_toolchains(
+    "@ctx_freebsd_python_toolchains//:all",
+    dev_dependency = True,
+)
+
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     sdks = {
