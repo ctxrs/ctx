@@ -474,6 +474,7 @@ fn complete_lineage_result() -> BlameResult {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 2, 0, 0, 0),
         matches: vec![
             commit_match(
                 &commit,
@@ -552,6 +553,7 @@ fn partial_lineage_result(omission: CommitLineageOmission) -> BlameResult {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 0, 0, 0, 0),
         matches: Vec::new(),
         evidence: vec![event_evidence(1)],
         next: None,
