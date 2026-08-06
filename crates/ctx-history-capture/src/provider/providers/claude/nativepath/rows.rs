@@ -70,6 +70,11 @@ pub(crate) struct ToolCallRequest {
     // compatibility digest.
     #[serde(skip)]
     pub(crate) exact_file_invocations: ClaudeExactFileInvocations,
+    // Projection-only authority bit. Raw duplicate JSON members are lost when
+    // `input` becomes a `serde_json::Value`, so ambiguous provider records may
+    // be retained but must not suppress themselves from retrieval.
+    #[serde(skip)]
+    pub(crate) retrieval_input_ambiguous: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +108,8 @@ pub(crate) struct ClaudeToolResult {
     // provider content continue to depend only on the complete native body.
     #[serde(skip)]
     pub(crate) discovery_evidence: ClaudeDiscoveryResultEvidence,
+    #[serde(skip)]
+    pub(crate) retrieval_input_ambiguous: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

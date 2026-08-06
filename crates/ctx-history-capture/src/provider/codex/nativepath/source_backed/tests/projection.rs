@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::codex::nativepath::tests::discover_one;
+use crate::provider::codex::nativepath::{tests::discover_one, MAX_CODEX_RECORD_BYTES};
 use serde_json::Value;
 
 mod repository_outcome_regressions;
@@ -63,6 +63,28 @@ fn exec_call_at(timestamp: &str, call_id: &str, command: &str, workdir: &Path) -
 
 pub(super) fn successful_result(call_id: &str, output: Value) -> String {
     successful_result_at("2026-07-28T12:00:02Z", call_id, output)
+}
+
+fn oversized_result(call_id: &str) -> String {
+    let mut record = format!(
+        r#"{{"timestamp":"2026-07-28T12:00:03Z","type":"response_item","payload":{{"type":"function_call_output","call_id":"{call_id}","output":""#,
+    );
+    record.push_str(&"x".repeat(MAX_CODEX_RECORD_BYTES));
+    record.push_str("\"}}");
+    record
+}
+
+fn exact_exec_result(call_id: &str, output: &str) -> String {
+    serde_json::json!({
+        "timestamp": "2026-07-28T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        }
+    })
+    .to_string()
 }
 
 fn successful_result_at(timestamp: &str, call_id: &str, output: Value) -> String {
@@ -175,6 +197,38 @@ fn codex_ctx_retrieval_invocation_and_exact_result_persist_exclusion_with_comple
 }
 
 #[test]
+fn codex_duplicate_raw_tool_members_remain_searchable() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000097";
+    let arguments = serde_json::json!({
+        "cmd": "ctx search ambiguous-duplicate-member",
+        "workdir": temp.path(),
+    })
+    .to_string();
+    let raw_call = format!(
+        r#"{{"timestamp":"2026-08-05T16:00:01Z","type":"response_item","payload":{{"type":"function_call","name":"ordinary","name":"exec_command","call_id":"duplicate-member-call","arguments":{}}}}}"#,
+        serde_json::to_string(&arguments).unwrap(),
+    );
+    write_session(&sessions, native_session_id, &[raw_call]);
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let invocation = outcome_for_sequence(&verified, session_id, 1);
+
+    assert!(invocation
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("ctx search ambiguous-duplicate-member")));
+    assert_eq!(invocation.content.discovery_exclusion, None);
+}
+
+#[test]
 fn appended_duplicate_ctx_result_retracts_prior_exclusion_and_preserves_identities() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -256,6 +310,245 @@ fn appended_duplicate_ctx_result_retracts_prior_exclusion_and_preserves_identiti
     assert_eq!(first.content.normalized_body.as_deref(), Some(first_output));
     assert_eq!(
         second.content.normalized_body.as_deref(),
+        Some(second_output)
+    );
+}
+
+#[test]
+fn cold_oversized_terminal_makes_an_earlier_ctx_result_searchable() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-00000000009b";
+    let call_id = "ctx-retrieval-oversized-cold";
+    let output = concat!(
+        "Chunk ID: 9abc0c\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "prior cold oversized authority payload"
+    );
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(call_id, "ctx search oversized-cold", temp.path()),
+            exact_exec_result(call_id, output),
+            oversized_result(call_id),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let invocation = outcome_for_sequence(&verified, session_id, 1);
+    let retained_result = outcome_for_sequence(&verified, session_id, 2);
+
+    assert_eq!(
+        invocation.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(retained_result.content.discovery_exclusion, None);
+    assert_eq!(
+        retained_result.content.normalized_body.as_deref(),
+        Some(output)
+    );
+}
+
+#[test]
+fn appended_oversized_terminal_retracts_prior_ctx_result_exclusion() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-00000000009c";
+    let call_id = "ctx-retrieval-oversized-append";
+    let output = concat!(
+        "Chunk ID: 9abc0a\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "prior append oversized authority payload"
+    );
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(call_id, "ctx search oversized-append", temp.path()),
+            exact_exec_result(call_id, output),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let initial = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        outcome_for_sequence(&initial, session_id, 2)
+            .content
+            .discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    drop(initial);
+
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap();
+    writeln!(file, "{}", oversized_result(call_id)).unwrap();
+    drop(file);
+
+    let receipt = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(receipt.counters.appended_sources, 0);
+    assert_eq!(receipt.counters.replaced_sources, 1);
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let retained_result = outcome_for_sequence(&verified, session_id, 2);
+    assert_eq!(retained_result.content.discovery_exclusion, None);
+    assert_eq!(
+        retained_result.content.normalized_body.as_deref(),
+        Some(output)
+    );
+}
+
+#[test]
+fn trailing_malformed_terminal_makes_an_earlier_ctx_result_searchable() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000099";
+    let call_id = "ctx-retrieval-trailing-terminal";
+    let output = concat!(
+        "Chunk ID: 9abc03\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "prior authoritative payload"
+    );
+    let result = serde_json::json!({
+        "timestamp": "2025-03-07T16:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        },
+    })
+    .to_string();
+    let trailing = format!("{result} trailing terminal bytes");
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(call_id, "ctx search trailing-terminal", temp.path()),
+            result,
+            trailing,
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let invocation = outcome_for_sequence(&verified, session_id, 1);
+    let retained_result = outcome_for_sequence(&verified, session_id, 2);
+
+    assert_eq!(
+        invocation.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(retained_result.content.discovery_exclusion, None);
+    assert_eq!(
+        retained_result.content.normalized_body.as_deref(),
+        Some(output)
+    );
+}
+
+#[test]
+fn appended_duplicate_member_terminal_retracts_prior_ctx_result_exclusion() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-00000000009a";
+    let call_id = "ctx-retrieval-ambiguous-terminal";
+    let first_output = concat!(
+        "Chunk ID: 9abc04\n",
+        "Wall time: 0.125 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "first authoritative payload"
+    );
+    let second_output = concat!(
+        "Chunk ID: 9abc05\n",
+        "Wall time: 0.250 seconds\n",
+        "Process exited with code 0\n",
+        "Final output:\n",
+        "ambiguous duplicate-member payload"
+    );
+    let first_result = serde_json::json!({
+        "timestamp": "2025-03-07T16:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": first_output,
+        },
+    })
+    .to_string();
+    write_session(
+        &sessions,
+        native_session_id,
+        &[
+            exec_call(call_id, "ctx search ambiguous-terminal", temp.path()),
+            first_result,
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let initial = VerifiedIndex::open(&index).unwrap();
+    let initial_invocation_id = outcome_for_sequence(&initial, session_id, 1).event_id;
+    let initial_result = outcome_for_sequence(&initial, session_id, 2);
+    assert_eq!(
+        initial_result.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    let initial_result_id = initial_result.event_id;
+    drop(initial);
+
+    let ambiguous_result = format!(
+        r#"{{"timestamp":"2025-03-07T16:00:02Z","type":"response_item","payload":{{"type":"function_call_output","call_id":"{call_id}","output":"discarded duplicate member","output":{}}}}}"#,
+        serde_json::to_string(second_output).unwrap(),
+    );
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(session_path(&sessions, native_session_id))
+        .unwrap();
+    writeln!(file, "{ambiguous_result}").unwrap();
+    drop(file);
+
+    let receipt = ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    assert_eq!(receipt.counters.appended_sources, 0);
+    assert_eq!(receipt.counters.replaced_sources, 1);
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let invocation = outcome_for_sequence(&verified, session_id, 1);
+    let first = outcome_for_sequence(&verified, session_id, 2);
+    let ambiguous = outcome_for_sequence(&verified, session_id, 3);
+    assert_eq!(invocation.event_id, initial_invocation_id);
+    assert_eq!(first.event_id, initial_result_id);
+    assert_eq!(
+        invocation.content.discovery_exclusion,
+        Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived)
+    );
+    assert_eq!(first.content.discovery_exclusion, None);
+    assert_eq!(ambiguous.content.discovery_exclusion, None);
+    assert_eq!(first.content.normalized_body.as_deref(), Some(first_output));
+    assert_eq!(
+        ambiguous.content.normalized_body.as_deref(),
         Some(second_output)
     );
 }

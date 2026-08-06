@@ -58,7 +58,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v8-source-unique-result-exclusion";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v9-exact-retrieval-json-authority";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 const RESULT_TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/claude-nativepath/result-terminal-call-id/v1\0";
@@ -128,6 +128,12 @@ impl ClaudeResultTerminalAuthority {
             || self.call_ids.values().any(|state| {
                 state.in_certified_prefix && state.after_certified_prefix && state.candidates > 1
             })
+    }
+
+    fn observe_ambiguous_terminal(&mut self) {
+        self.available = true;
+        self.call_ids.clear();
+        self.exhausted = true;
     }
 }
 
@@ -363,11 +369,16 @@ fn preflight_claude_result_terminals(
                 line_number: evidence.physical_ordinal().saturating_add(1),
                 record_sha256: evidence.record_digest(),
             };
-            let Ok(parsed) =
-                parse_native_record(record.bytes(), evidence.physical_ordinal(), &locator)
-            else {
-                return Ok(());
-            };
+            let exact_json_authority =
+                crate::common::json::raw_object_keys_are_unique(record.bytes());
+            if !exact_json_authority {
+                authority.observe_ambiguous_terminal();
+            }
+            let parsed =
+                match parse_native_record(record.bytes(), evidence.physical_ordinal(), &locator) {
+                    Ok(parsed) => parsed,
+                    Err(_) => return Ok(()),
+                };
             let in_certified_prefix = certified_prefix_end
                 .is_some_and(|prefix_end| evidence.byte_end_exclusive() <= prefix_end);
             for call_id in parsed.rows.iter().filter_map(|row| {
@@ -700,6 +711,9 @@ impl JsonlFamilyProjector for ClaudeProjector {
 }
 
 fn claude_call_contribution(call: &ToolCallRequest) -> ContributionClass {
+    if call.retrieval_input_ambiguous {
+        return ContributionClass::Unknown;
+    }
     let Some(tool_name) = call.tool_name.as_deref() else {
         return ContributionClass::Unknown;
     };
@@ -716,6 +730,9 @@ fn claude_result_contribution(
     result: &super::rows::ClaudeToolResult,
     context: Option<&PendingCall>,
 ) -> ContributionClass {
+    if result.retrieval_input_ambiguous {
+        return ContributionClass::Unknown;
+    }
     let linked_invocation = context
         .filter(|context| context.ctx_retrieval_derived)
         .map(|_| ContributionClass::RetrievalDerived);

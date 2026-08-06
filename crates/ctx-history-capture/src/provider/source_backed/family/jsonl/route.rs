@@ -1019,15 +1019,13 @@ struct TerminalSourceEvidence {
 }
 
 fn default_base_source_path(
-    adapter: &(impl JsonlFamilyAdapter + ?Sized),
+    _adapter: &(impl JsonlFamilyAdapter + ?Sized),
     certificate: &CertifiedSource,
 ) -> Result<PathBuf> {
     certificate.validate_contract().map_err(contract_error)?;
-    if certificate.parser_revision() != adapter.parser_revision() {
-        return Err(CaptureError::InvalidPayload(
-            "JSONL base parser revision changed".to_owned(),
-        ));
-    }
+    // Parser revisions govern projection semantics, not source ownership. The
+    // family still needs the prior source path so an unchanged source can be
+    // selected and replaced under the current parser rather than rejected.
     let frontier = certificate
         .frontier()
         .ok_or_else(|| CaptureError::InvalidPayload("JSONL base frontier is absent".to_owned()))?;

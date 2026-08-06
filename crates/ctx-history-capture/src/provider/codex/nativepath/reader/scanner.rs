@@ -8,6 +8,30 @@ struct McpTerminalAuthorityPreflight {
     peak_record_bytes: usize,
 }
 
+fn result_terminal_authority_is_ambiguous(record: &[u8]) -> bool {
+    // Codex treats a NUL-prefixed suffix as framing corruption, not a JSON
+    // record candidate. Preserve that dedicated append-boundary diagnosis.
+    if record.first() == Some(&0) {
+        return false;
+    }
+    !crate::common::json::raw_object_keys_are_unique(record)
+}
+
+#[cfg(test)]
+mod terminal_authority_tests {
+    use super::result_terminal_authority_is_ambiguous;
+
+    #[test]
+    fn duplicate_selector_cannot_hide_terminal_authority() {
+        assert!(result_terminal_authority_is_ambiguous(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call","output":"hidden"},"payload":{"type":"message","role":"user","content":[]}}"#,
+        ));
+        assert!(!result_terminal_authority_is_ambiguous(
+            br#"{"type":"response_item","payload":{"type":"message","role":"user","content":[]}}"#,
+        ));
+    }
+}
+
 fn observe_result_terminal_call_id(
     authority: &mut CodexMcpTerminalAuthority,
     record: &[u8],
@@ -88,12 +112,19 @@ fn preflight_mcp_terminal_authority(
         if !record_read.complete {
             break;
         }
-        if record_read.oversized || record_read.terminal_nul_padding {
+        if record_read.terminal_nul_padding {
+            continue;
+        }
+        if record_read.oversized {
+            authority.observe_ambiguous_result_terminal();
             continue;
         }
         let record = trim_jsonl_terminator(&record_buffer[..record_read.stored_len]);
         let in_certified_prefix =
             certified_prefix_end.is_some_and(|prefix_end| offset <= prefix_end);
+        if result_terminal_authority_is_ambiguous(record) {
+            authority.observe_ambiguous_result_terminal();
+        }
         if let Some(evidence) = mcp_terminal_candidate_evidence(record) {
             authority.observe(&evidence, in_certified_prefix);
         }

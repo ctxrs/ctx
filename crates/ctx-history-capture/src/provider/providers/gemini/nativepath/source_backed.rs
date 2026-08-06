@@ -20,7 +20,10 @@ use thiserror::Error;
 
 use super::dto::{GeminiEventBody, GeminiTranscriptLayout};
 use super::file_invocation::extract_gemini_file_invocations;
-use super::parser::{read_gemini_session_header, GeminiBorrowedRecordParser};
+use super::parser::{
+    gemini_result_terminal_authority_is_ambiguous, read_gemini_session_header,
+    GeminiBorrowedRecordParser,
+};
 use super::{
     discover_gemini_transcripts, GeminiFileObservation, GeminiScanError, GeminiSession,
     GeminiTranscriptSource,
@@ -51,7 +54,7 @@ const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
 const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
-    "gemini-nativepath-source-backed-v2-session-lineage-source-unique-result-exclusion";
+    "gemini-nativepath-source-backed-v3-exact-retrieval-json-authority";
 const MAX_GEMINI_LEXICAL_METADATA_CHARS: usize = 8 * 1024;
 const MAX_GEMINI_REPOSITORY_FIELD_CHARS: usize = 64 * 1024;
 const MAX_GEMINI_TOOL_CONTEXTS: usize = 256;
@@ -155,6 +158,12 @@ impl GeminiResultTerminalAuthority {
                     .call_ids
                     .get(&gemini_result_terminal_call_id_digest(call_id))
                     .is_some_and(|candidates| *candidates == 1))
+    }
+
+    fn observe_ambiguous_terminal(&mut self) {
+        self.available = true;
+        self.call_ids.clear();
+        self.exhausted = true;
     }
 }
 
@@ -334,6 +343,9 @@ fn preflight_gemini_result_terminals(
     while reader
         .visit_page(&mut |record: JsonlRecordRef<'_>| -> crate::Result<()> {
             let evidence = record.evidence();
+            if gemini_result_terminal_authority_is_ambiguous(record.bytes()) {
+                authority.observe_ambiguous_terminal();
+            }
             let events = parser
                 .project(
                     record.bytes(),

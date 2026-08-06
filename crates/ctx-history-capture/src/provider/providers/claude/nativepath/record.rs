@@ -230,6 +230,7 @@ impl SafeContent {
                     ),
                     file_touches: safe_file_touches(&block.input, block.name.as_deref()),
                     exact_file_invocations,
+                    retrieval_input_ambiguous: false,
                     input: block.input,
                 });
             }
@@ -572,7 +573,7 @@ fn parse_native_record_inner(
         let metadata: MetadataOnlyRecord = serde_json::from_slice(bytes)?;
         let outputs = output_descriptors(&preflight, bytes, &record_outcome)?;
         let value: Value = serde_json::from_slice(bytes)?;
-        let rows = complete_output_rows(
+        let mut rows = complete_output_rows(
             raw_ordinal,
             locator,
             metadata.uuid.clone(),
@@ -580,6 +581,11 @@ fn parse_native_record_inner(
             &outputs,
             &value,
         );
+        if !crate::common::json::raw_object_keys_are_unique(bytes) {
+            for result in rows.iter_mut().filter_map(|row| row.tool_result.as_mut()) {
+                result.retrieval_input_ambiguous = true;
+            }
+        }
         validate_row_count(&rows)?;
         return Ok(ParsedClaudeRecord {
             session_id: metadata.session_id,
@@ -597,7 +603,14 @@ fn parse_native_record_inner(
     let cwd = record.cwd.clone();
     let version = record.version.clone();
     let git_branch = record.git_branch.clone();
-    let rows = retain_safe_record(record, raw_ordinal, locator);
+    let mut rows = retain_safe_record(record, raw_ordinal, locator);
+    if rows.iter().any(|row| row.tool_call.is_some())
+        && !crate::common::json::raw_object_keys_are_unique(bytes)
+    {
+        for call in rows.iter_mut().filter_map(|row| row.tool_call.as_mut()) {
+            call.retrieval_input_ambiguous = true;
+        }
+    }
     validate_row_count(&rows)?;
     Ok(ParsedClaudeRecord {
         session_id,
