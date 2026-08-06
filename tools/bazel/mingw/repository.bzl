@@ -8,14 +8,19 @@ def _llvm_mingw_repository_impl(ctx):
         url = ctx.attr.urls,
     )
 
-    # Rust's windows-gnu standard library asks the compiler driver for these
-    # GCC compatibility archives. LLVM-MinGW provides compiler-rt instead; an
-    # empty archive is the established compatibility bridge because no libgcc
-    # symbols are referenced by the shipped graph. Put the bridge in clang's
-    # target-library directory so every direct compiler-driver link resolves it
-    # without an ambient search path or an unused shell wrapper.
-    ctx.file("x86_64-w64-mingw32/lib/libgcc.a", "!<arch>\n")
-    ctx.file("x86_64-w64-mingw32/lib/libgcc_eh.a", "!<arch>\n")
+    # Rust's windows-gnu standard library passes -nodefaultlibs and requests
+    # GCC-compatible runtime names explicitly. Preserve that link order while
+    # mapping the names to LLVM-MinGW's equivalent static runtimes. Bazel uses
+    # native symlinks where available and copies file targets on Windows hosts
+    # without symlink support.
+    ctx.symlink(
+        "x86_64-w64-mingw32/lib/libunwind.a",
+        "x86_64-w64-mingw32/lib/libgcc_eh.a",
+    )
+    ctx.symlink(
+        "lib/clang/22/lib/windows/libclang_rt.builtins-x86_64.a",
+        "x86_64-w64-mingw32/lib/libgcc.a",
+    )
     ctx.file(
         "BUILD.bazel",
         """
