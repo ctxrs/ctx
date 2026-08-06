@@ -87,7 +87,10 @@ pub use publication::{
     PinnedSourceBackedGeneration, SourceBackedRefreshPublication,
 };
 pub use request::{
-    AdmissionResponseBarrier, RefreshAdmission, RefreshOperation, RefreshStatus, RefreshSubmission,
+    AdmissionResponseBarrier, RefreshAdmission, RefreshLogicalPhase, RefreshLogicalStatus,
+    RefreshMaintenanceWakeStatus, RefreshOperation, RefreshOutcomeClass, RefreshOutcomeCode,
+    RefreshRequestState, RefreshRetryAdvice, RefreshStatus, RefreshStatusKind, RefreshSubmission,
+    RefreshTerminalOutcome,
 };
 pub use route_ledger::EventWatermark;
 

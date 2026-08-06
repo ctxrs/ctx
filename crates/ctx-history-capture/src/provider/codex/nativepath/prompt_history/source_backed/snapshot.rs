@@ -185,41 +185,11 @@ fn decode_observation(
         .map_err(|_| CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint)
 }
 
-/// Revalidates one previously staged prompt-history snapshot while allowing
-/// the provider to append bytes beyond its frozen observation boundary.
-pub(crate) fn revalidate_codex_prompt_history_source_backed_v0(
-    source: &CodexPromptHistorySourceBackedSourceV0,
-    expected: &CertifiedSource,
-) -> CodexPromptHistorySourceBackedResultV0<()> {
-    expected.validate_contract()?;
-    if expected.parser_revision() != PARSER_REVISION
-        || !source
-            .source
-            .exact_descriptor_eq(expected.observation().source())
-        || expected.observation().revision_kind() != SOURCE_REVISION_KIND
-    {
-        return Err(CodexPromptHistorySourceBackedErrorV0::SourceChanged);
-    }
-    let observation = decode_observation(expected)?;
-    let checkpoint = decode_checkpoint(expected)?;
-    if checkpoint.certified_prefix_bytes > observation.length {
-        return Err(CodexPromptHistorySourceBackedErrorV0::InvalidCheckpoint);
-    }
-    let (current_metadata, current_token) =
-        stable_current_ordinary_file_observation(&source.opened)?;
-    if observation_wire(
-        &current_metadata,
-        current_token,
-        observation.whole_source_digest,
-    )? == observation
-    {
-        return Ok(());
-    }
-    verify_frozen_prefix(
-        &source.opened,
-        observation.length,
-        observation.whole_source_digest,
-    )
+pub(super) fn terminal_prefix(
+    certificate: &CertifiedSource,
+) -> CodexPromptHistorySourceBackedResultV0<(u64, [u8; 32])> {
+    let observation = decode_observation(certificate)?;
+    Ok((observation.length, observation.whole_source_digest))
 }
 
 pub(super) fn decode_checkpoint(

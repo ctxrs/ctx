@@ -133,7 +133,16 @@ where
                 "validate requested explicit provider roots before source-refresh state writes",
             )?;
     }
-    execution.report_progress("discovering", 0, 0, None, None, None)?;
+    execution.report_detailed_progress_with_total_state(
+        "discovering",
+        0,
+        0,
+        false,
+        None,
+        None,
+        None,
+        None,
+    )?;
     let mut report_progress = |update: CaptureSourceBackedDetailedRefreshProgress| {
         let progress = update.progress;
         execution
@@ -393,7 +402,10 @@ pub(super) fn refresh_all_provider_sources_route_local(
     })?;
     let timings = SourceBackedRefreshTimings {
         discovery_us: nonzero_duration_micros(receipt.discovery_duration),
-        scan_stage_us: nonzero_duration_micros(receipt.scan_stage_duration),
+        scan_stage_us: nonzero_duration_micros(exclusive_scan_stage_duration(
+            receipt.scan_stage_duration,
+            receipt.commit_duration,
+        )),
         commit_us: nonzero_duration_micros(receipt.commit_duration),
     };
     if disposition == PublicationDisposition::Published {
@@ -459,6 +471,16 @@ pub(super) fn refresh_all_provider_sources_route_local(
     };
     covered_publication.apply(&mut publication);
     Ok(publication)
+}
+
+pub(super) fn exclusive_scan_stage_duration(
+    scan_stage_duration: StdDuration,
+    commit_duration: StdDuration,
+) -> StdDuration {
+    // The capture receipt measures scan-stage wall time from before the
+    // writer opens through commit, and also reports commit independently.
+    // Keep the exported buckets disjoint without creating a telemetry layer.
+    scan_stage_duration.saturating_sub(commit_duration)
 }
 
 fn publication_from_terminal_receipt(

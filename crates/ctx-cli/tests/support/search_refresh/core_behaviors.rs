@@ -836,7 +836,7 @@ fn search_refresh_invalid_source_failure_retains_last_published_generation() {
             && stderr.contains("overlaps or contains the ctx data root"),
         "{stderr}"
     );
-    assert!(stderr.contains("retained generation"), "{stderr}");
+    assert!(stderr.contains("retained_generation=Some"), "{stderr}");
     assert!(stderr.contains(&initial_generation), "{stderr}");
 
     let failed = assert_daemon_refresh_failure(&temp, 0, Some(&initial_generation));

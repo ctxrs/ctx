@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use anyhow::{bail, Context as _, Result};
 use clap::ValueEnum;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     cli::IndexDashboardFixtureArgs,
@@ -180,6 +180,7 @@ impl FixtureCase {
                 status.lexical.certified_source_bytes = 0;
                 status.refresh.progress.completed_sources = 0;
                 status.refresh.progress.total_sources = 0;
+                status.refresh.progress.total_sources_known = false;
             }
             Self::ActiveProgress => {}
             Self::Finalizing => {
@@ -191,16 +192,34 @@ impl FixtureCase {
             }
             Self::ReadyPartialWarning => {
                 status.make_lexical_ready();
-                status.refresh.status = RefreshState::Pending;
+                status.refresh.status = "pending";
                 status.refresh.reason = Some("core_refresh_pending");
+                status.refresh.request_state = "running";
+                status.refresh.logical_phase = "direct";
+                status.refresh.physical_attempt_state = "running";
+                status.refresh.progress_owner_attempt_state = "running";
+                status.refresh.structured_outcome = None;
+                status.refresh.progress.phase = "refreshing";
                 status.daemon.running = false;
             }
             Self::TerminalFailure => {
                 status.initialized = false;
                 status.lexical.status = LexicalState::Unavailable;
                 status.lexical.reason = Some("generation_verification_failed");
-                status.refresh.status = RefreshState::Unavailable;
+                status.refresh.status = "unavailable";
                 status.refresh.reason = Some("core_refresh_failed");
+                status.refresh.make_terminal(
+                    "failed",
+                    json!({
+                        "code": "source_refresh_failed",
+                        "class": "internal",
+                        "retryable": false,
+                        "affected_routes": [],
+                        "retryable_routes": [],
+                        "blocked_routes": [],
+                        "physical_attempt_id": "fixture-physical-attempt",
+                    }),
+                );
             }
             Self::StoppedDaemon => {
                 status.daemon.status = DaemonState::Failed;
@@ -252,12 +271,22 @@ impl DashboardStatus {
                 certified_source_bytes: CERTIFIED_SOURCE_BYTES,
             },
             refresh: RefreshStatus {
-                status: RefreshState::Pending,
+                status: "pending",
                 reason: Some("core_refresh_pending"),
+                request_state: "running",
+                request_id: "fixture-logical-request",
+                logical_request_id: "fixture-logical-request",
+                logical_phase: "direct",
+                physical_attempt_id: "fixture-physical-attempt",
+                physical_attempt_state: "running",
+                progress_owner_request_id: "fixture-physical-attempt",
+                progress_owner_attempt_state: "running",
+                structured_outcome: None,
                 progress: RefreshProgress {
                     phase: "scanning_provider_sources",
                     completed_sources: COMPLETED_SOURCES,
                     total_sources: TOTAL_SOURCES,
+                    total_sources_known: true,
                 },
             },
             semantic: SemanticStatus {
@@ -286,10 +315,22 @@ impl DashboardStatus {
     fn make_lexical_ready(&mut self) {
         self.lexical.status = LexicalState::Ready;
         self.lexical.reason = None;
-        self.refresh.status = RefreshState::Ready;
+        self.refresh.status = "ready";
         self.refresh.reason = None;
         self.refresh.progress.phase = "published";
         self.refresh.progress.completed_sources = TOTAL_SOURCES;
+        self.refresh.make_terminal(
+            "published",
+            json!({
+                "code": "completed",
+                "class": "completed",
+                "retryable": false,
+                "affected_routes": [],
+                "retryable_routes": [],
+                "blocked_routes": [],
+                "physical_attempt_id": "fixture-physical-attempt",
+            }),
+        );
     }
 
     fn enable_semantic(
@@ -327,9 +368,28 @@ enum LexicalState {
 
 #[derive(Debug, Serialize)]
 struct RefreshStatus {
-    status: RefreshState,
+    status: &'static str,
     reason: Option<&'static str>,
+    request_state: &'static str,
+    request_id: &'static str,
+    logical_request_id: &'static str,
+    logical_phase: &'static str,
+    physical_attempt_id: &'static str,
+    physical_attempt_state: &'static str,
+    progress_owner_request_id: &'static str,
+    progress_owner_attempt_state: &'static str,
+    structured_outcome: Option<Value>,
     progress: RefreshProgress,
+}
+
+impl RefreshStatus {
+    fn make_terminal(&mut self, request_state: &'static str, outcome: Value) {
+        self.request_state = request_state;
+        self.logical_phase = "terminal";
+        self.physical_attempt_state = request_state;
+        self.progress_owner_attempt_state = request_state;
+        self.structured_outcome = Some(outcome);
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -337,14 +397,7 @@ struct RefreshProgress {
     phase: &'static str,
     completed_sources: u64,
     total_sources: u64,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum RefreshState {
-    Pending,
-    Ready,
-    Unavailable,
+    total_sources_known: bool,
 }
 
 #[derive(Debug, Serialize)]

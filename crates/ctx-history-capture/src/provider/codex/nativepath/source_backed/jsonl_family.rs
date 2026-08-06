@@ -9,8 +9,9 @@ use crate::{
         family::jsonl::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
             JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
-            JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjector, JsonlFamilyPublication,
-            JsonlFamilyRootMissingMode, JsonlFamilyWorkerContext,
+            JsonlFamilyMembershipObservation, JsonlFamilyOptimizedLeafOutcome,
+            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRootMissingMode,
+            JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
         },
         SourceBackedRouteErrorKind,
     },
@@ -28,12 +29,12 @@ struct CodexSessionJsonlFamilyStateV0 {
     plans: HashMap<SourceKey, CodexSessionPlanV0>,
     outcome_lineage: Option<Arc<CodexOutcomeLineageAuthorityV0>>,
     replay_lineage: BTreeMap<u64, Vec<CodexReplayLineageV0>>,
-    terminal_evidence: HashMap<SourceKey, CodexTerminalSourceEvidenceV0>,
     counters: CodexSourceBackedCountersV0,
     stage_pending: bool,
 }
 
 fn scan_codex_session_jsonl_leaf_v0(
+    adapter: &dyn JsonlFamilyAdapter,
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
@@ -58,7 +59,6 @@ fn scan_codex_session_jsonl_leaf_v0(
     if plan.0.source_path != leaf.source_path() {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
-    let source_key = plan.1.clone();
     let mut scan_context = CodexJsonlFamilyLeafContextV0 {
         base_event_lookup,
         outcome_lineage: &outcome_lineage,
@@ -79,35 +79,21 @@ fn scan_codex_session_jsonl_leaf_v0(
         },
     )
     .map_err(codex_family_capture_error)?;
+    let terminal_proof = JsonlFamilyTerminalProof::frozen_prefix(
+        adapter,
+        leaf,
+        &outcome.certificate,
+        outcome.terminal_prefix_bytes,
+        outcome.terminal_prefix_sha256,
+    )?;
     let family_outcome = match outcome.append {
-        Some(append) => JsonlFamilyOptimizedLeafOutcome::append(append),
-        None => JsonlFamilyOptimizedLeafOutcome::replacement(outcome.certificate),
+        Some(append) => JsonlFamilyOptimizedLeafOutcome::append(append, terminal_proof),
+        None => JsonlFamilyOptimizedLeafOutcome::replacement(outcome.certificate, terminal_proof),
     };
     let mut state = state.lock().map_err(|_| codex_family_state_error())?;
-    state.terminal_evidence.insert(source_key, outcome.evidence);
     state.counters.add_assign(outcome.counters);
     state.stage_pending = true;
     Ok(family_outcome)
-}
-
-fn revalidate_codex_session_jsonl_leaf_v0(
-    state: &Mutex<CodexSessionJsonlFamilyStateV0>,
-    leaf: &JsonlFamilyLeaf,
-    certificate: &CertifiedSource,
-) -> Result<bool> {
-    let state = state.lock().map_err(|_| codex_family_state_error())?;
-    let Some(evidence) = state.terminal_evidence.get(leaf.source()) else {
-        return Ok(false);
-    };
-    if !matches!(
-        source_observation(leaf.source(), &evidence.observation),
-        Ok(observation) if observation == *certificate.observation()
-    ) {
-        return Ok(false);
-    }
-    evidence
-        .revalidate_fallible()
-        .map_err(codex_family_capture_error)
 }
 
 fn codex_family_state_error() -> CaptureError {
@@ -468,10 +454,6 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
             .collect();
         state.outcome_lineage = Some(outcome_lineage);
         state.replay_lineage.clear();
-        let current_sources = state.plans.keys().cloned().collect::<HashSet<_>>();
-        state
-            .terminal_evidence
-            .retain(|source, _| current_sources.contains(source));
         state.counters = CodexSourceBackedCountersV0::default();
         #[cfg(test)]
         {
@@ -533,6 +515,36 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
         self.discover_family(root)
+    }
+
+    fn observe_terminal_membership(
+        &self,
+        _root: &Path,
+        opening: &JsonlFamilyInventory,
+    ) -> Result<JsonlFamilyMembershipObservation> {
+        self.run_pending_stage_observer();
+        let mut observation = JsonlFamilyMembershipObservation::observe_authorities(opening)?;
+        let candidates = observation
+            .unbound_routes()
+            .map(|(path, authority, authority_path)| {
+                (path.to_path_buf(), authority, authority_path.to_path_buf())
+            })
+            .collect::<Vec<_>>();
+        for (path, authority, authority_path) in candidates {
+            if let Some(native_session_id) = super::catalog::codex_terminal_native_session_id_hint(
+                &path,
+                &authority,
+                &authority_path,
+            )
+            .map_err(codex_family_capture_error)?
+            {
+                observation.bind_source_hint(
+                    path,
+                    codex_source_key(&native_session_id).map_err(codex_family_capture_error)?,
+                );
+            }
+        }
+        Ok(observation)
     }
 
     fn discovery_error_kind(&self, error: &CaptureError) -> SourceBackedRouteErrorKind {
@@ -598,6 +610,7 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
         emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
     ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
         scan_codex_session_jsonl_leaf_v0(
+            self,
             &self.state,
             leaf,
             base,
@@ -615,15 +628,6 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
             .ok_or(CaptureError::SystemInvariant(
                 "Codex JSONL family has no route root",
             ))
-    }
-
-    fn revalidate_leaf(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        certificate: &CertifiedSource,
-        _checkpoint: Option<&crate::provider::source_backed::family::jsonl::JsonlCheckpoint>,
-    ) -> Result<bool> {
-        revalidate_codex_session_jsonl_leaf_v0(&self.state, leaf, certificate)
     }
 }
 
@@ -669,7 +673,6 @@ impl CodexExplicitSessionJsonlFamilyAdapterV0 {
             let mut state = self.state.lock().map_err(|_| codex_family_state_error())?;
             state.plans.clear();
             state.outcome_lineage = None;
-            state.terminal_evidence.clear();
             state.counters = CodexSourceBackedCountersV0::default();
             #[cfg(test)]
             if !_completed_stage {
@@ -717,10 +720,6 @@ impl CodexExplicitSessionJsonlFamilyAdapterV0 {
             CodexOutcomeLineageAuthorityV0::from_sources(&plans)
                 .map_err(codex_family_capture_error)?,
         ));
-        let current_sources = state.plans.keys().cloned().collect::<HashSet<_>>();
-        state
-            .terminal_evidence
-            .retain(|source, _| current_sources.contains(source));
         state.counters = CodexSourceBackedCountersV0::default();
         Ok(family_inventory)
     }
@@ -781,6 +780,15 @@ impl JsonlFamilyAdapter for CodexExplicitSessionJsonlFamilyAdapterV0 {
         self.discover_family(root)
     }
 
+    fn observe_terminal_membership(
+        &self,
+        root: &Path,
+        opening: &JsonlFamilyInventory,
+    ) -> Result<JsonlFamilyMembershipObservation> {
+        self.run_pending_stage_observer();
+        JsonlFamilyMembershipObservation::observe(root, opening)
+    }
+
     fn discovery_error_kind(&self, error: &CaptureError) -> SourceBackedRouteErrorKind {
         codex_discovery_error_kind(error)
     }
@@ -809,6 +817,7 @@ impl JsonlFamilyAdapter for CodexExplicitSessionJsonlFamilyAdapterV0 {
         emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
     ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
         scan_codex_session_jsonl_leaf_v0(
+            self,
             &self.state,
             leaf,
             base,
@@ -829,15 +838,6 @@ impl JsonlFamilyAdapter for CodexExplicitSessionJsonlFamilyAdapterV0 {
 
     fn base_source_path(&self, _certificate: &CertifiedSource) -> Result<PathBuf> {
         Ok(self.input.path().to_path_buf())
-    }
-
-    fn revalidate_leaf(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        certificate: &CertifiedSource,
-        _checkpoint: Option<&crate::provider::source_backed::family::jsonl::JsonlCheckpoint>,
-    ) -> Result<bool> {
-        revalidate_codex_session_jsonl_leaf_v0(&self.state, leaf, certificate)
     }
 }
 

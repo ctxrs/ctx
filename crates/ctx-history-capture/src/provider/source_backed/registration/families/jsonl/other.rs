@@ -1,7 +1,7 @@
 use super::*;
 use crate::provider::custom_history_jsonl::CustomHistorySourceBackedInput;
 
-/// Registers Cursor's thin adapter over the shared replacement-only JSONL
+/// Registers Cursor's thin adapter over the shared certified-append JSONL
 /// lifecycle.
 pub fn register_cursor_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,

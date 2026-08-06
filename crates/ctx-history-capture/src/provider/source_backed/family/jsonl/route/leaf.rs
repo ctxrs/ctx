@@ -17,8 +17,8 @@ use super::super::{
 use super::{
     binding_digest, contract_error, route_internal, route_invalid, route_scan, FamilyCheckpoint,
     JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome,
-    JsonlFamilyProjectionMode, JsonlFamilyPublication, JsonlFamilyWorkerContext,
-    TerminalSourceEvidence, FAMILY_FRONTIER_KIND, FAMILY_POLICY_REVISION,
+    JsonlFamilyProjectionMode, JsonlFamilyPublication, JsonlFamilyTerminalProof,
+    JsonlFamilyWorkerContext, TerminalSourceEvidence, FAMILY_FRONTIER_KIND, FAMILY_POLICY_REVISION,
     FAMILY_SOURCE_REVISION_KIND,
 };
 #[cfg(test)]
@@ -37,7 +37,7 @@ use crate::{
 pub(super) struct PreparedLeaf {
     pub(super) certificate: CertifiedSource,
     pub(super) append: Option<CertifiedSourceAppend>,
-    pub(super) checkpoint: Option<JsonlCheckpoint>,
+    pub(super) terminal_proof: JsonlFamilyTerminalProof,
 }
 
 struct JsonlLeafJob {
@@ -171,7 +171,7 @@ fn scan_leaf_serial(
     let PreparedLeaf {
         certificate,
         append,
-        checkpoint,
+        terminal_proof,
     } = prepared;
     match append {
         Some(append) => {
@@ -191,7 +191,7 @@ fn scan_leaf_serial(
             sink.certify_source_append(append).map_err(route_internal)?;
             Ok(TerminalSourceEvidence {
                 certificate,
-                checkpoint,
+                terminal_proof,
             })
         }
         None => {
@@ -208,7 +208,7 @@ fn scan_leaf_serial(
                 .map_err(route_internal)?;
             Ok(TerminalSourceEvidence {
                 certificate,
-                checkpoint,
+                terminal_proof,
             })
         }
     }
@@ -318,7 +318,7 @@ fn run_parallel_leaf_job_batch(
             let PreparedLeaf {
                 certificate,
                 append,
-                checkpoint,
+                terminal_proof,
             } = prepared;
             match append {
                 Some(append) => {
@@ -340,7 +340,7 @@ fn run_parallel_leaf_job_batch(
                             append,
                             TerminalSourceEvidence {
                                 certificate,
-                                checkpoint,
+                                terminal_proof,
                             },
                         ))
                         .map_err(ParallelLeafScanWorkerError::from)?;
@@ -358,7 +358,7 @@ fn run_parallel_leaf_job_batch(
                     }
                     let evidence = TerminalSourceEvidence {
                         certificate: certificate.clone(),
-                        checkpoint,
+                        terminal_proof,
                     };
                     emitter
                         .complete(ParallelLeafScanComplete::replace(certificate, evidence))
@@ -733,7 +733,7 @@ pub(super) fn prepare_leaf(
         return Ok(PreparedLeaf {
             certificate: base.clone(),
             append: Some(append),
-            checkpoint: Some(decoded.physical),
+            terminal_proof: terminal_proof_for_checkpoint(adapter, &leaf, base, &decoded.physical)?,
         });
     }
 
@@ -866,14 +866,16 @@ pub(super) fn prepare_leaf(
     } else {
         None
     };
+    let terminal_proof =
+        terminal_proof_for_checkpoint(adapter, &leaf, &certificate, &terminal_checkpoint)?;
     Ok(PreparedLeaf {
         certificate,
         append,
-        checkpoint: Some(terminal_checkpoint),
+        terminal_proof,
     })
 }
 
-fn validate_optimized_outcome(
+pub(super) fn validate_optimized_outcome(
     adapter: &dyn JsonlFamilyAdapter,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
@@ -901,11 +903,33 @@ fn validate_optimized_outcome(
             ));
         }
     }
+    outcome
+        .terminal_proof
+        .validate_for(adapter, leaf, &outcome.certificate)?;
     Ok(PreparedLeaf {
         certificate: outcome.certificate,
         append: outcome.append,
-        checkpoint: None,
+        terminal_proof: outcome.terminal_proof,
     })
+}
+
+fn terminal_proof_for_checkpoint(
+    adapter: &dyn JsonlFamilyAdapter,
+    leaf: &JsonlFamilyLeaf,
+    certificate: &CertifiedSource,
+    checkpoint: &JsonlCheckpoint,
+) -> Result<JsonlFamilyTerminalProof> {
+    if leaf.whole_record || adapter.append_mode() == JsonlFamilyAppendMode::Replacement {
+        JsonlFamilyTerminalProof::exact_file(adapter, leaf, certificate)
+    } else {
+        JsonlFamilyTerminalProof::frozen_shared_prefix(
+            adapter,
+            leaf,
+            certificate,
+            checkpoint.complete_prefix_end(),
+            *checkpoint.complete_prefix_sha256(),
+        )
+    }
 }
 
 fn certify(

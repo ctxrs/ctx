@@ -10,7 +10,9 @@ use std::{
     },
 };
 
-use ctx_history_capture::SourceBackedRefreshScope;
+use ctx_history_capture::{
+    SourceBackedRefreshScope, SourceBackedRouteError, SourceBackedRouteErrorKind,
+};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
     NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
@@ -32,7 +34,7 @@ use crate::{
             coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
             SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
             SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-            SourceBackedRefreshTimings,
+            SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
         },
         source_epoch_status_report,
     },
@@ -42,8 +44,7 @@ use crate::{
 use super::{
     background_refresh_rest, daemon_consumer_retry_due, daemon_core_refresh_job_path,
     daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
-    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path,
-    install_before_core_scheduler_status_hook_for_test, persist_pro_status,
+    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, persist_pro_status,
     prepare_pro_retry_for_generation, preserve_daemon_background_refresh_recovery_provenance,
     read_daemon_job_status, read_pro_status, record_daemon_job_retry, record_source_refresh_retry,
     restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
@@ -302,7 +303,10 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         .unwrap();
     let receipt = writer.commit(|_| true).unwrap();
     SourceBackedRefreshPublication {
-        route_results: Vec::new(),
+        route_results: vec![SourceBackedRefreshRouteResult::succeeded(
+            "ab".repeat(32),
+            true,
+        )],
         catalog_route_bindings: Vec::new(),
         verified_index: None,
         generation_id: receipt.generation_id,

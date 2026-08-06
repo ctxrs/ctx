@@ -610,6 +610,7 @@ pub(super) fn observed_opened_file(
     Ok(source.catalog_observation.clone())
 }
 
+#[cfg(test)]
 pub(crate) fn revalidate_codex_source_observation(
     source: &CodexCatalogSource,
     certified: &CodexFileObservation,
@@ -624,7 +625,6 @@ pub(crate) fn revalidate_codex_source_observation(
     }
     if current != *certified {
         revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
-        #[cfg(test)]
         run_after_codex_prefix_hash_hook();
         let middle = opened_file_observation(&source.source_path, opened.file())?;
         opened.revalidate_same_object()?;
@@ -636,7 +636,6 @@ pub(crate) fn revalidate_codex_source_observation(
         // admit a continuously appended JSONL file; waiting for a quiescent
         // metadata window makes an active session impossible to import.
         revalidate_opened_prefix(opened.file(), certified_len, certified_sha256)?;
-        #[cfg(test)]
         run_after_codex_second_prefix_hash_hook();
         let after = opened_file_observation(&source.source_path, opened.file())?;
         opened.revalidate_same_object()?;

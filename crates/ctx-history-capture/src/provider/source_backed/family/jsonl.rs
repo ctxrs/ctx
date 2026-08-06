@@ -25,15 +25,18 @@ use identity::observe_metadata;
 use revalidation::hash_prefix;
 #[cfg(test)]
 pub(crate) use revalidation::{
-    jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_jsonl_prefix_hash_hook,
+    jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_final_jsonl_prefix_hash_hook,
+    set_after_jsonl_prefix_hash_hook, set_after_second_jsonl_prefix_hash_hook,
 };
-pub(crate) use revalidation::{observe_opened_file, revalidate_frozen_prefix};
+pub(crate) use revalidation::{
+    observe_opened_file, revalidate_frozen_prefix, revalidate_frozen_prefix_sha256,
+};
 pub(crate) use route::{
     jsonl_family_driver, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
     JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
-    JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjectionMode, JsonlFamilyProjector,
-    JsonlFamilyPublication, JsonlFamilyRejectedLeaf, JsonlFamilyRootMissingMode,
-    JsonlFamilyWorkerContext,
+    JsonlFamilyMembershipObservation, JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjectionMode,
+    JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRejectedLeaf,
+    JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
 };
 const PREFIX_HASH_DOMAIN: &[u8] = b"ctx-direct-jsonl-nativepath-prefix-v1\0";
 const PAGE_MAX_RECORDS: usize = 64;
@@ -133,12 +136,6 @@ impl JsonlFileObservation {
             || (current.length >= self.length
                 && self.supports_exact_revalidation()
                 && self.same_stable_file(current))
-    }
-
-    pub(crate) fn is_same_file_growth_to(&self, current: &Self) -> bool {
-        current.length > self.length
-            && self.supports_exact_revalidation()
-            && self.same_stable_file(current)
     }
 }
 

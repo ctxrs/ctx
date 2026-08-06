@@ -119,10 +119,13 @@ impl CoreRefreshEngine {
             .clone()
             .or_else(|| predecessor.receipt.clone())?;
         let published_generation = publication_receipt.published_generation.clone();
-        let publication_metadata = state
+        let publication_authority = state
             .pinned_core_publication
             .as_ref()
             .filter(|authority| authority.generation_id() == published_generation)
+            .cloned();
+        let publication_metadata = publication_authority
+            .as_ref()
             .and_then(|authority| {
                 SourceBackedPublicationMetadata::decode(authority.verified_index_ref()).ok()
             })
@@ -192,6 +195,15 @@ impl CoreRefreshEngine {
                 routes,
             }
         });
+        let request_source_count = publication_authority.as_ref().map(|authority| {
+            let mut covered_receipt = publication_receipt.clone();
+            covered_receipt.route_results = continuation
+                .covered_route_results
+                .values()
+                .cloned()
+                .collect();
+            covered_receipt.source_count(authority.verified_index_ref())
+        });
         let now = utc_now().timestamp_millis();
         let request_receipt = {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -206,6 +218,7 @@ impl CoreRefreshEngine {
             attempt.progress.phase = "published".to_owned();
             attempt.progress.completed_sources = receipt.route_results.len();
             attempt.progress.total_sources = receipt.route_results.len();
+            attempt.progress_total_sources_known = true;
             attempt.scanned_routes = Some(0);
             attempt.unsupported_routes = Some(
                 receipt
@@ -214,12 +227,14 @@ impl CoreRefreshEngine {
                     .filter(|result| result.outcome.failure_class() == Some("incompatible"))
                     .count(),
             );
+            attempt.request_source_count = request_source_count;
             attempt.certified_source_count = Some(receipt.current.source_count);
             attempt.certified_source_bytes = Some(receipt.current.certified_source_bytes);
             attempt.receipt = Some(receipt.clone());
             attempt.publication_receipt = Some(publication_receipt);
             attempt.timings = Some(continuation.covered_timings);
             attempt.failure_type = None;
+            attempt.failure_outcome = None;
             attempt.last_error = None;
             receipt
         };
@@ -417,23 +432,26 @@ impl CoreRefreshEngine {
         if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
             if !run.terminal_persistence_pending {
                 let post_publication_fence = publication_ready.then(|| coverage_fence(request_id));
-                let coverage_certificate = self.finish_route_admissions(
+                match self.finish_route_admissions_and_persist(
+                    data_root,
                     request_id,
                     publication_ready,
                     post_publication_fence.as_ref(),
-                );
-                if let Err(error) = self.persist_job_status(data_root, request_id) {
-                    run.terminal_persistence_pending = true;
-                    let mut state = self.lock_state();
-                    if let Some(active_request_id) = state.active_request_id.clone() {
-                        if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
-                            active.last_error = Some(format!(
-                                "persist logical demand coverage after publication: {error:#}"
-                            ));
+                ) {
+                    Ok(finish) => {
+                        run.coverage_certificate = finish.coverage_certificate;
+                    }
+                    Err(error) => {
+                        run.terminal_persistence_pending = true;
+                        let mut state = self.lock_state();
+                        if let Some(active_request_id) = state.active_request_id.clone() {
+                            if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
+                                active.last_error = Some(format!(
+                                    "persist logical demand coverage after publication: {error:#}"
+                                ));
+                            }
                         }
                     }
-                } else {
-                    run.coverage_certificate = coverage_certificate;
                 }
             }
         }

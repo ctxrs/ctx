@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -8,7 +9,10 @@ use std::{
     },
 };
 
-use super::super::JsonlReader;
+use super::super::{
+    jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_jsonl_prefix_hash_hook,
+    JsonlReader,
+};
 use super::*;
 use crate::provider::source_backed::{
     SourceBackedLogicalSourceFailures, SourceBackedRecordRejections, SourceBackedRouteResources,
@@ -105,6 +109,9 @@ fn expected_state(
     root: &Path,
 ) -> (FamilyResident, CertifiedSourceInventory) {
     let observed = adapter.discover(root).unwrap();
+    let opening_membership = adapter
+        .observe_terminal_membership(root, &observed)
+        .unwrap();
     let inventory = observed.certify_against(&observed).unwrap();
     let terminal_sources = observed
         .leaves()
@@ -120,7 +127,7 @@ fn expected_state(
             {}
             let checkpoint = reader.outcome().unwrap().checkpoint().clone();
             let observation =
-                source_observation(leaf.source(), checkpoint.source_observation()).unwrap();
+                leaf::source_observation(leaf.source(), checkpoint.source_observation()).unwrap();
             let certificate = CertifiedSource::certify(
                 observation.clone(),
                 observation,
@@ -129,11 +136,19 @@ fn expected_state(
                 ScannedSourceCounts::default(),
             )
             .unwrap();
+            let terminal_proof = JsonlFamilyTerminalProof::frozen_shared_prefix(
+                adapter,
+                leaf,
+                &certificate,
+                checkpoint.complete_prefix_end(),
+                *checkpoint.complete_prefix_sha256(),
+            )
+            .unwrap();
             (
                 leaf.source().exact_descriptor_digest(),
                 TerminalSourceEvidence {
                     certificate,
-                    checkpoint: Some(checkpoint),
+                    terminal_proof,
                 },
             )
         })
@@ -153,6 +168,8 @@ fn expected_state(
             ownership_initialized: true,
             owned_sources,
             terminal_sources,
+            absent_sources: Vec::new(),
+            opening_membership: Some(opening_membership),
             certified_inventory: Some(inventory.clone()),
             opening_inventory: Some(observed),
         },
@@ -275,12 +292,7 @@ impl JsonlFamilyAdapter for TerminalRootSwapTestAdapter {
     }
 
     fn discover(&self, selection_root: &Path) -> Result<JsonlFamilyInventory> {
-        if self.discoveries.fetch_add(1, Ordering::SeqCst) == 1 {
-            let moved = self.root.with_file_name("moved-sessions");
-            fs::rename(&self.root, moved).unwrap();
-            fs::create_dir(&self.root).unwrap();
-            fs::write(self.root.join("first.jsonl"), TEST_RECORD).unwrap();
-        }
+        self.discoveries.fetch_add(1, Ordering::SeqCst);
         FrozenMultiRootTestAdapter {
             roots: vec![self.root.clone()],
         }
@@ -296,17 +308,6 @@ impl JsonlFamilyAdapter for TerminalRootSwapTestAdapter {
         Err(CaptureError::SystemInvariant(
             "terminal root swap tests never project",
         ))
-    }
-
-    fn revalidate_leaf(
-        &self,
-        leaf: &JsonlFamilyLeaf,
-        certificate: &CertifiedSource,
-        _checkpoint: Option<&JsonlCheckpoint>,
-    ) -> Result<bool> {
-        Ok(leaf
-            .source()
-            .exact_descriptor_eq(certificate.observation().source()))
     }
 }
 
@@ -1002,7 +1003,7 @@ impl JsonlFamilyAdapter for OptimizedLeafTestAdapter {
             Vec::new()
         };
         emit_page(JsonlFamilyPublication::Replace, records)?;
-        let observation = source_observation(leaf.source(), leaf.observation())?;
+        let observation = leaf::source_observation(leaf.source(), leaf.observation())?;
         let certificate = CertifiedSource::certify(
             observation.clone(),
             observation,
@@ -1018,8 +1019,10 @@ impl JsonlFamilyAdapter for OptimizedLeafTestAdapter {
             },
         )
         .map_err(contract_error)?;
+        let terminal_proof = JsonlFamilyTerminalProof::exact_file(self, leaf, &certificate)?;
         Ok(Some(JsonlFamilyOptimizedLeafOutcome::replacement(
             certificate,
+            terminal_proof,
         )))
     }
 }
@@ -1367,11 +1370,110 @@ fn optimized_leaf_execution_keeps_publication_inside_the_shared_family() {
     assert_eq!(adapter.scans.load(Ordering::SeqCst), 1);
     assert_eq!(publications, vec![(false, 0)]);
     assert!(prepared.append.is_none());
-    assert!(prepared.checkpoint.is_none());
+    assert!(matches!(
+        prepared.terminal_proof,
+        JsonlFamilyTerminalProof::ExactFile { .. }
+    ));
     assert_eq!(
         prepared.certificate.parser_revision(),
         adapter.parser_revision()
     );
+}
+
+fn optimized_test_certificate(
+    adapter: &dyn JsonlFamilyAdapter,
+    leaf: &JsonlFamilyLeaf,
+    content_digest: [u8; 32],
+) -> CertifiedSource {
+    let observation = super::leaf::source_observation(leaf.source(), leaf.observation()).unwrap();
+    CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        adapter.parser_revision(),
+        content_digest,
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 0,
+            rejected_records: 0,
+            ignored_records: 1,
+            indexed_documents: 0,
+            certified_bytes: TEST_RECORD.len() as u64,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn active_source_family_contract_jsonl_optimized_proof_rejects_cross_leaf_binding() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("optimized.jsonl"), TEST_RECORD).unwrap();
+    let adapter = OptimizedLeafTestAdapter {
+        scans: AtomicUsize::new(0),
+        emit_wrong_source: false,
+    };
+    let inventory = adapter.discover(&root).unwrap();
+    let first = inventory.leaves().first().unwrap();
+    let other_source = SourceKey::derive(
+        adapter.provider().as_str(),
+        TEST_SOURCE_FORMAT,
+        TEST_SCHEMA,
+        1,
+        SourceAnchor::provider_native(
+            "terminal-witness-file",
+            TypedKey::utf8("other-optimized-leaf").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let other = JsonlFamilyLeaf::bind_observed(
+        other_source,
+        first.source_path.clone(),
+        Arc::clone(&first.authority),
+        first.authority_path.clone(),
+        first.binding.clone(),
+        first.observation.clone(),
+    );
+    let first_certificate =
+        optimized_test_certificate(&adapter, first, Sha256::digest(TEST_RECORD).into());
+    let other_certificate =
+        optimized_test_certificate(&adapter, &other, Sha256::digest(TEST_RECORD).into());
+    let proof = JsonlFamilyTerminalProof::exact_file(&adapter, first, &first_certificate).unwrap();
+    let outcome = JsonlFamilyOptimizedLeafOutcome::replacement(other_certificate, proof);
+
+    let error = super::leaf::validate_optimized_outcome(&adapter, &other, None, outcome)
+        .err()
+        .expect("proof from another optimized leaf must be rejected");
+    assert!(error
+        .to_string()
+        .contains("bound to another leaf or certificate"));
+}
+
+#[test]
+fn active_source_family_contract_jsonl_optimized_proof_rejects_mismatched_certificate() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("optimized.jsonl"), TEST_RECORD).unwrap();
+    let adapter = OptimizedLeafTestAdapter {
+        scans: AtomicUsize::new(0),
+        emit_wrong_source: false,
+    };
+    let inventory = adapter.discover(&root).unwrap();
+    let leaf = inventory.leaves().first().unwrap();
+    let certificate =
+        optimized_test_certificate(&adapter, leaf, Sha256::digest(TEST_RECORD).into());
+    let mismatched = optimized_test_certificate(&adapter, leaf, [9; 32]);
+    let proof = JsonlFamilyTerminalProof::exact_file(&adapter, leaf, &certificate).unwrap();
+    let outcome = JsonlFamilyOptimizedLeafOutcome::replacement(mismatched, proof);
+
+    let error = super::leaf::validate_optimized_outcome(&adapter, leaf, None, outcome)
+        .err()
+        .expect("proof from another certificate must be rejected");
+    assert!(error
+        .to_string()
+        .contains("bound to another leaf or certificate"));
 }
 
 #[test]
@@ -1477,7 +1579,7 @@ fn borrowed_jsonl_worker_policy_honors_default_and_requested_counts() {
 
 #[test]
 fn certified_append_generation_is_identical_with_one_and_eight_workers() {
-    use std::{fs::OpenOptions, io::Write};
+    use std::io::Write;
 
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
@@ -1549,8 +1651,6 @@ fn certified_append_generation_is_identical_with_one_and_eight_workers() {
 
 #[test]
 fn opaque_provider_checkpoint_and_base_lookup_resume_only_the_certified_suffix() {
-    use std::{fs::OpenOptions, io::Write};
-
     for workers in [1, 8] {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let root = temp.path().join("sessions");
@@ -2199,7 +2299,31 @@ fn serial_and_parallel_jsonl_emission_preserve_resource_unavailable() {
 }
 
 #[test]
-fn active_source_family_contract_jsonl_terminal_inventory_rediscovers_live_tree() {
+fn jsonl_terminal_drift_and_io_failures_keep_distinct_route_kinds() {
+    assert_eq!(
+        normalized_jsonl_error_kind(&CaptureError::SourceChangedDuringCapture),
+        Some(SourceBackedRouteErrorKind::SourceChanged)
+    );
+    assert_eq!(
+        normalized_jsonl_error_kind(&CaptureError::Io(std::io::Error::from_raw_os_error(5))),
+        Some(SourceBackedRouteErrorKind::ResourceUnavailable)
+    );
+    assert_eq!(
+        normalized_jsonl_error_kind(&CaptureError::Io(std::io::Error::from_raw_os_error(24))),
+        Some(SourceBackedRouteErrorKind::ResourceUnavailable)
+    );
+    assert_eq!(
+        route_scan(
+            &TestAdapter,
+            CaptureError::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        )
+        .kind,
+        SourceBackedRouteErrorKind::SourceChanged
+    );
+}
+
+#[test]
+fn active_source_family_contract_jsonl_terminal_inventory_observes_live_tree() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
@@ -2227,13 +2351,13 @@ fn active_source_family_contract_jsonl_terminal_inventory_rediscovers_live_tree(
         SourceBackedRevalidationTarget::Source(&source),
     ));
     fs::write(root.join("new.jsonl"), b"{\"message\":\"late leaf\"}\n").unwrap();
-    assert!(!revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap());
+    assert!(
+        !revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap_or(false)
+    );
 }
 
 #[test]
 fn active_source_family_contract_jsonl_terminal_inventory_accepts_proven_append() {
-    use std::{fs::OpenOptions, io::Write};
-
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir_all(&root).unwrap();
@@ -2276,7 +2400,11 @@ fn active_source_family_contract_jsonl_terminal_inventory_rejects_reappearance()
         .clone();
 
     fs::remove_file(&deleted_path).unwrap();
-    let (resident, inventory) = expected_state(&adapter, &root);
+    let (mut resident, inventory) = expected_state(&adapter, &root);
+    let opening = resident.opening_inventory.as_ref().unwrap().clone();
+    resident
+        .absent_sources
+        .push(JsonlFamilyAbsentMember::from_path(&opening, deleted_path.clone()).unwrap());
     let deletion = CertifiedSourceDeletion::from_inventory(deleted_source, &inventory).unwrap();
     let resident = Mutex::new(resident);
     assert!(revalidate_target(
@@ -2285,7 +2413,9 @@ fn active_source_family_contract_jsonl_terminal_inventory_rejects_reappearance()
     ));
 
     fs::write(&deleted_path, b"{\"message\":\"reappeared\"}\n").unwrap();
-    assert!(!revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap());
+    assert!(
+        !revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap_or(false)
+    );
 }
 
 #[test]
@@ -2314,7 +2444,8 @@ fn active_source_family_contract_jsonl_frozen_multi_root_defers_new_leaves() {
     let resident = Mutex::new(resident);
     fs::remove_file(retained).unwrap();
     assert!(
-        !revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).unwrap()
+        !revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,)
+            .unwrap_or(false)
     );
 }
 
@@ -2341,7 +2472,7 @@ fn active_source_family_contract_jsonl_frozen_root_replacement_fails_closed() {
 }
 
 #[test]
-fn active_source_family_contract_jsonl_frozen_rejects_root_swap_during_rediscovery() {
+fn active_source_family_contract_jsonl_terminal_noop_is_metadata_only_without_recataloging() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
     fs::create_dir(&root).unwrap();
@@ -2354,9 +2485,55 @@ fn active_source_family_contract_jsonl_frozen_rejects_root_swap_during_rediscove
     let (resident, inventory) = expected_state(&adapter, &selection_root);
     let resident = Mutex::new(resident);
 
+    reset_jsonl_prefix_hash_bytes();
     assert!(
-        !revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).unwrap()
+        revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory).unwrap()
     );
+    assert_eq!(adapter.discoveries.load(Ordering::SeqCst), 1);
+    assert_eq!(jsonl_prefix_hash_bytes(), 0);
+}
+
+#[test]
+fn active_source_family_contract_jsonl_frozen_rejects_root_swap_without_recataloging() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("first.jsonl"), TEST_RECORD).unwrap();
+    let adapter = TerminalRootSwapTestAdapter {
+        root: root.clone(),
+        discoveries: AtomicUsize::new(0),
+    };
+    let selection_root = temp.path().join("codex-selection");
+    let (resident, inventory) = expected_state(&adapter, &selection_root);
+    let resident = Mutex::new(resident);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(root.join("first.jsonl"))
+        .unwrap()
+        .write_all(b"{\"message\":\"appended\"}\n")
+        .unwrap();
+    let moved = temp.path().join("moved-sessions");
+    let swap_root = root.clone();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let worker_barrier = Arc::clone(&barrier);
+    let worker = std::thread::spawn(move || {
+        worker_barrier.wait();
+        fs::rename(&swap_root, moved).unwrap();
+        fs::create_dir(&swap_root).unwrap();
+        fs::write(swap_root.join("first.jsonl"), TEST_RECORD).unwrap();
+        worker_barrier.wait();
+    });
+    set_after_jsonl_prefix_hash_hook(move || {
+        barrier.wait();
+        barrier.wait();
+    });
+
+    assert!(
+        revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).is_err()
+    );
+    worker.join().unwrap();
+    assert_eq!(adapter.discoveries.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -2382,6 +2559,10 @@ fn active_source_family_contract_jsonl_frozen_inventory_rejects_deleted_source_r
 
     fs::remove_file(&deleted_path).unwrap();
     let (mut resident, inventory) = expected_state(&adapter, &selection_root);
+    let opening = resident.opening_inventory.as_ref().unwrap().clone();
+    resident
+        .absent_sources
+        .push(JsonlFamilyAbsentMember::from_path(&opening, deleted_path.clone()).unwrap());
     resident.owned_sources.insert(
         deleted_source.exact_descriptor_digest(),
         deleted_source.clone(),

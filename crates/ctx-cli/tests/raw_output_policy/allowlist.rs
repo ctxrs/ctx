@@ -46,10 +46,20 @@ const ANALYTICS: TestOwner = TestOwner::behavioral(
     &["src/analytics/sender.rs"],
     &["post_event_chunks", "failure_on_post", "is_ok"],
 );
+const LIVE_OUTPUT: TestOwner = TestOwner::behavioral(
+    "src/ui/writer.rs::live_controller_bytes_cover_first_grow_shrink_and_final_frames",
+    &["src/ui/writer.rs"],
+    &["LiveOutput", "write_frame", "assert_eq"],
+);
+const APPEND_OUTPUT: TestOwner = TestOwner::behavioral(
+    "src/ui/writer.rs::append_controller_writes_documents_and_lines_exactly",
+    &["src/ui/writer.rs"],
+    &["LiveOutput", "write_document", "write_line", "assert_eq"],
+);
 const INDEX: TestOwner = TestOwner::behavioral(
-    "src/commands/index_dashboard.rs::styled_rendering_strips_to_plain_bytes",
+    "src/commands/index_tests.rs::wait_human_output_prints_a_changed_final_snapshot",
     &["src/commands/index.rs"],
-    &["render_dashboard", "strip_ansi", "render_plain"],
+    &["IndexWaitHumanOutput", "print_final", "rendered"],
 );
 const SOURCE_INDEX_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
     "src/commands/source_index/tests/recovery.rs::show_and_search_generation_races_use_the_stable_retryable_json_envelope",
@@ -156,11 +166,6 @@ const CLAP_OUTPUT: TestOwner = TestOwner::behavioral(
     &["src/dispatch.rs"],
     &["write_clap_output", "contains", "rendered"],
 );
-const PROGRESS_DELIVERY: TestOwner = TestOwner::behavioral(
-    "src/progress.rs::plain_and_json_progress_keep_explicit_stream_contracts",
-    &["src/progress.rs"],
-    &["ProgressRenderMode", "Plain", "Json", "progress_json"],
-);
 const SKILL_PROMPT: TestOwner = TestOwner::behavioral(
     "src/skill/selection.rs::interactive_picker_prompt_is_explicit_and_actionable",
     &["src/skill/selection.rs"],
@@ -202,7 +207,6 @@ const PRO_UNINSTALL: &str = "src/pro/lifecycle_commands/uninstall.rs";
 const PRO_PENDING: &str = "src/pro/pending_materialization.rs";
 const PRO_REFERRAL: &str = "src/pro/referral.rs";
 const PRO_RENDER: &str = "src/pro/render.rs";
-const PROGRESS: &str = "src/progress.rs";
 const RELEASE_IDENTITY: &str = "src/release_build_identity.rs";
 const SKILL_INSTALL: &str = "src/skill/install.rs";
 const SKILL_SELECTION: &str = "src/skill/selection.rs";
@@ -305,20 +309,20 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         UNIT
     ),
     allow!(
-        INDEX_COMMAND,
-        "index_watch_output#1@834c396ba62e925f",
-        UiRawWriter,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
         LIST_EVENTS,
         "run#1@75fb49cf76ccc9aa",
         UiRawWriter,
         Infrastructure,
         SPECIALIZED_STREAM,
         LIST_EVENTS_STREAM
+    ),
+    allow!(
+        INDEX_COMMAND,
+        "render#1@257ffe0fafbffd46",
+        DocumentRender,
+        Infrastructure,
+        UI_INFRASTRUCTURE,
+        INDEX
     ),
     allow!(
         LIST_EVENTS,
@@ -359,94 +363,6 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         MachineProtocol,
         JSON_PROTOCOL,
         LIST_EVENTS_STREAM
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_json#1@d7261ce140360114",
-        DirectWrite,
-        MachineProtocol,
-        JSON_PROTOCOL,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#1@b96d065e9b4e7c75",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#2@07261a95602a84f8",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#3@9e176dd4991e94f2",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#4@2a6861777f6f2eb8",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#5@8d6514562387b353",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#6@852e51f5897711eb",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#7@ed255c9516703587",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#8@257d49ad49992709",
-        DirectWrite,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "print_human#1@800a077f8a4bc2c0",
-        DocumentRender,
-        Infrastructure,
-        UI_INFRASTRUCTURE,
-        INDEX
-    ),
-    allow!(
-        INDEX_COMMAND,
-        "render#1@257ffe0fafbffd46",
-        DocumentRender,
-        Infrastructure,
-        UI_INFRASTRUCTURE,
-        INDEX
     ),
     allow!(
         SOURCE_INDEX_SHOW,
@@ -929,38 +845,6 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         PRO
     ),
     allow!(
-        PROGRESS,
-        "emit_status#1@9d99ae52ba0872ab",
-        StderrConstructor,
-        Infrastructure,
-        SPECIALIZED_STREAM,
-        PROGRESS_DELIVERY
-    ),
-    allow!(
-        PROGRESS,
-        "write_progress#1@afd18c22c5ce7e22",
-        DirectWrite,
-        JustifiedPlainHuman,
-        SPECIALIZED_STREAM,
-        PROGRESS_DELIVERY
-    ),
-    allow!(
-        PROGRESS,
-        "write_progress#2@7238ae0e2f4ab1cf",
-        DirectWrite,
-        MachineProtocol,
-        JSON_PROTOCOL,
-        PROGRESS_DELIVERY
-    ),
-    allow!(
-        PROGRESS,
-        "new#1@0b4277916e6ecd04",
-        StderrConstructor,
-        CapabilityProbe,
-        TERMINAL_PROBE,
-        PROGRESS_DELIVERY
-    ),
-    allow!(
         RELEASE_IDENTITY,
         "print_if_requested#1@9143e700fc22b2e1",
         PrintMacro,
@@ -1079,6 +963,110 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         Infrastructure,
         UI_INFRASTRUCTURE,
         UNIT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_document#1@074a3456d7db4974",
+        DirectWrite,
+        Infrastructure,
+        UI_INFRASTRUCTURE,
+        APPEND_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_document#1@074a3456d7db4974",
+        DocumentRender,
+        Infrastructure,
+        UI_INFRASTRUCTURE,
+        APPEND_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_line#1@9c23106aa6419c75",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        APPEND_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_line#2@26dbdba5809c8356",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        APPEND_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#1@800a077f8a4bc2c0",
+        DocumentRender,
+        Infrastructure,
+        UI_INFRASTRUCTURE,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#1@9e176dd4991e94f2",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#2@26dbdba5809c8356",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#3@9e176dd4991e94f2",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#4@2a6861777f6f2eb8",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#5@c8b2ea0629c2b043",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#6@4f59ef5cdaf825f7",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#7@16487886cf6aa080",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
+    ),
+    allow!(
+        UI_WRITER,
+        "write_frame#8@257d49ad49992709",
+        DirectWrite,
+        Infrastructure,
+        SPECIALIZED_STREAM,
+        LIVE_OUTPUT
     ),
     allow!(
         UI_WRITER,

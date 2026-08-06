@@ -36,7 +36,8 @@ use crate::{
     common::io::OpenedProviderSourceFile,
     provider::source_backed::family::jsonl::{
         JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-        JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlRecordRef,
+        JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyTerminalProof,
+        JsonlFamilyWorkerContext, JsonlRecordRef,
     },
     CaptureError, Result, CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT, MAX_PROVIDER_JSONL_LINE_BYTES,
 };
@@ -164,8 +165,19 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
                 .push(transcript);
         }
         let mut leaves = Vec::with_capacity(native_sessions.len());
+        let mut exact_dependencies = Vec::new();
         for (native_session_id, mut routes) in native_sessions {
             routes.sort_by(|left, right| left.path().cmp(right.path()));
+            let route_proofs = routes
+                .iter()
+                .map(|route| {
+                    JsonlFamilyTerminalProof::exact_path(
+                        route.path().to_path_buf(),
+                        Arc::clone(&authority),
+                        route.authority_relative_path().to_path_buf(),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
             let logical_transcript_sha256 = if routes.len() > 1 {
                 let signature = cursor_transcript_signature(&routes[0])?;
                 for route in routes.iter().skip(1) {
@@ -179,8 +191,12 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
             } else {
                 None
             };
+            for proof in &route_proofs {
+                proof.revalidate_dependency()?;
+            }
             let source = source_key(&native_session_id)?;
             let selected = routes.remove(0);
+            exact_dependencies.extend(route_proofs.into_iter().skip(1));
             let binding = CursorBinding {
                 native_session_id,
                 logical_transcript_sha256,
@@ -198,7 +214,10 @@ impl JsonlFamilyAdapter for CursorJsonlAdapter {
                 TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?,
             )?);
         }
-        JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+        Ok(
+            JsonlFamilyInventory::present(self.provider(), root, authority, leaves)?
+                .with_exact_dependencies(exact_dependencies),
+        )
     }
 
     fn projector(

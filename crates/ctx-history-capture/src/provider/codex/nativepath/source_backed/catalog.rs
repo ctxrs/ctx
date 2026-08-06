@@ -7,14 +7,8 @@ const CODEX_SESSION_TREE_UNION_INVENTORY_REVISION_KIND: &str =
 const CODEX_SESSION_TREE_UNION_DISCOVERY_REVISION: &str = "codex-session-tree-union-catalog-v0";
 
 #[cfg(test)]
-type CodexDirectoryVisitHook = (PathBuf, Box<dyn FnOnce()>);
-
-#[cfg(test)]
 std::thread_local! {
     static AFTER_CODEX_METADATA_INVENTORY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-    static AFTER_CODEX_DIRECTORY_VISIT_HOOK:
-        std::cell::RefCell<Option<CodexDirectoryVisitHook>> =
         const { std::cell::RefCell::new(None) };
     static AFTER_CODEX_CATALOG_AUTHORITY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -56,34 +50,6 @@ fn run_after_codex_catalog_authority_hook() {
     if let Some(hook) = hook {
         hook();
     }
-}
-
-#[cfg(test)]
-pub(crate) fn install_after_codex_directory_visit_hook(
-    relative_directory: PathBuf,
-    hook: impl FnOnce() + 'static,
-) {
-    AFTER_CODEX_DIRECTORY_VISIT_HOOK.with(|slot| {
-        assert!(
-            slot.borrow().is_none(),
-            "Codex directory-visit hook is already installed"
-        );
-        *slot.borrow_mut() = Some((relative_directory, Box::new(hook)));
-    });
-}
-
-#[cfg(test)]
-fn run_after_codex_directory_visit_hook(relative_directory: &Path) {
-    AFTER_CODEX_DIRECTORY_VISIT_HOOK.with(|slot| {
-        let pending = slot.borrow_mut().take();
-        if let Some((target, hook)) = pending {
-            if target == relative_directory {
-                hook();
-            } else {
-                *slot.borrow_mut() = Some((target, hook));
-            }
-        }
-    });
 }
 
 #[derive(Debug, Clone)]
@@ -590,8 +556,6 @@ fn discover_codex_metadata_inventory_root_v0(
             relative_directory.clone(),
             directory.authority_fingerprint(),
         ));
-        #[cfg(test)]
-        run_after_codex_directory_visit_hook(&relative_directory);
         child_directories.reverse();
         pending.extend(child_directories);
     }
@@ -759,7 +723,7 @@ fn catalog_source_from_body(
     Ok(source)
 }
 
-fn codex_native_session_id_path_hint(path: &Path) -> Option<String> {
+pub(super) fn codex_native_session_id_path_hint(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     if stem.len() >= 36 {
         let tail = &stem[stem.len() - 36..];
@@ -771,6 +735,18 @@ fn codex_native_session_id_path_hint(path: &Path) -> Option<String> {
         }
     }
     (!stem.trim().is_empty()).then(|| stem.to_owned())
+}
+
+pub(super) fn codex_terminal_native_session_id_hint(
+    path: &Path,
+    authority: &ProviderSourceRoot,
+    authority_path: &Path,
+) -> CodexSourceBackedResultV0<Option<String>> {
+    let opened = authority.open_file(authority_path)?;
+    Ok(
+        crate::provider::codex::catalog::probe_codex_native_session_id(&opened)?
+            .or_else(|| codex_native_session_id_path_hint(path)),
+    )
 }
 
 fn normalized_session_roots(session_roots: &[PathBuf]) -> CodexSourceBackedResultV0<Vec<PathBuf>> {

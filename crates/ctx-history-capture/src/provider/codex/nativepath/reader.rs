@@ -314,10 +314,12 @@ mod page_builder;
 mod project;
 mod scanner;
 
+#[cfg(test)]
+pub(crate) use checkpoint::revalidate_codex_source_observation;
 use checkpoint::*;
 pub(crate) use checkpoint::{
     open_codex_source_capability, opened_file_observation as opened_codex_file_observation,
-    opened_file_prefix_sha256, revalidate_codex_source_observation,
+    opened_file_prefix_sha256,
 };
 use identity::*;
 use lineage::CodexLineageFactMarkV0;

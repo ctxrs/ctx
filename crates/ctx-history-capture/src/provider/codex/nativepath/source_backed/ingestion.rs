@@ -10,7 +10,8 @@ pub(super) enum CodexJsonlFamilyPublicationV0 {
 pub(super) struct CodexJsonlFamilyLeafOutcomeV0 {
     pub(super) certificate: CertifiedSource,
     pub(super) append: Option<CertifiedSourceAppend>,
-    pub(super) evidence: CodexTerminalSourceEvidenceV0,
+    pub(super) terminal_prefix_bytes: u64,
+    pub(super) terminal_prefix_sha256: [u8; 32],
     pub(super) counters: CodexSourceBackedCountersV0,
 }
 
@@ -64,16 +65,11 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
                 frontier.certified_prefix_bytes(),
                 *frontier.certified_prefix_digest(),
             )?;
-            let evidence = CodexTerminalSourceEvidenceV0::new(
-                source,
-                proof.checkpoint.observation.clone(),
-                proof.checkpoint.observation.len,
-                proof.checkpoint.full_revision_sha256,
-            );
             return Ok(CodexJsonlFamilyLeafOutcomeV0 {
                 certificate: base.clone(),
                 append: Some(append),
-                evidence,
+                terminal_prefix_bytes: proof.checkpoint.observation.len,
+                terminal_prefix_sha256: proof.checkpoint.full_revision_sha256,
                 counters: CodexSourceBackedCountersV0 {
                     catalog_sources: 1,
                     catalog_source_bytes: proof.checkpoint.observation.len,
@@ -198,12 +194,8 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         }
         None => None,
     };
-    let evidence = CodexTerminalSourceEvidenceV0::new(
-        scan.source,
-        scan.after_observation,
-        scan.before_observation.len,
-        scan.full_revision_sha256,
-    );
+    let terminal_prefix_bytes = scan.before_observation.len;
+    let terminal_prefix_sha256 = scan.full_revision_sha256;
     let mut counters = CodexSourceBackedCountersV0 {
         catalog_sources: 1,
         catalog_source_bytes: source.catalog_observation.len,
@@ -229,7 +221,8 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
     Ok(CodexJsonlFamilyLeafOutcomeV0 {
         certificate,
         append,
-        evidence,
+        terminal_prefix_bytes,
+        terminal_prefix_sha256,
         counters,
     })
 }

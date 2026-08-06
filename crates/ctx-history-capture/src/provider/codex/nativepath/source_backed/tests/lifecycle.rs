@@ -1369,7 +1369,7 @@ fn active_source_family_contract_codex_append_publishes_then_catches_up() {
 }
 
 #[test]
-fn active_source_family_contract_codex_terminal_prefix_proof_rejects_post_hash_rewrite() {
+fn legacy_codex_terminal_prefix_proof_rejects_post_hash_rewrite() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     fs::create_dir_all(&sessions).unwrap();
@@ -1422,8 +1422,7 @@ fn active_source_family_contract_codex_terminal_prefix_proof_rejects_post_hash_r
 }
 
 #[test]
-fn active_source_family_contract_codex_terminal_prefix_proof_rejects_post_second_hash_rewrite_and_append(
-) {
+fn legacy_codex_terminal_prefix_proof_rejects_post_second_hash_rewrite_and_append() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     fs::create_dir_all(&sessions).unwrap();

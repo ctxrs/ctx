@@ -6,8 +6,7 @@ use observation_recovery::{
     request_bound_status_with_recovery, retained_request_unobservable, DISCONNECT_POLICY,
 };
 
-type SourceBackedRefreshProgressReporter<'a> =
-    &'a mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>;
+type SourceBackedRefreshProgressReporter<'a> = &'a mut dyn FnMut(&RefreshStatus) -> Result<()>;
 
 const SOURCE_REFRESH_PROGRESS_HEARTBEAT: StdDuration = StdDuration::from_secs(5);
 
@@ -48,13 +47,98 @@ pub(crate) struct SourceBackedRefreshObservation {
     pub(crate) pin: PinnedSourceBackedGeneration,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum SourceRefreshProtocolState {
-    AdmissionPending,
-    Queued,
-    Running,
-    Published,
-    Failed,
+#[derive(Debug)]
+pub(crate) struct SourceBackedRefreshTerminalError {
+    pub(crate) code: String,
+    pub(crate) class: String,
+    pub(crate) retryable: bool,
+    pub(crate) affected_routes: Vec<String>,
+    pub(crate) retryable_routes: Vec<String>,
+    pub(crate) blocked_routes: Vec<String>,
+    pub(crate) physical_attempt_id: String,
+    pub(crate) retained_generation: Option<String>,
+    pub(crate) retry_advice: Option<String>,
+    detail: Option<String>,
+    capture_error: Option<CaptureError>,
+}
+
+impl fmt::Display for SourceBackedRefreshTerminalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "daemon-owned source-backed refresh failed (code={}, class={}, retryable={}, attempt={}",
+            self.code, self.class, self.retryable, self.physical_attempt_id
+        )?;
+        write!(
+            formatter,
+            ", affected_routes={:?}, retryable_routes={:?}, blocked_routes={:?}",
+            self.affected_routes, self.retryable_routes, self.blocked_routes
+        )?;
+        write!(
+            formatter,
+            ", retained_generation={:?}, retry_advice={:?})",
+            self.retained_generation, self.retry_advice
+        )?;
+        if let Some(detail) = self.detail.as_deref() {
+            write!(formatter, ": {detail}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SourceBackedRefreshTerminalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.capture_error
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl From<RefreshTerminalOutcome> for SourceBackedRefreshTerminalError {
+    fn from(outcome: RefreshTerminalOutcome) -> Self {
+        let capture_error = match outcome.class {
+            RefreshOutcomeClass::Incompatible => Some(CaptureError::UnsupportedSchema(
+                outcome
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| outcome.code.as_str().to_owned()),
+            )),
+            RefreshOutcomeClass::Unreadable => Some(CaptureError::InvalidPayload(
+                outcome
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| outcome.code.as_str().to_owned()),
+            )),
+            _ => None,
+        };
+        Self {
+            code: outcome.code.as_str().to_owned(),
+            class: outcome.class.as_str().to_owned(),
+            retryable: outcome.retryable,
+            affected_routes: outcome
+                .affected_routes
+                .into_iter()
+                .map(|route| route.as_str().to_owned())
+                .collect(),
+            retryable_routes: outcome
+                .retryable_routes
+                .into_iter()
+                .map(|route| route.as_str().to_owned())
+                .collect(),
+            blocked_routes: outcome
+                .blocked_routes
+                .into_iter()
+                .map(|route| route.as_str().to_owned())
+                .collect(),
+            physical_attempt_id: outcome.physical_attempt_id,
+            retained_generation: outcome.retained_generation,
+            retry_advice: outcome
+                .retry_advice
+                .map(|advice| advice.as_str().to_owned()),
+            detail: outcome.detail,
+            capture_error,
+        }
+    }
 }
 
 const AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT: usize = 3;
@@ -275,6 +359,22 @@ pub(crate) fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_inner(data_root, mode, None)
+}
+
+pub(crate) fn coordinate_source_backed_refresh_with_progress(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_inner(data_root, mode, Some(report_progress))
+}
+
+fn coordinate_source_backed_refresh_inner(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
+) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_with_catalog(
         data_root,
         mode,
@@ -282,7 +382,7 @@ pub(crate) fn coordinate_source_backed_refresh(
         None,
         false,
         true,
-        None,
+        report_progress,
     )
 }
 
@@ -291,7 +391,7 @@ pub(crate) fn coordinate_import_source_backed_refresh_with_progress(
     mode: SourceBackedRefreshMode,
     explicit_source_catalog: Option<&ExplicitSourceCatalogAuthority>,
     allow_daemon_autostart: bool,
-    report_progress: &mut dyn FnMut(&SourceBackedRefreshProgress) -> Result<()>,
+    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_import_source_backed_refresh_inner(
         data_root,
@@ -406,6 +506,10 @@ fn coordinate_source_backed_refresh_with_catalog(
     source_refresh_protocol_state(&response)?;
 
     if mode == SourceBackedRefreshMode::Background {
+        if let Some(report_progress) = report_progress {
+            let status = source_refresh_progress_status(response.clone())?;
+            report_progress(&status).context("render daemon-owned source refresh progress")?;
+        }
         let pin = pin_published_generation(data_root)?.ok_or_else(|| {
             anyhow!(
                 "daemon source refresh was queued but no published generation exists; retry with --refresh wait"
@@ -489,7 +593,7 @@ fn wait_for_published_generation_inner(
         mut report_progress,
     } = wait;
     let mut unknown_request_recovery = TypedUnknownRequestRecovery::new(&request_id);
-    let mut last_reported_progress = None;
+    let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
         let status_request = compact_json(json!({
@@ -579,24 +683,24 @@ fn wait_for_published_generation_inner(
         }
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
-        let protocol_state = source_refresh_protocol_state(&response)?;
+        let status = source_refresh_progress_status(response.clone())?;
+        let protocol = status.kind()?;
+        let protocol_state = protocol.request_state();
         if let Some(report_progress) = report_progress.as_deref_mut() {
-            let progress = SourceBackedRefreshProgress::from_status_json(&response)?;
             if should_report_progress(
-                last_reported_progress.as_ref(),
+                last_reported_status.as_ref(),
                 last_reported_at,
-                &progress,
+                &status,
                 protocol_state,
                 StdInstant::now(),
             ) {
-                report_progress(&progress)
-                    .context("render daemon-owned source refresh progress")?;
-                last_reported_progress = Some(progress);
+                report_progress(&status).context("render daemon-owned source refresh progress")?;
+                last_reported_status = Some(status.clone());
                 last_reported_at = Some(StdInstant::now());
             }
         }
         match protocol_state {
-            SourceRefreshProtocolState::Published => {
+            RefreshRequestState::Published => {
                 let expected = response
                     .get("published_generation")
                     .and_then(Value::as_str)
@@ -611,6 +715,8 @@ fn wait_for_published_generation_inner(
                 let publication_receipt = published_refresh_receipt(&response, &pin)?;
                 validate_status_publication_authority(&publication_receipt, &pin)?;
                 let receipt = published_request_outcome(&response, &pin)?;
+                let source_count =
+                    published_source_count(&response, &receipt, pin.verified_index())?;
                 if let Some(expected_catalog) = expected_catalog {
                     if !explicit_catalog_request_is_accounted_for(
                         expected_catalog,
@@ -645,7 +751,7 @@ fn wait_for_published_generation_inner(
                     status: "published".to_owned(),
                     request_id: Some(request_id),
                     daemon_available: true,
-                    source_count: response_source_count(&response),
+                    source_count,
                     request_previous_generation,
                     request_generation_changed,
                     scanned_routes: Some(scanned_routes),
@@ -653,12 +759,12 @@ fn wait_for_published_generation_inner(
                     pin,
                 });
             }
-            SourceRefreshProtocolState::Failed => {
-                return failed_refresh_response(&response);
+            RefreshRequestState::Failed => {
+                return failed_refresh_response(&response, protocol.into_terminal_outcome());
             }
-            SourceRefreshProtocolState::AdmissionPending
-            | SourceRefreshProtocolState::Queued
-            | SourceRefreshProtocolState::Running => {
+            RefreshRequestState::AdmissionPending
+            | RefreshRequestState::Queued
+            | RefreshRequestState::Running => {
                 std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
             }
         }
@@ -708,22 +814,33 @@ fn missing_status_publication_authority() -> Result<()> {
 }
 
 fn should_report_progress(
-    last_progress: Option<&SourceBackedRefreshProgress>,
+    last_status: Option<&RefreshStatus>,
     last_reported_at: Option<StdInstant>,
-    progress: &SourceBackedRefreshProgress,
-    protocol_state: SourceRefreshProtocolState,
+    status: &RefreshStatus,
+    protocol_state: RefreshRequestState,
     now: StdInstant,
 ) -> bool {
     matches!(
         protocol_state,
-        SourceRefreshProtocolState::Published | SourceRefreshProtocolState::Failed
-    ) || last_progress != Some(progress)
+        RefreshRequestState::Published | RefreshRequestState::Failed
+    ) || last_status != Some(status)
         || last_reported_at.is_some_and(|at| {
             now.saturating_duration_since(at) >= SOURCE_REFRESH_PROGRESS_HEARTBEAT
         })
 }
 
-fn failed_refresh_response(response: &Value) -> Result<SourceBackedRefreshObservation> {
+fn failed_refresh_response(
+    response: &Value,
+    structured: Option<RefreshTerminalOutcome>,
+) -> Result<SourceBackedRefreshObservation> {
+    if let Some(structured) = structured {
+        return Err(SourceBackedRefreshTerminalError::from(structured).into());
+    }
+
+    legacy_failed_refresh_response(response)
+}
+
+fn legacy_failed_refresh_response(response: &Value) -> Result<SourceBackedRefreshObservation> {
     let error = response
         .get("last_error")
         .and_then(Value::as_str)
@@ -837,20 +954,18 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{label} has no request ID"))
 }
 
-fn source_refresh_protocol_state(response: &Value) -> Result<SourceRefreshProtocolState> {
-    match response.get("request_state").and_then(Value::as_str) {
-        Some("admission_pending") => Ok(SourceRefreshProtocolState::AdmissionPending),
-        Some("queued") => Ok(SourceRefreshProtocolState::Queued),
-        Some("running") => Ok(SourceRefreshProtocolState::Running),
-        Some("published") => Ok(SourceRefreshProtocolState::Published),
-        Some("failed") => Ok(SourceRefreshProtocolState::Failed),
-        Some(state) => Err(anyhow!(
-            "daemon source refresh response has unknown typed state `{state}`"
-        )),
-        None => Err(anyhow!(
-            "daemon source refresh response has no request state"
-        )),
-    }
+fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
+    Ok(source_refresh_protocol_status(response)?.request_state())
+}
+
+fn source_refresh_protocol_status(response: &Value) -> Result<RefreshStatusKind> {
+    RefreshStatus::classify_schema_v1(response)
+        .context("validate engine-owned source refresh status")
+}
+
+fn source_refresh_progress_status(response: Value) -> Result<RefreshStatus> {
+    RefreshStatus::parse_schema_v1(response)
+        .context("validate engine-owned source refresh progress status")
 }
 
 pub(super) fn validate_source_refresh_status_response_authority(
@@ -941,35 +1056,401 @@ fn response_source_count(response: &Value) -> usize {
         .unwrap_or(0)
 }
 
+fn published_source_count(
+    response: &Value,
+    request_receipt: &SourceBackedRefreshReceipt,
+    verified: &ctx_history_index::VerifiedIndex,
+) -> Result<usize> {
+    let _scanned_routes = response
+        .get("scanned_routes")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| anyhow!("published daemon source refresh has no scanned route count"))?;
+    let _unsupported_routes = response
+        .get("unsupported_routes")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or_else(|| anyhow!("published daemon source refresh has no unsupported route count"))?;
+    Ok(request_receipt.source_count(verified))
+}
+
 #[cfg(test)]
 mod progress_poll_tests {
     use super::*;
+    use ctx_history_core::{
+        CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation,
+    };
+    use ctx_history_index::{
+        GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
+    };
+
+    fn source_count_route(byte: u8) -> SourceRouteIdentity {
+        SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
+    }
+
+    fn verified_source_count_routes(route_bytes: &[u8]) -> (tempfile::TempDir, VerifiedIndex) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        let mut routes = Vec::new();
+        for byte in route_bytes {
+            let route = source_count_route(*byte);
+            let source = SourceKey::derive(
+                "codex",
+                "codex_session_jsonl",
+                "session",
+                1,
+                SourceAnchor::CatalogLineage([*byte; 32]),
+            )
+            .unwrap();
+            let observation =
+                SourceObservation::new(source.clone(), "source-count-test-v1", vec![*byte])
+                    .unwrap();
+            writer.begin_source(source.clone()).unwrap();
+            writer
+                .certify_source(
+                    CertifiedSource::certify(
+                        observation.clone(),
+                        observation,
+                        "source-count-test-v1",
+                        [*byte; 32],
+                        ScannedSourceCounts::default(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            routes.push(SourceRouteSnapshot::present(route, vec![source]).unwrap());
+        }
+        writer.set_present_source_routes(routes).unwrap();
+        writer.commit(|_| true).unwrap();
+        let verified = VerifiedIndex::open(temp.path()).unwrap();
+        (temp, verified)
+    }
+
+    fn typed_terminal_status() -> Value {
+        let request_id = Uuid::from_u128(0x294_0100).to_string();
+        let physical_attempt_id = Uuid::from_u128(0x294_0101).to_string();
+        let retryable_route = "a1".repeat(32);
+        let blocked_route = "a2".repeat(32);
+        json!({
+            "ok": true,
+            "schema_version": 1,
+            "owner": "daemon",
+            "request_id": request_id,
+            "request_state": "failed",
+            "logical_request_id": request_id,
+            "logical_phase": "terminal",
+            "physical_attempt_id": physical_attempt_id,
+            "physical_attempt_state": "failed",
+            "progress_owner_request_id": physical_attempt_id,
+            "progress_owner_attempt_state": "failed",
+            "structured_outcome": {
+                "code": "source_failures",
+                "class": "mixed",
+                "retryable": true,
+                "affected_routes": [retryable_route.clone(), blocked_route.clone()],
+                "retryable_routes": [retryable_route],
+                "blocked_routes": [blocked_route],
+                "physical_attempt_id": physical_attempt_id,
+                "retained_generation": "b1".repeat(32),
+                "retry_advice": "retry_affected_routes",
+                "detail": "typed mixed route outcome",
+            },
+        })
+    }
+
+    #[test]
+    fn published_source_count_uses_request_routes_not_global_or_diagnostic_counts() {
+        let (_temp, verified) = verified_source_count_routes(&[1, 2, 3, 4]);
+        for (name, scanned_routes, unsupported_routes, route_results, global_sources, expected) in [
+            ("unsupported only", 0, 1, vec![], 4, 0),
+            (
+                "mixed executable and unsupported",
+                1,
+                1,
+                vec![SourceBackedRefreshRouteResult::succeeded(
+                    source_count_route(1).as_str().to_owned(),
+                    false,
+                )],
+                4,
+                1,
+            ),
+            (
+                "covered executable route",
+                0,
+                3,
+                vec![SourceBackedRefreshRouteResult::succeeded(
+                    source_count_route(2).as_str().to_owned(),
+                    false,
+                )],
+                4,
+                1,
+            ),
+            (
+                "failed carried source remains global only",
+                1,
+                3,
+                vec![SourceBackedRefreshRouteResult::failed(
+                    source_count_route(2).as_str().to_owned(),
+                    "unavailable".to_owned(),
+                    true,
+                )],
+                4,
+                0,
+            ),
+            (
+                "global publication contains unrelated sources",
+                38,
+                37,
+                vec![
+                    SourceBackedRefreshRouteResult::succeeded(
+                        source_count_route(3).as_str().to_owned(),
+                        true,
+                    ),
+                    SourceBackedRefreshRouteResult::failed(
+                        source_count_route(30).as_str().to_owned(),
+                        "unavailable".to_owned(),
+                        false,
+                    ),
+                ],
+                4,
+                1,
+            ),
+        ] {
+            let receipt = SourceBackedRefreshReceipt {
+                previous_generation: None,
+                published_generation: verified.generation_id().to_owned(),
+                generation_changed: true,
+                published_explicit_source_catalog: None,
+                current: SourceBackedRefreshCurrent {
+                    source_count: global_sources,
+                    ..SourceBackedRefreshCurrent::default()
+                },
+                route_results,
+                catalog_route_bindings: Vec::new(),
+            };
+            let response = json!({
+                "scanned_routes": scanned_routes,
+                "unsupported_routes": unsupported_routes,
+            });
+            assert_eq!(
+                published_source_count(&response, &receipt, &verified).unwrap(),
+                expected,
+                "{name}"
+            );
+        }
+
+        let receipt = SourceBackedRefreshReceipt {
+            previous_generation: None,
+            published_generation: verified.generation_id().to_owned(),
+            generation_changed: true,
+            published_explicit_source_catalog: None,
+            current: SourceBackedRefreshCurrent::default(),
+            route_results: vec![
+                SourceBackedRefreshRouteResult::succeeded(
+                    source_count_route(4).as_str().to_owned(),
+                    false,
+                ),
+                SourceBackedRefreshRouteResult::failed(
+                    source_count_route(5).as_str().to_owned(),
+                    "incompatible".to_owned(),
+                    false,
+                ),
+            ],
+            catalog_route_bindings: Vec::new(),
+        };
+        assert_eq!(
+            published_source_count(
+                &json!({"scanned_routes": 2, "unsupported_routes": 1}),
+                &receipt,
+                &verified,
+            )
+            .unwrap(),
+            1,
+            "an exact incompatible route outcome is not a published source route"
+        );
+    }
 
     #[test]
     fn identical_poll_is_suppressed_until_heartbeat_or_terminal_state() {
-        let progress = SourceBackedRefreshProgress::default();
+        let status = RefreshStatus::parse_schema_v1(json!({
+            "request_id": "request",
+            "request_state": "running",
+            "progress": {
+                "phase": "refreshing",
+                "completed_sources": 0,
+                "total_sources": 0,
+                "total_sources_known": false
+            }
+        }))
+        .unwrap();
         let now = StdInstant::now();
         assert!(!should_report_progress(
-            Some(&progress),
+            Some(&status),
             Some(now),
-            &progress,
-            SourceRefreshProtocolState::Running,
+            &status,
+            RefreshRequestState::Running,
             now,
         ));
         assert!(should_report_progress(
-            Some(&progress),
+            Some(&status),
             Some(now),
-            &progress,
-            SourceRefreshProtocolState::Running,
+            &status,
+            RefreshRequestState::Running,
             now + SOURCE_REFRESH_PROGRESS_HEARTBEAT,
         ));
         assert!(should_report_progress(
-            Some(&progress),
+            Some(&status),
             Some(now),
-            &progress,
-            SourceRefreshProtocolState::Published,
+            &status,
+            RefreshRequestState::Published,
             now,
         ));
+    }
+
+    #[test]
+    fn logical_transition_with_unchanged_counters_is_reported() {
+        let status = |logical_phase: &str| {
+            RefreshStatus::parse_schema_v1(json!({
+                "request_id": "logical-request",
+                "request_state": "running",
+                "logical_request_id": "logical-request",
+                "logical_phase": logical_phase,
+                "physical_attempt_id": "physical-attempt",
+                "physical_attempt_state": "running",
+                "progress_owner_request_id": "physical-attempt",
+                "progress_owner_attempt_state": "running",
+                "progress": {
+                    "phase": "refreshing",
+                    "completed_sources": 1,
+                    "total_sources": 2,
+                    "total_sources_known": true
+                }
+            }))
+            .unwrap()
+        };
+        let attached = status("attached");
+        let coverage = status("coverage_check");
+        let now = StdInstant::now();
+        assert!(should_report_progress(
+            Some(&attached),
+            Some(now),
+            &coverage,
+            RefreshRequestState::Running,
+            now,
+        ));
+    }
+
+    #[test]
+    fn structured_terminal_error_preserves_engine_route_dispositions() {
+        let response = typed_terminal_status();
+        let protocol = source_refresh_protocol_status(&response).unwrap();
+        assert_eq!(protocol.request_state(), RefreshRequestState::Failed);
+        let error = match failed_refresh_response(&response, protocol.into_terminal_outcome()) {
+            Ok(_) => panic!("failed status must return a terminal error"),
+            Err(error) => error,
+        };
+        let terminal = error
+            .downcast_ref::<SourceBackedRefreshTerminalError>()
+            .expect("typed terminal error");
+
+        assert_eq!(terminal.code, "source_failures");
+        assert_eq!(terminal.class, "mixed");
+        assert!(terminal.retryable);
+        assert_eq!(terminal.affected_routes.len(), 2);
+        assert_eq!(terminal.retryable_routes, vec!["a1".repeat(32)]);
+        assert_eq!(terminal.blocked_routes, vec!["a2".repeat(32)]);
+        assert_eq!(
+            terminal.physical_attempt_id,
+            Uuid::from_u128(0x294_0101).to_string()
+        );
+        assert_eq!(
+            terminal.retained_generation.as_deref(),
+            Some("b1".repeat(32).as_str())
+        );
+        assert_eq!(
+            terminal.retry_advice.as_deref(),
+            Some("retry_affected_routes")
+        );
+    }
+
+    #[test]
+    fn present_structured_fields_are_strictly_validated() {
+        let mut unknown = typed_terminal_status();
+        unknown["structured_outcome"]["code"] = json!("invented_code");
+        assert!(format!(
+            "{:#}",
+            source_refresh_protocol_status(&unknown).unwrap_err()
+        )
+        .contains("unknown code"));
+
+        let mut overlap = typed_terminal_status();
+        overlap["structured_outcome"]["blocked_routes"] = json!(["a1".repeat(32)]);
+        assert!(format!(
+            "{:#}",
+            source_refresh_protocol_status(&overlap).unwrap_err()
+        )
+        .contains("inconsistent route dispositions"));
+
+        let mut partial = typed_terminal_status();
+        partial.as_object_mut().unwrap().remove("logical_phase");
+        assert!(format!(
+            "{:#}",
+            source_refresh_protocol_status(&partial).unwrap_err()
+        )
+        .contains("partial typed logical status"));
+    }
+
+    #[test]
+    fn attached_logical_phase_remains_active_until_engine_terminalizes_it() {
+        let request_id = Uuid::from_u128(0x294_0200).to_string();
+        let physical_attempt_id = Uuid::from_u128(0x294_0201).to_string();
+        let response = json!({
+            "request_id": request_id,
+            "request_state": "queued",
+            "logical_request_id": request_id,
+            "logical_phase": "attached",
+            "physical_attempt_id": physical_attempt_id,
+            "physical_attempt_state": "running",
+            "progress_owner_request_id": physical_attempt_id,
+            "progress_owner_attempt_state": "running",
+        });
+
+        let protocol = source_refresh_protocol_status(&response).unwrap();
+        assert_eq!(protocol.request_state(), RefreshRequestState::Queued);
+        assert!(matches!(
+            protocol,
+            RefreshStatusKind::Logical(ref status)
+                if status.logical_phase == RefreshLogicalPhase::Attached
+                    && status.structured_outcome.is_none()
+        ));
+    }
+
+    #[test]
+    fn legacy_terminal_record_uses_explicit_failure_type_fallback() {
+        let response = json!({
+            "request_id": Uuid::from_u128(0x294_0300).to_string(),
+            "request_state": "failed",
+            "failure_type": "unsupported_schema",
+            "last_error": "legacy incompatible source",
+            "previous_generation": "c1".repeat(32),
+        });
+        let protocol = source_refresh_protocol_status(&response).unwrap();
+        assert!(matches!(
+            protocol,
+            RefreshStatusKind::Legacy {
+                request_state: RefreshRequestState::Failed
+            }
+        ));
+        let error = match failed_refresh_response(&response, None) {
+            Ok(_) => panic!("legacy failed status must return an error"),
+            Err(error) => error,
+        };
+        assert!(error
+            .chain()
+            .any(|cause| cause.downcast_ref::<CaptureError>().is_some()));
     }
 }
 

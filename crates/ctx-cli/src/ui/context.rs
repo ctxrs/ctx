@@ -41,6 +41,7 @@ pub(crate) struct RenderContext {
     color_mode: ColorMode,
     is_terminal: bool,
     color_enabled: bool,
+    live_output_capable: bool,
     terminal_width: Option<usize>,
     unicode: bool,
 }
@@ -55,6 +56,7 @@ impl RenderContext {
             color_mode: ColorMode::Never,
             is_terminal: false,
             color_enabled: false,
+            live_output_capable: false,
             terminal_width: None,
             unicode: true,
         }
@@ -71,6 +73,7 @@ impl RenderContext {
             test.terminal_width,
             test.unicode,
             auto_color_enabled,
+            test.term_dumb,
         )
     }
 
@@ -81,6 +84,7 @@ impl RenderContext {
         terminal_width: Option<usize>,
         unicode: bool,
         auto_color_enabled: bool,
+        term_dumb: bool,
     ) -> Self {
         Self::from_capabilities(
             stream,
@@ -89,6 +93,7 @@ impl RenderContext {
             terminal_width,
             unicode,
             auto_color_enabled,
+            term_dumb,
         )
     }
 
@@ -99,6 +104,7 @@ impl RenderContext {
         terminal_width: Option<usize>,
         unicode: bool,
         auto_color_enabled: bool,
+        term_dumb: bool,
     ) -> Self {
         let color_enabled = match color_mode {
             ColorMode::Always => true,
@@ -114,6 +120,7 @@ impl RenderContext {
             color_mode,
             is_terminal,
             color_enabled,
+            live_output_capable: is_terminal && !term_dumb,
             terminal_width,
             unicode,
         }
@@ -135,6 +142,15 @@ impl RenderContext {
         self.color_enabled
     }
 
+    pub(crate) const fn live_output_capable(self) -> bool {
+        self.live_output_capable
+    }
+
+    pub(super) const fn with_terminal_control_support(mut self, supported: bool) -> Self {
+        self.live_output_capable = self.live_output_capable && supported;
+        self
+    }
+
     pub(crate) const fn terminal_width(self) -> Option<usize> {
         self.terminal_width
     }
@@ -148,14 +164,6 @@ impl RenderContext {
 
     pub(crate) const fn unicode(self) -> bool {
         self.unicode
-    }
-
-    pub(super) const fn adapter_choice(self) -> anstream::ColorChoice {
-        if self.color_enabled {
-            anstream::ColorChoice::Always
-        } else {
-            anstream::ColorChoice::Never
-        }
     }
 }
 

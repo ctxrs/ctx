@@ -89,6 +89,15 @@ impl CoreRefreshEngine {
         if durable_queue_entry_count(&state) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             bail!("source refresh retry queue exceeds its bounded capacity");
         }
+        if let Some(authoritative) = authoritative_route_terminal_job(&state, &request_id) {
+            // Route retry/block disposition is already part of the engine's
+            // durable terminal outcome. Do not let a caller turn it into a
+            // second global scheduler retry or replace a canceled logical
+            // successor's exact terminal image.
+            self.write_status(data_root, &authoritative)?;
+            state.pending_scheduler_retry_root_id = None;
+            return Ok(authoritative);
+        }
         let job = job_with_queued_successors(&state, job);
         // Serialize retry metadata against the same queue authority as IPC
         // admission so an older scheduler snapshot cannot erase a successor.
@@ -99,6 +108,38 @@ impl CoreRefreshEngine {
         Ok(job)
     }
 
+    /// Completes the scheduler handoff for a durably terminal admission-fence
+    /// failure. This releases queue capacity without resubmitting capture work
+    /// or changing the failed logical request's terminal image.
+    pub fn complete_retry_admission_handoff(&self, request_id: &str) -> Result<()> {
+        let mut state = self.lock_state();
+        let attempt = find_attempt(&state, request_id)
+            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
+        let retry_admission = attempt.state == SourceBackedRefreshState::Failed
+            && attempt.failure_outcome.as_ref().is_some_and(|outcome| {
+                outcome.code == "source_refresh_admission_failed"
+                    && outcome.retry_advice == Some("retry_admission")
+            });
+        if !retry_admission {
+            bail!("source refresh request `{request_id}` has no terminal retry-admission handoff");
+        }
+        match state.pending_scheduler_retry_root_id.as_deref() {
+            None => Ok(()),
+            Some(pending) if pending == request_id => {
+                state.pending_scheduler_retry_root_id = None;
+                Ok(())
+            }
+            Some(pending) => bail!(
+                "source refresh retry-admission handoff belongs to `{pending}`, not `{request_id}`"
+            ),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_scheduler_retry_root_for_test(&self) -> Option<String> {
+        self.lock_state().pending_scheduler_retry_root_id.clone()
+    }
+
     pub fn persist_scheduler_status(
         &self,
         data_root: &Path,
@@ -107,6 +148,17 @@ impl CoreRefreshEngine {
         let mut state = self.lock_state();
         if durable_queue_entry_count(&state) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             bail!("source refresh scheduler queue exceeds its bounded capacity");
+        }
+        if let Some(request_id) = scheduler_job
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|request_id| find_attempt(&state, request_id).is_some())
+        {
+            if let Some(authoritative) = authoritative_route_terminal_job(&state, request_id) {
+                self.write_status(data_root, &authoritative)?;
+                state.pending_scheduler_retry_root_id = None;
+                return Ok(authoritative);
+            }
         }
         let durable_root = state
             .pending_scheduler_retry_root_id
@@ -154,6 +206,7 @@ fn update_progress(
         completed_bytes: update.completed_bytes,
         current_source_progress: update.current_source_progress,
     };
+    attempt.progress_total_sources_known = update.total_sources_known;
     durable_job_json(state, request_id)
 }
 
@@ -169,10 +222,40 @@ fn overlay_daemon_retry_state(mut durable_job: Value, scheduler_job: &Value) -> 
     durable_job
 }
 
+fn authoritative_route_terminal_job(
+    state: &CoreRefreshEngineState,
+    request_id: &str,
+) -> Option<Value> {
+    let attempt = find_attempt(state, request_id)?;
+    let outcome = attempt.failure_outcome.as_ref()?;
+    if outcome.affected_routes.is_empty() {
+        return None;
+    }
+    let physical_attempt_id = attempt
+        .physical_attempt_id
+        .as_deref()
+        .unwrap_or(attempt.request_id.as_str());
+    let durable_request_id = state
+        .attempts
+        .iter()
+        .rev()
+        .find(|candidate| {
+            candidate.request_id != physical_attempt_id
+                && candidate.state == SourceBackedRefreshState::Failed
+                && candidate
+                    .physical_attempt_id
+                    .as_deref()
+                    .unwrap_or(candidate.request_id.as_str())
+                    == physical_attempt_id
+                && candidate.failure_outcome.as_ref() == Some(outcome)
+        })
+        .map(|candidate| candidate.request_id.as_str())
+        .unwrap_or(request_id);
+    durable_job_json(state, durable_request_id)
+}
+
 pub(super) fn durable_job_json(state: &CoreRefreshEngineState, request_id: &str) -> Option<Value> {
-    find_attempt(state, request_id)
-        .map(SourceBackedRefreshAttempt::job_json)
-        .map(|job| job_with_queued_successors(state, job))
+    projected_job_json(state, request_id).map(|job| job_with_queued_successors(state, job))
 }
 
 pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job: Value) -> Value {
@@ -189,7 +272,9 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
                 SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued
             )
         }) {
-            successors.push(job_with_logical_demand(state, active.job_json()));
+            if let Some(job) = projected_job_json(state, &active.request_id) {
+                successors.push(job_with_logical_demand(state, job));
+            }
         }
     }
     successors.extend(
@@ -203,7 +288,7 @@ pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job
                     SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued
                 )
             })
-            .map(SourceBackedRefreshAttempt::job_json)
+            .filter_map(|attempt| projected_job_json(state, &attempt.request_id))
             .map(|job| job_with_logical_demand(state, job)),
     );
     let Some(object) = job.as_object_mut() else {
@@ -396,6 +481,7 @@ fn recover_pending_attempt(
         refresh_scope,
     );
     attempt.request_id = request_id.to_owned();
+    attempt.physical_attempt_id = optional_pending_string(job, "physical_attempt_id")?;
     attempt.state = if request_state == Some("admission_pending") {
         SourceBackedRefreshState::AdmissionPending
     } else {
@@ -421,6 +507,14 @@ fn recover_pending_attempt(
                 .ok_or_else(|| anyhow!("durable source refresh {role} has invalid predecessor ID"))
         })
         .transpose()?;
+    if attempt.physical_attempt_id.is_none() {
+        attempt.physical_attempt_id = Some(
+            attempt
+                .coalesced_into_request_id
+                .clone()
+                .unwrap_or_else(|| attempt.request_id.clone()),
+        );
+    }
     if let Some(requested_at_ms) = job
         .get("requested_at_ms")
         .or_else(|| job.get("last_run_at_ms"))
@@ -446,6 +540,14 @@ fn recover_pending_attempt(
         bail!("durable admission-pending source refresh has no freshness requirement");
     }
     Ok(attempt)
+}
+
+fn optional_pending_string(job: &Value, field: &str) -> Result<Option<String>> {
+    match job.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(_) => bail!("durable source refresh has invalid `{field}`"),
+    }
 }
 
 fn optional_sha256(job: &Value, field: &str) -> Result<Option<String>> {

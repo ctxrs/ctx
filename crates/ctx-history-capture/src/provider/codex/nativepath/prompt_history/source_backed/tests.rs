@@ -2,7 +2,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Barrier},
 };
 
 use ctx_history_core::{CoreRecord, TypedKey};
@@ -127,6 +127,235 @@ fn active_source_family_contract_prompt_history_rejects_same_content_pathname_re
     let retained = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(retained.generation_id(), initial.commit.generation_id);
     assert_eq!(retained.document_count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn active_source_family_contract_prompt_history_rejects_scanner_leaf_open_same_length_inode_swap() {
+    use std::os::unix::fs::MetadataExt;
+
+    let temp = tempdir().unwrap();
+    let provider_root = temp.path().join("provider");
+    fs::create_dir(&provider_root).unwrap();
+    let history = provider_root.join("history.jsonl");
+    write_lines(
+        &history,
+        &[prompt_line("session", 1_700_000_000, "retained seed")],
+    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&history, [19; 32]);
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::new(input).unwrap();
+    let driver = jsonl_family_driver(Arc::new(adapter.clone()), history.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(
+        SourceBackedRoute::automatic(
+            ProviderSource {
+                provider: CaptureProvider::Codex,
+                path: history.clone(),
+                exists: true,
+                source_format: SOURCE_FORMAT,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )
+        .unwrap(),
+    );
+    let index_root = temp.path().join("index");
+    let initial =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+
+    let scanner_bytes = prompt_line("session", 1_700_000_001, "old descriptor");
+    let replacement_bytes = prompt_line("session", 1_700_000_001, "new descriptor");
+    assert_eq!(scanner_bytes.len(), replacement_bytes.len());
+    fs::write(&history, scanner_bytes).unwrap();
+    let replacement = provider_root.join("replacement.jsonl");
+    fs::write(&replacement, replacement_bytes).unwrap();
+    assert_ne!(
+        fs::metadata(&history).unwrap().ino(),
+        fs::metadata(&replacement).unwrap().ino()
+    );
+    let moved = provider_root.join("scanner-opened.jsonl");
+    let swap_path = history.clone();
+    adapter.set_after_family_source_open_hook(move || {
+        fs::rename(&swap_path, moved).unwrap();
+        fs::rename(replacement, swap_path).unwrap();
+    });
+
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(failed.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(failed.failed_routes.len(), 1);
+    assert_eq!(
+        failed.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(failed.failed_routes[0].carried_forward);
+    let retained = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(retained.document_count(), 1);
+    assert_eq!(
+        retained
+            .search_event_candidates("retained seed", 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(retained
+        .search_event_candidates("descriptor", 8)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn active_source_family_contract_prompt_history_rejects_inflight_disappearance_then_deletes() {
+    let temp = tempdir().unwrap();
+    let history = temp.path().join("history.jsonl");
+    write_lines(
+        &history,
+        &[prompt_line("session", 1_700_000_000, "retained prompt")],
+    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&history, [18; 32]);
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::new(input).unwrap();
+    let driver = jsonl_family_driver(Arc::new(adapter.clone()), history.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(
+        SourceBackedRoute::automatic(
+            ProviderSource {
+                provider: CaptureProvider::Codex,
+                path: history.clone(),
+                exists: true,
+                source_format: SOURCE_FORMAT,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )
+        .unwrap(),
+    );
+    let index_root = temp.path().join("index");
+    let initial =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    append(
+        &history,
+        &prompt_line("session", 1_700_000_001, "discarded prompt"),
+    );
+    let removed = history.clone();
+    adapter.set_after_scan_hook(move || fs::remove_file(removed).unwrap());
+
+    let failed =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(failed.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(failed.failed_routes.len(), 1);
+    assert_eq!(
+        failed.failed_routes[0].class,
+        SourceBackedSourceFailureClass::SourceChanged
+    );
+    assert!(failed.failed_routes[0].carried_forward);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        1
+    );
+
+    let deleted =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert!(
+        deleted.failed_routes.is_empty(),
+        "unexpected deletion failure: {:?}",
+        deleted.failed_routes
+    );
+    assert_ne!(deleted.commit.generation_id, initial.commit.generation_id);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        0
+    );
+}
+
+#[test]
+fn active_source_family_contract_prompt_history_defers_live_suffix_exactly_once() {
+    let temp = tempdir().unwrap();
+    let history = temp.path().join("history.jsonl");
+    write_lines(
+        &history,
+        &[prompt_line("session", 1_700_000_000, "frozen prompt")],
+    );
+    let input = CodexPromptHistorySourceBackedInputV0::explicit(&history, [14; 32]);
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::new(input).unwrap();
+    let driver = jsonl_family_driver(Arc::new(adapter.clone()), history.clone());
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(
+        SourceBackedRoute::automatic(
+            ProviderSource {
+                provider: CaptureProvider::Codex,
+                path: history.clone(),
+                exists: true,
+                source_format: SOURCE_FORMAT,
+                source_kind: ProviderSourceKind::NativeHistory,
+                import_support: ProviderImportSupport::Native,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Available,
+                unsupported_reason: None,
+            },
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            driver,
+        )
+        .unwrap(),
+    );
+    let index_root = temp.path().join("index");
+    let cold =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let worker_barrier = Arc::clone(&barrier);
+    let append_path = history.clone();
+    let worker = std::thread::spawn(move || {
+        worker_barrier.wait();
+        append(
+            &append_path,
+            &prompt_line("session", 1_700_000_001, "deferred prompt"),
+        );
+        worker_barrier.wait();
+    });
+    adapter.set_after_scan_hook(move || {
+        barrier.wait();
+        barrier.wait();
+    });
+
+    let deferred =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    worker.join().unwrap();
+    assert!(
+        deferred.failed_routes.is_empty(),
+        "unexpected route failures: {:?}",
+        deferred.failed_routes
+    );
+    assert_eq!(deferred.commit.generation_id, cold.commit.generation_id);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        1
+    );
+
+    let caught_up =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert!(caught_up.failed_routes.is_empty());
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        2
+    );
+
+    let no_op =
+        refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(no_op.commit.generation_id, caught_up.commit.generation_id);
+    assert_eq!(
+        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        2
+    );
 }
 
 #[test]

@@ -555,6 +555,12 @@ fn catalog_codex_session_opened(
     })
 }
 fn read_codex_session_meta_from_opened(opened: &OpenedProviderSourceFile) -> Result<Option<Value>> {
+    let session_meta = read_codex_session_meta(opened)?;
+    opened.revalidate()?;
+    Ok(session_meta)
+}
+
+fn read_codex_session_meta(opened: &OpenedProviderSourceFile) -> Result<Option<Value>> {
     let mut file = opened.file().try_clone()?;
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
@@ -572,12 +578,39 @@ fn read_codex_session_meta_from_opened(opened: &OpenedProviderSourceFile) -> Res
             continue;
         };
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
-            opened.revalidate()?;
             return Ok(Some(value));
         }
     }
-    opened.revalidate()?;
     Ok(None)
+}
+
+/// Reads only the bounded session-meta prefix needed to identify a newly
+/// appearing Codex membership candidate. This deliberately avoids cataloging
+/// or hashing the transcript body.
+pub(crate) fn probe_codex_native_session_id(
+    opened: &OpenedProviderSourceFile,
+) -> Result<Option<String>> {
+    let first = read_codex_session_meta(opened)?
+        .as_ref()
+        .and_then(codex_native_session_id_from_meta);
+    opened.revalidate_same_object()?;
+    let second = read_codex_session_meta(opened)?
+        .as_ref()
+        .and_then(codex_native_session_id_from_meta);
+    opened.revalidate_same_object()?;
+    if first != second {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(first)
+}
+
+fn codex_native_session_id_from_meta(value: &Value) -> Option<String> {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
 }
 pub(crate) fn codex_parent_session_id(source: &Value) -> Option<String> {
     source

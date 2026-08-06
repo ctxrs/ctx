@@ -28,16 +28,16 @@ pub(in crate::semantic) use ctx_history_refresh::RefreshEngine as CoreRefreshEng
 pub(crate) use ctx_history_refresh::{
     explicit_catalog_request_is_accounted_for, nonzero_duration_micros, open_verified_index,
     optional_generation, published_refresh_receipt_for_index, source_backed_index_root,
-    PinnedCorePublication, SourceBackedCurrentSourceProgress,
-    SourceBackedCurrentSourceProgressStage, SourceBackedPublicationMetadata,
-    SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
+    PinnedCorePublication, RefreshOutcomeClass, RefreshRequestState, RefreshStatus,
+    RefreshStatusKind, RefreshTerminalOutcome, SourceBackedCurrentSourceProgress,
+    SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
 };
 
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::{
-    EventWatermark, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
+    EventWatermark, RefreshLogicalPhase, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
     SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-    SourceBackedRefreshTimings,
+    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
 
 #[cfg(test)]
@@ -257,9 +257,11 @@ impl CoreRefreshEngine {
     }
 }
 
+#[allow(unused_imports)] // Stable typed terminal outcome for command/API integrations.
 pub(crate) use client::{
     coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshObservation,
+    coordinate_source_backed_refresh_with_progress, SourceBackedRefreshDaemonUnavailable,
+    SourceBackedRefreshObservation, SourceBackedRefreshTerminalError,
 };
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::count_verified_index_opens;

@@ -84,7 +84,7 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
         if !runtime.history_retry.ready() {
             return Ok(deferred_pending_core_refresh(data_root, runtime));
         }
-        return run_core_refresh(data_root, runtime, source_refresh, false);
+        return run_core_refresh(data_root, runtime, source_refresh);
     }
     if daemon_foreground_query_preempts(query_activity, query_generation) {
         if !daemon_consumer_retry_due(runtime) {
@@ -135,11 +135,12 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
             DaemonCycleStateV1::unknown(),
         ));
     }
-    if !runtime.history_retry.ready() {
-        let job = core_refresh_retry_backoff_job(data_root, &runtime.history_retry);
-        let job = persist_core_scheduler_status(data_root, source_refresh, job)?;
-        let state = daemon_core_cycle_state(&job);
-        return Ok(DaemonIteration::new(false, false, state));
+    // Global history backoff belongs only to an admitted control-plane
+    // finalization. With no pending engine request there is nothing global to
+    // retry, and manufacturing periodic capture work would violate the route
+    // ledger's retry/block dispositions.
+    if runtime.history_retry.consecutive_failures > 0 {
+        runtime.history_retry.reset();
     }
     if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
         return Ok(DaemonIteration::new(
@@ -147,9 +148,6 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
             false,
             DaemonCycleStateV1::unknown(),
         ));
-    }
-    if runtime.history_retry.consecutive_failures > 0 {
-        return run_core_refresh(data_root, runtime, source_refresh, true);
     }
     run_dirty_core_refresh(data_root, runtime, source_refresh)
 }
@@ -419,7 +417,6 @@ fn run_core_refresh(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     source_refresh: Option<&CoreRefreshEngine>,
-    enqueue_periodic: bool,
 ) -> Result<DaemonIteration> {
     let Some(coordinator) = source_refresh else {
         return finish_core_refresh(
@@ -433,20 +430,6 @@ fn run_core_refresh(
             false,
         );
     };
-    if enqueue_periodic {
-        if let Err(error) = coordinator.enqueue_periodic(data_root) {
-            return finish_core_refresh(
-                data_root,
-                runtime,
-                Some(coordinator),
-                core_refresh_failed_job(
-                    data_root,
-                    format!("schedule periodic Core refresh: {error:#}"),
-                ),
-                false,
-            );
-        }
-    }
     let Some(run) = coordinator.run_next(data_root) else {
         return finish_core_refresh(
             data_root,
@@ -569,42 +552,12 @@ fn persist_core_scheduler_status(
     coordinator: Option<&CoreRefreshEngine>,
     job: Value,
 ) -> Result<Value> {
-    run_before_core_scheduler_status_hook();
     let Some(coordinator) = coordinator else {
         write_daemon_job_status(&daemon_core_refresh_job_path(data_root), &job)?;
         return Ok(job);
     };
     coordinator.persist_scheduler_status(data_root, job)
 }
-
-#[cfg(test)]
-thread_local! {
-    static BEFORE_CORE_SCHEDULER_STATUS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn install_before_core_scheduler_status_hook_for_test(hook: impl FnOnce() + 'static) {
-    BEFORE_CORE_SCHEDULER_STATUS_HOOK.with(|slot| {
-        let previous = slot.replace(Some(Box::new(hook)));
-        assert!(
-            previous.is_none(),
-            "scheduler status test hooks must not nest"
-        );
-    });
-}
-
-#[cfg(test)]
-fn run_before_core_scheduler_status_hook() {
-    BEFORE_CORE_SCHEDULER_STATUS_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
-#[cfg(not(test))]
-fn run_before_core_scheduler_status_hook() {}
 
 fn daemon_core_cycle_state(job: &Value) -> DaemonCycleStateV1 {
     let history_backoff = daemon_job_in_retry_backoff(job);
@@ -656,7 +609,18 @@ pub(super) fn daemon_foreground_query_preempts(
 
 pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, data_root: &Path) {
     let status = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
-    runtime.history_retry.restore(status.as_ref());
+    // Current records identify the only global retry domain explicitly. The
+    // phase check is the narrow compatibility path for pre-domain records;
+    // route-terminal capture failures must never restore global backoff.
+    let finalization = status.as_ref().filter(|status| {
+        status.get("retry_domain").and_then(Value::as_str) == Some("control_plane")
+            || status
+                .get("progress")
+                .and_then(|progress| progress.get("phase"))
+                .and_then(Value::as_str)
+                == Some("persisting_terminal")
+    });
+    runtime.history_retry.restore(finalization);
 }
 
 pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_root: &Path) {
@@ -844,7 +808,7 @@ pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job:
 }
 
 fn record_source_refresh_retry(
-    data_root: &Path,
+    _data_root: &Path,
     backoff: &mut DaemonRetryBackoff,
     coordinator: &CoreRefreshEngine,
     mut job: Value,
@@ -852,12 +816,27 @@ fn record_source_refresh_retry(
 ) -> Result<Value> {
     if status_persistence_pending {
         job["retryable"] = Value::Bool(true);
+        job["retry_domain"] = Value::String("control_plane".to_owned());
+        job["retry_advice"] = Value::String("retry_finalization".to_owned());
+        return Ok(record_daemon_job_retry(backoff, job));
     }
-    let persist_retry = daemon_job_should_backoff(&job);
-    let job = record_daemon_job_retry(backoff, job);
-    if persist_retry && !status_persistence_pending {
-        return coordinator.persist_retry_status(data_root, job);
+
+    backoff.reset();
+    let status = RefreshStatus::classify_schema_v1(&job)?;
+    if status
+        .terminal_outcome()
+        .and_then(|outcome| outcome.retry_advice)
+        == Some(RefreshRetryAdvice::RetryAdmission)
+    {
+        let request_id = job
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("terminal retry-admission status has no request ID"))?;
+        coordinator.complete_retry_admission_handoff(request_id)?;
     }
+    // The engine already persisted this capture terminal together with its
+    // logical-demand queue. Rewriting it here could discard the durable image
+    // needed to cancel/replay attached demands after restart.
     Ok(job)
 }
 
@@ -926,6 +905,7 @@ use std::{
 use anyhow::Result;
 use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::utc_now;
+use ctx_history_refresh::{RefreshRetryAdvice, RefreshStatus};
 use ctx_pro_host_protocol::ProFilesystemLayout;
 use serde_json::{json, Value};
 

@@ -35,7 +35,7 @@ fn redraw(case: FixtureCase, columns: usize) -> Vec<u8> {
         output.dashboard = Default::default();
         output.print_human(&status).unwrap();
     }
-    output.writer
+    output.into_writer()
 }
 
 #[test]
@@ -189,6 +189,6 @@ fn all_22_fixture_screens_and_redraws_match_the_exact_golden_digest() {
     let digest = format!("{:x}", Sha256::digest(golden));
     assert_eq!(
         digest,
-        "8a1a3453da7a98964b41845dbd2ad16cc9c5a9447c08c6779d74c53e3ed20a72"
+        "5da40e1498351a146e551ccb0a73aabfd067a178a71bdbe52b678b735e762464"
     );
 }

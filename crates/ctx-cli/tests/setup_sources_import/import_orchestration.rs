@@ -195,6 +195,18 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(r#""type":"ctx_progress""#), "{stderr}");
     assert!(stderr.contains(r#""operation":"import""#), "{stderr}");
+    assert!(
+        !stderr.contains("Refreshing the provider-authoritative source index"),
+        "{stderr}"
+    );
+    let events = stderr
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events.iter().filter(|event| event["done"] == true).count(),
+        1
+    );
 }
 
 #[test]
@@ -264,7 +276,19 @@ fn human_import_is_outcome_first_without_internal_generation_fields() {
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.ends_with("Published the source for indexing.\n"),
+        stderr
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("History refresh complete (")),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("History refresh complete (").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Published the source for indexing"),
         "{stderr}"
     );
     assert!(!stderr.contains("generation"), "{stderr}");
@@ -848,7 +872,11 @@ fn explicit_import_reports_requested_route_failure_when_another_cold_route_publi
         .find(|event| event["done"] == true)
         .expect("terminal explicit-import progress event");
     assert_eq!(terminal_progress["operation"], "import", "{stderr}");
-    assert_eq!(terminal_progress["phase"], "failed", "{stderr}");
+    assert_eq!(terminal_progress["phase"], "published", "{stderr}");
+    assert_eq!(
+        terminal_progress["structured_outcome"]["code"], "completed_with_source_failures",
+        "{stderr}"
+    );
 }
 
 #[test]

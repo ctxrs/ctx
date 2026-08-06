@@ -223,6 +223,16 @@ fn running_cold_all_satisfies_fresh_demand_with_one_full_pass() {
         None,
         false,
     );
+    let predecessor_id = SourceBackedPublicationMetadata::decode(
+        &open_verified_index(&source_backed_index_root(&data_root)).unwrap(),
+    )
+    .unwrap()
+    .request_id;
+    let checking = coordinator.status(&demand_id).unwrap();
+    assert_eq!(checking["logical_phase"], "coverage_check");
+    assert_eq!(checking["physical_attempt_id"], predecessor_id);
+    assert_eq!(checking["progress_owner_request_id"], predecessor_id);
+    assert_eq!(checking["progress"]["phase"], "published");
     let sampled_route = route;
     let sampled_observation = route_observation;
     let resolution = coordinator
@@ -235,6 +245,12 @@ fn running_cold_all_satisfies_fresh_demand_with_one_full_pass() {
     assert!(!resolution.did_work);
     assert!(!resolution.failed);
     assert_eq!(resolution.job["scanned_routes"], 0);
+    assert_eq!(resolution.job["logical_phase"], "terminal");
+    assert_eq!(
+        resolution.job["structured_outcome"]["physical_attempt_id"],
+        predecessor_id
+    );
+    assert_eq!(resolution.job["structured_outcome"]["code"], "completed");
     assert!(selected_deltas.lock().unwrap().is_empty());
     assert!(!coordinator.has_pending_request());
 }
@@ -305,22 +321,74 @@ fn fully_covered_resolver_mismatch_and_unavailable_samples_execute_exact_delta()
         let sampled_by_resolver = Arc::clone(&sampled);
         let sampled_route = route.clone();
 
-        let resolution = coordinator
-            .run_next_with_post_publication_sampler_for_test(&data_root, move |_| {
+        let coverage =
+            coordinator.resolve_fully_covered_continuation_for_test(&data_root, move |_| {
                 sampled_by_resolver.store(true, Ordering::SeqCst);
                 Ok(BTreeMap::from([(sampled_route, sampled_observation)]))
-            })
-            .unwrap_or_else(|| panic!("{case} exact delta resolution"));
+            });
+        assert!(coverage.is_none(), "{case}");
+        let waiting = coordinator.status(&demand_id).unwrap();
+        assert_eq!(waiting["logical_phase"], "waiting", "{case}");
+        assert_eq!(waiting["physical_attempt_id"], demand_id, "{case}");
+        assert_eq!(waiting["physical_attempt_state"], "queued", "{case}");
+        assert_eq!(waiting["progress_owner_request_id"], demand_id, "{case}");
+
+        let (gate, runner_started, runner_release) = RunningRefreshGate::new();
+        let resolution = std::thread::scope(|scope| {
+            let runner = Arc::clone(&coordinator);
+            let exact_route = route.clone();
+            let recorded_deltas = Arc::clone(&selected_deltas);
+            let successor_demand_id = demand_id.clone();
+            let generation = format!("exact-successor-{case}");
+            let probed_generation = generation.clone();
+            let successor = scope.spawn(move || {
+                runner
+                    .run_next_with(
+                        |request_id, _| {
+                            assert_eq!(request_id, successor_demand_id);
+                            recorded_deltas
+                                .lock()
+                                .unwrap()
+                                .push(BTreeSet::from([exact_route.clone()]));
+                            runner_started.send(()).expect("signal exact successor");
+                            runner_release.recv().expect("release exact successor");
+                            Ok(publication_for_routes(
+                                &generation,
+                                &BTreeSet::from([exact_route]),
+                            ))
+                        },
+                        || Ok(Some(probed_generation)),
+                        |_| Ok(()),
+                        |_| Ok(()),
+                    )
+                    .unwrap_or_else(|| panic!("{case} exact delta resolution"))
+            });
+            gate.wait_until_started();
+            let running = coordinator.status(&demand_id).unwrap();
+            assert_eq!(running["logical_phase"], "exact_successor", "{case}");
+            assert_eq!(running["physical_attempt_id"], demand_id, "{case}");
+            assert_eq!(running["physical_attempt_state"], "running", "{case}");
+            assert_eq!(running["progress_owner_request_id"], demand_id, "{case}");
+            assert_eq!(running["progress_owner_attempt_state"], "running", "{case}");
+            gate.release();
+            successor.join().unwrap()
+        });
 
         assert!(sampled.load(Ordering::SeqCst), "{case}");
         assert!(resolution.did_work, "{case}");
         assert_eq!(request_id(&resolution.job), demand_id, "{case}");
         assert_eq!(resolution.job["request_state"], "published", "{case}");
+        assert_eq!(resolution.job["logical_phase"], "terminal", "{case}");
+        assert_eq!(
+            resolution.job["structured_outcome"]["physical_attempt_id"], demand_id,
+            "{case}"
+        );
         assert_eq!(
             selected_deltas.lock().unwrap().as_slice(),
             &[BTreeSet::from([route.clone()])],
             "{case}"
         );
+        assert!(coordinator.run_next(&data_root).is_none(), "{case}");
     }
 }
 

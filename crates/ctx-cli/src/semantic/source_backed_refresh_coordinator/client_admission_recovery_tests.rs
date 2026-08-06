@@ -42,7 +42,7 @@ fn admission_pending_is_a_non_terminal_protocol_state() {
     validate_source_refresh_status_response_authority(&response, request_id).unwrap();
     assert_eq!(
         source_refresh_protocol_state(&response).unwrap(),
-        SourceRefreshProtocolState::AdmissionPending
+        RefreshRequestState::AdmissionPending
     );
 }
 

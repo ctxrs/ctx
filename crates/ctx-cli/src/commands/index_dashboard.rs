@@ -2,8 +2,8 @@ use serde_json::Value;
 
 use crate::progress::{format_bytes, format_count};
 use crate::ui::{
-    fields, outcome, progress, section, Document, Field, Line, Outcome, OutcomeState, Progress,
-    RenderContext, Span, Token,
+    fields, outcome, progress, refresh_progress, section, Document, Field, Line, Outcome,
+    OutcomeState, Progress, RefreshProgressSnapshot, RenderContext, Span, Token,
 };
 
 #[derive(Debug, Default)]
@@ -177,59 +177,9 @@ fn render_refresh(readiness: &Value, context: &RenderContext) -> Document {
 }
 
 fn render_refresh_progress(readiness: &Value, context: &RenderContext) -> Document {
-    let phase = string_at(readiness, &["refresh", "progress", "phase"], "pending");
-    let completed = u64_at(readiness, &["refresh", "progress", "completed_sources"]).unwrap_or(0);
-    let total = u64_at(readiness, &["refresh", "progress", "total_sources"])
-        .filter(|total| *total > 0)
-        .map(|total| total.max(completed));
-    let label = match phase.as_str() {
-        "queued" | "pending" => "History refresh is queued",
-        "committing" | "committed" | "publishing" => "Publishing search index",
-        _ => "Refreshing history",
-    };
-    let mut document = progress(
-        context,
-        Progress {
-            label,
-            current: completed,
-            total,
-            detail: None,
-        },
-    );
-    let sources = total
-        .map(|total| {
-            format!(
-                "{} / {}",
-                format_count_u64(completed),
-                format_count_u64(total)
-            )
-        })
-        .unwrap_or_else(|| "measuring".to_owned());
-    let current_source =
-        value_at(readiness, &["refresh", "progress", "current_source"]).and_then(Value::as_str);
-    let completed_records = u64_at(readiness, &["refresh", "progress", "completed_records"]);
-    let completed_bytes = u64_at(readiness, &["refresh", "progress", "completed_bytes"]);
-    let phase = humanize(&phase);
-    let mut details = vec![("Sources", sources), ("Phase", phase)];
-    if let Some(current_source) = current_source {
-        details.push(("Source", current_source.to_owned()));
-        if let Some(completed_records) = completed_records {
-            details.push((
-                "Records",
-                format!("{} accepted", format_count_u64(completed_records)),
-            ));
-        }
-        if let Some(completed_bytes) = completed_bytes {
-            details.push(("Scanned", format_bytes(completed_bytes)));
-        }
-    }
-    let detail_fields = details
-        .iter()
-        .map(|(label, value)| Field::new(label, value.as_str()))
-        .collect::<Vec<_>>();
-    document.push_blank();
-    document.append(fields(context, &detail_fields));
-    document
+    RefreshProgressSnapshot::from_schema_v1(&readiness["refresh"])
+        .map(|snapshot| refresh_progress(context, &snapshot))
+        .unwrap_or_else(|_| fields(context, &[Field::new("Refresh", "status unavailable")]))
 }
 
 fn render_semantic(readiness: &Value, context: &RenderContext) -> Document {
@@ -439,10 +389,19 @@ mod tests {
             "refresh": {
                 "status": "pending",
                 "reason": "core_refresh_pending",
+                "request_id": "logical-request",
+                "request_state": "running",
+                "logical_request_id": "logical-request",
+                "logical_phase": "direct",
+                "physical_attempt_id": "physical-attempt",
+                "physical_attempt_state": "running",
+                "progress_owner_request_id": "physical-attempt",
+                "progress_owner_attempt_state": "running",
                 "progress": {
                     "phase": "scanning_provider_sources",
                     "completed_sources": 7,
                     "total_sources": 12,
+                    "total_sources_known": true,
                     "current_source": "~/.local/share/opencode/opencode.db",
                     "completed_records": 1234,
                     "completed_bytes": 4 * 1024 * 1024,

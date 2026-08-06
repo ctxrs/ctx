@@ -1044,7 +1044,8 @@ fn source_backed_custom_adapter_has_no_preview_or_store_body_fallback() {
     assert!(!source.contains("hydrate_"));
     assert!(source.contains("scan_optimized_leaf"));
     assert!(source.contains("base_source_path"));
-    assert!(source.contains("revalidate_leaf"));
+    assert!(source.contains("JsonlFamilyTerminalProof::exact_file"));
+    assert!(!source.contains("fn revalidate_leaf"));
 
     let registration = include_str!("../../source_backed/registration/families/jsonl/other.rs");
     assert!(registration.contains("custom_history_jsonl_family_adapter"));

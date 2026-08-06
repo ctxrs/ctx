@@ -86,6 +86,9 @@ fn unsupported_only_refresh_publishes_empty_once_and_replays_as_a_no_op() {
         )
         .unwrap();
     assert!(!run.failed);
+    assert_eq!(run.job["source_count"], 0);
+    assert_eq!(run.job["scanned_routes"], 0);
+    assert_eq!(run.job["unsupported_routes"], 1);
     assert!(run.job.get("published_explicit_source_catalog").is_none());
     assert!(run.job["receipt"]
         .get("published_explicit_source_catalog")

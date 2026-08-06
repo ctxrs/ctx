@@ -12,6 +12,10 @@ thread_local! {
     static PREFIX_HASH_BYTES: Cell<u64> = const { Cell::new(0) };
     static AFTER_PREFIX_HASH_HOOK: RefCell<Option<Box<dyn FnOnce()>>> =
         const { RefCell::new(None) };
+    static AFTER_SECOND_PREFIX_HASH_HOOK: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
+    static AFTER_FINAL_PREFIX_HASH_HOOK: RefCell<Option<Box<dyn FnOnce()>>> =
+        const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -32,8 +36,40 @@ pub(crate) fn set_after_jsonl_prefix_hash_hook(hook: impl FnOnce() + 'static) {
 }
 
 #[cfg(test)]
+pub(crate) fn set_after_second_jsonl_prefix_hash_hook(hook: impl FnOnce() + 'static) {
+    AFTER_SECOND_PREFIX_HASH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_final_jsonl_prefix_hash_hook(hook: impl FnOnce() + 'static) {
+    AFTER_FINAL_PREFIX_HASH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
 fn run_after_jsonl_prefix_hash_hook() {
     AFTER_PREFIX_HASH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_after_second_jsonl_prefix_hash_hook() {
+    AFTER_SECOND_PREFIX_HASH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn run_after_final_jsonl_prefix_hash_hook() {
+    AFTER_FINAL_PREFIX_HASH_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
             hook();
         }
@@ -57,79 +93,132 @@ pub(crate) fn revalidate_frozen_prefix(
     prefix_length: u64,
     expected_prefix_digest: [u8; 32],
 ) -> Result<JsonlFileObservation> {
+    revalidate_frozen_prefix_with_hasher(
+        source_path,
+        source_file,
+        frozen,
+        prefix_length,
+        expected_prefix_digest,
+        new_prefix_hasher(),
+    )
+}
+
+pub(crate) fn revalidate_frozen_prefix_sha256(
+    source_path: &Path,
+    source_file: &OpenedProviderSourceFile,
+    frozen: &JsonlFileObservation,
+    prefix_length: u64,
+    expected_prefix_digest: [u8; 32],
+) -> Result<JsonlFileObservation> {
+    revalidate_frozen_prefix_with_hasher(
+        source_path,
+        source_file,
+        frozen,
+        prefix_length,
+        expected_prefix_digest,
+        Sha256::default(),
+    )
+}
+
+fn revalidate_frozen_prefix_with_hasher(
+    source_path: &Path,
+    source_file: &OpenedProviderSourceFile,
+    frozen: &JsonlFileObservation,
+    prefix_length: u64,
+    expected_prefix_digest: [u8; 32],
+    prefix_hasher: Sha256,
+) -> Result<JsonlFileObservation> {
     if prefix_length > frozen.length {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
-    for _ in 0..2 {
-        let before = observe_metadata(
-            source_path,
-            source_file.file(),
-            &source_file.file().metadata()?,
-        )?;
-        if !frozen.admits_frozen_prefix_in(&before) {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        source_file.revalidate_same_object()?;
-
-        // An unchanged strong observation already binds the retained bytes.
-        // Avoid turning exact no-op refresh into an O(total source bytes)
-        // prefix rehash.
-        if &before == frozen {
-            let after = observe_metadata(
-                source_path,
-                source_file.file(),
-                &source_file.file().metadata()?,
-            )?;
-            source_file.revalidate_same_object()?;
-            if after == before {
-                return Ok(after);
-            }
-            continue;
-        }
-
-        let observed = hash_prefix(
-            &mut source_file.file().try_clone()?,
-            prefix_length,
-            new_prefix_hasher(),
-        )?;
-        #[cfg(test)]
-        run_after_jsonl_prefix_hash_hook();
-        let after = observe_metadata(
-            source_path,
-            source_file.file(),
-            &source_file.file().metadata()?,
-        )?;
-        source_file.revalidate_same_object()?;
-        if after != before {
-            continue;
-        }
-        if prefix_digest(&observed) != expected_prefix_digest {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        // A second digest closes the interval between the first prefix read
-        // and its metadata observation even on filesystems whose change-time
-        // granularity can coalesce two writes. Growth is the only path that
-        // pays this cost; exact no-op remains metadata-only above.
-        let confirmed = hash_prefix(
-            &mut source_file.file().try_clone()?,
-            prefix_length,
-            new_prefix_hasher(),
-        )?;
-        let final_observation = observe_metadata(
-            source_path,
-            source_file.file(),
-            &source_file.file().metadata()?,
-        )?;
-        source_file.revalidate_same_object()?;
-        if final_observation != after {
-            continue;
-        }
-        if prefix_digest(&confirmed) != expected_prefix_digest {
-            return Err(CaptureError::SourceChangedDuringCapture);
-        }
-        return Ok(final_observation);
+    let before = observe_metadata(
+        source_path,
+        source_file.file(),
+        &source_file.file().metadata()?,
+    )?;
+    if !frozen.admits_frozen_prefix_in(&before) {
+        return Err(CaptureError::SourceChangedDuringCapture);
     }
-    Err(CaptureError::SourceChangedDuringCapture)
+    source_file.revalidate_same_object()?;
+
+    // An unchanged strong observation already binds the retained bytes. This
+    // keeps an exact no-op metadata-only instead of rehashing the whole corpus.
+    if &before == frozen {
+        return Ok(before);
+    }
+
+    verify_prefix_digest(
+        source_file,
+        prefix_length,
+        expected_prefix_digest,
+        prefix_hasher.clone(),
+    )?;
+    #[cfg(test)]
+    run_after_jsonl_prefix_hash_hook();
+    let middle = observe_metadata(
+        source_path,
+        source_file.file(),
+        &source_file.file().metadata()?,
+    )?;
+    source_file.revalidate_same_object()?;
+    if !before.admits_frozen_prefix_in(&middle) {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+
+    // Exact prefix equality plus monotonic same-object observations admits a
+    // continuously growing append log. Requiring metadata to stop changing
+    // would make an active terminal source impossible to certify.
+    verify_prefix_digest(
+        source_file,
+        prefix_length,
+        expected_prefix_digest,
+        prefix_hasher.clone(),
+    )?;
+    #[cfg(test)]
+    run_after_second_jsonl_prefix_hash_hook();
+    let after = observe_metadata(
+        source_path,
+        source_file.file(),
+        &source_file.file().metadata()?,
+    )?;
+    source_file.revalidate_same_object()?;
+    if !middle.admits_frozen_prefix_in(&after) {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+
+    // End on content proof so rewrite-plus-append after the preceding metadata
+    // observation cannot be mistaken for deferred growth.
+    verify_prefix_digest(
+        source_file,
+        prefix_length,
+        expected_prefix_digest,
+        prefix_hasher,
+    )?;
+    #[cfg(test)]
+    run_after_final_jsonl_prefix_hash_hook();
+    // Bind the final content proof to both the retained object that was hashed
+    // and the authority-relative directory entry that currently names it.
+    // Append growth remains permitted because this compares object identity,
+    // while replacement, ancestor swaps, and route retargeting fail closed.
+    source_file.revalidate_same_object()?;
+    Ok(after)
+}
+
+fn verify_prefix_digest(
+    source_file: &OpenedProviderSourceFile,
+    prefix_length: u64,
+    expected_prefix_digest: [u8; 32],
+    prefix_hasher: Sha256,
+) -> Result<()> {
+    let observed = hash_prefix(
+        &mut source_file.file().try_clone()?,
+        prefix_length,
+        prefix_hasher,
+    )?;
+    if prefix_digest(&observed) != expected_prefix_digest {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    Ok(())
 }
 
 pub(super) fn hash_prefix(file: &mut File, length: u64, mut hasher: Sha256) -> Result<Sha256> {

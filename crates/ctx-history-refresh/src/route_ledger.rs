@@ -258,6 +258,23 @@ impl DirtySourceRoutes {
         scheduled
     }
 
+    /// Restores a durable non-retryable route disposition without inventing a
+    /// scheduler deadline. A newer watcher event, explicit seed, or parser
+    /// revision seed reactivates the route through `mark_dirty` as usual.
+    pub(super) fn block_exact_routes<'a>(
+        &mut self,
+        routes: impl IntoIterator<Item = &'a SourceRouteIdentity>,
+    ) {
+        for route in routes {
+            let Some(state) = self.dirty.get_mut(route) else {
+                continue;
+            };
+            state.in_flight = None;
+            state.permanently_blocked = true;
+            state.reset_retry();
+        }
+    }
+
     /// Earliest time at which any non-blocked, non-admitted route can run.
     pub(super) fn next_due_at_ms(&self) -> Option<u64> {
         if self.dirty.is_empty() {
@@ -281,6 +298,13 @@ impl DirtySourceRoutes {
             })
             .min_by(|left, right| compare_dirty_route_priority(*left, *right))
             .map(|(route, _)| route.clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_permanently_blocked(&self, route: &SourceRouteIdentity) -> bool {
+        self.dirty
+            .get(route)
+            .is_some_and(|state| state.permanently_blocked)
     }
 
     /// Returns a deterministic bounded batch of routes that are ready now.

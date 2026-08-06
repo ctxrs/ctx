@@ -13,7 +13,9 @@ use crate::ImportArgs;
 
 use super::provider_refresh::ProviderRefreshCollector;
 use super::report::{import_error_scope, import_failure_type, print_import_report};
-use super::{run_import_internal, ImportReport, ImportRunOptions, ImportTotals};
+use super::{
+    run_import_internal, ImportReport, ImportRunOptions, ImportRunPresentation, ImportTotals,
+};
 
 pub(crate) fn run_import(
     args: ImportArgs,
@@ -48,10 +50,13 @@ pub(crate) fn run_import(
         provider_refreshes,
         ProviderRefreshTrigger::Import,
         config,
-        ImportRunOptions {
-            progress,
-            json,
-            operation: "import",
+        ImportRunPresentation {
+            options: ImportRunOptions {
+                progress,
+                json,
+                operation: "import",
+            },
+            ui,
         },
     );
     provider_refreshes.stop_timing();
