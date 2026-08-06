@@ -10,6 +10,7 @@ use ctx_history_index::{
     SourceCoreRecordAggregate, SourceEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
     MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
+use ctx_semantic_model::{semantic_model_contract_descriptor, SEMANTIC_DIMENSIONS};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use uuid::Uuid;
@@ -22,7 +23,6 @@ use super::flat_segments::{
 use super::{SemanticChunkDocument, SemanticVectorStore};
 use crate::semantic::{
     indexing::{semantic_chunks_for_document, semantic_document_hash, semantic_source_text},
-    model_contract::SEMANTIC_DIMENSIONS,
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
     SemanticEventDocument,
 };
@@ -79,7 +79,7 @@ impl SourceBackedSemanticGeneration {
         Self::from_verified_index_with_authority(
             index,
             semantic_policy,
-            crate::semantic::model_contract::semantic_model_contract_descriptor(),
+            semantic_model_contract_descriptor(),
         )
     }
 
@@ -175,14 +175,14 @@ pub(super) struct SourceBackedSemanticPage {
     pub(super) terminal: bool,
 }
 
-pub(in crate::semantic) trait SourceBackedSemanticDocumentBuilder {
+pub(in crate::semantic) trait SemanticDocumentBuilder {
     /// Builds one semantic document exclusively from complete records in the
     /// same pinned Core generation. `None` is an intentional policy filter.
     fn build_document(&mut self, record: &CoreEventRecord)
         -> Result<Option<SemanticEventDocument>>;
 }
 
-pub(in crate::semantic) trait SourceBackedSemanticEmbedder {
+pub(in crate::semantic) trait SemanticBatchEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>>;
 }
 
@@ -242,16 +242,12 @@ struct ResolvedSourceDocument {
 }
 
 impl SemanticVectorStore {
-    pub(in crate::semantic) fn reconcile_source_backed_index<B, E>(
+    pub(in crate::semantic) fn reconcile_source_backed_index(
         &mut self,
         index: &VerifiedIndex,
-        builder: &mut B,
-        embedder: &mut E,
-    ) -> Result<SourceBackedSemanticOutcome>
-    where
-        B: SourceBackedSemanticDocumentBuilder,
-        E: SourceBackedSemanticEmbedder,
-    {
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
+    ) -> Result<SourceBackedSemanticOutcome> {
         semantic_owned_sidecar_result((|| {
             let work_before = self.flat.work_stats();
             let generation = SourceBackedSemanticGeneration::from_verified_index(index)?;
@@ -265,17 +261,13 @@ impl SemanticVectorStore {
         })())
     }
 
-    fn reconcile_source_backed_generation<B, E>(
+    fn reconcile_source_backed_generation(
         &mut self,
         index: &VerifiedIndex,
         generation: &SourceBackedSemanticGeneration,
-        builder: &mut B,
-        embedder: &mut E,
-    ) -> Result<SourceBackedSemanticOutcome>
-    where
-        B: SourceBackedSemanticDocumentBuilder,
-        E: SourceBackedSemanticEmbedder,
-    {
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
+    ) -> Result<SourceBackedSemanticOutcome> {
         validate_generation(generation)?;
         if generation.core_generation_id != index.generation_id() {
             return Err(anyhow!(
@@ -411,19 +403,15 @@ impl SemanticVectorStore {
         }
     }
 
-    fn reconcile_next_target_source<B, E>(
+    fn reconcile_next_target_source(
         &mut self,
         index: &VerifiedIndex,
         frontier: &mut SourceProjectionFrontier,
         generation: &SourceBackedSemanticGeneration,
-        builder: &mut B,
-        embedder: &mut E,
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
         states: &mut SourceProjectionStates,
-    ) -> Result<SourceBackedSemanticOutcome>
-    where
-        B: SourceBackedSemanticDocumentBuilder,
-        E: SourceBackedSemanticEmbedder,
-    {
+    ) -> Result<SourceBackedSemanticOutcome> {
         for source in
             generation.sources_after(frontier.source_traversal_after_identity_digest.as_deref())
         {
@@ -497,19 +485,15 @@ impl SemanticVectorStore {
         Ok(None)
     }
 
-    fn reconcile_source_page<B, E>(
+    fn reconcile_source_page(
         &mut self,
         index: &VerifiedIndex,
         frontier: &mut SourceProjectionFrontier,
         source: &SourceBackedSemanticSource,
         generation: &SourceBackedSemanticGeneration,
-        builder: &mut B,
-        embedder: &mut E,
-    ) -> Result<SourceBackedSemanticOutcome>
-    where
-        B: SourceBackedSemanticDocumentBuilder,
-        E: SourceBackedSemanticEmbedder,
-    {
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
+    ) -> Result<SourceBackedSemanticOutcome> {
         let after = frontier
             .after_identity
             .as_deref()

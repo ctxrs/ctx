@@ -175,10 +175,7 @@ impl DaemonRetryBackoff {
 use std::time::{Duration as StdDuration, Instant};
 
 use ctx_history_core::utc_now;
+use ctx_semantic_model::{semantic_model_acquisition_integrity_error, SemanticModelLoadDeferred};
 use serde_json::Value;
 
-use super::{
-    health_search::semantic_model_acquisition_integrity_error,
-    model_contract::SemanticModelLoadDeferred,
-    vector_store_schema::{semantic_vector_failure_kind, SemanticVectorFailureKind},
-};
+use super::vector_store_schema::{semantic_vector_failure_kind, SemanticVectorFailureKind};

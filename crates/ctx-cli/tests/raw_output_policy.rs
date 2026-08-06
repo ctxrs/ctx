@@ -1325,7 +1325,14 @@ fn production_source_paths(root: &Path) -> Vec<PathBuf> {
         }
     }
 
-    let mut paths = vec![root.join("build.rs")];
+    let workspace_root = root
+        .parent()
+        .and_then(Path::parent)
+        .expect("ctx-cli package belongs to the workspace crates directory");
+    let mut paths = vec![
+        root.join("build.rs"),
+        workspace_root.join("crates/ctx-semantic-model/build.rs"),
+    ];
     visit(&root.join("src"), &mut paths);
     paths.sort();
     paths
@@ -1349,13 +1356,21 @@ fn is_test_source_file(path: &Path) -> bool {
 
 fn scan_package() -> Vec<Site> {
     let root = package_root();
+    let workspace_root = root
+        .parent()
+        .and_then(Path::parent)
+        .expect("ctx-cli package belongs to the workspace crates directory");
+    let model_build = workspace_root.join("crates/ctx-semantic-model/build.rs");
     let mut sources = Vec::new();
     for path in production_source_paths(&root) {
-        let relative = path
-            .strip_prefix(&root)
-            .expect("package source belongs to package root")
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = if path == model_build {
+            "crates/ctx-semantic-model/build.rs".to_owned()
+        } else {
+            path.strip_prefix(&root)
+                .expect("CLI source belongs to the CLI package root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         sources.push((relative, source));
@@ -1380,7 +1395,25 @@ fn scan_package() -> Vec<Site> {
 
 #[test]
 fn production_raw_output_inventory_is_closed() {
-    let diff = compare_policy(scan_package(), ALLOWLIST);
+    let sites = scan_package();
+    let build_script_counts = sites.iter().fold(BTreeMap::new(), |mut counts, site| {
+        if matches!(
+            site.key.path.as_str(),
+            "build.rs" | "crates/ctx-semantic-model/build.rs"
+        ) {
+            *counts.entry(site.key.path.as_str()).or_insert(0usize) += 1;
+        }
+        counts
+    });
+    assert_eq!(
+        build_script_counts,
+        BTreeMap::from([
+            ("build.rs", 6),
+            ("crates/ctx-semantic-model/build.rs", 2),
+        ]),
+        "Cargo build-script output authority must remain exactly six CLI directives and two model directives"
+    );
+    let diff = compare_policy(sites, ALLOWLIST);
     assert!(diff.is_closed(), "{}", diff.render());
 }
 

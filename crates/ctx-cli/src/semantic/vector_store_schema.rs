@@ -1,18 +1,15 @@
 use std::{fmt, path::Path};
 
 use anyhow::Result;
+use ctx_semantic_model::{
+    semantic_tokenizer_fingerprint, SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_CONTRACT_VERSION,
+    SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION, SEMANTIC_POOLING,
+};
 
-use super::{
-    model_contract::{
-        SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_CONTRACT_VERSION, SEMANTIC_MODEL_ID,
-        SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION, SEMANTIC_POOLING,
-        SEMANTIC_REQUIRED_MODEL_FILES,
-    },
-    vector_store::{
-        control,
-        flat_segments::{FlatModelContract, FlatSegmentStore, FlatStoreError},
-        SemanticVectorStore,
-    },
+use super::vector_store::{
+    control,
+    flat_segments::{FlatModelContract, FlatSegmentStore, FlatStoreError},
+    SemanticVectorStore,
 };
 
 pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 5;
@@ -101,11 +98,7 @@ impl SemanticVectorStore {
 }
 
 pub(super) fn active_model_contract() -> FlatModelContract {
-    let tokenizer = SEMANTIC_REQUIRED_MODEL_FILES
-        .iter()
-        .find(|file| file.path == "tokenizer.json")
-        .map(|file| format!("sha256:{}", file.sha256))
-        .unwrap_or_else(|| "missing-tokenizer-contract".to_owned());
+    let tokenizer = semantic_tokenizer_fingerprint();
     FlatModelContract {
         contract_version: SEMANTIC_MODEL_CONTRACT_VERSION,
         model_id: SEMANTIC_MODEL_ID.to_owned(),

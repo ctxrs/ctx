@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
+use ctx_semantic_model::SharedSemanticRuntime;
 use serde_json::{json, Value};
 
 use crate::{
@@ -48,7 +49,6 @@ use super::{
     daemon_wakeup::{DaemonWakeup, SourceWatchBatch},
     daemon_worker::write_daemon_lifecycle_status_with_runtime,
     health_search::semantic_env_flag,
-    model_runtime::SharedSemanticRuntime,
     paths_status::{
         daemon_core_refresh_job_path, daemon_lock_is_active, daemon_report,
         daemon_report_with_disabled_status, read_daemon_job_status, read_daemon_status,

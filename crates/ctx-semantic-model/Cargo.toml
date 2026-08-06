@@ -1,0 +1,46 @@
+[package]
+name = "ctx-semantic-model"
+version = "0.26.0"
+description = "Verified semantic model contracts, caches, acquisition, and runtimes for ctx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+ctx-history-core = { path = "../ctx-history-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+uuid.workspace = true
+xz2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreml-native = "=0.2.0"
+tokenizers = "0.22.2"
+
+[target.'cfg(any(windows, all(target_os = "linux", target_arch = "x86_64")))'.dependencies]
+libloading = "0.9.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(any(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"), target_env = "gnu"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")), all(target_os = "windows", target_arch = "x86_64"), all(target_os = "freebsd", target_arch = "x86_64")))'.dependencies]
+fastembed = { version = "5.17.2", default-features = false, features = ["hf-hub-rustls-tls", "ort-load-dynamic"] }
+fs2 = "0.4.3"
+hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rustls-tls"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "cuda", "directml"] }
+
+[dev-dependencies]
+tempfile.workspace = true

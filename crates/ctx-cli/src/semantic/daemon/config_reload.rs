@@ -1,6 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use ctx_history_core::utc_now;
+use ctx_semantic_model::semantic_query_service_supported;
 use serde_json::{json, Value};
 
 use crate::{
@@ -13,8 +14,8 @@ use super::{
         daemon_wakeup::DaemonWakeup,
         paths_status::lower_semantic_worker_priority,
         query_service::{
-            daemon_query_service_transport_supported, semantic_query_service_supported,
-            start_daemon_query_service, start_daemon_source_refresh_service,
+            daemon_query_service_transport_supported, start_daemon_query_service,
+            start_daemon_source_refresh_service,
             start_daemon_source_refresh_service_with_coordinator, DaemonQueryService,
         },
     },

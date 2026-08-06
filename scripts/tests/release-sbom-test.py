@@ -31,6 +31,7 @@ WORKSPACE_PACKAGES = (
     ("ctx", "crates/ctx-cli"),
     ("ctx-history-core", "crates/ctx-history-core"),
     ("ctx-history-index", "crates/ctx-history-index"),
+    ("ctx-semantic-model", "crates/ctx-semantic-model"),
 )
 EXTERNAL_PACKAGES = (
     ("fs4", "0.1.0"),
@@ -137,6 +138,7 @@ members = [
   "crates/ctx-cli",
   "crates/ctx-history-core",
   "crates/ctx-history-index",
+  "crates/ctx-semantic-model",
 ]
 
 [workspace.package]
@@ -155,10 +157,18 @@ tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "l
         for name, directory in WORKSPACE_PACKAGES:
             manifest = self.main_runfiles / directory / "Cargo.toml"
             manifest.parent.mkdir(parents=True)
+            dependencies = {
+                "ctx": "ctx-semantic-model = { path = \"../ctx-semantic-model\" }",
+                "ctx-history-index": (
+                    "ctx-semantic-model = { path = \"../ctx-semantic-model\" }\n"
+                    "tantivy.workspace = true"
+                ),
+                "ctx-semantic-model": (
+                    "ctx-history-core = { path = \"../ctx-history-core\" }"
+                ),
+            }.get(name)
             dependencies = (
-                "\n[dependencies]\ntantivy.workspace = true\n"
-                if name == "ctx-history-index"
-                else ""
+                f"\n[dependencies]\n{dependencies}\n" if dependencies else ""
             )
             manifest.write_text(
                 f"""\
@@ -196,6 +206,7 @@ repository = "https://example.invalid/{name}"
             "@@//crates/ctx-cli:ctx",
             "@@//crates/ctx-history-core:ctx_history_core",
             "@@//crates/ctx-history-index:ctx_history_index",
+            "@@//crates/ctx-semantic-model:ctx_semantic_model",
         ]
         inventory_labels.extend(
             f"@@rules_rust~~crate~crates__{name}-{version}//:{name}"
@@ -278,13 +289,19 @@ repository = "https://example.invalid/{name}"
                 (
                     "ctx-history-core",
                     "ctx-history-index",
+                    "ctx-semantic-model",
                 ),
             ),
             self.package("ctx-history-core", "0.26.0"),
             self.package(
                 "ctx-history-index",
                 "0.26.0",
-                ("tantivy 0.26.1",),
+                ("ctx-semantic-model", "tantivy 0.26.1"),
+            ),
+            self.package(
+                "ctx-semantic-model",
+                "0.26.0",
+                ("ctx-history-core",),
             ),
             self.package("fs4", "0.1.0", external=True),
             self.package("lz4_flex", "0.11.0", external=True),
@@ -607,7 +624,7 @@ repository = "https://example.invalid/{name}"
                 for item in component.get("properties", [])
             )
         ]
-        self.assertEqual(len(cargo_components), 9)
+        self.assertEqual(len(cargo_components), 10)
         self.assertTrue(
             all(component.get("licenses") for component in cargo_components)
         )

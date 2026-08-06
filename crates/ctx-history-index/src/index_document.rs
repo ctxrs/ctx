@@ -947,7 +947,7 @@ mod tests {
             SessionEventOrderKey::session_range_end(record.session_id)
                 .unwrap()
                 .as_slice()
-                > key.as_bytes()
+                > key.as_bytes().as_slice()
         );
     }
 

@@ -11,11 +11,11 @@ use crate::semantic::{
     health_search::{
         create_private_dir_all, secure_private_file_permissions, secure_semantic_vector_permissions,
     },
-    runtime_limits::SEMANTIC_VECTOR_BUSY_TIMEOUT_MS,
     vector_store_schema::SemanticVectorStoreError,
 };
 
 pub(super) const CONTROL_FILE: &str = "state.sqlite";
+const SEMANTIC_VECTOR_BUSY_TIMEOUT_MS: u64 = 30_000;
 const CONTROL_APPLICATION_ID: i64 = 0x4354_584D; // "CTXM"
 const CONTROL_SCHEMA_VERSION: i64 = 5;
 pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";

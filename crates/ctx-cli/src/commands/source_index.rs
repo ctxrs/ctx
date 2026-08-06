@@ -23,8 +23,8 @@ use ctx_history_index::{CoreEventRecord, EventRecord, EventSearchCandidate};
 use crate::{
     config,
     semantic::{
-        PinnedSourceBackedGeneration, SourceBackedRefreshMode, SourceBackedRefreshObservation,
-        SourceBackedSemanticNotReady,
+        PinnedSourceBackedGeneration, SemanticNotReady, SourceBackedRefreshMode,
+        SourceBackedRefreshObservation,
     },
     RefreshArg, SearchBackendArg,
 };

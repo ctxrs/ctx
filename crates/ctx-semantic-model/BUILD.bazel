@@ -1,0 +1,107 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+load("//tools/bazel:gates.bzl", "loc_check_inputs")
+
+package(default_visibility = ["//visibility:public"])
+
+loc_check_inputs(name = "loc_check_inputs")
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+    "build.rs",
+])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+COMMON_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "crates/ctx-semantic-model",
+}
+
+RUST_SRCS = glob(["src/**/*.rs"])
+
+PROD_SRCS = glob(
+    ["src/**/*.rs"],
+    exclude = RUST_PROD_SRC_EXCLUDES,
+)
+
+CTX_SEMANTIC_MODEL_DEPS = [
+    "//crates/ctx-history-core:lib",
+]
+
+CTX_SEMANTIC_MODEL_RUSTC_FLAGS = [
+    "--check-cfg=cfg(ctx_semantic_fastembed)",
+    "--check-cfg=cfg(test)",
+    '--check-cfg=cfg(feature, values("test-support"))',
+] + select({
+    "@rules_rust//rust/platform:aarch64-apple-darwin": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "@rules_rust//rust/platform:x86_64-apple-darwin": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "@rules_rust//rust/platform:x86_64-pc-windows-msvc": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "//tools/bazel/platforms:x86_64-pc-windows-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "@rules_rust//rust/platform:x86_64-unknown-freebsd": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "@rules_rust//rust/platform:x86_64-unknown-nixos-gnu": [
+        "--cfg=ctx_semantic_fastembed",
+    ],
+    "//conditions:default": [],
+})
+
+rust_library(
+    name = "lib",
+    srcs = PROD_SRCS,
+    crate_name = "ctx_semantic_model",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + CTX_SEMANTIC_MODEL_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = CTX_SEMANTIC_MODEL_RUSTC_FLAGS,
+)
+
+rust_library(
+    name = "test_support_lib",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_semantic_model",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + CTX_SEMANTIC_MODEL_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = CTX_SEMANTIC_MODEL_RUSTC_FLAGS + ['--cfg=feature="test-support"'],
+)
+
+ctx_rust_test(
+    name = "unit_tests",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_semantic_model",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_SEMANTIC_MODEL_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = CTX_SEMANTIC_MODEL_RUSTC_FLAGS,
+)

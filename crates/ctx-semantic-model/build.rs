@@ -1,0 +1,23 @@
+use std::env;
+
+fn main() {
+    println!("cargo:rustc-check-cfg=cfg(ctx_semantic_fastembed)");
+
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+
+    if public_semantic_platform(&os, &arch, &target_env) {
+        println!("cargo:rustc-cfg=ctx_semantic_fastembed");
+    }
+}
+
+fn public_semantic_platform(os: &str, arch: &str, target_env: &str) -> bool {
+    match (os, arch) {
+        ("linux", "x86_64" | "aarch64") => target_env == "gnu",
+        ("macos", "x86_64" | "aarch64") => true,
+        ("windows", "x86_64") => true,
+        ("freebsd", "x86_64") => true,
+        _ => false,
+    }
+}

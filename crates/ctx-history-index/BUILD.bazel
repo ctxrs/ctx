@@ -31,6 +31,7 @@ PROD_SRCS = glob(
 
 CTX_HISTORY_INDEX_DEPS = [
     "//crates/ctx-history-core:lib",
+    "//crates/ctx-semantic-model:lib",
 ]
 
 rust_library(

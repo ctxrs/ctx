@@ -14,7 +14,7 @@ use crate::{
         normalize_source_identity_filters, parse_since_filter, SourceIdentityFilterArgs,
         SourceIdentityFilters,
     },
-    semantic::{semantic_query_service_supported, SourceBackedSemanticNotReady},
+    semantic::{semantic_query_service_supported, SemanticNotReady},
     transcript::shell_quote_arg,
     RefreshArg, SearchArgs, SearchBackendArg,
 };
@@ -239,19 +239,19 @@ pub(in crate::commands::source_index) fn resolve_source_search_backend(
     let semantic_enabled = config.semantic_search_enabled();
     match request.backend {
         Some(SearchBackendArg::Semantic) if !semantic_enabled => Err(anyhow::Error::new(
-            SourceBackedSemanticNotReady::new(
+            SemanticNotReady::new(
                 "semantic_disabled",
                 "semantic search is disabled. Set [search] semantic = true in ctx config to enable local semantic search",
             ),
         )),
         Some(SearchBackendArg::Semantic) if !semantic_query_service_supported() => {
-            Err(anyhow::Error::new(SourceBackedSemanticNotReady::new(
+            Err(anyhow::Error::new(SemanticNotReady::new(
                 "semantic_unsupported",
                 "local semantic search is not supported on this platform yet. Set [search] semantic = false or use --backend lexical",
             )))
         }
         Some(SearchBackendArg::Semantic) if !config.daemon.enabled => Err(anyhow::Error::new(
-            SourceBackedSemanticNotReady::new(
+            SemanticNotReady::new(
                 "semantic_daemon_disabled",
                 "local semantic search requires the ctx daemon. Set [daemon] enabled = true, set [search] semantic = false, or use --backend lexical",
             ),
@@ -264,14 +264,14 @@ pub(in crate::commands::source_index) fn resolve_source_search_backend(
 
 pub(super) fn unsupported_semantic_scope(
     request: &SourceSearchRequest,
-) -> Option<SourceBackedSemanticNotReady> {
+) -> Option<SemanticNotReady> {
     let content_scope = match request.content_scope {
         SearchContentScope::Calls => Some("calls"),
         SearchContentScope::Outputs => Some("outputs"),
         SearchContentScope::All | SearchContentScope::Transcript => None,
     };
     if let Some(content_scope) = content_scope {
-        return Some(SourceBackedSemanticNotReady::new(
+        return Some(SemanticNotReady::new(
             "semantic_content_scope_unsupported",
             format!(
                 "semantic retrieval does not support content scope '{content_scope}'; use --backend lexical or choose --content-scope all|transcript"
@@ -284,7 +284,7 @@ pub(super) fn unsupported_semantic_scope(
         .as_deref()
         .and_then(|value| value.parse::<EventType>().ok())
         .filter(|event_type| *event_type != EventType::Message)?;
-    Some(SourceBackedSemanticNotReady::new(
+    Some(SemanticNotReady::new(
         "semantic_event_type_unsupported",
         format!(
             "semantic retrieval does not support event type '{}'; use --backend lexical or remove --event-type",

@@ -83,6 +83,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-history-core:cargo_package_data",
     "//crates/ctx-history-index:cargo_package_data",
     "//crates/ctx-history-refresh:cargo_package_data",
+    "//crates/ctx-semantic-model:cargo_package_data",
     "//crates/ctx-pro-host-protocol:cargo_package_data",
     "//crates/ctx-protocol:cargo_package_data",
     "//crates/ctx-sdk:cargo_package_data",
@@ -96,6 +97,7 @@ LOC_CHECK_SOURCE_DATA = [
     "//crates/ctx-history-core:loc_check_inputs",
     "//crates/ctx-history-index:loc_check_inputs",
     "//crates/ctx-history-refresh:loc_check_inputs",
+    "//crates/ctx-semantic-model:loc_check_inputs",
     "//crates/ctx-pro-host-protocol:loc_check_inputs",
     "//crates/ctx-protocol:loc_check_inputs",
     "//crates/ctx-sdk:loc_check_inputs",
@@ -128,6 +130,7 @@ RELEASE_PACKAGE_AUDIT_DATA = NON_RUST_GATE_DATA + [
     "//crates/ctx-history-core:cargo_package_data",
     "//crates/ctx-history-index:cargo_package_data",
     "//crates/ctx-history-refresh:cargo_package_data",
+    "//crates/ctx-semantic-model:cargo_package_data",
 ]
 
 REAL_HARNESS_DATA = NON_RUST_GATE_DATA + ["//crates/ctx-cli:ctx"]
@@ -572,6 +575,7 @@ configured_license_materials(
         "//crates/ctx-history-refresh:Cargo.toml",
         "//crates/ctx-pro-host-protocol:Cargo.toml",
         "//crates/ctx-protocol:Cargo.toml",
+        "//crates/ctx-semantic-model:Cargo.toml",
         "//crates/ctx-sdk:Cargo.toml",
     ],
 )
@@ -862,6 +866,39 @@ sh_test(
         "//crates/ctx-cli:BUILD.bazel",
         "//crates/ctx-cli:build.rs",
         "//crates/ctx-cli:test_targets.bzl",
+    ],
+)
+
+sh_test(
+    name = "semantic_model_build_cfg_parity_check",
+    srcs = ["//tools/bazel:check-semantic-model-build-cfg.sh"],
+    data = [
+        "//crates/ctx-cli:build.rs",
+        "//crates/ctx-cli:test_targets.bzl",
+        "//crates/ctx-semantic-model:BUILD.bazel",
+        "//crates/ctx-semantic-model:Cargo.toml",
+        "//crates/ctx-semantic-model:build.rs",
+    ],
+)
+
+sh_test(
+    name = "semantic_model_dependency_boundary_check",
+    srcs = ["//tools/bazel:check-semantic-model-dependency-boundary.sh"],
+    args = ["$(rootpath BUILD.bazel)"],
+    data = [
+        "BUILD.bazel",
+        "scripts/bazelw",
+        "//crates/ctx-cli:BUILD.bazel",
+        "//crates/ctx-cli:cargo_package_data",
+        "//crates/ctx-history-index:BUILD.bazel",
+        "//crates/ctx-history-index:cargo_package_data",
+        "//crates/ctx-semantic-model:BUILD.bazel",
+        "//crates/ctx-semantic-model:cargo_package_data",
+    ],
+    tags = [
+        "build-graph",
+        "no-cache",
+        "no-sandbox",
     ],
 )
 

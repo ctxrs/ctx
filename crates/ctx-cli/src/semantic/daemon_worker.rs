@@ -3,6 +3,11 @@ use std::{path::Path, process, time::Instant};
 use anyhow::{anyhow, Result};
 use ctx_history_core::{utc_now, AgentType, CaptureProvider, EventRole, EventType};
 use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
+use ctx_semantic_model::{
+    semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetchRequest,
+    ArtifactFetcher, SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition,
+    SemanticModelConfig, SemanticModelLoadDeferred, SharedSemanticRuntime,
+};
 use serde_json::{json, Value};
 
 use crate::{DaemonRunArgs, DaemonTriggerCommandArg};
@@ -11,11 +16,7 @@ use super::{
     daemon::DaemonRuntime,
     daemon_retry::{annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff},
     daemon_scheduler::{daemon_deadline_has_min_budget, daemon_run_start_mode},
-    health_search::{semantic_model_acquisition_integrity_error, semantic_worker_cache_dir},
-    model_contract::{semantic_model_key, SemanticModelLoadDeferred},
-    model_runtime::{
-        SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SharedSemanticRuntime,
-    },
+    model_config::semantic_model_config,
     paths_status::write_daemon_status,
     resource_policy::{
         semantic_background_resource_deferred, semantic_resource_deferral_releases_runtime,
@@ -28,9 +29,8 @@ use super::{
     source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
     vector_store::{
         semantic_core_content_is_control, source_backed_semantic_vector_path,
-        SemanticChunkDocument, SemanticVectorStore, SourceBackedGenerationPin,
-        SourceBackedSemanticDocumentBuilder, SourceBackedSemanticEmbedder,
-        SourceBackedSemanticOutcome,
+        SemanticBatchEmbedder, SemanticChunkDocument, SemanticDocumentBuilder, SemanticVectorStore,
+        SourceBackedGenerationPin, SourceBackedSemanticOutcome,
     },
     SemanticEventDocument,
 };
@@ -43,6 +43,23 @@ use crate::output::compact_json;
 const MAX_LITE_TURN_PAIRING_PAGE_RECORDS: usize = 64;
 const LITE_TURN_PAIRING_BUDGET: CoreEventPageBudget =
     CoreEventPageBudget::new(64 * 1024 * 1024, 16 * 1024 * 1024);
+
+struct CliDaemonArtifactFetcher;
+
+impl ArtifactFetcher for CliDaemonArtifactFetcher {
+    fn fetch_to_writer(
+        &self,
+        request: ArtifactFetchRequest<'_>,
+        mut writer: &mut dyn std::io::Write,
+    ) -> Result<u64> {
+        crate::net::get_to_writer_limited(
+            request.endpoint(),
+            request.max_bytes(),
+            request.timeout(),
+            &mut writer,
+        )
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum DaemonSemanticModelStartup {
@@ -204,7 +221,7 @@ pub(super) fn run_daemon_semantic_job(
         SemanticBackgroundOperation::ModelLoad
     };
     if let Some(deferred) = semantic_background_resource_deferred(data_root, admission_operation) {
-        if semantic_resource_deferral_releases_runtime(deferred.reason) {
+        if semantic_resource_deferral_releases_runtime(deferred.reason()) {
             let _ = runtime.semantic_runtime.release_if_idle();
         }
         return Ok(daemon_semantic_resource_deferred_job(
@@ -249,20 +266,24 @@ pub(super) fn run_daemon_semantic_job(
     }
     let source_model_load_needed =
         source_eligible_events > 0 && !runtime.semantic_runtime.is_loaded();
+    let model_config = semantic_model_config(data_root);
     if source_model_load_needed {
-        let cache_dir = semantic_worker_cache_dir(data_root);
         match run_daemon_semantic_model_startup_with(
             last_run_at_ms,
-            || runtime.semantic_runtime.acquire_for_daemon(&cache_dir),
+            || {
+                runtime
+                    .semantic_runtime
+                    .acquire_for_daemon(&model_config, &CliDaemonArtifactFetcher)
+            },
             |fallback| {
                 runtime
                     .semantic_runtime
-                    .acquire_cpu_fallback_for_daemon(&cache_dir, fallback)
+                    .acquire_cpu_fallback_for_daemon(&model_config, fallback)
             },
             |acquisition| {
                 runtime
                     .semantic_runtime
-                    .ensure_loaded_after_daemon_acquisition(&cache_dir, acquisition)?;
+                    .ensure_loaded_after_daemon_acquisition(&model_config, acquisition)?;
                 Ok(())
             },
         )? {
@@ -270,13 +291,12 @@ pub(super) fn run_daemon_semantic_job(
             DaemonSemanticModelStartup::Finished(job) => return Ok(job),
         }
     }
-    let cache_dir = semantic_worker_cache_dir(data_root);
     let (outcome, indexed_chunks) = reconcile_source_backed_semantic_page(
         data_root,
         source_generation,
         &mut vector_store,
         &runtime.semantic_runtime,
-        &cache_dir,
+        &model_config,
         deadline,
     )?;
     let (status, reason, last_error) = if outcome.ready {
@@ -300,14 +320,14 @@ fn reconcile_source_backed_semantic_page(
     generation: PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
     runtime: &SharedSemanticRuntime,
-    cache_dir: &Path,
+    model_config: &SemanticModelConfig,
     deadline: Option<Instant>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
     let mut builder = CoreSemanticDocumentBuilder::new(&index);
     let mut embedder = RuntimeSourceSemanticEmbedder {
         runtime,
-        cache_dir,
+        model_config,
         deadline,
         indexed_chunks: 0,
     };
@@ -322,7 +342,7 @@ struct CoreSemanticDocumentBuilder<'a> {
     pairing_budget: CoreEventPageBudget,
 }
 
-impl SourceBackedSemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
+impl SemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
     fn build_document(
         &mut self,
         record: &CoreEventRecord,
@@ -398,20 +418,20 @@ fn annotate_source_backed_semantic_progress(
 
 struct RuntimeSourceSemanticEmbedder<'a> {
     runtime: &'a SharedSemanticRuntime,
-    cache_dir: &'a Path,
+    model_config: &'a SemanticModelConfig,
     deadline: Option<Instant>,
     indexed_chunks: usize,
 }
 
-impl SourceBackedSemanticEmbedder for RuntimeSourceSemanticEmbedder<'_> {
+impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         let texts = chunks
             .iter()
             .map(|chunk| chunk.text.clone())
             .collect::<Vec<_>>();
-        let (embeddings, _) = self
-            .runtime
-            .embed_documents(self.cache_dir, texts, self.deadline)?;
+        let (embeddings, _) =
+            self.runtime
+                .embed_documents(self.model_config, texts, self.deadline)?;
         self.indexed_chunks = self.indexed_chunks.saturating_add(embeddings.len());
         Ok(embeddings)
     }
@@ -522,8 +542,8 @@ pub(super) fn daemon_semantic_model_load_deferred_job(
     );
     value["failure_class"] = Value::String("resource_pressure".to_owned());
     value["retryable"] = Value::Bool(true);
-    value["available_memory_bytes"] = json!(deferred.available_memory_bytes);
-    value["required_available_memory_bytes"] = json!(deferred.required_available_memory_bytes);
+    value["available_memory_bytes"] = json!(deferred.available_memory_bytes());
+    value["required_available_memory_bytes"] = json!(deferred.required_available_memory_bytes());
     compact_json(value)
 }
 
@@ -533,7 +553,7 @@ pub(super) fn daemon_semantic_resource_deferred_job(
 ) -> Value {
     let mut value = daemon_semantic_job_json(
         "resource_deferred",
-        Some(deferred.reason.as_str()),
+        Some(deferred.reason().as_str()),
         last_run_at_ms,
         None,
         None,

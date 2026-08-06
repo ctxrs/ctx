@@ -421,9 +421,7 @@ pub(crate) fn run_cli() -> Result<()> {
                     )?
                 );
                 Some(RenderedJsonError.into())
-            } else if let Some(error) =
-                error.downcast_ref::<semantic::SourceBackedSemanticNotReady>()
-            {
+            } else if let Some(error) = error.downcast_ref::<semantic::SemanticNotReady>() {
                 eprintln!("{}", serde_json::to_string(&error.structured())?);
                 Some(RenderedJsonError.into())
             } else {

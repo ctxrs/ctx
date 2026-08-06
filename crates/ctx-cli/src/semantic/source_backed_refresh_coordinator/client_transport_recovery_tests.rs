@@ -5,11 +5,11 @@ use std::{
     os::unix::net::UnixListener,
 };
 
-use crate::semantic::model_runtime::SharedSemanticRuntime;
 use crate::semantic::query_service::{
     start_daemon_source_refresh_service_with_coordinator_for_test, write_daemon_service_endpoint,
     DaemonIpcService, DaemonQueryEndpoint,
 };
+use crate::semantic::SharedSemanticRuntime;
 
 const TEST_ENDPOINT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 

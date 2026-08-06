@@ -53,6 +53,72 @@ fn stale_allowlist_entry_is_rejected() {
 }
 
 #[test]
+fn build_script_add_remove_and_reorder_mutations_are_rejected() {
+    const OWNER: TestOwner = TestOwner::behavioral(
+        "tests/raw_output_policy/self_tests.rs::build_script_add_remove_and_reorder_mutations_are_rejected",
+        &["build.rs"],
+        &["compare_policy", "scan_source"],
+    );
+    let original = scan_source(
+        "build.rs",
+        r#"fn main() {
+            println!("cargo:rustc-check-cfg=cfg(first)");
+            println!("cargo:rustc-check-cfg=cfg(second)");
+        }"#,
+    );
+    let allowed = original
+        .iter()
+        .map(|site| AllowEntry {
+            path: "build.rs",
+            fingerprint: Box::leak(site.key.fingerprint.clone().into_boxed_str()),
+            primitive: Primitive::PrintMacro,
+            class: OutputClass::MachineProtocol,
+            rationale: "synthetic Cargo build-script directive",
+            owning_test: OWNER,
+        })
+        .collect::<Vec<_>>();
+    assert!(compare_policy(original, &allowed).is_closed());
+
+    let added = compare_policy(
+        scan_source(
+            "build.rs",
+            r#"fn main() {
+                println!("cargo:rustc-check-cfg=cfg(first)");
+                println!("cargo:rustc-check-cfg=cfg(second)");
+                println!("cargo:rustc-check-cfg=cfg(third)");
+            }"#,
+        ),
+        &allowed,
+    );
+    assert_eq!(added.unmatched.len(), 1);
+    assert!(!added.is_closed());
+
+    let removed = compare_policy(
+        scan_source(
+            "build.rs",
+            r#"fn main() { println!("cargo:rustc-check-cfg=cfg(first)"); }"#,
+        ),
+        &allowed,
+    );
+    assert_eq!(removed.stale.len(), 1);
+    assert!(!removed.is_closed());
+
+    let reordered = compare_policy(
+        scan_source(
+            "build.rs",
+            r#"fn main() {
+                println!("cargo:rustc-check-cfg=cfg(second)");
+                println!("cargo:rustc-check-cfg=cfg(first)");
+            }"#,
+        ),
+        &allowed,
+    );
+    assert_eq!(reordered.unmatched.len(), 2);
+    assert_eq!(reordered.stale.len(), 2);
+    assert!(!reordered.is_closed());
+}
+
+#[test]
 fn classified_violation_is_rejected() {
     let sites = scan_source(
         "src/example.rs",

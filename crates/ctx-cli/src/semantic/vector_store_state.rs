@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
+use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 use uuid::Uuid;
 
 use super::{
-    model_contract::SEMANTIC_DIMENSIONS,
     vector_store::{
         flat_segments::{
             FlatActiveEventLookup, FlatChunk, FlatEventMetadataUpdate, FlatEventReplacement,
