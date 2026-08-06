@@ -568,9 +568,9 @@ fn verify_session_relationships(
                 },
             )?;
         }
-        let session = session.ok_or(IndexError::InvalidSessionRelationshipGraph(
-            "session term has no live record",
-        ))?;
+        let Some(session) = session else {
+            continue;
+        };
         verify_session_chain(searcher, fields, spill, session, &mut valid_roots)?;
     }
     Ok(())

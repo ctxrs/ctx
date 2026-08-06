@@ -108,7 +108,19 @@ fn codex_jsonl_cold_route_publishes_beyond_old_aggregate_lineage_fact_limit() {
         let parent_path = sessions.join(format!("rollout-{parent_id}.jsonl"));
         let child_path = sessions.join(format!("rollout-{child_id}.jsonl"));
 
-        write_codex_lineage_session(&parent_path, &parent_id, None, &[]);
+        let parent_anchor = serde_json::json!({
+            "timestamp": "2026-08-04T11:59:59Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": format!("lineage parent anchor {component:02}")
+                }]
+            }
+        });
+        write_codex_lineage_session(&parent_path, &parent_id, None, &[parent_anchor]);
         append_codex_non_display_lineage_results(&parent_path, component, FACTS_PER_PARENT);
         let child_events = (component + 1 == COMPONENTS)
             .then(|| {
@@ -164,7 +176,8 @@ fn codex_jsonl_cold_route_publishes_beyond_old_aggregate_lineage_fact_limit() {
     )
     .unwrap();
     let expected_sources = COMPONENTS * 2;
-    let expected_complete_records = LINEAGE_FACTS + expected_sources + 1;
+    let expected_indexed_documents = COMPONENTS + 1;
+    let expected_complete_records = LINEAGE_FACTS + expected_sources + expected_indexed_documents;
     let counters = observed.lock().unwrap().expect("stage hook must run");
     assert_eq!(counters.cold_sources, expected_sources as u64);
     assert_eq!(counters.scanner_sources_started, expected_sources as u64);
@@ -173,7 +186,7 @@ fn codex_jsonl_cold_route_publishes_beyond_old_aggregate_lineage_fact_limit() {
         counters.complete_records_scanned,
         expected_complete_records as u64
     );
-    assert_eq!(counters.staged_documents, 1);
+    assert_eq!(counters.staged_documents, expected_indexed_documents as u64);
 
     assert_eq!(refreshed.successful_route_ids.len(), 1);
     assert!(refreshed.failed_routes.is_empty());
@@ -183,7 +196,10 @@ fn codex_jsonl_cold_route_publishes_beyond_old_aggregate_lineage_fact_limit() {
     );
     assert_eq!(refreshed.certified_source_count, expected_sources);
     assert_eq!(refreshed.commit.certified_sources, expected_sources);
-    assert_eq!(refreshed.commit.indexed_documents, 1);
+    assert_eq!(
+        refreshed.commit.indexed_documents,
+        expected_indexed_documents as u64
+    );
     let certified_complete_records = refreshed
         .sources
         .iter()
@@ -565,22 +581,35 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
                 .unwrap()
         })
         .collect::<Vec<_>>();
-    assert_eq!(copied_records.len(), 2);
-    assert_eq!(
-        copied_records
-            .iter()
-            .filter(|record| !record.repository_vcs_observations.is_empty())
-            .count(),
-        1
-    );
-    assert!(copied_records.iter().any(|record| {
-        record.repository_vcs_observations.is_empty()
-            && record.repository_abstentions.iter().any(|abstention| {
-                abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
-                    && abstention.detail.as_deref()
-                        == Some("copied_provider_history_has_ancestor_execution")
-            })
-    }));
+    assert_eq!(copied_records.len(), 1);
+    assert!(!copied_records[0].repository_vcs_observations.is_empty());
+    let child_sessions = cold_index
+        .sessions_by_provider_session_id(child_id, Some("codex"))
+        .unwrap();
+    assert_eq!(child_sessions.len(), 1);
+    let child_session_id = child_sessions[0].session_id;
+    let cold_copied_child = cold_index
+        .core_events_for_session(child_session_id.as_uuid())
+        .unwrap()
+        .into_iter()
+        .map(|record| record.core_record)
+        .find(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains(copied_oid))
+        })
+        .expect("cold copied child result must publish");
+    assert!(cold_copied_child.repository_vcs_observations.is_empty());
+    assert!(cold_copied_child
+        .repository_abstentions
+        .iter()
+        .any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref()
+                    == Some("copied_provider_history_has_ancestor_execution")
+        }));
     let cold_unique = cold_index
         .search_event_candidates(cold_child_oid, 8)
         .unwrap();
@@ -615,15 +644,17 @@ fn codex_jsonl_warm_replay_prepares_parent_lineage_before_changed_child() {
 
     let warm_index = VerifiedIndex::open(&index).unwrap();
     let warm_copied_child = warm_index
-        .search_event_candidates(warm_copied_oid, 8)
+        .core_events_for_session(child_session_id.as_uuid())
         .unwrap()
         .into_iter()
-        .filter_map(|candidate| {
-            warm_index
-                .core_record_by_id(candidate.event.event_id.as_uuid())
-                .unwrap()
+        .map(|record| record.core_record)
+        .find(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains(warm_copied_oid))
         })
-        .find(|record| record.provider_session_id.as_deref() == Some(child_id))
         .expect("warm copied child result must publish");
     assert!(warm_copied_child.repository_vcs_observations.is_empty());
     assert!(warm_copied_child

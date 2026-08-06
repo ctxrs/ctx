@@ -101,6 +101,82 @@ fn copied_event_with_a_missing_target_cannot_publish() {
 }
 
 #[test]
+fn deleted_session_terms_without_live_postings_do_not_block_publication() {
+    let temp = tempdir().unwrap();
+    let removed_source = source("removed-session.jsonl");
+    let removed = document_for_session(&removed_source, "removed", 1, "removed session");
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(removed_source.clone()).unwrap();
+    initial.add_core_record(removed).unwrap();
+    initial
+        .certify_source(certificate(&removed_source, 1, 1))
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let (deletion, inventory) = deletion_evidence(&removed_source, 2);
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    deleting.delete_source(deletion, inventory).unwrap();
+    deleting.commit(|_| true).unwrap();
+
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        0
+    );
+}
+
+#[test]
+fn deleting_a_live_parent_rejects_the_dangling_child_and_preserves_the_generation() {
+    let temp = tempdir().unwrap();
+    let parent_source = source("parent-session.jsonl");
+    let child_source = source("child-session.jsonl");
+    let parent = document_for_session(&parent_source, "parent", 1, "parent session");
+    let mut child = document_for_session(&child_source, "child", 1, "child session");
+    child
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(parent.session_id),
+            parent.session_id,
+        )
+        .unwrap();
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (source, record) in [(&parent_source, parent), (&child_source, child)] {
+        initial.begin_source(source.clone()).unwrap();
+        initial.add_core_record(record).unwrap();
+        initial.certify_source(certificate(source, 1, 1)).unwrap();
+    }
+    let baseline = initial.commit(|_| true).unwrap();
+
+    let (deletion, inventory) =
+        deletion_evidence_with_retained(&parent_source, 2, vec![child_source]);
+    let mut deleting = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    deleting.delete_source(deletion, inventory).unwrap();
+    assert!(matches!(
+        deleting.commit(|_| true),
+        Err(IndexError::InvalidSessionRelationshipGraph(
+            "related session does not exist"
+        ))
+    ));
+    assert_eq!(
+        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        baseline.generation_id
+    );
+}
+
+#[test]
 fn direct_copy_chain_resolves_to_one_noncopy_original() {
     let temp = tempdir().unwrap();
     let source = source("copy-chain.jsonl");
@@ -152,8 +228,7 @@ fn changed_intermediate_edge_revalidates_unchanged_descendant_copy() {
     let copy_source = source("inverse-copy-descendant.jsonl");
 
     let root = document_for_session(&root_source, "root", 1, "root");
-    let mut ancestor =
-        document_for_session(&ancestor_source, "ancestor-a", 1, "ancestor A");
+    let mut ancestor = document_for_session(&ancestor_source, "ancestor-a", 1, "ancestor A");
     ancestor
         .set_session_relationship(
             SessionRelationshipKind::Forked,
@@ -195,9 +270,7 @@ fn changed_intermediate_edge_revalidates_unchanged_descendant_copy() {
     ] {
         initial.begin_source(source.clone()).unwrap();
         initial.add_core_record(record).unwrap();
-        initial
-            .certify_source(certificate(source, 1, 1))
-            .unwrap();
+        initial.certify_source(certificate(source, 1, 1)).unwrap();
     }
     let baseline = initial.commit(|_| true).unwrap();
 
@@ -208,12 +281,8 @@ fn changed_intermediate_edge_revalidates_unchanged_descendant_copy() {
     replacement
         .begin_source(intermediate_source.clone())
         .unwrap();
-    let mut reparented = document_for_session(
-        &intermediate_source,
-        "intermediate-b",
-        1,
-        "intermediate B",
-    );
+    let mut reparented =
+        document_for_session(&intermediate_source, "intermediate-b", 1, "intermediate B");
     reparented
         .set_session_relationship(
             SessionRelationshipKind::Forked,
@@ -298,9 +367,7 @@ fn changed_edge_revalidates_copies_in_transitive_descendants() {
     ] {
         initial.begin_source(source.clone()).unwrap();
         initial.add_core_record(record).unwrap();
-        initial
-            .certify_source(certificate(source, 1, 1))
-            .unwrap();
+        initial.certify_source(certificate(source, 1, 1)).unwrap();
     }
     initial.commit(|_| true).unwrap();
 
