@@ -1164,7 +1164,7 @@ ambiguity, repository access, entitlement, repair, or transport failures.
 ```bash
 ctx referral create <codename> --format json
 ctx referral status --format json
-ctx referral payout [--country <CC>] [--entity-type <individual|company>] --format json
+ctx referral payout [--country <CC>] --format json
 ```
 
 All three commands return schema version 1. JSON referral commands use cached
@@ -1237,15 +1237,18 @@ external clawback.
 - `expires_at_unix`;
 - `browser_opened: false`.
 
-`--no-open` is optional and redundant in JSON mode. `--country` accepts a
-two-letter uppercase ISO country code, and `--entity-type` accepts
-`individual` or `company` when the hosted onboarding request requires them.
-No payout command accepts bank or card details.
+`--no-open` is optional and redundant in JSON mode. Referral payouts support
+individual recipients at launch. `--country` accepts a two-letter uppercase ISO
+country code as an advanced noninteractive override. JSON mode never prompts;
+when country is required and absent, the stable error is
+`referral_payout_country_required`, and the caller should supply
+`--country <CC>`. No payout command accepts bank or card details.
 
 Stable hosted referral failures include `authentication_required`,
 `referral_codename_conflict`, `referral_not_eligible`, `referral_not_found`,
-`referral_payout_unavailable`, and `referral_self_referral`. Malformed or
-out-of-bounds hosted results fail with `invalid_response`.
+`referral_payout_country_required`, `referral_payout_unavailable`, and
+`referral_self_referral`. Malformed or out-of-bounds hosted results fail with
+`invalid_response`.
 
 ## Doctor
 

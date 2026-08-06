@@ -1,11 +1,12 @@
 use std::{
     convert::Infallible,
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, IsTerminal as _},
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context as _, Result};
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -24,7 +25,9 @@ use crate::{
 };
 use render::{
     create as render_create_human, cta as render_cta_human, payout as render_payout_human,
-    payout_browser_notice as render_payout_browser_notice, status as render_status_human,
+    payout_browser_notice as render_payout_browser_notice,
+    payout_country_invalid as render_payout_country_invalid,
+    payout_country_prompt as render_payout_country_prompt, status as render_status_human,
 };
 
 const REFERRAL_CODENAME_MIN_BYTES: usize = 3;
@@ -43,7 +46,7 @@ enum ReferralCommand {
     Create(ReferralCreateArgs),
     #[command(about = "Show your aggregate referral ledger and payout state")]
     Status(ReferralStatusArgs),
-    #[command(about = "Open Stripe-hosted payout onboarding when eligible")]
+    #[command(about = "Set up individual referral payouts; asks for country when needed")]
     Payout(ReferralPayoutArgs),
 }
 
@@ -73,11 +76,9 @@ struct ReferralPayoutArgs {
     #[arg(
         long,
         value_parser = parse_country_code,
-        help = "Two-letter country code for payout onboarding"
+        help = "Advanced override: two-letter uppercase country code for payout onboarding"
     )]
     country: Option<CountryCode>,
-    #[arg(long, value_enum, help = "Legal entity that will receive payouts")]
-    entity_type: Option<ReferralEntityType>,
 }
 
 impl ReferralArgs {
@@ -110,10 +111,6 @@ impl ReferralArgs {
                 if let Some(country) = &args.country {
                     command.push_str(" --country ");
                     command.push_str(country.as_str());
-                }
-                if let Some(entity_type) = args.entity_type {
-                    command.push_str(" --entity-type ");
-                    command.push_str(entity_type.as_str());
                 }
                 command
             }
@@ -156,21 +153,6 @@ impl CountryCode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ReferralEntityType {
-    Individual,
-    Company,
-}
-
-impl ReferralEntityType {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Individual => "individual",
-            Self::Company => "company",
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn parse_referral_codename(value: &str) -> Result<ReferralCodename, String> {
     let codename = ReferralCodename(value.to_owned());
@@ -199,13 +181,308 @@ pub(super) fn valid_referral_codename(value: &str) -> bool {
 }
 
 fn parse_country_code(value: &str) -> Result<CountryCode, String> {
-    if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_uppercase()) {
+    if value.len() != 2
+        || !value.bytes().all(|byte| byte.is_ascii_uppercase())
+        || !is_iso_country_code(value)
+    {
         return Err(
             "country must be a two-letter uppercase ISO country code, for example US".to_owned(),
         );
     }
     Ok(CountryCode(value.to_owned()))
 }
+
+fn parse_country_input(value: &str) -> Result<CountryCode, &'static str> {
+    let value = value.trim();
+    if value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        let code = value.to_ascii_uppercase();
+        return if is_iso_country_code(&code) {
+            Ok(CountryCode(code))
+        } else {
+            Err("enter a valid ISO country name or two-letter country code")
+        };
+    }
+    country_code_for_name(value).map(|code| CountryCode(code.to_owned()))
+}
+
+fn is_iso_country_code(value: &str) -> bool {
+    ISO_COUNTRIES.iter().any(|(_, code)| *code == value)
+}
+
+fn country_code_for_name(value: &str) -> Result<&'static str, &'static str> {
+    ISO_COUNTRY_ALIASES
+        .iter()
+        .chain(ISO_COUNTRIES.iter())
+        .find(|(name, _)| name.eq_ignore_ascii_case(value))
+        .map(|(_, code)| *code)
+        .ok_or("enter a valid ISO country name or two-letter country code")
+}
+
+// Keep the interactive input independent of the host locale or an optional
+// system data file. The names are the readable labels used by the country
+// prompt; the codes are the ISO 3166-1 alpha-2 values sent to the service.
+const ISO_COUNTRIES: &[(&str, &str)] = &[
+    ("Andorra", "AD"),
+    ("United Arab Emirates", "AE"),
+    ("Afghanistan", "AF"),
+    ("Antigua & Barbuda", "AG"),
+    ("Anguilla", "AI"),
+    ("Albania", "AL"),
+    ("Armenia", "AM"),
+    ("Angola", "AO"),
+    ("Antarctica", "AQ"),
+    ("Argentina", "AR"),
+    ("Samoa (American)", "AS"),
+    ("Austria", "AT"),
+    ("Australia", "AU"),
+    ("Aruba", "AW"),
+    ("Åland Islands", "AX"),
+    ("Azerbaijan", "AZ"),
+    ("Bosnia & Herzegovina", "BA"),
+    ("Barbados", "BB"),
+    ("Bangladesh", "BD"),
+    ("Belgium", "BE"),
+    ("Burkina Faso", "BF"),
+    ("Bulgaria", "BG"),
+    ("Bahrain", "BH"),
+    ("Burundi", "BI"),
+    ("Benin", "BJ"),
+    ("St Barthelemy", "BL"),
+    ("Bermuda", "BM"),
+    ("Brunei", "BN"),
+    ("Bolivia", "BO"),
+    ("Caribbean NL", "BQ"),
+    ("Brazil", "BR"),
+    ("Bahamas", "BS"),
+    ("Bhutan", "BT"),
+    ("Bouvet Island", "BV"),
+    ("Botswana", "BW"),
+    ("Belarus", "BY"),
+    ("Belize", "BZ"),
+    ("Canada", "CA"),
+    ("Cocos (Keeling) Islands", "CC"),
+    ("Congo (Dem. Rep.)", "CD"),
+    ("Central African Rep.", "CF"),
+    ("Congo (Rep.)", "CG"),
+    ("Switzerland", "CH"),
+    ("Côte d’Ivoire", "CI"),
+    ("Cook Islands", "CK"),
+    ("Chile", "CL"),
+    ("Cameroon", "CM"),
+    ("China", "CN"),
+    ("Colombia", "CO"),
+    ("Costa Rica", "CR"),
+    ("Cuba", "CU"),
+    ("Cape Verde", "CV"),
+    ("Curaçao", "CW"),
+    ("Christmas Island", "CX"),
+    ("Cyprus", "CY"),
+    ("Czech Republic", "CZ"),
+    ("Germany", "DE"),
+    ("Djibouti", "DJ"),
+    ("Denmark", "DK"),
+    ("Dominica", "DM"),
+    ("Dominican Republic", "DO"),
+    ("Algeria", "DZ"),
+    ("Ecuador", "EC"),
+    ("Estonia", "EE"),
+    ("Egypt", "EG"),
+    ("Western Sahara", "EH"),
+    ("Eritrea", "ER"),
+    ("Spain", "ES"),
+    ("Ethiopia", "ET"),
+    ("Finland", "FI"),
+    ("Fiji", "FJ"),
+    ("Falkland Islands", "FK"),
+    ("Micronesia", "FM"),
+    ("Faroe Islands", "FO"),
+    ("France", "FR"),
+    ("Gabon", "GA"),
+    ("Britain (UK)", "GB"),
+    ("Grenada", "GD"),
+    ("Georgia", "GE"),
+    ("French Guiana", "GF"),
+    ("Guernsey", "GG"),
+    ("Ghana", "GH"),
+    ("Gibraltar", "GI"),
+    ("Greenland", "GL"),
+    ("Gambia", "GM"),
+    ("Guinea", "GN"),
+    ("Guadeloupe", "GP"),
+    ("Equatorial Guinea", "GQ"),
+    ("Greece", "GR"),
+    ("South Georgia & the South Sandwich Islands", "GS"),
+    ("Guatemala", "GT"),
+    ("Guam", "GU"),
+    ("Guinea-Bissau", "GW"),
+    ("Guyana", "GY"),
+    ("Hong Kong", "HK"),
+    ("Heard Island & McDonald Islands", "HM"),
+    ("Honduras", "HN"),
+    ("Croatia", "HR"),
+    ("Haiti", "HT"),
+    ("Hungary", "HU"),
+    ("Indonesia", "ID"),
+    ("Ireland", "IE"),
+    ("Israel", "IL"),
+    ("Isle of Man", "IM"),
+    ("India", "IN"),
+    ("British Indian Ocean Territory", "IO"),
+    ("Iraq", "IQ"),
+    ("Iran", "IR"),
+    ("Iceland", "IS"),
+    ("Italy", "IT"),
+    ("Jersey", "JE"),
+    ("Jamaica", "JM"),
+    ("Jordan", "JO"),
+    ("Japan", "JP"),
+    ("Kenya", "KE"),
+    ("Kyrgyzstan", "KG"),
+    ("Cambodia", "KH"),
+    ("Kiribati", "KI"),
+    ("Comoros", "KM"),
+    ("St Kitts & Nevis", "KN"),
+    ("Korea (North)", "KP"),
+    ("Korea (South)", "KR"),
+    ("Kuwait", "KW"),
+    ("Cayman Islands", "KY"),
+    ("Kazakhstan", "KZ"),
+    ("Laos", "LA"),
+    ("Lebanon", "LB"),
+    ("St Lucia", "LC"),
+    ("Liechtenstein", "LI"),
+    ("Sri Lanka", "LK"),
+    ("Liberia", "LR"),
+    ("Lesotho", "LS"),
+    ("Lithuania", "LT"),
+    ("Luxembourg", "LU"),
+    ("Latvia", "LV"),
+    ("Libya", "LY"),
+    ("Morocco", "MA"),
+    ("Monaco", "MC"),
+    ("Moldova", "MD"),
+    ("Montenegro", "ME"),
+    ("St Martin (French)", "MF"),
+    ("Madagascar", "MG"),
+    ("Marshall Islands", "MH"),
+    ("North Macedonia", "MK"),
+    ("Mali", "ML"),
+    ("Myanmar (Burma)", "MM"),
+    ("Mongolia", "MN"),
+    ("Macau", "MO"),
+    ("Northern Mariana Islands", "MP"),
+    ("Martinique", "MQ"),
+    ("Mauritania", "MR"),
+    ("Montserrat", "MS"),
+    ("Malta", "MT"),
+    ("Mauritius", "MU"),
+    ("Maldives", "MV"),
+    ("Malawi", "MW"),
+    ("Mexico", "MX"),
+    ("Malaysia", "MY"),
+    ("Mozambique", "MZ"),
+    ("Namibia", "NA"),
+    ("New Caledonia", "NC"),
+    ("Niger", "NE"),
+    ("Norfolk Island", "NF"),
+    ("Nigeria", "NG"),
+    ("Nicaragua", "NI"),
+    ("Netherlands", "NL"),
+    ("Norway", "NO"),
+    ("Nepal", "NP"),
+    ("Nauru", "NR"),
+    ("Niue", "NU"),
+    ("New Zealand", "NZ"),
+    ("Oman", "OM"),
+    ("Panama", "PA"),
+    ("Peru", "PE"),
+    ("French Polynesia", "PF"),
+    ("Papua New Guinea", "PG"),
+    ("Philippines", "PH"),
+    ("Pakistan", "PK"),
+    ("Poland", "PL"),
+    ("St Pierre & Miquelon", "PM"),
+    ("Pitcairn", "PN"),
+    ("Puerto Rico", "PR"),
+    ("Palestine", "PS"),
+    ("Portugal", "PT"),
+    ("Palau", "PW"),
+    ("Paraguay", "PY"),
+    ("Qatar", "QA"),
+    ("Réunion", "RE"),
+    ("Romania", "RO"),
+    ("Serbia", "RS"),
+    ("Russia", "RU"),
+    ("Rwanda", "RW"),
+    ("Saudi Arabia", "SA"),
+    ("Solomon Islands", "SB"),
+    ("Seychelles", "SC"),
+    ("Sudan", "SD"),
+    ("Sweden", "SE"),
+    ("Singapore", "SG"),
+    ("St Helena", "SH"),
+    ("Slovenia", "SI"),
+    ("Svalbard & Jan Mayen", "SJ"),
+    ("Slovakia", "SK"),
+    ("Sierra Leone", "SL"),
+    ("San Marino", "SM"),
+    ("Senegal", "SN"),
+    ("Somalia", "SO"),
+    ("Suriname", "SR"),
+    ("South Sudan", "SS"),
+    ("Sao Tome & Principe", "ST"),
+    ("El Salvador", "SV"),
+    ("St Maarten (Dutch)", "SX"),
+    ("Syria", "SY"),
+    ("Eswatini (Swaziland)", "SZ"),
+    ("Turks & Caicos Is", "TC"),
+    ("Chad", "TD"),
+    ("French S. Terr.", "TF"),
+    ("Togo", "TG"),
+    ("Thailand", "TH"),
+    ("Tajikistan", "TJ"),
+    ("Tokelau", "TK"),
+    ("East Timor", "TL"),
+    ("Turkmenistan", "TM"),
+    ("Tunisia", "TN"),
+    ("Tonga", "TO"),
+    ("Turkey", "TR"),
+    ("Trinidad & Tobago", "TT"),
+    ("Tuvalu", "TV"),
+    ("Taiwan", "TW"),
+    ("Tanzania", "TZ"),
+    ("Ukraine", "UA"),
+    ("Uganda", "UG"),
+    ("US minor outlying islands", "UM"),
+    ("United States", "US"),
+    ("Uruguay", "UY"),
+    ("Uzbekistan", "UZ"),
+    ("Vatican City", "VA"),
+    ("St Vincent", "VC"),
+    ("Venezuela", "VE"),
+    ("Virgin Islands (UK)", "VG"),
+    ("Virgin Islands (US)", "VI"),
+    ("Vietnam", "VN"),
+    ("Vanuatu", "VU"),
+    ("Wallis & Futuna", "WF"),
+    ("Samoa (western)", "WS"),
+    ("Yemen", "YE"),
+    ("Mayotte", "YT"),
+    ("South Africa", "ZA"),
+    ("Zambia", "ZM"),
+    ("Zimbabwe", "ZW"),
+];
+
+const ISO_COUNTRY_ALIASES: &[(&str, &str)] = &[
+    ("United States of America", "US"),
+    ("United Kingdom", "GB"),
+    ("UK", "GB"),
+    ("USA", "US"),
+    ("Czechia", "CZ"),
+    ("Türkiye", "TR"),
+    ("South Korea", "KR"),
+    ("North Korea", "KP"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReferralAuthMode {
@@ -224,7 +501,6 @@ pub(super) trait ReferralService {
     fn payout(
         &mut self,
         country: Option<&str>,
-        entity_type: Option<&str>,
         auth_mode: ReferralAuthMode,
         ui: &mut Ui,
     ) -> Result<ReferralPayoutResult>;
@@ -274,14 +550,11 @@ impl ReferralService for CommercialLifecycleService {
     fn payout(
         &mut self,
         country: Option<&str>,
-        entity_type: Option<&str>,
         auth_mode: ReferralAuthMode,
         ui: &mut Ui,
     ) -> Result<ReferralPayoutResult> {
         let mut access_token = self.referral_access_token(auth_mode, ui)?;
-        let result = self
-            .api
-            .referral_payout(&access_token, country, entity_type);
+        let result = self.api.referral_payout(&access_token, country);
         access_token.zeroize();
         result
     }
@@ -293,6 +566,12 @@ pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, ui: &mut Ui) -> Result
     super::test_control::prepare()?;
     args.validate_invocation()?;
     let json_output = args.json_output();
+    let stdin = io::stdin();
+    let interactive = !json_output
+        && stdin.is_terminal()
+        && ui.stdout_context().is_terminal()
+        && ui.stderr_context().is_terminal();
+    let mut input = stdin.lock();
     #[cfg(ctx_pro_test_helper)]
     let test_control_active = super::test_control::is_active()?;
     #[cfg(ctx_pro_test_helper)]
@@ -317,19 +596,23 @@ pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, ui: &mut Ui) -> Result
     })?;
     #[cfg(ctx_pro_test_helper)]
     let result = if let Some(mut service) = super::test_control::referral_service()? {
-        run_with_service(
+        run_with_service_with_input(
             args,
             &mut service,
             &mut io::stdout().lock(),
+            &mut input,
+            interactive,
             ui,
             &open_browser,
         )
     } else {
         let mut service = CommercialLifecycleService::production(&data_root)?;
-        run_with_service(
+        run_with_service_with_input(
             args,
             &mut service,
             &mut io::stdout().lock(),
+            &mut input,
+            interactive,
             ui,
             &open_browser,
         )
@@ -337,10 +620,12 @@ pub(crate) fn run(args: ReferralArgs, data_root: PathBuf, ui: &mut Ui) -> Result
     #[cfg(not(ctx_pro_test_helper))]
     let result = {
         let mut service = CommercialLifecycleService::production(&data_root)?;
-        run_with_service(
+        run_with_service_with_input(
             args,
             &mut service,
             &mut io::stdout().lock(),
+            &mut input,
+            interactive,
             ui,
             &open_browser,
         )
@@ -484,10 +769,24 @@ fn referral_lifecycle_lock_required() -> anyhow::Error {
     )
 }
 
+#[cfg(test)]
 fn run_with_service(
     args: ReferralArgs,
     service: &mut dyn ReferralService,
     output: &mut impl io::Write,
+    ui: &mut Ui,
+    opener: &impl Fn(&str) -> Result<()>,
+) -> Result<()> {
+    let mut input = io::Cursor::new(Vec::<u8>::new());
+    run_with_service_with_input(args, service, output, &mut input, true, ui, opener)
+}
+
+fn run_with_service_with_input(
+    args: ReferralArgs,
+    service: &mut dyn ReferralService,
+    output: &mut impl io::Write,
+    input: &mut impl io::BufRead,
+    interactive: bool,
     ui: &mut Ui,
     opener: &impl Fn(&str) -> Result<()>,
 ) -> Result<()> {
@@ -531,29 +830,37 @@ fn run_with_service(
                 }
             }
             ReferralCommand::Payout(args) => {
-                let auth_mode = if json_output {
+                let auth_mode = if json_output || !interactive {
                     ReferralAuthMode::CachedOnly
                 } else {
                     ReferralAuthMode::Interactive {
                         browser_enabled: !args.no_open,
                     }
                 };
-                let result = service.payout(
-                    args.country.as_ref().map(CountryCode::as_str),
-                    args.entity_type.map(ReferralEntityType::as_str),
-                    auth_mode,
-                    ui,
-                )?;
+                let requested_country = args.country.as_ref().map(CountryCode::as_str);
+                let result = match service.payout(requested_country, auth_mode, ui) {
+                    Ok(result) => result,
+                    Err(error)
+                        if requested_country.is_none() && is_country_required_error(&error) =>
+                    {
+                        if json_output || !interactive {
+                            return Err(payout_country_required_error());
+                        }
+                        let country = prompt_payout_country(input, ui)?;
+                        service.payout(Some(country.as_str()), auth_mode, ui)?
+                    }
+                    Err(error) => return Err(error),
+                };
                 if args.format.is_json() {
                     return write_json(output, &payout_output(&result, false));
                 }
                 let mut browser_opened = false;
-                if !args.no_open {
+                if interactive && !args.no_open {
                     browser_opened = opener(&result.url).is_ok();
                 }
                 let document = render_payout_human(ui.stdout_context(), &result, browser_opened);
                 ui.write_stdout(&document)?;
-                if !args.no_open {
+                if interactive && !args.no_open {
                     let notice = render_payout_browser_notice(ui.stderr_context(), browser_opened);
                     ui.write_stderr(&notice)?;
                 }
@@ -562,6 +869,36 @@ fn run_with_service(
         }
     })();
     super::human_result(result, !json_output, &retry_command, ui)
+}
+
+const REFERRAL_PAYOUT_COUNTRY_REQUIRED: &str = "referral_payout_country_required";
+
+fn is_country_required_error(error: &anyhow::Error) -> bool {
+    crate::pro::stable_error_code(error) == Some(REFERRAL_PAYOUT_COUNTRY_REQUIRED)
+}
+
+fn payout_country_required_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "{REFERRAL_PAYOUT_COUNTRY_REQUIRED}: a payout country is required; supply --country <CC>"
+    )
+}
+
+fn prompt_payout_country(input: &mut impl io::BufRead, ui: &mut Ui) -> Result<CountryCode> {
+    ui.write_stderr(&render_payout_country_prompt(ui.stderr_context()))?;
+    ui.flush()?;
+    loop {
+        let mut answer = String::new();
+        if input.read_line(&mut answer)? == 0 {
+            bail!("{REFERRAL_PAYOUT_COUNTRY_REQUIRED}: payout country selection was cancelled; supply --country <CC>");
+        }
+        match parse_country_input(&answer) {
+            Ok(country) => return Ok(country),
+            Err(_) => {
+                ui.write_stderr(&render_payout_country_invalid(ui.stderr_context()))?;
+                ui.flush()?;
+            }
+        }
+    }
 }
 
 fn write_json(output: &mut impl io::Write, value: &impl Serialize) -> Result<()> {
@@ -721,6 +1058,43 @@ mod tests {
             parse_country_code("us").unwrap_err(),
             "country must be a two-letter uppercase ISO country code, for example US"
         );
+        assert_eq!(parse_country_input("United States").unwrap().as_str(), "US");
+        assert_eq!(parse_country_input("ca").unwrap().as_str(), "CA");
+        assert!(parse_country_input("Atlantis").is_err());
+    }
+
+    #[test]
+    fn payout_country_collection_requires_the_stable_worker_error_code() {
+        assert!(is_country_required_error(&anyhow::anyhow!(
+            "referral_payout_country_required: country is required"
+        )));
+        for error in [
+            "invalid_request: country is required",
+            "invalid_request: commercial service rejected the request",
+        ] {
+            assert!(
+                !is_country_required_error(&anyhow::anyhow!("{error}")),
+                "{error} must not trigger country collection"
+            );
+        }
+    }
+
+    #[test]
+    fn payout_help_is_individual_only_and_has_no_entity_type_option() {
+        let mut command = Cli::command();
+        let payout = command
+            .find_subcommand_mut("referral")
+            .expect("referral subcommand")
+            .find_subcommand_mut("payout")
+            .expect("referral payout subcommand");
+        let help = payout.render_long_help().to_string();
+        assert!(help.contains("individual referral payouts"));
+        assert!(help.contains("country"));
+        assert!(!help.contains("--entity-type"));
+        assert!(!help.contains("company"));
+        assert!(
+            Cli::try_parse_from(["ctx", "referral", "payout", "--entity-type", "company"]).is_err()
+        );
     }
 
     #[test]
@@ -776,7 +1150,7 @@ mod tests {
             assert!(parse_referral_codename(invalid).is_err(), "{invalid:?}");
         }
         assert!(parse_country_code("US").is_ok());
-        for invalid in ["us", "USA", "U1", ""] {
+        for invalid in ["us", "USA", "U1", "ZZ", ""] {
             assert!(parse_country_code(invalid).is_err());
         }
     }

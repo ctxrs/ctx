@@ -627,7 +627,7 @@ The referrer management surface is entirely in the CLI:
 ```bash
 ctx referral create <codename> [--format json]
 ctx referral status [--format json]
-ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] [--format json]
+ctx referral payout [--no-open] [--country <CC>] [--format json]
 ```
 
 `create` lets any WorkOS-verified person claim one stable codename, or returns
@@ -668,20 +668,26 @@ no referred identity, invoice, or per-referral ledger. It does not add referral
 copy or status to ordinary `ctx status`, MCP, setup, search, or other Core
 flows.
 
-`payout` requests a one-use Stripe-hosted payout-onboarding URL when the account
-is eligible. Human mode opens that URL by default; `--no-open` prints it
-instead. If onboarding requests identity type, `--country <CC>` accepts a
-two-letter uppercase ISO country code and `--entity-type` accepts `individual`
-or `company`; ctx never collects bank or card data. These commands are explicit
-hosted-service operations. Human mode may start WorkOS AuthKit when no usable
-session is cached, and payout may open Stripe's hosted onboarding.
+`payout` requests a one-use hosted payout-onboarding URL when the account is
+eligible. Referral payouts support individual recipients at launch. Human mode
+opens the URL by default; `--no-open` prints it instead. When first-time setup
+needs a country, interactive human mode asks for a readable country name or
+two-letter code and sends the normalized ISO country code. Existing recipients
+are not asked for country again when the service already knows their onboarding
+state. `--country <CC>` is the advanced override for scripts and other
+noninteractive callers; ctx never collects bank or card data. Human mode may
+start WorkOS AuthKit when no usable session is cached, and payout may open the
+hosted onboarding page.
 
 Every referral command using `--format json` is noninteractive and browser-free. It
 uses only a cached WorkOS session and returns the stable authentication-required
 failure when none is available; it never starts AuthKit or invokes a browser
 opener. JSON contains only the requested deterministic command data, with no
 unsolicited referral slogan or promotional message. `payout --format json` returns
-the hosted URL without opening it.
+the hosted URL without opening it. JSON and piped payout calls never prompt; if
+the service requires a country and none was supplied, they return
+`referral_payout_country_required` and the caller should rerun with
+`--country <CC>`.
 
 The sole automatic referral mention is human-only and shown once. After the
 first successful, nonempty, interactive `ctx blame` result, ctx may write
@@ -1113,7 +1119,7 @@ ctx pro manage --no-open --format json
 ctx pro uninstall (--delete-data|--keep-data) --format json
 ctx referral create <codename> --format json
 ctx referral status --format json
-ctx referral payout [--no-open] [--country <CC>] [--entity-type <individual|company>] --format json
+ctx referral payout [--no-open] [--country <CC>] --format json
 ctx blame <target> [--type file|commit|pr] --format json
 ctx blame file <path> --format json
 ctx blame commit <sha> --format json

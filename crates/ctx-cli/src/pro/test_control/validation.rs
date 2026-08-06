@@ -78,6 +78,7 @@ pub(super) fn validate_error(code: &str, message: &str) -> Result<()> {
         "referral_codename_conflict",
         "referral_not_eligible",
         "referral_not_found",
+        "referral_payout_country_required",
         "referral_payout_unavailable",
         "referral_unavailable",
         "service_unavailable",

@@ -1,5 +1,5 @@
 use super::referral::{
-    validate_payout_identity, validate_referral_claim_token, ReferralCreateRequest,
+    validate_payout_country, validate_referral_claim_token, ReferralCreateRequest,
     ReferralPayoutRequest, MAX_REFERRAL_CENTS, MAX_REFERRAL_CENTS_PER_ATTRIBUTION, REFERRALS_PATH,
     REFERRAL_PAYOUT_PATH,
 };
@@ -331,31 +331,21 @@ fn referral_and_payout_request_bodies_are_minimal_and_bounded() {
         serde_json::json!({"codename": "agent-smith"})
     );
     assert_eq!(
-        serde_json::to_value(ReferralPayoutRequest {
-            country: None,
-            entity_type: None,
-        })
-        .unwrap(),
+        serde_json::to_value(ReferralPayoutRequest { country: None }).unwrap(),
         serde_json::json!({})
     );
     assert_eq!(
         serde_json::to_value(ReferralPayoutRequest {
             country: Some("US"),
-            entity_type: Some("individual"),
         })
         .unwrap(),
         serde_json::json!({
             "country": "US",
-            "entity_type": "individual",
         })
     );
-    validate_payout_identity(Some("US"), Some("company")).unwrap();
-    for invalid in [
-        (Some("us"), None),
-        (Some("USA"), None),
-        (None, Some("person")),
-    ] {
-        assert!(validate_payout_identity(invalid.0, invalid.1).is_err());
+    validate_payout_country(Some("US")).unwrap();
+    for invalid in ["us", "USA", ""] {
+        assert!(validate_payout_country(Some(invalid)).is_err());
     }
 }
 
@@ -438,6 +428,11 @@ fn referral_failures_render_only_stable_safe_copy() {
             "a payable referral balance is required",
         ),
         (
+            "referral_payout_country_required",
+            "referral_payout_country_required",
+            "a payout country is required; supply --country <CC>",
+        ),
+        (
             "referral_self_referral",
             "referral_self_referral",
             "self-referrals are not eligible",
@@ -467,6 +462,44 @@ fn referral_failures_render_only_stable_safe_copy() {
         assert!(rendered.starts_with(public_code), "{code}: {rendered}");
         assert!(rendered.contains(expected), "{code}: {rendered}");
         assert!(!rendered.contains(secret), "{code}: {rendered}");
+    }
+}
+
+#[test]
+fn referral_payout_country_error_is_actionable_without_masking_generic_invalid_request() {
+    for (code, expected_code, expected_message) in [
+        (
+            "referral_payout_country_required",
+            "referral_payout_country_required",
+            "a payout country is required; supply --country <CC>",
+        ),
+        (
+            "invalid_request",
+            "invalid_request",
+            "the commercial service rejected the request",
+        ),
+    ] {
+        let failure = typed_api_failure(
+            400,
+            None,
+            ApiFailure {
+                api_version: "v1".to_owned(),
+                request_id: "request_123".to_owned(),
+                error: ApiError {
+                    code: code.to_owned(),
+                    message: "private upstream detail".to_owned(),
+                    retryable: false,
+                },
+            },
+        )
+        .unwrap();
+        let rendered = failure.to_string();
+        assert!(rendered.starts_with(expected_code), "{code}: {rendered}");
+        assert!(rendered.contains(expected_message), "{code}: {rendered}");
+        assert!(
+            !rendered.contains("private upstream detail"),
+            "{code}: {rendered}"
+        );
     }
 }
 

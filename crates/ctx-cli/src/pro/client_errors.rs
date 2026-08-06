@@ -92,6 +92,7 @@ fn stable_error_code_from_text(text: &str) -> Option<&'static str> {
         "service_unavailable" => Some("service_unavailable"),
         "referral_unavailable" => Some("referral_unavailable"),
         "referral_payout_unavailable" => Some("referral_payout_unavailable"),
+        "referral_payout_country_required" => Some("referral_payout_country_required"),
         "referral_codename_conflict" => Some("referral_codename_conflict"),
         "referral_not_found" => Some("referral_not_found"),
         "referral_not_eligible" => Some("referral_not_eligible"),

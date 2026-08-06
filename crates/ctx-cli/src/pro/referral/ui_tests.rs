@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     io,
     sync::{Arc, Mutex},
 };
@@ -54,9 +55,11 @@ fn test_ui(width: usize) -> (Ui, SharedWriter, SharedWriter) {
 #[derive(Default)]
 struct FakeReferralService {
     auth_modes: RefCell<Vec<ReferralAuthMode>>,
+    payout_countries: RefCell<Vec<Option<String>>>,
     create: Option<ReferralCreateResult>,
     status: Option<ReferralStatusResult>,
     payout: Option<ReferralPayoutResult>,
+    payout_results: RefCell<VecDeque<Result<ReferralPayoutResult>>>,
 }
 
 impl ReferralService for FakeReferralService {
@@ -85,12 +88,17 @@ impl ReferralService for FakeReferralService {
 
     fn payout(
         &mut self,
-        _country: Option<&str>,
-        _entity_type: Option<&str>,
+        country: Option<&str>,
         auth_mode: ReferralAuthMode,
         _ui: &mut Ui,
     ) -> Result<ReferralPayoutResult> {
         self.auth_modes.borrow_mut().push(auth_mode);
+        self.payout_countries
+            .borrow_mut()
+            .push(country.map(str::to_owned));
+        if let Some(result) = self.payout_results.borrow_mut().pop_front() {
+            return result;
+        }
         self.payout
             .take()
             .ok_or_else(|| anyhow::anyhow!("missing payout fixture"))
@@ -120,7 +128,6 @@ impl ReferralService for FailingReferralService {
     fn payout(
         &mut self,
         _country: Option<&str>,
-        _entity_type: Option<&str>,
         _auth_mode: ReferralAuthMode,
         _ui: &mut Ui,
     ) -> Result<ReferralPayoutResult> {
@@ -338,6 +345,199 @@ fn payout_setup_url_moves_below_its_label_at_narrow_widths() {
         rendered.contains("Setup link  https://connect.stripe.com/setup/s/test\n"),
         "{rendered}"
     );
+}
+
+#[test]
+fn interactive_payout_country_prompt_normalizes_a_readable_name_before_retrying() {
+    let mut service = FakeReferralService {
+        payout_results: RefCell::new(VecDeque::from([
+            Err(anyhow::anyhow!(
+                "referral_payout_country_required: country is required"
+            )),
+            Ok(payout_result()),
+        ])),
+        ..FakeReferralService::default()
+    };
+    let mut input = io::Cursor::new(b"United States\n".to_vec());
+    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
+    run_with_service_with_input(
+        parse(&["referral", "payout", "--no-open"]),
+        &mut service,
+        &mut output,
+        &mut input,
+        true,
+        &mut ui,
+        &|_| panic!("--no-open must not open a browser"),
+    )
+    .unwrap();
+
+    assert!(output.is_empty());
+    assert!(stdout.text().contains("Setup link"));
+    assert!(stderr
+        .text()
+        .contains("Choose the country for payout setup"));
+    assert_eq!(
+        service.payout_countries.into_inner(),
+        [None, Some("US".to_owned())]
+    );
+    assert_eq!(
+        service.auth_modes.into_inner(),
+        [
+            ReferralAuthMode::Interactive {
+                browser_enabled: false
+            },
+            ReferralAuthMode::Interactive {
+                browser_enabled: false
+            }
+        ]
+    );
+}
+
+#[test]
+fn interactive_payout_country_prompt_rejects_invalid_input_and_accepts_a_code() {
+    let mut service = FakeReferralService {
+        payout_results: RefCell::new(VecDeque::from([
+            Err(anyhow::anyhow!(
+                "referral_payout_country_required: country is required"
+            )),
+            Ok(payout_result()),
+        ])),
+        ..FakeReferralService::default()
+    };
+    let mut input = io::Cursor::new(b"Atlantis\nca\n".to_vec());
+    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
+    run_with_service_with_input(
+        parse(&["referral", "payout", "--no-open"]),
+        &mut service,
+        &mut output,
+        &mut input,
+        true,
+        &mut ui,
+        &|_| panic!("--no-open must not open a browser"),
+    )
+    .unwrap();
+
+    assert!(stdout.text().contains("Setup link"));
+    assert!(stderr
+        .text()
+        .contains("Enter a valid country name or two-letter code"));
+    assert_eq!(
+        service.payout_countries.into_inner(),
+        [None, Some("CA".to_owned())]
+    );
+}
+
+#[test]
+fn cancelled_payout_country_prompt_returns_an_actionable_error() {
+    let mut input = io::Cursor::new(Vec::<u8>::new());
+    let (mut ui, _stdout, stderr) = test_ui(80);
+    let error = prompt_payout_country(&mut input, &mut ui).unwrap_err();
+
+    assert!(error.to_string().contains("cancelled"));
+    assert!(error.to_string().contains("--country <CC>"));
+    assert!(stderr
+        .text()
+        .contains("Choose the country for payout setup"));
+}
+
+#[test]
+fn noninteractive_payout_missing_country_never_reads_or_prompts() {
+    let mut service = FakeReferralService {
+        payout_results: RefCell::new(VecDeque::from([Err(anyhow::anyhow!(
+            "referral_payout_country_required: country is required"
+        ))])),
+        ..FakeReferralService::default()
+    };
+    let mut input = io::Cursor::new(b"US\n".to_vec());
+    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
+    let error = run_with_service_with_input(
+        parse(&["referral", "payout", "--format=json"]),
+        &mut service,
+        &mut output,
+        &mut input,
+        false,
+        &mut ui,
+        &|_| panic!("JSON mode must not open a browser"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "referral_payout_country_required: a payout country is required; supply --country <CC>"
+    );
+    assert_eq!(input.position(), 0);
+    assert!(output.is_empty());
+    assert!(stdout.text().is_empty());
+    assert!(stderr.text().is_empty());
+    assert_eq!(service.payout_countries.into_inner(), [None]);
+    assert_eq!(
+        service.auth_modes.into_inner(),
+        [ReferralAuthMode::CachedOnly]
+    );
+}
+
+#[test]
+fn piped_payout_missing_country_is_actionable_without_a_prompt() {
+    let mut service = FakeReferralService {
+        payout_results: RefCell::new(VecDeque::from([Err(anyhow::anyhow!(
+            "referral_payout_country_required: country is required"
+        ))])),
+        ..FakeReferralService::default()
+    };
+    let mut input = io::Cursor::new(b"US\n".to_vec());
+    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
+    let result = run_with_service_with_input(
+        parse(&["referral", "payout", "--no-open"]),
+        &mut service,
+        &mut output,
+        &mut input,
+        false,
+        &mut ui,
+        &|_| panic!("piped mode must not open a browser"),
+    );
+
+    assert!(result.is_err());
+    assert_eq!(input.position(), 0);
+    assert!(stdout.text().is_empty());
+    assert!(stderr.text().contains("--country <CC>"));
+    assert!(!stderr
+        .text()
+        .contains("Choose the country for payout setup"));
+}
+
+#[test]
+fn unrelated_payout_invalid_request_is_not_replaced_with_a_country_prompt() {
+    let raw_error = "invalid_request: country validation failed for an unrelated reason";
+    let mut service = FakeReferralService {
+        payout_results: RefCell::new(VecDeque::from([Err(anyhow::anyhow!(raw_error))])),
+        ..FakeReferralService::default()
+    };
+    let mut input = io::Cursor::new(b"US\n".to_vec());
+    let mut output = Vec::new();
+    let (mut ui, stdout, stderr) = test_ui(80);
+    let error = run_with_service_with_input(
+        parse(&["referral", "payout", "--no-open"]),
+        &mut service,
+        &mut output,
+        &mut input,
+        true,
+        &mut ui,
+        &|_| panic!("--no-open must not open a browser"),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), raw_error);
+    assert_eq!(input.position(), 0);
+    assert!(output.is_empty());
+    assert!(stdout.text().is_empty());
+    assert!(!stderr
+        .text()
+        .contains("Choose the country for payout setup"));
+    assert_eq!(service.payout_countries.into_inner(), [None]);
 }
 
 #[test]

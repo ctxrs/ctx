@@ -234,6 +234,30 @@ pub(super) fn payout_browser_notice(context: &RenderContext, browser_opened: boo
     )
 }
 
+pub(super) fn payout_country_prompt(context: &RenderContext) -> Document {
+    outcome(
+        context,
+        UiOutcome {
+            state: OutcomeState::Warning,
+            title: "Choose the country for payout setup",
+            detail: Some(
+                "Enter a country name or two-letter code (for example, United States or US).",
+            ),
+        },
+    )
+}
+
+pub(super) fn payout_country_invalid(context: &RenderContext) -> Document {
+    outcome(
+        context,
+        UiOutcome {
+            state: OutcomeState::Warning,
+            title: "Enter a valid country name or two-letter code",
+            detail: None,
+        },
+    )
+}
+
 fn status_outcome(result: &ReferralStatusResult) -> (OutcomeState, String) {
     if result.debt_cents > 0 {
         (

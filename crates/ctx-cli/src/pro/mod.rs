@@ -466,6 +466,14 @@ fn human_error_presentation<'a>(
             hint: "Try the referral command again later.",
             action: Some(retry_command),
         },
+        "referral_payout_country_required" => HumanErrorPresentation {
+            title: "A payout country is required",
+            detail: Some(
+                "Choose the country where you will receive referral payouts, or provide its two-letter code.",
+            ),
+            hint: "Supply the country code for payout setup.",
+            action: Some("ctx referral payout --country <CC>"),
+        },
         "referral_payout_unavailable" => HumanErrorPresentation {
             title: "Referral payout setup is temporarily unavailable",
             detail: Some("The ctx Pro service could not start Stripe-hosted payout onboarding."),

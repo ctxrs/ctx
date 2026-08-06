@@ -96,16 +96,12 @@ impl CommercialApiClient {
         &self,
         access_token: &str,
         country: Option<&str>,
-        entity_type: Option<&str>,
     ) -> Result<ReferralPayoutResult> {
-        validate_payout_identity(country, entity_type)?;
+        validate_payout_country(country)?;
         let result: ReferralPayoutResult = self.post(
             REFERRAL_PAYOUT_PATH,
             access_token,
-            &ReferralPayoutRequest {
-                country,
-                entity_type,
-            },
+            &ReferralPayoutRequest { country },
         )?;
         result.validate()?;
         Ok(result)
@@ -203,8 +199,6 @@ pub(super) struct ReferralCreateRequest<'a> {
 pub(super) struct ReferralPayoutRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) country: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) entity_type: Option<&'a str>,
 }
 
 pub(super) fn validate_optional_codename(codename: Option<&str>) -> Result<()> {
@@ -240,14 +234,10 @@ pub(super) fn validate_referral_claim_token(token: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_payout_identity(
-    country: Option<&str>,
-    entity_type: Option<&str>,
-) -> Result<()> {
+pub(super) fn validate_payout_country(country: Option<&str>) -> Result<()> {
     if country.is_some_and(|value| {
         value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_uppercase())
-    }) || entity_type.is_some_and(|value| !matches!(value, "individual" | "company"))
-    {
+    }) {
         bail!("invalid_request: referral payout identity is invalid");
     }
     Ok(())
@@ -277,6 +267,7 @@ pub(super) fn is_never_retryable_error_code(code: &str) -> bool {
             | "referral_codename_taken"
             | "referral_not_eligible"
             | "referral_not_found"
+            | "referral_payout_country_required"
             | "referral_payout_not_eligible"
             | "referral_payout_unavailable"
             | "referral_self_referral"
@@ -303,6 +294,9 @@ pub(super) fn commercial_error_message(code: &str) -> Option<&'static str> {
             Some("a payable referral balance is required")
         }
         "referral_not_found" => Some("create a referral codename first"),
+        "referral_payout_country_required" => {
+            Some("a payout country is required; supply --country <CC>")
+        }
         "referral_payout_unavailable" => {
             Some("referral payout onboarding is not currently available")
         }
@@ -320,6 +314,7 @@ pub(super) fn public_commercial_error_code(code: &str) -> Option<&str> {
         | "referral_codename_conflict"
         | "referral_not_eligible"
         | "referral_not_found"
+        | "referral_payout_country_required"
         | "referral_payout_unavailable"
         | "referral_self_referral" => Some(code),
         "payout_setup_unavailable" => Some("referral_payout_unavailable"),

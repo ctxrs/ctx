@@ -699,7 +699,6 @@ impl ReferralService for TestControlService {
     fn payout(
         &mut self,
         _country: Option<&str>,
-        _entity_type: Option<&str>,
         auth_mode: ReferralAuthMode,
         ui: &mut Ui,
     ) -> Result<ReferralPayoutResult> {
