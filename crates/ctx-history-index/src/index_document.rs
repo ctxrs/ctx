@@ -503,6 +503,21 @@ pub(crate) fn core_content_bytes(content: &CoreContent) -> Result<usize> {
     }
     Ok(content_bytes)
 }
+
+/// Derives the lexical body projection for one complete Core record.
+///
+/// Proven ancestor copies remain complete stored Core records, but their body
+/// must not create another full-text posting set. Unknown and positively
+/// unique records retain the ordinary policy-selected body projection.
+pub(crate) fn project_indexed_body_search(
+    event_origin: &EventOrigin,
+    content: CoreContent,
+) -> Result<Option<String>> {
+    if matches!(event_origin, EventOrigin::CopiedFromAncestor { .. }) {
+        return Ok(None);
+    }
+    crate::project_body_search(content)
+}
 #[cfg(test)]
 pub(super) struct SourceToken([u8; 64]);
 
@@ -697,7 +712,7 @@ impl IndexDocument {
         if let Some(role) = record.role {
             target.add_text(fields.role, role);
         }
-        if let Some(body) = crate::project_body_search(record.content)? {
+        if let Some(body) = project_indexed_body_search(&record.event_origin, record.content)? {
             target.add_text(fields.body_search, body);
         }
         for observation in record.repository_vcs_observations {
@@ -771,8 +786,8 @@ impl Document for IndexDocument {
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{
-        derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
-        NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+        derive_event_id, derive_session_id, CoreRecord, EventCopyProofKind, EventIdentityInput,
+        NativeItemKey, NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
     };
     use tantivy::schema::{Document, TantivyDocument};
     use tempfile::tempdir;
@@ -899,6 +914,75 @@ mod tests {
                 maximum: MAX_CORE_CONTENT_BYTES,
             }) if actual == MAX_CORE_CONTENT_BYTES + 1
         ));
+    }
+
+    #[test]
+    fn copied_core_keeps_exact_fields_and_stored_body_without_body_search() {
+        let schema = lexical_schema();
+        let fields = fields_from_schema(&schema).unwrap();
+        let source = source("codex_session_jsonl");
+        let mut record = core_record(&source);
+        let ancestor_session_key =
+            NativeSessionKey::native_id("session", TypedKey::utf8("ancestor-session").unwrap())
+                .unwrap();
+        let ancestor_session_id = derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "thread",
+            native_session_key: &ancestor_session_key,
+        })
+        .unwrap();
+        let ancestor_item_key = NativeItemKey::native_id("message", TypedKey::U64(9)).unwrap();
+        let ancestor_event_id = derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id: ancestor_session_id,
+            logical_item_kind: "message",
+            native_item_key: &ancestor_item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        record.event_origin = EventOrigin::CopiedFromAncestor {
+            ancestor_session_id,
+            ancestor_event_id,
+            proof: EventCopyProofKind::NativeCopiedFromField,
+        };
+        let expected_event_id = record.event_id.to_string();
+        let expected_session_id = record.session_id.to_string();
+        let expected_body = record.content.normalized_body.clone();
+        let encoded = record.encode_stored().unwrap();
+        let content_bytes = core_content_bytes(&record.content).unwrap();
+        let source_fields = IndexSourceFields::new(&source, &crate::source_token(&source));
+
+        let document =
+            IndexDocument::from_core(fields, record, encoded, content_bytes, source_fields)
+                .unwrap()
+                .into_tantivy_document();
+
+        assert!(document.get_first(fields.body_search).is_none());
+        assert_eq!(
+            document
+                .get_first(fields.event_id)
+                .and_then(|value| value.as_str()),
+            Some(expected_event_id.as_str())
+        );
+        assert_eq!(
+            document
+                .get_first(fields.session_id)
+                .and_then(|value| value.as_str()),
+            Some(expected_session_id.as_str())
+        );
+        assert_eq!(
+            document
+                .get_first(fields.event_origin_kind)
+                .and_then(|value| value.as_str()),
+            Some("copied_from_ancestor")
+        );
+        let stored = document
+            .get_first(fields.core_record)
+            .and_then(|value| value.as_bytes())
+            .map(CoreRecord::decode_stored)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.content.normalized_body, expected_body);
     }
 
     #[test]

@@ -224,7 +224,10 @@ fn verify_segment(
         parent_session_documents = parent_session_documents
             .checked_add(u64::from(record.identities.parent_session.is_some()))
             .ok_or(IndexError::CountOverflow)?;
-        let body_projection = crate::project_body_search(record.core_record.content)?;
+        let body_projection = crate::index_document::project_indexed_body_search(
+            &record.core_record.event_origin,
+            record.core_record.content,
+        )?;
         body_tokens = body_tokens
             .checked_add(verify_body_projection(
                 &body_search,

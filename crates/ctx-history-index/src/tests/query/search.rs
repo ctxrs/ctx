@@ -116,6 +116,101 @@ fn copied_events_are_excluded_before_search_windows_and_unknowns_remain_searchab
 }
 
 #[test]
+fn many_copied_bodies_add_no_postings_or_score_order_changes() {
+    const COPIES: u64 = 64;
+    const NEEDLE: &str = "copybodystatsneedle";
+
+    fn records_with_copy_body(source: &SourceKey, copy_body: &str) -> Vec<CoreRecord> {
+        let first = document_for_session(
+            source,
+            "body-stats-original-first",
+            1,
+            "copybodystatsneedle concise",
+        );
+        let second = document_for_session(
+            source,
+            "body-stats-original-second",
+            2,
+            "copybodystatsneedle deliberately longer original body",
+        );
+        let mut records = vec![first.clone(), second];
+        for offset in 0..COPIES {
+            let mut copied = document_for_session(
+                source,
+                &format!("body-stats-copy-{offset}"),
+                offset + 3,
+                copy_body,
+            );
+            copied
+                .set_session_relationship(
+                    SessionRelationshipKind::Forked,
+                    Some(first.session_id),
+                    first.session_id,
+                )
+                .unwrap();
+            copied.event_origin = EventOrigin::CopiedFromAncestor {
+                ancestor_session_id: first.session_id,
+                ancestor_event_id: first.event_id,
+                proof: EventCopyProofKind::NativeCopiedFromField,
+            };
+            copied.validate_contract().unwrap();
+            records.push(copied);
+        }
+        records
+    }
+
+    let source = source("copied-body-statistics.jsonl");
+    let duplicated = records_with_copy_body(&source, "copybodystatsneedle concise");
+    let expected_copy = duplicated[2].clone();
+    let control = records_with_copy_body(&source, "unrelated copied body control");
+    let (_duplicated_temp, duplicated_index) = publish_class_aware_records(duplicated);
+    let (_control_temp, control_index) = publish_class_aware_records(control);
+
+    let duplicated_hits = duplicated_index
+        .search_event_candidates(NEEDLE, COPIES as usize + 2)
+        .unwrap();
+    let control_hits = control_index
+        .search_event_candidates(NEEDLE, COPIES as usize + 2)
+        .unwrap();
+    assert_eq!(duplicated_hits.len(), 2);
+    assert_eq!(
+        candidate_ids(&duplicated_hits),
+        candidate_ids(&control_hits)
+    );
+    assert_eq!(duplicated_hits[0].score, control_hits[0].score);
+    assert_eq!(duplicated_hits[1].score, control_hits[1].score);
+
+    let fields = fields_from_schema(duplicated_index.searcher.schema()).unwrap();
+    let term = Term::from_field_text(fields.body_search, NEEDLE);
+    assert_eq!(duplicated_index.searcher.doc_freq(&term).unwrap(), 2);
+    let raw_matches = duplicated_index
+        .searcher
+        .search(
+            &TermQuery::new(term, IndexRecordOption::WithFreqs),
+            &DocSetCollector,
+        )
+        .unwrap();
+    assert_eq!(raw_matches.len(), 2);
+
+    let visible_copy = duplicated_index
+        .core_record_by_id(expected_copy.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(visible_copy.event_origin, expected_copy.event_origin);
+    assert_eq!(
+        visible_copy.content.normalized_body,
+        expected_copy.content.normalized_body
+    );
+    assert_eq!(
+        duplicated_index
+            .core_events_for_session(expected_copy.session_id.as_uuid())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     let temp = tempdir().unwrap();
     let codex_root = source("codex-root");

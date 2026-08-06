@@ -192,6 +192,71 @@ fn complete_verifier_rejects_identity_digest_corruption() {
 }
 
 #[test]
+fn complete_verifier_rejects_injected_copied_body_postings() {
+    let temp = tempdir().unwrap();
+    let source = source("injected-copy-body.jsonl");
+    let original = document_for_session(&source, "original-session", 1, "verified original body");
+    let mut copied = document_for_session(&source, "copied-session", 2, "verified original body");
+    copied
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(original.session_id),
+            original.session_id,
+        )
+        .unwrap();
+    copied.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: original.session_id,
+        ancestor_event_id: original.event_id,
+        proof: EventCopyProofKind::NativeCopiedFromField,
+    };
+    copied.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(original).unwrap();
+    writer.add_core_record(copied.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    let fields = fields_from_schema(searcher.schema()).unwrap();
+    let mut forged_documents = searcher
+        .search(&AllQuery, &DocSetCollector)
+        .unwrap()
+        .into_iter()
+        .map(|address| indexed_document(decoded_stored_core(&searcher, address)))
+        .collect::<Vec<_>>();
+    let forged_copy = forged_documents
+        .iter_mut()
+        .find(|document| {
+            document
+                .get_first(fields.event_id)
+                .and_then(|value| value.as_str())
+                == Some(copied.event_id.to_string().as_str())
+        })
+        .unwrap();
+    forged_copy.add_text(fields.body_search, "injectedcopybodyposting");
+    let index = searcher.index().clone();
+    drop(searcher);
+    publish_unchecked_generation(
+        temp.path(),
+        &index,
+        manifest,
+        std::slice::from_ref(&source),
+        forged_documents,
+    );
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    assert!(matches!(
+        verify_searcher(&searcher, &manifest),
+        Err(IndexError::InvalidStoredDocumentField("body_search"))
+    ));
+}
+
+#[test]
 fn complete_verifier_rejects_source_count_corruption() {
     let temp = tempdir().unwrap();
     let first = source("count-first.jsonl");
