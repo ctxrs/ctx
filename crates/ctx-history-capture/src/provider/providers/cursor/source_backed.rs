@@ -22,7 +22,7 @@ use sha2::Digest;
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 #[cfg(test)]
 use super::parser::MAX_CURSOR_INPUT_PATHS;
@@ -67,7 +67,8 @@ use checkpoint::*;
 use file_observations::preserve_cursor_ordinary_file_observations;
 
 #[cfg(test)]
-static CURSOR_PROJECTED_RECORDS: AtomicU64 = AtomicU64::new(0);
+static CURSOR_PROJECTED_RECORDS: LazyLock<Mutex<HashMap<StableEntityId, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(test)]
 thread_local! {
@@ -76,13 +77,32 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn reset_cursor_projected_records() {
-    CURSOR_PROJECTED_RECORDS.store(0, Ordering::SeqCst);
+fn reset_cursor_projected_records(source: &SourceKey) {
+    CURSOR_PROJECTED_RECORDS
+        .lock()
+        .expect("Cursor projection counters must remain available")
+        .insert(source.identity(), 0);
 }
 
 #[cfg(test)]
-fn cursor_projected_records() -> u64 {
-    CURSOR_PROJECTED_RECORDS.load(Ordering::SeqCst)
+fn take_cursor_projected_records(source: &SourceKey) -> u64 {
+    CURSOR_PROJECTED_RECORDS
+        .lock()
+        .expect("Cursor projection counters must remain available")
+        .remove(&source.identity())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn observe_cursor_projected_record(source: &SourceKey) {
+    let mut counters = CURSOR_PROJECTED_RECORDS
+        .lock()
+        .expect("Cursor projection counters must remain available");
+    if let Some(counter) = counters.get_mut(&source.identity()) {
+        *counter = counter
+            .checked_add(1)
+            .expect("Cursor projection test counter overflowed");
+    }
 }
 
 #[cfg(test)]
@@ -517,7 +537,7 @@ impl JsonlFamilyProjector for CursorProjector {
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         #[cfg(test)]
-        CURSOR_PROJECTED_RECORDS.fetch_add(1, Ordering::SeqCst);
+        observe_cursor_projected_record(&self.source);
         let evidence = record.evidence();
         let Some(events) = project_cursor_jsonl_record(
             record.bytes(),

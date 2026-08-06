@@ -261,7 +261,8 @@ impl CoreRefreshEngine {
 pub(crate) use client::{
     coordinate_import_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
     coordinate_source_backed_refresh_with_progress, SourceBackedRefreshDaemonUnavailable,
-    SourceBackedRefreshObservation, SourceBackedRefreshTerminalError,
+    SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
+    SourceBackedRefreshTerminalError,
 };
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::count_verified_index_opens;

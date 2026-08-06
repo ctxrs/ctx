@@ -10,6 +10,7 @@ use crate::semantic::{
     autostart_daemon_and_wait, coordinate_source_backed_refresh_with_progress,
     daemon_autostart_suppression_reason, semantic_query_service_supported,
     source_epoch_status_report, DaemonHandoff, SourceBackedRefreshMode,
+    SourceBackedRefreshPendingPublication,
 };
 use crate::ui::{
     fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, RenderContext, Span,
@@ -81,7 +82,11 @@ pub(crate) fn run_setup(
     let lexical_status = source.report["lexical"]["status"]
         .as_str()
         .unwrap_or("unavailable");
-    telemetry.mode = Some(if lexical_status == "ready" {
+    let mode = setup_mode(
+        lexical_status,
+        refresh_request["status"].as_str().unwrap_or("unavailable"),
+    );
+    telemetry.mode = Some(if mode == "ready" {
         SetupMode::Ready
     } else {
         SetupMode::Background
@@ -89,12 +94,6 @@ pub(crate) fn run_setup(
     telemetry.providers_detected = source.indexed_sources.map(analytics::count_bucket);
     telemetry.has_indexed_content = source.indexed_items.map(|count| count > 0);
 
-    let mode = match lexical_status {
-        "ready" => "ready",
-        "pending" => "pending",
-        "stale" => "stale",
-        _ => "unavailable",
-    };
     let mut output = source.report.clone();
     let Some(output_fields) = output.as_object_mut() else {
         bail!("source status report was not an object");
@@ -137,6 +136,16 @@ pub(crate) fn run_setup(
         ui.write_stdout(&document)?;
     }
     Ok(())
+}
+
+fn setup_mode(lexical_status: &str, refresh_status: &str) -> &'static str {
+    match lexical_status {
+        "ready" => "ready",
+        "pending" => "pending",
+        "stale" => "stale",
+        _ if refresh_status == "pending" => "pending",
+        _ => "unavailable",
+    }
 }
 
 fn request_source_refresh(
@@ -191,30 +200,42 @@ fn request_source_refresh(
             {
                 return Err(error);
             }
-            let daemon_unavailable = error
-                .downcast_ref::<crate::semantic::SourceBackedRefreshDaemonUnavailable>()
-                .is_some();
-            Ok(json!({
-                "status": if daemon_unavailable {
-                    "unavailable"
-                } else if !wait {
-                    "pending"
-                } else {
-                    "unavailable"
-                },
-                "reason": if daemon_unavailable {
-                    daemon_unavailable_reason.unwrap_or("daemon_unavailable")
-                } else if !wait {
-                    "refresh_queued_without_published_generation"
-                } else {
-                    "refresh_failed"
-                },
-                "mode": if wait { "wait" } else { "background" },
-                "daemon_available": !daemon_unavailable,
-                "last_error": format!("{error:#}"),
-            }))
+            Ok(refresh_request_failure(
+                &error,
+                wait,
+                daemon_unavailable_reason,
+            ))
         }
     }
+}
+
+fn refresh_request_failure(
+    error: &anyhow::Error,
+    wait: bool,
+    daemon_unavailable_reason: Option<&str>,
+) -> Value {
+    let daemon_unavailable = error
+        .downcast_ref::<crate::semantic::SourceBackedRefreshDaemonUnavailable>()
+        .is_some();
+    let pending = (!wait)
+        .then(|| error.downcast_ref::<SourceBackedRefreshPendingPublication>())
+        .flatten();
+    json!({
+        "status": if pending.is_some() { "pending" } else { "unavailable" },
+        "reason": if daemon_unavailable {
+            daemon_unavailable_reason.unwrap_or("daemon_unavailable")
+        } else if pending.is_some() {
+            "refresh_queued_without_published_generation"
+        } else {
+            "refresh_failed"
+        },
+        "mode": if wait { "wait" } else { "background" },
+        "request_id": pending.map(SourceBackedRefreshPendingPublication::request_id),
+        "request_state": pending.map(SourceBackedRefreshPendingPublication::request_state),
+        "source_count": pending.map(SourceBackedRefreshPendingPublication::source_count),
+        "daemon_available": !daemon_unavailable,
+        "last_error": format!("{error:#}"),
+    })
 }
 
 fn daemon_autostart_json(
@@ -454,6 +475,38 @@ mod tests {
             "registration_verified": true,
             "live_owner_verified": true,
         })
+    }
+
+    #[test]
+    fn admitted_background_refresh_reports_pending_before_first_publication() {
+        assert_eq!(setup_mode("unavailable", "pending"), "pending");
+        assert_eq!(setup_mode("unavailable", "unavailable"), "unavailable");
+        assert_eq!(setup_mode("stale", "pending"), "stale");
+        assert_eq!(setup_mode("ready", "pending"), "ready");
+    }
+
+    #[test]
+    fn only_admitted_background_work_reports_pending() {
+        let admitted: anyhow::Error = SourceBackedRefreshPendingPublication::new(
+            "request-1".to_owned(),
+            "admission_pending".to_owned(),
+            7,
+        )
+        .into();
+        let pending = refresh_request_failure(&admitted, false, None);
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(
+            pending["reason"],
+            "refresh_queued_without_published_generation"
+        );
+        assert_eq!(pending["request_id"], "request-1");
+        assert_eq!(pending["request_state"], "admission_pending");
+        assert_eq!(pending["source_count"], 7);
+
+        let rejected = refresh_request_failure(&anyhow::anyhow!("queue full"), false, None);
+        assert_eq!(rejected["status"], "unavailable");
+        assert_eq!(rejected["reason"], "refresh_failed");
+        assert!(rejected["request_id"].is_null());
     }
 
     fn ready_source() -> Value {

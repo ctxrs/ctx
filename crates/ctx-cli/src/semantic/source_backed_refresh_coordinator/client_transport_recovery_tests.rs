@@ -148,6 +148,65 @@ fn same_id_reenqueue_replays_the_exact_payload_after_a_lost_ack() -> Result<()> 
 }
 
 #[test]
+fn background_lost_ack_terminal_replay_is_not_reported_as_pending() -> Result<()> {
+    let data_root = short_data_root()?;
+    ctx_history_core::platform_security::establish_private_data_root(data_root.path())?;
+    let socket_path = data_root.path().join("lost-ack-terminal.sock");
+    let listener = UnixListener::bind(&socket_path)?;
+    write_daemon_service_endpoint(
+        data_root.path(),
+        DaemonIpcService::SourceRefresh,
+        &source_refresh_endpoint(&socket_path),
+    )?;
+    let server = std::thread::spawn(move || -> Result<[Vec<u8>; 2]> {
+        let mut requests = Vec::with_capacity(2);
+        for attempt in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received)?;
+            let request: Value = serde_json::from_slice(&received)?;
+            requests.push(received);
+            if attempt == 0 {
+                continue;
+            }
+            let request_id = request["request_id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("lost-ack request had no request ID"))?;
+            stream.write_all(
+                format!(
+                    "{{\"ok\":true,\"owner\":\"daemon\",\"request_id\":\"{request_id}\",\"request_state\":\"failed\",\"schema_version\":1,\"last_error\":\"replayed terminal failure\"}}\n"
+                )
+                .as_bytes(),
+            )?;
+        }
+        requests
+            .try_into()
+            .map_err(|_| anyhow!("test server did not observe exactly two requests"))
+    });
+
+    let error = match coordinate_source_backed_refresh_with_catalog(
+        data_root.path(),
+        SourceBackedRefreshMode::Background,
+        SourceBackedRefreshOperation::Refresh,
+        None,
+        false,
+        false,
+        None,
+    ) {
+        Ok(_) => panic!("terminal failed replay must remain a failure"),
+        Err(error) => error,
+    };
+    let requests = server.join().expect("lost-ack test server panicked")?;
+
+    assert_eq!(requests[0], requests[1]);
+    assert!(error
+        .downcast_ref::<SourceBackedRefreshPendingPublication>()
+        .is_none());
+    assert!(format!("{error:#}").contains("replayed terminal failure"));
+    Ok(())
+}
+
+#[test]
 fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> Result<()> {
     let data_root = short_data_root()?;
     let socket_path = data_root.path().join("lost-all-acks.sock");
