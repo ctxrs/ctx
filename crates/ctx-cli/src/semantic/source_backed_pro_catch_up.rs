@@ -586,6 +586,13 @@ pub(super) fn reconcile_core_finalization_generation_lease(data_root: &Path) -> 
         || status.owner != "daemon"
         || status.kind != "source_backed_pro_catch_up"
     {
+        if lease.is_some() {
+            cancel_core_finalization_generation_lease(
+                data_root,
+                "durable Pro finalization job identity was invalid",
+            )?;
+            return Ok(());
+        }
         anyhow::bail!(
             "invalid_response: durable source-backed Pro catch-up job identity is invalid"
         );
@@ -602,18 +609,30 @@ pub(super) fn reconcile_core_finalization_generation_lease(data_root: &Path) -> 
     }
 
     if let Some(progress) = &status.finalization_progress {
-        progress
-            .validate()
-            .map_err(|error| anyhow::anyhow!("invalid_response: {}", error.message))?;
-        if progress.core_generation_id != status.core_generation_id {
-            anyhow::bail!(
-                "invalid_response: durable Pro finalization progress targets a foreign Core generation"
-            );
-        }
-        if lease.is_some() {
-            validate_core_finalization_generation_lease(data_root, progress)?;
-        } else {
-            reconstruct_core_finalization_generation_lease(data_root, progress)?;
+        let validation = (|| -> Result<()> {
+            progress
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid_response: {}", error.message))?;
+            if progress.core_generation_id != status.core_generation_id {
+                anyhow::bail!(
+                    "invalid_response: durable Pro finalization progress targets a foreign Core generation"
+                );
+            }
+            if lease.is_some() {
+                validate_core_finalization_generation_lease(data_root, progress)
+            } else {
+                reconstruct_core_finalization_generation_lease(data_root, progress)
+            }
+        })();
+        if let Err(error) = validation {
+            if lease.is_some() {
+                cancel_core_finalization_generation_lease(data_root, &error.to_string())?;
+            } else {
+                let failed = status
+                    .clone()
+                    .error(SourceBackedProCatchUpError::projection(error));
+                persist_status(data_root, &failed)?;
+            }
         }
         return Ok(());
     }
@@ -622,7 +641,11 @@ pub(super) fn reconcile_core_finalization_generation_lease(data_root: &Path) -> 
         return Ok(());
     };
     if lease.generation_id() != status.core_generation_id {
-        anyhow::bail!("invalid_response: durable Core generation lease targets a foreign Pro job");
+        cancel_core_finalization_generation_lease(
+            data_root,
+            "durable Core generation lease targeted a foreign Pro job",
+        )?;
+        return Ok(());
     }
     if status.pending && status.status != SourceBackedProCatchUpState::Completed {
         // Finish can commit while its response is lost. Until helper status
@@ -1172,6 +1195,12 @@ mod tests {
                 scheduled_target_generation(temp.path()).unwrap().is_none(),
                 "{mismatch}"
             );
+            assert!(
+                core_finalization_generation_lease(temp.path())
+                    .unwrap()
+                    .is_none(),
+                "{mismatch}"
+            );
         }
     }
 
@@ -1196,6 +1225,23 @@ mod tests {
             .is_none());
 
         reconstruct_core_finalization_generation_lease(temp.path(), &progress).unwrap();
+        let mismatched_progress = CoreMaterializationFinalizationProgress {
+            materialization_id: "e".repeat(64),
+            ..progress.clone()
+        };
+        let mismatched =
+            SourceBackedProCatchUpStatus::pending(&generation, 2).finalizing(mismatched_progress);
+        persist_status(temp.path(), &mismatched).unwrap();
+        reconcile_core_finalization_generation_lease(temp.path()).unwrap();
+        assert!(core_finalization_generation_lease(temp.path())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            read_status_json(temp.path()).unwrap()["error_code"],
+            "cancelled"
+        );
+
+        reconstruct_core_finalization_generation_lease(temp.path(), &progress).unwrap();
         fs::remove_file(status_path(temp.path())).unwrap();
         reconcile_core_finalization_generation_lease(temp.path()).unwrap();
         assert!(core_finalization_generation_lease(temp.path())
@@ -1214,7 +1260,7 @@ mod tests {
             &"f".repeat(64),
         )
         .unwrap();
-        let finalizing = SourceBackedProCatchUpStatus::pending(&generation, 2).finalizing(progress);
+        let finalizing = SourceBackedProCatchUpStatus::pending(&generation, 3).finalizing(progress);
         persist_status(temp.path(), &finalizing).unwrap();
         let error = reconcile_core_finalization_generation_lease(temp.path()).unwrap_err();
         assert!(
