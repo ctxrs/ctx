@@ -827,11 +827,12 @@ impl RepositoryCommitOperationEvent {
         let mut mapped_results = HashSet::new();
         for mapping in &self.mappings {
             mapping.validate_contract()?;
-            if !mappings.insert(mapping) {
+            if !mappings.insert(mapping)
+                || !mapped_sources.insert(&mapping.source)
+                || !mapped_results.insert(&mapping.result)
+            {
                 return Err(CoreRecordError::InvalidRepositoryOutcome);
             }
-            mapped_sources.insert(&mapping.source);
-            mapped_results.insert(&mapping.result);
         }
         validate_canonical_object_set(&self.unlinked_sources)?;
         validate_canonical_object_set(&self.unlinked_results)?;

@@ -309,6 +309,66 @@ fn copied_origin_rejects_self_references() {
     ));
 }
 
+#[test]
+fn copied_origin_rejects_asserted_repository_outcomes_and_commit_operations() {
+    let scope = record();
+    let repository = binding();
+    let mut operation_outcome = outcome(RepositoryOutcomeKind::Commit);
+    let mappings = vec![RepositoryCommitMapping {
+        source: oid('b'),
+        result: oid('a'),
+    }];
+    let mut operation = RepositoryCommitOperationEvent::repository_verified_yield(
+        &operation_outcome.linkage,
+        RepositoryCommitOperationKind::Amend,
+        mappings,
+        Some(oid('b')),
+        None,
+        oid('a'),
+        [8; 32],
+    )
+    .unwrap();
+    operation
+        .bind_scoped_identity(
+            &scope.source,
+            scope.event_id,
+            scope.session_id,
+            &repository,
+            &operation_outcome.linkage,
+        )
+        .unwrap();
+    operation_outcome.produced_object_ids.clear();
+    operation_outcome.commit_operation = Some(operation);
+
+    let ancestor_session_id = related_session_id("copied-outcome-ancestor");
+    let ancestor_event_id = related_event_id(ancestor_session_id, 42);
+    for asserted_outcome in [outcome(RepositoryOutcomeKind::Commit), operation_outcome] {
+        let mut candidate = record();
+        candidate.repository_bindings.push(repository.clone());
+        candidate
+            .repository_vcs_observations
+            .push(RepositoryVcsObservation {
+                repository_binding_id: repository.binding_id.clone(),
+                kind: RepositoryVcsObservationKind::Outcome(Box::new(asserted_outcome)),
+                object_id: None,
+                parent_object_ids: Vec::new(),
+                reference: None,
+                relative_path: None,
+            });
+        candidate.validate_contract().unwrap();
+
+        candidate.event_origin = EventOrigin::CopiedFromAncestor {
+            ancestor_session_id: Box::new(ancestor_session_id),
+            ancestor_event_id: Box::new(ancestor_event_id),
+            proof: EventCopyProofKind::NativeCopiedFromField,
+        };
+        assert!(matches!(
+            candidate.validate_contract(),
+            Err(CoreRecordError::InvalidRepositoryOutcome)
+        ));
+    }
+}
+
 fn mcp_tool_call(server: impl Into<String>, tool: impl Into<String>) -> McpToolCallAttribution {
     McpToolCallAttribution {
         server: server.into(),
@@ -1864,6 +1924,48 @@ fn plural_exact_operation_mapping_bound_accepts_32_rejects_33_and_leaves_unlinke
     )
     .unwrap();
     assert_eq!(unlinked.unlinked_sources.len(), 33);
+}
+
+#[test]
+fn plural_asserted_operation_mappings_require_unique_sources_and_results() {
+    let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
+    for mappings in [
+        vec![
+            RepositoryCommitMapping {
+                source: numbered_oid(1),
+                result: numbered_oid(101),
+            },
+            RepositoryCommitMapping {
+                source: numbered_oid(1),
+                result: numbered_oid(102),
+            },
+        ],
+        vec![
+            RepositoryCommitMapping {
+                source: numbered_oid(1),
+                result: numbered_oid(101),
+            },
+            RepositoryCommitMapping {
+                source: numbered_oid(2),
+                result: numbered_oid(101),
+            },
+        ],
+    ] {
+        let command_pre_head = mappings[0].source.clone();
+        let command_post_head = mappings[0].result.clone();
+        assert!(matches!(
+            RepositoryCommitOperationEvent::repository_verified_yield(
+                &linkage,
+                RepositoryCommitOperationKind::Rebase,
+                mappings,
+                Some(command_pre_head.clone()),
+                Some(command_pre_head),
+                command_post_head,
+                [8; 32],
+            ),
+            Err(CoreRecordError::InvalidRepositoryOutcome)
+        ));
+    }
 }
 
 #[test]

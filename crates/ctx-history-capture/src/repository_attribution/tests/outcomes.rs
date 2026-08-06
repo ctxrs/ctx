@@ -363,6 +363,63 @@ fn native_cherry_pick_receipt_admits_exact_derivation_mapping() {
     assert!(annotation.repository_abstentions.is_empty());
 }
 
+#[test]
+fn asserted_cherry_pick_rejects_pre_head_from_another_repository_object_domain() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "cherry-pick-pre-head-domain", None);
+    let primary = git_output(&repo, &["branch", "--show-current"]);
+    run_git(&repo, &["checkout", "-qb", "source"]);
+    fs::write(repo.join("picked.txt"), "picked\n").unwrap();
+    run_git(&repo, &["add", "picked.txt"]);
+    run_git(&repo, &["commit", "-qm", "Apply domain-bound lineage"]);
+    let source = git_output(&repo, &["rev-parse", "HEAD"]);
+    run_git(&repo, &["checkout", "-q", &primary]);
+    fs::write(repo.join("primary.txt"), "diverge\n").unwrap();
+    run_git(&repo, &["add", "primary.txt"]);
+    run_git(&repo, &["commit", "-qm", "Diverge domain-bound primary"]);
+    run_git(&repo, &["cherry-pick", &source]);
+    let result = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    let foreign_repo = repository(temp.path(), "foreign-pre-head-domain", None);
+    fs::write(foreign_repo.join("foreign.txt"), "foreign\n").unwrap();
+    run_git(&foreign_repo, &["add", "foreign.txt"]);
+    run_git(
+        &foreign_repo,
+        &["commit", "-qm", "Create foreign pre-HEAD"],
+    );
+    let foreign_pre_head = git_output(&foreign_repo, &["rev-parse", "HEAD"]);
+
+    let receipt = serde_json::json!({
+        "pre_head_oid": foreign_pre_head,
+        "source_oid": source,
+        "result_oid": result,
+    });
+    let command = format!("git cherry-pick {source}");
+    let linked = linked_exact_result(&repo, &command, &receipt);
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some(command),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+
+    assert!(annotation
+        .repository_vcs_observations
+        .iter()
+        .all(|observation| {
+            !matches!(&observation.kind, RepositoryVcsObservationKind::Outcome(_))
+        }));
+    assert!(annotation.repository_abstentions.iter().any(|abstention| {
+        abstention.reason == RepositoryAbstentionReason::OutcomeResultInadmissible
+            && abstention.detail.as_deref()
+                == Some("commit_operation_objects_did_not_verify_exactly")
+    }));
+}
+
 #[cfg(unix)]
 #[test]
 fn native_cherry_pick_substituted_after_source_read_abstains() {

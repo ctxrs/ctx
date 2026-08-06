@@ -971,6 +971,11 @@ impl CoreRecord {
                     observation.repository_binding_id.clone(),
                 ));
             };
+            if matches!(&self.event_origin, EventOrigin::CopiedFromAncestor { .. })
+                && matches!(&observation.kind, RepositoryVcsObservationKind::Outcome(_))
+            {
+                return Err(CoreRecordError::InvalidRepositoryOutcome);
+            }
             for object_id in observation
                 .object_id
                 .iter()

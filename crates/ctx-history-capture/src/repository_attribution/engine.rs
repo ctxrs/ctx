@@ -589,6 +589,8 @@ fn resolve_deferred_commit_observations(
                     .mappings
                     .iter()
                     .flat_map(|mapping| [mapping.source.clone(), mapping.result.clone()])
+                    .chain(deferred.command_pre_head.iter().cloned())
+                    .chain(deferred.sequencer_pre_head.iter().cloned())
                     .collect::<Vec<_>>();
                 object_ids.sort();
                 object_ids.dedup();
