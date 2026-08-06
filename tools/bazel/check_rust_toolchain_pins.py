@@ -10,6 +10,19 @@ import sys
 
 
 VERSION = "1.97.1"
+RULES_RUST_VERSION = "0.71.3"
+RULES_RUST_PATCHES = [
+    "//tools/bazel/patches:rules-rust-freebsd-host.patch",
+    "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
+]
+WINDOWS_GNU_DLLTOOL_PATCH_LINES = (
+    'diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl',
+    '+load("@bazel_skylib//lib:paths.bzl", "paths")',
+    '+    if toolchain.target_os == "windows" and toolchain.target_abi == "gnu" and cc_toolchain:',
+    '+            action_name = CPP_LINK_EXECUTABLE_ACTION_NAME,',
+    '+        tool_dir = paths.dirname(linker)',
+    '+        env["PATH"] = tool_dir + (";" + inherited_path if inherited_path else "")',
+)
 CHANNEL_MANIFEST = (
     "https://static.rust-lang.org/dist/2026-07-16/channel-rust-1.97.1.toml"
 )
@@ -108,6 +121,36 @@ def validate_module_text(module_text: str) -> None:
         and len(node.targets) == 1
         and isinstance(node.targets[0], ast.Name)
     }
+    override_calls = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "single_version_override"
+    ]
+    rules_rust_overrides = []
+    for node in override_calls:
+        keywords = {
+            keyword.arg: keyword.value
+            for keyword in node.value.keywords
+            if keyword.arg
+        }
+        if "module_name" in keywords and _literal(
+            keywords["module_name"], assignments
+        ) == "rules_rust":
+            rules_rust_overrides.append(keywords)
+    if len(rules_rust_overrides) != 1:
+        raise PinContractError("expected exactly one rules_rust version override")
+    rules_rust_override = rules_rust_overrides[0]
+    if (
+        _literal(rules_rust_override.get("version"), assignments)
+        != RULES_RUST_VERSION
+        or _literal(rules_rust_override.get("patch_strip"), assignments) != 1
+        or _literal(rules_rust_override.get("patches"), assignments)
+        != RULES_RUST_PATCHES
+    ):
+        raise PinContractError("rules_rust override has incomplete release patches")
     calls = [
         node
         for node in ast.walk(tree)
@@ -175,6 +218,14 @@ def validate_module_text(module_text: str) -> None:
         )
 
 
+def validate_windows_gnu_dlltool_patch_text(patch_text: str) -> None:
+    for line in WINDOWS_GNU_DLLTOOL_PATCH_LINES:
+        if line not in patch_text:
+            raise PinContractError(
+                "Windows-GNU dlltool discovery patch is missing: " + line
+            )
+
+
 def validate_release_matrix_text(matrix_text: str) -> None:
     try:
         matrix = json.loads(matrix_text)
@@ -201,15 +252,19 @@ def validate_release_matrix_text(matrix_text: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 4:
         print(
-            "usage: check_rust_toolchain_pins.py MODULE.bazel release-targets.json",
+            "usage: check_rust_toolchain_pins.py MODULE.bazel "
+            "release-targets.json rules-rust-windows-gnu-dlltool-path.patch",
             file=sys.stderr,
         )
         return 2
     try:
         validate_module_text(Path(sys.argv[1]).read_text(encoding="utf-8"))
         validate_release_matrix_text(Path(sys.argv[2]).read_text(encoding="utf-8"))
+        validate_windows_gnu_dlltool_patch_text(
+            Path(sys.argv[3]).read_text(encoding="utf-8")
+        )
     except (OSError, SyntaxError, PinContractError) as error:
         print(f"Rust toolchain pin contract failed: {error}", file=sys.stderr)
         return 1

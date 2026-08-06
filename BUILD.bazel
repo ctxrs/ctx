@@ -251,10 +251,12 @@ py_test(
     args = [
         "$(rootpath MODULE.bazel)",
         "$(rootpath contracts/release-targets-v1.json)",
+        "$(rootpath //tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch)",
     ],
     data = [
         "MODULE.bazel",
         "contracts/release-targets-v1.json",
+        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
     ],
 )
 
@@ -267,6 +269,7 @@ py_test(
     data = [
         "MODULE.bazel",
         "contracts/release-targets-v1.json",
+        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
     ],
     imports = ["tools/bazel"],
     main = "//tools/bazel:check_rust_toolchain_pins_test.py",
@@ -857,6 +860,7 @@ sh_test(
         "scripts/stage-semantic-release-handoff.sh",
         "//tools/bazel:release_routes.bzl",
         "//tools/bazel/patches:rules-rust-freebsd-host.patch",
+        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
     ],
     tags = ["release-gate"],
 )
