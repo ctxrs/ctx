@@ -17,9 +17,11 @@ use ctx_history_core::{
     RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservationKind,
     RepositoryLocalRootAuthorization,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+    MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS,
 };
 use sha2::{Digest, Sha256};
 mod geometry;
+mod operation;
 mod parsing;
 mod pull_request;
 
@@ -44,6 +46,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 // Two repositories, each checked by two snapshots of two Git subprocesses.
 pub(super) const MAX_FULL_CERTIFICATIONS_PER_EVENT: usize = 2;
 pub(super) const MAX_GIT_SUBPROCESSES_PER_EVENT: usize = 10;
+pub(super) const MAX_VERIFIED_COMMIT_OPERATION_OBJECTS: usize =
+    MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS * 2;
 const MAX_GIT_PROBE_TIME_PER_EVENT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -443,64 +447,6 @@ impl GitCertifier {
             return Err(ProbeFailure::ConcurrentDrift);
         }
         Ok((result, repository_object_domain_sha256(certificate)))
-    }
-
-    /// Verifies full source/result commit objects in one immutable
-    /// repository/object domain. Object existence is corroboration only; the
-    /// caller must already hold prospective linked operation evidence.
-    pub(super) fn verify_commit_operation_objects(
-        &self,
-        certificate: &CertifiedCandidate,
-        object_ids: &[GitObjectId],
-        budget: &mut EventProbeBudget,
-    ) -> Result<[u8; 32], ProbeFailure> {
-        if object_ids.is_empty() || object_ids.len() > 2 {
-            return Err(ProbeFailure::Failed(
-                "commit_operation_object_bound_exceeded",
-            ));
-        }
-        certificate.ensure_current_geometry()?;
-        let opening_mutable_state = repository_mutable_evidence_state(
-            &certificate.git_dir,
-            &certificate.common_dir,
-            certificate.branch.as_deref(),
-        )?;
-        if opening_mutable_state != certificate.mutable_evidence_state {
-            return Err(ProbeFailure::ConcurrentDrift);
-        }
-        for object_id in object_ids {
-            object_id
-                .validate_contract()
-                .map_err(|_| ProbeFailure::Failed("invalid_commit_operation_object"))?;
-            if object_id.format != certificate.object_format() {
-                return Err(ProbeFailure::Failed(
-                    "commit_operation_object_format_mismatch",
-                ));
-            }
-            let revision = format!("{}^{{commit}}", object_id.hex);
-            let output = self.run_git(
-                &certificate.repository_root,
-                &["show", "-s", "--format=%H", &revision],
-                false,
-                budget,
-            )?;
-            let lines = utf8_lines(&output)?;
-            if lines.as_slice() != [object_id.hex.as_str()] {
-                return Err(ProbeFailure::Failed(
-                    "commit_operation_object_resolution_mismatch",
-                ));
-            }
-        }
-        certificate.ensure_current_geometry()?;
-        let closing_mutable_state = repository_mutable_evidence_state(
-            &certificate.git_dir,
-            &certificate.common_dir,
-            certificate.branch.as_deref(),
-        )?;
-        if closing_mutable_state != opening_mutable_state {
-            return Err(ProbeFailure::ConcurrentDrift);
-        }
-        Ok(repository_object_domain_sha256(certificate))
     }
 
     #[cfg(test)]

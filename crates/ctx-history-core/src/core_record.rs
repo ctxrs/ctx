@@ -50,7 +50,7 @@ pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 /// This identity is part of the Core record contract fingerprint so a change
 /// to the accumulator cannot be interpreted under older generation semantics.
 pub const CORE_RECORD_ACCUMULATOR_IDENTITY: &[u8] = b"ctx-core-record-event-binding-v1\0";
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 9;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 10;
 pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 5;
 pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 4;
 pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 6;
@@ -73,6 +73,8 @@ pub const MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES: usize = 64 * 1024;
 
 const MAX_TEXT_METADATA_BYTES: usize = 64 * 1024;
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
+/// Maximum exact source/result pairs admitted for one commit operation.
+pub const MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS: usize = 32;
 const MAX_REPOSITORY_ITEMS: usize = 256;
 const MAX_REPOSITORY_OBSERVATIONS: usize = 4_096;
 const MAX_REPOSITORY_ALIASES: usize = 64;

@@ -1549,6 +1549,13 @@ fn oid(hex: char) -> GitObjectId {
     }
 }
 
+fn numbered_oid(index: usize) -> GitObjectId {
+    GitObjectId {
+        format: GitObjectFormat::Sha1,
+        hex: format!("{index:040x}"),
+    }
+}
+
 fn outcome(kind: RepositoryOutcomeKind) -> RepositoryOutcomeObservation {
     RepositoryOutcomeObservation {
         kind,
@@ -1732,6 +1739,65 @@ fn replacement_lineage_and_pull_request_shapes_are_explicit() {
 }
 
 #[test]
+fn plural_exact_operation_mapping_bound_accepts_32_rejects_33_and_leaves_unlinked_unchanged() {
+    let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
+    let mappings = |count: usize| {
+        (0..count)
+            .map(|index| RepositoryCommitMapping {
+                source: numbered_oid(index + 1),
+                result: numbered_oid(index + 1_001),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let accepted_mappings = mappings(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS);
+    let accepted = RepositoryCommitOperationEvent::repository_verified_yield(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        accepted_mappings.clone(),
+        Some(accepted_mappings[0].source.clone()),
+        Some(accepted_mappings[0].source.clone()),
+        accepted_mappings[0].result.clone(),
+        [8; 32],
+    )
+    .unwrap();
+    assert_eq!(
+        accepted.mappings.len(),
+        MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS
+    );
+
+    let rejected_mappings = mappings(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS + 1);
+    let rejected = RepositoryCommitOperationEvent::repository_verified_yield(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        rejected_mappings.clone(),
+        Some(rejected_mappings[0].source.clone()),
+        Some(rejected_mappings[0].source.clone()),
+        rejected_mappings[0].result.clone(),
+        [8; 32],
+    );
+    assert!(matches!(
+        rejected,
+        Err(CoreRecordError::TooManyItems {
+            field: "repository_commit_operation_mappings",
+            actual: 33,
+            maximum: MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS,
+        })
+    ));
+
+    let unlinked_sources = (0..33).map(|index| numbered_oid(index + 1)).collect();
+    let unlinked = RepositoryCommitOperationEvent::record_exact_unlinked(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        unlinked_sources,
+        Vec::new(),
+        RepositoryCommitOperationState::Ambiguous,
+    )
+    .unwrap();
+    assert_eq!(unlinked.unlinked_sources.len(), 33);
+}
+
+#[test]
 fn pull_request_outcome_must_match_its_referenced_repository_binding() {
     let pull_request = RepositoryPullRequestIdentity {
         forge_repository: RepositoryAlias {
@@ -1823,14 +1889,14 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "bc71a6638f1bc5729c534518e1731f8f9fef8678db08eea91db1ccf9cee1043b"
+        "85249d306c18f120847b755511c932287aa634ee47341a7365299b2666dd6a74"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "3b7c681c128f468d4987c7fe305af15b3dbd4c830c0a222b3664a05245bbbe46"
+        "bb4fa22bcbc344ae6e6a2d24839994941f2cd270f611ed156a80b8198a82c291"
     );
     for changed in [
         CoreContractRevisions {

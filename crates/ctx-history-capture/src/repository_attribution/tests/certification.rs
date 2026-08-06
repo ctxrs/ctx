@@ -139,6 +139,61 @@ fn one_event_is_bounded_to_two_full_certificates_and_the_git_subprocess_budget()
     assert!(attributor.git_subprocess_count() <= git::MAX_GIT_SUBPROCESSES_PER_EVENT);
 }
 
+#[test]
+fn plural_operation_objects_are_batch_verified_with_an_explicit_unique_bound() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "plural-operation-objects", None);
+    let mut object_ids = vec![GitObjectId {
+        format: GitObjectFormat::Sha1,
+        hex: git_output(&repo, &["rev-parse", "HEAD"]),
+    }];
+    for index in 0..3 {
+        fs::write(
+            repo.join(format!("mapped-{index}.txt")),
+            format!("{index}\n"),
+        )
+        .unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-qm", &format!("mapped {index}")]);
+        object_ids.push(GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: git_output(&repo, &["rev-parse", "HEAD"]),
+        });
+    }
+    object_ids.sort();
+
+    let certifier = GitCertifier::default();
+    let certificate = certifier
+        .certify(
+            &repo,
+            CandidateKind::Directory,
+            RepositoryEvidenceKind::DeclaredToolWorkdir,
+        )
+        .unwrap();
+    let subprocesses_before = certifier.git_subprocess_count();
+    let mut budget = git::EventProbeBudget::new();
+    let domain = certifier
+        .verify_commit_operation_objects(&certificate, &object_ids, &mut budget)
+        .unwrap();
+    assert_ne!(domain, [0; 32]);
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 1);
+
+    let over_bound = (0..=git::MAX_VERIFIED_COMMIT_OPERATION_OBJECTS)
+        .map(|index| GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: format!("{:040x}", index + 1),
+        })
+        .collect::<Vec<_>>();
+    let failure = certifier
+        .verify_commit_operation_objects(&certificate, &over_bound, &mut budget)
+        .unwrap_err();
+    assert_eq!(
+        failure,
+        git::ProbeFailure::Failed("commit_operation_object_bound_exceeded")
+    );
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn every_candidate_route_is_revalidated_in_both_ancestor_descendant_orders() {

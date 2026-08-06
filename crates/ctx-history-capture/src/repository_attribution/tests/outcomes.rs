@@ -71,6 +71,31 @@ fn linked_short_commit(
     .unwrap()
 }
 
+fn linked_exact_result(
+    repository: &Path,
+    command: &str,
+    output: &serde_json::Value,
+) -> super::LinkedOutcomeEvidence {
+    let repository = repository.to_string_lossy().into_owned();
+    linked_outcome_evidence(LinkedOutcomeInput {
+        provider: "fixture",
+        command,
+        session_cwd: Some(&repository),
+        declared_workdir: Some(&repository),
+        origin_call_id: "call-origin",
+        result_call_id: "call-result",
+        origin_event_sequence: 7,
+        continuation_call_id_sha256: &[],
+        result_record_sha256: [9; 32],
+        observed_at_unix_ms: 10,
+        result_outcome: OutputOutcome::Success,
+        result_output: output,
+        structured_commit_oid: None,
+        output_repository_path: Some(&repository),
+    })
+    .unwrap()
+}
+
 #[test]
 fn public_ctx_short_commit_resolves_full_oid_parents_and_changed_files() {
     let temp = TempDir::new().unwrap();
@@ -180,6 +205,100 @@ fn short_amend_without_an_exact_source_result_map_abstains() {
 }
 
 #[test]
+fn exact_plural_rebase_receipt_certifies_all_source_result_mappings() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "plural-rebase", None);
+    let primary = git_output(&repo, &["branch", "--show-current"]);
+    run_git(&repo, &["checkout", "-qb", "feature"]);
+    fs::write(repo.join("first.txt"), "first\n").unwrap();
+    run_git(&repo, &["add", "first.txt"]);
+    run_git(&repo, &["commit", "-qm", "First rebased commit"]);
+    let first_source = git_output(&repo, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("second.txt"), "second\n").unwrap();
+    run_git(&repo, &["add", "second.txt"]);
+    run_git(&repo, &["commit", "-qm", "Second rebased commit"]);
+    let second_source = git_output(&repo, &["rev-parse", "HEAD"]);
+
+    run_git(&repo, &["checkout", "-q", &primary]);
+    fs::write(repo.join("primary.txt"), "primary\n").unwrap();
+    run_git(&repo, &["add", "primary.txt"]);
+    run_git(&repo, &["commit", "-qm", "Advance primary"]);
+    run_git(&repo, &["checkout", "-q", "feature"]);
+    run_git(&repo, &["rebase", &primary]);
+    let second_result = git_output(&repo, &["rev-parse", "HEAD"]);
+    let first_result = git_output(&repo, &["rev-parse", "HEAD^"]);
+    assert_ne!(first_source, first_result);
+    assert_ne!(second_source, second_result);
+
+    let receipt = serde_json::json!({
+        "pre_head_oid": second_source,
+        "post_head_oid": second_result,
+        "replacements": [
+            {"old_oid": second_source, "new_oid": second_result},
+            {"old_oid": first_source, "new_oid": first_result},
+        ],
+    });
+    let command = format!("git rebase {primary}");
+    let linked = linked_exact_result(&repo, &command, &receipt);
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some(command),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+
+    let outcome = annotation
+        .repository_vcs_observations
+        .iter()
+        .find_map(|observation| match &observation.kind {
+            RepositoryVcsObservationKind::Outcome(outcome) => Some(outcome.as_ref()),
+            _ => None,
+        })
+        .expect("expected exact plural rebase outcome");
+    let operation = outcome.commit_operation.as_ref().unwrap();
+    assert_eq!(
+        operation.kind,
+        ctx_history_core::RepositoryCommitOperationKind::Rebase
+    );
+    assert_eq!(operation.mappings.len(), 2);
+    let actual = operation
+        .mappings
+        .iter()
+        .map(|mapping| (mapping.source.hex.as_str(), mapping.result.hex.as_str()))
+        .collect::<Vec<_>>();
+    let mut expected = vec![
+        (first_source.as_str(), first_result.as_str()),
+        (second_source.as_str(), second_result.as_str()),
+    ];
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        operation
+            .repository_verified_yields()
+            .map(|oid| oid.hex.as_str())
+            .collect::<Vec<_>>(),
+        operation
+            .mappings
+            .iter()
+            .map(|mapping| mapping.result.hex.as_str())
+            .collect::<Vec<_>>()
+    );
+    let ctx_history_core::RepositoryCommitOperationProof::RepositoryVerifiedYield(proof) =
+        &operation.proof
+    else {
+        panic!("expected repository-verified plural rebase proof");
+    };
+    assert_eq!(proof.command_pre_head.as_ref().unwrap().hex, second_source);
+    assert_eq!(proof.sequencer_pre_head, proof.command_pre_head);
+    assert_eq!(proof.command_post_head.hex, second_result);
+    assert!(annotation.repository_abstentions.is_empty());
+}
+
+#[test]
 fn native_cherry_pick_receipt_admits_exact_derivation_mapping() {
     let temp = TempDir::new().unwrap();
     let repo = repository(temp.path(), "cherry-pick", None);
@@ -241,6 +360,77 @@ fn native_cherry_pick_receipt_admits_exact_derivation_mapping() {
             .collect::<Vec<_>>(),
         [result.as_str()]
     );
+    assert!(annotation.repository_abstentions.is_empty());
+}
+
+#[test]
+fn plural_mapping_model_preserves_native_sha256_cherry_pick_certification() {
+    let temp = TempDir::new().unwrap();
+    let Some(repo) = sha256_repository(temp.path(), "sha256-cherry-pick") else {
+        eprintln!("host Git does not support git init --object-format=sha256; skipping fixture");
+        return;
+    };
+    let primary = git_output(&repo, &["branch", "--show-current"]);
+    run_git(&repo, &["checkout", "-qb", "source"]);
+    fs::write(repo.join("picked.txt"), "picked\n").unwrap();
+    run_git(&repo, &["add", "picked.txt"]);
+    run_git(&repo, &["commit", "-qm", "Apply SHA-256 lineage"]);
+    let source = git_output(&repo, &["rev-parse", "HEAD"]);
+    run_git(&repo, &["checkout", "-q", &primary]);
+    fs::write(repo.join("primary.txt"), "diverge\n").unwrap();
+    run_git(&repo, &["add", "primary.txt"]);
+    run_git(&repo, &["commit", "-qm", "Diverge SHA-256 primary"]);
+    run_git(&repo, &["cherry-pick", &source]);
+    let result = git_output(&repo, &["rev-parse", "HEAD"]);
+    let short = git_output(&repo, &["rev-parse", "--short=7", "HEAD"]);
+    assert_ne!(source, result);
+    assert_eq!(source.len(), 64);
+    assert_eq!(result.len(), 64);
+    assert!(source.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(result.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+    let command = format!("git cherry-pick {source}");
+    let linked = linked_short_commit(
+        &repo,
+        &command,
+        format!("[{primary} {short}] Apply SHA-256 lineage\n 1 file changed, 1 insertion(+)\n"),
+    );
+    let annotation = attribute(AttributionInput {
+        activity_at_unix_ms: Some(10),
+        declared_tool_workdir: Some(repo.to_string_lossy().into_owned()),
+        command: Some(command),
+        outcome_operation_repository_path: linked.outcome_operation_repository_path,
+        outcome_output_repository_path: linked.outcome_output_repository_path,
+        outcome_observations: linked.outcomes,
+        outcome_abstentions: linked.abstentions,
+        ..AttributionInput::default()
+    });
+
+    let outcome = annotation
+        .repository_vcs_observations
+        .iter()
+        .find_map(|observation| match &observation.kind {
+            RepositoryVcsObservationKind::Outcome(outcome) => Some(outcome.as_ref()),
+            _ => None,
+        })
+        .expect("expected exact SHA-256 cherry-pick outcome");
+    let operation = outcome.commit_operation.as_ref().unwrap();
+    assert_eq!(operation.mappings.len(), 1);
+    assert_eq!(operation.mappings[0].source.hex, source);
+    assert_eq!(operation.mappings[0].result.hex, result);
+    assert_eq!(operation.mappings[0].source.format, GitObjectFormat::Sha256);
+    assert_eq!(operation.mappings[0].result.format, GitObjectFormat::Sha256);
+    let ctx_history_core::RepositoryCommitOperationProof::RepositoryVerifiedYield(proof) =
+        &operation.proof
+    else {
+        panic!("expected repository-verified SHA-256 yield proof");
+    };
+    assert_eq!(
+        proof.repository_geometry_before_sha256,
+        proof.repository_geometry_after_sha256
+    );
+    assert_ne!(proof.repository_geometry_before_sha256, [0; 32]);
+    assert_eq!(proof.exact_source_oids, [operation.mappings[0].source.clone()]);
     assert!(annotation.repository_abstentions.is_empty());
 }
 

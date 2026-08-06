@@ -11,6 +11,7 @@ use ctx_history_core::{
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
     CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION,
+    MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS,
 };
 use serde_json::json;
 
@@ -551,6 +552,17 @@ fn resolve_deferred_commit_observations(
                 continue;
             }
             UnscopedOutcomeObservation::DeferredCommitOperation(deferred) => {
+                if deferred.mappings.is_empty()
+                    || deferred.mappings.len() > MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS
+                {
+                    push_abstention(
+                        annotation,
+                        RepositoryEvidenceKind::ProviderNativeResult,
+                        RepositoryAbstentionReason::OutcomeResultInadmissible,
+                        "commit_operation_mapping_bound_exceeded",
+                    );
+                    continue;
+                }
                 let Some(operation_path) = operation_path else {
                     push_abstention(
                         annotation,

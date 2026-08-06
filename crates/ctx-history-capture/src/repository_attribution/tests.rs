@@ -28,6 +28,7 @@ use crate::OutputOutcome;
 mod certification;
 #[cfg(unix)]
 mod local_root_authorization;
+mod outcome_parser;
 mod pull_request_association;
 
 fn run_git(path: &Path, arguments: &[&str]) {
@@ -68,6 +69,28 @@ fn repository(parent: &Path, name: &str, remote: Option<&str>) -> PathBuf {
     run_git(&path, &["add", "tracked.txt"]);
     run_git(&path, &["commit", "-qm", "fixture"]);
     path
+}
+
+fn sha256_repository(parent: &Path, name: &str) -> Option<PathBuf> {
+    let path = parent.join(name);
+    fs::create_dir(&path).unwrap();
+    let initialized = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&path)
+        .args(["init", "-q", "--object-format=sha256"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .unwrap();
+    if !initialized.success() {
+        return None;
+    }
+    run_git(&path, &["config", "user.name", "ctx test"]);
+    run_git(&path, &["config", "user.email", "ctx@example.invalid"]);
+    fs::write(path.join("tracked.txt"), "tracked\n").unwrap();
+    run_git(&path, &["add", "tracked.txt"]);
+    run_git(&path, &["commit", "-qm", "fixture"]);
+    Some(path)
 }
 
 fn forge(namespace: &str, name: &str) -> RepositoryAlias {
