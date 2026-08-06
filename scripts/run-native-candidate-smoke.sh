@@ -221,7 +221,7 @@ pro_status_reports_absent_local_runtime() {
     '"ready"[[:space:]]*:[[:space:]]*false' \
     '"materialized"[[:space:]]*:[[:space:]]*false' \
     '"helper_version"[[:space:]]*:[[:space:]]*null' \
-    '"protocol_version"[[:space:]]*:[[:space:]]*1' \
+    '"protocol_version"[[:space:]]*:[[:space:]]*2' \
     '"capabilities"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]' \
     '"command"[[:space:]]*:[[:space:]]*"ctx pro"' \
     '"reason"[[:space:]]*:[[:space:]]*"helper_missing"'

@@ -6,7 +6,7 @@
   "ready": false,
   "materialized": false,
   "helper_version": null,
-  "protocol_version": 1,
+  "protocol_version": 2,
   "capabilities": [],
   "error_code": "entitlement_expired",
   "access_state": "locked",
