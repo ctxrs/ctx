@@ -93,6 +93,132 @@ fn codex_commit_receipt_with_trailing_command_and_many_refs_publishes_certified_
 }
 
 #[test]
+fn codex_lineage_evidence_authority_overrides_null_and_reordered_timestamps() {
+    use ctx_history_core::{EventCopyProofKind, EventOrigin, RepositoryAbstentionReason};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let parent = "019fa000-0000-7000-8000-000000000112";
+    let child = "019fa000-0000-7000-8000-000000000113";
+    let call_id = "call-copied-despite-timestamps";
+    let oid = "dddddddddddddddddddddddddddddddddddddddd";
+    let command = "git commit -m copied && git rev-parse HEAD";
+    let mut malformed_parent_call = serde_json::from_str::<Value>(&exec_call_at(
+        "2026-07-28T12:10:00Z",
+        call_id,
+        command,
+        &repository,
+    ))
+    .unwrap();
+    malformed_parent_call["timestamp"] = Value::Null;
+    let parent_result = successful_result_at(
+        "2026-07-28T12:10:01Z",
+        call_id,
+        Value::String(format!("[main ddddddd] copied\n{oid}\n")),
+    );
+    write_session(
+        &sessions,
+        parent,
+        &[malformed_parent_call.to_string(), parent_result.clone()],
+    );
+    write_forked_session_at(
+        &sessions,
+        child,
+        parent,
+        "2026-07-28T12:30:00Z",
+        &[
+            exec_call_at("2026-07-28T12:31:02Z", call_id, command, &repository),
+            successful_result_at(
+                "2026-07-28T12:31:01Z",
+                call_id,
+                Value::String(format!("[main ddddddd] copied\n{oid}\n")),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let parent_source = codex_source_key(parent).unwrap();
+    let parent_session = codex_session_identity(&parent_source, parent).unwrap();
+    let parent_result = outcome_for_sequence(&verified, parent_session, 2);
+    assert!(!parent_result.repository_vcs_observations.is_empty());
+    let child_source = codex_source_key(child).unwrap();
+    let child_session = codex_session_identity(&child_source, child).unwrap();
+    let copied_result = outcome_for_sequence(&verified, child_session, 2);
+    assert_eq!(
+        copied_result.event_origin,
+        EventOrigin::CopiedFromAncestor {
+            ancestor_session_id: parent_session,
+            ancestor_event_id: parent_result.event_id,
+            proof: EventCopyProofKind::NativeCallResultIdentity,
+        }
+    );
+    assert!(copied_result.repository_vcs_observations.is_empty());
+    assert!(copied_result
+        .repository_abstentions
+        .iter()
+        .any(|abstention| {
+            abstention.reason == RepositoryAbstentionReason::ProviderOutputUnjoined
+                && abstention.detail.as_deref()
+                    == Some("copied_provider_history_has_ancestor_execution")
+        }));
+}
+
+#[test]
+fn codex_lineage_evidence_authority_retains_certified_unique_repository_outcome() {
+    use ctx_history_core::{EventOrigin, RepositoryVcsObservationKind};
+
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&sessions).unwrap();
+    initialize_repository(&repository);
+    let parent = "019fa000-0000-7000-8000-000000000114";
+    let child = "019fa000-0000-7000-8000-000000000115";
+    let call_id = "call-certified-unique";
+    let oid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    write_session(&sessions, parent, &[message("user", "complete ancestor")]);
+    write_forked_session_at(
+        &sessions,
+        child,
+        parent,
+        "2026-07-28T12:30:00Z",
+        &[
+            exec_call_at(
+                "2026-07-28T12:31:02Z",
+                call_id,
+                "git commit -m unique && git rev-parse HEAD",
+                &repository,
+            ),
+            successful_result_at(
+                "2026-07-28T12:31:01Z",
+                call_id,
+                Value::String(format!("[main eeeeeee] unique\n{oid}\n")),
+            ),
+        ],
+    );
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let child_source = codex_source_key(child).unwrap();
+    let child_session = codex_session_identity(&child_source, child).unwrap();
+    let result = outcome_for_sequence(&verified, child_session, 2);
+    assert_eq!(result.event_origin, EventOrigin::Unknown);
+    assert!(result
+        .repository_vcs_observations
+        .iter()
+        .any(|observation| matches!(observation.kind, RepositoryVcsObservationKind::Outcome(_))));
+    assert!(!result.repository_abstentions.iter().any(|abstention| {
+        abstention.detail.as_deref() == Some("provider_execution_origin_lineage_unproven")
+    }));
+}
+
+#[test]
 fn codex_post_fork_execution_fails_closed_on_an_unavailable_older_ancestor() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");

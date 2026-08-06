@@ -279,23 +279,15 @@ pub(super) fn codex_core_record(
     let result_command_too_large = repository_result
         .as_ref()
         .is_some_and(|evidence| evidence.command_too_large);
-    let result_origin_occurred_at_unix_ms = repository_result
-        .as_ref()
-        .and_then(|evidence| evidence.origin_occurred_at_unix_ms);
     let result_lineage_origin = match repository_result.as_ref().and_then(|evidence| {
         Some((
             evidence.origin_call_id.as_deref()?,
             evidence.result_call_id.as_deref()?,
         ))
     }) {
-        Some((origin_call_id, result_call_id)) => Some(outcome_lineage.classify(
-            native_session_id,
-            origin_call_id,
-            result_call_id,
-            result_origin_occurred_at_unix_ms,
-            occurred_at.timestamp_millis(),
-            owner.started_at.timestamp_millis(),
-        )?),
+        Some((origin_call_id, result_call_id)) => {
+            Some(outcome_lineage.classify(native_session_id, origin_call_id, result_call_id)?)
+        }
         None => None,
     };
     let event_origin = match (
