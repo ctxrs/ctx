@@ -1723,15 +1723,30 @@ mod tests {
     }
 
     #[test]
-    fn parent_owned_by_another_route_is_conservatively_unproven() {
+    fn carried_parent_participates_and_requires_facts_before_child_classification() {
         let sources = vec![source("root", None, 1), source("child", Some("root"), 2)];
         let authority = CodexOutcomeLineageAuthorityV0::from_sources(&sources).unwrap();
         authority
             .bind_route_sources(&HashSet::from(["child".to_owned()]))
             .unwrap();
+
+        // Exact-route binding includes every transitive carried ancestor in
+        // the generation authority. Until that parent's certified or scanned
+        // facts arrive, classifying its child is an ordering failure rather
+        // than the pre-composition `OutsideRoute`/`Unproven` result.
+        assert!(authority.generation_participates("root").unwrap());
+        assert!(authority.needs_descendant_facts("root").unwrap());
+        assert!(matches!(
+            authority.classify("child", "call", "call"),
+            Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+        ));
+
+        authority
+            .register("root", authority.new_fact_set("root").unwrap())
+            .unwrap();
         assert_eq!(
             authority.classify("child", "call", "call").unwrap(),
-            CodexOutcomeOriginV0::Unproven
+            CodexOutcomeOriginV0::UniqueToSession
         );
     }
 
