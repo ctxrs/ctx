@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ctx_pro_host_protocol::{
     CommitLineage, CommitLineageBounds, CommitLineageEdge, CommitLineageOmission,
     CommitLineageState, CommitLineageYield, ExactCommitRef, ScopedCommitEndpoint,
@@ -11,23 +13,27 @@ use super::layout::{
 };
 
 pub(super) fn render(document: &mut Document, context: &RenderContext, lineage: &CommitLineage) {
+    let operations = grouped_operations(lineage);
     let completeness = if lineage.complete {
         "complete"
     } else {
         "partial"
     };
-    let status = if lineage.ambiguous {
-        format!("Lineage · {completeness} · ambiguous")
+    let operation_count = operations.len();
+    let operation_label = if operation_count == 1 {
+        "operation"
     } else {
-        format!("Lineage · {completeness}")
+        "operations"
+    };
+    let status = if lineage.ambiguous {
+        format!("Lineage · {completeness} · ambiguous · {operation_count} {operation_label}")
+    } else {
+        format!("Lineage · {completeness} · {operation_count} {operation_label}")
     };
     push_heading(document, 0, &status);
 
-    for edge in &lineage.edges {
-        render_edge(document, context, edge);
-    }
-    for yielded_by in &lineage.yielded_by {
-        render_yield(document, context, yielded_by);
+    for (operation_id, operation) in operations {
+        render_operation(document, context, operation_id, &operation);
     }
 
     if lineage.edges.is_empty() && lineage.yielded_by.is_empty() {
@@ -89,38 +95,122 @@ pub(super) fn render(document: &mut Document, context: &RenderContext, lineage: 
     );
 }
 
-fn render_edge(document: &mut Document, context: &RenderContext, edge: &CommitLineageEdge) {
-    let heading = format!(
-        "{} · {}",
-        enum_heading(edge.kind),
-        enum_text(edge.relation_class)
-    );
+#[derive(Default)]
+struct OperationGroup<'a> {
+    mappings: Vec<&'a CommitLineageEdge>,
+    yields: Vec<&'a CommitLineageYield>,
+}
+
+fn grouped_operations(lineage: &CommitLineage) -> BTreeMap<&str, OperationGroup<'_>> {
+    let mut operations: BTreeMap<&str, OperationGroup<'_>> = BTreeMap::new();
+    for edge in &lineage.edges {
+        operations
+            .entry(edge.operation_id.as_str())
+            .or_default()
+            .mappings
+            .push(edge);
+    }
+    for yielded_by in &lineage.yielded_by {
+        operations
+            .entry(yielded_by.operation_id.as_str())
+            .or_default()
+            .yields
+            .push(yielded_by);
+    }
+    for operation in operations.values_mut() {
+        operation.mappings.sort_by(|left, right| {
+            (
+                left.source.logical_repository_id.as_str(),
+                left.source.object_format,
+                left.source.oid.as_str(),
+                left.result.object_format,
+                left.result.oid.as_str(),
+            )
+                .cmp(&(
+                    right.source.logical_repository_id.as_str(),
+                    right.source.object_format,
+                    right.source.oid.as_str(),
+                    right.result.object_format,
+                    right.result.oid.as_str(),
+                ))
+        });
+        operation.yields.sort_by(|left, right| {
+            (left.yield_id.as_str(), left.actor.id.as_str())
+                .cmp(&(right.yield_id.as_str(), right.actor.id.as_str()))
+        });
+    }
+    operations
+}
+
+fn render_operation(
+    document: &mut Document,
+    context: &RenderContext,
+    operation_id: &str,
+    operation: &OperationGroup<'_>,
+) {
+    let heading = operation_heading(operation);
     push_heading(document, 2, &heading);
-    push_exact_commit(document, context, 4, "source", &edge.source);
-    push_exact_commit(document, context, 4, "result", &edge.result);
+
+    if operation.mappings.len() == 1 {
+        render_mapping(document, context, 4, operation.mappings[0]);
+    } else {
+        for (index, mapping) in operation.mappings.iter().enumerate() {
+            push_heading(document, 4, &format!("Mapping {}", index + 1));
+            render_mapping(document, context, 6, mapping);
+        }
+    }
+
+    let Some((actor, proof_class, state, observed_at_ms, evidence_numbers)) = operation
+        .mappings
+        .first()
+        .map(|edge| {
+            (
+                &edge.actor,
+                edge.proof_class,
+                edge.state,
+                edge.observed_at_ms,
+                edge.evidence_numbers.as_slice(),
+            )
+        })
+        .or_else(|| {
+            operation.yields.first().map(|yielded_by| {
+                (
+                    &yielded_by.actor,
+                    yielded_by.proof_class,
+                    yielded_by.state,
+                    yielded_by.observed_at_ms,
+                    yielded_by.evidence_numbers.as_slice(),
+                )
+            })
+        })
+    else {
+        return;
+    };
+
+    let outcome = yield_outcome(state, operation.mappings.len());
     push_field(
         document,
         context,
         4,
         "outcome",
         METADATA_LABEL_WIDTH,
-        yield_outcome(edge.state),
-        state_token(edge.state),
+        &outcome,
+        state_token(state),
         false,
     );
-    push_role_resource(document, context, 4, "actor", &edge.actor);
+    push_role_resource(document, context, 4, "actor", actor);
     push_field(
         document,
         context,
         4,
         "proof",
         METADATA_LABEL_WIDTH,
-        &enum_text(edge.proof_class),
+        &enum_text(proof_class),
         Token::Text,
         false,
     );
-    render_non_asserted_state(document, context, 4, edge.state);
-    if let Some(observed_at_ms) = edge.observed_at_ms {
+    render_non_asserted_state(document, context, 4, state);
+    if let Some(observed_at_ms) = observed_at_ms {
         push_field(
             document,
             context,
@@ -138,84 +228,73 @@ fn render_edge(document: &mut Document, context: &RenderContext, edge: &CommitLi
         4,
         "operation id",
         METADATA_LABEL_WIDTH,
-        &edge.operation_id,
+        operation_id,
         Token::Text,
         true,
     );
+    for (index, yielded_by) in operation.yields.iter().enumerate() {
+        let label = if operation.yields.len() == 1 {
+            "yield id".to_owned()
+        } else {
+            format!("yield {} id", index + 1)
+        };
+        push_field(
+            document,
+            context,
+            4,
+            &label,
+            METADATA_LABEL_WIDTH,
+            &yielded_by.yield_id,
+            Token::Text,
+            true,
+        );
+    }
     push_references(
         document,
         context,
         4,
         "evidence",
         METADATA_LABEL_WIDTH,
-        &edge.evidence_numbers,
+        evidence_numbers,
     );
 }
 
-fn render_yield(document: &mut Document, context: &RenderContext, yielded_by: &CommitLineageYield) {
-    push_heading(document, 2, "Yield record");
-    push_field(
-        document,
-        context,
-        4,
-        "outcome",
-        METADATA_LABEL_WIDTH,
-        yield_outcome(yielded_by.state),
-        state_token(yielded_by.state),
-        false,
-    );
-    push_role_resource(document, context, 4, "actor", &yielded_by.actor);
-    push_field(
-        document,
-        context,
-        4,
-        "proof",
-        METADATA_LABEL_WIDTH,
-        &enum_text(yielded_by.proof_class),
-        Token::Text,
-        false,
-    );
-    render_non_asserted_state(document, context, 4, yielded_by.state);
-    if let Some(observed_at_ms) = yielded_by.observed_at_ms {
-        push_field(
-            document,
-            context,
-            4,
-            "observed",
-            METADATA_LABEL_WIDTH,
-            &timestamp_text(observed_at_ms),
-            Token::Text,
-            true,
-        );
+fn operation_heading(operation: &OperationGroup<'_>) -> String {
+    let mapping_count = operation.mappings.len();
+    let yield_count = operation.yields.len();
+    let mapping_label = if mapping_count == 1 {
+        "mapping"
+    } else {
+        "mappings"
+    };
+    let yield_label = if yield_count == 1 {
+        "yield record"
+    } else {
+        "yield records"
+    };
+    match (operation.mappings.first(), yield_count) {
+        (Some(edge), 0) => format!(
+            "{} · {} · {mapping_count} {mapping_label}",
+            enum_heading(edge.kind),
+            enum_text(edge.relation_class)
+        ),
+        (Some(edge), _) => format!(
+            "{} · {} · {mapping_count} {mapping_label} · {yield_count} {yield_label}",
+            enum_heading(edge.kind),
+            enum_text(edge.relation_class)
+        ),
+        (None, _) => format!("Yield operation · {yield_count} {yield_label}"),
     }
-    push_field(
-        document,
-        context,
-        4,
-        "operation id",
-        METADATA_LABEL_WIDTH,
-        &yielded_by.operation_id,
-        Token::Text,
-        true,
-    );
-    push_field(
-        document,
-        context,
-        4,
-        "yield id",
-        METADATA_LABEL_WIDTH,
-        &yielded_by.yield_id,
-        Token::Text,
-        true,
-    );
-    push_references(
-        document,
-        context,
-        4,
-        "evidence",
-        METADATA_LABEL_WIDTH,
-        &yielded_by.evidence_numbers,
-    );
+}
+
+fn render_mapping(
+    document: &mut Document,
+    context: &RenderContext,
+    indent: usize,
+    edge: &CommitLineageEdge,
+) {
+    push_exact_commit(document, context, indent, "source", &edge.source);
+    push_exact_commit(document, context, indent, "result", &edge.result);
 }
 
 fn render_endpoint(
@@ -343,11 +422,14 @@ const fn state_token(state: CommitLineageState) -> Token {
     }
 }
 
-const fn yield_outcome(state: CommitLineageState) -> &'static str {
+fn yield_outcome(state: CommitLineageState, mapping_count: usize) -> String {
     match state {
-        CommitLineageState::Asserted => "operation yielded this commit",
-        CommitLineageState::Ambiguous => "operation yield is ambiguous",
-        CommitLineageState::Contradicted => "operation yield is contradicted",
+        CommitLineageState::Asserted if mapping_count > 1 => {
+            format!("operation yielded {mapping_count} mapped commits")
+        }
+        CommitLineageState::Asserted => "operation yielded this commit".to_owned(),
+        CommitLineageState::Ambiguous => "operation yield is ambiguous".to_owned(),
+        CommitLineageState::Contradicted => "operation yield is contradicted".to_owned(),
     }
 }
 
@@ -355,11 +437,19 @@ fn omission_notice(omission: &CommitLineageOmission) -> String {
     match omission {
         CommitLineageOmission::Exact(count) => format!(
             "More proven lineage may be omitted: {count} {}.",
-            if *count == 1 { "event" } else { "events" }
+            if *count == 1 {
+                "operation event"
+            } else {
+                "operation events"
+            }
         ),
         CommitLineageOmission::AtLeast(count) => format!(
             "More proven lineage may be omitted: at least {count} {}.",
-            if *count == 1 { "event" } else { "events" }
+            if *count == 1 {
+                "operation event"
+            } else {
+                "operation events"
+            }
         ),
         CommitLineageOmission::Unknown => "More proven lineage may be omitted.".to_owned(),
     }
@@ -368,7 +458,7 @@ fn omission_notice(omission: &CommitLineageOmission) -> String {
 fn render_bounds(document: &mut Document, context: &RenderContext, bounds: &CommitLineageBounds) {
     let reason = bounds.truncation_reason.map(enum_text).unwrap_or_default();
     let value = format!(
-        "returned {}/{} · examined {}/{} · {reason}",
+        "operations returned {}/{} · events examined {}/{} · {reason}",
         bounds.returned_events,
         bounds.returned_event_limit,
         bounds.examined_events,

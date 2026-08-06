@@ -530,6 +530,18 @@ fn complete_lineage_result() -> BlameResult {
     }
 }
 
+fn plural_lineage_result() -> BlameResult {
+    let mut result = complete_lineage_result();
+    let lineage = result.lineage.as_mut().unwrap();
+    lineage.edges.push(lineage_edge(
+        exact_commit('2'),
+        exact_commit('4'),
+        CommitLineageState::Asserted,
+    ));
+    lineage.origin = None;
+    result
+}
+
 fn partial_lineage_result(omission: CommitLineageOmission) -> BlameResult {
     let requested = exact_commit('3');
     let source = exact_commit('1');
@@ -634,6 +646,45 @@ fn commit_lineage_complete_human_output_is_exact_and_deduplicates_yield_actor() 
 }
 
 #[test]
+fn plural_mappings_render_as_one_deterministic_operation_with_copyable_ids() {
+    let result = plural_lineage_result();
+    result.validate().unwrap();
+    let rendered = render_plain(&result, 80);
+    assert_eq!(
+        rendered,
+        include_str!("../../../testdata/pro/blame_commit_lineage_plural.golden.txt")
+    );
+    assert_eq!(rendered.matches("Rebase · replacement").count(), 1);
+    assert_eq!(rendered.matches(&"a".repeat(64)).count(), 1);
+    assert!(rendered.contains(&"1".repeat(40)), "{rendered}");
+    assert!(rendered.contains(&"2".repeat(40)), "{rendered}");
+    assert!(rendered.contains(&"3".repeat(40)), "{rendered}");
+    assert!(rendered.contains(&"4".repeat(40)), "{rendered}");
+    assert!(rendered.contains("1 operation"), "{rendered}");
+    assert!(rendered.contains("2 mappings"), "{rendered}");
+
+    for width in [32, 48, 80, 120] {
+        let width_rendered = render_plain(&result, width);
+        for id in [
+            "a".repeat(64),
+            "1".repeat(40),
+            "2".repeat(40),
+            "3".repeat(40),
+            "4".repeat(40),
+        ] {
+            assert!(
+                width_rendered.contains(&id),
+                "width {width}: {width_rendered}"
+            );
+        }
+    }
+
+    let mut reversed = result;
+    reversed.lineage.as_mut().unwrap().edges.reverse();
+    assert_eq!(render_plain(&reversed, 80), rendered);
+}
+
+#[test]
 fn commit_lineage_partial_human_output_is_exact_and_abstains() {
     let result = partial_lineage_result(CommitLineageOmission::AtLeast(2));
     result.validate().unwrap();
@@ -667,13 +718,13 @@ fn commit_lineage_omission_counts_are_only_shown_when_supported() {
     for (omission, expected, rejected) in [
         (
             CommitLineageOmission::Exact(2),
-            "More proven lineage may be omitted: 2 events.",
+            "More proven lineage may be omitted: 2 operation events.",
             "at least 2",
         ),
         (
             CommitLineageOmission::AtLeast(2),
-            "More proven lineage may be omitted: at least 2 events.",
-            "omitted: 2 events",
+            "More proven lineage may be omitted: at least 2 operation events.",
+            "omitted: 2 operation events",
         ),
         (
             CommitLineageOmission::Unknown,
@@ -740,7 +791,10 @@ fn standalone_yield_is_rendered_only_as_a_yield_record() {
     lineage.bounds.examined_events = 1;
     result.validate().unwrap();
     let rendered = render_plain(&result, 80);
-    assert!(rendered.contains("Yield record"), "{rendered}");
+    assert!(
+        rendered.contains("Yield operation · 1 yield record"),
+        "{rendered}"
+    );
     assert!(!rendered.contains("Rebase · replacement"), "{rendered}");
     assert_eq!(rendered.matches("session rebaser").count(), 1, "{rendered}");
 }

@@ -1,8 +1,8 @@
 Commit      3333333333333333333333333333333333333333
 Repository  ctxrs/ctx
 
-Lineage · partial · ambiguous
-  Rebase · replacement
+Lineage · partial · ambiguous · 1 operation
+  Rebase · replacement · 1 mapping
     source        commit 1111111111111111111111111111111111111111 (sha1)
     result        commit 3333333333333333333333333333333333333333 (sha1)
     outcome       operation yield is ambiguous
@@ -13,8 +13,9 @@ Lineage · partial · ambiguous
     operation id  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     evidence      [1]
 
-  ! More proven lineage may be omitted: at least 2 events.
-    bounds        returned 1/100 · examined 1000/1000 · examined event limit
+  ! More proven lineage may be omitted: at least 2 operation events.
+    bounds        operations returned 1/100 · events examined 1000/1000 ·
+                  examined event limit
 
   ! Lineage is ambiguous. No unique origin or endpoint is claimed.
 

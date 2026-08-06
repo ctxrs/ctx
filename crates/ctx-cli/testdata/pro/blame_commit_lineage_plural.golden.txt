@@ -2,18 +2,20 @@ Commit      3333333333333333333333333333333333333333
 Repository  ctxrs/ctx
 
 Lineage · complete · 1 operation
-  Rebase · replacement · 1 mapping
-    source        commit 1111111111111111111111111111111111111111 (sha1)
-    result        commit 3333333333333333333333333333333333333333 (sha1)
-    outcome       operation yielded this commit
+  Rebase · replacement · 2 mappings
+    Mapping 1
+      source        commit 1111111111111111111111111111111111111111 (sha1)
+      result        commit 3333333333333333333333333333333333333333 (sha1)
+    Mapping 2
+      source        commit 2222222222222222222222222222222222222222 (sha1)
+      result        commit 4444444444444444444444444444444444444444 (sha1)
+    outcome       operation yielded 2 mapped commits
     actor         session rebaser
     proof         repository verified
     observed      2024-07-14T23:33:20.000Z
-    operation id  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    operation id
+      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     evidence      [1]
-
-  Origin
-    commit        1111111111111111111111111111111111111111 (sha1)
 
   Current at ref
     commit        3333333333333333333333333333333333333333 (sha1)

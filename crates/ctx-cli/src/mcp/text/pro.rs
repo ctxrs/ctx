@@ -211,7 +211,14 @@ fn render_lineage(out: &mut String, value: &Value) {
     out.push_str(&format!("lineage.yielded_by: {}\n", yielded_by.len()));
     for (index, yielded) in yielded_by.iter().enumerate() {
         let prefix = format!("lineage.yield.{}", index + 1);
-        for field in ["yield_id", "proof_class", "state", "observed_at_ms"] {
+        for field in [
+            "operation_id",
+            "yield_id",
+            "logical_repository_id",
+            "proof_class",
+            "state",
+            "observed_at_ms",
+        ] {
             push_scalar(out, &format!("{prefix}.{field}"), yielded.get(field), "");
         }
         push_resource(out, &format!("{prefix}.actor"), yielded.get("actor"), "");
@@ -283,6 +290,12 @@ fn push_exact_commit(out: &mut String, label: &str, value: Option<&Value>, inden
         out,
         &format!("{label}.resource"),
         value.get("resource"),
+        indent,
+    );
+    push_scalar(
+        out,
+        &format!("{label}.logical_repository_id"),
+        value.get("logical_repository_id"),
         indent,
     );
     push_scalar(
@@ -633,6 +646,86 @@ mod tests {
         assert!(!rendered.contains("event_seq:"));
         assert!(!rendered.contains("payload_type"));
         assert!(!rendered.contains("omitted"));
+    }
+
+    #[test]
+    fn lineage_fallback_preserves_exact_repository_and_standalone_yield_identity() {
+        let value = json!({
+            "requested": {
+                "resource": {
+                    "id": "commit:3",
+                    "kind": "commit",
+                    "display": "3333333333333333333333333333333333333333"
+                },
+                "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                "object_format": "sha1",
+                "oid": "3333333333333333333333333333333333333333"
+            },
+            "edges": [{
+                "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "kind": "rebase",
+                "relation_class": "replacement",
+                "source": {
+                    "resource": {
+                        "id": "commit:3",
+                        "kind": "commit",
+                        "display": "3333333333333333333333333333333333333333"
+                    },
+                    "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                    "object_format": "sha1",
+                    "oid": "3333333333333333333333333333333333333333"
+                },
+                "result": {
+                    "resource": {
+                        "id": "commit:2",
+                        "kind": "commit",
+                        "display": "2222222222222222222222222222222222222222"
+                    },
+                    "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                    "object_format": "sha1",
+                    "oid": "2222222222222222222222222222222222222222"
+                },
+                "actor": {"id": "session:edge", "kind": "session", "display": "edge"},
+                "proof_class": "repository_verified",
+                "state": "asserted",
+                "observed_at_ms": 1,
+                "evidence_numbers": [1]
+            }],
+            "yielded_by": [{
+                "yield_id": "yield:requested",
+                "operation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                "actor": {"id": "session:yield", "kind": "session", "display": "yield"},
+                "proof_class": "repository_verified",
+                "state": "asserted",
+                "observed_at_ms": 2,
+                "evidence_numbers": [2]
+            }],
+            "origin": null,
+            "endpoint": null,
+            "complete": true,
+            "ambiguous": false,
+            "bounds": {
+                "returned_events": 2,
+                "returned_event_limit": 100,
+                "examined_events": 2,
+                "examined_event_limit": 1000,
+                "omission": {"kind": "exact", "count": 0},
+                "truncation_reason": null
+            }
+        });
+        let mut rendered = String::new();
+        render_lineage(&mut rendered, &value);
+
+        for expected in [
+            "lineage.requested.logical_repository_id: forge:github.com/ctxrs/ctx",
+            "lineage.edge.1.source.logical_repository_id: forge:github.com/ctxrs/ctx",
+            "lineage.edge.1.result.logical_repository_id: forge:github.com/ctxrs/ctx",
+            "lineage.yield.1.operation_id: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "lineage.yield.1.logical_repository_id: forge:github.com/ctxrs/ctx",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected}:\n{rendered}");
+        }
     }
 
     #[test]
