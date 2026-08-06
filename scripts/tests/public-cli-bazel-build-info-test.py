@@ -330,8 +330,8 @@ esac
         self.assertNotIn("--construction-host", builder)
         self.assertIn("requires a native ${expected_host_arch} Docker daemon", builder)
         self.assertIn(
-            "d7aedc8565ed47b6231badb80b09f034"
-            "e389c5f2b1c2ac2c55406f7c661d8b88",
+            "049dd21f40ad979db11c3ee68c96a42c"
+            "e75f1185e69ac61ab20de1501427a410",
             builder,
         )
         self.assertIn(

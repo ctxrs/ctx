@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${1:-}" == "--version" ]]; then
-  printf 'bazel %s\n' "${CTX_FAKE_BAZEL_VERSION:-7.7.1}"
+  printf 'bazel %s\n' "${CTX_FAKE_BAZEL_VERSION:-9.2.0}"
   exit 0
 fi
 

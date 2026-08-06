@@ -1,3 +1,6 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_java//java:defs.bzl", "java_binary")
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("@rules_rust//rust:defs.bzl", "rustfmt_test")
 load(
@@ -72,7 +75,7 @@ NON_RUST_GATE_DATA = glob([
     "sdks/**",
     "skills/**",
     "tests/**",
-]) + [
+], allow_empty = True) + [
     "//sdks/go:repository_gate_data",
     "//sdks/go/examples/dogfood:repository_gate_data",
 ]

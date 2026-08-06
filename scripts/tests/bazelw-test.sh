@@ -47,8 +47,8 @@ mkdir -p "${HOME}" "${TMPDIR}"
 "${wrapper}" test //:focused --config=test 2>"${test_root}/config.log"
 [[ "$(grep -c '^ctx bazel:' "${test_root}/config.log")" == "1" ]] \
   || fail 'wrapper must print exactly one configuration line'
-assert_log_line "arg=--repository_cache=${CTX_BAZEL_CACHE_ROOT}/bazel-7.7.1/repository-cache"
-assert_log_line "arg=--disk_cache=${CTX_BAZEL_CACHE_ROOT}/bazel-7.7.1/action-test-cache"
+assert_log_line "arg=--repository_cache=${CTX_BAZEL_CACHE_ROOT}/bazel-9.2.0/repository-cache"
+assert_log_line "arg=--disk_cache=${CTX_BAZEL_CACHE_ROOT}/bazel-9.2.0/action-test-cache"
 assert_log_line "arg=--experimental_disk_cache_gc_max_size=100G"
 assert_log_line "arg=--experimental_disk_cache_gc_max_age=30d"
 assert_log_line "arg=--max_idle_secs=600"
@@ -58,9 +58,9 @@ assert_log_line "arg=--local_resources=memory=65536"
 assert_log_line "arg=--local_test_jobs=2"
 assert_log_line "arg=--test_env=RUST_TEST_THREADS=4"
 assert_log_line "env=RUST_TEST_THREADS=4"
-grep -Fq "arg=--output_user_root=${CTX_BAZEL_CACHE_ROOT}/output-roots/bazel-7.7.1/" "${CTX_FAKE_BAZEL_LOG}" \
+grep -Fq "arg=--output_user_root=${CTX_BAZEL_CACHE_ROOT}/output-roots/bazel-9.2.0/" "${CTX_FAKE_BAZEL_LOG}" \
   || fail 'output root is not versioned per worktree'
-grep -Fq "arg=--sandbox_base=${CTX_BAZEL_CACHE_ROOT}/bazel-7.7.1/sandboxes/" "${CTX_FAKE_BAZEL_LOG}" \
+grep -Fq "arg=--sandbox_base=${CTX_BAZEL_CACHE_ROOT}/bazel-9.2.0/sandboxes/" "${CTX_FAKE_BAZEL_LOG}" \
   || fail 'sandbox is not placed in the spacious cache root'
 sandbox_base="$(sed -n 's/^arg=--sandbox_base=//p' "${CTX_FAKE_BAZEL_LOG}" | head -n 1)"
 mkdir -p "${sandbox_base}/stale-sandbox"
@@ -98,7 +98,7 @@ if CTX_FAKE_BAZEL_VERSION=8.0.0 "${wrapper}" info output_base \
   >"${test_root}/version-mismatch.out" 2>"${test_root}/version-mismatch.err"; then
   fail 'mismatched Bazel binary version unexpectedly succeeded'
 fi
-grep -Fq 'Bazel version mismatch: expected 7.7.1, got 8.0.0' \
+grep -Fq 'Bazel version mismatch: expected 9.2.0, got 8.0.0' \
   "${test_root}/version-mismatch.err" \
   || fail 'Bazel version mismatch diagnostic was not emitted'
 
@@ -113,20 +113,28 @@ export CTX_BAZEL_SPACIOUS_ROOT="${test_root}/spacious"
 mkdir -p "${CTX_BAZEL_SPACIOUS_ROOT}"
 : >"${CTX_FAKE_BAZEL_LOG}"
 "${wrapper}" info output_base 2>"${test_root}/spacious-config.log"
-grep -Fq "cache=${CTX_BAZEL_SPACIOUS_ROOT}/ctx-bazel/bazel-7.7.1" "${test_root}/spacious-config.log" \
+grep -Fq "cache=${CTX_BAZEL_SPACIOUS_ROOT}/ctx-bazel/bazel-9.2.0" "${test_root}/spacious-config.log" \
   || fail 'usable spacious root was not preferred'
 
 export CTX_BAZEL_SPACIOUS_ROOT="${test_root}/missing-spacious"
 export XDG_CACHE_HOME="${test_root}/xdg-cache"
 : >"${CTX_FAKE_BAZEL_LOG}"
 "${wrapper}" info output_base 2>"${test_root}/xdg-config.log"
-grep -Fq "cache=${XDG_CACHE_HOME}/ctx/bazel/bazel-7.7.1" "${test_root}/xdg-config.log" \
+grep -Fq "cache=${XDG_CACHE_HOME}/ctx/bazel/bazel-9.2.0" "${test_root}/xdg-config.log" \
   || fail 'XDG cache fallback was not selected'
 
 # A writable volume can still be unusable to Bazel when blocks or inodes are
 # exhausted. Exercise the capacity decision directly with deterministic df
 # output instead of requiring a dedicated filesystem in the test sandbox.
 source "${repo_root}/scripts/ci-common.sh"
+launcher_bin="${test_root}/launcher-bin"
+mkdir -p "${launcher_bin}"
+ln -s "${fake_bazel}" "${launcher_bin}/bazelisk"
+ln -s "${fake_bazel}" "${launcher_bin}/bazel"
+selected_launcher="$(PATH="${launcher_bin}:/usr/bin:/bin" ctx_find_bazel)"
+[[ "${selected_launcher}" == "${launcher_bin}/bazelisk" ]] \
+  || fail 'Bazelisk was not preferred over a direct Bazel binary'
+
 export CTX_FAKE_DF_FREE_INODES=1
 export CTX_BAZEL_SPACIOUS_ROOT="${test_root}/spacious"
 export XDG_CACHE_HOME="${test_root}/xdg-low-inode"

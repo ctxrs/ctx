@@ -29,5 +29,4 @@ def _impl(ctx):
 
 llvm_mingw_cc_toolchain_config = rule(
     implementation = _impl,
-    provides = [CcToolchainConfigInfo],
 )

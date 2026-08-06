@@ -612,10 +612,6 @@ ctx_bootstrap_bazelisk() {
 }
 
 ctx_find_bazel() {
-  if command -v bazel >/dev/null 2>&1; then
-    command -v bazel
-    return 0
-  fi
   if command -v bazelisk >/dev/null 2>&1; then
     command -v bazelisk
     return 0
@@ -624,6 +620,10 @@ ctx_find_bazel() {
     printf 'Bazelisk network bootstrap explicitly enabled with CTX_BOOTSTRAP_BAZELISK=1\n' >&2
     ctx_bootstrap_bazelisk
     return $?
+  fi
+  if command -v bazel >/dev/null 2>&1; then
+    command -v bazel
+    return 0
   fi
   return 1
 }

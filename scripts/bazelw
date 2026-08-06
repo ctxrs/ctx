@@ -110,12 +110,12 @@ elif [[ -n "${BAZEL:-}" ]]; then
   bazel_bin="${BAZEL}"
 elif command -v bazelisk >/dev/null 2>&1; then
   bazel_bin="$(command -v bazelisk)"
-elif command -v bazel >/dev/null 2>&1; then
-  bazel_bin="$(command -v bazel)"
 elif [[ -x "${repo_root}/target/tool-cache/bazelisk/bin/bazelisk" ]]; then
   bazel_bin="${repo_root}/target/tool-cache/bazelisk/bin/bazelisk"
+elif bazel_bin="$(ctx_find_bazel)"; then
+  :
 else
-  printf 'bazelisk or bazel is required (or set BAZEL)\n' >&2
+  printf 'Bazelisk is required (install it, set CTX_BOOTSTRAP_BAZELISK=1, or set BAZEL)\n' >&2
   exit 127
 fi
 

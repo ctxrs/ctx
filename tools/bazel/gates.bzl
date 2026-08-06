@@ -1,5 +1,7 @@
 """Macros for explicit non-Rust repository gates."""
 
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 _LOC_CHECK_EXTENSIONS = [
     "bash",
     "bzl",
@@ -61,6 +63,7 @@ def loc_check_inputs(name):
         name = name,
         srcs = ["BUILD.bazel"] + native.glob(
             patterns,
+            allow_empty = True,
             exclude = _LOC_CHECK_EXCLUDES,
         ),
         visibility = ["//visibility:public"],
@@ -92,7 +95,7 @@ def loc_check_manifest(name, srcs):
     _loc_check_manifest(name = name, srcs = srcs)
 
 def non_rust_gate(name, mode, args = [], data = [], tags = []):
-    native.sh_test(
+    sh_test(
         name = name,
         srcs = ["//:scripts/bazel-test.sh"],
         args = [mode] + args,

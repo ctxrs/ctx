@@ -35,29 +35,13 @@ from pathlib import Path
 import sys
 
 lock = json.loads(Path(sys.argv[1]).read_bytes())
-extension = lock["moduleExtensions"]["@@rules_go~//go:extensions.bzl%go_sdk"]
-expected = {
-    "os:linux,arch:amd64",
-    "os:linux,arch:aarch64",
-    "os:freebsd,arch:amd64",
-    "os:osx,arch:x86_64",
-    "os:osx,arch:aarch64",
-    "os:windows,arch:amd64",
-}
-if set(extension) != expected:
+go_extension_key = "@@rules_go+//go:extensions.bzl%go_sdk"
+facts = lock.get("facts", {}).get(go_extension_key)
+if not facts or not all(isinstance(value, dict) and value for value in facts.values()):
     raise SystemExit(
-        "rules_go host lock factors differ: "
-        f"expected {sorted(expected)}, observed {sorted(extension)}"
+        "rules_go SDK facts are missing from the Bazel 9 lockfile: "
+        f"{sorted(lock.get('facts', {}))}"
     )
-for digest_field in ("bzlTransitiveDigest", "usagesDigest"):
-    digests = {entry[digest_field] for entry in extension.values()}
-    if len(digests) != 1:
-        raise SystemExit(
-            f"host factors disagree on {digest_field}: {sorted(digests)}"
-        )
-for factor, entry in extension.items():
-    if not entry["generatedRepoSpecs"]:
-        raise SystemExit(f"{factor} has no generated repository specs")
 PY
 
 grep -Fq 'patches = ["//tools/bazel/patches:rules-rust-freebsd-host.patch"]' \
@@ -238,13 +222,13 @@ for required in \
   }
 done
 
-[[ "$(tr -d '[:space:]' <"${source_root}/.bazelversion")" == "7.7.1" ]] || {
-  echo 'native release checksum contract expects Bazel 7.7.1' >&2
+[[ "$(tr -d '[:space:]' <"${source_root}/.bazelversion")" == "9.2.0" ]] || {
+  echo 'native release checksum contract expects Bazel 9.2.0' >&2
   exit 1
 }
 for required in \
-  'bazel_binary_sha256=115a1b62be95f29e5821d4dddffba1b058905a48019b499919c285e7f708d5e2' \
-  'bazel_binary_sha256=71df04ec724f1b577f1f47ec9a6b81d13f39683f6c3215cacf45fdaf40b2c5c1'; do
+  'bazel_binary_sha256=7668a95db1250f12c40407251e4e203b4ec8bf39bc495d2f485b2d8c99048694' \
+  'bazel_binary_sha256=049dd21f40ad979db11c3ee68c96a42ce75f1185e69ac61ab20de1501427a410'; do
   grep -Fq -- "${required}" "${wrapper}" || {
     printf 'native Linux release wrapper has a stale Bazel checksum: %s\n' \
       "${required}" >&2

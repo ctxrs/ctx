@@ -1,5 +1,6 @@
 """Focused analysis tests for public release route transitions."""
 
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load(
     ":release_routes.bzl",
     "ReleaseRouteInfo",
@@ -223,7 +224,7 @@ def release_route_analysis_test_suite(name):
         sbom_tool = ":_release_route_test_packager",
         target_id = "linux-x64",
     )
-    native.sh_test(
+    sh_test(
         name = "_release_route_runfiles_runtime_test",
         srcs = ["release_route_runfiles_test.sh"],
         data = [":_release_route_runfiles_probe"],

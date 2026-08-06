@@ -9,6 +9,22 @@ Use the repository-owned entry points for every normal build or test:
 and `scripts/bazel-affected.sh` for affected tests. Do not invoke raw `bazel`;
 that bypasses the worktree/cache policy owned by the wrapper.
 
+The repository pins Bazel 9.2.0 in `.bazelversion`. The wrapper resolves
+Bazelisk before a direct Bazel binary, passes the pin through `USE_BAZEL_VERSION`,
+and fails closed unless the selected launcher reports exactly that version. If
+Bazelisk is not already installed, bootstrap the checked-in launcher into the
+worktree tool cache with:
+
+```bash
+CTX_BOOTSTRAP_BAZELISK=1 scripts/bazelw version
+```
+
+This bootstrap is explicit so offline builds do not unexpectedly access the
+network. Buildkite enables the same bootstrap path in its isolated job tool
+environment. The Linux release container remains separately checksum-pinned to
+the same Bazel version for reproducible release construction and injects that
+binary explicitly into the wrapper.
+
 ## Fast Linux loop
 
 Start with the narrowest real Bazel test that covers the change:

@@ -4,8 +4,12 @@ module(
 )
 
 bazel_dep(name = "rules_rust", version = "0.71.3")
-bazel_dep(name = "rules_cc", version = "0.2.8")
-bazel_dep(name = "rules_go", version = "0.46.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_go", version = "0.62.0")
+bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "rules_java", version = "9.1.0")
+bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "platforms", version = "1.1.0")
 
 # rules_rust 0.71.3 publishes the x86_64-unknown-freebsd toolchain, but its
@@ -60,6 +64,7 @@ rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 # separate explicit lane rather than in this CI parity graph.
 rust.toolchain(
     edition = "2021",
+    rustfmt_version = "1.97.1",
     # Source: Rust 1.97.1 channel manifest dated 2026-07-16.
     # https://static.rust-lang.org/dist/2026-07-16/channel-rust-1.97.1.toml
     # Default Windows Bazel actions remain MSVC. The public release route below
@@ -102,11 +107,9 @@ rust.toolchain(
         "rustfmt-1.97.1-x86_64-unknown-freebsd.tar.xz": "1982a27f1d0d5bd6a4248d06cb13f63cdd95f9782742ad3a180b6314a4cfb889",
         "rustfmt-1.97.1-x86_64-unknown-linux-gnu.tar.xz": "907fe97d6afbde1eca1b34c992c76e1406d422e2e6f137813d382acec7eb4d14",
     },
-    rustfmt_version = "1.97.1",
     target_settings = ["//tools/bazel:default_rust_toolchain"],
     versions = ["1.97.1"],
 )
-
 rust.repository_set(
     name = "ctx_windows_gnu",
     edition = "2021",
@@ -131,6 +134,7 @@ rust.repository_set(
     target_triple = "x86_64-pc-windows-gnu",
     versions = ["1.97.1"],
 )
+
 # repository_set also emits a target toolchain for its execution triple. Give
 # that MSVC target the opposite ABI constraint so it cannot match the GNU
 # release platform while the shared route setting is enabled.
@@ -186,6 +190,7 @@ llvm_mingw_repository = use_repo_rule(
     "//tools/bazel/mingw:repository.bzl",
     "llvm_mingw_repository",
 )
+
 llvm_mingw_repository(
     name = "ctx_llvm_mingw",
     sha256 = "744809646fdefe24a357399788d68fb07ecc65fa0be71baa2406793ce25c9813",
@@ -194,13 +199,16 @@ llvm_mingw_repository(
         "https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-msvcrt-x86_64.zip",
     ],
 )
+
 register_toolchains("@ctx_llvm_mingw//:windows_x64_gnu_toolchain")
 
 # Development links use a content-pinned mold input. The public build macros
 # expose it only through the Linux development configuration; CI/debug/release
 # configurations retain their independently keyed linker behavior.
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
 http_jar = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_jar")
+
 http_archive(
     name = "ctx_tomli",
     build_file_content = """
@@ -218,6 +226,7 @@ py_library(
         "https://files.pythonhosted.org/packages/97/75/10a9ebee3fd790d20926a90a2547f0bf78f371b2f13aa822c759680ca7b9/tomli-2.0.1-py3-none-any.whl",
     ],
 )
+
 http_archive(
     name = "ctx_scc_linux_x86_64",
     build_file_content = """
@@ -227,11 +236,13 @@ exports_files(["scc"])
     sha256 = "3d9d65b00ca874c2b29151abe7e1480736f5229edc3ce8e4b2791460cdfabf5a",
     urls = ["https://github.com/boyter/scc/releases/download/v3.7.0/scc_Linux_x86_64.tar.gz"],
 )
+
 http_jar(
     name = "ctx_bazel_diff",
     sha256 = "331fa4d5f220e99e727d3c9a4fd89a23fe27806f99c4788fa9fa233e350fef5f",
     urls = ["https://github.com/Tinder/bazel-diff/releases/download/v36.0.0/bazel-diff_deploy.jar"],
 )
+
 http_archive(
     name = "ctx_mold",
     build_file_content = """
