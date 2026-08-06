@@ -316,15 +316,15 @@ pub struct CoreSessionEventPage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticEligibility {
-    UserMessageCandidateV3,
+    UserMessageCandidateV4,
 }
 
 impl SemanticEligibility {
-    pub const CURRENT: Self = Self::UserMessageCandidateV3;
+    pub const CURRENT: Self = Self::UserMessageCandidateV4;
 
     pub fn includes(self, event: &EventRecord) -> bool {
         match self {
-            Self::UserMessageCandidateV3 => {
+            Self::UserMessageCandidateV4 => {
                 !matches!(event.event_origin, EventOrigin::CopiedFromAncestor { .. })
                     && crate::policy::is_semantic_candidate(
                         &event.event_type,

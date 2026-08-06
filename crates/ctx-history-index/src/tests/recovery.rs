@@ -1448,7 +1448,7 @@ fn incompatible_schema_generation_is_rebuilt_without_interpretation() {
 
 #[test]
 fn schema_without_encoded_core_size_is_rebuilt_without_fallback() {
-    assert_eq!(LEXICAL_SCHEMA_VERSION, 18);
+    assert_eq!(LEXICAL_SCHEMA_VERSION, 19);
     assert_active_meta_incompatibility_is_rebuilt(
         "encoded-size-schema-rebuild.jsonl",
         |meta| {
@@ -1468,7 +1468,7 @@ fn schema_without_encoded_core_size_is_rebuilt_without_fallback() {
 
 #[test]
 fn schema_without_event_range_order_is_rebuilt_without_fallback() {
-    assert_eq!(LEXICAL_SCHEMA_VERSION, 18);
+    assert_eq!(LEXICAL_SCHEMA_VERSION, 19);
     assert_active_meta_incompatibility_is_rebuilt(
         "event-range-order-schema-rebuild.jsonl",
         |meta| {

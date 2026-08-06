@@ -60,6 +60,7 @@ impl VerifiedIndex {
         }
         validate_core_event_page_budget(pairing_budget)?;
         if !SemanticEligibility::CURRENT.includes(&anchor.event)
+            || !anchor.core_record.content.is_discovery_eligible()
             || anchor.event_id != anchor.core_record.event_id
             || anchor.session_id != anchor.core_record.session_id
         {
@@ -148,6 +149,9 @@ impl VerifiedIndex {
                     return Err(IndexError::InvalidStoredDocumentField(
                         SESSION_EVENT_ORDER_FIELD,
                     ));
+                }
+                if !assistant.core_record.content.is_discovery_eligible() {
+                    continue;
                 }
                 let text = assistant.core_record.content.meaningful_text().trim();
                 if !text.is_empty() {

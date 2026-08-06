@@ -11,7 +11,9 @@ use crate::{IndexError, Result};
 /// response, capture-state, structured-content, or attribution-only data enters
 /// this projection.
 pub fn project_body_search(mut content: CoreContent) -> Result<Option<String>> {
-    if !matches!(content.policy_status, CoreContentPolicyStatus::Selected) {
+    if !content.is_discovery_eligible()
+        || !matches!(content.policy_status, CoreContentPolicyStatus::Selected)
+    {
         return Ok(None);
     }
 
@@ -85,6 +87,7 @@ mod tests {
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: normalized_body.map(str::to_owned),
             structured_content: None,
+            discovery_exclusion: None,
             mcp_exchange: arguments.map(|arguments| McpExchangeContent {
                 provider_call_id: "excluded-call-id".to_owned(),
                 invocation: Some(McpInvocationContent {
@@ -105,6 +108,15 @@ mod tests {
 
         assert_eq!(projection.as_ptr(), body_pointer);
         assert_eq!(projection, "ordinary normalized body");
+    }
+
+    #[test]
+    fn retrieval_derived_content_has_no_body_projection() {
+        let mut content = selected_content(Some("retrieval payload canary"), None);
+        content.discovery_exclusion =
+            Some(ctx_history_core::CoreDiscoveryExclusion::CtxRetrievalDerived);
+
+        assert_eq!(project_body_search(content).unwrap(), None);
     }
 
     #[test]
