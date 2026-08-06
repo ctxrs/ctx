@@ -51,14 +51,13 @@ impl OpenClawTerminalAuthority {
 
     fn observe_record(&mut self, record: &[u8]) {
         let exact_json_authority = crate::common::json::raw_object_keys_are_unique(record);
-        let Ok(value) = serde_json::from_slice::<Value>(record) else {
+        if !exact_json_authority {
             self.observe_ambiguous_terminal();
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(record) else {
             return;
         };
         let result = native_tool_result(&value);
-        if !exact_json_authority && result.is_some() {
-            self.observe_ambiguous_terminal();
-        }
         if let Some(call_id) = result.and_then(|result| result.call_id) {
             self.observe(call_id);
         }

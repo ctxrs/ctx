@@ -463,6 +463,14 @@ fn openclaw_ambiguous_terminal_exhausts_source_wide_result_uniqueness() {
         ]);
         assert!(!authority.is_unique("ambiguous-terminal-call"));
     }
+
+    let hidden_terminal = br#"{"type":"message","id":"hidden-terminal","message":{"role":"toolResult","toolCallId":"ambiguous-terminal-call","content":"hidden result"},"message":{"role":"assistant","content":"last-wins ordinary message"}}"#;
+    let authority = terminal_authority_for_records([
+        call_bytes.as_slice(),
+        first_result_bytes.as_slice(),
+        hidden_terminal.as_slice(),
+    ]);
+    assert!(!authority.is_unique("ambiguous-terminal-call"));
 }
 
 #[test]

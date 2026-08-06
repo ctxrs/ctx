@@ -14,23 +14,22 @@ fn result_terminal_authority_is_ambiguous(record: &[u8]) -> bool {
     if record.first() == Some(&0) {
         return false;
     }
-    if crate::common::json::raw_object_keys_are_unique(record) {
-        return false;
+    !crate::common::json::raw_object_keys_are_unique(record)
+}
+
+#[cfg(test)]
+mod terminal_authority_tests {
+    use super::result_terminal_authority_is_ambiguous;
+
+    #[test]
+    fn duplicate_selector_cannot_hide_terminal_authority() {
+        assert!(result_terminal_authority_is_ambiguous(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call","output":"hidden"},"payload":{"type":"message","role":"user","content":[]}}"#,
+        ));
+        assert!(!result_terminal_authority_is_ambiguous(
+            br#"{"type":"response_item","payload":{"type":"message","role":"user","content":[]}}"#,
+        ));
     }
-    let Ok(envelope) = serde_json::from_slice::<Value>(record) else {
-        return true;
-    };
-    let Some(record_type) = envelope.get("type").and_then(Value::as_str) else {
-        return false;
-    };
-    let item_type = envelope
-        .get("payload")
-        .and_then(|payload| payload.get("type"))
-        .and_then(Value::as_str);
-    matches!(
-        codex_record_class(record_type, item_type),
-        CodexRecordClass::ExcludedResult(_)
-    )
 }
 
 fn observe_result_terminal_call_id(
