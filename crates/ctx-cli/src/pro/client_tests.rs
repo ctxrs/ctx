@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use ctx_pro_host_protocol::{
     BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameResult,
-    CoreMaterializationReceipt, CoreProjectionCurrentness, MaterializedCoverage, ProAccessState,
-    ProAccessStatus, ProOperation, ProStorageEvidence, QuerySnapshotExpectation,
-    RepositoryCoverage, ResolvedBlameTarget, ResourceKind, ResourceRef,
+    CoreMaterializationReceipt, CoreProjectionCurrentness, ErrorClass, MaterializedCoverage,
+    ProAccessState, ProAccessStatus, ProOperation, ProStorageEvidence, ProtocolError,
+    QuerySnapshotExpectation, RepositoryCoverage, ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
 
 fn receipt(generation: char) -> CoreMaterializationReceipt {
@@ -392,6 +392,81 @@ fn core_advance_during_blame_returns_typed_stale_source() {
     let error =
         ensure_active_core_generation_is_unchanged(&"a".repeat(64), &"b".repeat(64)).unwrap_err();
     assert_eq!(stable_error_code(&error), Some("stale_source"));
+}
+
+#[test]
+fn blame_freshness_accepts_only_current_or_fully_positive_stale_coverage() {
+    let outcome = |attribution, proven, possible, conflicting, none| BlameOutcome {
+        attribution,
+        coverage: BlameCoverage {
+            unit: BlameCoverageUnit::CommitFact,
+            evaluated: proven + possible + conflicting + none,
+            proven,
+            possible,
+            conflicting,
+            none,
+        },
+    };
+    let current_none = outcome(BlameAttribution::None, 0, 0, 0, 0);
+    assert_eq!(
+        classify_blame_snapshot_freshness("a", &current_none, "a", "a").unwrap(),
+        BlameResultFreshness::Current
+    );
+
+    for positive in [
+        outcome(BlameAttribution::Proven, 1, 0, 0, 0),
+        outcome(BlameAttribution::Possible, 1, 1, 0, 0),
+        outcome(BlameAttribution::Conflicting, 1, 0, 1, 0),
+    ] {
+        assert_eq!(
+            classify_blame_snapshot_freshness("a", &positive, "b", "b").unwrap(),
+            BlameResultFreshness::StaleCommitted
+        );
+    }
+
+    for stale_miss in [
+        outcome(BlameAttribution::None, 0, 0, 0, 1),
+        outcome(BlameAttribution::Possible, 1, 0, 0, 1),
+    ] {
+        let error = classify_blame_snapshot_freshness("a", &stale_miss, "b", "b").unwrap_err();
+        assert_eq!(stable_error_code(&error), Some("stale_source"));
+    }
+}
+
+#[test]
+fn stale_generation_bound_failure_becomes_one_typed_stale_diagnostic() {
+    let error = protocol_blame_error(
+        ProtocolError::new(ErrorClass::ResourceNotFound, "ignored helper detail")
+            .with_blame_details(ctx_pro_host_protocol::BlameDiagnosticDetails {
+                reason: ctx_pro_host_protocol::BlameDiagnosticReason::TargetNotIndexed,
+                candidates: Vec::new(),
+                candidates_truncated: false,
+            }),
+        &BlameTarget::Commit {
+            oid: "a".repeat(40),
+            repository: None,
+        },
+    );
+    assert!(is_generation_bound_negative(&error));
+
+    let stale = stale_negative_diagnostic();
+    let diagnostic = blame_diagnostic(&stale).unwrap();
+    assert_eq!(diagnostic.error_code, "stale_source");
+    assert!(diagnostic.retryable);
+    assert!(diagnostic.candidates.is_empty());
+    assert_ne!(
+        diagnostic.next_action.as_ref().map(|action| action.kind),
+        Some(crate::pro::diagnostic::BlameNextActionKind::SearchCore)
+    );
+
+    let entitlement = protocol_blame_error(
+        ProtocolError::new(ErrorClass::EntitlementExpired, "ignored helper detail"),
+        &BlameTarget::Commit {
+            oid: "a".repeat(40),
+            repository: None,
+        },
+    );
+    assert!(!is_generation_bound_negative(&entitlement));
 }
 
 #[test]
