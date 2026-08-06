@@ -88,6 +88,11 @@ pub(super) fn render_blame_text(value: &Value) -> String {
         );
     }
 
+    if let Some(lineage) = value.get("lineage").filter(|value| !value.is_null()) {
+        out.push('\n');
+        render_lineage(&mut out, lineage);
+    }
+
     let matches = array(value, "matches");
     out.push_str(&format!("matches: {}\n", matches.len()));
     for (index, value) in matches.iter().enumerate() {
@@ -170,6 +175,136 @@ fn coverage_units(unit: &str, evaluated: u64) -> String {
         .to_owned(),
         _ => unit.replace('_', " "),
     }
+}
+
+fn render_lineage(out: &mut String, value: &Value) {
+    push_scalar(out, "lineage.complete", value.get("complete"), "");
+    push_scalar(out, "lineage.ambiguous", value.get("ambiguous"), "");
+    push_exact_commit(out, "lineage.requested", value.get("requested"), "");
+
+    let edges = array(value, "edges");
+    out.push_str(&format!("lineage.edges: {}\n", edges.len()));
+    for (index, edge) in edges.iter().enumerate() {
+        let prefix = format!("lineage.edge.{}", index + 1);
+        for field in [
+            "operation_id",
+            "kind",
+            "relation_class",
+            "proof_class",
+            "state",
+            "observed_at_ms",
+        ] {
+            push_scalar(out, &format!("{prefix}.{field}"), edge.get(field), "");
+        }
+        push_exact_commit(out, &format!("{prefix}.source"), edge.get("source"), "");
+        push_exact_commit(out, &format!("{prefix}.result"), edge.get("result"), "");
+        push_resource(out, &format!("{prefix}.actor"), edge.get("actor"), "");
+        push_number_list(
+            out,
+            &format!("{prefix}.evidence_numbers"),
+            edge.get("evidence_numbers"),
+            "",
+        );
+    }
+
+    let yielded_by = array(value, "yielded_by");
+    out.push_str(&format!("lineage.yielded_by: {}\n", yielded_by.len()));
+    for (index, yielded) in yielded_by.iter().enumerate() {
+        let prefix = format!("lineage.yield.{}", index + 1);
+        for field in [
+            "operation_id",
+            "yield_id",
+            "logical_repository_id",
+            "proof_class",
+            "state",
+            "observed_at_ms",
+        ] {
+            push_scalar(out, &format!("{prefix}.{field}"), yielded.get(field), "");
+        }
+        push_resource(out, &format!("{prefix}.actor"), yielded.get("actor"), "");
+        push_number_list(
+            out,
+            &format!("{prefix}.evidence_numbers"),
+            yielded.get("evidence_numbers"),
+            "",
+        );
+    }
+
+    push_exact_commit(out, "lineage.origin", value.get("origin"), "");
+    if let Some(endpoint) = value.get("endpoint").filter(|value| !value.is_null()) {
+        for field in ["kind", "observation_id", "observed_at_ms"] {
+            push_scalar(
+                out,
+                &format!("lineage.endpoint.{field}"),
+                endpoint.get(field),
+                "",
+            );
+        }
+        push_exact_commit(out, "lineage.endpoint.commit", endpoint.get("commit"), "");
+        push_resource(out, "lineage.endpoint.scope", endpoint.get("scope"), "");
+        push_number_list(
+            out,
+            "lineage.endpoint.evidence_numbers",
+            endpoint.get("evidence_numbers"),
+            "",
+        );
+    }
+
+    if let Some(bounds) = value.get("bounds") {
+        for field in [
+            "returned_events",
+            "returned_event_limit",
+            "examined_events",
+            "examined_event_limit",
+            "truncation_reason",
+        ] {
+            push_scalar(
+                out,
+                &format!("lineage.bounds.{field}"),
+                bounds.get(field),
+                "",
+            );
+        }
+        if let Some(omission) = bounds.get("omission") {
+            push_scalar(
+                out,
+                "lineage.bounds.omission.kind",
+                omission.get("kind"),
+                "",
+            );
+            push_scalar(
+                out,
+                "lineage.bounds.omission.count",
+                omission.get("count"),
+                "",
+            );
+        }
+    }
+}
+
+fn push_exact_commit(out: &mut String, label: &str, value: Option<&Value>, indent: &str) {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return;
+    };
+    push_resource(
+        out,
+        &format!("{label}.resource"),
+        value.get("resource"),
+        indent,
+    );
+    push_scalar(
+        out,
+        &format!("{label}.logical_repository_id"),
+        value.get("logical_repository_id"),
+        indent,
+    );
+    push_scalar(
+        out,
+        &format!("{label}.object_format"),
+        value.get("object_format"),
+        indent,
+    );
+    push_scalar(out, &format!("{label}.oid"), value.get("oid"), indent);
 }
 
 fn render_match(out: &mut String, index: usize, value: &Value) {
@@ -511,6 +646,86 @@ mod tests {
         assert!(!rendered.contains("event_seq:"));
         assert!(!rendered.contains("payload_type"));
         assert!(!rendered.contains("omitted"));
+    }
+
+    #[test]
+    fn lineage_fallback_preserves_exact_repository_and_standalone_yield_identity() {
+        let value = json!({
+            "requested": {
+                "resource": {
+                    "id": "commit:3",
+                    "kind": "commit",
+                    "display": "3333333333333333333333333333333333333333"
+                },
+                "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                "object_format": "sha1",
+                "oid": "3333333333333333333333333333333333333333"
+            },
+            "edges": [{
+                "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "kind": "rebase",
+                "relation_class": "replacement",
+                "source": {
+                    "resource": {
+                        "id": "commit:3",
+                        "kind": "commit",
+                        "display": "3333333333333333333333333333333333333333"
+                    },
+                    "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                    "object_format": "sha1",
+                    "oid": "3333333333333333333333333333333333333333"
+                },
+                "result": {
+                    "resource": {
+                        "id": "commit:2",
+                        "kind": "commit",
+                        "display": "2222222222222222222222222222222222222222"
+                    },
+                    "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                    "object_format": "sha1",
+                    "oid": "2222222222222222222222222222222222222222"
+                },
+                "actor": {"id": "session:edge", "kind": "session", "display": "edge"},
+                "proof_class": "repository_verified",
+                "state": "asserted",
+                "observed_at_ms": 1,
+                "evidence_numbers": [1]
+            }],
+            "yielded_by": [{
+                "yield_id": "yield:requested",
+                "operation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "logical_repository_id": "forge:github.com/ctxrs/ctx",
+                "actor": {"id": "session:yield", "kind": "session", "display": "yield"},
+                "proof_class": "repository_verified",
+                "state": "asserted",
+                "observed_at_ms": 2,
+                "evidence_numbers": [2]
+            }],
+            "origin": null,
+            "endpoint": null,
+            "complete": true,
+            "ambiguous": false,
+            "bounds": {
+                "returned_events": 2,
+                "returned_event_limit": 100,
+                "examined_events": 2,
+                "examined_event_limit": 1000,
+                "omission": {"kind": "exact", "count": 0},
+                "truncation_reason": null
+            }
+        });
+        let mut rendered = String::new();
+        render_lineage(&mut rendered, &value);
+
+        for expected in [
+            "lineage.requested.logical_repository_id: forge:github.com/ctxrs/ctx",
+            "lineage.edge.1.source.logical_repository_id: forge:github.com/ctxrs/ctx",
+            "lineage.edge.1.result.logical_repository_id: forge:github.com/ctxrs/ctx",
+            "lineage.yield.1.operation_id: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "lineage.yield.1.logical_repository_id: forge:github.com/ctxrs/ctx",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected}:\n{rendered}");
+        }
     }
 
     #[test]

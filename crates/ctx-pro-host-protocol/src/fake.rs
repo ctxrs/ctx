@@ -344,6 +344,7 @@ impl FakeHelper {
             matches: Vec::new(),
             evidence: Vec::new(),
             next: None,
+            lineage: None,
         })
     }
 }

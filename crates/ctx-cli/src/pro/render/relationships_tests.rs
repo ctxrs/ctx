@@ -173,6 +173,7 @@ fn same_display_lineage_leaves_machine_json_bytes_and_schema_unchanged() {
         })],
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     };
     let result = crate::pro::HostedBlameResult {
         result,

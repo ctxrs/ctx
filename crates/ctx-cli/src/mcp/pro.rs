@@ -510,6 +510,7 @@ mod tests {
             matches: Vec::new(),
             evidence: Vec::new(),
             next: None,
+            lineage: None,
         };
         let model = crate::pro::evidence_preview::EvidencePreviewModel {
             previews: vec![crate::pro::evidence_preview::EvidencePreview {
@@ -606,6 +607,7 @@ mod tests {
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
+                    lineage: None,
                 },
             ),
             (
@@ -630,6 +632,7 @@ mod tests {
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
+                    lineage: None,
                 },
             ),
         ] {

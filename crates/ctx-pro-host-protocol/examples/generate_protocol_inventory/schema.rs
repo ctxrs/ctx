@@ -82,8 +82,34 @@ pub(super) fn inventory() -> Value {
             "blame_diagnostic_candidates": MAX_BLAME_DIAGNOSTIC_CANDIDATES,
             "citations_per_fact": MAX_CITATIONS_PER_FACT,
             "blame_target_bytes": MAX_BLAME_TARGET_BYTES,
+            "commit_lineage_returned_events": MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+            "commit_lineage_examined_events": MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
             "mcp_tool_call_attribution_component_bytes":
                 MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
+        },
+        "commit_lineage_contract": {
+            "operation_kinds": ["amend", "rebase", "cherry_pick"],
+            "relation_classes": ["replacement", "derivation"],
+            "proof_classes": ["record_exact", "repository_verified", "forge_verified"],
+            "states": ["asserted", "ambiguous", "contradicted"],
+            "omission_kinds": ["exact", "at_least", "unknown"],
+            "truncation_reasons": [
+                "returned_event_limit", "examined_event_limit", "evidence_gap"
+            ],
+            "endpoint_kinds": ["current_at_ref", "current_for_pr"],
+            "stable_edge_order": [
+                "operation_id", "operation_kind", "logical_repository_id",
+                "source_object_format", "source_oid", "result_object_format", "result_oid"
+            ],
+            "stable_yield_order": ["operation_id", "yield_id", "actor_id"],
+            "commit_identity": "canonical_logical_repository_id_plus_object_format_plus_full_oid",
+            "operation_id": "canonical_lowercase_sha256_digest",
+            "operation_grouping": "edges_and_yields_share_operation_id_and_consistent_metadata",
+            "returned_event_count": "distinct_operation_ids_across_edges_and_yields",
+            "asserted_yield_proof": "repository_verified",
+            "connectivity": "all_operations_connect_to_requested_and_claimed_origins_and_endpoints_follow_directed_reachability",
+            "root_ambiguity": "multiple_directed_roots_to_requested_require_ambiguous_and_suppress_origin",
+            "match_pagination": "independent"
         },
         "host_message_kinds": [
             "hello", "authorize", "prepare_graph_key_deletion",
@@ -249,8 +275,35 @@ pub(super) fn inventory() -> Value {
                 "unit", "evaluated", "proven", "possible", "conflicting", "none"
             ], &[]),
             "BlameResult": fields(&[
-                "snapshot", "target", "git_snapshot", "outcome", "matches", "evidence", "next"
+                "snapshot", "target", "git_snapshot", "outcome", "matches", "evidence", "next",
+                "lineage"
             ], &[]),
+            "ExactCommitRef": fields(
+                &["resource", "logical_repository_id", "object_format", "oid"], &[]),
+            "CommitLineage": fields(&[
+                "requested", "edges", "yielded_by", "origin", "endpoint", "complete",
+                "ambiguous", "bounds"
+            ], &[]),
+            "CommitLineageEdge": fields(&[
+                "operation_id", "kind", "relation_class", "source", "result", "actor",
+                "proof_class", "state", "observed_at_ms", "evidence_numbers"
+            ], &[]),
+            "CommitLineageYield": fields(&[
+                "yield_id", "operation_id", "logical_repository_id", "actor", "proof_class",
+                "state", "observed_at_ms", "evidence_numbers"
+            ], &[]),
+            "CommitLineageBounds": fields(&[
+                "returned_events", "returned_event_limit", "examined_events",
+                "examined_event_limit", "omission", "truncation_reason"
+            ], &[]),
+            "ScopedCommitEndpoint.current_at_ref": fields(&[
+                "kind", "commit", "scope", "observation_id", "observed_at_ms",
+                "evidence_numbers"
+            ], &[]),
+            "ScopedCommitEndpoint.current_for_pr": fields(&[
+                "kind", "commit", "scope", "observation_id", "observed_at_ms",
+                "evidence_numbers"
+             ], &[]),
             "EvidenceCitation": fields(&[
                 "core_generation_id", "source", "session_id", "event_id", "event_sequence",
                 "byte_range", "evidence_sha256"

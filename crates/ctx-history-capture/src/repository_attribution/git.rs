@@ -17,8 +17,11 @@ use ctx_history_core::{
     RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservationKind,
     RepositoryLocalRootAuthorization,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
+    MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS,
 };
+use sha2::{Digest, Sha256};
 mod geometry;
+mod operation;
 mod parsing;
 mod pull_request;
 
@@ -43,6 +46,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 // Two repositories, each checked by two snapshots of two Git subprocesses.
 pub(super) const MAX_FULL_CERTIFICATIONS_PER_EVENT: usize = 2;
 pub(super) const MAX_GIT_SUBPROCESSES_PER_EVENT: usize = 10;
+pub(super) const MAX_VERIFIED_COMMIT_OPERATION_OBJECTS: usize =
+    MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS * 2;
 const MAX_GIT_PROBE_TIME_PER_EVENT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,7 +144,6 @@ pub(super) struct ResolvedPullRequestMergeMembership {
 pub(super) enum ResolvedCommitProducer {
     Commit,
     Merge,
-    Rewrite,
 }
 
 #[derive(Debug, Clone)]
@@ -310,7 +314,6 @@ impl GitCertifier {
             ResolvedCommitProducer::Merge if parent_object_ids.len() < 2 => {
                 return Err(ProbeFailure::Failed("merge_has_nonmerge_parent_shape"));
             }
-            ResolvedCommitProducer::Rewrite => {}
             _ => {}
         }
 
@@ -380,6 +383,75 @@ impl GitCertifier {
             parent_object_ids,
             files,
         })
+    }
+
+    /// Resolves the exact full source from the bounded command and the one
+    /// native Git result prefix/subject in a single certified repository
+    /// window. The linked command/result receipt supplies causality; these
+    /// object probes only close identity, object format, and drift predicates.
+    pub(super) fn resolve_cherry_pick_operation(
+        &self,
+        certificate: &CertifiedCandidate,
+        source: &GitObjectId,
+        result_oid_prefix: &str,
+        result_subject: &str,
+        budget: &mut EventProbeBudget,
+    ) -> Result<(ResolvedCommit, [u8; 32]), ProbeFailure> {
+        source
+            .validate_contract()
+            .map_err(|_| ProbeFailure::Failed("invalid_cherry_pick_source"))?;
+        if source.format != certificate.object_format() {
+            return Err(ProbeFailure::Failed("cherry_pick_object_format_mismatch"));
+        }
+        certificate.ensure_current_geometry()?;
+        let opening_mutable_state = repository_mutable_evidence_state(
+            &certificate.git_dir,
+            &certificate.common_dir,
+            certificate.branch.as_deref(),
+        )?;
+        if opening_mutable_state != certificate.mutable_evidence_state {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+
+        let source_revision = format!("{}^{{commit}}", source.hex);
+        let source_output = self.run_git(
+            &certificate.repository_root,
+            &["show", "-s", "--format=%H", &source_revision],
+            false,
+            budget,
+        )?;
+        if utf8_lines(&source_output)?.as_slice() != [source.hex.as_str()] {
+            return Err(ProbeFailure::Failed(
+                "cherry_pick_source_resolution_mismatch",
+            ));
+        }
+
+        let result = self.resolve_commit(
+            certificate,
+            result_oid_prefix,
+            result_subject,
+            ResolvedCommitProducer::Commit,
+            budget,
+        )?;
+        if result.object_id.format != source.format || result.object_id == *source {
+            return Err(ProbeFailure::Failed("invalid_cherry_pick_mapping"));
+        }
+
+        let mut mapped_object_ids = [source.clone(), result.object_id.clone()];
+        mapped_object_ids.sort();
+        let object_domain =
+            self.recertify_commit_operation_objects(certificate, &mapped_object_ids, budget)?;
+
+        certificate.ensure_current_geometry()?;
+        let closing_mutable_state = repository_mutable_evidence_state(
+            &certificate.git_dir,
+            &certificate.common_dir,
+            certificate.branch.as_deref(),
+        )?;
+        if closing_mutable_state != opening_mutable_state {
+            return Err(ProbeFailure::ConcurrentDrift);
+        }
+        Ok((result, object_domain))
     }
 
     #[cfg(test)]
@@ -566,6 +638,18 @@ impl GitCertifier {
         }
         Ok(stdout)
     }
+}
+
+fn repository_object_domain_sha256(certificate: &CertifiedCandidate) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.object-domain.v1\0");
+    digest.update(certificate.binding.logical_repository_id.as_bytes());
+    digest.update([match certificate.object_format() {
+        GitObjectFormat::Sha1 => 1,
+        GitObjectFormat::Sha256 => 2,
+    }]);
+    digest.update(certificate.repository_geometry_state);
+    digest.finalize().into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

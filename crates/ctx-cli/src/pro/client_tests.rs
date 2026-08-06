@@ -105,6 +105,7 @@ fn empty_commit_result(snapshot: QuerySnapshotExpectation) -> BlameResult {
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     }
 }
 

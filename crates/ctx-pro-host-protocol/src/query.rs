@@ -1,11 +1,14 @@
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
-    CoreMaterializationReceiptIdentity, ErrorClass, EvidenceCitation, ProtocolError, ResourceKind,
-    ResourceRef, MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES, MAX_BLAME_EVIDENCE,
-    MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT,
+    CommitLineage, CoreMaterializationReceiptIdentity, ErrorClass, EvidenceCitation, ProtocolError,
+    ResourceKind, ResourceRef, MAX_BLAME_ATTRIBUTIONS_PER_MATCH, MAX_BLAME_CURSOR_BYTES,
+    MAX_BLAME_EVIDENCE, MAX_BLAME_RESULTS, MAX_BLAME_TARGET_BYTES, MAX_CITATIONS_PER_FACT,
 };
 
 #[path = "query_pull_request_selector.rs"]
@@ -497,6 +500,7 @@ pub struct BlameResult {
     pub matches: Vec<BlameMatch>,
     pub evidence: Vec<NumberedEvidence>,
     pub next: Option<BlameContinuation>,
+    pub lineage: Option<CommitLineage>,
 }
 
 #[derive(Deserialize)]
@@ -509,6 +513,8 @@ struct BlameResultWire {
     matches: Vec<BlameMatch>,
     evidence: Vec<NumberedEvidence>,
     next: Option<BlameContinuation>,
+    #[serde(default)]
+    lineage: Option<CommitLineage>,
 }
 
 impl<'de> Deserialize<'de> for BlameResult {
@@ -525,6 +531,7 @@ impl<'de> Deserialize<'de> for BlameResult {
             matches: wire.matches,
             evidence: wire.evidence,
             next: wire.next,
+            lineage: wire.lineage,
         };
         result
             .validate()
@@ -607,6 +614,21 @@ impl BlameResult {
         for blame_match in &self.matches {
             blame_match.validate(&self.target, &available, &mut referenced)?;
         }
+        match (&self.target, &self.lineage) {
+            (ResolvedBlameTarget::Commit { commit, repository }, Some(lineage)) => {
+                lineage.validate(commit, repository, &available, &mut referenced)?;
+            }
+            (
+                ResolvedBlameTarget::File { .. } | ResolvedBlameTarget::PullRequest { .. },
+                Some(_),
+            ) => {
+                return Err(ProtocolError::new(
+                    ErrorClass::Corrupt,
+                    "commit lineage is only valid for commit blame results",
+                ));
+            }
+            (_, None) => {}
+        }
         if referenced != available {
             return Err(ProtocolError::new(
                 ErrorClass::Corrupt,
@@ -663,7 +685,8 @@ impl BlameResult {
             }
             ResolvedBlameTarget::Commit { .. } => {
                 let mut fact_ids = BTreeSet::new();
-                let mut asserted_producers = BTreeSet::new();
+                let mut asserted_producers =
+                    BTreeMap::<(ResourceKind, String), BTreeSet<(ResourceKind, String)>>::new();
                 for item in &self.matches {
                     let BlameMatch::Commit(item) = item else {
                         return Err(ProtocolError::new(
@@ -681,11 +704,13 @@ impl BlameResult {
                         && item.state == FactState::Asserted
                     {
                         if let Some(producer) = &item.object {
-                            asserted_producers.insert((producer.kind, producer.id.as_str()));
+                            asserted_producers
+                                .entry((item.subject.kind, item.subject.id.clone()))
+                                .or_default()
+                                .insert((producer.kind, producer.id.clone()));
                         }
                     }
                 }
-                let conflicting_producers = asserted_producers.len() >= 2;
                 for item in &self.matches {
                     let BlameMatch::Commit(item) = item else {
                         return Err(ProtocolError::new(
@@ -693,6 +718,9 @@ impl BlameResult {
                             "commit blame coverage contains a non-commit match",
                         ));
                     };
+                    let conflicting_producers = asserted_producers
+                        .get(&(item.subject.kind, item.subject.id.clone()))
+                        .is_some_and(|producers| producers.len() >= 2);
                     coverage.add(commit_fact_attribution(item, conflicting_producers), 1)?;
                 }
             }
@@ -1170,7 +1198,7 @@ impl PullRequestBlameMatch {
     }
 }
 
-fn validate_evidence_numbers(
+pub(crate) fn validate_evidence_numbers(
     numbers: &[u32],
     available: &BTreeSet<u32>,
     referenced: &mut BTreeSet<u32>,
@@ -1258,7 +1286,7 @@ fn line_range_contains(outer: &LineRange, inner: &LineRange) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
 
-fn same_resource_identity(left: &ResourceRef, right: &ResourceRef) -> bool {
+pub(crate) fn same_resource_identity(left: &ResourceRef, right: &ResourceRef) -> bool {
     left.kind == right.kind && left.id == right.id
 }
 

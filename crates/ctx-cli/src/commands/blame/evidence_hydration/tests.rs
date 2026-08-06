@@ -197,6 +197,7 @@ fn result(evidence: Vec<NumberedEvidence>) -> BlameResult {
         matches: Vec::new(),
         evidence,
         next: None,
+        lineage: None,
     }
 }
 

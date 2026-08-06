@@ -1,0 +1,29 @@
+No producer proven
+
+Commit      3333333333333333333333333333333333333333
+Repository  ctxrs/ctx
+
+Lineage · partial · ambiguous · 1 operation
+  Rebase · replacement · 1 mapping
+    source        commit 1111111111111111111111111111111111111111 (sha1)
+    result        commit 3333333333333333333333333333333333333333 (sha1)
+    outcome       operation yield is ambiguous
+    actor         session rebaser
+    proof         repository verified
+    state         ambiguous
+    observed      2024-07-14T23:33:20.000Z
+    operation id
+      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    evidence      [1]
+
+  ! More proven lineage may be omitted: at least 2 operation events.
+    bounds        operations returned 1/100 · events examined 1000/1000 ·
+                  examined event limit
+
+  ! Lineage is ambiguous. No unique origin or endpoint is claimed.
+
+  implementation  commit lineage does not establish who implemented the code
+
+Evidence
+  [1]
+    ctx show event 8cd765ac-68a3-8a2c-ae04-669a08be6370 · Core aaaaaaaaaaaa · source 0f989cc2-fb1b-8eaf-8403-078d7622424b · sequence 1

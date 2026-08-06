@@ -19,6 +19,8 @@ pub const MAX_BLAME_ATTRIBUTIONS_PER_MATCH: usize = 100;
 pub const MAX_BLAME_DIAGNOSTIC_CANDIDATES: usize = 5;
 pub const MAX_CITATIONS_PER_FACT: usize = 32;
 pub const MAX_BLAME_TARGET_BYTES: usize = 8 * 1024;
+pub const MAX_COMMIT_LINEAGE_RETURNED_EVENTS: u32 = 100;
+pub const MAX_COMMIT_LINEAGE_EXAMINED_EVENTS: u32 = 1_000;
 /// Canonical generated Protocol V2 inventory shipped by this exact crate revision.
 pub const PROTOCOL_INVENTORY_JSON: &str = include_str!("../testdata/v2/inventory.json");
 /// Canonical entitlement vectors shipped by this exact crate revision.
@@ -77,6 +79,13 @@ pub use query::{
     ProductionRelationship, PullRequestAction, PullRequestActivity, PullRequestBlameMatch,
     PullRequestBlameRelationship, PullRequestCommit, PullRequestCommitRelationship,
     QuerySnapshotExpectation, ResolvedBlameTarget, WorktreeStatus,
+};
+mod query_lineage;
+pub use query_lineage::{
+    CommitLineage, CommitLineageBounds, CommitLineageEdge, CommitLineageOmission,
+    CommitLineageOperationKind, CommitLineageProofClass, CommitLineageRelationClass,
+    CommitLineageState, CommitLineageTruncationReason, CommitLineageYield, ExactCommitRef,
+    GitObjectFormat, ScopedCommitEndpoint,
 };
 mod core_materialization;
 pub use core_materialization::{

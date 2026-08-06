@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ctx_history_core::RepositoryAbstentionReason;
+use ctx_history_core::{RepositoryAbstentionReason, RepositoryCommitOperationKind};
 
 use super::{
     known_git_builtin, lexical_absolute, literal_cd_destination, strip_comments_and_bound_heredocs,
@@ -12,13 +12,17 @@ pub(crate) enum BoundedCommitProducer {
     Commit,
     Merge,
     Rebase,
+    CherryPick,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoundedOutcomeOperation {
     Commit {
         producer: BoundedCommitProducer,
+        /// Compatibility discriminator for provider integrations that only
+        /// need to fail closed on history-changing commands.
         rewrites_history: bool,
+        operation_kind: Option<RepositoryCommitOperationKind>,
         exact_oid_output: bool,
     },
     PullRequestCreate,
@@ -28,6 +32,7 @@ pub(crate) enum BoundedOutcomeOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundedOutcomePlan {
     pub(crate) operation: BoundedOutcomeOperation,
+    pub(crate) operation_source_oid: Option<String>,
     pub(crate) operation_repository_path: PathBuf,
     pub(crate) output_repository_path: Option<PathBuf>,
     pub(crate) machine_output_isolated: bool,
@@ -46,9 +51,8 @@ pub(crate) enum BoundedOutcomePlanDisposition {
     },
 }
 
-/// Recognizes an ordered, route-preserving outcome plan. Wrappers and prefix
-/// assignments are never outcome authority because Codex does not supply a
-/// typed executable/argv attestation for them.
+/// Recognizes an ordered, route-preserving outcome plan, including the same
+/// statically resolvable wrappers admitted by repository command analysis.
 #[cfg(test)]
 pub(super) fn bounded_outcome_operation(command: &str) -> Option<BoundedOutcomeOperation> {
     match bounded_outcome_plan(command, Path::new("/")) {
@@ -118,27 +122,26 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
             current = Some(destination);
             continue;
         }
-        if segment
+        let (unwrapped, wrapper_error) = unwrap_command_wrappers(&segment);
+        let Some(command) = unwrapped else {
+            return outcome_abstained_with_plan(
+                RepositoryAbstentionReason::UnknownWrapper,
+                wrapper_error.unwrap_or("unknown_outcome_wrapper"),
+                plan,
+            );
+        };
+        if command
             .first()
             .is_none_or(|token| !matches!(token.as_str(), "git" | "gh"))
         {
-            let (unwrapped, _) = unwrap_command_wrappers(&segment);
-            if unwrapped.is_some_and(|command| {
-                matches!(command.first().map(String::as_str), Some("git" | "gh"))
-            }) {
-                return outcome_abstained_with_plan(
-                    RepositoryAbstentionReason::UnknownWrapper,
-                    "outcome_wrapper_or_assignment_is_unattested",
-                    plan,
-                );
-            }
             if plan.as_ref().is_some_and(|plan| {
                 matches!(
                     plan.operation,
                     BoundedOutcomeOperation::Commit {
                         producer: BoundedCommitProducer::Commit,
-                        rewrites_history: false,
+                        operation_kind: None,
                         exact_oid_output: true,
+                        ..
                     }
                 )
             }) {
@@ -158,10 +161,10 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
             }
             return BoundedOutcomePlanDisposition::Unrecognized;
         }
-        match segment.first().map(String::as_str) {
+        match command.first().map(String::as_str) {
             Some("git") => {
                 let Some((subcommand, arguments, repository_path)) =
-                    bounded_git_invocation(&segment, current.as_deref())
+                    bounded_git_invocation(command, current.as_deref())
                 else {
                     return outcome_abstained(
                         RepositoryAbstentionReason::DynamicPath,
@@ -169,7 +172,7 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
                     );
                 };
                 match subcommand {
-                    "commit" | "rebase" | "merge" => {
+                    "commit" | "rebase" | "merge" | "cherry-pick" => {
                         if subcommand == "merge"
                             && !arguments.iter().any(|argument| argument == "--no-ff")
                         {
@@ -179,17 +182,46 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
                             "commit" => BoundedCommitProducer::Commit,
                             "merge" => BoundedCommitProducer::Merge,
                             "rebase" => BoundedCommitProducer::Rebase,
+                            "cherry-pick" => BoundedCommitProducer::CherryPick,
                             _ => return BoundedOutcomePlanDisposition::Unrecognized,
+                        };
+                        let operation_kind = match producer {
+                            BoundedCommitProducer::Commit
+                                if arguments.iter().any(|argument| {
+                                    argument == "--amend" || argument.starts_with("--amend=")
+                                }) =>
+                            {
+                                Some(RepositoryCommitOperationKind::Amend)
+                            }
+                            BoundedCommitProducer::Rebase => {
+                                Some(RepositoryCommitOperationKind::Rebase)
+                            }
+                            BoundedCommitProducer::CherryPick => {
+                                Some(RepositoryCommitOperationKind::CherryPick)
+                            }
+                            _ => None,
+                        };
+                        let operation_source_oid = match producer {
+                            BoundedCommitProducer::CherryPick => {
+                                let Some(source) = exact_cherry_pick_source(arguments) else {
+                                    return outcome_abstained_with_plan(
+                                        RepositoryAbstentionReason::OutcomeResultInadmissible,
+                                        "cherry_pick_source_is_not_one_full_oid",
+                                        None,
+                                    );
+                                };
+                                Some(source)
+                            }
+                            _ => None,
                         };
                         let candidate = BoundedOutcomePlan {
                             operation: BoundedOutcomeOperation::Commit {
                                 producer,
-                                rewrites_history: subcommand == "rebase"
-                                    || arguments.iter().any(|argument| {
-                                        argument == "--amend" || argument.starts_with("--amend=")
-                                    }),
+                                rewrites_history: operation_kind.is_some(),
+                                operation_kind,
                                 exact_oid_output: false,
                             },
+                            operation_source_oid,
                             operation_repository_path: repository_path,
                             output_repository_path: None,
                             machine_output_isolated: !prior_git_segment,
@@ -272,7 +304,7 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
             }
             Some("gh") => {
                 let Some((operation, expected_pr_repository_path, expected_pr_number)) =
-                    bounded_gh_operation(&segment)
+                    bounded_gh_operation(command)
                 else {
                     if plan.is_some() {
                         return outcome_abstained_with_plan(
@@ -299,6 +331,7 @@ pub(crate) fn bounded_outcome_plan(command: &str, base: &Path) -> BoundedOutcome
                 operation_segment_index = Some(segment_index);
                 plan = Some(BoundedOutcomePlan {
                     operation,
+                    operation_source_oid: None,
                     operation_repository_path: repository_path,
                     output_repository_path: None,
                     machine_output_isolated: true,
@@ -374,10 +407,43 @@ fn producer_is_non_producing_mode(producer: BoundedCommitProducer, arguments: &[
         BoundedCommitProducer::Rebase => {
             &["--abort", "--quit", "--edit-todo", "--show-current-patch"][..]
         }
+        BoundedCommitProducer::CherryPick => &[
+            "--abort",
+            "--continue",
+            "--ff",
+            "--no-commit",
+            "-n",
+            "--quit",
+            "--skip",
+        ][..],
     };
     rejected
         .iter()
         .any(|option| outcome_option_present(arguments, option))
+}
+
+fn exact_cherry_pick_source(arguments: &[String]) -> Option<String> {
+    let mut source = None;
+    for argument in arguments {
+        if argument == "--" {
+            continue;
+        }
+        if matches!(
+            argument.as_str(),
+            "-e" | "--edit" | "--no-edit" | "-s" | "--signoff" | "-x"
+        ) {
+            continue;
+        }
+        if argument.starts_with('-')
+            || !matches!(argument.len(), 40 | 64)
+            || !argument.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || source.is_some()
+        {
+            return None;
+        }
+        source = Some(argument.to_ascii_lowercase());
+    }
+    source
 }
 
 fn outcome_option_present(arguments: &[String], option: &str) -> bool {

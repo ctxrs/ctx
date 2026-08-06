@@ -1,20 +1,23 @@
 use std::{cmp::Ordering, collections::HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{SourceKey, StableEntityId, StableEntityKind};
 
 use super::{
     validation::{
-        validate_count, validate_optional_text, validate_repository_alias_component,
-        validate_repository_relative_path, validate_text,
+        validate_count, validate_optional_text, validate_owned_identity,
+        validate_repository_alias_component, validate_repository_relative_path, validate_text,
     },
     CoreRecordError, CoreRecordResult, CORE_BOUNDED_SHELL_SUBSET_REVISION,
     CORE_MISSING_ACTIVITY_TIME_UNIX_MS, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
     CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION,
     CORE_REPOSITORY_OBSERVATION_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
     CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION, MAX_GIT_REF_BYTES,
-    MAX_OUTCOME_LINKAGE_ITEMS, MAX_REPOSITORY_ALIASES, MAX_REPOSITORY_EVIDENCE,
-    MAX_REPOSITORY_ITEMS, MAX_REPOSITORY_NAMESPACE_PARTS, MAX_REPOSITORY_RELATIVE_PATH_BYTES,
-    MAX_TEXT_METADATA_BYTES,
+    MAX_OUTCOME_LINKAGE_ITEMS, MAX_REPOSITORY_ALIASES, MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS,
+    MAX_REPOSITORY_EVIDENCE, MAX_REPOSITORY_ITEMS, MAX_REPOSITORY_NAMESPACE_PARTS,
+    MAX_REPOSITORY_RELATIVE_PATH_BYTES, MAX_TEXT_METADATA_BYTES,
 };
 
 const MAX_REPOSITORY_TOOL_NAME_BYTES: usize = 512;
@@ -612,8 +615,10 @@ pub enum RepositoryVcsObservationKind {
 pub struct RepositoryOutcomeObservation {
     pub kind: RepositoryOutcomeKind,
     pub produced_object_ids: Vec<GitObjectId>,
-    pub replacement_lineage: Vec<RepositoryObjectReplacement>,
+    pub commit_operation: Option<RepositoryCommitOperationEvent>,
     pub pull_request: Option<RepositoryPullRequestIdentity>,
+    /// Exact forge-reported merge association. This is never a commit yield.
+    pub pull_request_merge_commit: Option<GitObjectId>,
     pub observed_at_unix_ms: i64,
     pub linkage: RepositoryOutcomeLinkage,
     pub outcome_capture_revision: u32,
@@ -629,11 +634,6 @@ impl RepositoryOutcomeObservation {
             self.produced_object_ids.len(),
             MAX_REPOSITORY_ITEMS,
         )?;
-        validate_count(
-            "repository_outcome_replacement_lineage",
-            self.replacement_lineage.len(),
-            MAX_REPOSITORY_ITEMS,
-        )?;
         let mut produced = HashSet::new();
         for object_id in &self.produced_object_ids {
             object_id.validate_contract()?;
@@ -641,64 +641,47 @@ impl RepositoryOutcomeObservation {
                 return Err(CoreRecordError::InvalidRepositoryOutcome);
             }
         }
-        let mut replacements = HashSet::new();
-        let mut replaced_ids = HashSet::new();
-        let mut replacement_ids = HashSet::new();
-        for replacement in &self.replacement_lineage {
-            replacement.validate_contract()?;
-            if !produced.contains(&(
-                replacement.replacement.format,
-                replacement.replacement.hex.as_str(),
-            )) || !replaced_ids.insert(replacement.replaced.clone())
-                || !replacement_ids.insert(replacement.replacement.clone())
-                || !replacements.insert((
-                    replacement.replaced.clone(),
-                    replacement.replacement.clone(),
-                ))
-            {
-                return Err(CoreRecordError::InvalidRepositoryOutcome);
-            }
-        }
-        for start in &replaced_ids {
-            let mut visited = HashSet::new();
-            let mut current = start;
-            while let Some(next) = self
-                .replacement_lineage
-                .iter()
-                .find(|replacement| &replacement.replaced == current)
-                .map(|replacement| &replacement.replacement)
-            {
-                if !visited.insert(current) || next == start {
-                    return Err(CoreRecordError::InvalidRepositoryOutcome);
-                }
-                current = next;
-            }
+        if let Some(operation) = &self.commit_operation {
+            operation.validate_contract(&self.linkage)?;
         }
         if let Some(pull_request) = &self.pull_request {
             pull_request.validate_contract()?;
         }
+        if let Some(merge_commit) = &self.pull_request_merge_commit {
+            merge_commit.validate_contract()?;
+        }
         match self.kind {
             RepositoryOutcomeKind::Commit
-                if !self.produced_object_ids.is_empty() && self.pull_request.is_none() => {}
+                if self.pull_request.is_none()
+                    && self.pull_request_merge_commit.is_none()
+                    && ((!self.produced_object_ids.is_empty()
+                        && self.commit_operation.is_none())
+                        || (self.produced_object_ids.is_empty()
+                            && self.commit_operation.is_some())) => {}
             RepositoryOutcomeKind::PullRequestCreated
                 if self.produced_object_ids.is_empty()
-                    && self.replacement_lineage.is_empty()
-                    && self.pull_request.is_some() => {}
+                    && self.commit_operation.is_none()
+                    && self.pull_request.is_some()
+                    && self.pull_request_merge_commit.is_none() => {}
             RepositoryOutcomeKind::PullRequestMerged
-                if self.produced_object_ids.len() == 1
-                    && self.replacement_lineage.is_empty()
-                    && self.pull_request.is_some() => {}
+                if self.produced_object_ids.is_empty()
+                    && self.commit_operation.is_none()
+                    && self.pull_request.is_some()
+                    && self.pull_request_merge_commit.is_some() => {}
             _ => return Err(CoreRecordError::InvalidRepositoryOutcome),
         }
         self.linkage.validate_contract()
     }
 
     pub fn object_ids(&self) -> impl Iterator<Item = &GitObjectId> {
-        self.produced_object_ids.iter().chain(
-            self.replacement_lineage
-                .iter()
-                .flat_map(|replacement| [&replacement.replaced, &replacement.replacement]),
-        )
+        self.produced_object_ids
+            .iter()
+            .chain(
+                self.commit_operation
+                    .iter()
+                    .flat_map(RepositoryCommitOperationEvent::object_ids),
+            )
+            .chain(self.pull_request_merge_commit.iter())
     }
 }
 
@@ -710,22 +693,550 @@ pub enum RepositoryOutcomeKind {
     PullRequestMerged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RepositoryObjectReplacement {
-    pub replaced: GitObjectId,
-    pub replacement: GitObjectId,
+pub struct RepositoryCommitMapping {
+    pub source: GitObjectId,
+    pub result: GitObjectId,
 }
 
-impl RepositoryObjectReplacement {
+impl RepositoryCommitMapping {
     fn validate_contract(&self) -> CoreRecordResult<()> {
-        self.replaced.validate_contract()?;
-        self.replacement.validate_contract()?;
-        if self.replaced == self.replacement || self.replaced.format != self.replacement.format {
+        self.source.validate_contract()?;
+        self.result.validate_contract()?;
+        if self.source == self.result || self.source.format != self.result.format {
             return Err(CoreRecordError::InvalidRepositoryOutcome);
         }
         Ok(())
     }
+}
+
+/// One operation-scoped causal observation. Object identity remains the
+/// enclosing logical repository plus object format plus full OID; checkout,
+/// worktree, and ref values remain observation context on the binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryCommitOperationEvent {
+    pub event_id: [u8; 32],
+    pub receipt_id: [u8; 32],
+    pub kind: RepositoryCommitOperationKind,
+    pub mappings: Vec<RepositoryCommitMapping>,
+    pub unlinked_sources: Vec<GitObjectId>,
+    pub unlinked_results: Vec<GitObjectId>,
+    pub mapping_completeness: RepositoryCommitMappingCompleteness,
+    pub state: RepositoryCommitOperationState,
+    pub proof: RepositoryCommitOperationProof,
+}
+
+impl RepositoryCommitOperationEvent {
+    /// Admits one exact yield only after the caller has supplied the closed
+    /// operation proof gathered from a linked command/result record and one
+    /// drift-free repository/object-domain verification pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn repository_verified_yield(
+        linkage: &RepositoryOutcomeLinkage,
+        kind: RepositoryCommitOperationKind,
+        mut mappings: Vec<RepositoryCommitMapping>,
+        command_pre_head: Option<GitObjectId>,
+        sequencer_pre_head: Option<GitObjectId>,
+        command_post_head: GitObjectId,
+        repository_object_domain_sha256: [u8; 32],
+    ) -> CoreRecordResult<Self> {
+        mappings.sort();
+        let exact_source_oids = canonical_mapping_sources(&mappings);
+        let proof = RepositoryVerifiedYieldProof {
+            command_pre_head,
+            sequencer_pre_head,
+            exact_source_oids,
+            command_post_head,
+            repository_geometry_before_sha256: repository_object_domain_sha256,
+            repository_geometry_after_sha256: repository_object_domain_sha256,
+            exact_result_map_sha256: repository_result_map_sha256(&mappings),
+            drift_excluded: true,
+            mutation_excluded: true,
+        };
+        let event = Self {
+            event_id: unscoped_repository_commit_operation_event_id(linkage, kind),
+            receipt_id: repository_outcome_receipt_id(linkage),
+            kind,
+            mappings,
+            unlinked_sources: Vec::new(),
+            unlinked_results: Vec::new(),
+            mapping_completeness: RepositoryCommitMappingCompleteness::Complete,
+            state: RepositoryCommitOperationState::Asserted,
+            proof: RepositoryCommitOperationProof::RepositoryVerifiedYield(proof),
+        };
+        event.validate_contract(linkage)?;
+        Ok(event)
+    }
+
+    /// Retains an exact provider record without granting causal-edge or yield
+    /// authority. Unlinked objects remain observations only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_exact_unlinked(
+        linkage: &RepositoryOutcomeLinkage,
+        kind: RepositoryCommitOperationKind,
+        mut unlinked_sources: Vec<GitObjectId>,
+        mut unlinked_results: Vec<GitObjectId>,
+        state: RepositoryCommitOperationState,
+    ) -> CoreRecordResult<Self> {
+        unlinked_sources.sort();
+        unlinked_sources.dedup();
+        unlinked_results.sort();
+        unlinked_results.dedup();
+        let event = Self {
+            event_id: unscoped_repository_commit_operation_event_id(linkage, kind),
+            receipt_id: repository_outcome_receipt_id(linkage),
+            kind,
+            mappings: Vec::new(),
+            unlinked_sources,
+            unlinked_results,
+            mapping_completeness: RepositoryCommitMappingCompleteness::None,
+            state,
+            proof: RepositoryCommitOperationProof::RecordExact,
+        };
+        event.validate_contract(linkage)?;
+        Ok(event)
+    }
+
+    fn validate_contract(&self, linkage: &RepositoryOutcomeLinkage) -> CoreRecordResult<()> {
+        validate_count(
+            "repository_commit_operation_mappings",
+            self.mappings.len(),
+            MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS,
+        )?;
+        validate_count(
+            "repository_commit_operation_unlinked_sources",
+            self.unlinked_sources.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        validate_count(
+            "repository_commit_operation_unlinked_results",
+            self.unlinked_results.len(),
+            MAX_REPOSITORY_ITEMS,
+        )?;
+        if self.event_id == [0; 32] || self.receipt_id != repository_outcome_receipt_id(linkage) {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+
+        let mut mappings = HashSet::new();
+        if self.mappings.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        let mut mapped_sources = HashSet::new();
+        let mut mapped_results = HashSet::new();
+        for mapping in &self.mappings {
+            mapping.validate_contract()?;
+            if !mappings.insert(mapping)
+                || !mapped_sources.insert(&mapping.source)
+                || !mapped_results.insert(&mapping.result)
+            {
+                return Err(CoreRecordError::InvalidRepositoryOutcome);
+            }
+        }
+        validate_canonical_object_set(&self.unlinked_sources)?;
+        validate_canonical_object_set(&self.unlinked_results)?;
+        if self
+            .unlinked_sources
+            .iter()
+            .any(|source| mapped_sources.contains(source))
+            || self
+                .unlinked_results
+                .iter()
+                .any(|result| mapped_results.contains(result))
+        {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        let format = self.object_ids().next().map(|object_id| object_id.format);
+        if format.is_none()
+            || self
+                .object_ids()
+                .any(|object_id| Some(object_id.format) != format)
+        {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        match self.mapping_completeness {
+            RepositoryCommitMappingCompleteness::Complete
+                if !self.mappings.is_empty()
+                    && self.unlinked_sources.is_empty()
+                    && self.unlinked_results.is_empty() => {}
+            RepositoryCommitMappingCompleteness::Partial
+                if !self.mappings.is_empty()
+                    && (!self.unlinked_sources.is_empty() || !self.unlinked_results.is_empty()) => {
+            }
+            RepositoryCommitMappingCompleteness::None
+                if self.mappings.is_empty()
+                    && (!self.unlinked_sources.is_empty() || !self.unlinked_results.is_empty()) => {
+            }
+            _ => return Err(CoreRecordError::InvalidRepositoryOutcome),
+        }
+        self.proof.validate_contract(self)
+    }
+
+    pub fn bind_scoped_identity(
+        &mut self,
+        source: &SourceKey,
+        core_event_id: StableEntityId,
+        core_session_id: StableEntityId,
+        repository: &RepositoryBinding,
+        linkage: &RepositoryOutcomeLinkage,
+    ) -> CoreRecordResult<()> {
+        let object_format = self
+            .object_ids()
+            .next()
+            .map(|object_id| object_id.format)
+            .ok_or(CoreRecordError::InvalidRepositoryOutcome)?;
+        self.event_id = repository_commit_operation_event_id(
+            source,
+            core_event_id,
+            core_session_id,
+            repository,
+            object_format,
+            &self.mappings,
+            linkage,
+            self.kind,
+        );
+        self.validate_scoped_identity(source, core_event_id, core_session_id, repository, linkage)
+    }
+
+    pub(super) fn validate_scoped_identity(
+        &self,
+        source: &SourceKey,
+        core_event_id: StableEntityId,
+        core_session_id: StableEntityId,
+        repository: &RepositoryBinding,
+        linkage: &RepositoryOutcomeLinkage,
+    ) -> CoreRecordResult<()> {
+        source
+            .validate_contract()
+            .map_err(|_| CoreRecordError::InvalidIdentityRelationship)?;
+        validate_owned_identity(core_event_id, StableEntityKind::Event, source)?;
+        validate_owned_identity(core_session_id, StableEntityKind::Session, source)?;
+        repository.validate_contract()?;
+        let object_format = self
+            .object_ids()
+            .next()
+            .map(|object_id| object_id.format)
+            .ok_or(CoreRecordError::InvalidRepositoryOutcome)?;
+        if repository
+            .git_object_format
+            .is_some_and(|format| format != object_format)
+            || self.event_id
+                != repository_commit_operation_event_id(
+                    source,
+                    core_event_id,
+                    core_session_id,
+                    repository,
+                    object_format,
+                    &self.mappings,
+                    linkage,
+                    self.kind,
+                )
+        {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        Ok(())
+    }
+
+    pub fn object_ids(&self) -> impl Iterator<Item = &GitObjectId> {
+        self.mappings
+            .iter()
+            .flat_map(|mapping| [&mapping.source, &mapping.result])
+            .chain(self.unlinked_sources.iter())
+            .chain(self.unlinked_results.iter())
+    }
+
+    #[must_use]
+    pub fn operation_class(&self) -> RepositoryCommitOperationClass {
+        self.kind.operation_class()
+    }
+
+    /// Results admitted by Core as exact operation yields. Unlinked results
+    /// and non-asserted/non-verified observations intentionally return none.
+    pub fn repository_verified_yields(&self) -> impl Iterator<Item = &GitObjectId> {
+        let admitted = self.state == RepositoryCommitOperationState::Asserted
+            && matches!(
+                self.proof,
+                RepositoryCommitOperationProof::RepositoryVerifiedYield(_)
+            );
+        self.mappings
+            .iter()
+            .filter(move |_| admitted)
+            .map(|mapping| &mapping.result)
+    }
+}
+
+fn unscoped_repository_commit_operation_event_id(
+    linkage: &RepositoryOutcomeLinkage,
+    kind: RepositoryCommitOperationKind,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.commit-operation-event.unscoped.v1\0");
+    digest.update(repository_outcome_receipt_id(linkage));
+    digest.update([match kind {
+        RepositoryCommitOperationKind::Amend => 1,
+        RepositoryCommitOperationKind::Rebase => 2,
+        RepositoryCommitOperationKind::CherryPick => 3,
+    }]);
+    digest.finalize().into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryCommitOperationKind {
+    Amend,
+    Rebase,
+    CherryPick,
+}
+
+impl RepositoryCommitOperationKind {
+    #[must_use]
+    pub const fn operation_class(self) -> RepositoryCommitOperationClass {
+        match self {
+            Self::Amend | Self::Rebase => RepositoryCommitOperationClass::Replacement,
+            Self::CherryPick => RepositoryCommitOperationClass::Derivation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryCommitOperationClass {
+    Replacement,
+    Derivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryCommitMappingCompleteness {
+    Complete,
+    Partial,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryCommitOperationState {
+    Asserted,
+    Ambiguous,
+    Contradicted,
+}
+
+/// Proof is deliberately orthogonal to operation kind, mapping completeness,
+/// and merged state. Only `repository_verified_yield` admits direct yields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RepositoryCommitOperationProof {
+    RecordExact,
+    RepositoryVerifiedYield(RepositoryVerifiedYieldProof),
+}
+
+impl RepositoryCommitOperationProof {
+    fn validate_contract(&self, event: &RepositoryCommitOperationEvent) -> CoreRecordResult<()> {
+        match self {
+            Self::RecordExact if event.state != RepositoryCommitOperationState::Asserted => Ok(()),
+            Self::RecordExact => Err(CoreRecordError::InvalidRepositoryOutcome),
+            Self::RepositoryVerifiedYield(proof) => proof.validate_contract(event),
+        }
+    }
+}
+
+/// Closed proof predicates required before Core admits an asserted yield.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryVerifiedYieldProof {
+    pub command_pre_head: Option<GitObjectId>,
+    pub sequencer_pre_head: Option<GitObjectId>,
+    pub exact_source_oids: Vec<GitObjectId>,
+    pub command_post_head: GitObjectId,
+    pub repository_geometry_before_sha256: [u8; 32],
+    pub repository_geometry_after_sha256: [u8; 32],
+    pub exact_result_map_sha256: [u8; 32],
+    pub drift_excluded: bool,
+    pub mutation_excluded: bool,
+}
+
+impl RepositoryVerifiedYieldProof {
+    fn validate_contract(&self, event: &RepositoryCommitOperationEvent) -> CoreRecordResult<()> {
+        if let Some(command_pre_head) = &self.command_pre_head {
+            command_pre_head.validate_contract()?;
+        }
+        self.command_post_head.validate_contract()?;
+        if let Some(sequencer_pre_head) = &self.sequencer_pre_head {
+            sequencer_pre_head.validate_contract()?;
+        }
+        validate_canonical_object_set(&self.exact_source_oids)?;
+        let mapped_sources = canonical_mapping_sources(&event.mappings);
+        let mapped_results = canonical_mapping_results(&event.mappings);
+        let object_format = event.mappings[0].source.format;
+        if event.state != RepositoryCommitOperationState::Asserted
+            || event.mapping_completeness != RepositoryCommitMappingCompleteness::Complete
+            || !event.unlinked_sources.is_empty()
+            || !event.unlinked_results.is_empty()
+            || self.exact_source_oids != mapped_sources
+            || !mapped_results.contains(&self.command_post_head)
+            || self.exact_result_map_sha256 != repository_result_map_sha256(&event.mappings)
+            || self.repository_geometry_before_sha256 == [0; 32]
+            || self.repository_geometry_before_sha256 != self.repository_geometry_after_sha256
+            || !self.drift_excluded
+            || !self.mutation_excluded
+            || self
+                .command_pre_head
+                .as_ref()
+                .is_some_and(|object_id| object_id.format != object_format)
+            || self
+                .sequencer_pre_head
+                .as_ref()
+                .is_some_and(|object_id| object_id.format != object_format)
+        {
+            return Err(CoreRecordError::InvalidRepositoryOutcome);
+        }
+        match event.kind {
+            RepositoryCommitOperationKind::Amend
+                if event.mappings.len() == 1
+                    && self.sequencer_pre_head.is_none()
+                    && self.command_pre_head.as_ref() == Some(&event.mappings[0].source)
+                    && event.mappings[0].result == self.command_post_head =>
+            {
+                Ok(())
+            }
+            RepositoryCommitOperationKind::Rebase
+                if self.command_pre_head.is_some()
+                    && self.sequencer_pre_head == self.command_pre_head
+                    && self
+                        .command_pre_head
+                        .as_ref()
+                        .is_some_and(|pre_head| mapped_sources.contains(pre_head)) =>
+            {
+                Ok(())
+            }
+            RepositoryCommitOperationKind::CherryPick
+                if event.mappings.len() == 1
+                    && ((self.command_pre_head.is_none() && self.sequencer_pre_head.is_none())
+                        || (self.command_pre_head.is_some()
+                            && self.sequencer_pre_head == self.command_pre_head)) =>
+            {
+                Ok(())
+            }
+            _ => Err(CoreRecordError::InvalidRepositoryOutcome),
+        }
+    }
+}
+
+fn validate_canonical_object_set(values: &[GitObjectId]) -> CoreRecordResult<()> {
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(CoreRecordError::InvalidRepositoryOutcome);
+    }
+    values.iter().try_for_each(GitObjectId::validate_contract)
+}
+
+fn canonical_mapping_sources(mappings: &[RepositoryCommitMapping]) -> Vec<GitObjectId> {
+    let mut values = mappings
+        .iter()
+        .map(|mapping| mapping.source.clone())
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn canonical_mapping_results(mappings: &[RepositoryCommitMapping]) -> Vec<GitObjectId> {
+    let mut values = mappings
+        .iter()
+        .map(|mapping| mapping.result.clone())
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
+#[must_use]
+pub fn repository_outcome_receipt_id(linkage: &RepositoryOutcomeLinkage) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.outcome-receipt.v1\0");
+    update_identity_component(&mut digest, linkage.provider.as_bytes());
+    update_identity_component(&mut digest, linkage.origin_call_id.as_bytes());
+    update_identity_component(&mut digest, linkage.result_call_id.as_bytes());
+    digest.update(linkage.origin_event_sequence.to_be_bytes());
+    for continuation in &linkage.continuation_call_id_sha256 {
+        digest.update(continuation);
+    }
+    digest.update(linkage.result_record_sha256);
+    digest.finalize().into()
+}
+
+/// Derives one identity for one plural commit operation.
+///
+/// The v2 domain binds the stable Core source/event/session identities, the
+/// canonical logical repository identity, object format, digest of the
+/// complete canonically sorted mapping set, operation kind, and exact provider
+/// linkage receipt. Checkout, worktree, and binding coordinates are
+/// deliberately excluded.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn repository_commit_operation_event_id(
+    source: &SourceKey,
+    core_event_id: StableEntityId,
+    core_session_id: StableEntityId,
+    repository: &RepositoryBinding,
+    object_format: GitObjectFormat,
+    mappings: &[RepositoryCommitMapping],
+    linkage: &RepositoryOutcomeLinkage,
+    kind: RepositoryCommitOperationKind,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.commit-operation-event.v2\0");
+    update_stable_identity_component(&mut digest, source.identity());
+    update_stable_identity_component(&mut digest, core_event_id);
+    update_stable_identity_component(&mut digest, core_session_id);
+    update_identity_component(&mut digest, repository.logical_repository_id.as_bytes());
+    digest.update([match object_format {
+        GitObjectFormat::Sha1 => 1,
+        GitObjectFormat::Sha256 => 2,
+    }]);
+    digest.update(repository_result_map_sha256(mappings));
+    digest.update([match kind {
+        RepositoryCommitOperationKind::Amend => 1,
+        RepositoryCommitOperationKind::Rebase => 2,
+        RepositoryCommitOperationKind::CherryPick => 3,
+    }]);
+    digest.update(repository_outcome_receipt_id(linkage));
+    digest.finalize().into()
+}
+
+/// Digests the complete mapping set in canonical order, independent of input
+/// order. Operation admission separately rejects duplicate or invalid maps.
+#[must_use]
+pub fn repository_result_map_sha256(mappings: &[RepositoryCommitMapping]) -> [u8; 32] {
+    let mut mappings = mappings.to_vec();
+    mappings.sort();
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.repository.commit-result-map.v1\0");
+    digest.update(
+        u64::try_from(mappings.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for mapping in mappings {
+        digest.update([match mapping.source.format {
+            GitObjectFormat::Sha1 => 1,
+            GitObjectFormat::Sha256 => 2,
+        }]);
+        update_identity_component(&mut digest, mapping.source.hex.as_bytes());
+        update_identity_component(&mut digest, mapping.result.hex.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn update_identity_component(digest: &mut Sha256, value: &[u8]) {
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value);
+}
+
+fn update_stable_identity_component(digest: &mut Sha256, identity: StableEntityId) {
+    digest.update(identity.contract_version().to_be_bytes());
+    digest.update([identity.entity_kind() as u8]);
+    digest.update(identity.digest());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

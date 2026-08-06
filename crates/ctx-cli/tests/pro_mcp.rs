@@ -302,6 +302,15 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
         })
     );
     assert_eq!(structured["freshness"]["state"], "current");
+    let exact_oid = format!("{}{}", "0123456789abcdef", "0".repeat(24));
+    assert_eq!(structured["lineage"]["requested"]["oid"], exact_oid);
+    assert_eq!(structured["lineage"]["edges"][0]["kind"], "rebase");
+    assert_eq!(
+        structured["lineage"]["edges"][0]["relation_class"],
+        "replacement"
+    );
+    assert_eq!(structured["lineage"]["endpoint"]["kind"], "current_at_ref");
+    assert_eq!(structured["lineage"]["complete"], true);
     assert_eq!(structured["matches"][0]["kind"], "commit");
     assert_eq!(structured["evidence"].as_array().map(Vec::len), Some(1));
     assert!(structured.get("payload_type").is_none());
@@ -309,6 +318,16 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("matches: 1"));
     assert!(text.contains("object.display: session-producer"));
+    assert!(text.contains("lineage.complete: true"), "{text}");
+    assert!(text.contains("lineage.edge.1.kind: rebase"), "{text}");
+    assert!(
+        text.contains(&format!("lineage.edge.1.result.oid: {exact_oid}")),
+        "{text}"
+    );
+    assert!(
+        text.contains("lineage.endpoint.kind: current_at_ref"),
+        "{text}"
+    );
     let event_id = structured["evidence"][0]["citation"]["event_id"]["uuid"]
         .as_str()
         .expect("Core evidence event UUID");
