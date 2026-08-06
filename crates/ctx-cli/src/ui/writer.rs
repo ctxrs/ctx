@@ -27,6 +27,7 @@ impl Ui {
             stdout_auto_color,
             term_is_dumb(),
         );
+        let stdout_terminal_controls = stdio_terminal_controls(&stdout, stdout_context);
         let stderr = io::stderr();
         let stderr_terminal = stderr.is_terminal();
         let stderr_auto_color = auto_color_enabled(&stderr);
@@ -39,9 +40,10 @@ impl Ui {
             stderr_auto_color,
             term_is_dumb(),
         );
+        let stderr_terminal_controls = stdio_terminal_controls(&stderr, stderr_context);
         Self {
-            stdout: Destination::adapted(stdout_context, stdout),
-            stderr: Destination::adapted(stderr_context, stderr),
+            stdout: Destination::adapted(stdout_context, stdout, stdout_terminal_controls),
+            stderr: Destination::adapted(stderr_context, stderr, stderr_terminal_controls),
         }
     }
 
@@ -59,6 +61,33 @@ impl Ui {
         Self {
             stdout: Destination::injected(stdout_context, stdout),
             stderr: Destination::injected(stderr_context, stderr),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_writers_and_terminal_controls<Out, Err>(
+        stdout: Out,
+        stdout_context: RenderContext,
+        stdout_terminal_controls: bool,
+        stderr: Err,
+        stderr_context: RenderContext,
+        stderr_terminal_controls: bool,
+    ) -> Self
+    where
+        Out: Write + Send + 'static,
+        Err: Write + Send + 'static,
+    {
+        Self {
+            stdout: Destination::injected_with_terminal_controls(
+                stdout_context,
+                stdout,
+                stdout_terminal_controls,
+            ),
+            stderr: Destination::injected_with_terminal_controls(
+                stderr_context,
+                stderr,
+                stderr_terminal_controls,
+            ),
         }
     }
 
@@ -214,20 +243,30 @@ impl Destination {
     where
         W: Write + Send + 'static,
     {
+        Self::injected_with_terminal_controls(context, writer, context.live_output_capable())
+    }
+
+    fn injected_with_terminal_controls<W>(
+        context: RenderContext,
+        writer: W,
+        terminal_controls: bool,
+    ) -> Self
+    where
+        W: Write + Send + 'static,
+    {
         let writer: BoxedWriter = Box::new(writer);
-        Self::adapted(context, writer)
+        Self::adapted(context, writer, terminal_controls)
     }
 
     /// Keeps platform terminal adaptation at the final shared writer boundary.
     /// Measurement remains outside the adapter so every caller follows the
     /// same stdout/stderr accounting path.
-    fn adapted<W>(context: RenderContext, writer: W) -> Self
+    fn adapted<W>(context: RenderContext, writer: W, terminal_controls: bool) -> Self
     where
         W: anstream::stream::RawStream + anstream::stream::AsLockedWrite + Send + 'static,
     {
+        let context = context.with_terminal_control_support(terminal_controls);
         let adapted = terminal_adapter(writer, context);
-        let context = context
-            .with_terminal_control_support(terminal_controls_supported(adapted.current_choice()));
         let measured: BoxedWriter = Box::new(MeasuredWriter::current(adapted, context.stream()));
         Self::new(context, measured)
     }
@@ -258,17 +297,65 @@ where
 }
 
 const fn terminal_adapter_choice(context: RenderContext) -> anstream::ColorChoice {
-    if context.live_output_capable() || context.color_enabled() {
-        // `Always` asks anstream to enable ANSI support or use its native
-        // Windows console fallback. It does not add styling to plain bytes.
+    if context.live_output_capable() {
+        // The actual destination handle has already enabled VT processing.
+        // Bypass anstream's combined stdout/stderr capability probe.
+        anstream::ColorChoice::AlwaysAnsi
+    } else if context.color_enabled() {
+        // Keep anstream's Wincon styling fallback when VT is unavailable.
         anstream::ColorChoice::Always
     } else {
         anstream::ColorChoice::Never
     }
 }
 
-const fn terminal_controls_supported(active_choice: anstream::ColorChoice) -> bool {
-    matches!(active_choice, anstream::ColorChoice::AlwaysAnsi)
+fn resolve_terminal_controls(
+    context: RenderContext,
+    enable_for_destination: impl FnOnce() -> bool,
+) -> bool {
+    context.live_output_capable() && enable_for_destination()
+}
+
+#[cfg(not(windows))]
+fn stdio_terminal_controls<W>(_writer: &W, context: RenderContext) -> bool {
+    resolve_terminal_controls(context, || true)
+}
+
+#[cfg(windows)]
+fn stdio_terminal_controls<W>(writer: &W, context: RenderContext) -> bool
+where
+    W: std::os::windows::io::AsRawHandle,
+{
+    resolve_terminal_controls(context, || {
+        enable_windows_terminal_controls(writer.as_raw_handle())
+    })
+}
+
+#[cfg(windows)]
+fn enable_windows_terminal_controls(handle: std::os::windows::io::RawHandle) -> bool {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, SetConsoleMode, CONSOLE_MODE, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    };
+
+    let handle = handle as HANDLE;
+    if handle.is_null() {
+        return false;
+    }
+
+    let mut mode: CONSOLE_MODE = 0;
+    unsafe {
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            // `IsTerminal` also recognizes MSYS/Cygwin pseudo-terminals,
+            // whose pipe handles do not expose console modes. Ordinary pipes
+            // never reach this probe because the render context gates them.
+            return std::env::var_os("TERM").is_some_and(|term| term != "dumb" && term != "cygwin");
+        }
+        if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+            return true;
+        }
+        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    }
 }
 
 fn auto_color_enabled<S>(stream: &S) -> bool
@@ -305,7 +392,10 @@ fn stream_width(stream: StreamKind) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::ui::{Line, Span, TestContext, Token};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        cell::Cell,
+        sync::{Arc, Mutex},
+    };
 
     #[derive(Clone, Default)]
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -414,11 +504,11 @@ mod tests {
         assert!(live_without_style.live_output_capable());
         assert_eq!(
             terminal_adapter_choice(live_without_style),
-            anstream::ColorChoice::Always
+            anstream::ColorChoice::AlwaysAnsi
         );
         let adapted = terminal_adapter(Vec::new(), live_without_style);
-        assert_ne!(adapted.current_choice(), anstream::ColorChoice::Never);
-        let destination = Destination::adapted(live_without_style, Vec::new());
+        assert_eq!(adapted.current_choice(), anstream::ColorChoice::AlwaysAnsi);
+        let destination = Destination::adapted(live_without_style, Vec::new(), true);
         assert!(destination.context().live_output_capable());
 
         let styled_pipe =
@@ -449,29 +539,108 @@ mod tests {
     }
 
     #[test]
-    fn active_adapter_capability_gates_live_cursor_output() {
-        assert!(terminal_controls_supported(
-            anstream::ColorChoice::AlwaysAnsi
-        ));
-        assert!(!terminal_controls_supported(anstream::ColorChoice::Always));
-        assert!(!terminal_controls_supported(anstream::ColorChoice::Never));
-
+    fn per_destination_terminal_control_resolution_gates_live_output() {
         let live = RenderContext::for_test(
             TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Never),
         );
-        assert!(live
-            .with_terminal_control_support(true)
-            .live_output_capable());
-        assert!(!live
-            .with_terminal_control_support(false)
-            .live_output_capable());
+        assert!(resolve_terminal_controls(live, || true));
+        assert!(!resolve_terminal_controls(live, || false));
 
         let pipe =
             RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always));
         assert!(pipe.color_enabled());
-        assert!(!pipe
-            .with_terminal_control_support(true)
-            .live_output_capable());
+        let probed = Cell::new(false);
+        assert!(!resolve_terminal_controls(pipe, || {
+            probed.set(true);
+            true
+        }));
+        assert!(!probed.get(), "redirected streams must not be probed");
+
+        let unsupported = live.with_terminal_control_support(false);
+        assert!(!unsupported.live_output_capable());
+        assert_eq!(
+            terminal_adapter_choice(unsupported),
+            anstream::ColorChoice::Never
+        );
+
+        let styled_unsupported = RenderContext::for_test(
+            TestContext::tty(StreamKind::Stderr, 80).color(ColorMode::Always),
+        )
+        .with_terminal_control_support(false);
+        assert!(!styled_unsupported.live_output_capable());
+        assert!(styled_unsupported.color_enabled());
+        assert_eq!(
+            terminal_adapter_choice(styled_unsupported),
+            anstream::ColorChoice::Always
+        );
+    }
+
+    #[test]
+    fn split_stdout_stderr_terminal_controls_are_independent() {
+        let cases = [
+            (
+                RenderContext::for_test(
+                    TestContext::tty(StreamKind::Stdout, 80).color(ColorMode::Never),
+                ),
+                true,
+                RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+                false,
+            ),
+            (
+                RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+                false,
+                RenderContext::for_test(
+                    TestContext::tty(StreamKind::Stderr, 80).color(ColorMode::Never),
+                ),
+                true,
+            ),
+        ];
+
+        for (stdout_context, stdout_controls, stderr_context, stderr_controls) in cases {
+            let stdout = SharedWriter::default();
+            let stdout_capture = stdout.clone();
+            let stderr = SharedWriter::default();
+            let stderr_capture = stderr.clone();
+            let mut ui = Ui::with_writers_and_terminal_controls(
+                stdout,
+                stdout_context,
+                stdout_controls,
+                stderr,
+                stderr_context,
+                stderr_controls,
+            );
+
+            assert_eq!(ui.stdout_context().live_output_capable(), stdout_controls);
+            assert_eq!(ui.stderr_context().live_output_capable(), stderr_controls);
+
+            {
+                let mut output = ui.stdout_live_output();
+                output
+                    .write_frame(&document(&["stdout first", "stdout stale"]), false)
+                    .unwrap();
+                output
+                    .write_frame(&document(&["stdout replacement"]), true)
+                    .unwrap();
+            }
+            {
+                let mut output = ui.stderr_live_output();
+                output
+                    .write_frame(&document(&["stderr first", "stderr stale"]), false)
+                    .unwrap();
+                output
+                    .write_frame(&document(&["stderr replacement"]), true)
+                    .unwrap();
+            }
+
+            let stdout = stdout_capture.text();
+            let stderr = stderr_capture.text();
+            assert_eq!(stdout.contains("\x1b[2A"), stdout_controls);
+            assert_eq!(stdout.contains("\x1b[2K"), stdout_controls);
+            assert_eq!(stderr.contains("\x1b[2A"), stderr_controls);
+            assert_eq!(stderr.contains("\x1b[2K"), stderr_controls);
+            assert!(!stdout.contains("\x1b[1m"));
+            assert!(!stderr.contains("\x1b[1m"));
+        }
     }
 
     #[test]
