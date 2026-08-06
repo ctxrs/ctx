@@ -31,8 +31,8 @@ pub(crate) use source::{
 pub(crate) use source::{CodexCatalogSource, CodexSourceIdentity};
 pub(crate) use source_backed::{
     codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,
-    CodexExplicitSessionSourceBackedInputV0, CodexGenerationNormalizationCoordinatorV0,
-    CodexSessionTreeJsonlFamilyAdapterV0,
+    CodexExplicitSessionSourceBackedInputV0, CodexGenerationCarriedRouteV0,
+    CodexGenerationNormalizationCoordinatorV0, CodexSessionTreeJsonlFamilyAdapterV0,
 };
 #[cfg(test)]
 pub(crate) use source_backed::{

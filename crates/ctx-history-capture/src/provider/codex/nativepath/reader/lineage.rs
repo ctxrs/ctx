@@ -9,6 +9,10 @@ use std::{
 };
 
 use super::*;
+use crate::provider::codex::nativepath::checkpoint::{
+    CodexCertifiedLineageFactKindV0, CodexCertifiedLineageFactV0, CodexCertifiedLineageFactsV0,
+    MAX_CODEX_CERTIFIED_LINEAGE_FACTS,
+};
 use crate::provider::codex::nativepath::record::codex_lineage_call_id_digest;
 
 // One authority component owns one semantic budget. The shared JSONL runner's
@@ -290,6 +294,50 @@ impl CodexLineageFactsV0 {
         } else {
             CodexLineageFactPresenceV0::Absent
         }
+    }
+
+    pub(crate) fn certified_authority(&self) -> Option<CodexCertifiedLineageFactsV0> {
+        if !self.sealed || self.conservative || self.facts.len() > MAX_CODEX_CERTIFIED_LINEAGE_FACTS
+        {
+            return None;
+        }
+        Some(CodexCertifiedLineageFactsV0 {
+            facts: self
+                .facts
+                .iter()
+                .map(|fact| CodexCertifiedLineageFactV0 {
+                    call_id_sha256: fact.call_id_sha256,
+                    kind: match fact.kind {
+                        CodexLineageFactKindV0::Call => CodexCertifiedLineageFactKindV0::Call,
+                        CodexLineageFactKindV0::Result => CodexCertifiedLineageFactKindV0::Result,
+                        CodexLineageFactKindV0::Ambiguous => {
+                            CodexCertifiedLineageFactKindV0::Ambiguous
+                        }
+                    },
+                })
+                .collect(),
+            has_unattributed_ambiguity: self.has_unattributed_ambiguity,
+        })
+    }
+
+    pub(crate) fn from_certified_authority(
+        authority: &CodexCertifiedLineageFactsV0,
+        budget: Arc<CodexLineageFactBudgetV0>,
+    ) -> Result<Self> {
+        let mut facts = Self::new(budget)?;
+        for fact in &authority.facts {
+            facts.push_digest(
+                match fact.kind {
+                    CodexCertifiedLineageFactKindV0::Call => CodexLineageFactKindV0::Call,
+                    CodexCertifiedLineageFactKindV0::Result => CodexLineageFactKindV0::Result,
+                    CodexCertifiedLineageFactKindV0::Ambiguous => CodexLineageFactKindV0::Ambiguous,
+                },
+                fact.call_id_sha256,
+            )?;
+        }
+        facts.has_unattributed_ambiguity = authority.has_unattributed_ambiguity;
+        facts.seal();
+        Ok(facts)
     }
 
     pub(crate) fn spill_to(&mut self, file: &mut File) -> Result<CodexLineageFactsSpillRecordV0> {

@@ -656,18 +656,34 @@ impl CodexOutcomeLineageAuthorityV0 {
         selected_native_session_ids: &HashSet<String>,
     ) -> CodexSourceBackedResultV0<()> {
         let mut needs_descendant_facts = vec![false; self.nodes.len()];
+        let mut participates = vec![false; self.nodes.len()];
         for node in &self.nodes {
             if !selected_native_session_ids.contains(&node.native_session_id) {
                 continue;
             }
-            if let ParentLinkV0::Source(parent) = node.parent {
-                if self.nodes.get(parent).is_some_and(|parent| {
-                    selected_native_session_ids.contains(&parent.native_session_id)
-                }) {
-                    *needs_descendant_facts
-                        .get_mut(parent)
-                        .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)? = true;
-                }
+            let mut current = *self
+                .indices
+                .get(&node.native_session_id)
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            *participates
+                .get_mut(current)
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)? = true;
+            let mut remaining = self.nodes.len().saturating_add(1);
+            while remaining != 0 {
+                remaining = remaining.saturating_sub(1);
+                let Some(parent) = self.nodes.get(current).and_then(|node| match node.parent {
+                    ParentLinkV0::Root => None,
+                    ParentLinkV0::Source(parent) => Some(parent),
+                }) else {
+                    break;
+                };
+                *participates
+                    .get_mut(parent)
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)? = true;
+                *needs_descendant_facts
+                    .get_mut(parent)
+                    .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)? = true;
+                current = parent;
             }
         }
         *self
@@ -679,8 +695,8 @@ impl CodexOutcomeLineageAuthorityV0 {
             .facts
             .lock()
             .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-        for (node, state) in self.nodes.iter().zip(facts.iter_mut()) {
-            if !selected_native_session_ids.contains(&node.native_session_id) {
+        for (participates, state) in participates.into_iter().zip(facts.iter_mut()) {
+            if !participates {
                 if !matches!(state, LineageFactsStateV0::Pending) {
                     return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable);
                 }
@@ -698,11 +714,7 @@ impl CodexOutcomeLineageAuthorityV0 {
         for component in 0..self.component_members.len() {
             let component = u64::try_from(component)
                 .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-            let remaining_owners = owner_counts
-                .get(&component)
-                .copied()
-                .filter(|owners| *owners != 0)
-                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            let remaining_owners = owner_counts.get(&component).copied().unwrap_or(0);
             components.push(GenerationComponentCacheStateV0 {
                 remaining_owners,
                 leases: 0,
@@ -1054,6 +1066,83 @@ impl CodexOutcomeLineageAuthorityV0 {
                 Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
             }
         }
+    }
+
+    pub(super) fn register_certified(
+        &self,
+        native_session_id: &str,
+        authority: &CodexCertifiedLineageFactsV0,
+    ) -> CodexSourceBackedResultV0<()> {
+        let component = self
+            .indices
+            .get(native_session_id)
+            .and_then(|index| self.nodes.get(*index))
+            .map(|node| node.component)
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let budget = self
+            .component_budgets
+            .get(component)
+            .cloned()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let facts = CodexLineageFactsV0::from_certified_authority(authority, budget)
+            .map_err(map_lineage_capture_error)?;
+        self.register(native_session_id, facts)
+    }
+
+    pub(super) fn certified_authority(
+        &self,
+        native_session_id: &str,
+    ) -> CodexSourceBackedResultV0<Option<CodexCertifiedLineageFactsV0>> {
+        let index = self
+            .indices
+            .get(native_session_id)
+            .copied()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let facts = self
+            .facts
+            .lock()
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        match facts.get(index) {
+            Some(LineageFactsStateV0::Ready(facts)) => Ok(facts.certified_authority()),
+            Some(LineageFactsStateV0::CompleteLeaf) => Ok(None),
+            _ => Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable),
+        }
+    }
+
+    pub(super) fn generation_fact_state_ready(
+        &self,
+        native_session_id: &str,
+    ) -> CodexSourceBackedResultV0<bool> {
+        let index = self
+            .indices
+            .get(native_session_id)
+            .copied()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        Ok(matches!(
+            self.facts
+                .lock()
+                .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+                .get(index),
+            Some(LineageFactsStateV0::Ready(_) | LineageFactsStateV0::CompleteLeaf)
+        ))
+    }
+
+    pub(super) fn generation_participates(
+        &self,
+        native_session_id: &str,
+    ) -> CodexSourceBackedResultV0<bool> {
+        let index = self
+            .indices
+            .get(native_session_id)
+            .copied()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        Ok(!matches!(
+            self.facts
+                .lock()
+                .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+                .get(index),
+            Some(LineageFactsStateV0::OutsideRoute)
+        ))
     }
 
     pub(super) fn component_partition(&self, native_session_id: &str) -> Option<u64> {

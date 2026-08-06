@@ -193,6 +193,7 @@ impl CodexSourceScan {
     pub(crate) fn checkpoint(
         &self,
         lineage_dependency_sha256: [u8; 32],
+        certified_lineage_facts: Option<super::checkpoint::CodexCertifiedLineageFactsV0>,
     ) -> Option<CodexNativeCheckpoint> {
         Some(CodexNativeCheckpoint::new(
             self.after_observation.clone(),
@@ -206,6 +207,7 @@ impl CodexSourceScan {
             &self.pending_tool_authorities,
             self.owner.clone()?,
             lineage_dependency_sha256,
+            certified_lineage_facts,
         ))
     }
 
@@ -221,7 +223,7 @@ impl CodexSourceScan {
             self.source.source_path.clone(),
         )?;
         Ok(self
-            .checkpoint([0; 32])
+            .checkpoint([0; 32], None)
             .map(|checkpoint| CodexAppendProof::new(identity, generation, checkpoint)))
     }
 }

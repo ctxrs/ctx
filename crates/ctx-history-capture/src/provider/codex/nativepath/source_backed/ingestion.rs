@@ -169,6 +169,9 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         None if !collect_lineage_facts => {}
         Some(_) | None => return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable),
     }
+    let certified_lineage_facts = context
+        .outcome_lineage
+        .certified_authority(&native_session_id)?;
     let scan_counters = scan.counters;
     let certificate = match (append_base, scan.disposition) {
         (None, CodexParseDisposition::FullGeneration) => certify_scan(
@@ -178,6 +181,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
             staged_documents,
             scan_counters,
             lineage_dependency_sha256,
+            certified_lineage_facts.clone(),
         )?,
         (Some(base), CodexParseDisposition::AppendDelta) => certify_scan(
             &source_key,
@@ -186,6 +190,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
             staged_documents,
             scan_counters,
             lineage_dependency_sha256,
+            certified_lineage_facts,
         )?,
         _ => {
             return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
@@ -631,6 +636,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             .take()
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
         outcome_lineage.register(&native_session_id, lineage_facts)?;
+        let certified_lineage_facts = outcome_lineage.certified_authority(&native_session_id)?;
         counters.scanner_sources_completed = counters.scanner_sources_completed.saturating_add(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         timings.scan_and_stage += scan_started.elapsed();
@@ -651,6 +657,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     staged_for_source,
                     scan_counters,
                     lineage_dependency_sha256,
+                    certified_lineage_facts.clone(),
                 )?;
                 writer.certify_source(current)?;
                 if base.is_some() {
@@ -667,6 +674,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     staged_for_source,
                     scan_counters,
                     lineage_dependency_sha256,
+                    certified_lineage_facts,
                 )?;
                 let base_frontier = base
                     .frontier()
@@ -757,6 +765,9 @@ pub(super) fn prepare_generation_lineage_v0(
     let mut active_component = None;
     let mut source_scans = 0_u64;
     for (source, _, native_session_id) in ordered {
+        if !outcome_lineage.generation_participates(native_session_id)? {
+            continue;
+        }
         let component = outcome_lineage
             .component_partition(native_session_id)
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
@@ -766,6 +777,9 @@ pub(super) fn prepare_generation_lineage_v0(
             )?;
         }
         active_component = Some(component);
+        if outcome_lineage.generation_fact_state_ready(native_session_id)? {
+            continue;
+        }
         let facts = outcome_lineage.new_fact_set(native_session_id)?;
         if !outcome_lineage.needs_descendant_facts(native_session_id)? {
             outcome_lineage.register(native_session_id, facts)?;

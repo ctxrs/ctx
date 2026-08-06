@@ -35,6 +35,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
+    checkpoint::CodexCertifiedLineageFactsV0,
     discover_codex_catalog_sources,
     reader::{
         opened_file_prefix_sha256, reopen_codex_source_capability,
@@ -410,16 +411,18 @@ use lineage::{
 };
 
 use catalog::discover_codex_session_tree_inventory_v0;
+pub(crate) use catalog::{
+    discover_codex_carried_session_tree_inventory_v0,
+    observe_codex_carried_explicit_session_source_backed_v0,
+    observe_codex_explicit_session_source_backed_v0, CodexExplicitSessionInventoryV0,
+    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
+};
 #[cfg(test)]
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
     discover_codex_session_tree_inventory_from_plans_v0,
     install_after_codex_catalog_authority_hook, install_after_codex_metadata_inventory_hook,
     managed_codex_session_source, writer_base_sources, CodexCatalogWorkV0,
-};
-pub(crate) use catalog::{
-    observe_codex_explicit_session_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
-    CodexSessionTreeInventoryV0,
 };
 #[cfg(test)]
 use cold::{
@@ -430,7 +433,10 @@ use cold::{
 use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
 #[cfg(test)]
 pub(crate) use generation::install_after_codex_lineage_normalization_hook_v0;
-pub(crate) use generation::{CodexGenerationNormalizationCoordinatorV0, CodexGenerationRouteV0};
+pub(crate) use generation::{
+    CodexGenerationCarriedRouteV0, CodexGenerationNormalizationCoordinatorV0,
+    CodexGenerationRouteV0,
+};
 use identity::{
     certify_scan, codex_core_record, codex_session_identity, codex_source_key, decode_append_proof,
     validate_owner, CodexEventIdentityStateV0,

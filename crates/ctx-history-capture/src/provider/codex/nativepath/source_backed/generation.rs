@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -10,6 +10,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::*;
 
 type CodexSessionPlanV0 = (CodexCatalogSource, SourceKey, String);
+
+fn decode_certified_lineage_facts_v0(
+    source: &CertifiedSource,
+) -> CodexSourceBackedResultV0<Option<CodexCertifiedLineageFactsV0>> {
+    if source.parser_revision() != CODEX_PARSER_REVISION {
+        return Ok(None);
+    }
+    let Some(frontier) = source
+        .frontier()
+        .filter(|frontier| frontier.checkpoint_kind() == CODEX_FRONTIER_KIND)
+    else {
+        return Ok(None);
+    };
+    let TypedKey::Bytes(bytes) = frontier.checkpoint() else {
+        return Err(CodexSourceBackedErrorV0::InvalidCheckpoint);
+    };
+    let checkpoint = CodexNativeCheckpoint::decode(bytes)
+        .map_err(|_| CodexSourceBackedErrorV0::InvalidCheckpoint)?;
+    Ok(checkpoint.certified_lineage_facts().cloned())
+}
 
 #[derive(Debug, Clone)]
 enum CodexGenerationParticipantV0 {
@@ -50,6 +70,11 @@ pub(super) struct CodexPreparedRouteV0 {
     pub(super) authority: Arc<CodexOutcomeLineageAuthorityV0>,
     #[cfg(test)]
     pub(super) work: CodexCatalogWorkV0,
+}
+
+pub(crate) struct CodexGenerationCarriedRouteV0 {
+    pub(crate) participant: usize,
+    pub(crate) sources: HashMap<SourceKey, CertifiedSource>,
 }
 
 struct CodexPendingRouteV0 {
@@ -132,13 +157,27 @@ impl CodexGenerationNormalizationCoordinatorV0 {
         })
     }
 
-    pub(crate) fn prepare(&self, selected: &[usize]) -> CodexSourceBackedResultV0<()> {
+    pub(crate) fn prepare(
+        &self,
+        selected: &[usize],
+        carried: Vec<CodexGenerationCarriedRouteV0>,
+    ) -> CodexSourceBackedResultV0<()> {
+        let selected = selected.iter().copied().collect::<HashSet<_>>();
+        let carried = carried
+            .into_iter()
+            .map(|route| (route.participant, route.sources))
+            .collect::<HashMap<_, _>>();
+        let participant_ids = selected
+            .iter()
+            .copied()
+            .chain(carried.keys().copied())
+            .collect::<BTreeSet<_>>();
         let participants = {
             let state = self
                 .state
                 .lock()
                 .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-            selected
+            participant_ids
                 .iter()
                 .map(|id| {
                     state
@@ -157,9 +196,15 @@ impl CodexGenerationNormalizationCoordinatorV0 {
         let mut descriptors = HashMap::<[u8; 32], (SourceKey, String)>::new();
 
         for (participant, discovery) in participants {
+            let carried_sources = carried.get(&participant);
             let (missing, discovered, work) = match discovery {
                 CodexGenerationParticipantV0::SessionTree { roots } => {
-                    let inventory = discover_codex_session_tree_inventory_v0(&roots)?;
+                    let inventory = match carried_sources {
+                        Some(base) => {
+                            discover_codex_carried_session_tree_inventory_v0(&roots, base)?
+                        }
+                        None => discover_codex_session_tree_inventory_v0(&roots)?,
+                    };
                     #[cfg(test)]
                     let work = inventory.work;
                     #[cfg(not(test))]
@@ -167,7 +212,18 @@ impl CodexGenerationNormalizationCoordinatorV0 {
                     (false, inventory.sources, work)
                 }
                 CodexGenerationParticipantV0::ExplicitSession { input } => {
-                    let inventory = observe_codex_explicit_session_source_backed_v0(&input)?;
+                    let inventory = match carried_sources {
+                        Some(base) => base
+                            .get(input.source())
+                            .map(|base| {
+                                observe_codex_carried_explicit_session_source_backed_v0(
+                                    &input, base,
+                                )
+                            })
+                            .transpose()?
+                            .unwrap_or_else(CodexExplicitSessionInventoryV0::missing),
+                        None => observe_codex_explicit_session_source_backed_v0(&input)?,
+                    };
                     let plan = inventory.source_plan();
                     #[cfg(test)]
                     let work = CodexCatalogWorkV0::default();
@@ -219,27 +275,16 @@ impl CodexGenerationNormalizationCoordinatorV0 {
         let selected_native_session_ids = normalized
             .sources
             .iter()
+            .filter(|plan| {
+                owners
+                    .get(&(plan.0.source_path.clone(), plan.2.clone()))
+                    .is_some_and(|owner| selected.contains(owner))
+            })
             .map(|(_, _, native_session_id)| native_session_id.clone())
             .collect::<HashSet<_>>();
         normalized
             .authority
             .bind_route_sources(&selected_native_session_ids)?;
-        let mut component_owners = HashMap::<u64, HashSet<usize>>::new();
-        for plan in &normalized.sources {
-            let owner = owners
-                .get(&(plan.0.source_path.clone(), plan.2.clone()))
-                .copied()
-                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-            let component = normalized
-                .authority
-                .component_partition(&plan.2)
-                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-            component_owners.entry(component).or_default().insert(owner);
-        }
-        let component_owner_counts = component_owners
-            .into_iter()
-            .map(|(component, owners)| (component, owners.len()))
-            .collect::<HashMap<_, _>>();
         #[cfg(test)]
         if let Some((byte_limit, fact_limit)) = self
             .state
@@ -251,6 +296,39 @@ impl CodexGenerationNormalizationCoordinatorV0 {
                 .authority
                 .set_generation_component_budget_limits(byte_limit, fact_limit);
         }
+        for plan in &normalized.sources {
+            let owner = owners
+                .get(&(plan.0.source_path.clone(), plan.2.clone()))
+                .copied()
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            let Some(base) = carried.get(&owner).and_then(|sources| sources.get(&plan.1)) else {
+                continue;
+            };
+            let Some(facts) = decode_certified_lineage_facts_v0(base)? else {
+                continue;
+            };
+            if normalized.authority.needs_descendant_facts(&plan.2)? {
+                normalized.authority.register_certified(&plan.2, &facts)?;
+            }
+        }
+        let mut component_owners = HashMap::<u64, HashSet<usize>>::new();
+        for plan in &normalized.sources {
+            let owner = owners
+                .get(&(plan.0.source_path.clone(), plan.2.clone()))
+                .copied()
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            let component = normalized
+                .authority
+                .component_partition(&plan.2)
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            if selected.contains(&owner) {
+                component_owners.entry(component).or_default().insert(owner);
+            }
+        }
+        let component_owner_counts = component_owners
+            .into_iter()
+            .map(|(component, owners)| (component, owners.len()))
+            .collect::<HashMap<_, _>>();
         normalized
             .authority
             .initialize_generation_spill(&component_owner_counts)?;

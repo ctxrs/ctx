@@ -208,6 +208,33 @@ fn register_codex_tree(sessions: &Path) -> SourceBackedProviderRegistry {
     register_codex_trees(&[(sessions, ProviderImportSupport::Native)])
 }
 
+fn append_codex_lineage_message(path: &Path, native_session_id: &str, marker: &str) {
+    let bytes = codex_lineage_rollout(
+        native_session_id,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        marker,
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(bytes.split_inclusive(|byte| *byte == b'\n').nth(1).unwrap())
+        .unwrap();
+}
+
+fn route_identity_for_path(
+    registry: &SourceBackedProviderRegistry,
+    path: &Path,
+) -> SourceRouteIdentity {
+    registry
+        .routes()
+        .find(|route| route.source.path == path)
+        .and_then(|route| route.route_identity.clone())
+        .unwrap()
+}
+
 fn register_codex_trees(roots: &[(&Path, ProviderImportSupport)]) -> SourceBackedProviderRegistry {
     let mut registry = SourceBackedProviderRegistry::new();
     super::super::register_codex_session_tree_routes(
@@ -381,6 +408,156 @@ fn codex_explicit_parent_facts_precede_automatic_child_regardless_of_route_order
     assert_eq!(copied.root_session_id, parent_record.session_id);
 }
 
+#[test]
+fn codex_exact_route_composes_carried_parent_authority_without_reparsing_it() {
+    for automatic_parent in [true, false] {
+        let temp = tempdir().unwrap();
+        let parent_dir = temp.path().join("automatic-parent");
+        let child_dir = temp.path().join("automatic-child");
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::create_dir_all(&child_dir).unwrap();
+        let parent_path = if automatic_parent {
+            parent_dir.join("parent.jsonl")
+        } else {
+            temp.path().join("explicit-parent.jsonl")
+        };
+        let child_path = if automatic_parent {
+            temp.path().join("explicit-child.jsonl")
+        } else {
+            child_dir.join("child.jsonl")
+        };
+        let parent = if automatic_parent {
+            "019fa000-0000-7000-8000-000000003310"
+        } else {
+            "019fa000-0000-7000-8000-000000003312"
+        };
+        let child = if automatic_parent {
+            "019fa000-0000-7000-8000-000000003311"
+        } else {
+            "019fa000-0000-7000-8000-000000003313"
+        };
+        let call_id = format!("exact-carried-parent-{automatic_parent}");
+        let call = codex_lineage_call(&call_id, "git rev-parse --verify HEAD");
+        let result = codex_lineage_result(&call_id, "exact carried parent output");
+        fs::write(
+            &parent_path,
+            codex_lineage_rollout_with_events(
+                parent,
+                None,
+                SessionRelationshipKind::Root,
+                None,
+                &[call.clone(), result.clone()],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &child_path,
+            codex_lineage_rollout_with_events(
+                child,
+                Some(parent),
+                SessionRelationshipKind::Forked,
+                Some(parent),
+                &[call, result],
+            ),
+        )
+        .unwrap();
+
+        let mut registry = SourceBackedProviderRegistry::new();
+        let register_parent = |registry: &mut SourceBackedProviderRegistry| {
+            register_codex_route(
+                registry,
+                if automatic_parent {
+                    &parent_dir
+                } else {
+                    &parent_path
+                },
+                if automatic_parent {
+                    "codex_session_jsonl_tree"
+                } else {
+                    "codex_session_jsonl"
+                },
+                if automatic_parent {
+                    ProviderImportSupport::Native
+                } else {
+                    ProviderImportSupport::Explicit
+                },
+                if automatic_parent {
+                    SourceBackedRouteSelection::Automatic
+                } else {
+                    SourceBackedRouteSelection::ExplicitManual
+                },
+            );
+        };
+        let register_child = |registry: &mut SourceBackedProviderRegistry| {
+            register_codex_route(
+                registry,
+                if automatic_parent {
+                    &child_path
+                } else {
+                    &child_dir
+                },
+                if automatic_parent {
+                    "codex_session_jsonl"
+                } else {
+                    "codex_session_jsonl_tree"
+                },
+                if automatic_parent {
+                    ProviderImportSupport::Explicit
+                } else {
+                    ProviderImportSupport::Native
+                },
+                if automatic_parent {
+                    SourceBackedRouteSelection::ExplicitManual
+                } else {
+                    SourceBackedRouteSelection::Automatic
+                },
+            );
+        };
+        if automatic_parent {
+            register_parent(&mut registry);
+            register_child(&mut registry);
+        } else {
+            register_child(&mut registry);
+            register_parent(&mut registry);
+        }
+        let index = temp.path().join("index");
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+        let child_route = route_identity_for_path(
+            &registry,
+            if automatic_parent {
+                &child_path
+            } else {
+                &child_dir
+            },
+        );
+        append_codex_lineage_message(&child_path, child, "dirty child suffix");
+        let observed = Arc::new(Mutex::new(None));
+        let observed_from_hook = Arc::clone(&observed);
+        install_after_codex_lineage_normalization_hook_v0(move |observation| {
+            *observed_from_hook.lock().unwrap() = Some(observation);
+        });
+        let refreshed = refresh_source_backed_generation_for_routes(
+            &index,
+            &registry,
+            WriterOptions::default(),
+            [child_route],
+        )
+        .unwrap();
+        assert!(refreshed.failed_routes.is_empty());
+        assert_eq!(
+            observed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .lineage_fact_source_scans,
+            0
+        );
+        let records = core_records(&VerifiedIndex::open(&index).unwrap());
+        assert_copied_result(&records, child, "exact carried parent output");
+    }
+}
+
 fn register_three_level_codex_routes(
     registry: &mut SourceBackedProviderRegistry,
     automatic: &Path,
@@ -494,6 +671,135 @@ fn codex_three_level_cross_route_output_is_registration_order_independent() {
     forward_records.sort_by_key(|record| record.event_id.to_string());
     reversed_records.sort_by_key(|record| record.event_id.to_string());
     assert_eq!(forward_records, reversed_records);
+}
+
+#[test]
+fn codex_exact_leaf_uses_three_level_carried_authority_and_missing_parent_fails() {
+    let temp = tempdir().unwrap();
+    let root_dir = temp.path().join("root-route");
+    let leaf_dir = temp.path().join("leaf-route");
+    fs::create_dir_all(&root_dir).unwrap();
+    fs::create_dir_all(&leaf_dir).unwrap();
+    let root_path = root_dir.join("root.jsonl");
+    let middle_path = temp.path().join("middle.jsonl");
+    let leaf_path = leaf_dir.join("leaf.jsonl");
+    let root = "019fa000-0000-7000-8000-000000003314";
+    let middle = "019fa000-0000-7000-8000-000000003315";
+    let leaf = "019fa000-0000-7000-8000-000000003316";
+    let root_call = codex_lineage_call("exact-three-root", "git rev-parse --verify HEAD");
+    let root_result = codex_lineage_result("exact-three-root", "exact three root output");
+    let middle_call = codex_lineage_call("exact-three-middle", "git rev-parse --verify HEAD");
+    let middle_result = codex_lineage_result("exact-three-middle", "exact three middle output");
+    fs::write(
+        &root_path,
+        codex_lineage_rollout_with_events(
+            root,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            &[root_call.clone(), root_result.clone()],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &middle_path,
+        codex_lineage_rollout_with_events(
+            middle,
+            Some(root),
+            SessionRelationshipKind::Forked,
+            Some(root),
+            &[
+                root_call.clone(),
+                root_result.clone(),
+                middle_call.clone(),
+                middle_result.clone(),
+            ],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &leaf_path,
+        codex_lineage_rollout_with_events(
+            leaf,
+            Some(middle),
+            SessionRelationshipKind::Forked,
+            Some(root),
+            &[root_call, root_result, middle_call, middle_result],
+        ),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    // Reverse topological registration is intentional.
+    register_codex_route(
+        &mut registry,
+        &leaf_dir,
+        "codex_session_jsonl_tree",
+        ProviderImportSupport::Native,
+        SourceBackedRouteSelection::Automatic,
+    );
+    register_codex_route(
+        &mut registry,
+        &middle_path,
+        "codex_session_jsonl",
+        ProviderImportSupport::Explicit,
+        SourceBackedRouteSelection::ExplicitManual,
+    );
+    register_codex_route(
+        &mut registry,
+        &root_dir,
+        "codex_session_jsonl_tree",
+        ProviderImportSupport::Explicit,
+        SourceBackedRouteSelection::ExplicitManual,
+    );
+    let leaf_route = route_identity_for_path(&registry, &leaf_dir);
+    let index = temp.path().join("index");
+    let cold =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    append_codex_lineage_message(&leaf_path, leaf, "dirty three-level leaf");
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+    let refreshed = refresh_source_backed_generation_for_routes(
+        &index,
+        &registry,
+        WriterOptions::default(),
+        [leaf_route.clone()],
+    )
+    .unwrap();
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .lineage_fact_source_scans,
+        0
+    );
+    assert_copied_result(
+        &core_records(&VerifiedIndex::open(&index).unwrap()),
+        leaf,
+        "exact three middle output",
+    );
+
+    fs::remove_file(&root_path).unwrap();
+    append_codex_lineage_message(&leaf_path, leaf, "dirty leaf after parent deletion");
+    let failed = refresh_source_backed_generation_for_routes(
+        &index,
+        &registry,
+        WriterOptions::default(),
+        [leaf_route],
+    )
+    .unwrap();
+    assert_eq!(failed.failed_routes.len(), 1);
+    assert_eq!(
+        VerifiedIndex::open(&index).unwrap().generation_id(),
+        refreshed.commit.generation_id
+    );
+    assert_ne!(cold.commit.generation_id, refreshed.commit.generation_id);
 }
 
 #[test]
