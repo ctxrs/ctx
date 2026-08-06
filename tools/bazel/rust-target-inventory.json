@@ -57,6 +57,7 @@
       "targets": {
         "lib:ctx_history_capture": "//crates/ctx-history-capture:lib",
         "test:codex_direct_result": "//crates/ctx-history-capture:codex_direct_result_tests",
+        "test:ctx_retrieval_classifier": "//crates/ctx-history-capture:ctx_retrieval_classifier_tests",
         "test:repository_shell_outcomes": "//crates/ctx-history-capture:repository_shell_outcomes_tests",
         "test:self_contained_core_final_locator_removal": "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests"
       },

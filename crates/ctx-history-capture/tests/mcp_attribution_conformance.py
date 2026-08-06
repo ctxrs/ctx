@@ -445,9 +445,19 @@ def _validate_provenance(
 def _matrix_inventory(
     provider_matrix: dict[str, Any],
 ) -> tuple[set[str], set[BaseKey]]:
-    _exact_keys(provider_matrix, {"schema_version", "scope", "providers"}, "matrix")
-    if provider_matrix["schema_version"] != 1:
-        raise ConformanceError("provider matrix schema_version must equal 1")
+    _exact_keys(
+        provider_matrix,
+        {
+            "schema_version",
+            "scope",
+            "lineage_capability_values",
+            "custom_history_lineage_support",
+            "providers",
+        },
+        "matrix",
+    )
+    if provider_matrix["schema_version"] != 2:
+        raise ConformanceError("provider matrix schema_version must equal 2")
     provider_ids: set[str] = set()
     base_routes: set[BaseKey] = set()
     for provider_index, raw_provider in enumerate(

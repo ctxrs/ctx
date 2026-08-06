@@ -124,6 +124,11 @@ const PRO_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
     &["src/dispatch.rs"],
     &["write_stable_error_json", "from_slice", "output"],
 );
+const PRO_BLAME_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
+    "src/pro/tests.rs::blame_machine_errors_are_typed_without_expanding_unrelated_pro_errors",
+    &["src/dispatch.rs"],
+    &["write_blame_error_json", "from_slice", "output"],
+);
 const SKILL: TestOwner = TestOwner::behavioral(
     "src/skill/install.rs::human_install_and_status_results_use_the_typed_ui",
     &["src/skill/"],
@@ -444,6 +449,14 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         MachineProtocol,
         JSON_PROTOCOL,
         PRO_MACHINE_ERROR
+    ),
+    allow!(
+        DISPATCH,
+        "render_blame_error_json#1@51617f6288b47ada",
+        OutputRawHelper,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        PRO_BLAME_MACHINE_ERROR
     ),
     allow!(
         DISPATCH,

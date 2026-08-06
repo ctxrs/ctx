@@ -43,6 +43,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-cli:upgrade_tests",
     "//crates/ctx-cli:upgrade_analytics_tests",
     "//crates/ctx-history-capture:codex_direct_result_tests",
+    "//crates/ctx-history-capture:ctx_retrieval_classifier_tests",
     "//crates/ctx-history-capture:repository_shell_outcomes_tests",
     "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
     "//crates/ctx-history-capture:unit_tests",
@@ -65,6 +66,7 @@ RUST_FORMAT_TARGETS = [
 # families. The CLI targets prove real-shape admission/rejection, discovery,
 # refresh, and user-facing self-contained Core behavior.
 _CI_PROVIDER_TESTS = [
+    ":provider_support_matrix_tests",
     "//crates/ctx-cli:mcp_attribution_privacy_tests",
     "//crates/ctx-cli:native_provider_real_shapes_tests",
     "//crates/ctx-cli:native_provider_rejections_tests",
@@ -73,6 +75,7 @@ _CI_PROVIDER_TESTS = [
     "//crates/ctx-cli:setup_sources_import_tests",
     "//crates/ctx-cli:self_contained_core_content_tests",
     "//crates/ctx-history-capture:active_source_family_contract_tests",
+    "//crates/ctx-history-capture:ctx_retrieval_classifier_tests",
     "//crates/ctx-history-capture:mcp_attribution_conformance_runner_tests",
     "//crates/ctx-history-capture:mcp_attribution_conformance_tests",
     "//crates/ctx-history-capture:self_contained_core_final_locator_removal_tests",
@@ -118,7 +121,7 @@ _CI_RUST_TESTS = [
     "//crates/ctx-history-capture:codex_direct_result_tests",
     "//crates/ctx-history-capture:repository_shell_outcomes_tests",
     "//crates/ctx-history-core:unit_tests",
-    "//crates/ctx-history-index:migration_fault_tests",
+    "//crates/ctx-history-index:republish_fault_tests",
     "//crates/ctx-history-index:source_backed_recovery_tests",
     "//crates/ctx-history-index:unit_tests",
     "//crates/ctx-history-refresh:unit_tests",
@@ -198,6 +201,6 @@ NIGHTLY_TESTS = [
     ":performance_sanity_tests",
     "//crates/ctx-cli:auto_upgrade_acceptance_tests",
     "//crates/ctx-cli:persistent_daemon_lifecycle_tests",
-    "//crates/ctx-history-index:migration_disk_qualification_tests",
+    "//crates/ctx-history-index:republish_disk_qualification_tests",
     "//scripts/source-backed-recovery:fault_qualification",
 ]

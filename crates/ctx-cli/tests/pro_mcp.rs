@@ -200,36 +200,30 @@ fn mcp_blame_rejects_non_launch_targets_and_invalid_bounds() {
         (
             "issue",
             json!({"target": {"kind": "issue", "selector": "42"}}),
-            "target.kind must be file, commit, or pull_request",
         ),
         (
             "numeric-pr-without-repository",
             json!({"target": {"kind": "pull_request", "selector": "42"}}),
-            "pull request number requires a repository selector",
         ),
         (
             "zero-pr",
             json!({"target": {"kind": "pull_request", "selector": "0", "repository": "ctxrs/ctx"}}),
-            "pull request selector must be a positive decimal number or canonical supported PR URL",
         ),
         (
             "malformed-pr-url",
             json!({"target": {"kind": "pull_request", "selector": "https://gitlab.example.com/a/b/merge_requests/42"}}),
-            "pull request selector must be a positive decimal number or canonical supported PR URL",
         ),
         (
             "bad-lines",
             json!({"target": {"kind": "file", "path": "src/lib.rs", "lines": {"start": 9, "end": 2}}}),
-            "line range must be positive and inclusive",
         ),
         (
             "limit",
             json!({"target": {"kind": "commit", "oid": "abcd"}, "limit": 9}),
-            "limit must be between 1 and 8",
         ),
     ];
     let mut requests = vec![initialize_request(), initialized_notification()];
-    requests.extend(cases.iter().map(|(id, arguments, _)| {
+    requests.extend(cases.iter().map(|(id, arguments)| {
         json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -238,15 +232,25 @@ fn mcp_blame_rejects_non_launch_targets_and_invalid_bounds() {
         })
     }));
     let responses = mcp_roundtrip_with_env(&temp, &requests, &[]);
-    for (response, (_, _, expected)) in responses[1..].iter().zip(cases) {
+    for (response, _) in responses[1..].iter().zip(cases) {
         let result = &response["result"];
         assert_eq!(result["isError"], true);
-        assert_eq!(result["structuredContent"]["error_code"], "invalid_request");
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .is_some_and(|text| text.contains(expected)),
-            "{result:#?}"
+        assert_eq!(
+            result["structuredContent"],
+            json!({
+                "error": "invalid_request",
+                "error_code": "invalid_request",
+                "reason": "request_invalid",
+                "message": "The blame request is invalid.",
+                "retryable": false,
+            })
+        );
+        assert_eq!(
+            result["content"],
+            json!([{
+                "type": "text",
+                "text": "The blame request is invalid.",
+            }])
         );
     }
 }

@@ -130,8 +130,31 @@ def bind_manifest_contract(manifest: dict, contract: RouteSchemaContract) -> Non
 
 def minimal_matrix(provider: str = "fixture", source_format: str = "fixture_jsonl") -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "fixture",
+        "lineage_capability_values": {
+            "session_relationship": ["exact_relationship", "unknown"],
+            "event_origin": [
+                "exact_copy",
+                "certified_prefix",
+                "explicit_no_copy",
+                "unknown",
+            ],
+        },
+        "custom_history_lineage_support": {
+            "legacy": {
+                "session_relationship": "unknown",
+                "event_origin": "unknown",
+            },
+            "provider_native_v1": {
+                "session_relationship": "exact_relationship",
+                "event_origin": "exact_copy",
+            },
+            "command_only_plugin": {
+                "session_relationship": "unknown",
+                "event_origin": "unknown",
+            },
+        },
         "providers": [
             {
                 "id": provider,
