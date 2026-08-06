@@ -89,14 +89,39 @@ for required in \
     exit 1
   }
 done
-for required in \
-  'ctx.file("x86_64-w64-mingw32/lib/libgcc.a", "!<arch>\n")' \
-  'ctx.file("x86_64-w64-mingw32/lib/libgcc_eh.a", "!<arch>\n")'; do
-  grep -Fq -- "${required}" "${mingw_repository}" || {
-    printf 'LLVM-MinGW GCC compatibility bridge is not in clang search root: %s\n' "${required}" >&2
-    exit 1
-  }
-done
+python3 - "${mingw_repository}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+aliases = (
+    (
+        "x86_64-w64-mingw32/lib/libunwind.a",
+        "x86_64-w64-mingw32/lib/libgcc_eh.a",
+    ),
+    (
+        "lib/clang/22/lib/windows/libclang_rt.builtins-x86_64.a",
+        "x86_64-w64-mingw32/lib/libgcc.a",
+    ),
+)
+for source, destination in aliases:
+    pattern = re.compile(
+        r'ctx\.symlink\(\s*"'
+        + re.escape(source)
+        + r'",\s*"'
+        + re.escape(destination)
+        + r'",\s*\)',
+        re.MULTILINE,
+    )
+    if pattern.search(text) is None:
+        raise SystemExit(
+            "LLVM-MinGW GCC runtime alias is missing: "
+            f"{source} -> {destination}"
+        )
+if "!<arch>" in text:
+    raise SystemExit("LLVM-MinGW GCC runtime aliases must not be empty archives")
+PY
 grep -Fq 'tool_path(name = "ld", path = "bin/x86_64-w64-mingw32-clang.exe")' \
   "${mingw_toolchain}" || {
   echo 'LLVM-MinGW linker route does not use the direct hermetic driver' >&2
