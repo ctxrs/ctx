@@ -2438,14 +2438,14 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "67bab9f428c639820a173fabb2e27aa173aa0979d81ded77ad48c6613b8d1ca5"
+        "0610be9a5810ce742b505dc4c3b3db24e9ab795126a6b62e0ef2172e04a85cc3"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "679209888be4de5d771033ed1f2831a284c2ed5ba34848ec06178d870947521e"
+        "fc61723d453f4e953145517891e8c9c7129ec09068a821182c77b52a006df982"
     );
     for changed in [
         CoreContractRevisions {
