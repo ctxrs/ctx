@@ -110,7 +110,8 @@ impl CodexNativeScanner {
                     return Ok(CodexRecordProjection::default());
                 };
                 let mut built =
-                    match build_source_backed_event_row(self.raw_ordinal, kind, &retained)? {
+                    match build_source_backed_event_row(self.raw_ordinal, kind, &retained, record)?
+                    {
                         Ok(built) => built,
                         Err(CodexRetainedNonMaterialized::ValidUnmaterializable) => {
                             self.counters.ignored_records =

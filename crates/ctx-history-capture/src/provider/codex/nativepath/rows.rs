@@ -315,10 +315,12 @@ pub(super) fn build_source_backed_event_row(
     raw_ordinal: u64,
     kind: CodexRetainedKind,
     retained: &CodexDecodedRecord,
+    raw_record: &[u8],
 ) -> CaptureResult<std::result::Result<CodexSourceBackedBuiltRowV0, CodexRetainedNonMaterialized>> {
     let discovery_exclusion = (kind == CodexRetainedKind::ToolCall)
         .then(|| codex_tool_call_discovery_exclusion(&retained.payload))
-        .flatten();
+        .flatten()
+        .filter(|_| crate::common::json::raw_object_keys_are_unique(raw_record));
     let semantic = match source_backed_semantic_projection(kind, &retained.payload) {
         SourceBackedSemanticProjection::Materialized(semantic) => *semantic,
         SourceBackedSemanticProjection::ValidUnmaterializable => {

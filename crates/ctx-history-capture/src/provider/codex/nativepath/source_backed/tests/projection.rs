@@ -175,6 +175,38 @@ fn codex_ctx_retrieval_invocation_and_exact_result_persist_exclusion_with_comple
 }
 
 #[test]
+fn codex_duplicate_raw_tool_members_remain_searchable() {
+    let temp = tempfile::tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("global-index");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fa000-0000-7000-8000-000000000097";
+    let arguments = serde_json::json!({
+        "cmd": "ctx search ambiguous-duplicate-member",
+        "workdir": temp.path(),
+    })
+    .to_string();
+    let raw_call = format!(
+        r#"{{"timestamp":"2026-08-05T16:00:01Z","type":"response_item","payload":{{"type":"function_call","name":"ordinary","name":"exec_command","call_id":"duplicate-member-call","arguments":{}}}}}"#,
+        serde_json::to_string(&arguments).unwrap(),
+    );
+    write_session(&sessions, native_session_id, &[raw_call]);
+
+    ingest_codex_source_backed_v0(&sessions, &index).unwrap();
+    let source = codex_source_key(native_session_id).unwrap();
+    let session_id = codex_session_identity(&source, native_session_id).unwrap();
+    let verified = VerifiedIndex::open(&index).unwrap();
+    let invocation = outcome_for_sequence(&verified, session_id, 1);
+
+    assert!(invocation
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("ctx search ambiguous-duplicate-member")));
+    assert_eq!(invocation.content.discovery_exclusion, None);
+}
+
+#[test]
 fn appended_duplicate_ctx_result_retracts_prior_exclusion_and_preserves_identities() {
     let temp = tempfile::tempdir().unwrap();
     let sessions = temp.path().join("sessions");

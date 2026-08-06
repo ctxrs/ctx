@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashSet, fmt};
+use std::{borrow::Cow, fmt};
 
 use serde::{
     de::{MapAccess, SeqAccess, Visitor},
@@ -8,6 +8,7 @@ use serde_json::{value::RawValue, Map, Value};
 
 use super::mcp::BoundedStringProbe;
 use super::*;
+use crate::common::json::exact_value as exact_json_value;
 
 pub(super) struct ProjectedMcpExchange {
     content: ctx_history_core::McpExchangeContent,
@@ -1124,100 +1125,6 @@ impl<'de> Visitor<'de> for BoolProbeVisitor {
             .is_some()
         {}
         Ok(BoolProbe(None))
-    }
-}
-
-/// Parses one JSON value and rejects duplicate keys at every object depth.
-fn exact_json_value(input: &str) -> Option<Value> {
-    let mut deserializer = serde_json::Deserializer::from_str(input);
-    let value = NoDuplicateJson::deserialize(&mut deserializer).ok()?.0;
-    deserializer.end().ok()?;
-    Some(value)
-}
-
-struct NoDuplicateJson(Value);
-
-impl<'de> Deserialize<'de> for NoDuplicateJson {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(NoDuplicateJsonVisitor)
-    }
-}
-
-struct NoDuplicateJsonVisitor;
-
-impl<'de> Visitor<'de> for NoDuplicateJsonVisitor {
-    type Value = NoDuplicateJson;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JSON without duplicate object keys")
-    }
-
-    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
-        Ok(NoDuplicateJson(Value::Bool(value)))
-    }
-
-    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
-        Ok(NoDuplicateJson(Value::Number(value.into())))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
-        Ok(NoDuplicateJson(Value::Number(value.into())))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        serde_json::Number::from_f64(value)
-            .map(Value::Number)
-            .map(NoDuplicateJson)
-            .ok_or_else(|| E::custom("non-finite JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
-        Ok(NoDuplicateJson(Value::String(value.to_owned())))
-    }
-
-    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
-        Ok(NoDuplicateJson(Value::String(value)))
-    }
-
-    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(NoDuplicateJson(Value::Null))
-    }
-
-    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
-        Ok(NoDuplicateJson(Value::Null))
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element::<NoDuplicateJson>()? {
-            values.push(value.0);
-        }
-        Ok(NoDuplicateJson(Value::Array(values)))
-    }
-
-    fn visit_map<A>(self, mut object: A) -> std::result::Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut keys = HashSet::new();
-        let mut values = Map::new();
-        while let Some(key) = object.next_key::<String>()? {
-            if !keys.insert(key.clone()) {
-                return Err(serde::de::Error::custom("duplicate JSON object key"));
-            }
-            let value = object.next_value::<NoDuplicateJson>()?;
-            values.insert(key, value.0);
-        }
-        Ok(NoDuplicateJson(Value::Object(values)))
     }
 }
 

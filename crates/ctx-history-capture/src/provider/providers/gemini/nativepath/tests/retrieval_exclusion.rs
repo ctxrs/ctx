@@ -150,6 +150,90 @@ fn duplicate_result_terminals_fail_open_including_the_earlier_result() {
 }
 
 #[test]
+fn malformed_duplicate_result_terminal_invalidates_source_wide_uniqueness() {
+    use crate::provider::source_backed::refresh_source_backed_generation;
+
+    let temp = TempDir::new().unwrap();
+    let root = fixture_root(&temp);
+    let path = transcript_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = jsonl(&[
+        header("gemini-malformed-duplicate-terminal", "main"),
+        json!({
+            "id": "call-record",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "type": "gemini",
+            "toolCalls": [{
+                "id": "duplicate-terminal-call",
+                "name": "run_shell_command",
+                "args": {"command": "ctx search malformed-duplicate-terminal"}
+            }]
+        }),
+        json!({
+            "id": "first-result-record",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "type": "gemini",
+            "toolCalls": [{
+                "id": "duplicate-terminal-call",
+                "name": "run_shell_command",
+                "result": {"content": "first authoritative payload", "exitCode": 0}
+            }]
+        }),
+    ]);
+    bytes.extend_from_slice(
+        br#"{"id":"malformed-result-record","timestamp":"2026-01-01T00:00:03Z","type":"gemini","toolCalls":[{"id":"other-call","id":"duplicate-terminal-call","name":"run_shell_command","result":{"content":"ambiguous duplicate terminal payload","exitCode":0}}]}"#,
+    );
+    bytes.push(b'\n');
+    std::fs::write(&path, bytes).unwrap();
+
+    let registry = registry(&root);
+    let index = temp.path().join("index");
+    refresh_source_backed_generation(
+        &index,
+        &registry,
+        ctx_history_index::WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    )
+    .unwrap();
+    let records = indexed_records(&index);
+
+    assert_eq!(records.len(), 3);
+    let record_with_body = |needle: &str| {
+        records
+            .iter()
+            .find(|record| {
+                record
+                    .content
+                    .normalized_body
+                    .as_deref()
+                    .is_some_and(|body| body.contains(needle))
+            })
+            .unwrap()
+    };
+    assert!(excluded(record_with_body(
+        "ctx search malformed-duplicate-terminal"
+    )));
+    assert!(!excluded(record_with_body("first authoritative payload")));
+    assert!(!excluded(record_with_body(
+        "ambiguous duplicate terminal payload"
+    )));
+}
+
+#[test]
+fn malformed_terminal_candidates_poison_result_uniqueness_authority() {
+    use super::super::parser::gemini_result_terminal_authority_is_ambiguous;
+
+    assert!(gemini_result_terminal_authority_is_ambiguous(
+        br#"{"type":"gemini","toolCalls":[{"id":"call","result":{"content":"payload"}}]} trailing"#,
+    ));
+    assert!(gemini_result_terminal_authority_is_ambiguous(
+        br#"{"type":"gemini","toolCalls":[],"toolCalls":[{"id":"call","result":{"content":"payload"}}]}"#,
+    ));
+}
+
+#[test]
 fn late_duplicate_result_replacement_corrects_the_earlier_result() {
     use crate::provider::source_backed::refresh_source_backed_generation;
 

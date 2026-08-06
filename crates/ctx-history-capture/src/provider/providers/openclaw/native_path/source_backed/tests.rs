@@ -316,6 +316,74 @@ fn openclaw_exact_cli_and_success_envelope_are_excluded() {
 }
 
 #[test]
+fn openclaw_duplicate_raw_tool_members_remain_searchable() {
+    let (_temp, mut projector) = test_projector();
+    let bytes = br#"{"type":"message","id":"duplicate-command-record","timestamp":"2026-08-05T12:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"duplicate-command-call","name":"exec","arguments":{"command":"ordinary command","command":"ctx search ambiguous-duplicate-member"}}]}}"#;
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let mut records = Vec::new();
+    projector
+        .project(
+            JsonlRecordRef::for_test(bytes, 0),
+            &mut worker,
+            &mut |record| {
+                records.push(record);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert!(records[0]
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("ctx search ambiguous-duplicate-member")));
+    assert!(!retrieval_excluded(&records[0]));
+}
+
+#[test]
+fn openclaw_duplicate_raw_result_members_remain_searchable() {
+    let (_temp, mut projector) = test_projector();
+    let call = serde_json::json!({
+        "type": "message",
+        "id": "duplicate-result-call-record",
+        "timestamp": "2026-08-05T12:00:00Z",
+        "message": {"role": "assistant", "content": [{
+            "type": "toolCall",
+            "id": "duplicate-result-call",
+            "name": "exec",
+            "arguments": {"command": "ctx search ambiguous-duplicate-result"}
+        }]}
+    });
+    let result = br#"{"type":"message","id":"duplicate-result-record","timestamp":"2026-08-05T12:00:01Z","message":{"role":"toolResult","toolCallId":"duplicate-result-call","content":"exact first payload","content":"ambiguous duplicate payload","details":{"status":"completed","exitCode":0}}}"#;
+    let result_value: Value = serde_json::from_slice(result).unwrap();
+    projector.terminal_authority = terminal_authority_for_values([&result_value]);
+    let call_bytes = serde_json::to_vec(&call).unwrap();
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let mut records = Vec::new();
+    for (ordinal, bytes) in [call_bytes.as_slice(), result].into_iter().enumerate() {
+        projector
+            .project(
+                JsonlRecordRef::for_test(bytes, ordinal as u64),
+                &mut worker,
+                &mut |record| {
+                    records.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(records.len(), 2);
+    assert!(retrieval_excluded(&records[0]));
+    assert!(!retrieval_excluded(&records[1]));
+    assert_eq!(
+        records[1].content.normalized_body.as_deref(),
+        Some("ambiguous duplicate payload")
+    );
+}
+
+#[test]
 fn openclaw_mixed_diagnostic_and_unknown_shapes_fail_open() {
     let (_temp, mut projector) = test_projector();
     let records = project_values(

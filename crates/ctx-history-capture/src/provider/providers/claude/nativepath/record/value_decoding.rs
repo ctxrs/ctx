@@ -102,6 +102,7 @@ pub(super) fn complete_output_rows(
                     content,
                     tool_use_result: tool_use_result.cloned(),
                     discovery_evidence,
+                    retrieval_input_ambiguous: false,
                 }),
                 locator: locator.clone(),
             }

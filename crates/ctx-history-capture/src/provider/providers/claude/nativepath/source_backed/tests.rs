@@ -888,6 +888,58 @@ fn claude_ctx_retrieval_cli_mcp_and_success_payloads_are_excluded_without_body_l
 }
 
 #[test]
+fn claude_duplicate_raw_tool_members_remain_searchable() {
+    let record = br#"{"type":"assistant","uuid":"duplicate-command","sessionId":"test-session","message":{"role":"assistant","content":[{"type":"tool_use","id":"duplicate-command-call","name":"Bash","input":{"command":"ordinary command","command":"ctx search ambiguous-duplicate-member"}}]}}"#.to_vec();
+
+    let records = project_claude_records(&mut test_projector(), &[record]);
+
+    assert_eq!(records.len(), 1);
+    assert!(records[0]
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.contains("ctx search ambiguous-duplicate-member")));
+    assert_eq!(records[0].content.discovery_exclusion, None);
+}
+
+#[test]
+fn claude_duplicate_raw_result_members_remain_searchable() {
+    let call = claude_ctx_call(
+        "duplicate-result-member",
+        "Bash",
+        serde_json::json!({"command": "ctx search ambiguous-duplicate-result"}),
+    );
+    let result = br#"{"type":"user","uuid":"duplicate-result-member","sessionId":"test-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"duplicate-result-member","content":{"result":"ordinary payload","result":"ambiguous duplicate payload"},"is_error":false}]}}"#.to_vec();
+
+    let records = project_claude_records(&mut test_projector(), &[call, result]);
+
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record.content.discovery_exclusion
+                    == Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
+            })
+            .count(),
+        1
+    );
+    let retained_results = records
+        .iter()
+        .filter(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains("ambiguous duplicate payload"))
+        })
+        .collect::<Vec<_>>();
+    assert!(!retained_results.is_empty());
+    assert!(retained_results
+        .iter()
+        .all(|record| record.content.discovery_exclusion.is_none()));
+}
+
+#[test]
 fn claude_duplicate_result_terminals_fail_open_without_retracting_invocation_exclusion() {
     let call = claude_ctx_call(
         "duplicate-result",

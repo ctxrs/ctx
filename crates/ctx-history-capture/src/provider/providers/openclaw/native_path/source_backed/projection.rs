@@ -368,8 +368,11 @@ impl OpenClawProjector {
         let linked_invocation = context
             .as_ref()
             .map(|context| ctx_retrieval::ContributionClass::from(context.retrieval_contribution));
-        let result_contribution =
-            classify_openclaw_tool_result(source_value, result, linked_invocation);
+        let result_contribution = if crate::common::json::raw_object_keys_are_unique(source_bytes) {
+            classify_openclaw_tool_result(source_value, result, linked_invocation)
+        } else {
+            ctx_retrieval::ContributionClass::Unknown
+        };
         let Some(mut context) = context else {
             return (None, Some(result_contribution));
         };
@@ -829,7 +832,11 @@ impl JsonlFamilyProjector for OpenClawProjector {
         );
         let tool_calls = native_tool_calls(&value);
         if !tool_calls.is_empty() {
-            let source_contribution = self.tool_call_source_contribution(&value, &tool_calls);
+            let source_contribution = if crate::common::json::raw_object_keys_are_unique(bytes) {
+                self.tool_call_source_contribution(&value, &tool_calls)
+            } else {
+                ctx_retrieval::ContributionClass::Unknown
+            };
             let mut call_id_counts = HashMap::<&str, usize>::new();
             for call_id in tool_calls.iter().filter_map(|call| call.call_id) {
                 *call_id_counts.entry(call_id).or_default() += 1;

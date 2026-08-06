@@ -58,7 +58,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
 const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
-const PARSER_REVISION: &str = "claude-shared-jsonl-v8-source-unique-result-exclusion";
+const PARSER_REVISION: &str = "claude-shared-jsonl-v9-exact-retrieval-json-authority";
 const MAX_PENDING_CALLS: usize = 4096;
 const MAX_RESULT_METADATA_BYTES: usize = 64 * 1024;
 const RESULT_TERMINAL_CALL_ID_DOMAIN: &[u8] = b"ctx/claude-nativepath/result-terminal-call-id/v1\0";
@@ -700,6 +700,9 @@ impl JsonlFamilyProjector for ClaudeProjector {
 }
 
 fn claude_call_contribution(call: &ToolCallRequest) -> ContributionClass {
+    if call.retrieval_input_ambiguous {
+        return ContributionClass::Unknown;
+    }
     let Some(tool_name) = call.tool_name.as_deref() else {
         return ContributionClass::Unknown;
     };
@@ -716,6 +719,9 @@ fn claude_result_contribution(
     result: &super::rows::ClaudeToolResult,
     context: Option<&PendingCall>,
 ) -> ContributionClass {
+    if result.retrieval_input_ambiguous {
+        return ContributionClass::Unknown;
+    }
     let linked_invocation = context
         .filter(|context| context.ctx_retrieval_derived)
         .map(|_| ContributionClass::RetrievalDerived);

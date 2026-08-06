@@ -219,7 +219,11 @@ impl GeminiBorrowedRecordParser {
             byte_length: byte_end_exclusive.saturating_sub(byte_start),
             record_digest,
         };
-        let events = match class {
+        let exact_json_authority = !matches!(
+            class,
+            GeminiRecordClass::ToolCall | GeminiRecordClass::Result
+        ) || crate::common::json::raw_object_keys_are_unique(payload);
+        let mut events = match class {
             GeminiRecordClass::Result => {
                 let decoded = match decode_result_record(payload, raw_ordinal, source_record) {
                     Ok(decoded) => decoded,
@@ -271,6 +275,21 @@ impl GeminiBorrowedRecordParser {
             }
             GeminiRecordClass::Ignored | GeminiRecordClass::Header => Vec::new(),
         };
+        if !exact_json_authority {
+            for event in &mut events {
+                match class {
+                    GeminiRecordClass::ToolCall => event
+                        .extra_body_contributions
+                        .push(ContributionClass::Unknown),
+                    GeminiRecordClass::Result => event.result_atoms.push(ResultAtom::Unknown),
+                    GeminiRecordClass::Header
+                    | GeminiRecordClass::Message
+                    | GeminiRecordClass::StateNotice
+                    | GeminiRecordClass::RewindNotice
+                    | GeminiRecordClass::Ignored => {}
+                }
+            }
+        }
         if let Some(native_event_id) = native_event_id {
             self.page_native_event_ids
                 .commit_at(native_event_id, raw_ordinal);
@@ -290,6 +309,14 @@ impl GeminiBorrowedRecordParser {
             })
         }
     }
+}
+
+pub(crate) fn gemini_result_terminal_authority_is_ambiguous(payload: &[u8]) -> bool {
+    if crate::common::json::raw_object_keys_are_unique(payload) {
+        return false;
+    }
+    serde_json::from_slice::<GeminiRecordProbe>(payload)
+        .map_or(true, |probe| probe.classify() == GeminiRecordClass::Result)
 }
 
 /// Reads only through the first importable header. This is the bounded

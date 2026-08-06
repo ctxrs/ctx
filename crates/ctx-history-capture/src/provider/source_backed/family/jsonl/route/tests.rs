@@ -708,6 +708,7 @@ impl JsonlFamilyAdapter for UnpartitionedSchedulerStateTestAdapter {
 }
 
 struct IdentityRevisionTestAdapter {
+    parser_revision: &'static str,
     revision: &'static str,
     expected_mode: JsonlFamilyProjectionMode,
 }
@@ -726,7 +727,7 @@ impl JsonlFamilyAdapter for IdentityRevisionTestAdapter {
     }
 
     fn parser_revision(&self) -> &'static str {
-        "identity-revision-test-parser-v1"
+        self.parser_revision
     }
 
     fn event_identity_revision(&self) -> &'static str {
@@ -1697,12 +1698,14 @@ fn event_identity_revision_forces_replacement_with_core_base_authority() {
     fs::write(root.join("identity.jsonl"), b"{\"message\":\"stable\"}\n").unwrap();
 
     let cold = IdentityRevisionTestAdapter {
+        parser_revision: "identity-revision-test-parser-v1",
         revision: "content-occurrence-v1",
         expected_mode: JsonlFamilyProjectionMode::Cold,
     };
     let (cold_receipt, _) = capture_parallel_test_generation(&cold, &root, &index, 1);
 
     let upgraded = IdentityRevisionTestAdapter {
+        parser_revision: "identity-revision-test-parser-v1",
         revision: "content-occurrence-v2",
         expected_mode: JsonlFamilyProjectionMode::Replacement,
     };
@@ -1721,6 +1724,35 @@ fn event_identity_revision_forces_replacement_with_core_base_authority() {
             .unwrap()
             .event_identity_revision,
         "content-occurrence-v2"
+    );
+}
+
+#[test]
+fn parser_revision_forces_unchanged_source_replacement() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("parser.jsonl"), b"{\"message\":\"stable\"}\n").unwrap();
+
+    let cold = IdentityRevisionTestAdapter {
+        parser_revision: "identity-revision-test-parser-v1",
+        revision: "content-occurrence-v1",
+        expected_mode: JsonlFamilyProjectionMode::Cold,
+    };
+    let (cold_receipt, _) = capture_parallel_test_generation(&cold, &root, &index, 1);
+
+    let upgraded = IdentityRevisionTestAdapter {
+        parser_revision: "identity-revision-test-parser-v2",
+        revision: "content-occurrence-v1",
+        expected_mode: JsonlFamilyProjectionMode::Replacement,
+    };
+    let (upgraded_receipt, _) = capture_parallel_test_generation(&upgraded, &root, &index, 1);
+
+    assert_ne!(cold_receipt.generation_id, upgraded_receipt.generation_id);
+    assert_eq!(
+        upgraded_receipt.manifest().sources[0].parser_revision(),
+        "identity-revision-test-parser-v2"
     );
 }
 
