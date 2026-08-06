@@ -357,7 +357,7 @@ impl JsonlReader {
             source_file.file(),
             &current_metadata,
         )?;
-        let mut file = source_file.file().try_clone()?;
+        let mut file = source_file.reopen_same_object()?;
         if observe_metadata(identity.source_path(), &file, &file.metadata()?)? != observation {
             return Err(CaptureError::SourceChangedDuringCapture);
         }
@@ -719,11 +719,7 @@ where
             .map_err(E::from)?,
     )
     .map_err(E::from)?;
-    let mut file = source_file
-        .file()
-        .try_clone()
-        .map_err(CaptureError::from)
-        .map_err(E::from)?;
+    let mut file = source_file.reopen_same_object().map_err(E::from)?;
     file.seek(SeekFrom::Start(0))
         .map_err(CaptureError::from)
         .map_err(E::from)?;
@@ -907,4 +903,53 @@ fn new_prefix_hasher() -> Sha256 {
 
 fn prefix_digest(hasher: &Sha256) -> [u8; 32] {
     hasher.clone().finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::common::io::open_provider_source_file;
+
+    fn drain(reader: &mut JsonlReader) -> Result<Vec<Vec<u8>>> {
+        let mut records = Vec::new();
+        while reader
+            .visit_page(&mut |record| -> Result<()> {
+                records.push(record.bytes().to_vec());
+                Ok(())
+            })?
+            .is_some()
+        {}
+        Ok(records)
+    }
+
+    #[test]
+    fn readers_opened_from_one_retained_source_drain_independently() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let source_path = temp.path().join("source.jsonl");
+        fs::write(
+            &source_path,
+            b"{\"message\":\"first\"}\n{\"message\":\"second\"}\n",
+        )
+        .unwrap();
+        let source_file = Arc::new(open_provider_source_file(&source_path).unwrap());
+        let identity = JsonlSourceIdentity::new(
+            "test",
+            "independent-reader-v1",
+            "independent-reader-policy-v1",
+            [7; 32],
+            source_path,
+        );
+        let mut first =
+            JsonlReader::open(identity.clone(), Arc::clone(&source_file), None, None).unwrap();
+        let mut second = JsonlReader::open(identity, source_file, None, None).unwrap();
+        let expected = vec![
+            br#"{"message":"first"}"#.to_vec(),
+            br#"{"message":"second"}"#.to_vec(),
+        ];
+
+        assert_eq!(drain(&mut first).unwrap(), expected);
+        assert_eq!(drain(&mut second).unwrap(), expected);
+    }
 }

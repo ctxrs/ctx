@@ -397,6 +397,40 @@ impl OpenedProviderSourceFile {
         &self.file
     }
 
+    /// Reopens this file through its retained path authority and verifies that
+    /// the new handle names the same ordinary object admitted originally.
+    ///
+    /// Unlike [`File::try_clone`], the returned handle has an independent file
+    /// cursor. Callers that seek or stream concurrently must use this operation
+    /// so one reader cannot move another reader's position.
+    pub(crate) fn reopen_same_object(&self) -> Result<File> {
+        match &self.route {
+            ProviderSourceFileRoute::Absolute(path) => {
+                let reopened = platform::open_absolute(path)
+                    .map_err(|error| map_changed_open_error(path, error))?;
+                let platform::OpenedPath::File { file, metadata, .. } = reopened else {
+                    return Err(changed_path(path));
+                };
+                let opened = platform::object_stamp(&file, &metadata)?;
+                if !platform::same_object(&opened, &self.opened) {
+                    return Err(changed_path(path));
+                }
+                Ok(file)
+            }
+            ProviderSourceFileRoute::Relative {
+                root,
+                relative_path,
+            } => match root.open_path(relative_path)? {
+                OpenedProviderSourcePath::File(reopened)
+                    if platform::same_object(&reopened.opened, &self.opened) =>
+                {
+                    Ok(reopened.file)
+                }
+                _ => Err(changed_path(self.display_path())),
+            },
+        }
+    }
+
     pub(crate) fn bounded_reader(&self, maximum_bytes: u64) -> Result<Take<File>> {
         if self.len() > maximum_bytes {
             return Err(CaptureError::InvalidPayload(format!(

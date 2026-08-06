@@ -248,6 +248,29 @@ fn deepagents_cli_sources_import_search_and_reimport_with_aliases() {
 }
 
 #[test]
+fn goose_v14_schema_is_rejected_as_unsupported() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("goose/v14/sessions.db");
+    let _daemon = start_isolated_provider_daemon(&temp);
+    let stderr = failure_stderr(ctx(&temp).args([
+        "import",
+        "--provider",
+        "goose",
+        "--path",
+        &fixture,
+        "--no-daemon",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+
+    assert!(
+        stderr.contains("unsupported capture envelope schema version: 14"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
     for (cli_provider, stored_provider, source_format, fixture, query, sessions, events) in [
         (
@@ -272,7 +295,7 @@ fn sqlite_cli_imports_crush_goose_zed_kiro_and_forgecode_and_searches() {
             "goose",
             "goose",
             "goose_sessions_sqlite",
-            "goose/v14/sessions.db",
+            "goose/v15/sessions.db",
             "goose sqlite search oracle",
             1,
             3,
