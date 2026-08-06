@@ -131,23 +131,24 @@ if [[ "${platform}" == macos-* ]]; then
 fi
 
 package_path="${package_dir}/${asset_name}"
-archive_args=()
+archive_command=(
+  python3 "${sidecar_tools}/archive_tool.py" create
+  --kind "${archive_kind}"
+  --library "${library_name}"
+  --source "${stage_dir}"
+  --output "${package_path}"
+  --source-date-epoch "${SOURCE_DATE_EPOCH}"
+)
 for provider_library in ${provider_libraries}; do
-  archive_args+=(--extra-library "${provider_library}")
+  archive_command+=(--extra-library "${provider_library}")
 done
 for extra_document in ${extra_documents}; do
-  archive_args+=(--extra-document "${extra_document}")
+  archive_command+=(--extra-document "${extra_document}")
 done
 for exact_file in ${archive_exact_files}; do
-  archive_args+=(--exact-file "${exact_file}")
+  archive_command+=(--exact-file "${exact_file}")
 done
-python3 "${sidecar_tools}/archive_tool.py" create \
-  --kind "${archive_kind}" \
-  --library "${library_name}" \
-  --source "${stage_dir}" \
-  --output "${package_path}" \
-  --source-date-epoch "${SOURCE_DATE_EPOCH}" \
-  "${archive_args[@]}"
+"${archive_command[@]}"
 bash "${sidecar_tools}/validate_sidecar.sh" "${platform}" "${package_path}"
 
 signed_files=()
@@ -168,11 +169,10 @@ else
     signed_files+=("lib/${provider_library}")
   done
 fi
-mapfile -t signed_files < <(printf '%s\n' "${signed_files[@]}" | LC_ALL=C sort -u)
 metadata_args=()
-for signed_file in "${signed_files[@]}"; do
+while IFS= read -r signed_file; do
   metadata_args+=(--file "${signed_file}")
-done
+done < <(printf '%s\n' "${signed_files[@]}" | LC_ALL=C sort -u)
 package_metadata=""
 if [[ "${semantic_catalog_asset}" == "1" ]]; then
   package_metadata="${package_path}.asset.json"
