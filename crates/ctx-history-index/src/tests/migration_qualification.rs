@@ -23,7 +23,6 @@ use std::{
 };
 
 use crate::{
-    core_contract::TestCoreFingerprintOverride,
     durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard},
     publication::{CloneTestHookGuard, CloneTestOptions, MigrationStage, MigrationTestHookGuard},
 };
@@ -34,8 +33,6 @@ mod topology;
 use process::wait4_operation;
 use topology::{first_payload_pair, verify_clone_topology, CloneTopologyProof};
 
-const SUCCESSOR_CORE_FINGERPRINT: &str =
-    "bc73c991e160746fbaaddb641fdce8c7bec24e5ba212a406ec26d197cf0c6a5e";
 const QUALIFICATION_CASE_ENV: &str = "CTX_MIGRATION_QUALIFICATION_CASE";
 const QUALIFICATION_ROOT_ENV: &str = "CTX_MIGRATION_QUALIFICATION_ROOT";
 const QUALIFICATION_OUTPUT_ENV: &str = "CTX_MIGRATION_QUALIFICATION_OUTPUT";
@@ -534,92 +531,29 @@ fn deterministic_body(bytes: usize, sequence: u64) -> String {
     body
 }
 
-fn relabel_active_manifest(root: &Path, mutate: impl FnOnce(&mut GenerationManifest)) {
-    let pointer = load_active_generation_pointer(root).unwrap().unwrap();
-    let index = open_slot_index(root, pointer.active()).unwrap();
-    let metas = index.load_metas().unwrap();
-    let publication = load_publication_for_metas(root, &metas).unwrap();
-    let prior_generation_id = publication.generation_id;
-    let mut manifest = publication.manifest;
-    mutate(&mut manifest);
-    manifest.validate_contract().unwrap();
-    let generation_id = manifest.generation_id().unwrap();
-    assert_ne!(generation_id, prior_generation_id);
-    write_manifest(root, &generation_id, &manifest).unwrap();
-    let payload =
-        canonical_commit_payload(&generation_id, publication.metadata.as_deref()).unwrap();
-    let mut writer = index
-        .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
-        .unwrap();
-    writer.set_merge_policy(Box::<NoMergePolicy>::default());
-    let mut prepared = writer.prepare_commit().unwrap();
-    prepared.set_payload(&payload);
-    prepared.commit().unwrap();
-    writer.wait_merging_threads().unwrap();
-    let generation_path = active_generation_path(root);
-    sync_generation(&generation_path).unwrap();
-    let slot = GenerationSlot::new(
-        generation_id,
-        pointer.active().directory().to_owned(),
-        physical_integrity_digest(&index, &generation_path, Some(&pointer)).unwrap(),
-    )
-    .unwrap();
-    publish_active_generation_pointer(root, &ActiveGenerationPointer::new(slot, None).unwrap())
-        .unwrap();
-    fs::remove_file(manifest_path(root, &prior_generation_id)).unwrap();
-    sync_directory(manifest_path(root, &prior_generation_id).parent().unwrap()).unwrap();
-}
-
 fn build_generated_predecessor(root: &Path, corpus: CorpusSpec) {
-    {
-        // Produce equivalent records through the current writer, then bind the
-        // generation to the exact deployed pre-projector-4 Core/policy pair.
-        let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
-        let source = source("migration-qualification.jsonl");
-        let options = WriterOptions {
-            indexer_threads: 1,
-            memory_bytes: INDEX_MEMORY_MIN_PER_THREAD,
-        };
-        let mut writer = GenerationWriter::open(root, options)
-            .unwrap()
-            .into_writer()
-            .unwrap();
-        writer.begin_source(source.clone()).unwrap();
-        for sequence in 1..=corpus.documents {
-            let body = deterministic_body(corpus.body_bytes, sequence);
-            writer
-                .add_core_record(document(&source, sequence, &body))
-                .unwrap();
-        }
+    let source = source("migration-qualification.jsonl");
+    let options = WriterOptions {
+        indexer_threads: 1,
+        memory_bytes: INDEX_MEMORY_MIN_PER_THREAD,
+    };
+    let mut writer = GenerationWriter::open(root, options)
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for sequence in 1..=corpus.documents {
+        let body = deterministic_body(corpus.body_bytes, sequence);
         writer
-            .certify_source(certificate(&source, 1, corpus.documents))
+            .add_core_record(document(&source, sequence, &body))
             .unwrap();
-        writer.commit(|_| true).unwrap();
-        relabel_active_manifest(root, |manifest| {
-            manifest.core_record_contract_fingerprint =
-                SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT.to_owned();
-            manifest.policy_schema_hash =
-                SAME_EPOCH_PREDECESSOR_SOURCE_GENERATION_POLICY_HASH.to_owned();
-        });
     }
-
+    writer
+        .certify_source(certificate(&source, 1, corpus.documents))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
     let verified = VerifiedIndex::open(root).unwrap();
     assert_eq!(verified.document_count(), corpus.documents);
-    assert_eq!(
-        verified.manifest().core_record_contract_fingerprint,
-        SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
-    );
-}
-
-fn relabel_as_current(root: &Path) {
-    let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
-    relabel_active_manifest(root, |manifest| {
-        manifest.core_record_contract_fingerprint = SUCCESSOR_CORE_FINGERPRINT.to_owned();
-        manifest.policy_schema_hash = current_source_generation_policy_hash().unwrap();
-    });
-    assert!(!VerifiedIndex::open(root)
-        .unwrap()
-        .uses_allowlisted_predecessor_contract());
 }
 
 fn stored_payload(index: &VerifiedIndex) -> Vec<u8> {
@@ -722,15 +656,7 @@ fn completed_pointer(outcome: PredecessorMigrationOutcome) -> ActiveGenerationPo
 
 fn execute_qualification_operation(case: QualificationCase, root: &Path) {
     match case {
-        QualificationCase::Migration => {
-            drop(
-                GenerationWriter::open(root, WriterOptions::default())
-                    .unwrap()
-                    .into_writer()
-                    .unwrap(),
-            );
-        }
-        QualificationCase::CurrentRepublish => {
+        QualificationCase::Migration | QualificationCase::CurrentRepublish => {
             let lease = GenerationWriter::open(root, WriterOptions::default())
                 .unwrap()
                 .into_writer()
@@ -817,7 +743,6 @@ fn qualification_subprocess_worker() {
     let root = PathBuf::from(env::var_os(QUALIFICATION_ROOT_ENV).unwrap());
     let output_path = PathBuf::from(env::var_os(QUALIFICATION_OUTPUT_ENV).unwrap());
     let report_path = PathBuf::from(env::var_os(QUALIFICATION_REPORT_ENV).unwrap());
-    let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
     let _clone_guard = clone_guard(clone_mode);
     let tracker = Rc::new(RefCell::new(DiskTracker::new(&root).unwrap()));
     let migration_tracker = Rc::clone(&tracker);
@@ -880,7 +805,6 @@ fn qualification_performance_subprocess_worker() {
     .expect("unknown qualification clone mode");
     let root = PathBuf::from(env::var_os(QUALIFICATION_ROOT_ENV).unwrap());
     let report_path = PathBuf::from(env::var_os(QUALIFICATION_REPORT_ENV).unwrap());
-    let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
     let _clone_guard = clone_guard(clone_mode);
 
     let cpu_before = process_cpu_seconds();
@@ -919,9 +843,6 @@ fn run_prepared_disk_case(
     root: &Path,
     output_root: &Path,
 ) -> serde_json::Value {
-    if case == QualificationCase::CurrentRepublish {
-        relabel_as_current(root);
-    }
     let output_path = output_root.join(format!("{}-payload.jsonl", case.as_str()));
     let report_path = output_root.join(format!("{}-report.json", case.as_str()));
     let completed = Command::new(env::current_exe().unwrap())
@@ -984,7 +905,6 @@ fn run_paired_cases(
     let current_root = temp.path().join("current-root");
     copy_tree(&base, &migration_root);
     copy_tree(&base, &current_root);
-    relabel_as_current(&current_root);
     let migration_before_path = temp.path().join("migration-preflight-payload.jsonl");
     let current_before_path = temp.path().join("current-preflight-payload.jsonl");
     let migration_before = materialize_output_identity(&migration_root, &migration_before_path);
@@ -1303,7 +1223,6 @@ fn release_benchmark_report() {
 }
 
 fn migrate_and_prove_topology(root: &Path, clone_mode: CloneMode) -> CloneTopologyProof {
-    let _successor = TestCoreFingerprintOverride::set(SUCCESSOR_CORE_FINGERPRINT);
     let clone_guard = clone_guard(clone_mode);
     execute_qualification_operation(QualificationCase::Migration, root);
     drop(clone_guard);

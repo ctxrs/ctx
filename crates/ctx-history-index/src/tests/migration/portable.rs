@@ -16,7 +16,7 @@ fn portable_copy_preserves_permissions_and_writer_availability() {
     fs::set_permissions(&source_file, permissions).unwrap();
     let guard = PortableCloneTestGuard::set(PortableCloneTestOptions::default(), |_, _| Ok(()));
 
-    let writer = GenerationWriter::open(predecessor.root(), WriterOptions::default())
+    let writer = open_republish_writer(predecessor.root())
         .unwrap()
         .into_writer()
         .unwrap();
@@ -58,7 +58,7 @@ fn portable_copy_failure_is_previsibility_and_retryable() {
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
         pointer_before
     );
-    assert!(VerifiedIndex::open(predecessor.root())
+    assert!(!VerifiedIndex::open(predecessor.root())
         .unwrap()
         .uses_allowlisted_predecessor_contract());
     assert_eq!(
@@ -70,7 +70,7 @@ fn portable_copy_failure_is_previsibility_and_retryable() {
     );
     drop(guard);
     drop(
-        GenerationWriter::open(predecessor.root(), WriterOptions::default())
+        open_republish_writer(predecessor.root())
             .unwrap()
             .into_writer()
             .unwrap(),
@@ -102,7 +102,7 @@ fn portable_copy_rejects_insufficient_headroom_before_copying() {
         fs::read(predecessor.root().join("active-generation.json")).unwrap(),
         pointer_before
     );
-    assert!(VerifiedIndex::open(predecessor.root())
+    assert!(!VerifiedIndex::open(predecessor.root())
         .unwrap()
         .uses_allowlisted_predecessor_contract());
 }
@@ -120,10 +120,10 @@ fn portable_copy_retains_committed_postvisibility_outcome() {
         Ok(())
     });
 
-    let outcome = GenerationWriter::open(predecessor.root(), WriterOptions::default()).unwrap();
+    let outcome = open_republish_writer(predecessor.root()).unwrap();
     assert!(outcome.committed_migration_recovery().is_some());
     let writer = outcome.into_writer().unwrap();
-    assert_ne!(
+    assert_eq!(
         writer.base_manifest().unwrap().generation_id().unwrap(),
         predecessor.generation_id()
     );

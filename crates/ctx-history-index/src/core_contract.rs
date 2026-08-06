@@ -20,13 +20,6 @@ pub(crate) enum CoreContractGeneration {
 }
 
 pub(crate) fn current_core_record_contract_fingerprint() -> String {
-    #[cfg(test)]
-    if let Some(fingerprint) =
-        TEST_CURRENT_CORE_FINGERPRINT.with(|override_value| override_value.borrow().clone())
-    {
-        return fingerprint;
-    }
-
     ctx_history_core::core_record_contract_fingerprint()
 }
 
@@ -34,9 +27,6 @@ pub(crate) fn classify_core_contract_generation(actual: &str) -> Result<CoreCont
     let current = current_core_record_contract_fingerprint();
     if actual == current {
         return Ok(CoreContractGeneration::Current);
-    }
-    if actual == SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT {
-        return Ok(CoreContractGeneration::AllowlistedPredecessor);
     }
     Err(IndexError::CoreRecordContractMismatch {
         expected: current,
@@ -197,46 +187,21 @@ fn reject_predecessor_successor_members(encoded: &[u8]) -> Result<()> {
 }
 
 #[cfg(test)]
-thread_local! {
-    static TEST_CURRENT_CORE_FINGERPRINT: std::cell::RefCell<Option<String>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
-#[cfg(test)]
-pub(crate) struct TestCoreFingerprintOverride(Option<String>);
-
-#[cfg(test)]
-impl TestCoreFingerprintOverride {
-    pub(crate) fn set(fingerprint: impl Into<String>) -> Self {
-        let previous = TEST_CURRENT_CORE_FINGERPRINT
-            .with(|override_value| override_value.replace(Some(fingerprint.into())));
-        Self(previous)
-    }
-}
-
-#[cfg(test)]
-impl Drop for TestCoreFingerprintOverride {
-    fn drop(&mut self) {
-        TEST_CURRENT_CORE_FINGERPRINT.with(|override_value| override_value.replace(self.0.take()));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn core_contract_allowlist_is_exact_and_fails_closed() {
-        let _override = TestCoreFingerprintOverride::set("a".repeat(64));
+    fn retired_predecessor_contract_fails_closed() {
+        let current = current_core_record_contract_fingerprint();
         assert_eq!(
-            classify_core_contract_generation(&"a".repeat(64)).unwrap(),
+            classify_core_contract_generation(&current).unwrap(),
             CoreContractGeneration::Current
         );
-        assert_eq!(
-            classify_core_contract_generation(SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT).unwrap(),
-            CoreContractGeneration::AllowlistedPredecessor
-        );
+        assert!(matches!(
+            classify_core_contract_generation(SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT),
+            Err(IndexError::CoreRecordContractMismatch { actual, .. })
+                if actual == SAME_EPOCH_PREDECESSOR_CORE_FINGERPRINT
+        ));
         assert!(matches!(
             classify_core_contract_generation(&"b".repeat(64)),
             Err(IndexError::CoreRecordContractMismatch { actual, .. }) if actual == "b".repeat(64)

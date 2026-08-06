@@ -1,3 +1,14 @@
+const COMPACT_IDENTITY_DIGEST_BYTES: u64 = 32;
+const VERIFICATION_IDENTITY_SLOTS: u64 = 6;
+const VERIFICATION_IDENTITY_TAG_BYTES: u64 = 3;
+const VERIFICATION_SOURCE_ORDINAL_BYTES: u64 = 4;
+const VERIFICATION_QUERY_PROJECTION_BYTES: u64 = 32;
+const VERIFICATION_SCRATCH_BYTES_PER_DOCUMENT: u64 = COMPACT_IDENTITY_DIGEST_BYTES
+    * VERIFICATION_IDENTITY_SLOTS
+    + VERIFICATION_IDENTITY_TAG_BYTES
+    + VERIFICATION_SOURCE_ORDINAL_BYTES
+    + VERIFICATION_QUERY_PROJECTION_BYTES;
+
 #[test]
 fn complete_verifier_decodes_once_with_bounded_parallel_segment_state() {
     const SOURCE_COUNT: usize = 6;
@@ -24,7 +35,7 @@ fn complete_verifier_decodes_once_with_bounded_parallel_segment_state() {
     assert!(metrics.body_tokens >= expected_documents as u64);
     assert_eq!(
         metrics.verification_spill_bytes,
-        expected_documents as u64 * 133
+        expected_documents as u64 * VERIFICATION_SCRATCH_BYTES_PER_DOCUMENT
     );
     assert!(metrics.verification_tracked_heap_bytes < 64 * 1024);
 }
@@ -124,7 +135,10 @@ fn complete_verifier_splits_one_large_segment_across_workers() {
     assert_eq!(metrics.document_decodes, DOCUMENTS as usize);
     assert_eq!(metrics.source_terms, 3);
     assert!(metrics.body_tokens >= DOCUMENTS);
-    assert_eq!(metrics.verification_spill_bytes, (DOCUMENTS + 1) * 133);
+    assert_eq!(
+        metrics.verification_spill_bytes,
+        (DOCUMENTS + 1) * VERIFICATION_SCRATCH_BYTES_PER_DOCUMENT
+    );
     assert!(metrics.verification_tracked_heap_bytes < 1024 * 1024);
 }
 

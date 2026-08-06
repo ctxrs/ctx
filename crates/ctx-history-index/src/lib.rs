@@ -211,9 +211,9 @@ impl PendingDeletion {
 /// These errors describe versioned pointer, schema, policy, or physical index
 /// settings, not damaged control metadata. Callers must not read, clone,
 /// migrate, or otherwise interpret the incompatible generation.
-/// Core fingerprint mismatches are deliberately excluded: the exact
-/// same-epoch predecessor is handled by its read/migration bridge, while every
-/// unknown Core fingerprint fails closed without source reconstruction.
+/// Core fingerprint mismatches are deliberately excluded: current-schema
+/// generations with an unknown or retired fingerprint fail closed, while an
+/// obsolete schema is detected first and rebuilt without interpreting rows.
 pub fn generation_incompatibility_requires_rebuild(error: &IndexError) -> bool {
     matches!(
         error,
@@ -351,12 +351,28 @@ impl GenerationWriter {
         reclaim_abandoned_atomic_writes(&root)?;
         reclaim_abandoned_atomic_writes(&root.join(MANIFEST_DIRECTORY))?;
 
-        let (mut active_pointer, pointer_requires_rebuild) =
+        let (mut active_pointer, mut pointer_requires_rebuild) =
             match load_active_generation_pointer(&root) {
                 Ok(pointer) => (pointer, false),
                 Err(error) if generation_incompatibility_requires_rebuild(&error) => (None, true),
                 Err(error) => return Err(error),
             };
+        if !pointer_requires_rebuild {
+            if let Some(pointer) = active_pointer.as_ref() {
+                let schema_check = open_slot_index(&root, pointer.active())
+                    .and_then(|index| validate_schema(&index.schema()));
+                if let Err(error) = schema_check {
+                    if generation_incompatibility_requires_rebuild(&error) {
+                        // A retired schema is disposable source projection, not
+                        // clone authority. Keep its pointer untouched until a
+                        // fresh current candidate is completely published.
+                        pointer_requires_rebuild = true;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+        }
         let mut committed_predecessor_migration_recovery = None;
         let mut report_committed_predecessor_migration_recovery = false;
         if !pointer_requires_rebuild {
