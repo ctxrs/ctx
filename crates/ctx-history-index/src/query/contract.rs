@@ -316,16 +316,20 @@ pub struct CoreSessionEventPage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticEligibility {
-    UserMessageCandidateV2,
+    UserMessageCandidateV3,
 }
 
 impl SemanticEligibility {
-    pub const CURRENT: Self = Self::UserMessageCandidateV2;
+    pub const CURRENT: Self = Self::UserMessageCandidateV3;
 
     pub fn includes(self, event: &EventRecord) -> bool {
         match self {
-            Self::UserMessageCandidateV2 => {
-                crate::policy::is_semantic_candidate(&event.event_type, event.role.as_deref())
+            Self::UserMessageCandidateV3 => {
+                !matches!(event.event_origin, EventOrigin::CopiedFromAncestor { .. })
+                    && crate::policy::is_semantic_candidate(
+                        &event.event_type,
+                        event.role.as_deref(),
+                    )
             }
         }
     }
@@ -550,6 +554,8 @@ pub struct EventRecord {
     pub session_id: StableEntityId,
     pub parent_session_id: Option<StableEntityId>,
     pub root_session_id: StableEntityId,
+    pub session_relationship: SessionRelationshipKind,
+    pub event_origin: EventOrigin,
     pub source: SourceKey,
     pub provider: String,
     pub source_format: String,
@@ -595,6 +601,7 @@ pub struct SessionRecord {
     pub session_id: StableEntityId,
     pub parent_session_id: Option<StableEntityId>,
     pub root_session_id: StableEntityId,
+    pub session_relationship: SessionRelationshipKind,
     pub provider: String,
     pub source_format: String,
     pub provider_session_id: Option<String>,

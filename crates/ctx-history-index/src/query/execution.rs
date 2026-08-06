@@ -312,6 +312,7 @@ impl VerifiedIndex {
             let max_doc =
                 usize::try_from(segment.max_doc()).map_err(|_| IndexError::CountOverflow)?;
             let mut message_docs = vec![false; max_doc];
+            let mut copied_docs = vec![false; max_doc];
             let mut selected_docs = vec![false; max_doc];
             let event_types = segment.inverted_index(fields.event_type)?;
             if let Some(term_info) =
@@ -327,6 +328,21 @@ impl VerifiedIndex {
                     doc_id = postings.advance();
                 }
             }
+            let origins = segment.inverted_index(fields.event_origin_kind)?;
+            if let Some(term_info) = origins.get_term_info(&Term::from_field_text(
+                fields.event_origin_kind,
+                "copied_from_ancestor",
+            ))? {
+                let mut postings =
+                    origins.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment.is_deleted(doc_id) {
+                        copied_docs[doc_id as usize] = true;
+                    }
+                    doc_id = postings.advance();
+                }
+            }
             let roles = segment.inverted_index(fields.role)?;
             if let Some(term_info) =
                 roles.get_term_info(&Term::from_field_text(fields.role, "user"))?
@@ -335,7 +351,10 @@ impl VerifiedIndex {
                     roles.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
                 let mut doc_id = postings.doc();
                 while doc_id != TERMINATED {
-                    if !segment.is_deleted(doc_id) && message_docs[doc_id as usize] {
+                    if !segment.is_deleted(doc_id)
+                        && message_docs[doc_id as usize]
+                        && !copied_docs[doc_id as usize]
+                    {
                         selected_docs[doc_id as usize] = true;
                         total = total.checked_add(1).ok_or(IndexError::CountOverflow)?;
                     }

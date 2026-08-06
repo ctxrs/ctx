@@ -11,6 +11,7 @@ const HEADER_LABEL_WIDTH: usize = 16;
 const EVENT_INDENT: usize = 3;
 const EVENT_LABEL_WIDTH: usize = 5;
 const MCP_EVENT_LABEL_WIDTH: usize = 10;
+const LINEAGE_EVENT_LABEL_WIDTH: usize = 16;
 
 pub(in crate::commands::source_index) fn render_show_document(
     value: &Value,
@@ -118,6 +119,13 @@ fn render_session_header(document: &mut Document, context: &RenderContext, value
     push_optional_field(
         document,
         context,
+        "Relationship",
+        session["session_relationship"].as_str(),
+        Token::Accent,
+    );
+    push_optional_field(
+        document,
+        context,
         "Provider",
         value["provider"].as_str(),
         Token::Accent,
@@ -157,6 +165,14 @@ fn render_event_header(document: &mut Document, context: &RenderContext, value: 
         selected["parent_ctx_session_id"].as_str(),
         selected["root_ctx_session_id"].as_str(),
     );
+    push_optional_field(
+        document,
+        context,
+        "Relationship",
+        selected["session_relationship"].as_str(),
+        Token::Accent,
+    );
+    push_event_origin(document, context, selected, 0);
     push_optional_field(
         document,
         context,
@@ -254,6 +270,7 @@ fn render_event(document: &mut Document, context: &RenderContext, position: usiz
         time_token,
     );
     render_event_identity(document, context, event);
+    push_event_origin(document, context, event, EVENT_INDENT);
     if let Some(attribution) = mcp_tool_call_display(event) {
         push_field(
             document,
@@ -350,5 +367,54 @@ fn render_event_identity(document: &mut Document, context: &RenderContext, event
             &sequence,
             Token::Text,
         );
+    }
+}
+
+fn push_event_origin(
+    document: &mut Document,
+    context: &RenderContext,
+    event: &Value,
+    indent: usize,
+) {
+    let origin = &event["event_origin"];
+    let Some(kind) = origin["kind"].as_str() else {
+        return;
+    };
+    push_field(
+        document,
+        context,
+        indent,
+        "Origin",
+        LINEAGE_EVENT_LABEL_WIDTH,
+        kind,
+        if kind == "copied_from_ancestor" {
+            Token::Warning
+        } else {
+            Token::Text
+        },
+    );
+    if kind != "copied_from_ancestor" {
+        return;
+    }
+    for (label, key) in [
+        ("Original event", "ancestor_event_id"),
+        ("Original session", "ancestor_session_id"),
+        ("Copy proof", "proof"),
+    ] {
+        if let Some(value) = origin[key].as_str() {
+            push_field(
+                document,
+                context,
+                indent,
+                label,
+                LINEAGE_EVENT_LABEL_WIDTH,
+                value,
+                if key == "proof" {
+                    Token::Text
+                } else {
+                    Token::Reference
+                },
+            );
+        }
     }
 }

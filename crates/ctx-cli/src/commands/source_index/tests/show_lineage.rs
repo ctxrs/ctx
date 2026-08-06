@@ -9,6 +9,7 @@ fn machine_show_contract_keeps_lineage_in_existing_nested_fields() {
     direct.root_session_id = root.session_id;
     direct.agent_type = "subagent".to_owned();
     direct.is_primary = false;
+    direct.session_relationship = SessionRelationshipKind::Delegated;
     let event = fixture_core_event(&direct, "nested lineage event");
     let session = SessionRecord::from(&direct);
 
@@ -45,6 +46,7 @@ fn machine_show_contract_keeps_lineage_in_existing_nested_fields() {
         session_value["session"]["root_ctx_session_id"],
         root.session_id.as_uuid().to_string()
     );
+    assert_eq!(session_value["session"]["session_relationship"], "delegated");
 
     let event_value =
         event_window_value(&event, OutputFormat::Json, vec![render_event_value(&event)]).unwrap();
@@ -71,4 +73,57 @@ fn machine_show_contract_keeps_lineage_in_existing_nested_fields() {
         event_value["event"]["root_ctx_session_id"],
         root.session_id.as_uuid().to_string()
     );
+    assert_eq!(event_value["event"]["session_relationship"], "delegated");
+    assert_eq!(event_value["event"]["event_origin"]["kind"], "unknown");
+}
+
+#[test]
+fn copied_event_show_list_and_search_models_share_typed_lineage() {
+    let ancestor = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 54, 1);
+    let mut copied = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 55, 1);
+    copied.parent_session_id = Some(ancestor.session_id);
+    copied.root_session_id = ancestor.session_id;
+    copied.session_relationship = SessionRelationshipKind::Forked;
+    copied.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: ancestor.session_id,
+        ancestor_event_id: ancestor.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+    let copied = fixture_core_event(&copied, "copied body remains directly visible");
+
+    let shown = render_event_value(&copied);
+    let listed = crate::commands::list::events::render_event(
+        &copied,
+        crate::commands::list::events::EventContentProjection::Full,
+    )
+    .unwrap();
+    let search = SearchEventMetadata::from(&copied.event);
+
+    for value in [&shown, &listed] {
+        assert_eq!(value["session_relationship"], "forked");
+        assert_eq!(value["event_origin"]["kind"], "copied_from_ancestor");
+        assert_eq!(
+            value["event_origin"]["ancestor_event_id"],
+            ancestor.event_id.as_uuid().to_string()
+        );
+        assert_eq!(
+            value["event_origin"]["ancestor_session_id"],
+            ancestor.session_id.as_uuid().to_string()
+        );
+        assert_eq!(value["event_origin"]["proof"], "native_event_identity");
+        assert_eq!(value["text"], "copied body remains directly visible");
+    }
+    assert_eq!(search.session_relationship, SessionRelationshipKind::Forked);
+    assert_eq!(search.event_origin, copied.event_origin);
+
+    let rendered = render_show_document(
+        &event_window_value(&copied, OutputFormat::Json, vec![shown]).unwrap(),
+        &RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+    )
+    .render(&RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)));
+    assert!(rendered.contains("Relationship"));
+    assert!(rendered.contains("forked"));
+    assert!(rendered.contains("Original event"));
+    assert!(rendered.contains(&ancestor.event_id.as_uuid().to_string()));
+    assert!(rendered.contains("copied body remains directly visible"));
 }

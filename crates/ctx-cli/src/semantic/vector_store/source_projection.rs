@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::{SourceKey, StableEntityId};
+use ctx_history_core::{EventOrigin, SourceKey, StableEntityId};
 use ctx_history_index::{
     current_semantic_generation_policy, CoreEventRecord, SemanticGenerationPolicy,
     SourceCoreRecordAggregate, SourceEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
@@ -140,7 +140,11 @@ impl SourceBackedSemanticGeneration {
     }
 
     fn includes(&self, record: &CoreEventRecord) -> bool {
-        self.semantic_policy
+        !matches!(
+            record.core_record.event_origin,
+            EventOrigin::CopiedFromAncestor { .. }
+        ) && self
+            .semantic_policy
             .includes_event(&record.event.event_type, record.event.role.as_deref())
     }
 

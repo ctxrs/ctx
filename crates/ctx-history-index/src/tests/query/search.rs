@@ -5,6 +5,117 @@ use ctx_history_core::StableEntityId;
 use tantivy::{collector::TopDocs, Score};
 
 #[test]
+fn copied_events_are_excluded_before_search_windows_and_unknowns_remain_searchable() {
+    let temp = tempdir().unwrap();
+    let source = source("copied-search-shaping.jsonl");
+    let original = document_for_session(
+        &source,
+        "original-session",
+        1,
+        "lineagewindowneedle shared body",
+    );
+    let mut copied = document_for_session(
+        &source,
+        "copied-session",
+        2,
+        "lineagewindowneedle shared body",
+    );
+    copied
+        .set_session_relationship(
+            SessionRelationshipKind::Forked,
+            Some(original.session_id),
+            original.session_id,
+        )
+        .unwrap();
+    copied.event_origin = EventOrigin::CopiedFromAncestor {
+        ancestor_session_id: original.session_id,
+        ancestor_event_id: original.event_id,
+        proof: EventCopyProofKind::NativeEventIdentity,
+    };
+    copied.validate_contract().unwrap();
+    let unknown = document_for_session(
+        &source,
+        "unknown-session",
+        3,
+        "lineagewindowneedle unknown body",
+    );
+    let mut unique = document_for_session(
+        &source,
+        "unique-session",
+        4,
+        "lineagewindowneedle unique body",
+    );
+    unique.event_origin = EventOrigin::UniqueToSession;
+    unique.validate_contract().unwrap();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [
+        copied.clone(),
+        unique.clone(),
+        unknown.clone(),
+        original.clone(),
+    ] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 4)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    let expected = HashSet::from([original.event_id, unknown.event_id, unique.event_id]);
+    let lexical = index
+        .search_event_candidates("lineagewindowneedle", 3)
+        .unwrap();
+    assert_eq!(lexical.len(), 3, "copied rows must not consume the window");
+    assert_eq!(
+        candidate_ids(&lexical).into_iter().collect::<HashSet<_>>(),
+        expected
+    );
+    assert!(!lexical
+        .iter()
+        .any(|candidate| candidate.event.event_id == copied.event_id));
+
+    let listed = index
+        .list_event_candidates_with_filters(&EventSearchFilters::default(), 3)
+        .unwrap();
+    assert_eq!(listed.len(), 3);
+    assert_eq!(
+        candidate_ids(&listed).into_iter().collect::<HashSet<_>>(),
+        expected
+    );
+
+    let semantic = index
+        .semantic_filter_projection(&EventSearchFilters::default())
+        .unwrap();
+    assert_eq!(
+        semantic.event_ids().collect::<HashSet<_>>(),
+        expected
+            .iter()
+            .map(|event_id| event_id.as_uuid())
+            .collect::<HashSet<_>>()
+    );
+    let semantic_page = index.semantic_event_page(None, 3).unwrap();
+    assert_eq!(semantic_page.items.len(), 3);
+    assert_eq!(semantic_page.eligible_total, 3);
+
+    let source_page = index.core_source_event_page(&source, None, 4).unwrap();
+    assert_eq!(source_page.items.len(), 4);
+    let visible_copy = index
+        .core_record_by_id(copied.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(visible_copy.event_origin, copied.event_origin);
+    let copied_session = index
+        .core_events_for_session(copied.session_id.as_uuid())
+        .unwrap();
+    assert_eq!(copied_session.len(), 1);
+    assert_eq!(copied_session[0].event_origin, copied.event_origin);
+}
+
+#[test]
 fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     let temp = tempdir().unwrap();
     let codex_root = source("codex-root");

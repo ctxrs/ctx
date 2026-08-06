@@ -29,8 +29,8 @@ use std::{
 };
 
 use ctx_history_core::{
-    CoreRecord, SourceKey, StableEntityId, StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES,
-    MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreRecord, EventOrigin, SessionRelationshipKind, SourceKey, StableEntityId, StableEntityKind,
+    TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use tantivy::{

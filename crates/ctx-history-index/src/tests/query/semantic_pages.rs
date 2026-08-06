@@ -75,7 +75,7 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
     assert_eq!(core_first_page.generation_id, first_page.generation_id);
     assert_eq!(
         first_page.eligibility,
-        SemanticEligibility::UserMessageCandidateV2
+        SemanticEligibility::UserMessageCandidateV3
     );
     assert_eq!(core_first_page.eligibility, first_page.eligibility);
     assert_eq!(first_page.eligible_total, 4);

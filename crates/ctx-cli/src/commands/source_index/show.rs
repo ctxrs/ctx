@@ -589,6 +589,9 @@ fn render_stream_text_header(value: &Value) -> String {
     if let Some(provider_session_id) = value["provider_session_id"].as_str() {
         output.push_str(&format!("provider_session_id: {provider_session_id}\n"));
     }
+    if let Some(relationship) = value["session"]["session_relationship"].as_str() {
+        output.push_str(&format!("session_relationship: {relationship}\n"));
+    }
     output.push_str(&format!(
         "mode: {}\nformat: text\n\n",
         value["mode"].as_str().unwrap_or("lite")
@@ -607,6 +610,7 @@ fn render_stream_text_event(event: &Value) -> String {
         event["event_type"].as_str().unwrap_or("event"),
         event["ctx_event_id"].as_str().unwrap_or("unknown"),
     );
+    append_stream_event_origin(&mut output, event, "");
     append_mcp_tool_call_text(&mut output, event, "", MCP_TOOL_CALL_JSON_GUIDANCE);
     output.push_str(event["text"].as_str().unwrap_or_default());
     output.push_str("\n\n");
@@ -614,7 +618,7 @@ fn render_stream_text_event(event: &Value) -> String {
 }
 
 fn render_stream_markdown_header(value: &Value) -> String {
-    format!(
+    let mut output = format!(
         "# {} session {}\n\n- ctx_session_id: `{}`\n",
         value["provider"].as_str().unwrap_or("unknown"),
         value["provider_session_id"]
@@ -622,7 +626,11 @@ fn render_stream_markdown_header(value: &Value) -> String {
             .or_else(|| value["ctx_session_id"].as_str())
             .unwrap_or("unknown"),
         value["ctx_session_id"].as_str().unwrap_or("unknown")
-    )
+    );
+    if let Some(relationship) = value["session"]["session_relationship"].as_str() {
+        output.push_str(&format!("- session_relationship: `{relationship}`\n"));
+    }
+    output
 }
 
 fn render_stream_markdown_event(event: &Value) -> String {
@@ -636,12 +644,33 @@ fn render_stream_markdown_event(event: &Value) -> String {
         event["occurred_at"].as_str().unwrap_or("-"),
         event["ctx_event_id"].as_str().unwrap_or("unknown"),
     );
+    append_stream_event_origin(&mut output, event, "- ");
     if append_mcp_tool_call_markdown(&mut output, event) {
         output.push('\n');
     }
     output.push_str(event["text"].as_str().unwrap_or_default());
     output.push('\n');
     output
+}
+
+fn append_stream_event_origin(output: &mut String, event: &Value, prefix: &str) {
+    let origin = &event["event_origin"];
+    let Some(kind) = origin["kind"].as_str() else {
+        return;
+    };
+    output.push_str(&format!("{prefix}event_origin: {kind}\n"));
+    if kind != "copied_from_ancestor" {
+        return;
+    }
+    for (label, key) in [
+        ("ancestor_event_id", "ancestor_event_id"),
+        ("ancestor_session_id", "ancestor_session_id"),
+        ("copy_proof", "proof"),
+    ] {
+        if let Some(value) = origin[key].as_str() {
+            output.push_str(&format!("{prefix}{label}: {value}\n"));
+        }
+    }
 }
 
 fn write_show_document(value: &Value, event_id: Uuid, ui: &mut Ui) -> Result<usize> {

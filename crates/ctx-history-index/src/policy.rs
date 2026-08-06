@@ -16,7 +16,7 @@ pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 4;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
-pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 2;
+pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 3;
 pub const SEMANTIC_CHUNKING_REVISION: u32 = 1;
 pub const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;

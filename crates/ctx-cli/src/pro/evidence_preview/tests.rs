@@ -176,6 +176,8 @@ fn base_record(
         session_id,
         parent_session_id: None,
         root_session_id: session_id,
+        session_relationship: core.session_relationship,
+        event_origin: core.event_origin.clone(),
         source: source.clone(),
         provider,
         source_format: source.source_format().to_owned(),

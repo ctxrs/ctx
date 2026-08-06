@@ -245,6 +245,8 @@ fn search_result_json(
         "source_format": event.source_format,
         "parent_ctx_session_id": event.parent_session_id,
         "root_ctx_session_id": event.root_session_id,
+        "session_relationship": event.session_relationship,
+        "event_origin": super::event_origin_json(&event.event_origin),
         "branch": event.branch,
         "agent_type": event.agent_type,
         "is_primary": event.is_primary,

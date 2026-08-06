@@ -11,6 +11,13 @@ pub(super) fn filtered_event_query(
     fields: Fields,
 ) -> Result<Box<dyn Query>> {
     let mut clauses = vec![(Occur::Must, body_query)];
+    clauses.push((
+        Occur::MustNot,
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.event_origin_kind, "copied_from_ancestor"),
+            IndexRecordOption::Basic,
+        )),
+    ));
     if let Some(query) = source_identity_query {
         add_filter_clause(&mut clauses, query);
     }
