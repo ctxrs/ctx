@@ -238,6 +238,37 @@ impl BlameNextAction {
         })
     }
 
+    pub(crate) fn core_search_for_resolved(
+        target: &ctx_pro_host_protocol::ResolvedBlameTarget,
+    ) -> Option<Self> {
+        let target = match target {
+            ctx_pro_host_protocol::ResolvedBlameTarget::File {
+                path,
+                repository,
+                requested_lines,
+            } => BlameTarget::File {
+                path: path.clone(),
+                repository: Some(repository.display.clone()),
+                lines: requested_lines.clone(),
+            },
+            ctx_pro_host_protocol::ResolvedBlameTarget::Commit { commit, repository } => {
+                BlameTarget::Commit {
+                    oid: commit.display.clone(),
+                    repository: Some(repository.display.clone()),
+                }
+            }
+            ctx_pro_host_protocol::ResolvedBlameTarget::PullRequest {
+                selector,
+                repository,
+                ..
+            } => BlameTarget::PullRequest {
+                selector: selector.clone(),
+                repository: Some(repository.display.clone()),
+            },
+        };
+        Self::core_search_for(&target)
+    }
+
     fn trusted(kind: BlameNextActionKind, argv: &[&str]) -> Self {
         if kind == BlameNextActionKind::CheckStatus {
             return Self::check_status();

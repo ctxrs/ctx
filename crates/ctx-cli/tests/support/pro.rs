@@ -704,6 +704,23 @@ body = request['message']['body']
 if request['message']['kind'] != 'blame':
     sys.exit(26)
 if __BLAME_ERROR_CLASS__ is not None:
+    details = {
+      'resource_not_found':{
+        'reason':'target_not_indexed',
+        'candidates':[],
+        'candidates_truncated':False
+      },
+      'missing_repository':{
+        'reason':'repository_not_bound',
+        'candidates':[],
+        'candidates_truncated':False
+      },
+      'ambiguous':{
+        'reason':'target_ambiguous',
+        'candidates':[],
+        'candidates_truncated':False
+      }
+    }.get(__BLAME_ERROR_CLASS__)
     send({
       'sequence': request['sequence'],
       'request_id': request['request_id'],
@@ -711,8 +728,16 @@ if __BLAME_ERROR_CLASS__ is not None:
         'class':__BLAME_ERROR_CLASS__,
         'message':'untrusted helper detail at /secret/graph/path',
         'retryable':False,
-        'details':None
+        'details':details
       }}
+    })
+    request = receive()
+    if request['message']['kind'] != 'status':
+        sys.exit(27)
+    send({
+      'sequence': request['sequence'],
+      'request_id': request['request_id'],
+      'message': {'kind':'status','body':status_body(request)}
     })
     sys.exit(0)
 target = body['target']
@@ -847,14 +872,14 @@ elif kind == 'pull_request':
     }]
     snapshot = None
     outcome = {
-      'attribution':'none',
+      'attribution':'proven',
       'coverage':{
         'unit':'pull_request_relationship',
         'evaluated':1,
-        'proven':0,
+        'proven':1,
         'possible':0,
         'conflicting':0,
-        'none':1
+        'none':0
       }
     }
 else:

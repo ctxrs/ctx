@@ -451,6 +451,7 @@ fn missing_blame_resource_keeps_stable_json_mode_code() {
     let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(diagnostic["error"], "resource_not_found");
     assert_eq!(diagnostic["error_code"], "resource_not_found");
+    assert_eq!(diagnostic["reason"], "target_not_indexed");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("Error:"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("/secret/graph/path"));
 }
@@ -631,10 +632,10 @@ fn numeric_pr_selector_requires_repository_before_helper_access() {
 #[test]
 fn obsolete_public_pro_query_commands_have_no_compatibility_aliases() {
     for args in [
-        &["facts", "commit", "abc"][..],
-        &["timeline", "commit", "abc"][..],
-        &["related", "commit", "abc"][..],
-        &["show", "commit", "abc"][..],
+        &["facts", "commit", "abcd"][..],
+        &["timeline", "commit", "abcd"][..],
+        &["related", "commit", "abcd"][..],
+        &["show", "commit", "abcd"][..],
         &["locate", "file", "src/lib.rs"][..],
     ] {
         Command::cargo_bin("ctx")
@@ -666,7 +667,7 @@ fn blame_without_an_installation_identity_fails_before_starting_the_helper() {
         .env("CTX_PRO_HELPER", &helper)
         .arg("--data-root")
         .arg(root.path())
-        .args(["blame", "commit", "abc"])
+        .args(["blame", "commit", "abcd"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(

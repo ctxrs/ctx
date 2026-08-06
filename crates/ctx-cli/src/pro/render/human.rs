@@ -1,24 +1,42 @@
 use ctx_pro_host_protocol::{BlameResult, ResolvedBlameTarget};
 use serde_json::Value;
 
-use crate::ui::{Document, RenderContext, Token};
+use crate::ui::{hint, Action, Document, Hint, RenderContext, Token};
 
 use super::{
     commit, evidence, file,
     layout::{push_authored, push_heading, push_notice},
     pull_request, target, BlameEvidenceContext,
 };
+use crate::pro::diagnostic::BlameNextAction;
 use crate::pro::BlameResultFreshness;
 
 pub(super) fn render(
     result: &BlameResult,
     freshness: Option<BlameResultFreshness>,
+    next_action: Option<&BlameNextAction>,
     context: &RenderContext,
     evidence_context: &BlameEvidenceContext,
 ) -> Document {
     let mut document = Document::new();
     let serialized = serde_json::to_value(result).unwrap_or(Value::Null);
     if render_contract_summary(&mut document, context, &serialized, freshness) {
+        if let Some(action) = next_action {
+            let command = action
+                .argv
+                .iter()
+                .map(|argument| crate::transcript::shell_quote_arg(argument))
+                .collect::<Vec<_>>()
+                .join(" ");
+            document.push_blank();
+            document.append(hint(
+                context,
+                Hint {
+                    text: "Search Core history for supporting context.",
+                },
+                Some(Action { command: &command }),
+            ));
+        }
         document.push_blank();
     }
     target::render(&mut document, context, result);

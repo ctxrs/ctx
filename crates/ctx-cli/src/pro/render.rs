@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::ui::{canonical_human_output_bytes, Document, RenderContext, Ui};
 
 use super::evidence_preview::EvidencePreviewModel;
-use super::{BlameResultFreshness, HostedBlameResult};
+use super::{diagnostic::BlameNextAction, BlameResultFreshness, HostedBlameResult};
 
 mod commit;
 mod evidence;
@@ -37,6 +37,12 @@ fn blame_result_json_with_context<T: BlameOutput>(
             object.insert(
                 "freshness".to_owned(),
                 serde_json::json!({ "state": freshness }),
+            );
+        }
+        if let Some(action) = successful_next_action(output) {
+            object.insert(
+                "next_action".to_owned(),
+                serde_json::to_value(action).unwrap_or(Value::Null),
             );
         }
     }
@@ -193,9 +199,17 @@ fn render_blame_document<T: BlameOutput>(
     human::render(
         output.result(),
         output.freshness(),
+        successful_next_action(output).as_ref(),
         context,
         evidence_context,
     )
+}
+
+fn successful_next_action<T: BlameOutput>(output: &T) -> Option<BlameNextAction> {
+    (output.freshness() == Some(BlameResultFreshness::Current)
+        && output.result().outcome.attribution == ctx_pro_host_protocol::BlameAttribution::None)
+        .then(|| BlameNextAction::core_search_for_resolved(&output.result().target))
+        .flatten()
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
-Possible producer found
-  2 pull request relationships evaluated on this page · 0 proven · 1 possible ·
-  0 conflicting · 1 none
+Producer proven
+  2 pull request relationships evaluated on this page · 2 proven · 0 possible ·
+  0 conflicting · 0 none
 
 Pull request  ctxrs/ctx#42
 Repository    ctxrs/ctx

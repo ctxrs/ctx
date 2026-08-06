@@ -178,7 +178,8 @@ pub(super) fn is_generation_bound_negative(error: &anyhow::Error) -> bool {
 pub(super) fn stale_negative_diagnostic() -> anyhow::Error {
     anyhow::Error::new(
         crate::pro::diagnostic::BlameDiagnostic::for_stable_error_code("stale_source")
-            .expect("stale_source is a stable Pro blame diagnostic"),
+            .expect("stale_source is a stable Pro blame diagnostic")
+            .with_stale_committed(),
     )
 }
 

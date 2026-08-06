@@ -224,7 +224,7 @@ fn mcp_blame_rejects_non_launch_targets_and_invalid_bounds() {
         ),
         (
             "limit",
-            json!({"target": {"kind": "commit", "oid": "abc"}, "limit": 9}),
+            json!({"target": {"kind": "commit", "oid": "abcd"}, "limit": 9}),
             "limit must be between 1 and 8",
         ),
     ];
@@ -361,6 +361,7 @@ fn missing_blame_resource_matches_cli_json_error_code() {
         result["structuredContent"]["error_code"],
         "resource_not_found"
     );
+    assert_eq!(result["structuredContent"]["reason"], "target_not_indexed");
     let expected_text = result["structuredContent"]
         .get("message")
         .and_then(Value::as_str)
@@ -425,7 +426,7 @@ fn mcp_blame_fails_intact_when_helper_page_exceeds_aggregate_cap() {
 
 #[cfg(unix)]
 #[test]
-fn mcp_pr_activity_does_not_claim_commit_membership() {
+fn mcp_pr_activity_reports_proven_activity_without_claiming_commit_membership() {
     let temp = tempdir();
     let root = data_root(&temp);
     initialize_current_query_store(&root);
@@ -457,14 +458,14 @@ fn mcp_pr_activity_does_not_claim_commit_membership() {
     assert_eq!(
         structured["outcome"],
         json!({
-            "attribution": "none",
+            "attribution": "proven",
             "coverage": {
                 "unit": "pull_request_relationship",
                 "evaluated": 1,
-                "proven": 0,
+                "proven": 1,
                 "possible": 0,
                 "conflicting": 0,
-                "none": 1,
+                "none": 0,
             },
         })
     );

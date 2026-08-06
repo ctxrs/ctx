@@ -185,6 +185,33 @@ fn commit_blame_result(evidence_count: u32) -> BlameResult {
     }
 }
 
+#[test]
+fn current_none_result_offers_the_same_safe_core_search_in_human_and_json() {
+    let hosted = current(commit_blame_result(0));
+    let expected_argv = serde_json::json!([
+        "ctx",
+        "search",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--refresh",
+        "off"
+    ]);
+    let json = super::blame_result_json(&hosted, None);
+    assert_eq!(json["next_action"]["kind"], "search_core");
+    assert_eq!(json["next_action"]["argv"], expected_argv);
+
+    let document = super::render_blame_document(
+        &hosted,
+        &context(80),
+        &BlameEvidenceContext::not_applicable(),
+    );
+    let human = document.render_plain();
+    assert!(human.contains("No producer proven"), "{human}");
+    assert!(
+        human.contains("ctx search 0123456789abcdef0123456789abcdef01234567 --refresh off"),
+        "{human}"
+    );
+}
+
 fn preview(
     result: &BlameResult,
     numbers: Vec<u32>,
@@ -472,7 +499,7 @@ fn pull_request_renderer_preserves_proof_edges_and_continuation_golden() {
             repository: repository(),
         },
         git_snapshot: None,
-        outcome: outcome(BlameCoverageUnit::PullRequestRelationship, 0, 1, 0, 1),
+        outcome: outcome(BlameCoverageUnit::PullRequestRelationship, 2, 0, 0, 0),
         matches: vec![
             BlameMatch::PullRequest(PullRequestBlameMatch {
                 pull_request: pull_request.clone(),
@@ -565,7 +592,11 @@ fn paginated_pr_result(commit_page: bool) -> BlameResult {
             repository: repository(),
         },
         git_snapshot: None,
-        outcome: outcome(BlameCoverageUnit::PullRequestRelationship, 0, 0, 0, 1),
+        outcome: if commit_page {
+            outcome(BlameCoverageUnit::PullRequestRelationship, 0, 0, 0, 1)
+        } else {
+            outcome(BlameCoverageUnit::PullRequestRelationship, 1, 0, 0, 0)
+        },
         matches: vec![BlameMatch::PullRequest(PullRequestBlameMatch {
             pull_request,
             relationship,
@@ -778,7 +809,7 @@ fn many_attributions_keep_two_space_ancestry_at_reference_widths() {
             head_oid: "deadbeef".to_owned(),
             worktree_status: WorktreeStatus::Differs,
         }),
-        outcome: outcome(BlameCoverageUnit::CommittedLine, 0, 20, 0, 0),
+        outcome: outcome(BlameCoverageUnit::CommittedLine, 0, 0, 20, 0),
         matches: vec![BlameMatch::File(FileBlameMatch {
             id: "file:1".to_owned(),
             lines: LineRange { start: 1, end: 20 },
@@ -1510,6 +1541,8 @@ fn evidence_context_bytes_are_accounted_and_json_is_status_bearing() {
     };
     let default_bytes =
         crate::ui::canonical_human_output_bytes(|context| render_blame_document(&result, context));
+    let hosted = current(result.clone());
+    let evidence_context = BlameEvidenceContext::for_file(model.clone());
 
     for color in [ColorMode::Never, ColorMode::Always] {
         let writer = SharedWriter::default();
@@ -1529,7 +1562,7 @@ fn evidence_context_bytes_are_accounted_and_json_is_status_bearing() {
         assert_eq!(
             measured,
             crate::ui::canonical_human_output_bytes(|context| {
-                render_blame_document_with_evidence_preview(&result, context, Some(&model))
+                super::render_blame_document(&hosted, context, &evidence_context)
             })
         );
     }
@@ -1552,6 +1585,10 @@ fn evidence_context_bytes_are_accounted_and_json_is_status_bearing() {
     expected_helper_fields.as_object_mut().unwrap().insert(
         "freshness".to_owned(),
         serde_json::json!({"state": "current"}),
+    );
+    expected_helper_fields.as_object_mut().unwrap().insert(
+        "next_action".to_owned(),
+        expected_value["next_action"].clone(),
     );
     assert_eq!(helper_fields, expected_helper_fields);
     assert_eq!(expected_value["evidence_context"]["status"], "available");

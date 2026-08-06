@@ -108,6 +108,18 @@ pub(super) fn render_blame_text(value: &Value) -> String {
         push_scalar(&mut out, "next.reason", next.get("reason"), "");
         push_scalar(&mut out, "next.cursor", next.get("cursor"), "");
     }
+    if let Some(argv) = value
+        .pointer("/next_action/argv")
+        .and_then(Value::as_array)
+        .and_then(|values| values.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+    {
+        let command = argv
+            .iter()
+            .map(|argument| crate::transcript::shell_quote_arg(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!("next action: {}\n", escape_controls(&command)));
+    }
     out
 }
 
@@ -557,5 +569,36 @@ mod tests {
         assert!(rendered.starts_with(
             "ctx blame\noutcome: Possible producer found\npage coverage: 3 pull request relationships evaluated · 1 proven · 2 possible · 0 conflicting · 0 none\nfreshness: current\n"
         ));
+    }
+
+    #[test]
+    fn fallback_preserves_the_structured_safe_next_action() {
+        let value = json!({
+            "target": {"kind": "commit"},
+            "outcome": {
+                "attribution": "none",
+                "coverage": {
+                    "unit": "commit_fact",
+                    "evaluated": 0,
+                    "proven": 0,
+                    "possible": 0,
+                    "conflicting": 0,
+                    "none": 0
+                }
+            },
+            "freshness": {"state": "current"},
+            "matches": [],
+            "evidence": [],
+            "next_action": {
+                "kind": "search_core",
+                "argv": ["ctx", "search", "deadbeef", "--refresh", "off"]
+            }
+        });
+
+        let rendered = render_blame_text(&value);
+        assert!(
+            rendered.contains("next action: ctx search deadbeef --refresh off"),
+            "{rendered}"
+        );
     }
 }
