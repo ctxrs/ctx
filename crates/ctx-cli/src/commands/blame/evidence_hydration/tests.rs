@@ -13,8 +13,9 @@ use ctx_history_index::{
     CoreEventRecord, EventRecord, GenerationWriter, IndexError, WriterOptions,
 };
 use ctx_pro_host_protocol::{
-    BlameResult, ByteRange, EvidenceCitation, GitSnapshot, NumberedEvidence, ResolvedBlameTarget,
-    ResourceKind, ResourceRef, WorktreeStatus,
+    BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameResult, ByteRange,
+    EvidenceCitation, GitSnapshot, NumberedEvidence, ResolvedBlameTarget, ResourceKind,
+    ResourceRef, WorktreeStatus,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -180,6 +181,17 @@ fn result(evidence: Vec<NumberedEvidence>) -> BlameResult {
             head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             worktree_status: WorktreeStatus::Clean,
         }),
+        outcome: BlameOutcome {
+            attribution: BlameAttribution::None,
+            coverage: BlameCoverage {
+                unit: BlameCoverageUnit::CommittedLine,
+                evaluated: 0,
+                proven: 0,
+                possible: 0,
+                conflicting: 0,
+                none: 0,
+            },
+        },
         matches: Vec::new(),
         evidence,
         next: None,

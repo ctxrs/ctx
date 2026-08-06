@@ -287,6 +287,21 @@ fn mcp_blame_returns_exact_typed_json_and_complete_text_fallback() {
         "pro-query-fixture-v1"
     );
     assert_eq!(structured["target"]["kind"], "commit");
+    assert_eq!(
+        structured["outcome"],
+        json!({
+            "attribution": "proven",
+            "coverage": {
+                "unit": "commit_fact",
+                "evaluated": 1,
+                "proven": 1,
+                "possible": 0,
+                "conflicting": 0,
+                "none": 0,
+            },
+        })
+    );
+    assert_eq!(structured["freshness"]["state"], "current");
     assert_eq!(structured["matches"][0]["kind"], "commit");
     assert_eq!(structured["evidence"].as_array().map(Vec::len), Some(1));
     assert!(structured.get("payload_type").is_none());
@@ -439,6 +454,20 @@ fn mcp_pr_activity_does_not_claim_commit_membership() {
         &[("CTX_PRO_HELPER", helper.to_str().unwrap())],
     );
     let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(
+        structured["outcome"],
+        json!({
+            "attribution": "none",
+            "coverage": {
+                "unit": "pull_request_relationship",
+                "evaluated": 1,
+                "proven": 0,
+                "possible": 0,
+                "conflicting": 0,
+                "none": 1,
+            },
+        })
+    );
     assert_eq!(
         structured["matches"][0]["value"]["relationship"]["kind"], "activity",
         "{structured:#}"

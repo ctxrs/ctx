@@ -2,8 +2,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use ctx_pro_host_protocol::{
-    BlameResult, CoreMaterializationReceipt, CoreProjectionCurrentness, MaterializedCoverage,
-    ProAccessState, ProAccessStatus, ProOperation, ProStorageEvidence, QuerySnapshotExpectation,
+    BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameResult,
+    CoreMaterializationReceipt, CoreProjectionCurrentness, MaterializedCoverage, ProAccessState,
+    ProAccessStatus, ProOperation, ProStorageEvidence, QuerySnapshotExpectation,
     RepositoryCoverage, ResolvedBlameTarget, ResourceKind, ResourceRef,
 };
 
@@ -90,6 +91,17 @@ fn empty_commit_result(snapshot: QuerySnapshotExpectation) -> BlameResult {
             },
         },
         git_snapshot: None,
+        outcome: BlameOutcome {
+            attribution: BlameAttribution::None,
+            coverage: BlameCoverage {
+                unit: BlameCoverageUnit::CommitFact,
+                evaluated: 0,
+                proven: 0,
+                possible: 0,
+                conflicting: 0,
+                none: 0,
+            },
+        },
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,

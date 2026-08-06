@@ -391,6 +391,21 @@ fn blame_commit_negotiates_the_exact_protocol_and_returns_typed_json() {
         "pro-query-fixture-v1"
     );
     assert_eq!(value["target"]["kind"], "commit");
+    assert_eq!(
+        value["outcome"],
+        serde_json::json!({
+            "attribution": "proven",
+            "coverage": {
+                "unit": "commit_fact",
+                "evaluated": 1,
+                "proven": 1,
+                "possible": 0,
+                "conflicting": 0,
+                "none": 0,
+            },
+        })
+    );
+    assert_eq!(value["freshness"]["state"], "current");
     assert_eq!(value["matches"][0]["kind"], "commit");
     assert_eq!(value["matches"][0]["value"]["predicate"], "produced_by");
     assert_eq!(value["evidence"].as_array().map(Vec::len), Some(1));
@@ -423,7 +438,7 @@ fn missing_blame_resource_has_trusted_human_diagnostic() {
         .failure()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::eq(
-            "✗ No indexed Pro resource matches the requested blame target.\nThe target is valid but is not present in the materialized Pro graph.\n",
+            "✗ No indexed Pro resource matches the requested blame target.\n\nHint: Try:\n\nNext\n  ctx search 0123456789abcdef --refresh off\n",
         ));
 }
 
@@ -577,7 +592,9 @@ fn commit_and_pr_blame_do_not_require_git_but_file_blame_does() {
         .args(["blame", "file", "src/lib.rs"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("repository_unavailable"))
+        .stderr(predicate::str::contains(
+            "The repository required for this blame request is unavailable",
+        ))
         .stderr(predicate::str::contains("helper_crashed").not());
     assert!(!marker.exists());
 }
@@ -652,7 +669,9 @@ fn blame_without_an_installation_identity_fails_before_starting_the_helper() {
         .args(["blame", "commit", "abc"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("key store is unavailable"))
+        .stderr(predicate::str::contains(
+            "The source data required for this blame request is unavailable",
+        ))
         .stderr(predicate::str::contains("helper_crashed").not());
     assert!(!marker.exists());
 }

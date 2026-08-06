@@ -148,7 +148,7 @@ def send(request, kind, body):
       'message': {'kind': kind, 'body': body}
     }
     payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 1) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
     sys.stdout.buffer.flush()
 
 def stored_receipt():
@@ -203,7 +203,7 @@ if hello is None or hello['message']['kind'] != 'hello':
 with LOG.open('a') as stream:
     stream.write('start:' + REVISION + '\n')
 send(hello, 'hello', {
-  'protocol_version': 1,
+  'protocol_version': 2,
   'protocol_fingerprint': '__PROTOCOL_FINGERPRINT__',
   'helper_version': 'same-generation-fixture-' + REVISION,
   'authorization_challenge_base64url': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -461,7 +461,7 @@ def receive():
 
 def send(value):
     payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 1) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
     sys.stdout.buffer.flush()
 
 hello = receive()
@@ -471,7 +471,7 @@ send({
   'sequence': hello['sequence'],
   'request_id': hello['request_id'],
   'message': {'kind':'hello','body':{
-    'protocol_version':1,
+    'protocol_version':2,
     'protocol_fingerprint':'__PROTOCOL_FINGERPRINT__',
     'helper_version':'fake-status-v1',
     'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -625,7 +625,7 @@ def receive():
 
 def send(value):
     payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 1) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
     sys.stdout.buffer.flush()
 
 def status_body(request):
@@ -684,7 +684,7 @@ send({
   'sequence': hello['sequence'],
   'request_id': hello['request_id'],
   'message': {'kind':'hello','body':{
-    'protocol_version':1,
+    'protocol_version':2,
     'protocol_fingerprint':'__PROTOCOL_FINGERPRINT__',
     'helper_version':'fake-blame-v1',
     'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -710,7 +710,8 @@ if __BLAME_ERROR_CLASS__ is not None:
       'message': {'kind':'error','body':{
         'class':__BLAME_ERROR_CLASS__,
         'message':'untrusted helper detail at /secret/graph/path',
-        'retryable':False
+        'retryable':False,
+        'details':None
       }}
     })
     sys.exit(0)
@@ -769,6 +770,17 @@ if kind == 'commit':
       }
     } for index in range(match_count)]
     snapshot = None
+    outcome = {
+      'attribution':'proven',
+      'coverage':{
+        'unit':'commit_fact',
+        'evaluated':match_count,
+        'proven':match_count,
+        'possible':0,
+        'conflicting':0,
+        'none':0
+      }
+    }
 elif kind == 'file':
     if 'git_read' not in capabilities or not os.environ.get('CTX_PRO_GIT_EXECUTABLE'):
         sys.exit(24)
@@ -792,6 +804,18 @@ elif kind == 'file':
       }
     }]
     snapshot = {'head_oid':'deadbeef', 'worktree_status':'clean'}
+    line_count = lines['end'] - lines['start'] + 1
+    outcome = {
+      'attribution':'none',
+      'coverage':{
+        'unit':'committed_line',
+        'evaluated':line_count,
+        'proven':0,
+        'possible':0,
+        'conflicting':0,
+        'none':line_count
+      }
+    }
 elif kind == 'pull_request':
     selector = target['selector']
     pull_request = {'id':'pull_request:' + selector, 'kind':'pull_request', 'display':selector}
@@ -822,6 +846,17 @@ elif kind == 'pull_request':
       }
     }]
     snapshot = None
+    outcome = {
+      'attribution':'none',
+      'coverage':{
+        'unit':'pull_request_relationship',
+        'evaluated':1,
+        'proven':0,
+        'possible':0,
+        'conflicting':0,
+        'none':1
+      }
+    }
 else:
     sys.exit(25)
 send({
@@ -831,6 +866,7 @@ send({
     'snapshot':body['expected_snapshot'],
     'target':resolved,
     'git_snapshot':snapshot,
+    'outcome':outcome,
     'matches':matches,
     'evidence':evidence,
     'next':None
@@ -901,7 +937,7 @@ response = {{
   }}}}
 }}
 payload = json.dumps(response, separators=(',', ':')).encode()
-sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 1) + struct.pack('>I', len(payload)) + payload)
+sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
 sys.stdout.buffer.flush()
 "#
     );

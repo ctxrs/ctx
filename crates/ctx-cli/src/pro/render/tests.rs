@@ -8,12 +8,12 @@ use ctx_history_core::{
     RepositoryFileInvocationKind, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
 };
 use ctx_pro_host_protocol::{
-    AgentAttribution, BlameContinuation, BlameMatch, BlameResult, CommitBlameMatch, CommitFactType,
-    CommitPredicate, ContinuationReason, EvidenceCitation, FactConfidence, FactState,
-    FileBlameMatch, GitSnapshot, LineRange, NumberedEvidence, ProductionRelationship,
-    PullRequestAction, PullRequestActivity, PullRequestBlameMatch, PullRequestBlameRelationship,
-    PullRequestCommit, PullRequestCommitRelationship, ResolvedBlameTarget, ResourceKind,
-    ResourceRef, WorktreeStatus,
+    AgentAttribution, BlameAttribution, BlameContinuation, BlameCoverage, BlameCoverageUnit,
+    BlameMatch, BlameOutcome, BlameResult, CommitBlameMatch, CommitFactType, CommitPredicate,
+    ContinuationReason, EvidenceCitation, FactConfidence, FactState, FileBlameMatch, GitSnapshot,
+    LineRange, NumberedEvidence, ProductionRelationship, PullRequestAction, PullRequestActivity,
+    PullRequestBlameMatch, PullRequestBlameRelationship, PullRequestCommit,
+    PullRequestCommitRelationship, ResolvedBlameTarget, ResourceKind, ResourceRef, WorktreeStatus,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -33,6 +33,43 @@ fn protocol_snapshot() -> ctx_pro_host_protocol::QuerySnapshotExpectation {
             core_generation_id: "a".repeat(64),
             materializer_revision: "materializer-v1".to_owned(),
         },
+    }
+}
+
+fn outcome(
+    unit: BlameCoverageUnit,
+    proven: u32,
+    possible: u32,
+    conflicting: u32,
+    none: u32,
+) -> BlameOutcome {
+    let evaluated = proven + possible + conflicting + none;
+    let attribution = if conflicting > 0 {
+        BlameAttribution::Conflicting
+    } else if evaluated > 0 && proven == evaluated {
+        BlameAttribution::Proven
+    } else if proven > 0 || possible > 0 {
+        BlameAttribution::Possible
+    } else {
+        BlameAttribution::None
+    };
+    BlameOutcome {
+        attribution,
+        coverage: BlameCoverage {
+            unit,
+            evaluated,
+            proven,
+            possible,
+            conflicting,
+            none,
+        },
+    }
+}
+
+fn current(result: BlameResult) -> crate::pro::HostedBlameResult {
+    crate::pro::HostedBlameResult {
+        result,
+        freshness: crate::pro::BlameResultFreshness::Current,
     }
 }
 
@@ -72,7 +109,12 @@ fn print_blame_result_with_evidence_preview(
     previews: &EvidencePreviewModel,
     ui: &mut crate::ui::Ui,
 ) -> anyhow::Result<usize> {
-    super::print_blame_result_with_evidence_preview(result, json_output, previews, ui)
+    super::print_blame_result_with_evidence_preview(
+        &current(result.clone()),
+        json_output,
+        previews,
+        ui,
+    )
 }
 
 #[derive(Clone, Default)]
@@ -117,6 +159,7 @@ fn file_preview_result(evidence_count: u32) -> BlameResult {
             head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             worktree_status: WorktreeStatus::Clean,
         }),
+        outcome: outcome(BlameCoverageUnit::CommittedLine, 0, 0, 0, 0),
         matches: Vec::new(),
         evidence,
         next: None,
@@ -135,6 +178,7 @@ fn commit_blame_result(evidence_count: u32) -> BlameResult {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 0, 0, 0, 0),
         matches: Vec::new(),
         evidence: (1..=evidence_count).map(event_evidence).collect(),
         next: None,
@@ -312,6 +356,7 @@ fn direct_commit_blame_shows_its_parent_session() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
         matches: vec![item],
         evidence: vec![event_evidence(1)],
         next: None,
@@ -364,6 +409,7 @@ fn commit_renderer_keeps_production_grouping_golden() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 1, 0, 1),
         matches: vec![
             commit_match(
                 &commit,
@@ -426,6 +472,7 @@ fn pull_request_renderer_preserves_proof_edges_and_continuation_golden() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::PullRequestRelationship, 0, 1, 0, 1),
         matches: vec![
             BlameMatch::PullRequest(PullRequestBlameMatch {
                 pull_request: pull_request.clone(),
@@ -518,6 +565,7 @@ fn paginated_pr_result(commit_page: bool) -> BlameResult {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::PullRequestRelationship, 0, 0, 0, 1),
         matches: vec![BlameMatch::PullRequest(PullRequestBlameMatch {
             pull_request,
             relationship,
@@ -566,6 +614,7 @@ fn paginated_file_result() -> BlameResult {
             head_oid: "deadbeef".to_owned(),
             worktree_status: WorktreeStatus::Differs,
         }),
+        outcome: outcome(BlameCoverageUnit::CommittedLine, 0, 0, 0, 9),
         matches: vec![BlameMatch::File(FileBlameMatch {
             id: "file:42-50".to_owned(),
             lines: LineRange { start: 42, end: 50 },
@@ -616,6 +665,7 @@ fn empty_commit_page_has_a_concise_golden() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 0, 0, 0, 0),
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
@@ -637,6 +687,7 @@ fn ambiguous_commit_never_implies_an_asserted_producer_golden() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 0, 1, 0, 0),
         matches: vec![commit_match(
             &commit,
             CommitFactType::Ambiguous,
@@ -685,6 +736,7 @@ fn narrow_commit_uses_label_children_without_truncating_ids_golden() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
         matches: vec![produced],
         evidence: vec![evidence],
         next: None,
@@ -726,6 +778,7 @@ fn many_attributions_keep_two_space_ancestry_at_reference_widths() {
             head_oid: "deadbeef".to_owned(),
             worktree_status: WorktreeStatus::Differs,
         }),
+        outcome: outcome(BlameCoverageUnit::CommittedLine, 0, 20, 0, 0),
         matches: vec![BlameMatch::File(FileBlameMatch {
             id: "file:1".to_owned(),
             lines: LineRange { start: 1, end: 20 },
@@ -820,6 +873,7 @@ fn core_evidence_keeps_generation_event_source_and_sequence() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
         matches: vec![commit_match(
             &commit,
             CommitFactType::Produced,
@@ -847,6 +901,7 @@ fn styled_output_strips_to_plain_and_plain_bytes_ignore_color() {
             repository: repository(),
         },
         git_snapshot: None,
+        outcome: outcome(BlameCoverageUnit::CommitFact, 1, 0, 0, 0),
         matches: vec![commit_match(
             &commit,
             CommitFactType::Produced,
@@ -1486,13 +1541,19 @@ fn evidence_context_bytes_are_accounted_and_json_is_status_bearing() {
     let measured =
         print_blame_result_with_evidence_preview(&result, true, &model, &mut ui).unwrap();
     ui.flush().unwrap();
-    let expected_value = super::blame_result_json(&result, Some(&model));
+    let hosted = current(result.clone());
+    let expected_value = super::blame_result_json(&hosted, Some(&model));
     let mut helper_fields = expected_value.clone();
     helper_fields
         .as_object_mut()
         .unwrap()
         .remove("evidence_context");
-    assert_eq!(helper_fields, serde_json::to_value(&result).unwrap());
+    let mut expected_helper_fields = serde_json::to_value(&result).unwrap();
+    expected_helper_fields.as_object_mut().unwrap().insert(
+        "freshness".to_owned(),
+        serde_json::json!({"state": "current"}),
+    );
+    assert_eq!(helper_fields, expected_helper_fields);
     assert_eq!(expected_value["evidence_context"]["status"], "available");
     assert_eq!(
         expected_value["evidence_context"]["items"]
@@ -1509,7 +1570,7 @@ fn evidence_context_bytes_are_accounted_and_json_is_status_bearing() {
     let unavailable = EvidencePreviewModel {
         previews: Vec::new(),
     };
-    let unavailable_value = super::blame_result_json(&result, Some(&unavailable));
+    let unavailable_value = super::blame_result_json(&hosted, Some(&unavailable));
     assert_eq!(
         unavailable_value["evidence_context"]["status"],
         "unavailable"

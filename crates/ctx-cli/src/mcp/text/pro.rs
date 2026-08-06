@@ -433,6 +433,18 @@ mod tests {
                 "repository": {"id": "repo:ctx", "kind": "repository", "display": "ctxrs/ctx"}
             },
             "git_snapshot": null,
+            "outcome": {
+                "attribution": "proven",
+                "coverage": {
+                    "unit": "commit_fact",
+                    "evaluated": 1,
+                    "proven": 1,
+                    "possible": 0,
+                    "conflicting": 0,
+                    "none": 0
+                }
+            },
+            "freshness": {"state": "current"},
             "matches": [{
                 "kind": "commit",
                 "value": {

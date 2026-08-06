@@ -4,9 +4,10 @@ use std::{
 };
 
 use ctx_pro_host_protocol::{
-    AgentAttribution, BlameMatch, BlameResult, CoreMaterializationReceiptIdentity, FactConfidence,
-    FactState, FileBlameMatch, LineRange, ProductionRelationship, QuerySnapshotExpectation,
-    ResolvedBlameTarget, ResourceKind, ResourceRef,
+    AgentAttribution, BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameMatch, BlameOutcome,
+    BlameResult, CoreMaterializationReceiptIdentity, FactConfidence, FactState, FileBlameMatch,
+    LineRange, ProductionRelationship, QuerySnapshotExpectation, ResolvedBlameTarget, ResourceKind,
+    ResourceRef,
 };
 
 use crate::ui::{ColorMode, Document, RenderContext, StreamKind, TestContext, Ui};
@@ -141,6 +142,17 @@ fn same_display_lineage_leaves_machine_json_bytes_and_schema_unchanged() {
             requested_lines: None,
         },
         git_snapshot: None,
+        outcome: BlameOutcome {
+            attribution: BlameAttribution::Proven,
+            coverage: BlameCoverage {
+                unit: BlameCoverageUnit::CommittedLine,
+                evaluated: 1,
+                proven: 1,
+                possible: 0,
+                conflicting: 0,
+                none: 0,
+            },
+        },
         matches: vec![BlameMatch::File(FileBlameMatch {
             id: "file:src/lib.rs".to_owned(),
             lines: LineRange { start: 1, end: 1 },
@@ -162,10 +174,18 @@ fn same_display_lineage_leaves_machine_json_bytes_and_schema_unchanged() {
         evidence: Vec::new(),
         next: None,
     };
-    let mut expected_value = serde_json::to_value(&result).unwrap();
+    let result = crate::pro::HostedBlameResult {
+        result,
+        freshness: crate::pro::BlameResultFreshness::Current,
+    };
+    let mut expected_value = serde_json::to_value(&result.result).unwrap();
     expected_value.as_object_mut().unwrap().insert(
         "evidence_context".to_owned(),
         serde_json::json!({"status": "unavailable", "items": []}),
+    );
+    expected_value.as_object_mut().unwrap().insert(
+        "freshness".to_owned(),
+        serde_json::json!({"state": "current"}),
     );
     let mut expected_bytes = serde_json::to_vec_pretty(&expected_value).unwrap();
     expected_bytes.push(b'\n');

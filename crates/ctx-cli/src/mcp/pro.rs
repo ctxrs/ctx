@@ -371,7 +371,10 @@ mod tests {
     use std::{cell::Cell, collections::BTreeSet};
 
     use ctx_history_core::RepositoryFileInvocationKind;
-    use ctx_pro_host_protocol::{BlameResult, ResolvedBlameTarget, ResourceKind, ResourceRef};
+    use ctx_pro_host_protocol::{
+        BlameAttribution, BlameCoverage, BlameCoverageUnit, BlameOutcome, BlameResult,
+        ResolvedBlameTarget, ResourceKind, ResourceRef,
+    };
 
     use super::*;
 
@@ -381,6 +384,27 @@ mod tests {
                 core_generation_id: "a".repeat(64),
                 materializer_revision: "materializer-v1".to_owned(),
             },
+        }
+    }
+
+    fn empty_outcome(unit: BlameCoverageUnit) -> BlameOutcome {
+        BlameOutcome {
+            attribution: BlameAttribution::None,
+            coverage: BlameCoverage {
+                unit,
+                evaluated: 0,
+                proven: 0,
+                possible: 0,
+                conflicting: 0,
+                none: 0,
+            },
+        }
+    }
+
+    fn current(result: BlameResult) -> crate::pro::HostedBlameResult {
+        crate::pro::HostedBlameResult {
+            result,
+            freshness: crate::pro::BlameResultFreshness::Current,
         }
     }
 
@@ -470,6 +494,7 @@ mod tests {
                 head_oid: "0123456789abcdef0123456789abcdef01234567".to_owned(),
                 worktree_status: ctx_pro_host_protocol::WorktreeStatus::Clean,
             }),
+            outcome: empty_outcome(BlameCoverageUnit::CommittedLine),
             matches: Vec::new(),
             evidence: Vec::new(),
             next: None,
@@ -485,7 +510,8 @@ mod tests {
                 excerpt: "modified: src/lib.rs".to_owned(),
             }],
         };
-        let expected = crate::pro::blame_result_json(&result, Some(&model));
+        let hosted = current(result.clone());
+        let expected = crate::pro::blame_result_json(&hosted, Some(&model));
         let reads = Cell::new(0usize);
         let mcp = tool_pro_blame_with(
             &json!({"target": {"kind": "file", "path": "src/lib.rs"}}),
@@ -495,7 +521,7 @@ mod tests {
                 repository: None,
                 lines: None,
             }),
-            |_, _, _, _| Ok(result.clone()),
+            |_, _, _, _| Ok(hosted.clone()),
             |_, _| {
                 reads.set(reads.get() + 1);
                 model.clone()
@@ -520,7 +546,7 @@ mod tests {
                 repository: None,
                 lines: None,
             }),
-            |_, _, _, _| Ok(result.clone()),
+            |_, _, _, _| Ok(hosted.clone()),
             |_, _| crate::pro::evidence_preview::EvidencePreviewModel {
                 previews: Vec::new(),
             },
@@ -530,7 +556,7 @@ mod tests {
         let empty_model = crate::pro::evidence_preview::EvidencePreviewModel {
             previews: Vec::new(),
         };
-        let expected_unavailable = crate::pro::blame_result_json(&result, Some(&empty_model));
+        let expected_unavailable = crate::pro::blame_result_json(&hosted, Some(&empty_model));
         assert_eq!(unavailable, expected_unavailable);
         assert_eq!(unavailable["evidence_context"]["status"], "unavailable");
         assert_eq!(
@@ -564,6 +590,7 @@ mod tests {
                         repository: repository.clone(),
                     },
                     git_snapshot: None,
+                    outcome: empty_outcome(BlameCoverageUnit::CommitFact),
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
@@ -587,18 +614,20 @@ mod tests {
                         repository: repository.clone(),
                     },
                     git_snapshot: None,
+                    outcome: empty_outcome(BlameCoverageUnit::PullRequestRelationship),
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
                 },
             ),
         ] {
-            let expected = crate::pro::blame_result_json(&result, None);
+            let hosted = current(result);
+            let expected = crate::pro::blame_result_json(&hosted, None);
             let output = tool_pro_blame_with(
                 &arguments,
                 std::path::Path::new("/unopened"),
                 Ok(target),
-                |_, _, _, _| Ok(result.clone()),
+                |_, _, _, _| Ok(hosted.clone()),
                 |_, _| panic!("non-file MCP blame performed an evidence hydration read"),
             )
             .value
