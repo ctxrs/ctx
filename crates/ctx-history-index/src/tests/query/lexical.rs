@@ -42,8 +42,9 @@ fn with_produced_object(mut record: CoreRecord, object_id: GitObjectId) -> CoreR
             kind: RepositoryVcsObservationKind::Outcome(Box::new(RepositoryOutcomeObservation {
                 kind: RepositoryOutcomeKind::Commit,
                 produced_object_ids: vec![object_id],
-                replacement_lineage: Vec::new(),
+                commit_operation: None,
                 pull_request: None,
+                pull_request_merge_commit: None,
                 observed_at_unix_ms: 1_700_000_000_000,
                 linkage: RepositoryOutcomeLinkage {
                     provider: "codex".to_owned(),

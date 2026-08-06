@@ -139,6 +139,109 @@ fn one_event_is_bounded_to_two_full_certificates_and_the_git_subprocess_budget()
     assert!(attributor.git_subprocess_count() <= git::MAX_GIT_SUBPROCESSES_PER_EVENT);
 }
 
+#[test]
+fn plural_operation_objects_are_batch_verified_with_an_explicit_unique_bound() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "plural-operation-objects", None);
+    let mut object_ids = vec![GitObjectId {
+        format: GitObjectFormat::Sha1,
+        hex: git_output(&repo, &["rev-parse", "HEAD"]),
+    }];
+    for index in 0..3 {
+        fs::write(
+            repo.join(format!("mapped-{index}.txt")),
+            format!("{index}\n"),
+        )
+        .unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-qm", &format!("mapped {index}")]);
+        object_ids.push(GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: git_output(&repo, &["rev-parse", "HEAD"]),
+        });
+    }
+    object_ids.sort();
+
+    let certifier = GitCertifier::default();
+    let certificate = certifier
+        .certify(
+            &repo,
+            CandidateKind::Directory,
+            RepositoryEvidenceKind::DeclaredToolWorkdir,
+        )
+        .unwrap();
+    let subprocesses_before = certifier.git_subprocess_count();
+    let mut budget = git::EventProbeBudget::new();
+    let domain = certifier
+        .verify_commit_operation_objects(&certificate, &object_ids, &mut budget)
+        .unwrap();
+    assert_ne!(domain, [0; 32]);
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 2);
+
+    let over_bound = (0..=git::MAX_VERIFIED_COMMIT_OPERATION_OBJECTS)
+        .map(|index| GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex: format!("{:040x}", index + 1),
+        })
+        .collect::<Vec<_>>();
+    let failure = certifier
+        .verify_commit_operation_objects(&certificate, &over_bound, &mut budget)
+        .unwrap_err();
+    assert_eq!(
+        failure,
+        git::ProbeFailure::Failed("commit_operation_object_bound_exceeded")
+    );
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn mapped_object_removed_after_first_operation_read_fails_recertification() {
+    let temp = TempDir::new().unwrap();
+    let repo = repository(temp.path(), "mapped-object-removal", None);
+    let removed_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("next.txt"), "next\n").unwrap();
+    run_git(&repo, &["add", "next.txt"]);
+    run_git(&repo, &["commit", "-qm", "next mapped object"]);
+    let next_oid = git_output(&repo, &["rev-parse", "HEAD"]);
+    let mut object_ids = [removed_oid.clone(), next_oid]
+        .into_iter()
+        .map(|hex| GitObjectId {
+            format: GitObjectFormat::Sha1,
+            hex,
+        })
+        .collect::<Vec<_>>();
+    object_ids.sort();
+
+    let removed_object = loose_object_path(&repo, &removed_oid);
+    assert!(removed_object.is_file());
+    let certifier = GitCertifier::for_test(
+        delegating_git_with_object_mutation(temp.path(), &removed_object, None),
+        Duration::from_secs(2),
+    );
+    let certificate = certifier
+        .certify(
+            &repo,
+            CandidateKind::Directory,
+            RepositoryEvidenceKind::DeclaredToolWorkdir,
+        )
+        .unwrap();
+    let subprocesses_before = certifier.git_subprocess_count();
+
+    let failure = certifier
+        .verify_commit_operation_objects(
+            &certificate,
+            &object_ids,
+            &mut git::EventProbeBudget::new(),
+        )
+        .unwrap_err();
+
+    assert_eq!(failure, ProbeFailure::Failed("git_command_failed"));
+    assert_eq!(certifier.git_subprocess_count(), subprocesses_before + 2);
+    assert!(!removed_object.exists());
+    assert!(temp.path().join("mapped-object-first-read").is_dir());
+}
+
 #[cfg(unix)]
 #[test]
 fn every_candidate_route_is_revalidated_in_both_ancestor_descendant_orders() {

@@ -510,6 +510,7 @@ fn commit_and_pr_results_skip_hydration_for_text_and_json() {
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
+                    lineage: None,
                 }))
             },
             |_, _| panic!("non-file blame performed an evidence hydration read"),
@@ -574,6 +575,7 @@ fn file_hydration_is_automatic_for_text_and_json_and_empty_context_is_nonfatal()
                     matches: Vec::new(),
                     evidence: Vec::new(),
                     next: None,
+                    lineage: None,
                 }))
             },
             |_, _| {
@@ -631,6 +633,7 @@ fn output_failure_does_not_retain_blame_result_or_citation_counts() {
         )],
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     });
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
@@ -683,6 +686,7 @@ fn successful_blame_observes_structured_results_and_empty_pages() {
         )],
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     });
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut usage = crate::local_usage::CliUsage::from_command(&cli.command);
@@ -741,6 +745,7 @@ fn human_byte_accounting_is_plain_and_invariant_across_color_modes() {
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     });
     let cli = crate::Cli::try_parse_from(["ctx", "blame", "commit", "abc1234"]).unwrap();
     let mut observations = Vec::new();
@@ -794,6 +799,7 @@ fn automatic_evidence_context_bytes_are_included_in_local_usage_accounting() {
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     });
     let previews = crate::pro::evidence_preview::EvidencePreviewModel {
         previews: vec![crate::pro::evidence_preview::EvidencePreview {
@@ -864,6 +870,7 @@ fn referral_cta_requires_nonempty_interactive_human_success() {
         )],
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     });
 
     assert!(referral_cta_eligible(&result, false, true));

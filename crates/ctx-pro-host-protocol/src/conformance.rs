@@ -306,7 +306,7 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     assert_eq!(
         canonical["core_record_contract"],
         serde_json::json!({
-            "fingerprint": "db35cdc4758894ad0059048e2c7764bf20de7347d341f6a2cc5cbdda20d67fa0",
+            "fingerprint": "0610be9a5810ce742b505dc4c3b3db24e9ab795126a6b62e0ef2172e04a85cc3",
             "leaf": {
                 "helper": "ctx_pro_host_protocol::core_record_leaf_sha256",
                 "paired_helper": "ctx_pro_host_protocol::core_record_digests",
@@ -319,12 +319,12 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
                 "identity": "ctx-core-record-event-binding-v1\0",
                 "algorithm": "sum_mod_2^256(sha256(identity_then_u64_be_canonical_event_id_length_then_canonical_event_id_then_core_record_leaf))"
             },
-            "repository_contract_revision": 8,
-            "repository_observation_revision": 4,
-            "bounded_shell_subset_revision": 3,
+            "repository_contract_revision": 11,
+            "repository_observation_revision": 5,
+            "bounded_shell_subset_revision": 4,
             "repository_association_policy_revision": 6,
             "repository_pull_request_association_capture_revision": 3,
-            "repository_outcome_capture_revision": 4,
+            "repository_outcome_capture_revision": 5,
             "repository_local_root_authorization_fingerprint_revision": 1,
             "mcp_tool_call_attribution_revision": 1,
             "session_lineage_revision": 1,
@@ -348,9 +348,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
         value["golden_vectors"]["core_record_digests"],
         serde_json::json!({
             "core_record_sha256":
-                "ea595771c021b4af15e80b79fc52a4845eb223838035e0b898a3c00e13e062eb",
+                "24578fd6c6577ff86d143ea86d1d96ef079a1d2b544808dae3e9018f1c4ddaf4",
             "core_record_leaf_sha256":
-                "a3c03d3e0a15b2aae40d0fcf231642f7884c04aec5332e6ca1968a5dce687cf6"
+                "f068e6f140d7e03c215fd0233171a15edaddc2c89456a3403c194a62f677af08"
         })
     );
 
@@ -362,9 +362,9 @@ fn inventory_freezes_candidate_sets_and_active_repository_revisions() {
     let envelope: Value = serde_json::from_slice(&frame[FRAME_HEADER_BYTES..]).unwrap();
     let evidence =
         &envelope["message"]["body"]["page"]["deltas"][0]["value"]["repository_candidate_evidence"];
-    assert_eq!(evidence["repository_observation_revision"], 4);
+    assert_eq!(evidence["repository_observation_revision"], 5);
     assert_eq!(evidence["association_policy_revision"], 6);
-    assert_eq!(evidence["outcome_capture_revision"], 4);
+    assert_eq!(evidence["outcome_capture_revision"], 5);
     assert_eq!(
         evidence["candidates"],
         serde_json::json!([
@@ -615,7 +615,7 @@ fn every_generated_frame_round_trips_and_names_match_typed_kinds() {
 }
 
 #[test]
-fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract() {
+fn inventory_freezes_blame_outcome_diagnostics_and_commit_lineage() {
     let value = inventory();
     let canonical = &value["canonical_inventory"];
     assert_eq!(canonical["protocol_version"], serde_json::json!(2));
@@ -628,10 +628,48 @@ fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract()
     let HelperMessage::Blame(result) = envelope.message else {
         panic!("blame response kind");
     };
+    let actual = serde_json::to_value(result).expect("blame response JSON");
+    assert_inventory_fields_match_actual(canonical, "BlameResult", &actual);
+    let lineage = &actual["lineage"];
+    assert_inventory_fields_match_actual(canonical, "CommitLineage", lineage);
+    assert_inventory_fields_match_actual(canonical, "ExactCommitRef", &lineage["requested"]);
+    assert_inventory_fields_match_actual(canonical, "CommitLineageEdge", &lineage["edges"][0]);
+    assert_inventory_fields_match_actual(canonical, "CommitLineageBounds", &lineage["bounds"]);
     assert_inventory_fields_match_actual(
         canonical,
-        "BlameResult",
-        &serde_json::to_value(result).expect("blame response JSON"),
+        "ScopedCommitEndpoint.current_at_ref",
+        &lineage["endpoint"],
+    );
+    assert_eq!(
+        canonical["commit_lineage_contract"],
+        serde_json::json!({
+            "operation_kinds": ["amend", "rebase", "cherry_pick"],
+            "relation_classes": ["replacement", "derivation"],
+            "proof_classes": ["record_exact", "repository_verified", "forge_verified"],
+            "states": ["asserted", "ambiguous", "contradicted"],
+            "omission_kinds": ["exact", "at_least", "unknown"],
+            "truncation_reasons": [
+                "returned_event_limit", "examined_event_limit", "evidence_gap"
+            ],
+            "endpoint_kinds": ["current_at_ref", "current_for_pr"],
+            "stable_edge_order": [
+                "operation_id", "operation_kind", "logical_repository_id",
+                "source_object_format", "source_oid", "result_object_format", "result_oid"
+            ],
+            "stable_yield_order": ["operation_id", "yield_id", "actor_id"],
+            "commit_identity":
+                "canonical_logical_repository_id_plus_object_format_plus_full_oid",
+            "operation_id": "canonical_lowercase_sha256_digest",
+            "operation_grouping":
+                "edges_and_yields_share_operation_id_and_consistent_metadata",
+            "returned_event_count": "distinct_operation_ids_across_edges_and_yields",
+            "asserted_yield_proof": "repository_verified",
+            "connectivity":
+                "all_operations_connect_to_requested_and_claimed_origins_and_endpoints_follow_directed_reachability",
+            "root_ambiguity":
+                "multiple_directed_roots_to_requested_require_ambiguous_and_suppress_origin",
+            "match_pagination": "independent"
+        })
     );
     assert_eq!(
         canonical["dto_fields"]["BlameResult"]["required"],
@@ -642,7 +680,8 @@ fn inventory_freezes_the_blame_result_snapshot_outcome_and_diagnostic_contract()
             "outcome",
             "matches",
             "evidence",
-            "next"
+            "next",
+            "lineage"
         ])
     );
     assert_eq!(

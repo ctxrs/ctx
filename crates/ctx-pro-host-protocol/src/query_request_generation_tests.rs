@@ -1,4 +1,7 @@
-use crate::SourceKey;
+use crate::{
+    CommitLineageBounds, CommitLineageOmission, ExactCommitRef, GitObjectFormat, SourceKey,
+    MAX_COMMIT_LINEAGE_EXAMINED_EVENTS, MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+};
 use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
     SessionIdentityInput, SourceAnchor, TypedKey,
@@ -123,6 +126,7 @@ fn file_result(result_snapshot: QuerySnapshotExpectation, generations: &[String]
         })],
         evidence,
         next: None,
+        lineage: None,
     }
 }
 
@@ -156,6 +160,7 @@ fn empty_file_result(result_snapshot: QuerySnapshotExpectation) -> BlameResult {
         matches: Vec::new(),
         evidence: Vec::new(),
         next: None,
+        lineage: None,
     }
 }
 
@@ -279,6 +284,7 @@ fn commit_result(matches: Vec<BlameMatch>, outcome: BlameOutcome) -> BlameResult
             citation: citation(&"a".repeat(64)),
         }],
         next: None,
+        lineage: None,
     }
 }
 
@@ -345,7 +351,40 @@ fn pull_request_result(matches: Vec<BlameMatch>, outcome: BlameOutcome) -> Blame
             citation: citation(&"a".repeat(64)),
         }],
         next: None,
+        lineage: None,
     }
+}
+
+#[test]
+fn non_commit_blame_result_rejects_commit_lineage() {
+    let mut result = empty_file_result(snapshot('a', "materializer-v1"));
+    let oid = "1".repeat(40);
+    result.lineage = Some(CommitLineage {
+        requested: ExactCommitRef {
+            resource: resource("commit:one", ResourceKind::Commit, &oid),
+            logical_repository_id: "ctxrs/ctx".to_owned(),
+            object_format: GitObjectFormat::Sha1,
+            oid,
+        },
+        edges: Vec::new(),
+        yielded_by: Vec::new(),
+        origin: None,
+        endpoint: None,
+        complete: true,
+        ambiguous: false,
+        bounds: CommitLineageBounds {
+            returned_events: 0,
+            returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+            examined_events: 0,
+            examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+            omission: CommitLineageOmission::Exact(0),
+            truncation_reason: None,
+        },
+    });
+
+    let error = result.validate().unwrap_err();
+    assert_eq!(error.class, ErrorClass::Corrupt);
+    assert!(error.message.contains("only valid for commit blame"));
 }
 
 #[test]
@@ -661,6 +700,45 @@ fn commit_coverage_detects_page_wide_producer_conflicts_and_duplicate_fact_units
         duplicate.validate().unwrap_err().message,
         "commit blame page contains duplicate fact units"
     );
+}
+
+#[test]
+fn commit_producer_conflicts_are_scoped_to_the_exact_commit_subject() {
+    let mut first_match = commit_match(
+        "produced-a",
+        CommitFactType::Produced,
+        FactState::Asserted,
+        "session:a",
+    );
+    let mut second_match = commit_match(
+        "produced-b",
+        CommitFactType::Produced,
+        FactState::Asserted,
+        "session:b",
+    );
+    let BlameMatch::Commit(first) = &mut first_match else {
+        unreachable!();
+    };
+    first.subject = resource(
+        "commit:first",
+        ResourceKind::Commit,
+        "1111111111111111111111111111111111111111",
+    );
+    let BlameMatch::Commit(second) = &mut second_match else {
+        unreachable!();
+    };
+    second.subject = resource(
+        "commit:second",
+        ResourceKind::Commit,
+        "2222222222222222222222222222222222222222",
+    );
+
+    commit_result(
+        vec![first_match, second_match],
+        outcome(BlameCoverageUnit::CommitFact, 2, 0, 0, 0),
+    )
+    .validate()
+    .unwrap();
 }
 
 #[test]

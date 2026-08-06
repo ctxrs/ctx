@@ -265,7 +265,7 @@ impl OpenClawProjector {
         {
             append_invocation_abstention(&mut annotation, abstention);
         }
-        apply_annotation(&mut record, annotation);
+        apply_annotation(&mut record, annotation).map_err(contract)?;
         record.content.discovery_exclusion = ctx_retrieval::discovery_exclusion_for(
             source_contribution.into_iter().chain(result_contribution),
         );

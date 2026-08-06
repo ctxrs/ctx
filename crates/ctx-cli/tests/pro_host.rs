@@ -406,8 +406,23 @@ fn blame_commit_negotiates_the_exact_protocol_and_returns_typed_json() {
         })
     );
     assert_eq!(value["freshness"]["state"], "current");
+    let exact_oid = format!("{}{}", "0123456789abcdef", "0".repeat(24));
+    assert_eq!(value["target"]["commit"]["display"], exact_oid);
     assert_eq!(value["matches"][0]["kind"], "commit");
     assert_eq!(value["matches"][0]["value"]["predicate"], "produced_by");
+    assert_eq!(value["lineage"]["requested"]["oid"], exact_oid);
+    assert_eq!(value["lineage"]["edges"][0]["kind"], "rebase");
+    assert_eq!(
+        value["lineage"]["edges"][0]["relation_class"],
+        "replacement"
+    );
+    assert_eq!(
+        value["lineage"]["edges"][0]["actor"]["display"],
+        "session-producer"
+    );
+    assert_eq!(value["lineage"]["endpoint"]["kind"], "current_at_ref");
+    assert_eq!(value["lineage"]["complete"], true);
+    assert_eq!(value["lineage"]["ambiguous"], false);
     assert_eq!(value["evidence"].as_array().map(Vec::len), Some(1));
     assert!(value.get("payload_type").is_none());
     assert!(value.get("summary").is_none());
@@ -457,13 +472,13 @@ fn missing_blame_resource_keeps_stable_json_mode_code() {
 }
 
 #[test]
-fn commit_blame_human_output_preserves_production_grouping() {
+fn commit_blame_human_output_prefers_exact_lineage_without_actor_duplication() {
     let root = tempdir().unwrap();
     initialize_current_query_store(root.path());
     let helper = root.path().join("ctx-pro-blame");
     write_blame_helper(&helper);
 
-    Command::cargo_bin("ctx")
+    let output = Command::cargo_bin("ctx")
         .unwrap()
         .env("CTX_PRO_HELPER", &helper)
         .args([
@@ -473,17 +488,35 @@ fn commit_blame_human_output_preserves_production_grouping() {
             "commit",
             "0123456789abcdef",
         ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Produced by\n  session session-producer\n    id",
-        ))
-        .stdout(predicate::str::contains("state         asserted"))
-        .stdout(predicate::str::contains(
-            "Evidence\n  [1]  ctx show event d863cb84-6bd3-8071-abdb-5326c44c896a",
-        ))
-        .stdout(predicate::str::contains("\u{1b}[").not())
-        .stdout(predicate::str::contains("Also recorded").not());
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered = String::from_utf8(output.stdout).unwrap();
+    assert!(rendered.contains("Lineage · complete"), "{rendered}");
+    assert!(
+        rendered.contains("outcome       operation yielded this commit"),
+        "{rendered}"
+    );
+    assert_eq!(
+        rendered.matches("session session-producer").count(),
+        1,
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("commit lineage does not establish who implemented the code"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Evidence\n  [1]  ctx show event d863cb84-6bd3-8071-abdb-5326c44c896a"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Produced by"), "{rendered}");
+    assert!(!rendered.contains("\u{1b}["), "{rendered}");
+    assert!(!rendered.contains("Also recorded"), "{rendered}");
 }
 
 #[test]

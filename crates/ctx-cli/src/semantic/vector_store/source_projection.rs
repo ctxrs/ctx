@@ -66,7 +66,7 @@ pub(super) struct SourceBackedSemanticGeneration {
 }
 
 impl SourceBackedSemanticGeneration {
-    /// Binds semantic catch-up to one verified schema-v15 Core manifest and
+    /// Binds semantic catch-up to one verified current-schema Core manifest and
     /// mirrors its exact per-source Core commitments.
     pub(super) fn from_verified_index(index: &VerifiedIndex) -> Result<Self> {
         Self::from_verified_index_with_policy(index, current_semantic_generation_policy())

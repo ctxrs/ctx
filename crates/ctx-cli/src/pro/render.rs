@@ -12,6 +12,7 @@ mod evidence;
 mod file;
 mod human;
 mod layout;
+mod lineage;
 mod pull_request;
 mod relationships;
 mod target;

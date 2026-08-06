@@ -8,9 +8,9 @@ mod scoping;
 mod shell;
 
 use ctx_history_core::{
-    CoreRecordAnnotation, GitObjectId, RepositoryAbstentionReason, RepositoryAlias,
-    RepositoryFileInvocationKind, RepositoryFileInvocationTextRange, RepositoryFileObservationKind,
-    RepositoryVcsObservationKind,
+    CoreRecordAnnotation, CoreRecordResult, GitObjectId, RepositoryAbstentionReason,
+    RepositoryAlias, RepositoryFileInvocationKind, RepositoryFileInvocationTextRange,
+    RepositoryFileObservationKind, RepositoryVcsObservationKind,
 };
 use serde_json::Value;
 
@@ -93,7 +93,7 @@ pub(crate) enum CommandEvidenceDisposition {
 pub(crate) fn apply_annotation(
     record: &mut ctx_history_core::CoreRecord,
     annotation: CoreRecordAnnotation,
-) {
+) -> CoreRecordResult<()> {
     record.content.structured_content = annotation.structured_content;
     record.metadata = annotation.metadata;
     record.repository_candidate_evidence = annotation.repository_candidate_evidence;
@@ -102,6 +102,7 @@ pub(crate) fn apply_annotation(
     record.repository_file_invocation_evidence = annotation.repository_file_invocation_evidence;
     record.repository_file_observations = annotation.repository_file_observations;
     record.repository_vcs_observations = annotation.repository_vcs_observations;
+    record.bind_repository_commit_operation_identities()
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use crate::ui::{hint, Action, Document, Hint, RenderContext, Token};
 use super::{
     commit, evidence, file,
     layout::{push_authored, push_heading, push_notice},
-    pull_request, target, BlameEvidenceContext,
+    lineage, pull_request, target, BlameEvidenceContext,
 };
 use crate::pro::diagnostic::BlameNextAction;
 use crate::pro::BlameResultFreshness;
@@ -44,7 +44,15 @@ pub(super) fn render(
     match &result.target {
         ResolvedBlameTarget::File { .. } => file::render(&mut document, context, &result.matches),
         ResolvedBlameTarget::Commit { commit, .. } => {
-            commit::render(&mut document, context, commit, &result.matches)
+            if let Some(lineage) = &result.lineage {
+                lineage::render(&mut document, context, lineage);
+                if commit::has_observations(commit, &result.matches) {
+                    document.push_blank();
+                    commit::render_observations(&mut document, context, commit, &result.matches);
+                }
+            } else {
+                commit::render(&mut document, context, commit, &result.matches);
+            }
         }
         ResolvedBlameTarget::PullRequest { .. } => {
             pull_request::render(&mut document, context, &result.matches)

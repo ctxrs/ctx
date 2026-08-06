@@ -28,6 +28,7 @@ use crate::OutputOutcome;
 mod certification;
 #[cfg(unix)]
 mod local_root_authorization;
+mod outcome_parser;
 mod pull_request_association;
 
 fn run_git(path: &Path, arguments: &[&str]) {
@@ -55,6 +56,72 @@ fn git_output(path: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+#[cfg(unix)]
+fn loose_object_path(repository: &Path, oid: &str) -> PathBuf {
+    repository
+        .join(".git/objects")
+        .join(&oid[..2])
+        .join(&oid[2..])
+}
+
+#[cfg(unix)]
+fn shell_quote_path(path: &Path) -> String {
+    format!(
+        "'{}'",
+        path.to_str()
+            .expect("test fixture paths must be UTF-8")
+            .replace('\'', "'\"'\"'")
+    )
+}
+
+#[cfg(unix)]
+fn delegating_git_with_object_mutation(
+    fixture_root: &Path,
+    target: &Path,
+    replacement: Option<&Path>,
+) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let wrapper = fixture_root.join("delegating-git");
+    let first_read_marker = fixture_root.join("mapped-object-first-read");
+    let target = shell_quote_path(target);
+    let mutation = replacement.map_or_else(
+        || format!("        /usr/bin/rm -- {target}\n"),
+        |replacement| {
+            let replacement = shell_quote_path(replacement);
+            format!(
+                "        /usr/bin/rm -- {target}\n        /usr/bin/cp -- {replacement} {target}\n"
+            )
+        },
+    );
+    let body = format!(
+        "#!/bin/sh\n\
+         saw_show=0\n\
+         saw_exact_format=0\n\
+         for argument in \"$@\"; do\n\
+             case \"$argument\" in\n\
+                 show) saw_show=1 ;;\n\
+                 --format=%H) saw_exact_format=1 ;;\n\
+             esac\n\
+         done\n\
+         /usr/bin/git \"$@\"\n\
+         status=$?\n\
+         if [ \"$status\" -eq 0 ] && [ \"$saw_show\" -eq 1 ] && [ \"$saw_exact_format\" -eq 1 ]; then\n\
+             if /usr/bin/mkdir {} 2>/dev/null; then\n\
+         {}\
+             fi\n\
+         fi\n\
+         exit \"$status\"\n",
+        shell_quote_path(&first_read_marker),
+        mutation,
+    );
+    fs::write(&wrapper, body).unwrap();
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+    wrapper
+}
+
 fn repository(parent: &Path, name: &str, remote: Option<&str>) -> PathBuf {
     let path = parent.join(name);
     fs::create_dir(&path).unwrap();
@@ -68,6 +135,28 @@ fn repository(parent: &Path, name: &str, remote: Option<&str>) -> PathBuf {
     run_git(&path, &["add", "tracked.txt"]);
     run_git(&path, &["commit", "-qm", "fixture"]);
     path
+}
+
+fn sha256_repository(parent: &Path, name: &str) -> Option<PathBuf> {
+    let path = parent.join(name);
+    fs::create_dir(&path).unwrap();
+    let initialized = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&path)
+        .args(["init", "-q", "--object-format=sha256"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .unwrap();
+    if !initialized.success() {
+        return None;
+    }
+    run_git(&path, &["config", "user.name", "ctx test"]);
+    run_git(&path, &["config", "user.email", "ctx@example.invalid"]);
+    fs::write(path.join("tracked.txt"), "tracked\n").unwrap();
+    run_git(&path, &["add", "tracked.txt"]);
+    run_git(&path, &["commit", "-qm", "fixture"]);
+    Some(path)
 }
 
 fn forge(namespace: &str, name: &str) -> RepositoryAlias {

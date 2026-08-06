@@ -95,6 +95,7 @@ pub(super) fn project_event(
         content.annotation.repository_file_invocation_evidence;
     record.repository_file_observations = content.annotation.repository_file_observations;
     record.repository_vcs_observations = content.annotation.repository_vcs_observations;
+    record.bind_repository_commit_operation_identities()?;
     record.validate_contract()?;
     Ok(record)
 }

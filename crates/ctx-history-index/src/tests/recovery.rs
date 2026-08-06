@@ -484,8 +484,9 @@ fn query_projection_fixture_record(source: &SourceKey, body: &str) -> CoreRecord
                     format: GitObjectFormat::Sha1,
                     hex: "a".repeat(40),
                 }],
-                replacement_lineage: Vec::new(),
+                commit_operation: None,
                 pull_request: None,
+                pull_request_merge_commit: None,
                 observed_at_unix_ms: 1_700_000_000_000,
                 linkage: RepositoryOutcomeLinkage {
                     provider: "codex".to_owned(),

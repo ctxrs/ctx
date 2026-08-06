@@ -566,7 +566,7 @@ pub(super) fn core_record(
     {
         append_invocation_abstention(&mut attribution, abstention);
     }
-    apply_annotation(&mut record, attribution);
+    apply_annotation(&mut record, attribution)?;
     if let Some(native_file_touches) = native_file_touches {
         record.metadata.insert(
             "provider_native_file_touches".to_owned(),

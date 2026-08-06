@@ -19,15 +19,19 @@ pub use mcp_exchange::{
     CORE_MCP_EXCHANGE_REVISION, MAX_MCP_EXCHANGE_CALL_ID_BYTES,
 };
 pub use repository::{
-    GitObjectFormat, GitObjectId, RepositoryAbstention, RepositoryAbstentionReason,
-    RepositoryAlias, RepositoryAliasKind, RepositoryBinding, RepositoryCandidate,
-    RepositoryCandidateEvidence, RepositoryCandidateKind, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileInvocationEvidence,
-    RepositoryFileInvocationKind, RepositoryFileInvocationTextRange, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryLocalRootAuthorization, RepositoryObjectReplacement,
-    RepositoryOutcomeKind, RepositoryOutcomeLinkage, RepositoryOutcomeObservation,
-    RepositoryPullRequestAssociationObservation, RepositoryPullRequestIdentity,
-    RepositoryVcsObservation, RepositoryVcsObservationKind,
+    repository_commit_operation_event_id, repository_outcome_receipt_id,
+    repository_result_map_sha256, GitObjectFormat, GitObjectId, RepositoryAbstention,
+    RepositoryAbstentionReason, RepositoryAlias, RepositoryAliasKind, RepositoryBinding,
+    RepositoryCandidate, RepositoryCandidateEvidence, RepositoryCandidateKind,
+    RepositoryCommitMapping, RepositoryCommitMappingCompleteness, RepositoryCommitOperationClass,
+    RepositoryCommitOperationEvent, RepositoryCommitOperationKind, RepositoryCommitOperationProof,
+    RepositoryCommitOperationState, RepositoryEvidence, RepositoryEvidenceConfidence,
+    RepositoryEvidenceKind, RepositoryFileInvocationEvidence, RepositoryFileInvocationKind,
+    RepositoryFileInvocationTextRange, RepositoryFileObservation, RepositoryFileObservationKind,
+    RepositoryLocalRootAuthorization, RepositoryOutcomeKind, RepositoryOutcomeLinkage,
+    RepositoryOutcomeObservation, RepositoryPullRequestAssociationObservation,
+    RepositoryPullRequestIdentity, RepositoryVcsObservation, RepositoryVcsObservationKind,
+    RepositoryVerifiedYieldProof,
 };
 use validation::{
     validate_count, validate_json_map, validate_optional_text, validate_owned_identity,
@@ -46,12 +50,12 @@ pub const CORE_RECORD_LEAF_DOMAIN: &[u8] = b"ctx-core-record-leaf-v1\0";
 /// This identity is part of the Core record contract fingerprint so a change
 /// to the accumulator cannot be interpreted under older generation semantics.
 pub const CORE_RECORD_ACCUMULATOR_IDENTITY: &[u8] = b"ctx-core-record-event-binding-v1\0";
-pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 8;
-pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 4;
-pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 3;
+pub const CORE_REPOSITORY_CONTRACT_REVISION: u32 = 11;
+pub const CORE_REPOSITORY_OBSERVATION_REVISION: u32 = 5;
+pub const CORE_BOUNDED_SHELL_SUBSET_REVISION: u32 = 4;
 pub const CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION: u32 = 6;
 pub const CORE_REPOSITORY_PULL_REQUEST_ASSOCIATION_CAPTURE_REVISION: u32 = 3;
-pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 4;
+pub const CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION: u32 = 5;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_REVISION: u32 = 1;
 pub const CORE_REPOSITORY_LOCAL_ROOT_AUTHORIZATION_FINGERPRINT_DOMAIN: &[u8] =
     b"ctx.core.repository-local-root-fingerprint.v1\0";
@@ -69,6 +73,8 @@ pub const MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES: usize = 64 * 1024;
 
 const MAX_TEXT_METADATA_BYTES: usize = 64 * 1024;
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
+/// Maximum exact source/result pairs admitted for one commit operation.
+pub const MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS: usize = 32;
 const MAX_REPOSITORY_ITEMS: usize = 256;
 const MAX_REPOSITORY_OBSERVATIONS: usize = 4_096;
 const MAX_REPOSITORY_ALIASES: usize = 64;
@@ -804,6 +810,41 @@ impl CoreRecord {
             })
     }
 
+    /// Finalizes repository commit-operation identities after provider capture
+    /// has attached the repository annotation to this stable Core record.
+    pub fn bind_repository_commit_operation_identities(&mut self) -> CoreRecordResult<()> {
+        let bindings = self
+            .repository_bindings
+            .iter()
+            .cloned()
+            .map(|binding| (binding.binding_id.clone(), binding))
+            .collect::<BTreeMap<_, _>>();
+        for observation in &mut self.repository_vcs_observations {
+            let RepositoryVcsObservationKind::Outcome(outcome) = &mut observation.kind else {
+                continue;
+            };
+            let Some(operation) = &mut outcome.commit_operation else {
+                continue;
+            };
+            let binding = bindings
+                .get(&observation.repository_binding_id)
+                .ok_or_else(|| {
+                    CoreRecordError::UnknownRepositoryBinding(
+                        observation.repository_binding_id.clone(),
+                    )
+                })?;
+            let linkage = outcome.linkage.clone();
+            operation.bind_scoped_identity(
+                &self.source,
+                self.event_id,
+                self.session_id,
+                binding,
+                &linkage,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Retains a previously certified logical identity when the same event is
     /// rebuilt after its local candidate disappeared. The old local route is
     /// deliberately revoked; only immutable identity and scoped observations
@@ -947,6 +988,11 @@ impl CoreRecord {
                     observation.repository_binding_id.clone(),
                 ));
             };
+            if matches!(&self.event_origin, EventOrigin::CopiedFromAncestor { .. })
+                && matches!(&observation.kind, RepositoryVcsObservationKind::Outcome(_))
+            {
+                return Err(CoreRecordError::InvalidRepositoryOutcome);
+            }
             for object_id in observation
                 .object_id
                 .iter()
@@ -969,6 +1015,15 @@ impl CoreRecord {
                         if format.is_none_or(|format| object_id.format != format) {
                             return Err(CoreRecordError::InvalidGitObjectId);
                         }
+                    }
+                    if let Some(operation) = &outcome.commit_operation {
+                        operation.validate_scoped_identity(
+                            &self.source,
+                            self.event_id,
+                            self.session_id,
+                            binding,
+                            &outcome.linkage,
+                        )?;
                     }
                 }
                 RepositoryVcsObservationKind::PullRequestAssociation(association)

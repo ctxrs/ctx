@@ -251,7 +251,7 @@ pub(super) fn authorization() -> AuthorizationRequest {
 pub(super) fn blame_request() -> BlameRequest {
     BlameRequest {
         target: BlameTarget::Commit {
-            oid: "0123456789abcdef".to_owned(),
+            oid: "3333333333333333".to_owned(),
             repository: Some("ctxrs/ctx".to_owned()),
         },
         limit: 10,
@@ -264,14 +264,48 @@ pub(super) fn blame_request() -> BlameRequest {
 }
 
 pub(super) fn blame_result() -> BlameResult {
+    let record = record();
+    let requested = ExactCommitRef {
+        resource: ResourceRef {
+            id: "commit:golden-result".to_owned(),
+            kind: ResourceKind::Commit,
+            display: "3333333333333333333333333333333333333333".to_owned(),
+        },
+        logical_repository_id: "ctxrs/ctx".to_owned(),
+        object_format: GitObjectFormat::Sha1,
+        oid: "3333333333333333333333333333333333333333".to_owned(),
+    };
+    let source = ExactCommitRef {
+        resource: ResourceRef {
+            id: "commit:golden-source".to_owned(),
+            kind: ResourceKind::Commit,
+            display: "1111111111111111111111111111111111111111".to_owned(),
+        },
+        logical_repository_id: "ctxrs/ctx".to_owned(),
+        object_format: GitObjectFormat::Sha1,
+        oid: "1111111111111111111111111111111111111111".to_owned(),
+    };
+    let actor = ResourceRef {
+        id: format!("session:{}", record.session_id),
+        kind: ResourceKind::Session,
+        display: "golden-session".to_owned(),
+    };
+    let evidence = NumberedEvidence {
+        number: 1,
+        citation: EvidenceCitation {
+            core_generation_id: "a".repeat(64),
+            source: record.source,
+            session_id: record.session_id,
+            event_id: record.event_id,
+            event_sequence: record.event_sequence,
+            byte_range: None,
+            evidence_sha256: None,
+        },
+    };
     BlameResult {
         snapshot: blame_request().expected_snapshot,
         target: ResolvedBlameTarget::Commit {
-            commit: ResourceRef {
-                id: "commit:golden".to_owned(),
-                kind: ResourceKind::Commit,
-                display: "0123456789abcdef".to_owned(),
-            },
+            commit: requested.resource.clone(),
             repository: ResourceRef {
                 id: "repository:ctxrs-ctx".to_owned(),
                 kind: ResourceKind::Repository,
@@ -291,7 +325,45 @@ pub(super) fn blame_result() -> BlameResult {
             },
         },
         matches: Vec::new(),
-        evidence: Vec::new(),
+        evidence: vec![evidence],
         next: None,
+        lineage: Some(CommitLineage {
+            requested: requested.clone(),
+            edges: vec![CommitLineageEdge {
+                operation_id: "d".repeat(64),
+                kind: CommitLineageOperationKind::Rebase,
+                relation_class: CommitLineageRelationClass::Replacement,
+                source: source.clone(),
+                result: requested.clone(),
+                actor,
+                proof_class: CommitLineageProofClass::RepositoryVerified,
+                state: CommitLineageState::Asserted,
+                observed_at_ms: Some(1_700_000_000_000),
+                evidence_numbers: vec![1],
+            }],
+            yielded_by: Vec::new(),
+            origin: Some(source),
+            endpoint: Some(ScopedCommitEndpoint::CurrentAtRef {
+                commit: requested,
+                scope: ResourceRef {
+                    id: "branch:ctxrs-ctx:main".to_owned(),
+                    kind: ResourceKind::Branch,
+                    display: "main".to_owned(),
+                },
+                observation_id: "observation:golden-main".to_owned(),
+                observed_at_ms: 1_700_000_000_000,
+                evidence_numbers: vec![1],
+            }),
+            complete: true,
+            ambiguous: false,
+            bounds: CommitLineageBounds {
+                returned_events: 1,
+                returned_event_limit: MAX_COMMIT_LINEAGE_RETURNED_EVENTS,
+                examined_events: 1,
+                examined_event_limit: MAX_COMMIT_LINEAGE_EXAMINED_EVENTS,
+                omission: CommitLineageOmission::Exact(0),
+                truncation_reason: None,
+            },
+        }),
     }
 }

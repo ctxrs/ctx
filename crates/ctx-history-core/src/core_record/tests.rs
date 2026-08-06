@@ -5,15 +5,44 @@ use crate::{
 };
 
 fn source() -> SourceKey {
+    source_named("core-record-test")
+}
+
+fn source_named(native_key: &str) -> SourceKey {
     SourceKey::derive(
         "codex",
         "codex_session_jsonl",
         "session",
         1,
-        SourceAnchor::provider_native("session-file", TypedKey::utf8("core-record-test").unwrap())
-            .unwrap(),
+        SourceAnchor::provider_native("session-file", TypedKey::utf8(native_key).unwrap()).unwrap(),
     )
     .unwrap()
+}
+
+fn operation_core_ids(
+    source: &SourceKey,
+    native_session: &str,
+    native_event: u64,
+) -> (StableEntityId, StableEntityId) {
+    let session_id = derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: "thread",
+        native_session_key: &NativeSessionKey::native_id(
+            "session",
+            TypedKey::utf8(native_session).unwrap(),
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let event_id = derive_event_id(EventIdentityInput {
+        source,
+        session_id,
+        logical_item_kind: "message",
+        native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(native_event)).unwrap(),
+        subrecord_selector: None,
+    })
+    .unwrap();
+    (session_id, event_id)
 }
 
 fn record() -> CoreRecord {
@@ -280,6 +309,66 @@ fn copied_origin_rejects_self_references() {
         record.validate_contract(),
         Err(CoreRecordError::InvalidEventOrigin)
     ));
+}
+
+#[test]
+fn copied_origin_rejects_asserted_repository_outcomes_and_commit_operations() {
+    let scope = record();
+    let repository = binding();
+    let mut operation_outcome = outcome(RepositoryOutcomeKind::Commit);
+    let mappings = vec![RepositoryCommitMapping {
+        source: oid('b'),
+        result: oid('a'),
+    }];
+    let mut operation = RepositoryCommitOperationEvent::repository_verified_yield(
+        &operation_outcome.linkage,
+        RepositoryCommitOperationKind::Amend,
+        mappings,
+        Some(oid('b')),
+        None,
+        oid('a'),
+        [8; 32],
+    )
+    .unwrap();
+    operation
+        .bind_scoped_identity(
+            &scope.source,
+            scope.event_id,
+            scope.session_id,
+            &repository,
+            &operation_outcome.linkage,
+        )
+        .unwrap();
+    operation_outcome.produced_object_ids.clear();
+    operation_outcome.commit_operation = Some(operation);
+
+    let ancestor_session_id = related_session_id("copied-outcome-ancestor");
+    let ancestor_event_id = related_event_id(ancestor_session_id, 42);
+    for asserted_outcome in [outcome(RepositoryOutcomeKind::Commit), operation_outcome] {
+        let mut candidate = record();
+        candidate.repository_bindings.push(repository.clone());
+        candidate
+            .repository_vcs_observations
+            .push(RepositoryVcsObservation {
+                repository_binding_id: repository.binding_id.clone(),
+                kind: RepositoryVcsObservationKind::Outcome(Box::new(asserted_outcome)),
+                object_id: None,
+                parent_object_ids: Vec::new(),
+                reference: None,
+                relative_path: None,
+            });
+        candidate.validate_contract().unwrap();
+
+        candidate.event_origin = EventOrigin::CopiedFromAncestor {
+            ancestor_session_id: Box::new(ancestor_session_id),
+            ancestor_event_id: Box::new(ancestor_event_id),
+            proof: EventCopyProofKind::NativeCopiedFromField,
+        };
+        assert!(matches!(
+            candidate.validate_contract(),
+            Err(CoreRecordError::InvalidRepositoryOutcome)
+        ));
+    }
 }
 
 fn mcp_tool_call(server: impl Into<String>, tool: impl Into<String>) -> McpToolCallAttribution {
@@ -1634,12 +1723,20 @@ fn oid(hex: char) -> GitObjectId {
     }
 }
 
+fn numbered_oid(index: usize) -> GitObjectId {
+    GitObjectId {
+        format: GitObjectFormat::Sha1,
+        hex: format!("{index:040x}"),
+    }
+}
+
 fn outcome(kind: RepositoryOutcomeKind) -> RepositoryOutcomeObservation {
     RepositoryOutcomeObservation {
         kind,
         produced_object_ids: vec![oid('a')],
-        replacement_lineage: Vec::new(),
+        commit_operation: None,
         pull_request: None,
+        pull_request_merge_commit: None,
         observed_at_unix_ms: 1_700_000_000_000,
         linkage: RepositoryOutcomeLinkage {
             provider: "codex".to_owned(),
@@ -1735,52 +1832,91 @@ fn pull_request_association_is_exact_scoped_and_membership_is_atomic() {
 }
 
 #[test]
-fn replacement_lineage_and_pull_request_shapes_are_explicit() {
+fn operation_event_and_pull_request_shapes_are_explicit() {
+    let scope = record();
+    let repository = binding();
     let mut commit = outcome(RepositoryOutcomeKind::Commit);
-    commit
-        .replacement_lineage
-        .push(RepositoryObjectReplacement {
-            replaced: oid('b'),
-            replacement: oid('a'),
-        });
+    let mappings = vec![RepositoryCommitMapping {
+        source: oid('b'),
+        result: oid('a'),
+    }];
+    let linkage = commit.linkage.clone();
+    commit.produced_object_ids.clear();
+    commit.commit_operation = Some(RepositoryCommitOperationEvent {
+        event_id: repository_commit_operation_event_id(
+            &scope.source,
+            scope.event_id,
+            scope.session_id,
+            &repository,
+            GitObjectFormat::Sha1,
+            &mappings,
+            &linkage,
+            RepositoryCommitOperationKind::Amend,
+        ),
+        receipt_id: repository_outcome_receipt_id(&linkage),
+        kind: RepositoryCommitOperationKind::Amend,
+        mappings: mappings.clone(),
+        unlinked_sources: Vec::new(),
+        unlinked_results: Vec::new(),
+        mapping_completeness: RepositoryCommitMappingCompleteness::Complete,
+        state: RepositoryCommitOperationState::Asserted,
+        proof: RepositoryCommitOperationProof::RepositoryVerifiedYield(
+            RepositoryVerifiedYieldProof {
+                command_pre_head: Some(oid('b')),
+                sequencer_pre_head: None,
+                exact_source_oids: vec![oid('b')],
+                command_post_head: oid('a'),
+                repository_geometry_before_sha256: [8; 32],
+                repository_geometry_after_sha256: [8; 32],
+                exact_result_map_sha256: repository_result_map_sha256(&mappings),
+                drift_excluded: true,
+                mutation_excluded: true,
+            },
+        ),
+    });
     commit.validate_contract().unwrap();
-    commit.replacement_lineage[0].replacement = oid('c');
-    assert!(matches!(
-        commit.validate_contract(),
-        Err(CoreRecordError::InvalidRepositoryOutcome)
-    ));
+    assert_eq!(
+        commit
+            .commit_operation
+            .as_ref()
+            .unwrap()
+            .repository_verified_yields()
+            .map(|object_id| object_id.hex.as_str())
+            .collect::<Vec<_>>(),
+        vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+    );
 
-    let mut branching = outcome(RepositoryOutcomeKind::Commit);
-    branching.produced_object_ids.push(oid('c'));
-    branching.replacement_lineage = vec![
-        RepositoryObjectReplacement {
-            replaced: oid('b'),
-            replacement: oid('a'),
-        },
-        RepositoryObjectReplacement {
-            replaced: oid('b'),
-            replacement: oid('c'),
-        },
-    ];
-    assert!(matches!(
-        branching.validate_contract(),
-        Err(CoreRecordError::InvalidRepositoryOutcome)
-    ));
+    let old_shape = serde_json::json!({
+        "kind": "commit",
+        "produced_object_ids": [oid('a')],
+        "replacement_lineage": [{"replaced": oid('b'), "replacement": oid('a')}],
+        "pull_request": null,
+        "observed_at_unix_ms": 1_700_000_000_000_i64,
+        "linkage": linkage,
+        "outcome_capture_revision": CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    });
+    assert!(serde_json::from_value::<RepositoryOutcomeObservation>(old_shape).is_err());
 
-    let mut cycle = outcome(RepositoryOutcomeKind::Commit);
-    cycle.produced_object_ids.push(oid('b'));
-    cycle.replacement_lineage = vec![
-        RepositoryObjectReplacement {
-            replaced: oid('a'),
-            replacement: oid('b'),
-        },
-        RepositoryObjectReplacement {
-            replaced: oid('b'),
-            replacement: oid('a'),
-        },
-    ];
+    let mut partial = commit.clone();
+    let operation = partial.commit_operation.as_mut().unwrap();
+    operation.state = RepositoryCommitOperationState::Ambiguous;
+    operation.mapping_completeness = RepositoryCommitMappingCompleteness::Partial;
+    operation.unlinked_results.push(oid('c'));
+    operation.proof = RepositoryCommitOperationProof::RecordExact;
+    partial.validate_contract().unwrap();
+    assert!(partial
+        .commit_operation
+        .as_ref()
+        .unwrap()
+        .repository_verified_yields()
+        .next()
+        .is_none());
+
+    let mut invalid_verified = partial;
+    invalid_verified.commit_operation.as_mut().unwrap().proof =
+        commit.commit_operation.as_ref().unwrap().proof.clone();
     assert!(matches!(
-        cycle.validate_contract(),
+        invalid_verified.validate_contract(),
         Err(CoreRecordError::InvalidRepositoryOutcome)
     ));
 
@@ -1812,8 +1948,402 @@ fn replacement_lineage_and_pull_request_shapes_are_explicit() {
 
     let mut merged = created;
     merged.kind = RepositoryOutcomeKind::PullRequestMerged;
-    merged.produced_object_ids.push(oid('d'));
+    merged.pull_request_merge_commit = Some(oid('d'));
     merged.validate_contract().unwrap();
+}
+
+#[test]
+fn plural_exact_operation_mapping_bound_accepts_32_rejects_33_and_leaves_unlinked_unchanged() {
+    let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
+    let mappings = |count: usize| {
+        (0..count)
+            .map(|index| RepositoryCommitMapping {
+                source: numbered_oid(index + 1),
+                result: numbered_oid(index + 1_001),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let accepted_mappings = mappings(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS);
+    let accepted = RepositoryCommitOperationEvent::repository_verified_yield(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        accepted_mappings.clone(),
+        Some(accepted_mappings[0].source.clone()),
+        Some(accepted_mappings[0].source.clone()),
+        accepted_mappings[0].result.clone(),
+        [8; 32],
+    )
+    .unwrap();
+    assert_eq!(
+        accepted.mappings.len(),
+        MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS
+    );
+
+    let rejected_mappings = mappings(MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS + 1);
+    let rejected = RepositoryCommitOperationEvent::repository_verified_yield(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        rejected_mappings.clone(),
+        Some(rejected_mappings[0].source.clone()),
+        Some(rejected_mappings[0].source.clone()),
+        rejected_mappings[0].result.clone(),
+        [8; 32],
+    );
+    assert!(matches!(
+        rejected,
+        Err(CoreRecordError::TooManyItems {
+            field: "repository_commit_operation_mappings",
+            actual: 33,
+            maximum: MAX_REPOSITORY_COMMIT_OPERATION_MAPPINGS,
+        })
+    ));
+
+    let unlinked_sources = (0..33).map(|index| numbered_oid(index + 1)).collect();
+    let unlinked = RepositoryCommitOperationEvent::record_exact_unlinked(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        unlinked_sources,
+        Vec::new(),
+        RepositoryCommitOperationState::Ambiguous,
+    )
+    .unwrap();
+    assert_eq!(unlinked.unlinked_sources.len(), 33);
+}
+
+#[test]
+fn plural_asserted_operation_mappings_require_unique_sources_and_results() {
+    let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
+    for mappings in [
+        vec![
+            RepositoryCommitMapping {
+                source: numbered_oid(1),
+                result: numbered_oid(101),
+            },
+            RepositoryCommitMapping {
+                source: numbered_oid(1),
+                result: numbered_oid(102),
+            },
+        ],
+        vec![
+            RepositoryCommitMapping {
+                source: numbered_oid(1),
+                result: numbered_oid(101),
+            },
+            RepositoryCommitMapping {
+                source: numbered_oid(2),
+                result: numbered_oid(101),
+            },
+        ],
+    ] {
+        let command_pre_head = mappings[0].source.clone();
+        let command_post_head = mappings[0].result.clone();
+        assert!(matches!(
+            RepositoryCommitOperationEvent::repository_verified_yield(
+                &linkage,
+                RepositoryCommitOperationKind::Rebase,
+                mappings,
+                Some(command_pre_head.clone()),
+                Some(command_pre_head),
+                command_post_head,
+                [8; 32],
+            ),
+            Err(CoreRecordError::InvalidRepositoryOutcome)
+        ));
+    }
+}
+
+#[test]
+fn plural_operation_id_replay_is_stable_and_mapping_order_is_canonical() {
+    let scope = record();
+    let repository = binding();
+    let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
+    let mappings = vec![
+        RepositoryCommitMapping {
+            source: numbered_oid(1),
+            result: numbered_oid(101),
+        },
+        RepositoryCommitMapping {
+            source: numbered_oid(2),
+            result: numbered_oid(102),
+        },
+    ];
+    let mut replay_mappings = mappings.clone();
+    replay_mappings.reverse();
+
+    let mut first = RepositoryCommitOperationEvent::repository_verified_yield(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        mappings.clone(),
+        Some(mappings[0].source.clone()),
+        Some(mappings[0].source.clone()),
+        mappings[0].result.clone(),
+        [8; 32],
+    )
+    .unwrap();
+    let mut replay = RepositoryCommitOperationEvent::repository_verified_yield(
+        &linkage,
+        RepositoryCommitOperationKind::Rebase,
+        replay_mappings.clone(),
+        Some(mappings[0].source.clone()),
+        Some(mappings[0].source.clone()),
+        mappings[0].result.clone(),
+        [8; 32],
+    )
+    .unwrap();
+
+    first
+        .bind_scoped_identity(
+            &scope.source,
+            scope.event_id,
+            scope.session_id,
+            &repository,
+            &linkage,
+        )
+        .unwrap();
+    replay
+        .bind_scoped_identity(
+            &scope.source,
+            scope.event_id,
+            scope.session_id,
+            &repository,
+            &linkage,
+        )
+        .unwrap();
+
+    assert_eq!(first, replay);
+    assert_eq!(first.mappings.len(), 2);
+    assert_eq!(
+        repository_result_map_sha256(&mappings),
+        repository_result_map_sha256(&replay_mappings)
+    );
+}
+
+#[test]
+fn operation_ids_bind_core_repository_mapping_kind_and_provider_domains() {
+    let source = source_named("operation-source-a");
+    let (session_id, event_id) = operation_core_ids(&source, "shared-provider-session", 1);
+    let (_, other_event_id) = operation_core_ids(&source, "shared-provider-session", 2);
+    let (other_session_id, other_session_event_id) =
+        operation_core_ids(&source, "other-core-session", 1);
+    let other_source = source_named("operation-source-b");
+    let (other_source_session_id, other_source_event_id) =
+        operation_core_ids(&other_source, "shared-provider-session", 1);
+    let repository = binding();
+    let mut equivalent_checkout = repository.clone();
+    equivalent_checkout.binding_id = "binding-2".to_owned();
+    equivalent_checkout.checkout_id = Some("checkout-2".to_owned());
+    equivalent_checkout.worktree_id = Some("worktree-2".to_owned());
+    let mut other_repository = repository.clone();
+    other_repository.logical_repository_id = "repo-2".to_owned();
+    let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
+    let mappings = vec![
+        RepositoryCommitMapping {
+            source: numbered_oid(1),
+            result: numbered_oid(101),
+        },
+        RepositoryCommitMapping {
+            source: numbered_oid(2),
+            result: numbered_oid(102),
+        },
+    ];
+    let mut changed_mappings = mappings.clone();
+    changed_mappings[1].result = numbered_oid(103);
+    let sha256_mappings = vec![RepositoryCommitMapping {
+        source: GitObjectId {
+            format: GitObjectFormat::Sha256,
+            hex: "1".repeat(64),
+        },
+        result: GitObjectId {
+            format: GitObjectFormat::Sha256,
+            hex: "2".repeat(64),
+        },
+    }];
+    let mut changed_linkage = linkage.clone();
+    changed_linkage.origin_call_id = "other-provider-call".to_owned();
+    let id = |source: &SourceKey,
+              event_id: StableEntityId,
+              session_id: StableEntityId,
+              repository: &RepositoryBinding,
+              mappings: &[RepositoryCommitMapping],
+              kind: RepositoryCommitOperationKind| {
+        repository_commit_operation_event_id(
+            source,
+            event_id,
+            session_id,
+            repository,
+            GitObjectFormat::Sha1,
+            mappings,
+            &linkage,
+            kind,
+        )
+    };
+    let baseline = id(
+        &source,
+        event_id,
+        session_id,
+        &repository,
+        &mappings,
+        RepositoryCommitOperationKind::Rebase,
+    );
+
+    assert_eq!(
+        baseline,
+        id(
+            &source,
+            event_id,
+            session_id,
+            &equivalent_checkout,
+            &mappings,
+            RepositoryCommitOperationKind::Rebase,
+        ),
+        "checkout and binding coordinates are not logical repository identity"
+    );
+    assert_ne!(
+        baseline,
+        id(
+            &source,
+            other_event_id,
+            session_id,
+            &repository,
+            &mappings,
+            RepositoryCommitOperationKind::Rebase,
+        )
+    );
+    assert_ne!(
+        baseline,
+        id(
+            &source,
+            other_session_event_id,
+            other_session_id,
+            &repository,
+            &mappings,
+            RepositoryCommitOperationKind::Rebase,
+        ),
+        "reused provider-local IDs must not collide across Core sessions"
+    );
+    assert_ne!(
+        baseline,
+        id(
+            &other_source,
+            other_source_event_id,
+            other_source_session_id,
+            &repository,
+            &mappings,
+            RepositoryCommitOperationKind::Rebase,
+        )
+    );
+    assert_ne!(
+        baseline,
+        id(
+            &source,
+            event_id,
+            session_id,
+            &other_repository,
+            &mappings,
+            RepositoryCommitOperationKind::Rebase,
+        ),
+        "reused provider-local IDs must not collide across logical repositories"
+    );
+    assert_ne!(
+        baseline,
+        id(
+            &source,
+            event_id,
+            session_id,
+            &repository,
+            &changed_mappings,
+            RepositoryCommitOperationKind::Rebase,
+        )
+    );
+    assert_ne!(
+        baseline,
+        id(
+            &source,
+            event_id,
+            session_id,
+            &repository,
+            &mappings,
+            RepositoryCommitOperationKind::CherryPick,
+        )
+    );
+    assert_ne!(
+        baseline,
+        repository_commit_operation_event_id(
+            &source,
+            event_id,
+            session_id,
+            &repository,
+            GitObjectFormat::Sha256,
+            &sha256_mappings,
+            &linkage,
+            RepositoryCommitOperationKind::Rebase,
+        )
+    );
+    assert_ne!(
+        baseline,
+        repository_commit_operation_event_id(
+            &source,
+            event_id,
+            session_id,
+            &repository,
+            GitObjectFormat::Sha1,
+            &mappings,
+            &changed_linkage,
+            RepositoryCommitOperationKind::Rebase,
+        )
+    );
+}
+
+#[test]
+fn core_record_rejects_operation_id_transplanted_to_another_repository() {
+    let mut record = record();
+    let repository = binding();
+    let linkage = outcome(RepositoryOutcomeKind::Commit).linkage;
+    let mapping = RepositoryCommitMapping {
+        source: oid('b'),
+        result: oid('a'),
+    };
+    let operation = RepositoryCommitOperationEvent::repository_verified_yield(
+        &linkage,
+        RepositoryCommitOperationKind::Amend,
+        vec![mapping.clone()],
+        Some(mapping.source),
+        None,
+        mapping.result,
+        [8; 32],
+    )
+    .unwrap();
+    record.repository_bindings.push(repository);
+    record
+        .repository_vcs_observations
+        .push(RepositoryVcsObservation {
+            repository_binding_id: "binding-1".to_owned(),
+            kind: RepositoryVcsObservationKind::Outcome(Box::new(RepositoryOutcomeObservation {
+                kind: RepositoryOutcomeKind::Commit,
+                produced_object_ids: Vec::new(),
+                commit_operation: Some(operation),
+                pull_request: None,
+                pull_request_merge_commit: None,
+                observed_at_unix_ms: 1_700_000_000_000,
+                linkage,
+                outcome_capture_revision: CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+            })),
+            object_id: None,
+            parent_object_ids: Vec::new(),
+            reference: None,
+            relative_path: None,
+        });
+    record
+        .bind_repository_commit_operation_identities()
+        .unwrap();
+    record.validate_contract().unwrap();
+
+    record.repository_bindings[0].logical_repository_id = "repo-2".to_owned();
+    assert!(matches!(
+        record.validate_contract(),
+        Err(CoreRecordError::InvalidRepositoryOutcome)
+    ));
 }
 
 #[test]
@@ -1908,14 +2438,14 @@ fn every_bound_revision_and_accumulator_identity_changes_the_core_contract_finge
     let expected = core_record_contract_fingerprint_for(current);
     assert_eq!(
         expected,
-        "db35cdc4758894ad0059048e2c7764bf20de7347d341f6a2cc5cbdda20d67fa0"
+        "0610be9a5810ce742b505dc4c3b3db24e9ab795126a6b62e0ef2172e04a85cc3"
     );
     assert_eq!(
         core_record_contract_fingerprint_for(CoreContractRevisions {
             accumulator_identity: b"",
             ..current
         }),
-        "75813d6c9af76ee2061f3b413d6987f2aa2f3b8c48a9c0475e980e09e848d494"
+        "fc61723d453f4e953145517891e8c9c7129ec09068a821182c77b52a006df982"
     );
     for changed in [
         CoreContractRevisions {
