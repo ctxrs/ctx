@@ -42,6 +42,7 @@ pub(crate) struct Fields {
     pub(crate) session_event_order: Field,
     pub(crate) semantic_event_order: Field,
     pub(crate) event_range_order: Field,
+    pub(crate) discovery_eligible: Field,
 }
 
 pub(crate) fn validate_schema(schema: &Schema) -> Result<()> {
@@ -95,6 +96,7 @@ pub(crate) fn lexical_schema() -> Schema {
     builder.add_bytes_field("session_event_order", INDEXED);
     builder.add_bytes_field("semantic_event_order", INDEXED);
     builder.add_bytes_field("event_range_order", FAST | INDEXED);
+    builder.add_u64_field("discovery_eligible", INDEXED);
     builder.build()
 }
 
@@ -136,6 +138,7 @@ pub(crate) fn fields_from_schema(schema: &Schema) -> Result<Fields> {
         session_event_order: required_field(schema, "session_event_order")?,
         semantic_event_order: required_field(schema, "semantic_event_order")?,
         event_range_order: required_field(schema, "event_range_order")?,
+        discovery_eligible: required_field(schema, "discovery_eligible")?,
     })
 }
 
@@ -212,5 +215,17 @@ mod tests {
         assert_eq!(entry.field_type().value_type(), tantivy::schema::Type::U64);
         assert!(!entry.is_stored());
         assert!(!entry.is_indexed());
+    }
+
+    #[test]
+    fn discovery_eligibility_is_positive_only_indexed_metadata() {
+        let schema = lexical_schema();
+        let field = schema.get_field("discovery_eligible").unwrap();
+        let entry = schema.get_field_entry(field);
+
+        assert_eq!(entry.field_type().value_type(), tantivy::schema::Type::U64);
+        assert!(entry.is_indexed());
+        assert!(!entry.is_stored());
+        assert!(!entry.is_fast());
     }
 }

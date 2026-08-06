@@ -163,6 +163,36 @@ fn exact_produced_object_hits_precede_twelve_mentions_and_deduplicate() {
 }
 
 #[test]
+fn exact_produced_object_ranking_cannot_reintroduce_retrieval_derived_records() {
+    let temp = tempdir().unwrap();
+    let source = source("excluded-produced-object.jsonl");
+    let object_id = sha1('d');
+    let excluded_producer = retrieval_excluded(with_produced_object(
+        document(&source, 1, "successful ctx retrieval payload"),
+        object_id.clone(),
+    ));
+    let ordinary_mention = document(
+        &source,
+        2,
+        &format!("ordinary diagnostic mentions {}", object_id.hex),
+    );
+    let ordinary_id = ordinary_mention.event_id;
+    let excluded_id = excluded_producer.event_id;
+    let index = publish_records(&temp, &source, vec![excluded_producer, ordinary_mention]);
+
+    let hits = index.search_event_candidates(&object_id.hex, 10).unwrap();
+    assert_eq!(
+        hits.iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        vec![ordinary_id]
+    );
+    assert!(hits
+        .iter()
+        .all(|candidate| candidate.event.event_id != excluded_id));
+}
+
+#[test]
 fn prose_inspection_and_abbreviated_sha_gain_no_produced_object_authority() {
     let temp = tempdir().unwrap();
     let source = source("produced-object-negative.jsonl");

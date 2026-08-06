@@ -1,15 +1,16 @@
 use std::{collections::HashSet, sync::atomic::Ordering};
 
 use ctx_history_core::{
-    derive_event_id, derive_session_id, CertifiedSourceInventory, CoreRecord, CoreRecordAnnotation,
-    EventCopyProofKind, EventIdentityInput, EventOrigin, GitObjectFormat, GitObjectId,
-    NativeItemKey, NativeSessionKey, RepositoryBinding, RepositoryEvidence,
-    RepositoryEvidenceConfidence, RepositoryEvidenceKind, RepositoryFileObservation,
-    RepositoryFileObservationKind, RepositoryOutcomeKind, RepositoryOutcomeLinkage,
-    RepositoryOutcomeObservation, RepositoryVcsObservation, RepositoryVcsObservationKind,
-    ScannedSourceCounts, SessionIdentityInput, SessionRelationshipKind, SourceAnchor,
-    SourceFrontier, SourceInventoryObservation, SourceObservation, TypedKey,
-    CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION, CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
+    derive_event_id, derive_session_id, CertifiedSourceInventory, CoreDiscoveryExclusion,
+    CoreRecord, CoreRecordAnnotation, EventCopyProofKind, EventIdentityInput, EventOrigin,
+    GitObjectFormat, GitObjectId, NativeItemKey, NativeSessionKey, RepositoryBinding,
+    RepositoryEvidence, RepositoryEvidenceConfidence, RepositoryEvidenceKind,
+    RepositoryFileObservation, RepositoryFileObservationKind, RepositoryOutcomeKind,
+    RepositoryOutcomeLinkage, RepositoryOutcomeObservation, RepositoryVcsObservation,
+    RepositoryVcsObservationKind, ScannedSourceCounts, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, SourceFrontier, SourceInventoryObservation,
+    SourceObservation, TypedKey, CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
+    CORE_REPOSITORY_OUTCOME_CAPTURE_REVISION,
 };
 use tantivy::{
     collector::DocSetCollector, indexer::NoMergePolicy, query::AllQuery,
@@ -136,6 +137,12 @@ fn stage_exact_replay(writer: &mut GenerationWriter, source: &SourceKey) -> Cert
 
 pub(crate) fn document(source: &SourceKey, sequence: u64, body: &str) -> CoreRecord {
     document_for_session(source, "session", sequence, body)
+}
+
+pub(crate) fn retrieval_excluded(mut record: CoreRecord) -> CoreRecord {
+    record.content.discovery_exclusion = Some(CoreDiscoveryExclusion::CtxRetrievalDerived);
+    record.validate_contract().unwrap();
+    record
 }
 
 fn document_for_session(

@@ -75,7 +75,7 @@ fn semantic_event_pages_follow_full_identity_order_and_explicit_eligibility() {
     assert_eq!(core_first_page.generation_id, first_page.generation_id);
     assert_eq!(
         first_page.eligibility,
-        SemanticEligibility::UserMessageCandidateV3
+        SemanticEligibility::UserMessageCandidateV4
     );
     assert_eq!(core_first_page.eligibility, first_page.eligibility);
     assert_eq!(first_page.eligible_total, 4);
@@ -267,6 +267,57 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
         index.semantic_filter_projection(&invalid),
         Err(IndexError::EmptyQueryFilter { field: "provider" })
     ));
+}
+
+#[test]
+fn retrieval_derived_user_message_is_not_a_semantic_candidate() {
+    let temp = tempdir().unwrap();
+    let source = source("semantic-retrieval-derived.jsonl");
+    let ordinary = document(&source, 1, "ordinary semantic candidate");
+    let excluded = retrieval_excluded(document(
+        &source,
+        2,
+        "retrieval derived semantic bypass canary",
+    ));
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(ordinary.clone()).unwrap();
+    writer.add_core_record(excluded.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    assert_eq!(index.semantic_eligible_event_count().unwrap(), 1);
+    let metadata_page = index.semantic_event_page(None, 10).unwrap();
+    assert!(metadata_page.terminal);
+    assert_eq!(metadata_page.eligible_total, 1);
+    assert_eq!(metadata_page.items.len(), 1);
+    assert_eq!(metadata_page.items[0].event_id, ordinary.event_id);
+
+    let core_page = index.core_semantic_event_page(None, 10).unwrap();
+    assert!(core_page.terminal);
+    assert_eq!(core_page.eligible_total, 1);
+    assert_eq!(core_page.items.len(), 1);
+    assert_eq!(core_page.items[0].event_id, ordinary.event_id);
+
+    let projection = index
+        .semantic_filter_projection(&EventSearchFilters::default())
+        .unwrap();
+    assert_eq!(
+        projection.event_ids().collect::<Vec<_>>(),
+        vec![ordinary.event_id.as_uuid()]
+    );
+    assert_eq!(
+        index
+            .core_record_by_id(excluded.event_id.as_uuid())
+            .unwrap()
+            .unwrap(),
+        excluded
+    );
 }
 
 #[test]

@@ -36,7 +36,7 @@ use validation::{
 
 pub const CORE_RECORD_VERSION: u32 = 2;
 pub const CORE_NORMALIZATION_REVISION: u32 = 1;
-pub const CORE_CONTENT_POLICY_REVISION: u32 = 2;
+pub const CORE_CONTENT_POLICY_REVISION: u32 = 3;
 pub const CORE_MCP_TOOL_CALL_ATTRIBUTION_REVISION: u32 = 1;
 pub const CORE_SESSION_LINEAGE_REVISION: u32 = 1;
 /// Frozen domain for the exact canonical Core-record leaf algorithm.
@@ -291,6 +291,14 @@ pub struct CoreContent {
     /// `normalized_body`; every encoded representation is charged to the
     /// aggregate selected-content budget.
     pub structured_content: Option<serde_json::Value>,
+    /// Optional positive proof that every body contribution is derived from a
+    /// ctx history-retrieval invocation. Absence means unproven, not ordinary.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_discovery_exclusion"
+    )]
+    pub discovery_exclusion: Option<CoreDiscoveryExclusion>,
     /// Typed, provider-neutral MCP invocation/response content. This remains
     /// content-policy governed and is never projection-independent metadata.
     #[serde(
@@ -299,6 +307,14 @@ pub struct CoreContent {
         deserialize_with = "deserialize_present_mcp_exchange"
     )]
     pub mcp_exchange: Option<McpExchangeContent>,
+}
+
+/// Provider-neutral reason a complete Core record is excluded from ranked
+/// discovery while remaining available to deterministic enumeration and show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreDiscoveryExclusion {
+    CtxRetrievalDerived,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -612,6 +628,7 @@ impl CoreRecord {
                 policy_status: CoreContentPolicyStatus::Selected,
                 normalized_body: Some(normalized_body.into()),
                 structured_content: None,
+                discovery_exclusion: None,
                 mcp_exchange: None,
             },
             metadata: BTreeMap::new(),
@@ -1006,7 +1023,23 @@ where
     McpExchangeContent::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_present_discovery_exclusion<'de, D>(
+    deserializer: D,
+) -> Result<Option<CoreDiscoveryExclusion>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    CoreDiscoveryExclusion::deserialize(deserializer).map(Some)
+}
+
 impl CoreContent {
+    /// Whether this complete record may contribute to ranked discovery.
+    ///
+    /// Enumeration and direct show APIs intentionally do not use this policy.
+    pub const fn is_discovery_eligible(&self) -> bool {
+        self.discovery_exclusion.is_none()
+    }
+
     pub fn meaningful_text(&self) -> &str {
         self.normalized_body.as_deref().unwrap_or("")
     }
@@ -1056,6 +1089,11 @@ impl CoreContent {
                 return Err(CoreRecordError::InvalidContentPolicyState);
             }
             exchange.validate_contract(self.normalized_body.as_deref())?;
+        }
+        if self.discovery_exclusion.is_some()
+            && !matches!(self.policy_status, CoreContentPolicyStatus::Selected)
+        {
+            return Err(CoreRecordError::InvalidContentPolicyState);
         }
         validate_size("selected_content", counts.total, MAX_CORE_CONTENT_BYTES)?;
         match &self.policy_status {
