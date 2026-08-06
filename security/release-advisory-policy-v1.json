@@ -4,6 +4,7 @@
     "name": "osv-scanner",
     "version": "2.4.0",
     "sha256_by_target": {
+      "freebsd-x64": "5e9343ae565c37a6d1767e0b2a55fb59158890ffb480797fb602e22fb48b478e",
       "linux-x64": "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0",
       "linux-arm64": "44e580752910f0ff36ec99aff59af20f65df1e859aa31e5605a8f0d055b496e9",
       "macos-arm64": "9ca3185ad63e9ab54f7cb90f46a7362be02d80e37f0123d095a54355ea202f5d",

@@ -20,6 +20,7 @@ SPEC.loader.exec_module(matrix)
 class ReleaseTargetMatrixTest(unittest.TestCase):
     def test_repository_matrix_is_exact(self) -> None:
         value = matrix.load_and_validate()
+        matrix.validate_advisory_policy_coverage(value)
         self.assertEqual(
             [target["id"] for target in value["targets"]],
             list(matrix.SUPPORTED_TARGET_IDS),
@@ -54,6 +55,36 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
             linux["linux_build"]["rust_sysroot"],
             "/opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu",
         )
+
+    def test_advisory_scanner_must_cover_every_release_target(self) -> None:
+        value = matrix.load_and_validate()
+        policy = json.loads(matrix.ADVISORY_POLICY_PATH.read_text(encoding="utf-8"))
+        del policy["scanner"]["sha256_by_target"]["freebsd-x64"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-advisory-policy-v1.json"
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing: freebsd-x64"):
+                matrix.validate_advisory_policy_coverage(value, path)
+
+    def test_advisory_scanner_rejects_unexpected_targets(self) -> None:
+        value = matrix.load_and_validate()
+        policy = json.loads(matrix.ADVISORY_POLICY_PATH.read_text(encoding="utf-8"))
+        policy["scanner"]["sha256_by_target"]["freebsd-arm64"] = "1" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-advisory-policy-v1.json"
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unexpected: freebsd-arm64"):
+                matrix.validate_advisory_policy_coverage(value, path)
+
+    def test_advisory_scanner_rejects_malformed_digest(self) -> None:
+        value = matrix.load_and_validate()
+        policy = json.loads(matrix.ADVISORY_POLICY_PATH.read_text(encoding="utf-8"))
+        policy["scanner"]["sha256_by_target"]["freebsd-x64"] = None
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-advisory-policy-v1.json"
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "malformed SHA-256 for: freebsd-x64"):
+                matrix.validate_advisory_policy_coverage(value, path)
 
     def test_diagnostic_runner_cannot_be_authoritative(self) -> None:
         value = matrix.load_and_validate()
