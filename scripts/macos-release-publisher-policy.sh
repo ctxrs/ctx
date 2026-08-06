@@ -2,7 +2,7 @@
 
 # SHA-256 of the allowed Apple Team ID. Keep the identity itself out of source
 # while retaining a project-specific trust anchor across certificate rotation.
-readonly CTX_MACOS_RELEASE_TEAM_ID_SHA256="913603530eb11be6c4e501c7a8190bee4192f3536ac195add60716e3e372594a"
+readonly CTX_MACOS_RELEASE_TEAM_ID_SHA256="013a2701d0f3400afe5257f41fce0e2d4276ef37981e443b1d3aeb442a95763c"
 
 ctx_macos_release_team_id_matches_policy() {
   local team_id="$1"
