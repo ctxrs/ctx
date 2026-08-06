@@ -497,7 +497,7 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "WhRNsYW7B4LBk+68iRWNiYRwZu9KVbwq01S7mj18jGU=",
+        "bzlTransitiveDigest": "qL3sSlj9UfbrFrXGxVG/YFFPId7vO9RcW1XsCZdKZ0A=",
         "usagesDigest": "smlcd296BSO7bKl00H5EjAeWv6dmGaGYfjx58mde3eE=",
         "recordedInputs": [
           "ENV:CARGO_BAZEL_DEBUG \\0",
@@ -6997,7 +6997,7 @@
     },
     "@@rules_rust+//crate_universe/private:internal_extensions.bzl%cu_nr": {
       "general": {
-        "bzlTransitiveDigest": "zKMEz8bCDR8KFgYqm1jrD5t/Lgg0gFwfFyX5yeEVVXc=",
+        "bzlTransitiveDigest": "LjJaGRJvM0xwbywHpeXuhXA8OOTlSogdhKXPiPTWzz8=",
         "usagesDigest": "cXwM8V1dYpvU0qY6LVYuUUf4Ql389ZhymEzwJhYVr2o=",
         "recordedInputs": [
           "REPO_MAPPING:apple_support+,bazel_skylib bazel_skylib+",

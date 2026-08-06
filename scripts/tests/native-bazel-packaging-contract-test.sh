@@ -22,7 +22,8 @@ release_routes="${source_root}/tools/bazel/release_routes.bzl"
 release_config="${source_root}/.bazelrc"
 module_definition="${source_root}/MODULE.bazel"
 module_lock="${source_root}/MODULE.bazel.lock"
-rules_rust_patch="${source_root}/tools/bazel/patches/rules-rust-freebsd-host.patch"
+rules_rust_freebsd_patch="${source_root}/tools/bazel/patches/rules-rust-freebsd-host.patch"
+rules_rust_windows_patch="${source_root}/tools/bazel/patches/rules-rust-windows-gnu-dlltool-path.patch"
 
 grep -Fxq 'build:release --lockfile_mode=error' "${release_config}" || {
   echo 'release config must fail closed on incomplete module lock data' >&2
@@ -50,17 +51,30 @@ if not facts or not all(isinstance(value, dict) and value for value in facts.val
     )
 PY
 
-grep -Fq 'patches = ["//tools/bazel/patches:rules-rust-freebsd-host.patch"]' \
-  "${module_definition}" || {
-  echo 'rules_rust must retain the pinned FreeBSD host patch' >&2
-  exit 1
-}
+for required_patch in \
+  '//tools/bazel/patches:rules-rust-freebsd-host.patch' \
+  '//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch'; do
+  grep -Fq -- "${required_patch}" "${module_definition}" || {
+    printf 'rules_rust must retain release patch: %s\n' "${required_patch}" >&2
+    exit 1
+  }
+done
 for required_patch_line in \
   '+        "freebsd": ["x86_64"],' \
   '+    if "freebsd" in repository_ctx.os.name:' \
   '+        return triple("{}-unknown-freebsd".format(arch))'; do
-  grep -Fq -- "${required_patch_line}" "${rules_rust_patch}" || {
+  grep -Fq -- "${required_patch_line}" "${rules_rust_freebsd_patch}" || {
     echo "rules_rust FreeBSD host patch is missing: ${required_patch_line}" >&2
+    exit 1
+  }
+done
+for required_patch_line in \
+  '+load("@bazel_skylib//lib:paths.bzl", "paths")' \
+  '+    if toolchain.target_os == "windows" and toolchain.target_abi == "gnu" and cc_toolchain:' \
+  '+        tool_dir = paths.dirname(linker)' \
+  '+        env["PATH"] = tool_dir + (";" + inherited_path if inherited_path else "")'; do
+  grep -Fq -- "${required_patch_line}" "${rules_rust_windows_patch}" || {
+    echo "rules_rust Windows-GNU dlltool patch is missing: ${required_patch_line}" >&2
     exit 1
   }
 done
