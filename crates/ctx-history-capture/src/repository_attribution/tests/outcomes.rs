@@ -167,9 +167,12 @@ fn short_amend_without_an_exact_source_result_map_abstains() {
         outcome_abstentions: linked.abstentions,
         ..AttributionInput::default()
     });
-    assert!(annotation.repository_vcs_observations.iter().all(|observation| {
-        !matches!(&observation.kind, RepositoryVcsObservationKind::Outcome(_))
-    }));
+    assert!(annotation
+        .repository_vcs_observations
+        .iter()
+        .all(|observation| {
+            !matches!(&observation.kind, RepositoryVcsObservationKind::Outcome(_))
+        }));
     assert!(has_reason(
         &annotation,
         RepositoryAbstentionReason::HistoryRewriteUnlinked
