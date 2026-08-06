@@ -37,8 +37,10 @@ use thiserror::Error;
 use super::{
     discover_codex_catalog_sources,
     reader::{
-        opened_file_prefix_sha256, CodexLineageFactBudgetV0, CodexLineageFactsV0,
-        CodexParseDisposition, CodexScanCounters, CODEX_LINEAGE_EXHAUSTED_SENTINEL,
+        opened_file_prefix_sha256, reopen_codex_source_capability,
+        revalidate_codex_catalog_source_capability, CodexLineageFactBudgetV0,
+        CodexLineageFactsSpillRecordV0, CodexLineageFactsV0, CodexParseDisposition,
+        CodexScanCounters, CODEX_LINEAGE_EXHAUSTED_SENTINEL,
     },
     rows::{
         CodexProviderEventIdentityKindV0, CodexProviderEventIdentityV0, CodexSourceBackedRowV0,
@@ -72,6 +74,7 @@ const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
 const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v10";
 const CODEX_PARSER_REVISION: &str =
     "codex-nativepath-core-record-v21-transitive-root-normalization";
+const CODEX_GENERATION_LINEAGE_COMPONENTS_PER_WAVE: usize = 4;
 #[cfg(test)]
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 #[cfg(test)]

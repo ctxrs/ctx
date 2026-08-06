@@ -732,28 +732,40 @@ pub(super) fn prepare_replayed_lineage_v0(
     Ok(())
 }
 
-/// Freezes every selected ancestor fact set before route-local workers run.
-///
-/// One route can own both an ancestor and a grandchild while a different route
-/// owns the intermediate child, so sorting whole routes cannot provide a
-/// generation-wide parent-before-child schedule. This deterministic prepass
-/// scans only sources whose facts can be consulted by a descendant; terminal
-/// leaves receive an empty completed state without a body pass. Publication
-/// workers subsequently parse and certify every accepted source normally, but
-/// they do not mutate the already-frozen lineage authority.
+/// Scans each selected ancestor exactly once, component by component, and
+/// moves its sealed facts into the generation's capability-owned authenticated
+/// spill before starting the next component. Route-local partition leases load
+/// at most four components from that spill and never reread provider bodies.
+/// Terminal leaves receive an empty completed state without a body pass.
 pub(super) fn prepare_generation_lineage_v0(
     sources: &[(CodexCatalogSource, SourceKey, String)],
-    outcome_lineage: &CodexOutcomeLineageAuthorityV0,
-) -> CodexSourceBackedResultV0<()> {
+    outcome_lineage: &mut CodexOutcomeLineageAuthorityV0,
+) -> CodexSourceBackedResultV0<u64> {
     let mut ordered = sources.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         outcome_lineage
-            .depth(&left.2)
-            .cmp(&outcome_lineage.depth(&right.2))
+            .component_partition(&left.2)
+            .cmp(&outcome_lineage.component_partition(&right.2))
+            .then_with(|| {
+                outcome_lineage
+                    .depth(&left.2)
+                    .cmp(&outcome_lineage.depth(&right.2))
+            })
             .then_with(|| left.2.cmp(&right.2))
             .then_with(|| left.0.source_path.cmp(&right.0.source_path))
     });
+    let mut active_component = None;
+    let mut source_scans = 0_u64;
     for (source, _, native_session_id) in ordered {
+        let component = outcome_lineage
+            .component_partition(native_session_id)
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        if active_component.is_some_and(|active| active != component) {
+            outcome_lineage.spill_generation_component(
+                active_component.ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?,
+            )?;
+        }
+        active_component = Some(component);
         let facts = outcome_lineage.new_fact_set(native_session_id)?;
         if !outcome_lineage.needs_descendant_facts(native_session_id)? {
             outcome_lineage.register(native_session_id, facts)?;
@@ -775,8 +787,14 @@ pub(super) fn prepare_generation_lineage_v0(
             .take()
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
         outcome_lineage.register(native_session_id, facts)?;
+        source_scans = source_scans
+            .checked_add(1)
+            .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
     }
-    Ok(())
+    if let Some(component) = active_component {
+        outcome_lineage.spill_generation_component(component)?;
+    }
+    Ok(source_scans)
 }
 
 #[cfg(test)]

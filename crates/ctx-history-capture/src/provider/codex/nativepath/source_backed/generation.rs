@@ -62,6 +62,7 @@ struct CodexPendingRouteV0 {
 
 struct CodexPreparedGenerationV0 {
     routes: HashMap<usize, CodexPreparedRouteV0>,
+    sources_revalidated: bool,
     #[cfg(test)]
     worker_start_latch: CodexWorkerStartLatchV0,
 }
@@ -71,6 +72,8 @@ struct CodexGenerationCoordinatorStateV0 {
     next_participant: usize,
     participants: BTreeMap<usize, CodexGenerationParticipantV0>,
     prepared: Option<CodexPreparedGenerationV0>,
+    #[cfg(test)]
+    lineage_budget_limits: Option<(usize, usize)>,
 }
 
 /// Owns the one selected Codex lineage graph for a source-backed generation.
@@ -212,7 +215,7 @@ impl CodexGenerationNormalizationCoordinatorV0 {
             }
         }
 
-        let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&plans)?;
+        let mut normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&plans)?;
         let selected_native_session_ids = normalized
             .sources
             .iter()
@@ -221,8 +224,47 @@ impl CodexGenerationNormalizationCoordinatorV0 {
         normalized
             .authority
             .bind_route_sources(&selected_native_session_ids)?;
+        let mut component_owners = HashMap::<u64, HashSet<usize>>::new();
+        for plan in &normalized.sources {
+            let owner = owners
+                .get(&(plan.0.source_path.clone(), plan.2.clone()))
+                .copied()
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            let component = normalized
+                .authority
+                .component_partition(&plan.2)
+                .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+            component_owners.entry(component).or_default().insert(owner);
+        }
+        let component_owner_counts = component_owners
+            .into_iter()
+            .map(|(component, owners)| (component, owners.len()))
+            .collect::<HashMap<_, _>>();
+        #[cfg(test)]
+        if let Some((byte_limit, fact_limit)) = self
+            .state
+            .lock()
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+            .lineage_budget_limits
+        {
+            normalized
+                .authority
+                .set_generation_component_budget_limits(byte_limit, fact_limit);
+        }
+        normalized
+            .authority
+            .initialize_generation_spill(&component_owner_counts)?;
+        let lineage_fact_source_scans =
+            prepare_generation_lineage_v0(&normalized.sources, &mut normalized.authority)?;
+        #[cfg(not(test))]
+        let _ = lineage_fact_source_scans;
+        // Preparation may have consumed an explicit route's retained opening
+        // capability. Route discovery must reopen and bind the current path
+        // entry after the generation-wide replacement fence below.
+        for (source, _, _) in &mut normalized.sources {
+            source.opened = None;
+        }
         let authority = Arc::new(normalized.authority);
-        prepare_generation_lineage_v0(&normalized.sources, &authority)?;
         #[cfg(test)]
         let valid_sources = normalized.sources.len();
         #[cfg(test)]
@@ -279,6 +321,7 @@ impl CodexGenerationNormalizationCoordinatorV0 {
         let worker_start_latch = CodexWorkerStartLatchV0::default();
         let prepared = CodexPreparedGenerationV0 {
             routes,
+            sources_revalidated: false,
             #[cfg(test)]
             worker_start_latch: worker_start_latch.clone(),
         };
@@ -291,19 +334,58 @@ impl CodexGenerationNormalizationCoordinatorV0 {
             valid_sources,
             rejected_sources,
             worker_start_latch,
+            lineage_fact_source_scans,
         );
         Ok(())
     }
 
     fn prepared(&self, participant: usize) -> CodexSourceBackedResultV0<CodexPreparedRouteV0> {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?
+            .map_err(|_| CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        let prepared = state
             .prepared
-            .as_ref()
-            .and_then(|prepared| prepared.routes.get(&participant))
+            .as_mut()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        if !prepared.sources_revalidated {
+            for route in prepared.routes.values() {
+                for (source, _, _) in &route.sources {
+                    let opened = reopen_codex_source_capability(source)
+                        .map_err(map_lineage_capture_error)?;
+                    revalidate_codex_catalog_source_capability(source, &opened)
+                        .map_err(map_lineage_capture_error)?;
+                }
+            }
+            prepared.sources_revalidated = true;
+        }
+        prepared
+            .routes
+            .get(&participant)
             .cloned()
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_generation_lineage_budget_limits(
+        &self,
+        byte_limit: usize,
+        fact_limit: usize,
+    ) {
+        if let Ok(mut state) = self.state.lock() {
+            state.lineage_budget_limits = Some((byte_limit, fact_limit));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn generation_lineage_metrics(&self) -> Option<(usize, usize, usize, usize, usize)> {
+        self.state.lock().ok().and_then(|state| {
+            state
+                .prepared
+                .as_ref()
+                .and_then(|prepared| prepared.routes.values().next())
+                .map(|route| route.authority.generation_component_metrics())
+        })
     }
 
     #[cfg(test)]
@@ -338,6 +420,7 @@ pub(crate) struct CodexLineageNormalizationObservationV0 {
     pub(crate) rejected_sources: usize,
     pub(crate) worker_starts_at_normalization: u64,
     pub(crate) worker_start_latch: CodexWorkerStartLatchV0,
+    pub(crate) lineage_fact_source_scans: u64,
 }
 
 #[cfg(test)]
@@ -365,6 +448,7 @@ fn run_after_codex_lineage_normalization_hook_v0(
     valid_sources: usize,
     rejected_sources: usize,
     worker_start_latch: CodexWorkerStartLatchV0,
+    lineage_fact_source_scans: u64,
 ) {
     AFTER_CODEX_LINEAGE_NORMALIZATION_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
@@ -373,6 +457,7 @@ fn run_after_codex_lineage_normalization_hook_v0(
                 rejected_sources,
                 worker_starts_at_normalization: worker_start_latch.starts(),
                 worker_start_latch,
+                lineage_fact_source_scans,
             });
         }
     });

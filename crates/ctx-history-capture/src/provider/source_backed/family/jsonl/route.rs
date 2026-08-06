@@ -219,6 +219,13 @@ pub(crate) trait JsonlFamilyAdapter: Send + Sync {
         Ok(None)
     }
 
+    /// Conservatively narrows the shared maximum of 16 simultaneously live
+    /// dependency partitions. Adapters may lower but never raise the shared
+    /// ceiling; returning zero is invalid.
+    fn leaf_scan_partition_wave_limit(&self) -> usize {
+        16
+    }
+
     /// Prepares partition-local state immediately before its first leaf runs.
     fn begin_leaf_scan_partition(&self, _partition: u64) -> Result<()> {
         Ok(())
