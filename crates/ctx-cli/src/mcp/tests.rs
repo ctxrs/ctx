@@ -151,6 +151,49 @@ fn query_events_rejects_removed_aliases_and_page_budget_arguments() {
 }
 
 #[test]
+fn blame_validation_failures_use_one_trusted_cli_mcp_diagnostic() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut expected_bytes = Vec::new();
+    assert!(crate::pro::write_stable_error_json(
+        &mut expected_bytes,
+        &crate::pro::invalid_blame_request(),
+    )
+    .unwrap());
+    let expected: Value = serde_json::from_slice(&expected_bytes).unwrap();
+    let hostile = "private_path_/home/alice/token_secret";
+
+    for params in [
+        json!({
+            "name": "blame",
+            "arguments": {
+                "target": {"kind": "commit", "oid": "abc1234"},
+                (hostile): true,
+            },
+        }),
+        json!({"name": "blame", "arguments": hostile}),
+        json!({
+            "name": "blame",
+            "arguments": {
+                "target": {
+                    "kind": "file",
+                    "path": "src/lib.rs",
+                    "lines": {"start": 4, "end": 2},
+                },
+            },
+        }),
+    ] {
+        let (handled, _) = handle_tools_call(params, temp.path());
+        let value = handled.unwrap().value;
+
+        assert_eq!(value["isError"], true);
+        assert_eq!(value["structuredContent"], expected);
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert!(!encoded.contains(hostile));
+        assert!(!encoded.contains("/home/alice"));
+    }
+}
+
+#[test]
 fn search_content_scope_schema_and_runtime_are_in_parity() {
     let tool = tool_definitions()
         .into_iter()

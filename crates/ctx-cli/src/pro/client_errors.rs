@@ -1,7 +1,7 @@
 use ctx_pro_host_protocol::{BlameTarget, ProtocolError};
 
 #[cfg(test)]
-use ctx_pro_host_protocol::ErrorClass;
+use ctx_pro_host_protocol::{BlameDiagnosticDetails, BlameDiagnosticReason, ErrorClass};
 
 use super::super::diagnostic::BlameDiagnostic;
 pub(crate) use super::super::diagnostic::RESOURCE_NOT_FOUND_DIAGNOSTIC;
@@ -14,10 +14,14 @@ pub(super) fn protocol_blame_error(error: ProtocolError, target: &BlameTarget) -
     anyhow::Error::new(BlameDiagnostic::from_protocol_error(error).with_core_search_for(target))
 }
 
+pub(crate) fn invalid_blame_request() -> anyhow::Error {
+    anyhow::Error::new(
+        BlameDiagnostic::for_stable_error_code("invalid_request")
+            .expect("invalid_request has a trusted blame diagnostic"),
+    )
+}
+
 pub(crate) fn blame_boundary_error(error: anyhow::Error, target: &BlameTarget) -> anyhow::Error {
-    if typed_blame_diagnostic(&error).is_some() {
-        return error;
-    }
     let diagnostic = blame_diagnostic(&error).unwrap_or_else(|| {
         BlameDiagnostic::for_stable_error_code("invalid_response")
             .expect("invalid_response has a trusted blame diagnostic")
@@ -232,6 +236,36 @@ mod tests {
             assert_eq!(diagnostic.reason, reason);
             assert!(!diagnostic.message.contains("ignored legacy host detail"));
         }
+    }
+
+    #[test]
+    fn blame_boundary_replaces_generic_operation_recovery_with_targeted_core_search() {
+        let target = BlameTarget::Commit {
+            oid: "abcd1234".to_owned(),
+            repository: Some("ctxrs/ctx".to_owned()),
+        };
+        let error = protocol_error(
+            ProtocolError::new(
+                ErrorClass::OperationUnavailable,
+                "untrusted helper operation detail",
+            )
+            .with_blame_details(BlameDiagnosticDetails {
+                reason: BlameDiagnosticReason::CommitBlameNotCovered,
+                candidates: Vec::new(),
+                candidates_truncated: false,
+            }),
+        );
+
+        let error = blame_boundary_error(error, &target);
+        let encoded = serde_json::to_value(typed_blame_diagnostic(&error).unwrap()).unwrap();
+
+        assert_eq!(encoded["error_code"], "operation_unavailable");
+        assert_eq!(encoded["next_action"]["kind"], "search_core");
+        assert_eq!(
+            encoded["next_action"]["argv"],
+            serde_json::json!(["ctx", "search", "abcd1234", "--refresh", "off"])
+        );
+        assert!(!encoded.to_string().contains("untrusted helper"));
     }
 
     #[test]

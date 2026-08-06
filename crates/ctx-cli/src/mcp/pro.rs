@@ -139,6 +139,16 @@ fn tool_pro_blame_with(
         .then(|| hydrate(data_root, &result.result));
         Ok(crate::pro::blame_result_json(&result, previews.as_ref()))
     })();
+    let result = result.map_err(|error| {
+        if error
+            .downcast_ref::<super::response::InvalidToolRequest>()
+            .is_some()
+        {
+            crate::pro::invalid_blame_request()
+        } else {
+            error
+        }
+    });
     finish_mcp_blame_telemetry(&mut telemetry, started, result)
 }
 

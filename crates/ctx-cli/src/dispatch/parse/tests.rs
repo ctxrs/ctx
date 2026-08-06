@@ -271,6 +271,53 @@ fn raw_argv_classifier_requires_unambiguous_blame_json() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn raw_argv_classifier_keeps_blame_json_after_an_opaque_positional_value() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let arguments = vec![
+        OsString::from("ctx"),
+        OsString::from("blame"),
+        OsString::from("file"),
+        OsString::from_vec(vec![0xff]),
+        OsString::from("--format=json"),
+    ];
+
+    assert!(raw_argv_selects_blame_json(&arguments));
+
+    for arguments in [
+        vec![
+            OsString::from("ctx"),
+            OsString::from("--data-root"),
+            OsString::from_vec(vec![0xff]),
+            OsString::from("blame"),
+            OsString::from("commit"),
+            OsString::from("abcd1234"),
+            OsString::from("--format=json"),
+        ],
+        vec![
+            OsString::from("ctx"),
+            OsString::from("blame"),
+            OsString::from("--color"),
+            OsString::from_vec(vec![0xff]),
+            OsString::from("commit"),
+            OsString::from("abcd1234"),
+            OsString::from("--format=json"),
+        ],
+        vec![
+            OsString::from("ctx"),
+            OsString::from_vec([b"--data-root=".as_slice(), &[0xff_u8][..]].concat()),
+            OsString::from("blame"),
+            OsString::from("commit"),
+            OsString::from("abcd1234"),
+            OsString::from("--format=json"),
+        ],
+    ] {
+        assert!(raw_argv_selects_blame_json(&arguments));
+    }
+}
+
 #[test]
 fn blame_json_parse_failure_is_one_exact_trusted_diagnostic() {
     let unsafe_value = "\u{1b}[31msecret\u{202e}";

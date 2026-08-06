@@ -29,9 +29,10 @@ use std::io;
 
 use crate::ui::{hint, outcome, Action, Document, Hint, Outcome, OutcomeState, RenderContext, Ui};
 pub(crate) use client::{
-    blame, blame_boundary_error, blame_diagnostic, preflight_core_materialization,
-    selected_helper_artifact_sha256, stable_error_code, sync_core_materialization,
-    BlameResultFreshness, HostedBlameResult, RESOURCE_NOT_FOUND_DIAGNOSTIC,
+    blame, blame_boundary_error, blame_diagnostic, invalid_blame_request,
+    preflight_core_materialization, selected_helper_artifact_sha256, stable_error_code,
+    sync_core_materialization, BlameResultFreshness, HostedBlameResult,
+    RESOURCE_NOT_FOUND_DIAGNOSTIC,
 };
 #[cfg(test)]
 pub(crate) use lifecycle::count_lifecycle_status_queries;

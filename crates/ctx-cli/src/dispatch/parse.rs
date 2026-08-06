@@ -82,14 +82,22 @@ fn write_adapted_clap_output(
 
 fn raw_argv_selects_blame_json(arguments: &[OsString]) -> bool {
     let mut index = 1;
-    while let Some(argument) = arguments.get(index).and_then(|argument| argument.to_str()) {
+    while let Some(raw_argument) = arguments.get(index) {
+        let Some(argument) = raw_argument.to_str() else {
+            let bytes = raw_argument.as_encoded_bytes();
+            if bytes.starts_with(b"--data-root=") || bytes.starts_with(b"--color=") {
+                index += 1;
+                continue;
+            }
+            return false;
+        };
         match argument {
             "--" => return false,
             "--data-root" | "--color" => {
-                let Some(value) = arguments.get(index + 1).and_then(|value| value.to_str()) else {
+                let Some(value) = arguments.get(index + 1) else {
                     return false;
                 };
-                if value.starts_with('-') {
+                if value.as_encoded_bytes().starts_with(b"-") {
                     return false;
                 }
                 index += 2;
@@ -108,14 +116,18 @@ fn raw_argv_selects_blame_json(arguments: &[OsString]) -> bool {
 
 fn blame_json_format_selected(arguments: &[OsString], mut index: usize) -> bool {
     let mut selected = false;
-    while let Some(argument) = arguments.get(index).and_then(|argument| argument.to_str()) {
+    while let Some(raw_argument) = arguments.get(index) {
+        let Some(argument) = raw_argument.to_str() else {
+            index += 1;
+            continue;
+        };
         match argument {
             "--" => break,
             "--data-root" | "--color" => {
-                let Some(value) = arguments.get(index + 1).and_then(|value| value.to_str()) else {
+                let Some(value) = arguments.get(index + 1) else {
                     return false;
                 };
-                if value.starts_with('-') {
+                if value.as_encoded_bytes().starts_with(b"-") {
                     return false;
                 }
                 index += 2;
