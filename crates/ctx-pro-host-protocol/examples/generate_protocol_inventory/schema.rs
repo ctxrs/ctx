@@ -131,6 +131,7 @@ pub(super) fn inventory() -> Value {
             "pro_operation": ["file_blame", "commit_blame", "pull_request_blame"],
             "core_source_delta_kind": ["present", "removed"],
             "core_event_delta_kind": ["added", "replaced", "tombstoned"],
+            "core_discovery_exclusion": ["ctx_retrieval_derived"],
             "session_relationship_kind": [
                 "root", "delegated", "forked", "resumed_from", "workflow_child",
                 "related_unknown"
@@ -284,6 +285,9 @@ pub(super) fn inventory() -> Value {
                 "repository_file_invocation_evidence", "repository_file_observations",
                 "repository_vcs_observations"
             ], &["mcp_tool_call"]),
+            "CoreContent": fields(&[
+                "policy_revision", "policy_status", "normalized_body", "structured_content"
+            ], &["discovery_exclusion", "mcp_exchange"]),
             "EventOrigin.unknown": fields(&["kind"], &[]),
             "EventOrigin.unique_to_session": fields(&["kind"], &[]),
             "EventOrigin.copied_from_ancestor": fields(
@@ -351,6 +355,11 @@ pub(super) fn inventory() -> Value {
                 "shape": "exact_server_and_tool_string_pair",
                 "component_bound": "decoded_utf8_bytes",
                 "maximum_component_bytes": MAX_MCP_TOOL_CALL_ATTRIBUTION_COMPONENT_BYTES
+            },
+            "discovery_exclusion": {
+                "wire_path": "CoreRecord.content.discovery_exclusion",
+                "presence": "optional_omitted_when_absent_explicit_null_rejected",
+                "reasons": ["ctx_retrieval_derived"]
             },
             "repository_candidate_set": "strictly_sorted_unique_kind_and_path_pairs",
             "repository_file_invocation_evidence_set":

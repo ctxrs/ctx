@@ -1,10 +1,10 @@
 use super::*;
 use ctx_history_core::{
     core_record_contract_fingerprint, derive_event_id, derive_session_id, CoreContent,
-    CoreContentPolicyStatus, EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey,
-    RepositoryCandidateEvidence, RepositoryCandidateKind, SessionIdentityInput,
-    SessionRelationshipKind, SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION,
-    CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
+    CoreContentPolicyStatus, CoreDiscoveryExclusion, EventIdentityInput, EventOrigin,
+    NativeItemKey, NativeSessionKey, RepositoryCandidateEvidence, RepositoryCandidateKind,
+    SessionIdentityInput, SessionRelationshipKind, SourceAnchor, TypedKey,
+    CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
 
 pub(super) fn source(lineage: u8) -> SourceKey {
@@ -138,6 +138,7 @@ pub(super) fn record() -> CoreRecord {
             policy_status: CoreContentPolicyStatus::Selected,
             normalized_body: Some("complete golden Core body".to_owned()),
             structured_content: None,
+            discovery_exclusion: Some(CoreDiscoveryExclusion::CtxRetrievalDerived),
             mcp_exchange: None,
         },
         mcp_tool_call: None,

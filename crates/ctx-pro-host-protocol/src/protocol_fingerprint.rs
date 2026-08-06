@@ -1,3 +1,3 @@
 /// Lowercase SHA-256 of `testdata/v2/inventory.json`'s canonical inventory.
 pub const PROTOCOL_FINGERPRINT: &str =
-    "49675614f836a9e7036f753720c4b8468dc1188d7381bc57488f866e86c13235";
+    "ce1af9bdaecd3ebcbdd4ff5c0e9f0bfef26fdca2e17ae5a384d5d421dc5b65dd";
