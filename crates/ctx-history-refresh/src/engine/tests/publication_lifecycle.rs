@@ -236,16 +236,7 @@ fn verified_publication_atomically_installs_pinned_core_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
+        move |execution: SourceBackedRefreshExecution<'_>| publish_pin_fixture(&execution, false),
     ));
     coordinator.enqueue_periodic(&data_root).unwrap();
 
@@ -785,16 +776,7 @@ fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
     drop(first);
 
     let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
+        move |execution: SourceBackedRefreshExecution<'_>| publish_pin_fixture(&execution, false),
     ));
     restarted.enqueue_periodic(&data_root).unwrap();
     let published = restarted.run_next(&data_root).expect("restart refresh");
@@ -917,16 +899,7 @@ fn activated_generation_missing_commit_payload_remains_typed_corruption() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let writer = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?;
-            let receipt = writer.commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
+        move |execution: SourceBackedRefreshExecution<'_>| publish_pin_fixture(&execution, false),
     ));
     coordinator.enqueue_periodic(&data_root).unwrap();
     let run = coordinator.run_next(&data_root).expect("initial refresh");

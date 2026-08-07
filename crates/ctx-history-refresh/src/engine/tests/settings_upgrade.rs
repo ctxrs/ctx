@@ -18,19 +18,37 @@ fn automatic_refresh_replaces_a_zstd_settings_generation() {
         DiscoveryPlatform::Linux,
         DiscoveryPlatformDirs::default(),
     );
+    let empty_codex_sessions = temp.path().join("empty-codex-sessions");
+    std::fs::create_dir_all(&empty_codex_sessions).unwrap();
     let report = DiscoveryReport {
-        sources: vec![ProviderSource {
-            provider: CaptureProvider::Warp,
-            path: temp.path().join("missing-unsupported.sqlite"),
-            exists: false,
-            source_format: "warp_sqlite",
-            source_kind: ProviderSourceKind::DetectionOnly,
-            import_support: ProviderImportSupport::Unsupported,
-            catalog_support: ProviderCatalogSupport::None,
-            status: ProviderSourceStatus::Unsupported,
-            unsupported_reason: Some("fixture has no executable source-backed route"),
-        }],
-        issues: Vec::new(),
+        sources: vec![
+            provider_source_for_path(CaptureProvider::Codex, empty_codex_sessions),
+            ProviderSource {
+                provider: CaptureProvider::Warp,
+                path: temp.path().join("missing-unsupported.sqlite"),
+                exists: false,
+                source_format: "warp_sqlite",
+                source_kind: ProviderSourceKind::DetectionOnly,
+                import_support: ProviderImportSupport::Unsupported,
+                catalog_support: ProviderCatalogSupport::None,
+                status: ProviderSourceStatus::Unsupported,
+                unsupported_reason: Some("fixture has no executable source-backed route"),
+            },
+        ],
+        issues: vec![
+            ctx_history_capture::DiscoveryIssue {
+                provider: CaptureProvider::Warp,
+                path: None,
+                kind: DiscoveryIssueKind::NoDiskHistory,
+                reason: "fixture has no provider history",
+            },
+            ctx_history_capture::DiscoveryIssue {
+                provider: CaptureProvider::Warp,
+                path: None,
+                kind: DiscoveryIssueKind::InsufficientOfficialEvidence,
+                reason: "fixture has no officially supported source",
+            },
+        ],
     };
     let mut progress =
         |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());

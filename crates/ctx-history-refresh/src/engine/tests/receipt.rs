@@ -2,33 +2,24 @@
 
 use super::*;
 
-fn empty_terminal_receipt_fixture() -> (tempfile::TempDir, Value, PinnedSourceBackedGeneration) {
+fn terminal_receipt_fixture() -> (tempfile::TempDir, Value, PinnedSourceBackedGeneration) {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let receipt = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
-            Ok(empty_test_publication(receipt.generation_id))
-        },
+        move |execution: SourceBackedRefreshExecution<'_>| publish_pin_fixture(&execution, false),
     ));
     coordinator.enqueue_periodic(&data_root).unwrap();
-    let run = coordinator.run_next(&data_root).expect("empty refresh");
+    let run = coordinator.run_next(&data_root).expect("terminal refresh");
     assert!(!run.failed, "{:#}", run.job);
     let pin = pin_published_generation(&data_root)
         .unwrap()
-        .expect("empty published generation");
+        .expect("published generation");
     (temp, run.job, pin)
 }
 
 #[test]
 fn terminal_receipt_requires_one_canonical_route_result_collection() {
-    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let (_temp, response, pin) = terminal_receipt_fixture();
     for field in [
         "selected_route_total",
         "successful_route_total",
@@ -90,7 +81,7 @@ fn terminal_publication_rejects_route_rejections_beyond_committed_core_total() {
 
 #[test]
 fn terminal_receipt_rejects_omitted_success_failure_and_inconsistent_totals() {
-    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let (_temp, response, pin) = terminal_receipt_fixture();
     let route = "22".repeat(32);
     let cases = [
         {
@@ -122,7 +113,7 @@ fn terminal_receipt_rejects_omitted_success_failure_and_inconsistent_totals() {
 
 #[test]
 fn terminal_receipt_rejects_malformed_or_untyped_route_results() {
-    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let (_temp, response, pin) = terminal_receipt_fixture();
     for outcome in [
         json!(["s"]),
         json!(["s", false, "extra"]),
@@ -144,7 +135,7 @@ fn terminal_receipt_rejects_malformed_or_untyped_route_results() {
 
 #[test]
 fn terminal_receipt_preserves_legitimate_empty_route_results() {
-    let (_temp, response, pin) = empty_terminal_receipt_fixture();
+    let (_temp, response, pin) = terminal_receipt_fixture();
     let receipt = published_refresh_receipt(&response, &pin).unwrap();
     assert_eq!(receipt.selected_route_total(), 0);
     assert_eq!(receipt.successful_route_total(), 0);
@@ -221,13 +212,7 @@ fn terminal_response_is_bounded_while_route_results_remain_exact() {
     let data_root = temp.path().join("data");
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
-            let commit = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
-            .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
+            let mut publication = publish_pin_fixture(&execution, false)?;
             let route_results = (0..256)
                 .map(|index| {
                     let route_identity = format!("{index:064x}");
@@ -248,19 +233,8 @@ fn terminal_response_is_bounded_while_route_results_remain_exact() {
                     result
                 })
                 .collect::<Vec<_>>();
-            Ok(SourceBackedRefreshPublication {
-                generation_id: commit.generation_id,
-                published_explicit_source_catalog: None,
-                unsupported_routes: 0,
-                certified_source_count: 0,
-                certified_source_bytes: 0,
-                current: SourceBackedRefreshCurrent::default(),
-                timings: SourceBackedRefreshTimings::default(),
-                route_results,
-                zero_source_authority: Vec::new(),
-                catalog_route_bindings: Vec::new(),
-                verified_index: None,
-            })
+            publication.route_results = route_results;
+            Ok(publication)
         },
     ));
     coordinator.enqueue_periodic(&data_root).unwrap();

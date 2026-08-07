@@ -17,10 +17,12 @@ fn discovery_fixture(root: &Path) -> (PathBuf, PathBuf, DiscoveryContext) {
 }
 
 fn unsupported_warp(root: &Path) -> ProviderSource {
+    let path = root.join("present-unsupported.sqlite");
+    fs::write(&path, b"unsupported fixture").unwrap();
     ProviderSource {
         provider: CaptureProvider::Warp,
-        path: root.join("missing-unsupported.sqlite"),
-        exists: false,
+        path,
+        exists: true,
         source_format: "warp_sqlite",
         source_kind: ProviderSourceKind::DetectionOnly,
         import_support: ProviderImportSupport::Unsupported,
@@ -76,7 +78,7 @@ fn replace_metadata_version(index_root: &Path, version: u64) -> VerifiedIndex {
 }
 
 #[test]
-fn unsupported_only_refresh_fails_closed_cold_and_retains_warm_generation() {
+fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_generation() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let index_root = source_backed_index_root(&data_root);
@@ -88,15 +90,25 @@ fn unsupported_only_refresh_fails_closed_cold_and_retains_warm_generation() {
     };
 
     let cold_error = run_report(&discovery, report.clone(), &data_root, &index_root).unwrap_err();
-    assert!(format!("{cold_error:#}").contains(TERMINAL_COVERAGE_ERROR_CODE));
+    let cold_detail = format!("{cold_error:#}");
+    assert!(
+        cold_detail.contains("retained no usable source")
+            && cold_detail.contains("unsupported provider schema"),
+        "{cold_detail}"
+    );
     assert!(matches!(
         VerifiedIndex::open(&index_root),
         Err(IndexError::MissingActiveGenerationPointer)
     ));
 
     let retained_generation = publish_pin_source(&index_root, publication_pin_source());
-    let warm_error = run_report(&discovery, report, &data_root, &index_root).unwrap_err();
-    assert!(format!("{warm_error:#}").contains(TERMINAL_COVERAGE_ERROR_CODE));
+    let warm = run_report(&discovery, report, &data_root, &index_root).unwrap();
+    assert_eq!(warm.generation_id, retained_generation);
+    let [failed_route] = warm.route_results.as_slice() else {
+        panic!("one failed unsupported route expected: {warm:#?}");
+    };
+    assert_eq!(failed_route.outcome.failure_class(), Some("incompatible"));
+    assert!(!failed_route.outcome.is_success());
     let retained = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
     assert_eq!(retained.manifest().sources.len(), 1);
