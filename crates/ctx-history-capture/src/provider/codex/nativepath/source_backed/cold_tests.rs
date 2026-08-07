@@ -73,7 +73,9 @@ fn worker_error_and_disconnect_remain_typed() {
             sender
                 .send(ColdWorkerEventV0::Failed {
                     lane_index: 0,
-                    error: CodexSourceBackedErrorV0::InjectedColdWorkerFailure { source_index: 7 },
+                    error: CodexSourceBackedErrorV0::InjectedColdWorkerFailure {
+                        native_session_id: "source-test".to_owned(),
+                    },
                 })
                 .unwrap();
         });
@@ -81,7 +83,8 @@ fn worker_error_and_disconnect_remain_typed() {
             receive_cold_worker_event_v0(&receiver, &lane_states, &finished_lanes).unwrap_err();
         assert!(matches!(
             error,
-            CodexSourceBackedErrorV0::InjectedColdWorkerFailure { source_index: 7 }
+            CodexSourceBackedErrorV0::InjectedColdWorkerFailure { native_session_id }
+                if native_session_id == "source-test"
         ));
     });
 

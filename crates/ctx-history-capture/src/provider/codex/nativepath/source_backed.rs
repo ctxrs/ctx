@@ -135,8 +135,8 @@ pub enum CodexSourceBackedErrorV0 {
     #[error("Codex cold scanner protocol mismatch: {0}")]
     ColdProtocolMismatch(&'static str),
     #[cfg(test)]
-    #[error("injected Codex cold scanner failure for source {source_index}")]
-    InjectedColdWorkerFailure { source_index: usize },
+    #[error("injected Codex cold scanner failure for native session {native_session_id}")]
+    InjectedColdWorkerFailure { native_session_id: String },
     #[error("Codex source-backed scanner emitted a legacy Core publication row")]
     UnexpectedLegacyRow,
     #[error("explicit Codex session source changed its native session identity")]

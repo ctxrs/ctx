@@ -96,7 +96,7 @@ pub(super) fn take_cold_scanner_activity_v0() -> Option<(u64, u64, u64)> {
 pub(super) struct ColdParallelOptionsV0 {
     pub(super) scanner_workers: Option<usize>,
     #[cfg(test)]
-    pub(super) fail_source_index: Option<usize>,
+    pub(super) fail_native_session_id: Option<&'static str>,
     #[cfg(test)]
     pub(super) before_commit_revalidation: Option<fn(&Path)>,
     #[cfg(test)]
@@ -452,9 +452,9 @@ fn run_cold_scan_lane_v0(
             return Ok(());
         }
         #[cfg(test)]
-        if cold_options.fail_source_index == Some(job.source_index) {
+        if cold_options.fail_native_session_id == Some(job.native_session_id.as_str()) {
             return Err(CodexSourceBackedErrorV0::InjectedColdWorkerFailure {
-                source_index: job.source_index,
+                native_session_id: job.native_session_id.clone(),
             });
         }
         #[cfg(not(test))]
