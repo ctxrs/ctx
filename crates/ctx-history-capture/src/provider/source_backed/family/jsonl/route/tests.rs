@@ -168,6 +168,7 @@ fn expected_state(
             ownership_initialized: true,
             owned_sources,
             terminal_sources,
+            terminal_rejected_sources: HashMap::new(),
             absent_sources: Vec::new(),
             opening_membership: Some(opening_membership),
             certified_inventory: Some(inventory.clone()),

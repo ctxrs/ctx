@@ -32,6 +32,63 @@ pub(super) enum CodexLineageRejectionReasonV0 {
     AdvisoryIrreconcilable { advisory_session_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CodexLineageSourceRecordKindV0 {
+    SessionMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CodexLineageSourceRecordV0 {
+    source_native_session_id: String,
+    record_kind: CodexLineageSourceRecordKindV0,
+}
+
+impl CodexLineageSourceRecordV0 {
+    fn session_meta(source_native_session_id: &str) -> Self {
+        Self {
+            source_native_session_id: source_native_session_id.to_owned(),
+            record_kind: CodexLineageSourceRecordKindV0::SessionMeta,
+        }
+    }
+
+    fn diagnostic_identity(&self) -> String {
+        let kind = match self.record_kind {
+            CodexLineageSourceRecordKindV0::SessionMeta => "session_meta",
+        };
+        format!("{kind}:{}", self.source_native_session_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CodexLineageRootConflictV0 {
+    computed_root_native_session_id: String,
+    conflicting_advisory_session_id: String,
+    evidence_source_record: CodexLineageSourceRecordV0,
+    computed_root_source_record: CodexLineageSourceRecordV0,
+    advisory_source_record: Option<CodexLineageSourceRecordV0>,
+}
+
+impl CodexLineageRootConflictV0 {
+    fn diagnostic_detail(&self) -> String {
+        let advisory_source_record = self
+            .advisory_source_record
+            .as_ref()
+            .map(CodexLineageSourceRecordV0::diagnostic_identity)
+            .unwrap_or_else(|| "unavailable".to_owned());
+        format!(
+            "codex_lineage_root_conflict_v0 computed_root_native_session_id={} \
+             conflicting_advisory_session_id={} evidence_source_record={} \
+             computed_root_source_record={} advisory_source_record={}",
+            self.computed_root_native_session_id,
+            self.conflicting_advisory_session_id,
+            self.evidence_source_record.diagnostic_identity(),
+            self.computed_root_source_record.diagnostic_identity(),
+            advisory_source_record,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct CodexLineageRejectionProofV0 {
     version: u8,
@@ -39,6 +96,16 @@ pub(super) struct CodexLineageRejectionProofV0 {
     component_native_session_id: String,
     evidence_native_session_id: String,
     reason: CodexLineageRejectionReasonV0,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root_conflict: Option<CodexLineageRootConflictV0>,
+}
+
+impl CodexLineageRejectionProofV0 {
+    pub(super) fn root_conflict_diagnostic_detail(&self) -> Option<String> {
+        self.root_conflict
+            .as_ref()
+            .map(CodexLineageRootConflictV0::diagnostic_detail)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +124,7 @@ pub(super) struct CodexLineageNormalizationV0 {
 struct ComponentIssueV0 {
     evidence_native_session_id: String,
     reason: CodexLineageRejectionReasonV0,
+    root_conflict: Option<CodexLineageRootConflictV0>,
 }
 
 struct DisjointComponentsV0 {
@@ -243,12 +311,16 @@ impl CodexOutcomeLineageAuthorityV0 {
         let mut issues = HashMap::<usize, ComponentIssueV0>::new();
         macro_rules! reject {
             ($index:expr, $reason:expr $(,)?) => {{
+                reject!($index, $reason, None);
+            }};
+            ($index:expr, $reason:expr, $root_conflict:expr $(,)?) => {{
                 let index = $index;
                 issues
                     .entry(component_of[index])
                     .or_insert_with(|| ComponentIssueV0 {
                         evidence_native_session_id: ordered[index].2.clone(),
                         reason: $reason,
+                        root_conflict: $root_conflict,
                     });
             }};
         }
@@ -391,6 +463,17 @@ impl CodexOutcomeLineageAuthorityV0 {
             if advisory == &ordered[root_index].2 || advisory == &ordered[index].2 {
                 continue;
             }
+            let root_conflict = |advisory_index: Option<usize>| CodexLineageRootConflictV0 {
+                computed_root_native_session_id: ordered[root_index].2.clone(),
+                conflicting_advisory_session_id: advisory.clone(),
+                evidence_source_record: CodexLineageSourceRecordV0::session_meta(&ordered[index].2),
+                computed_root_source_record: CodexLineageSourceRecordV0::session_meta(
+                    &ordered[root_index].2,
+                ),
+                advisory_source_record: advisory_index.map(|advisory_index| {
+                    CodexLineageSourceRecordV0::session_meta(&ordered[advisory_index].2)
+                }),
+            };
             let advisory_index = match groups.get(advisory).map(Vec::as_slice) {
                 Some([advisory_index]) => *advisory_index,
                 Some(_) | None => {
@@ -399,6 +482,7 @@ impl CodexOutcomeLineageAuthorityV0 {
                         CodexLineageRejectionReasonV0::AdvisoryIrreconcilable {
                             advisory_session_id: advisory.clone(),
                         },
+                        Some(root_conflict(None)),
                     );
                     continue;
                 }
@@ -409,6 +493,7 @@ impl CodexOutcomeLineageAuthorityV0 {
                     CodexLineageRejectionReasonV0::AdvisoryUnrelatedComponent {
                         advisory_session_id: advisory.clone(),
                     },
+                    Some(root_conflict(Some(advisory_index))),
                 );
                 continue;
             }
@@ -430,6 +515,7 @@ impl CodexOutcomeLineageAuthorityV0 {
                     CodexLineageRejectionReasonV0::AdvisoryIrreconcilable {
                         advisory_session_id: advisory.clone(),
                     },
+                    Some(root_conflict(Some(advisory_index))),
                 );
             }
         }
@@ -460,11 +546,12 @@ impl CodexOutcomeLineageAuthorityV0 {
                 rejections.push(CodexLineageRejectedSourceV0 {
                     source: plan.0,
                     proof: CodexLineageRejectionProofV0 {
-                        version: 1,
+                        version: if issue.root_conflict.is_some() { 2 } else { 1 },
                         native_session_id: plan.2,
                         component_native_session_id,
                         evidence_native_session_id: issue.evidence_native_session_id.clone(),
                         reason: issue.reason.clone(),
+                        root_conflict: issue.root_conflict.clone(),
                     },
                 });
                 continue;

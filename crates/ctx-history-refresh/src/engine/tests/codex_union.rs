@@ -113,6 +113,229 @@ fn successful_codex_route_derives_rejected_records_from_committed_core_sources()
 }
 
 #[test]
+fn codex_root_conflict_projects_source_failures_while_valid_peer_publishes() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let root = temp.path().join("private-codex-sessions");
+    let root_a = "019fb600-0000-7000-8000-0000000032a0";
+    let child_a = "019fb600-0000-7000-8000-0000000032a1";
+    let root_b = "019fb600-0000-7000-8000-0000000032b0";
+    let private_root_marker = "privaterootacanary328";
+    let private_child_marker = "privatechildacanary328";
+    let valid_marker = "validrootbpublicationmarker";
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    write_codex_rollout(&root, root_a, private_root_marker);
+    write_codex_root_conflict_rollout(&root, child_a, root_a, root_b, private_child_marker);
+    write_codex_rollout(&root, root_b, valid_marker);
+    let report = DiscoveryReport {
+        sources: vec![provider_source_for_path(
+            CaptureProvider::Codex,
+            root.clone(),
+        )],
+        issues: Vec::new(),
+    };
+    let discovery = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+
+    let publication = refresh_all_provider_sources(
+        &discovery,
+        report,
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
+        &mut progress,
+    )
+    .unwrap();
+
+    let [result] = publication.route_results.as_slice() else {
+        panic!("one selected Codex route expected");
+    };
+    assert!(result.outcome.is_success());
+    assert_eq!(result.source_failure_total, 2);
+    assert_eq!(result.source_failures.len(), 2);
+    assert_eq!(result.rejected_record_total, 0);
+    assert!(result.rejection_diagnostics.is_empty());
+    assert_eq!(publication.current.source_count, 1);
+    assert_eq!(publication.current.rejected_records, 0);
+    for failure in &result.source_failures {
+        assert!(failure.source_selector.starts_with("logical-source:"));
+        for expected in [
+            format!("computed_root_native_session_id={root_a}"),
+            format!("conflicting_advisory_session_id={root_b}"),
+            format!("evidence_source_record=session_meta:{child_a}"),
+            format!("computed_root_source_record=session_meta:{root_a}"),
+            format!("advisory_source_record=session_meta:{root_b}"),
+        ] {
+            assert!(failure.detail.contains(&expected), "{}", failure.detail);
+        }
+        assert!(!failure.detail.contains(root.to_str().unwrap()));
+        assert!(!failure.detail.contains(private_root_marker));
+        assert!(!failure.detail.contains(private_child_marker));
+    }
+    let verified = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(
+        verified
+            .search_event_candidates(valid_marker, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(verified
+        .search_event_candidates(private_root_marker, 10)
+        .unwrap()
+        .is_empty());
+    assert!(verified
+        .search_event_candidates(private_child_marker, 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn codex_root_conflict_receipt_keeps_exact_total_and_bounded_path_safe_diagnostics() {
+    const CONFLICTING_CHILDREN: usize = 65;
+    const REJECTED_SOURCES: usize = CONFLICTING_CHILDREN + 1;
+
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let root = temp.path().join("private-bounded-codex-conflicts");
+    let root_a = "019fb600-0000-7000-8000-000000003400";
+    let root_b = "019fb600-0000-7000-8000-0000000034b0";
+    let evidence_child = "019fb600-0000-7000-8001-000000000000";
+    let private_marker = "private bounded root conflict content 328";
+    let valid_marker = "bounded root conflict valid peer 328";
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    write_codex_rollout(&root, root_a, private_marker);
+    for index in 0..CONFLICTING_CHILDREN {
+        let child = format!("019fb600-0000-7000-8001-{index:012x}");
+        if index == 0 {
+            write_codex_root_conflict_rollout(&root, &child, root_a, root_b, private_marker);
+        } else {
+            write_codex_related_rollout(&root, &child, root_a, private_marker);
+        }
+    }
+    write_codex_rollout(&root, root_b, valid_marker);
+    let report = DiscoveryReport {
+        sources: vec![provider_source_for_path(
+            CaptureProvider::Codex,
+            root.clone(),
+        )],
+        issues: Vec::new(),
+    };
+    let discovery = DiscoveryContext::new(
+        &home,
+        &cwd,
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+
+    let publication = refresh_all_provider_sources(
+        &discovery,
+        report,
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &BTreeSet::new(),
+        &mut progress,
+    )
+    .unwrap();
+
+    let [result] = publication.route_results.as_slice() else {
+        panic!("one selected Codex route expected");
+    };
+    assert!(result.outcome.is_success());
+    assert_eq!(result.source_failure_total, REJECTED_SOURCES);
+    let bounded_diagnostics = result.source_failures.len();
+    assert!((1..=64).contains(&bounded_diagnostics));
+    assert!(bounded_diagnostics < REJECTED_SOURCES);
+    assert_eq!(result.rejected_record_total, 0);
+    assert!(result.rejection_diagnostics.is_empty());
+    assert_eq!(publication.current.source_count, 1);
+    assert_eq!(publication.current.rejected_records, 0);
+    for failure in &result.source_failures {
+        assert!(failure.source_selector.starts_with("logical-source:"));
+        for expected in [
+            format!("computed_root_native_session_id={root_a}"),
+            format!("conflicting_advisory_session_id={root_b}"),
+            format!("evidence_source_record=session_meta:{evidence_child}"),
+            format!("computed_root_source_record=session_meta:{root_a}"),
+            format!("advisory_source_record=session_meta:{root_b}"),
+        ] {
+            assert!(failure.detail.contains(&expected), "{}", failure.detail);
+        }
+        assert!(!failure.detail.contains(root.to_str().unwrap()));
+        assert!(!failure.detail.contains(private_marker));
+    }
+
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        None,
+        publication.generation_id.clone(),
+        &publication,
+    )
+    .unwrap();
+    assert_eq!(receipt.terminal_outcome(), "completed_with_source_failures");
+    assert_eq!(receipt.source_failure_total(), REJECTED_SOURCES);
+    assert_eq!(
+        receipt.source_failure_diagnostic_count(),
+        bounded_diagnostics
+    );
+    assert_eq!(
+        receipt.source_failures_omitted(),
+        REJECTED_SOURCES - bounded_diagnostics
+    );
+    assert_eq!(receipt.rejected_record_total(), 0);
+
+    let envelope = receipt.to_json();
+    assert_eq!(envelope["source_failure_total"], REJECTED_SOURCES);
+    assert_eq!(envelope["rejected_record_total"], 0);
+    let route = envelope["route_results"]
+        .as_object()
+        .and_then(|routes| routes.values().next())
+        .and_then(Value::as_array)
+        .expect("one compact route receipt");
+    let transmitted = route[3]
+        .as_array()
+        .expect("bounded source failure diagnostics")
+        .len();
+    assert!(transmitted <= bounded_diagnostics);
+    assert_eq!(
+        envelope["source_failures_omitted"],
+        REJECTED_SOURCES - transmitted
+    );
+    assert!(
+        serde_json::to_vec(&envelope).unwrap().len() <= SOURCE_REFRESH_RECEIPT_JSON_BUDGET_BYTES
+    );
+    assert_eq!(
+        VerifiedIndex::open(&index_root)
+            .unwrap()
+            .search_event_candidates(valid_marker, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
@@ -534,10 +757,42 @@ fn write_codex_related_rollout(
     )
 }
 
+fn write_codex_root_conflict_rollout(
+    root: &Path,
+    native_session_id: &str,
+    parent_native_session_id: &str,
+    advisory_session_id: &str,
+    text: &str,
+) -> PathBuf {
+    write_codex_rollout_with_lineage(
+        root,
+        native_session_id,
+        Some(parent_native_session_id),
+        Some(advisory_session_id),
+        text,
+    )
+}
+
 fn write_codex_rollout_with_parent(
     root: &Path,
     native_session_id: &str,
     parent_native_session_id: Option<&str>,
+    text: &str,
+) -> PathBuf {
+    write_codex_rollout_with_lineage(
+        root,
+        native_session_id,
+        parent_native_session_id,
+        parent_native_session_id,
+        text,
+    )
+}
+
+fn write_codex_rollout_with_lineage(
+    root: &Path,
+    native_session_id: &str,
+    parent_native_session_id: Option<&str>,
+    advisory_session_id: Option<&str>,
     text: &str,
 ) -> PathBuf {
     fs::create_dir_all(root).unwrap();
@@ -552,9 +807,11 @@ fn write_codex_rollout_with_parent(
     });
     if let Some(parent) = parent_native_session_id {
         payload["forked_from_id"] = json!(parent);
+    }
+    if let Some(advisory) = advisory_session_id {
         // `payload.session_id` is advisory. The structural parent marker
         // remains authoritative for the native child identity and edge.
-        payload["session_id"] = json!(parent);
+        payload["session_id"] = json!(advisory);
     }
     let session_meta = json!({
         "timestamp": "2026-07-30T12:00:00Z",

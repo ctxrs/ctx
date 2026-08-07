@@ -54,6 +54,48 @@ fn source_refresh_failure(command: &mut Command) -> String {
     String::from_utf8(output.stderr).unwrap()
 }
 
+fn write_codex_lineage_rollout(
+    root: &Path,
+    native_session_id: &str,
+    parent_native_session_id: Option<&str>,
+    advisory_session_id: Option<&str>,
+    marker: &str,
+) -> PathBuf {
+    fs::create_dir_all(root).unwrap();
+    let mut payload = serde_json::json!({
+        "id": native_session_id,
+        "timestamp": "2026-08-07T12:00:00Z",
+        "cwd": "/private/root-conflict/workspace",
+        "originator": "codex_cli_rs",
+        "cli_version": "1.0.0",
+        "source": "cli",
+        "model_provider": "openai"
+    });
+    if let Some(parent) = parent_native_session_id {
+        payload["forked_from_id"] = serde_json::json!(parent);
+    }
+    if let Some(advisory) = advisory_session_id {
+        payload["session_id"] = serde_json::json!(advisory);
+    }
+    let session_meta = serde_json::json!({
+        "timestamp": "2026-08-07T12:00:00Z",
+        "type": "session_meta",
+        "payload": payload,
+    });
+    let message = serde_json::json!({
+        "timestamp": "2026-08-07T12:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": marker}]
+        }
+    });
+    let path = root.join(format!("rollout-{native_session_id}.jsonl"));
+    fs::write(&path, format!("{session_meta}\n{message}\n")).unwrap();
+    path
+}
+
 #[test]
 fn antigravity_cli_import_skips_malformed_file_among_valid_files() {
     let temp = finite_daemon_test_root();
@@ -336,6 +378,206 @@ fn codex_mixed_session_replay_preserves_source_backed_rejection_counts() {
         "--format=json",
     ]));
     assert_search_provider_oracle(&search, "codex", "codex mixed replay oracle", 1, "message");
+}
+
+#[test]
+fn codex_root_conflict_cli_reports_path_safe_source_failure_and_publishes_peer() {
+    let temp = finite_daemon_test_root();
+    let sessions = temp.path().join("private-codex-root-conflict-sessions");
+    let root_a = "019fc000-0000-7000-8000-0000000032a0";
+    let child_a = "019fc000-0000-7000-8000-0000000032a1";
+    let root_b = "019fc000-0000-7000-8000-0000000032b0";
+    let private_root_marker = "privaterootaclicanary328";
+    let private_child_marker = "privatechildaclicanary328";
+    let valid_marker = "validrootbclicanary328";
+    write_codex_lineage_rollout(&sessions, root_a, None, None, private_root_marker);
+    write_codex_lineage_rollout(
+        &sessions,
+        child_a,
+        Some(root_a),
+        Some(root_b),
+        private_child_marker,
+    );
+    write_codex_lineage_rollout(&sessions, root_b, None, None, valid_marker);
+
+    let report = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(
+        report["outcome"], "completed_with_source_failures",
+        "{report:#}"
+    );
+    assert_eq!(report["failure_scope"], "source", "{report:#}");
+    let [source] = report["sources"].as_array().unwrap().as_slice() else {
+        panic!("one explicit Codex receipt expected: {report:#}");
+    };
+    assert_eq!(source["status"], "partial", "{report:#}");
+    assert_eq!(source["failure_scope"], "source", "{report:#}");
+    assert_eq!(source["route_source_failure_total"], 2, "{report:#}");
+    assert_eq!(source["current_source_count"], 1, "{report:#}");
+    assert_eq!(source["current_rejected_records"], 0, "{report:#}");
+    assert!(source["rejection_diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(source["source_selector"]
+        .as_str()
+        .is_some_and(|selector| selector.starts_with("logical-source:")));
+    let detail = source["detail"].as_str().unwrap();
+    for expected in [
+        format!("computed_root_native_session_id={root_a}"),
+        format!("conflicting_advisory_session_id={root_b}"),
+        format!("evidence_source_record=session_meta:{child_a}"),
+        format!("computed_root_source_record=session_meta:{root_a}"),
+        format!("advisory_source_record=session_meta:{root_b}"),
+    ] {
+        assert!(detail.contains(&expected), "{detail}");
+    }
+    assert!(!detail.contains(sessions.to_str().unwrap()));
+    assert!(!detail.contains(private_root_marker));
+    assert!(!detail.contains(private_child_marker));
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        valid_marker,
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "codex", valid_marker, 1, "message");
+}
+
+#[test]
+fn codex_many_root_conflicts_cli_reports_exact_total_and_bounded_omission() {
+    const CONFLICTING_CHILDREN: usize = 65;
+    const REJECTED_SOURCES: usize = CONFLICTING_CHILDREN + 1;
+
+    let temp = finite_daemon_test_root();
+    let sessions = temp.path().join(".codex/sessions/2026/08/07");
+    let root_a = "019fc000-0000-7000-8000-000000003400";
+    let root_b = "019fc000-0000-7000-8000-0000000034b0";
+    let evidence_child = "019fc000-0000-7000-8001-000000000000";
+    let private_marker = "private bounded CLI root conflict content 328";
+    let valid_marker = "bounded CLI root conflict valid peer 328";
+    write_codex_lineage_rollout(&sessions, root_a, None, None, private_marker);
+    for index in 0..CONFLICTING_CHILDREN {
+        let child = format!("019fc000-0000-7000-8001-{index:012x}");
+        let advisory = if index == 0 { root_b } else { root_a };
+        write_codex_lineage_rollout(
+            &sessions,
+            &child,
+            Some(root_a),
+            Some(advisory),
+            private_marker,
+        );
+    }
+    write_codex_lineage_rollout(&sessions, root_b, None, None, valid_marker);
+
+    let report =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_eq!(
+        report["outcome"], "completed_with_source_failures",
+        "{report:#}"
+    );
+    assert_eq!(report["failure_scope"], "source", "{report:#}");
+    assert_eq!(report["totals"]["current_source_count"], 1, "{report:#}");
+    assert_eq!(
+        report["totals"]["current_rejected_records"], 0,
+        "{report:#}"
+    );
+    let sources = report["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 4, "summary plus three bounded diagnostics");
+    let summary = &sources[0];
+    assert_eq!(summary["status"], "partial", "{report:#}");
+    assert_eq!(summary["failure_scope"], "source", "{report:#}");
+    assert_eq!(summary["failure_type"], "source_failure", "{report:#}");
+    assert_eq!(summary["source_failure_total"], REJECTED_SOURCES);
+    assert_eq!(summary["source_failures_omitted"], REJECTED_SOURCES - 3);
+    assert_eq!(summary["rejected_record_total"], 0);
+    assert_eq!(summary["current_rejected_records"], 0);
+    for source in &sources[1..] {
+        assert_eq!(source["failure_scope"], "source", "{source:#}");
+        assert_eq!(source["failure_type"], "other", "{source:#}");
+        assert!(source["source_selector"]
+            .as_str()
+            .is_some_and(|selector| selector.starts_with("logical-source:")));
+        let detail = source["detail"].as_str().unwrap();
+        for expected in [
+            format!("computed_root_native_session_id={root_a}"),
+            format!("conflicting_advisory_session_id={root_b}"),
+            format!("evidence_source_record=session_meta:{evidence_child}"),
+            format!("computed_root_source_record=session_meta:{root_a}"),
+            format!("advisory_source_record=session_meta:{root_b}"),
+        ] {
+            assert!(detail.contains(&expected), "{detail}");
+        }
+        assert!(!detail.contains(sessions.to_str().unwrap()));
+        assert!(!detail.contains(private_marker));
+    }
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        valid_marker,
+        "--provider",
+        "codex",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "codex", valid_marker, 1, "message");
+}
+
+#[test]
+fn codex_all_invalid_root_conflict_cli_failure_includes_typed_proof() {
+    let temp = finite_daemon_test_root();
+    let sessions = temp.path().join("private-codex-root-conflict-sessions");
+    let root = "019fc000-0000-7000-8000-0000000032c0";
+    let child = "019fc000-0000-7000-8000-0000000032c1";
+    let missing_advisory = "019fc000-0000-7000-8000-0000000032ff";
+    let private_marker = "private all-invalid CLI message content";
+    write_codex_lineage_rollout(&sessions, root, None, None, private_marker);
+    write_codex_lineage_rollout(
+        &sessions,
+        child,
+        Some(root),
+        Some(missing_advisory),
+        private_marker,
+    );
+
+    let stderr = source_refresh_failure(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        sessions.to_str().unwrap(),
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    for expected in [
+        format!("computed_root_native_session_id={root}"),
+        format!("conflicting_advisory_session_id={missing_advisory}"),
+        format!("evidence_source_record=session_meta:{child}"),
+        format!("computed_root_source_record=session_meta:{root}"),
+        "advisory_source_record=unavailable".to_owned(),
+    ] {
+        assert!(stderr.contains(&expected), "{stderr}");
+    }
+    let diagnostic = stderr
+        .split_once("first rejection diagnostic:")
+        .and_then(|(_, diagnostic)| diagnostic.lines().next())
+        .expect("all-invalid Codex failure must identify its projected diagnostic");
+    assert!(!diagnostic.contains(sessions.to_str().unwrap()), "{stderr}");
+    assert!(!stderr.contains(private_marker), "{stderr}");
 }
 
 #[test]
