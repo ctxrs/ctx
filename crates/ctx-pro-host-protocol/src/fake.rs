@@ -326,7 +326,7 @@ impl FakeHelper {
             ResolvedBlameTarget::Commit { .. } => BlameCoverageUnit::CommitFact,
             ResolvedBlameTarget::PullRequest { .. } => BlameCoverageUnit::PullRequestRelationship,
         };
-        HelperMessage::Blame(BlameResult {
+        HelperMessage::Blame(Box::new(BlameResult {
             snapshot: request.expected_snapshot,
             target,
             git_snapshot,
@@ -345,6 +345,6 @@ impl FakeHelper {
             evidence: Vec::new(),
             next: None,
             lineage: None,
-        })
+        }))
     }
 }

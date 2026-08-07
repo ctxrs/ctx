@@ -141,7 +141,7 @@ fn blame_once(
     let request_context = request.clone();
     let result = match client.exchange(HostMessage::Blame(request), BLAME_TIMEOUT)? {
         HelperMessage::Blame(result) => {
-            validate_blame_response(&request_context, &result).map(|()| result)
+            validate_blame_response(&request_context, &result).map(|()| *result)
         }
         HelperMessage::Error(error) => Err(protocol_blame_error(error, &request_context.target)),
         _ => Err(anyhow!(
