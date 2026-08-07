@@ -68,12 +68,25 @@ pub(super) fn run_daemon_scheduler_cycle_with_activity(
             activity.cancel_idle_wakeup();
         }
         if source_refresh_requested && !runtime.history_retry.ready() {
+            cancel_core_finalization_generation_lease(
+                data_root,
+                "daemon mode disabled Pro finalization",
+            )?;
             return Ok(deferred_pending_core_refresh(data_root, runtime));
         }
         if let Some(iteration) = run_pending_core_refresh(data_root, runtime, source_refresh)? {
+            cancel_core_finalization_generation_lease(
+                data_root,
+                "daemon mode disabled Pro finalization",
+            )?;
             return Ok(iteration);
         }
-        return run_dirty_core_refresh(data_root, runtime, source_refresh);
+        let iteration = run_dirty_core_refresh(data_root, runtime, source_refresh)?;
+        cancel_core_finalization_generation_lease(
+            data_root,
+            "daemon mode disabled Pro finalization",
+        )?;
+        return Ok(iteration);
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
     if source_refresh_requested {
@@ -221,10 +234,42 @@ fn run_pending_core_pro_catch_up(
     runtime: &mut DaemonRuntime,
     source_refresh: Option<&CoreRefreshEngine>,
 ) -> Result<Option<DaemonIteration>> {
+    run_pending_core_pro_catch_up_with(
+        data_root,
+        runtime,
+        source_refresh,
+        run_pro_catch_up_with_retry,
+    )
+}
+
+fn run_pending_core_pro_catch_up_with<RunPro>(
+    data_root: &Path,
+    runtime: &mut DaemonRuntime,
+    source_refresh: Option<&CoreRefreshEngine>,
+    run_pro: RunPro,
+) -> Result<Option<DaemonIteration>>
+where
+    RunPro: for<'a> FnOnce(
+        &Path,
+        &mut DaemonRuntime,
+        &str,
+        SourceBackedProCoreAuthority<'a>,
+    ) -> Result<SourceBackedProCatchUpRun>,
+{
     if !daemon_mode_runs_core_pro_catch_up(runtime.config.daemon.mode) {
+        cancel_core_finalization_generation_lease(
+            data_root,
+            "daemon mode disabled Pro finalization",
+        )?;
         return Ok(None);
     }
+    reconcile_core_finalization_generation_lease(data_root)?;
     let retry_due = runtime.pro_retry.consecutive_failures > 0 && runtime.pro_retry.ready();
+    let scheduled = pin_scheduled_pro_target(data_root)?;
+    let scheduled_target = scheduled
+        .as_ref()
+        .map(|(generation, _)| generation.as_str());
+    let scheduled_authority = scheduled.as_ref().map(|(_, authority)| authority);
     let retained_authority = source_refresh.and_then(CoreRefreshEngine::pinned_core_publication);
     // Reading an absent intent is the ordinary fast path. Only a pending
     // intent resolves the installed helper identity (and may take its lock).
@@ -248,18 +293,29 @@ fn run_pending_core_pro_catch_up(
         || (retained_authority.is_none()
             && runtime.sidecar_drain.pro_attempted_generation.is_some()
             && pro_installation_requires_recheck(data_root));
-    let durable_check_required = retained_authority.is_none()
+    let durable_finalization_pending = runtime
+        .sidecar_drain
+        .pro_attempted_generation
+        .as_deref()
+        .is_some_and(|generation| status_has_finalization_pending(data_root, generation));
+    let durable_check_required = scheduled_authority.is_none()
+        && retained_authority.is_none()
         && (runtime.sidecar_drain.pro_attempted_generation.is_none()
             || retry_due
-            || installation_requires_recheck);
+            || installation_requires_recheck
+            || durable_finalization_pending);
     let durable_authority = if durable_check_required {
         pin_published_generation(data_root)?
     } else {
         None
     };
-    let authority = retained_authority
-        .as_deref()
-        .map(SourceBackedProCoreAuthority::Retained)
+    let authority = scheduled_authority
+        .map(SourceBackedProCoreAuthority::Durable)
+        .or_else(|| {
+            retained_authority
+                .as_deref()
+                .map(SourceBackedProCoreAuthority::Retained)
+        })
         .or_else(|| {
             durable_authority
                 .as_ref()
@@ -269,9 +325,11 @@ fn run_pending_core_pro_catch_up(
         return Ok(None);
     };
     let generation = authority.generation_id();
+    let continuation_pending = status_has_finalization_pending(data_root, generation);
     if runtime.sidecar_drain.pro_attempted_generation.as_deref() == Some(generation)
         && !retry_due
         && !installation_requires_recheck
+        && !continuation_pending
     {
         return Ok(None);
     }
@@ -280,11 +338,50 @@ fn run_pending_core_pro_catch_up(
         runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
         return Ok(None);
     }
-    let run = run_pro_catch_up_with_retry(data_root, runtime, generation, authority)?;
-    runtime.sidecar_drain.pro_attempted_generation = Some(generation.to_owned());
+    let run = run_pro(data_root, runtime, generation, authority)?;
+    let completed_scheduled_target = scheduled_target == Some(generation)
+        && run.status.get("status").and_then(Value::as_str) == Some("completed");
+    let newer_active_pending = if completed_scheduled_target {
+        newer_active_pro_generation_is_pending(data_root, generation)?
+    } else {
+        false
+    };
+    runtime.sidecar_drain.pro_attempted_generation = if newer_active_pending {
+        None
+    } else {
+        Some(generation.to_owned())
+    };
     runtime.sidecar_drain.pro_attempted_recheck = helper_recheck_request;
     runtime.sidecar_drain.generation = Some(generation.to_owned());
-    Ok(Some(core_pro_catch_up_iteration(run.did_work)))
+    Ok(Some(core_pro_catch_up_iteration(
+        run.did_work,
+        run.continuation_pending || newer_active_pending,
+    )))
+}
+
+fn pin_scheduled_pro_target(
+    data_root: &Path,
+) -> Result<
+    Option<(
+        String,
+        super::source_backed_refresh_coordinator::PinnedSourceBackedGeneration,
+    )>,
+> {
+    let Some(generation) = scheduled_target_generation(data_root)? else {
+        return Ok(None);
+    };
+    // A durable unfinished target is authoritative across daemon restart and
+    // must be pinned before consulting the newer active Core generation.
+    let authority = pin_retained_generation(data_root, &generation)?;
+    Ok(Some((generation, authority)))
+}
+
+fn newer_active_pro_generation_is_pending(
+    data_root: &Path,
+    completed_generation: &str,
+) -> Result<bool> {
+    Ok(pin_published_generation(data_root)?
+        .is_some_and(|active| active.generation_id() != completed_generation))
 }
 
 fn pro_installation_requires_recheck(data_root: &Path) -> bool {
@@ -294,9 +391,9 @@ fn pro_installation_requires_recheck(data_root: &Path) -> bool {
     })
 }
 
-fn core_pro_catch_up_iteration(did_work: bool) -> DaemonIteration {
+fn core_pro_catch_up_iteration(did_work: bool, continuation_pending: bool) -> DaemonIteration {
     let iteration = DaemonIteration::new(did_work, false, DaemonCycleStateV1::unknown());
-    if did_work {
+    if did_work || continuation_pending {
         immediate_follow_up(iteration)
     } else {
         iteration
@@ -489,6 +586,7 @@ fn run_pro_catch_up_with_retry(
         return Ok(SourceBackedProCatchUpRun {
             status,
             did_work: false,
+            continuation_pending: false,
         });
     }
     let run = run_after_core_publication(data_root, core_generation_id, authority)?;
@@ -497,6 +595,7 @@ fn run_pro_catch_up_with_retry(
     Ok(SourceBackedProCatchUpRun {
         status,
         did_work: run.did_work,
+        continuation_pending: run.continuation_pending,
     })
 }
 
@@ -930,12 +1029,15 @@ use super::{
     query_service::DaemonQueryActivity,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
     source_backed_pro_catch_up::{
-        helper_recheck_schedule, persist_status_json as persist_pro_status,
-        read_status_json as read_pro_status, run_after_core_publication,
-        status_generation as pro_status_generation, SourceBackedProCatchUpRun,
-        SourceBackedProCoreAuthority,
+        cancel_core_finalization_generation_lease, helper_recheck_schedule,
+        persist_status_json as persist_pro_status, read_status_json as read_pro_status,
+        reconcile_core_finalization_generation_lease, run_after_core_publication,
+        scheduled_target_generation, status_generation as pro_status_generation,
+        status_has_finalization_pending, SourceBackedProCatchUpRun, SourceBackedProCoreAuthority,
     },
-    source_backed_refresh_coordinator::{pin_published_generation, CoreRefreshEngine},
+    source_backed_refresh_coordinator::{
+        pin_published_generation, pin_retained_generation, CoreRefreshEngine,
+    },
 };
 
 #[cfg(test)]

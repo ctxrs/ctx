@@ -6,12 +6,53 @@ use sha2::{Digest, Sha256};
 use super::rows::CodexSessionRow;
 use super::source::CodexFileObservation;
 
-const CODEX_NATIVE_CHECKPOINT_VERSION: u8 = 9;
+const CODEX_NATIVE_CHECKPOINT_VERSION: u8 = 10;
+pub(crate) const MAX_CODEX_CERTIFIED_LINEAGE_FACTS: usize = 16;
 const CODEX_PENDING_CALL_ID_DOMAIN: &[u8] = b"ctx/codex-nativepath/pending-call-id/v1\0";
 const MAX_CODEX_PENDING_TOOL_RECORD_BYTES: u64 = 16 * 1024 * 1024 + 1;
 pub(crate) const MAX_CODEX_TOOL_CONTEXTS: usize = 24;
 pub(super) const MAX_CODEX_TOOL_CALL_ID_BYTES: usize = 1024;
 pub(super) const MAX_CODEX_CONTINUATION_CELL_ID_BYTES: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CodexCertifiedLineageFactKindV0 {
+    Call,
+    Result,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexCertifiedLineageFactV0 {
+    pub(crate) call_id_sha256: [u8; 32],
+    pub(crate) kind: CodexCertifiedLineageFactKindV0,
+}
+
+/// Small exact lineage authority carried by an authenticated source frontier.
+///
+/// Larger sources deliberately omit this capsule and use the existing bounded
+/// one-pass fact scanner. Keeping the capsule exact avoids probabilistic
+/// publication changes while bounding aggregate manifest growth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexCertifiedLineageFactsV0 {
+    pub(crate) facts: Vec<CodexCertifiedLineageFactV0>,
+    pub(crate) has_unattributed_ambiguity: bool,
+}
+
+impl CodexCertifiedLineageFactsV0 {
+    fn validate_wire_state(&self) -> serde_json::Result<()> {
+        if self.facts.len() > MAX_CODEX_CERTIFIED_LINEAGE_FACTS
+            || self.facts.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(serde::de::Error::custom(
+                "Codex certified lineage fact authority is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +191,8 @@ pub(crate) struct CodexNativeCheckpoint {
     pending_tool_authorities: Vec<CodexPendingToolAuthority>,
     pub(crate) owner: CodexSessionRow,
     pub(crate) lineage_dependency_sha256: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    certified_lineage_facts: Option<CodexCertifiedLineageFactsV0>,
 }
 
 impl CodexNativeCheckpoint {
@@ -167,6 +210,7 @@ impl CodexNativeCheckpoint {
         pending_tool_authorities: &[CodexPendingToolAuthority],
         owner: CodexSessionRow,
         lineage_dependency_sha256: [u8; 32],
+        certified_lineage_facts: Option<CodexCertifiedLineageFactsV0>,
     ) -> Self {
         let boundary = match incomplete_tail {
             Some((incomplete_tail_len, incomplete_tail_sha256)) => {
@@ -190,6 +234,7 @@ impl CodexNativeCheckpoint {
             pending_tool_authorities: pending_tool_authorities.to_vec(),
             owner,
             lineage_dependency_sha256,
+            certified_lineage_facts,
         }
     }
 
@@ -230,6 +275,10 @@ impl CodexNativeCheckpoint {
 
     pub(super) fn pending_tool_authorities(&self) -> &[CodexPendingToolAuthority] {
         &self.pending_tool_authorities
+    }
+
+    pub(crate) fn certified_lineage_facts(&self) -> Option<&CodexCertifiedLineageFactsV0> {
+        self.certified_lineage_facts.as_ref()
     }
 
     fn validate_wire_state(&self) -> serde_json::Result<()> {
@@ -299,6 +348,9 @@ impl CodexNativeCheckpoint {
             return Err(serde::de::Error::custom(
                 "Codex NativePath checkpoint pending-tool authority is invalid",
             ));
+        }
+        if let Some(facts) = self.certified_lineage_facts.as_ref() {
+            facts.validate_wire_state()?;
         }
         Ok(())
     }

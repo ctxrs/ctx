@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Mutex};
 
 use chrono::{DateTime, Utc};
 
+use super::generation::CodexPreparedRouteV0;
 use super::*;
 use crate::{
     common::io::OpenedProviderSourceFile,
@@ -10,8 +11,9 @@ use crate::{
             observe_opened_file, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope,
             JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
             JsonlFamilyMembershipObservation, JsonlFamilyOptimizedLeafOutcome,
-            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRootMissingMode,
-            JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
+            JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRejectedLeaf,
+            JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
+            JsonlFileObservation,
         },
         SourceBackedRouteErrorKind,
     },
@@ -23,6 +25,31 @@ type CodexReplayLineageV0 = (CodexCatalogSource, CodexAppendProof, String);
 const CODEX_LINEAGE_EXHAUSTED_DETAIL: &str =
     "Codex lineage working set exceeded its bounded task-local capacity";
 const CODEX_LINEAGE_UNAVAILABLE_DETAIL: &str = "Codex lineage working set is unavailable";
+const CODEX_GENERATION_TERMINAL_PARTITION_V0: u64 = u64::MAX;
+
+fn bind_generation_source_capability_v0(
+    source: &mut CodexCatalogSource,
+) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
+    let opened = reopen_codex_source_capability(source)?;
+    revalidate_codex_catalog_source_capability(source, &opened)?;
+    let observation = observe_opened_file(&source.source_path, &opened)?;
+    source.opened = Some(Arc::clone(&opened));
+    Ok((opened, observation))
+}
+
+fn codex_lineage_rejected_leaf_v0(
+    rejected: CodexLineageRejectedSourceV0,
+    authority_path: PathBuf,
+) -> Result<JsonlFamilyRejectedLeaf> {
+    let proof = TypedKey::bytes(serde_json::to_vec(&rejected.proof)?)
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    Ok(JsonlFamilyRejectedLeaf::bind_observed(
+        rejected.source.source_path,
+        authority_path,
+        proof,
+        1,
+    ))
+}
 
 #[derive(Default)]
 struct CodexSessionJsonlFamilyStateV0 {
@@ -38,6 +65,7 @@ fn scan_codex_session_jsonl_leaf_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaf: &JsonlFamilyLeaf,
     base: Option<&CertifiedSource>,
+    collect_lineage_facts: bool,
     base_event_lookup: &BaseEventIdentityLookup,
     worker: &mut JsonlFamilyWorkerContext,
     emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
@@ -69,6 +97,7 @@ fn scan_codex_session_jsonl_leaf_v0(
         plan.1,
         plan.2,
         base,
+        collect_lineage_facts,
         &mut scan_context,
         |publication, records| {
             let publication = match publication {
@@ -104,7 +133,16 @@ fn prepare_codex_session_jsonl_scans_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaves: &[JsonlFamilyLeaf],
     bases: &HashMap<[u8; 32], &CertifiedSource>,
+    generation_prepared_lineage: bool,
 ) -> Result<Option<usize>> {
+    if leaves.is_empty() {
+        state
+            .lock()
+            .map_err(|_| codex_family_state_error())?
+            .replay_lineage
+            .clear();
+        return Ok(None);
+    }
     let (plans, outcome_lineage) = {
         let state = state.lock().map_err(|_| codex_family_state_error())?;
         let outcome_lineage = state.outcome_lineage.clone().ok_or_else(|| {
@@ -123,6 +161,17 @@ fn prepare_codex_session_jsonl_scans_v0(
         .filter(|(source_key, _)| selected.contains(&source_key.exact_descriptor_digest()))
         .map(|(_, (_, _, native_session_id))| native_session_id.clone())
         .collect::<HashSet<_>>();
+    if generation_prepared_lineage {
+        // Generation preparation already scanned each selected ancestor once
+        // and spilled its sealed facts. Route-local exact replay must not
+        // register those facts a second time; partition leases hydrate them.
+        state
+            .lock()
+            .map_err(|_| codex_family_state_error())?
+            .replay_lineage
+            .clear();
+        return Ok(None);
+    }
     outcome_lineage
         .bind_route_sources(&selected_native_session_ids)
         .map_err(codex_family_capture_error)?;
@@ -194,6 +243,7 @@ fn prepare_codex_session_jsonl_scans_v0(
 fn codex_session_jsonl_scan_partition_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaf: &JsonlFamilyLeaf,
+    generation: bool,
 ) -> Result<Option<u64>> {
     let state = state.lock().map_err(|_| codex_family_state_error())?;
     let outcome_lineage = state.outcome_lineage.as_ref().ok_or_else(|| {
@@ -204,15 +254,25 @@ fn codex_session_jsonl_scan_partition_v0(
     let (_, _, native_session_id) = state.plans.get(leaf.source()).ok_or_else(|| {
         CaptureError::InvalidPayload("Codex JSONL family leaf has no native source plan".to_owned())
     })?;
-    outcome_lineage
+    let component = outcome_lineage
         .component_partition(native_session_id)
-        .map(Some)
-        .ok_or_else(|| CaptureError::InvalidPayload("Codex lineage partition is absent".to_owned()))
+        .ok_or_else(|| {
+            CaptureError::InvalidPayload("Codex lineage partition is absent".to_owned())
+        })?;
+    if generation
+        && !outcome_lineage
+            .generation_component_has_spilled_facts(component)
+            .map_err(codex_family_capture_error)?
+    {
+        return Ok(Some(CODEX_GENERATION_TERMINAL_PARTITION_V0));
+    }
+    Ok(Some(component))
 }
 
 fn begin_codex_session_jsonl_scan_partition_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     partition: u64,
+    generation: bool,
 ) -> Result<()> {
     let (replay_sources, outcome_lineage) = {
         let state = state.lock().map_err(|_| codex_family_state_error())?;
@@ -230,13 +290,23 @@ fn begin_codex_session_jsonl_scan_partition_v0(
             outcome_lineage,
         )
     };
-    prepare_replayed_lineage_v0(&replay_sources, &outcome_lineage)
-        .map_err(codex_family_capture_error)
+    if generation {
+        if partition == CODEX_GENERATION_TERMINAL_PARTITION_V0 {
+            return Ok(());
+        }
+        outcome_lineage
+            .lease_generation_component(partition)
+            .map_err(codex_family_capture_error)
+    } else {
+        prepare_replayed_lineage_v0(&replay_sources, &outcome_lineage)
+            .map_err(codex_family_capture_error)
+    }
 }
 
 fn finish_codex_session_jsonl_scan_partition_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     partition: u64,
+    generation: bool,
 ) -> Result<()> {
     let outcome_lineage = {
         let mut state = state.lock().map_err(|_| codex_family_state_error())?;
@@ -247,9 +317,18 @@ fn finish_codex_session_jsonl_scan_partition_v0(
             )
         })?
     };
-    outcome_lineage
-        .release_component(partition)
-        .map_err(codex_family_capture_error)
+    if generation {
+        if partition == CODEX_GENERATION_TERMINAL_PARTITION_V0 {
+            return Ok(());
+        }
+        outcome_lineage
+            .release_generation_component(partition)
+            .map_err(codex_family_capture_error)
+    } else {
+        outcome_lineage
+            .release_component(partition)
+            .map_err(codex_family_capture_error)
+    }
 }
 
 fn codex_session_jsonl_scan_phase_v0(
@@ -272,6 +351,9 @@ fn order_codex_session_jsonl_scans_v0(
     state: &Mutex<CodexSessionJsonlFamilyStateV0>,
     leaves: &mut [JsonlFamilyLeaf],
 ) -> Result<()> {
+    if leaves.is_empty() {
+        return Ok(());
+    }
     let state = state.lock().map_err(|_| codex_family_state_error())?;
     let outcome_lineage = state.outcome_lineage.as_ref().ok_or_else(|| {
         CaptureError::InvalidPayload(
@@ -323,6 +405,7 @@ fn order_codex_session_jsonl_scans_v0(
 pub(crate) struct CodexSessionTreeJsonlFamilyAdapterV0 {
     roots: Arc<[PathBuf]>,
     state: Arc<Mutex<CodexSessionJsonlFamilyStateV0>>,
+    generation: Option<CodexGenerationRouteV0>,
     #[cfg(test)]
     lineage_budget_override: Option<Arc<CodexLineageFactBudgetV0>>,
     #[cfg(test)]
@@ -346,11 +429,17 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
         Ok(Self {
             roots: roots.into(),
             state: Arc::new(Mutex::new(CodexSessionJsonlFamilyStateV0::default())),
+            generation: None,
             #[cfg(test)]
             lineage_budget_override: None,
             #[cfg(test)]
             after_stage: None,
         })
+    }
+
+    pub(crate) fn with_generation(mut self, generation: CodexGenerationRouteV0) -> Self {
+        self.generation = Some(generation);
+        self
     }
 
     #[cfg(test)]
@@ -388,24 +477,59 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
         // admission and before starting leaf workers. That opening inventory is
         // frozen by the shared lifecycle; construction and registration remain
         // free of recursive discovery, hashing, and provider metadata parsing.
-        let inventory = self.discover().map_err(codex_family_capture_error)?;
-        #[cfg(test)]
-        let outcome_lineage = match self.lineage_budget_override.as_ref() {
-            Some(budget) => CodexOutcomeLineageAuthorityV0::from_sources_with_budget(
-                &inventory.sources,
-                Arc::clone(budget),
-            ),
-            None => CodexOutcomeLineageAuthorityV0::from_sources(&inventory.sources),
+        let prepared = match self.generation.as_ref() {
+            Some(generation) => generation.prepared().map_err(codex_family_capture_error)?,
+            None => {
+                let inventory = self.discover().map_err(codex_family_capture_error)?;
+                #[cfg(test)]
+                let normalized = match self.lineage_budget_override.as_ref() {
+                    Some(budget) => CodexOutcomeLineageAuthorityV0::normalize_sources_with_budget(
+                        &inventory.sources,
+                        Arc::clone(budget),
+                    ),
+                    None => CodexOutcomeLineageAuthorityV0::normalize_sources(&inventory.sources),
+                };
+                #[cfg(not(test))]
+                let normalized =
+                    CodexOutcomeLineageAuthorityV0::normalize_sources(&inventory.sources);
+                let normalized = normalized.map_err(codex_family_capture_error)?;
+                CodexPreparedRouteV0 {
+                    missing: false,
+                    sources: normalized.sources,
+                    rejections: normalized.rejections,
+                    authority: Arc::new(normalized.authority),
+                    #[cfg(test)]
+                    work: inventory.work,
+                }
+            }
         };
-        #[cfg(not(test))]
-        let outcome_lineage = CodexOutcomeLineageAuthorityV0::from_sources(&inventory.sources);
-        let outcome_lineage = Arc::new(outcome_lineage.map_err(codex_family_capture_error)?);
-        let mut ordered_sources = inventory.sources.iter().collect::<Vec<_>>();
-        ordered_sources
-            .sort_by_key(|(_, _, native_session_id)| outcome_lineage.depth(native_session_id));
+        if prepared.missing {
+            return Err(CaptureError::SystemInvariant(
+                "Codex session-tree generation partition is missing",
+            ));
+        }
+        let outcome_lineage = prepared.authority;
+        let mut normalized_sources = prepared.sources;
+        let mut rejected_leaves = Vec::with_capacity(prepared.rejections.len());
+        for rejected in prepared.rejections {
+            let authority_path = rejected.source.authority_relative_path.clone().ok_or(
+                CaptureError::SystemInvariant(
+                    "rejected Codex catalog source has no authority path",
+                ),
+            )?;
+            rejected_leaves.push(codex_lineage_rejected_leaf_v0(rejected, authority_path)?);
+        }
+        let mut ordered_sources = (0..normalized_sources.len()).collect::<Vec<_>>();
+        ordered_sources.sort_by_key(|index| outcome_lineage.depth(&normalized_sources[*index].2));
         let mut authorities = BTreeMap::<PathBuf, Arc<ProviderSourceRoot>>::new();
-        let mut leaves = Vec::with_capacity(inventory.sources.len());
-        for (source, source_key, native_session_id) in ordered_sources {
+        let mut leaves = Vec::with_capacity(normalized_sources.len());
+        for index in ordered_sources {
+            let (source, source_key, native_session_id) =
+                normalized_sources
+                    .get_mut(index)
+                    .ok_or(CaptureError::SystemInvariant(
+                        "Codex generation source ordering changed",
+                    ))?;
             let authority = Arc::new(source.authority_root.clone().ok_or(
                 CaptureError::SystemInvariant("Codex catalog source has no retained root"),
             )?);
@@ -416,14 +540,18 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
                     .ok_or(CaptureError::SystemInvariant(
                         "Codex catalog source has no authority path",
                     ))?;
-            let opened = authority.open_file(&authority_path)?;
-            let observation = observe_opened_file(&source.source_path, &opened)?;
+            let observation = if self.generation.is_some() {
+                bind_generation_source_capability_v0(source)?.1
+            } else {
+                let opened = authority.open_file(&authority_path)?;
+                observe_opened_file(&source.source_path, &opened)?
+            };
             leaves.push(JsonlFamilyLeaf::bind_observed(
                 source_key.clone(),
                 source.source_path.clone(),
                 Arc::clone(&authority),
                 authority_path,
-                TypedKey::utf8(native_session_id)
+                TypedKey::utf8(&*native_session_id)
                     .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
                 observation,
             ));
@@ -437,17 +565,27 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
                 authorities.insert(authority.named_path().to_path_buf(), authority);
             }
         }
-        let family_inventory = JsonlFamilyInventory::present_multi(
-            CaptureProvider::Codex,
-            route_root,
-            authorities.into_values().collect(),
-            leaves,
-        )?;
+        let authorities = authorities.into_values().collect();
+        let family_inventory = if rejected_leaves.is_empty() {
+            JsonlFamilyInventory::present_multi(
+                CaptureProvider::Codex,
+                route_root,
+                authorities,
+                leaves,
+            )?
+        } else {
+            JsonlFamilyInventory::present_multi_with_rejected(
+                CaptureProvider::Codex,
+                route_root,
+                authorities,
+                leaves,
+                rejected_leaves,
+            )?
+        };
         let mut state = self.state.lock().map_err(|_| {
             CaptureError::InvalidPayload("Codex JSONL family state lock was poisoned".to_owned())
         })?;
-        state.plans = inventory
-            .sources
+        state.plans = normalized_sources
             .iter()
             .cloned()
             .map(|plan| (plan.1.clone(), plan))
@@ -457,8 +595,8 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
         state.counters = CodexSourceBackedCountersV0::default();
         #[cfg(test)]
         {
-            state.counters.add_catalog_work(inventory.work);
-            if inventory.sources.is_empty() && !_completed_stage {
+            state.counters.add_catalog_work(prepared.work);
+            if normalized_sources.is_empty() && !_completed_stage {
                 state.stage_pending = true;
             }
         }
@@ -564,7 +702,7 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
         leaves: &[JsonlFamilyLeaf],
         bases: &HashMap<[u8; 32], &CertifiedSource>,
     ) -> Result<Option<usize>> {
-        prepare_codex_session_jsonl_scans_v0(&self.state, leaves, bases)
+        prepare_codex_session_jsonl_scans_v0(&self.state, leaves, bases, self.generation.is_some())
     }
 
     fn leaf_scan_phase(&self, leaf: &JsonlFamilyLeaf) -> Result<usize> {
@@ -572,15 +710,31 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
     }
 
     fn leaf_scan_partition(&self, leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
-        codex_session_jsonl_scan_partition_v0(&self.state, leaf)
+        codex_session_jsonl_scan_partition_v0(&self.state, leaf, self.generation.is_some())
+    }
+
+    fn leaf_scan_partition_wave_limit(&self) -> usize {
+        if self.generation.is_some() {
+            CODEX_GENERATION_LINEAGE_COMPONENTS_PER_WAVE
+        } else {
+            16
+        }
     }
 
     fn begin_leaf_scan_partition(&self, partition: u64) -> Result<()> {
-        begin_codex_session_jsonl_scan_partition_v0(&self.state, partition)
+        begin_codex_session_jsonl_scan_partition_v0(
+            &self.state,
+            partition,
+            self.generation.is_some(),
+        )
     }
 
     fn finish_leaf_scan_partition(&self, partition: u64) -> Result<()> {
-        finish_codex_session_jsonl_scan_partition_v0(&self.state, partition)
+        finish_codex_session_jsonl_scan_partition_v0(
+            &self.state,
+            partition,
+            self.generation.is_some(),
+        )
     }
 
     fn finish_leaf_scans(&self) -> Result<()> {
@@ -609,11 +763,16 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
         worker: &mut JsonlFamilyWorkerContext,
         emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
     ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
+        #[cfg(test)]
+        if let Some(generation) = self.generation.as_ref() {
+            generation.record_worker_start();
+        }
         scan_codex_session_jsonl_leaf_v0(
             self,
             &self.state,
             leaf,
             base,
+            self.generation.is_none(),
             base_event_lookup,
             worker,
             emit_page,
@@ -637,6 +796,7 @@ impl JsonlFamilyAdapter for CodexSessionTreeJsonlFamilyAdapterV0 {
 pub(crate) struct CodexExplicitSessionJsonlFamilyAdapterV0 {
     input: CodexExplicitSessionSourceBackedInputV0,
     state: Arc<Mutex<CodexSessionJsonlFamilyStateV0>>,
+    generation: Option<CodexGenerationRouteV0>,
     #[cfg(test)]
     after_stage: Option<fn(CodexSourceBackedCountersV0)>,
 }
@@ -646,9 +806,15 @@ impl CodexExplicitSessionJsonlFamilyAdapterV0 {
         Self {
             input,
             state: Arc::new(Mutex::new(CodexSessionJsonlFamilyStateV0::default())),
+            generation: None,
             #[cfg(test)]
             after_stage: None,
         }
+    }
+
+    pub(crate) fn with_generation(mut self, generation: CodexGenerationRouteV0) -> Self {
+        self.generation = Some(generation);
+        self
     }
 
     #[cfg(test)]
@@ -667,9 +833,35 @@ impl CodexExplicitSessionJsonlFamilyAdapterV0 {
                 "explicit Codex JSONL route path changed".to_owned(),
             ));
         }
-        let inventory = observe_codex_explicit_session_source_backed_v0(&self.input)
-            .map_err(codex_family_capture_error)?;
-        let Some(plan) = inventory.source_plan() else {
+        let prepared = match self.generation.as_ref() {
+            Some(generation) => generation.prepared().map_err(codex_family_capture_error)?,
+            None => {
+                let inventory = observe_codex_explicit_session_source_backed_v0(&self.input)
+                    .map_err(codex_family_capture_error)?;
+                let Some(plan) = inventory.source_plan() else {
+                    let mut state = self.state.lock().map_err(|_| codex_family_state_error())?;
+                    state.plans.clear();
+                    state.outcome_lineage = None;
+                    state.counters = CodexSourceBackedCountersV0::default();
+                    #[cfg(test)]
+                    if !_completed_stage {
+                        state.stage_pending = true;
+                    }
+                    return JsonlFamilyInventory::missing(CaptureProvider::Codex, route_path);
+                };
+                let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&[plan])
+                    .map_err(codex_family_capture_error)?;
+                CodexPreparedRouteV0 {
+                    missing: false,
+                    sources: normalized.sources,
+                    rejections: normalized.rejections,
+                    authority: Arc::new(normalized.authority),
+                    #[cfg(test)]
+                    work: CodexCatalogWorkV0::default(),
+                }
+            }
+        };
+        if prepared.missing {
             let mut state = self.state.lock().map_err(|_| codex_family_state_error())?;
             state.plans.clear();
             state.outcome_lineage = None;
@@ -679,48 +871,58 @@ impl CodexExplicitSessionJsonlFamilyAdapterV0 {
                 state.stage_pending = true;
             }
             return JsonlFamilyInventory::missing(CaptureProvider::Codex, route_path);
-        };
-        let parent = plan.0.source_path.parent().ok_or_else(|| {
+        }
+        let parent = route_path.parent().ok_or_else(|| {
             CaptureError::InvalidPayload("explicit Codex JSONL path has no parent".to_owned())
         })?;
-        let authority_path = plan
-            .0
-            .source_path
-            .file_name()
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                CaptureError::InvalidPayload("explicit Codex JSONL path has no filename".to_owned())
-            })?;
+        let authority_path = route_path.file_name().map(PathBuf::from).ok_or_else(|| {
+            CaptureError::InvalidPayload("explicit Codex JSONL path has no filename".to_owned())
+        })?;
         let authority = Arc::new(ProviderSourceRoot::open(parent)?);
-        let opened = authority.open_file(&authority_path)?;
-        let observation = observe_opened_file(&plan.0.source_path, &opened)?;
-        let leaf = JsonlFamilyLeaf::bind_observed(
-            plan.1.clone(),
-            plan.0.source_path.clone(),
-            Arc::clone(&authority),
-            authority_path,
-            TypedKey::utf8(&plan.2)
-                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
-            observation,
-        );
-        let family_inventory = JsonlFamilyInventory::present(
+        let outcome_lineage = prepared.authority;
+        let mut plans = prepared.sources;
+        let mut leaves = Vec::with_capacity(plans.len());
+        for plan in &mut plans {
+            let observation = if self.generation.is_some() {
+                bind_generation_source_capability_v0(&mut plan.0)?.1
+            } else {
+                let opened = authority.open_file(&authority_path)?;
+                observe_opened_file(&plan.0.source_path, &opened)?
+            };
+            leaves.push(JsonlFamilyLeaf::bind_observed(
+                plan.1.clone(),
+                plan.0.source_path.clone(),
+                Arc::clone(&authority),
+                authority_path.clone(),
+                TypedKey::utf8(&plan.2)
+                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+                observation,
+            ));
+        }
+        let rejected_leaves = prepared
+            .rejections
+            .into_iter()
+            .map(|rejected| codex_lineage_rejected_leaf_v0(rejected, authority_path.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        let family_inventory = JsonlFamilyInventory::present_with_rejected(
             CaptureProvider::Codex,
             route_path,
             authority,
-            vec![leaf],
+            leaves,
+            rejected_leaves,
         )?;
-        let plans = vec![plan];
         let mut state = self.state.lock().map_err(|_| codex_family_state_error())?;
         state.plans = plans
             .iter()
             .cloned()
             .map(|plan| (plan.1.clone(), plan))
             .collect();
-        state.outcome_lineage = Some(Arc::new(
-            CodexOutcomeLineageAuthorityV0::from_sources(&plans)
-                .map_err(codex_family_capture_error)?,
-        ));
+        state.outcome_lineage = Some(outcome_lineage);
         state.counters = CodexSourceBackedCountersV0::default();
+        #[cfg(test)]
+        if plans.is_empty() && !_completed_stage {
+            state.stage_pending = true;
+        }
         Ok(family_inventory)
     }
 
@@ -797,6 +999,50 @@ impl JsonlFamilyAdapter for CodexExplicitSessionJsonlFamilyAdapterV0 {
         codex_scan_error_kind(error)
     }
 
+    fn order_leaf_scans(&self, leaves: &mut [JsonlFamilyLeaf]) -> Result<()> {
+        order_codex_session_jsonl_scans_v0(&self.state, leaves)
+    }
+
+    fn prepare_leaf_scans(
+        &self,
+        leaves: &[JsonlFamilyLeaf],
+        bases: &HashMap<[u8; 32], &CertifiedSource>,
+    ) -> Result<Option<usize>> {
+        prepare_codex_session_jsonl_scans_v0(&self.state, leaves, bases, self.generation.is_some())
+    }
+
+    fn leaf_scan_phase(&self, leaf: &JsonlFamilyLeaf) -> Result<usize> {
+        codex_session_jsonl_scan_phase_v0(&self.state, leaf)
+    }
+
+    fn leaf_scan_partition(&self, leaf: &JsonlFamilyLeaf) -> Result<Option<u64>> {
+        codex_session_jsonl_scan_partition_v0(&self.state, leaf, self.generation.is_some())
+    }
+
+    fn leaf_scan_partition_wave_limit(&self) -> usize {
+        if self.generation.is_some() {
+            CODEX_GENERATION_LINEAGE_COMPONENTS_PER_WAVE
+        } else {
+            16
+        }
+    }
+
+    fn begin_leaf_scan_partition(&self, partition: u64) -> Result<()> {
+        begin_codex_session_jsonl_scan_partition_v0(
+            &self.state,
+            partition,
+            self.generation.is_some(),
+        )
+    }
+
+    fn finish_leaf_scan_partition(&self, partition: u64) -> Result<()> {
+        finish_codex_session_jsonl_scan_partition_v0(
+            &self.state,
+            partition,
+            self.generation.is_some(),
+        )
+    }
+
     fn projector(
         &self,
         _leaf: &JsonlFamilyLeaf,
@@ -816,11 +1062,16 @@ impl JsonlFamilyAdapter for CodexExplicitSessionJsonlFamilyAdapterV0 {
         worker: &mut JsonlFamilyWorkerContext,
         emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
     ) -> Result<Option<JsonlFamilyOptimizedLeafOutcome>> {
+        #[cfg(test)]
+        if let Some(generation) = self.generation.as_ref() {
+            generation.record_worker_start();
+        }
         scan_codex_session_jsonl_leaf_v0(
             self,
             &self.state,
             leaf,
             base,
+            self.generation.is_none(),
             base_event_lookup,
             worker,
             emit_page,

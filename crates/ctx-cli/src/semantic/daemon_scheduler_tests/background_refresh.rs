@@ -130,7 +130,7 @@ fn explicit_freshness_bypasses_background_rest_without_second_publisher() {
     let coordinator = CoreRefreshEngine::with_executor(Arc::new(
         move |execution: SourceBackedRefreshExecution<'_>| {
             executor_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(publish_empty_authoritative_generation(execution.index_root))
+            Ok(publish_empty_authoritative_generation(&execution))
         },
     ));
     let response = coordinator

@@ -9,6 +9,7 @@ pub struct SourceBackedRefreshReceipt {
     pub published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub current: SourceBackedRefreshCurrent,
     pub route_results: Vec<SourceBackedRefreshRouteResult>,
+    pub zero_source_authority: Vec<SourceBackedZeroSourceAuthority>,
     pub catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
 }
 
@@ -101,6 +102,13 @@ impl SourceBackedRefreshReceipt {
                 "terminal Core publication has incomplete or inconsistent catalog lineage bindings"
             );
         }
+        crate::publication::validate_zero_source_authority(
+            &published_generation,
+            publication.current.source_count,
+            &publication.route_results,
+            &publication.zero_source_authority,
+            false,
+        )?;
         let receipt = Self {
             generation_changed: previous_generation.as_deref()
                 != Some(published_generation.as_str()),
@@ -111,6 +119,7 @@ impl SourceBackedRefreshReceipt {
                 .clone(),
             current: publication.current,
             route_results: publication.route_results.clone(),
+            zero_source_authority: publication.zero_source_authority.clone(),
             catalog_route_bindings: publication.catalog_route_bindings.clone(),
         };
         if serde_json::to_vec(&receipt.to_json()).map_or(true, |json| {
@@ -366,6 +375,10 @@ impl SourceBackedRefreshReceipt {
             "rejection_diagnostics_omitted": rejected_record_total
                 .saturating_sub(rejection_diagnostic_total),
             "route_results": self.route_results_json(route_results),
+            "zero_source_authority": crate::publication::zero_source_authority_json(
+                &self.zero_source_authority,
+                route_results,
+            ),
             "catalog_route_bindings": catalog_route_bindings,
         }))
     }

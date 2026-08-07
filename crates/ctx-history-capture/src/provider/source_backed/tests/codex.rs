@@ -1,6 +1,9 @@
 use std::{fs::OpenOptions, io::Write};
 
+use ctx_history_core::{EventOrigin, SessionRelationshipKind};
+
 use super::*;
+use crate::provider::codex::nativepath::install_after_codex_lineage_normalization_hook_v0;
 
 fn prompt_line(session_id: &str, ts: i64, text: &str) -> Vec<u8> {
     let mut line = serde_json::to_vec(&serde_json::json!({
@@ -35,6 +38,1549 @@ fn core_records(index: &VerifiedIndex) -> Vec<CoreRecord> {
         )
     });
     records
+}
+
+fn codex_lineage_rollout(
+    native_session_id: &str,
+    parent_native_session_id: Option<&str>,
+    relationship: SessionRelationshipKind,
+    advisory_session_id: Option<&str>,
+    marker: &str,
+) -> Vec<u8> {
+    codex_lineage_rollout_with_events(
+        native_session_id,
+        parent_native_session_id,
+        relationship,
+        advisory_session_id,
+        &[serde_json::json!({
+            "timestamp": "2026-08-06T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": marker}]
+            }
+        })],
+    )
+}
+
+fn codex_lineage_rollout_with_events(
+    native_session_id: &str,
+    parent_native_session_id: Option<&str>,
+    relationship: SessionRelationshipKind,
+    advisory_session_id: Option<&str>,
+    events: &[serde_json::Value],
+) -> Vec<u8> {
+    let source = match (relationship, parent_native_session_id) {
+        (SessionRelationshipKind::Delegated, Some(parent)) => serde_json::json!({
+            "subagent": {"thread_spawn": {"parent_thread_id": parent}}
+        }),
+        _ => serde_json::json!("cli"),
+    };
+    let mut payload = serde_json::json!({
+        "id": native_session_id,
+        "timestamp": "2026-08-06T12:00:00Z",
+        "cwd": "/tmp/root-normalization",
+        "source": source,
+        "model_provider": "openai"
+    });
+    if let Some(parent) = parent_native_session_id {
+        match relationship {
+            SessionRelationshipKind::Delegated => {
+                payload["parent_thread_id"] = serde_json::json!(parent);
+            }
+            SessionRelationshipKind::Forked => {
+                payload["forked_from_id"] = serde_json::json!(parent);
+            }
+            SessionRelationshipKind::ResumedFrom => {
+                payload["history_base"] = serde_json::json!({
+                    "thread_id": parent,
+                    "end_ordinal_exclusive": 7,
+                    "end_byte_offset": 4096
+                });
+            }
+            relationship => panic!("unsupported Codex fixture relationship: {relationship:?}"),
+        }
+    }
+    if let Some(advisory) = advisory_session_id {
+        payload["session_id"] = serde_json::json!(advisory);
+    }
+    std::iter::once(serde_json::json!({
+        "timestamp": "2026-08-06T12:00:00Z",
+        "type": "session_meta",
+        "payload": payload,
+    }))
+    .chain(events.iter().cloned())
+    .flat_map(|record| {
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        line
+    })
+    .collect()
+}
+
+fn codex_lineage_call(call_id: &str, command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-08-06T11:59:58Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": call_id,
+            "arguments": serde_json::json!({
+                "cmd": command,
+                "workdir": "/tmp/root-normalization",
+                "yield_time_ms": 10000
+            }).to_string()
+        }
+    })
+}
+
+fn codex_lineage_result(call_id: &str, output: &str) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-08-06T11:59:59Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "status": "success",
+            "output": output
+        }
+    })
+}
+
+fn codex_dense_lineage_events(component: usize, pairs: usize) -> Vec<serde_json::Value> {
+    (0..pairs)
+        .flat_map(|pair| {
+            let call_id = format!("dense-component-{component:02}-call-{pair:03}");
+            [
+                codex_lineage_call(&call_id, &format!("printf dense-{component:02}-{pair:03}")),
+                codex_lineage_result(
+                    &call_id,
+                    &format!("dense-component-{component:02}-result-{pair:03}"),
+                ),
+            ]
+        })
+        .collect()
+}
+
+fn register_codex_route(
+    registry: &mut SourceBackedProviderRegistry,
+    path: &Path,
+    source_format: &'static str,
+    import_support: ProviderImportSupport,
+    selection: SourceBackedRouteSelection,
+) {
+    register_landed_source_backed_route(
+        registry,
+        fixture_provider_source_at(CaptureProvider::Codex, source_format, import_support, path),
+        selection,
+    )
+    .unwrap();
+}
+
+fn assert_copied_result(
+    records: &[CoreRecord],
+    native_session_id: &str,
+    output_marker: &str,
+) -> CoreRecord {
+    let record = records
+        .iter()
+        .find(|record| {
+            record.provider_session_id.as_deref() == Some(native_session_id)
+                && record
+                    .content
+                    .normalized_body
+                    .as_deref()
+                    .is_some_and(|body| body.contains(output_marker))
+        })
+        .unwrap_or_else(|| {
+            panic!("missing copied result {output_marker} in session {native_session_id}")
+        });
+    assert!(matches!(
+        record.event_origin,
+        EventOrigin::CopiedFromAncestor { .. }
+    ));
+    record.clone()
+}
+
+fn register_codex_tree(sessions: &Path) -> SourceBackedProviderRegistry {
+    register_codex_trees(&[(sessions, ProviderImportSupport::Native)])
+}
+
+fn append_codex_lineage_message(path: &Path, native_session_id: &str, marker: &str) {
+    let bytes = codex_lineage_rollout(
+        native_session_id,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        marker,
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(bytes.split_inclusive(|byte| *byte == b'\n').nth(1).unwrap())
+        .unwrap();
+}
+
+fn route_identity_for_path(
+    registry: &SourceBackedProviderRegistry,
+    path: &Path,
+) -> SourceRouteIdentity {
+    registry
+        .routes()
+        .find(|route| route.source.path == path)
+        .and_then(|route| route.route_identity.clone())
+        .unwrap()
+}
+
+fn register_codex_trees(roots: &[(&Path, ProviderImportSupport)]) -> SourceBackedProviderRegistry {
+    let mut registry = SourceBackedProviderRegistry::new();
+    super::super::register_codex_session_tree_routes(
+        &mut registry,
+        roots
+            .iter()
+            .map(|(root, support)| {
+                fixture_provider_source_at(
+                    CaptureProvider::Codex,
+                    "codex_session_jsonl_tree",
+                    *support,
+                    root,
+                )
+            })
+            .collect(),
+        SourceBackedRouteSelection::Automatic,
+    )
+    .unwrap();
+    registry
+}
+
+#[test]
+fn codex_distinct_automatic_and_explicit_files_with_one_native_id_are_quarantined() {
+    let temp = tempdir().unwrap();
+    let automatic = temp.path().join("automatic");
+    let explicit = temp.path().join("explicit.jsonl");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&automatic).unwrap();
+    let duplicate = "019fa000-0000-7000-8000-000000003290";
+    let valid = "019fa000-0000-7000-8000-000000003291";
+    fs::write(
+        automatic.join(format!("rollout-{duplicate}.jsonl")),
+        codex_lineage_rollout(
+            duplicate,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            "automatic duplicate must be quarantined",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &explicit,
+        codex_lineage_rollout(
+            duplicate,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            "explicit duplicate must be quarantined",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        automatic.join(format!("rollout-{valid}.jsonl")),
+        codex_lineage_rollout(
+            valid,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            "unrelated valid component",
+        ),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_codex_route(
+        &mut registry,
+        &automatic,
+        "codex_session_jsonl_tree",
+        ProviderImportSupport::Native,
+        SourceBackedRouteSelection::Automatic,
+    );
+    register_codex_route(
+        &mut registry,
+        &explicit,
+        "codex_session_jsonl",
+        ProviderImportSupport::Explicit,
+        SourceBackedRouteSelection::ExplicitManual,
+    );
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+
+    let refreshed =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    let observation = observed.lock().unwrap().clone().unwrap();
+    assert_eq!(observation.valid_sources, 1);
+    assert_eq!(observation.rejected_sources, 2);
+    assert_eq!(observation.worker_starts_at_normalization, 0);
+    assert_eq!(observation.worker_start_latch.starts(), 1);
+    assert_eq!(refreshed.successful_route_ids.len(), 1);
+    assert_eq!(refreshed.failed_routes.len(), 1);
+    assert_eq!(
+        refreshed.failed_routes[0].class,
+        SourceBackedSourceFailureClass::Unreadable
+    );
+    let records = core_records(&VerifiedIndex::open(&index).unwrap());
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].content.normalized_body.as_deref(),
+        Some("unrelated valid component")
+    );
+}
+
+#[test]
+fn codex_explicit_parent_facts_precede_automatic_child_regardless_of_route_order() {
+    let temp = tempdir().unwrap();
+    let automatic = temp.path().join("automatic-child");
+    let explicit_parent = temp.path().join("explicit-parent.jsonl");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&automatic).unwrap();
+    let parent = "019fa000-0000-7000-8000-000000003292";
+    let child = "019fa000-0000-7000-8000-000000003293";
+    let call = codex_lineage_call("call-explicit-parent", "git rev-parse --verify HEAD");
+    let result = codex_lineage_result(
+        "call-explicit-parent",
+        "explicit-parent-copy-output aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    fs::write(
+        &explicit_parent,
+        codex_lineage_rollout_with_events(
+            parent,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            &[call.clone(), result.clone()],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        automatic.join(format!("rollout-{child}.jsonl")),
+        codex_lineage_rollout_with_events(
+            child,
+            Some(parent),
+            SessionRelationshipKind::Forked,
+            Some(parent),
+            &[call, result],
+        ),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    // Register the automatic child first to exercise the formerly failing
+    // production order: its route scans before the explicit parent route.
+    register_codex_route(
+        &mut registry,
+        &automatic,
+        "codex_session_jsonl_tree",
+        ProviderImportSupport::Native,
+        SourceBackedRouteSelection::Automatic,
+    );
+    register_codex_route(
+        &mut registry,
+        &explicit_parent,
+        "codex_session_jsonl",
+        ProviderImportSupport::Explicit,
+        SourceBackedRouteSelection::ExplicitManual,
+    );
+    let refreshed =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert!(refreshed.failed_routes.is_empty());
+    let records = core_records(&VerifiedIndex::open(&index).unwrap());
+    let copied = assert_copied_result(&records, child, "explicit-parent-copy-output");
+    let parent_record = records
+        .iter()
+        .find(|record| record.provider_session_id.as_deref() == Some(parent))
+        .unwrap();
+    assert_eq!(copied.parent_session_id, Some(parent_record.session_id));
+    assert_eq!(copied.root_session_id, parent_record.session_id);
+}
+
+#[test]
+fn codex_exact_route_composes_carried_parent_authority_without_reparsing_it() {
+    for automatic_parent in [true, false] {
+        let temp = tempdir().unwrap();
+        let parent_dir = temp.path().join("automatic-parent");
+        let child_dir = temp.path().join("automatic-child");
+        fs::create_dir_all(&parent_dir).unwrap();
+        fs::create_dir_all(&child_dir).unwrap();
+        let parent_path = if automatic_parent {
+            parent_dir.join("parent.jsonl")
+        } else {
+            temp.path().join("explicit-parent.jsonl")
+        };
+        let child_path = if automatic_parent {
+            temp.path().join("explicit-child.jsonl")
+        } else {
+            child_dir.join("child.jsonl")
+        };
+        let parent = if automatic_parent {
+            "019fa000-0000-7000-8000-000000003310"
+        } else {
+            "019fa000-0000-7000-8000-000000003312"
+        };
+        let child = if automatic_parent {
+            "019fa000-0000-7000-8000-000000003311"
+        } else {
+            "019fa000-0000-7000-8000-000000003313"
+        };
+        let call_id = format!("exact-carried-parent-{automatic_parent}");
+        let call = codex_lineage_call(&call_id, "git rev-parse --verify HEAD");
+        let result = codex_lineage_result(&call_id, "exact carried parent output");
+        fs::write(
+            &parent_path,
+            codex_lineage_rollout_with_events(
+                parent,
+                None,
+                SessionRelationshipKind::Root,
+                None,
+                &[call.clone(), result.clone()],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &child_path,
+            codex_lineage_rollout_with_events(
+                child,
+                Some(parent),
+                SessionRelationshipKind::Forked,
+                Some(parent),
+                &[call, result],
+            ),
+        )
+        .unwrap();
+
+        let mut registry = SourceBackedProviderRegistry::new();
+        let register_parent = |registry: &mut SourceBackedProviderRegistry| {
+            register_codex_route(
+                registry,
+                if automatic_parent {
+                    &parent_dir
+                } else {
+                    &parent_path
+                },
+                if automatic_parent {
+                    "codex_session_jsonl_tree"
+                } else {
+                    "codex_session_jsonl"
+                },
+                if automatic_parent {
+                    ProviderImportSupport::Native
+                } else {
+                    ProviderImportSupport::Explicit
+                },
+                if automatic_parent {
+                    SourceBackedRouteSelection::Automatic
+                } else {
+                    SourceBackedRouteSelection::ExplicitManual
+                },
+            );
+        };
+        let register_child = |registry: &mut SourceBackedProviderRegistry| {
+            register_codex_route(
+                registry,
+                if automatic_parent {
+                    &child_path
+                } else {
+                    &child_dir
+                },
+                if automatic_parent {
+                    "codex_session_jsonl"
+                } else {
+                    "codex_session_jsonl_tree"
+                },
+                if automatic_parent {
+                    ProviderImportSupport::Explicit
+                } else {
+                    ProviderImportSupport::Native
+                },
+                if automatic_parent {
+                    SourceBackedRouteSelection::ExplicitManual
+                } else {
+                    SourceBackedRouteSelection::Automatic
+                },
+            );
+        };
+        if automatic_parent {
+            register_parent(&mut registry);
+            register_child(&mut registry);
+        } else {
+            register_child(&mut registry);
+            register_parent(&mut registry);
+        }
+        let index = temp.path().join("index");
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+        let child_route = route_identity_for_path(
+            &registry,
+            if automatic_parent {
+                &child_path
+            } else {
+                &child_dir
+            },
+        );
+        append_codex_lineage_message(&child_path, child, "dirty child suffix");
+        let observed = Arc::new(Mutex::new(None));
+        let observed_from_hook = Arc::clone(&observed);
+        install_after_codex_lineage_normalization_hook_v0(move |observation| {
+            *observed_from_hook.lock().unwrap() = Some(observation);
+        });
+        let refreshed = refresh_source_backed_generation_for_routes(
+            &index,
+            &registry,
+            WriterOptions::default(),
+            [child_route],
+        )
+        .unwrap();
+        assert!(refreshed.failed_routes.is_empty());
+        assert_eq!(
+            observed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .lineage_fact_source_scans,
+            0
+        );
+        let records = core_records(&VerifiedIndex::open(&index).unwrap());
+        assert_copied_result(&records, child, "exact carried parent output");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_exact_route_ignores_unrelated_carried_replacement_after_preparation() {
+    let temp = tempdir().unwrap();
+    let parent_path = temp.path().join("parent.jsonl");
+    let child_path = temp.path().join("child.jsonl");
+    let unrelated_path = temp.path().join("unrelated.jsonl");
+    let replacement_path = temp.path().join("unrelated-replacement");
+    let moved_path = temp.path().join("unrelated-prepared");
+    let index = temp.path().join("index");
+    let parent = "019fa000-0000-7000-8000-000000003320";
+    let child = "019fa000-0000-7000-8000-000000003321";
+    let unrelated = "019fa000-0000-7000-8000-000000003322";
+    let call = codex_lineage_call("exact-scope-parent", "git rev-parse --verify HEAD");
+    let result = codex_lineage_result("exact-scope-parent", "exact scope parent output");
+    fs::write(
+        &parent_path,
+        codex_lineage_rollout_with_events(
+            parent,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            &[call.clone(), result.clone()],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &child_path,
+        codex_lineage_rollout_with_events(
+            child,
+            Some(parent),
+            SessionRelationshipKind::Forked,
+            Some(parent),
+            &[call, result],
+        ),
+    )
+    .unwrap();
+    let unrelated_old = codex_lineage_rollout(
+        unrelated,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        "unrelated carried old aa",
+    );
+    let unrelated_new = codex_lineage_rollout(
+        unrelated,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        "unrelated carried new bb",
+    );
+    assert_eq!(unrelated_old.len(), unrelated_new.len());
+    fs::write(&unrelated_path, unrelated_old).unwrap();
+    fs::write(&replacement_path, unrelated_new).unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    for path in [&unrelated_path, &parent_path, &child_path] {
+        register_codex_route(
+            &mut registry,
+            path,
+            "codex_session_jsonl",
+            ProviderImportSupport::Explicit,
+            SourceBackedRouteSelection::ExplicitManual,
+        );
+    }
+    let cold =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert!(cold.failed_routes.is_empty());
+    let child_route = route_identity_for_path(&registry, &child_path);
+    append_codex_lineage_message(&child_path, child, "selected child exact suffix");
+
+    let unrelated_from_hook = unrelated_path.clone();
+    install_after_codex_lineage_normalization_hook_v0(move |_| {
+        fs::rename(&unrelated_from_hook, moved_path).unwrap();
+        fs::rename(replacement_path, unrelated_from_hook).unwrap();
+    });
+    let refreshed = refresh_source_backed_generation_for_routes(
+        &index,
+        &registry,
+        WriterOptions::default(),
+        [child_route.clone()],
+    )
+    .unwrap();
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(refreshed.successful_route_ids, vec![child_route]);
+    assert_ne!(refreshed.commit.generation_id, cold.commit.generation_id);
+
+    let records = core_records(&VerifiedIndex::open(&index).unwrap());
+    assert!(records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(child)
+            && record.content.normalized_body.as_deref() == Some("selected child exact suffix")
+    }));
+    assert!(records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(unrelated)
+            && record.content.normalized_body.as_deref() == Some("unrelated carried old aa")
+    }));
+    assert!(!records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(unrelated)
+            && record.content.normalized_body.as_deref() == Some("unrelated carried new bb")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_exact_route_rejects_participating_replacement_after_preparation() {
+    for replace_parent in [true, false] {
+        let temp = tempdir().unwrap();
+        let parent_path = temp.path().join("parent.jsonl");
+        let child_path = temp.path().join("child.jsonl");
+        let replacement_path = temp.path().join("replacement");
+        let moved_path = temp.path().join("prepared");
+        let index = temp.path().join("index");
+        let parent = "019fa000-0000-7000-8000-000000003323";
+        let child = "019fa000-0000-7000-8000-000000003324";
+        let call_id = format!("exact-participant-parent-{replace_parent}");
+        let call = codex_lineage_call(&call_id, "git rev-parse --verify HEAD");
+        let result = codex_lineage_result(&call_id, "exact participant parent output");
+        fs::write(
+            &parent_path,
+            codex_lineage_rollout_with_events(
+                parent,
+                None,
+                SessionRelationshipKind::Root,
+                None,
+                &[call.clone(), result.clone()],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &child_path,
+            codex_lineage_rollout_with_events(
+                child,
+                Some(parent),
+                SessionRelationshipKind::Forked,
+                Some(parent),
+                &[call, result],
+            ),
+        )
+        .unwrap();
+
+        let mut registry = SourceBackedProviderRegistry::new();
+        for path in [&parent_path, &child_path] {
+            register_codex_route(
+                &mut registry,
+                path,
+                "codex_session_jsonl",
+                ProviderImportSupport::Explicit,
+                SourceBackedRouteSelection::ExplicitManual,
+            );
+        }
+        let cold =
+            refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+        assert!(cold.failed_routes.is_empty());
+        let parent_route = route_identity_for_path(&registry, &parent_path);
+        let child_route = route_identity_for_path(&registry, &child_path);
+        append_codex_lineage_message(&child_path, child, "dirty selected participant suffix");
+
+        let target = if replace_parent {
+            &parent_path
+        } else {
+            &child_path
+        };
+        fs::write(&replacement_path, fs::read(target).unwrap()).unwrap();
+        let target_from_hook = target.clone();
+        install_after_codex_lineage_normalization_hook_v0(move |_| {
+            fs::rename(&target_from_hook, moved_path).unwrap();
+            fs::rename(replacement_path, target_from_hook).unwrap();
+        });
+        let rejected = refresh_source_backed_generation_for_routes(
+            &index,
+            &registry,
+            WriterOptions::default(),
+            [child_route.clone()],
+        )
+        .unwrap();
+        assert_eq!(rejected.failed_routes.len(), 1);
+        assert_eq!(
+            rejected.failed_routes[0].class,
+            SourceBackedSourceFailureClass::SourceChanged
+        );
+        assert_eq!(
+            VerifiedIndex::open(&index).unwrap().generation_id(),
+            cold.commit.generation_id
+        );
+
+        if replace_parent {
+            let ancestor_retried = refresh_source_backed_generation_for_routes(
+                &index,
+                &registry,
+                WriterOptions::default(),
+                [parent_route.clone()],
+            )
+            .unwrap();
+            assert!(ancestor_retried.failed_routes.is_empty());
+            assert_eq!(ancestor_retried.successful_route_ids, vec![parent_route]);
+            assert!(!core_records(&VerifiedIndex::open(&index).unwrap())
+                .iter()
+                .any(|record| {
+                    record.provider_session_id.as_deref() == Some(child)
+                        && record.content.normalized_body.as_deref()
+                            == Some("dirty selected participant suffix")
+                }));
+        }
+        let retried = refresh_source_backed_generation_for_routes(
+            &index,
+            &registry,
+            WriterOptions::default(),
+            [child_route.clone()],
+        )
+        .unwrap();
+        assert!(retried.failed_routes.is_empty());
+        assert_eq!(retried.successful_route_ids, vec![child_route]);
+        assert!(core_records(&VerifiedIndex::open(&index).unwrap())
+            .iter()
+            .any(|record| {
+                record.provider_session_id.as_deref() == Some(child)
+                    && record.content.normalized_body.as_deref()
+                        == Some("dirty selected participant suffix")
+            }));
+    }
+}
+
+fn register_three_level_codex_routes(
+    registry: &mut SourceBackedProviderRegistry,
+    automatic: &Path,
+    middle: &Path,
+    reverse: bool,
+) {
+    let register_automatic = |registry: &mut SourceBackedProviderRegistry| {
+        register_codex_route(
+            registry,
+            automatic,
+            "codex_session_jsonl_tree",
+            ProviderImportSupport::Native,
+            SourceBackedRouteSelection::Automatic,
+        );
+    };
+    let register_middle = |registry: &mut SourceBackedProviderRegistry| {
+        register_codex_route(
+            registry,
+            middle,
+            "codex_session_jsonl",
+            ProviderImportSupport::Explicit,
+            SourceBackedRouteSelection::ExplicitManual,
+        );
+    };
+    if reverse {
+        register_middle(registry);
+        register_automatic(registry);
+    } else {
+        register_automatic(registry);
+        register_middle(registry);
+    }
+}
+
+#[test]
+fn codex_three_level_cross_route_output_is_registration_order_independent() {
+    let temp = tempdir().unwrap();
+    let automatic = temp.path().join("automatic-root-and-grandchild");
+    let explicit_middle = temp.path().join("explicit-middle.jsonl");
+    fs::create_dir_all(&automatic).unwrap();
+    let root = "019fa000-0000-7000-8000-000000003294";
+    let middle = "019fa000-0000-7000-8000-000000003295";
+    let grandchild = "019fa000-0000-7000-8000-000000003296";
+    let root_call = codex_lineage_call("call-three-level-root", "git rev-parse --verify HEAD");
+    let root_result = codex_lineage_result(
+        "call-three-level-root",
+        "three-level-root-output bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    let middle_call = codex_lineage_call("call-three-level-middle", "git rev-parse --verify HEAD");
+    let middle_result = codex_lineage_result(
+        "call-three-level-middle",
+        "three-level-middle-output cccccccccccccccccccccccccccccccccccccccc",
+    );
+    fs::write(
+        automatic.join(format!("rollout-{root}.jsonl")),
+        codex_lineage_rollout_with_events(
+            root,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            &[root_call.clone(), root_result.clone()],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &explicit_middle,
+        codex_lineage_rollout_with_events(
+            middle,
+            Some(root),
+            SessionRelationshipKind::Forked,
+            Some(root),
+            &[
+                root_call.clone(),
+                root_result.clone(),
+                middle_call.clone(),
+                middle_result.clone(),
+            ],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        automatic.join(format!("rollout-{grandchild}.jsonl")),
+        codex_lineage_rollout_with_events(
+            grandchild,
+            Some(middle),
+            SessionRelationshipKind::Forked,
+            Some(root),
+            &[root_call, root_result, middle_call, middle_result],
+        ),
+    )
+    .unwrap();
+
+    let mut forward = SourceBackedProviderRegistry::new();
+    register_three_level_codex_routes(&mut forward, &automatic, &explicit_middle, false);
+    let mut reversed = SourceBackedProviderRegistry::new();
+    register_three_level_codex_routes(&mut reversed, &automatic, &explicit_middle, true);
+    let forward_index = temp.path().join("forward-index");
+    let reversed_index = temp.path().join("reversed-index");
+    let forward_receipt =
+        refresh_source_backed_generation(&forward_index, &forward, WriterOptions::default())
+            .unwrap();
+    let reversed_receipt =
+        refresh_source_backed_generation(&reversed_index, &reversed, WriterOptions::default())
+            .unwrap();
+    assert!(forward_receipt.failed_routes.is_empty());
+    assert!(reversed_receipt.failed_routes.is_empty());
+
+    let mut forward_records = core_records(&VerifiedIndex::open(&forward_index).unwrap());
+    let mut reversed_records = core_records(&VerifiedIndex::open(&reversed_index).unwrap());
+    assert_copied_result(&forward_records, grandchild, "three-level-middle-output");
+    assert_copied_result(&reversed_records, grandchild, "three-level-middle-output");
+    forward_records.sort_by_key(|record| record.event_id.to_string());
+    reversed_records.sort_by_key(|record| record.event_id.to_string());
+    assert_eq!(forward_records, reversed_records);
+}
+
+#[test]
+fn codex_exact_leaf_uses_three_level_carried_authority_and_missing_parent_fails() {
+    let temp = tempdir().unwrap();
+    let root_dir = temp.path().join("root-route");
+    let leaf_dir = temp.path().join("leaf-route");
+    fs::create_dir_all(&root_dir).unwrap();
+    fs::create_dir_all(&leaf_dir).unwrap();
+    let root_path = root_dir.join("root.jsonl");
+    let middle_path = temp.path().join("middle.jsonl");
+    let leaf_path = leaf_dir.join("leaf.jsonl");
+    let root = "019fa000-0000-7000-8000-000000003314";
+    let middle = "019fa000-0000-7000-8000-000000003315";
+    let leaf = "019fa000-0000-7000-8000-000000003316";
+    let root_call = codex_lineage_call("exact-three-root", "git rev-parse --verify HEAD");
+    let root_result = codex_lineage_result("exact-three-root", "exact three root output");
+    let middle_call = codex_lineage_call("exact-three-middle", "git rev-parse --verify HEAD");
+    let middle_result = codex_lineage_result("exact-three-middle", "exact three middle output");
+    fs::write(
+        &root_path,
+        codex_lineage_rollout_with_events(
+            root,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            &[root_call.clone(), root_result.clone()],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &middle_path,
+        codex_lineage_rollout_with_events(
+            middle,
+            Some(root),
+            SessionRelationshipKind::Forked,
+            Some(root),
+            &[
+                root_call.clone(),
+                root_result.clone(),
+                middle_call.clone(),
+                middle_result.clone(),
+            ],
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &leaf_path,
+        codex_lineage_rollout_with_events(
+            leaf,
+            Some(middle),
+            SessionRelationshipKind::Forked,
+            Some(root),
+            &[root_call, root_result, middle_call, middle_result],
+        ),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    // Reverse topological registration is intentional.
+    register_codex_route(
+        &mut registry,
+        &leaf_dir,
+        "codex_session_jsonl_tree",
+        ProviderImportSupport::Native,
+        SourceBackedRouteSelection::Automatic,
+    );
+    register_codex_route(
+        &mut registry,
+        &middle_path,
+        "codex_session_jsonl",
+        ProviderImportSupport::Explicit,
+        SourceBackedRouteSelection::ExplicitManual,
+    );
+    register_codex_route(
+        &mut registry,
+        &root_dir,
+        "codex_session_jsonl_tree",
+        ProviderImportSupport::Explicit,
+        SourceBackedRouteSelection::ExplicitManual,
+    );
+    let leaf_route = route_identity_for_path(&registry, &leaf_dir);
+    let index = temp.path().join("index");
+    let cold =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    append_codex_lineage_message(&leaf_path, leaf, "dirty three-level leaf");
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+    let refreshed = refresh_source_backed_generation_for_routes(
+        &index,
+        &registry,
+        WriterOptions::default(),
+        [leaf_route.clone()],
+    )
+    .unwrap();
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .lineage_fact_source_scans,
+        0
+    );
+    assert_copied_result(
+        &core_records(&VerifiedIndex::open(&index).unwrap()),
+        leaf,
+        "exact three middle output",
+    );
+
+    fs::remove_file(&root_path).unwrap();
+    append_codex_lineage_message(&leaf_path, leaf, "dirty leaf after parent deletion");
+    let failed = refresh_source_backed_generation_for_routes(
+        &index,
+        &registry,
+        WriterOptions::default(),
+        [leaf_route],
+    )
+    .unwrap();
+    assert_eq!(failed.failed_routes.len(), 1);
+    assert_eq!(
+        VerifiedIndex::open(&index).unwrap().generation_id(),
+        refreshed.commit.generation_id
+    );
+    assert_ne!(cold.commit.generation_id, refreshed.commit.generation_id);
+}
+
+#[test]
+fn codex_generation_spills_more_than_sixteen_near_budget_components_four_at_a_time() {
+    const COMPONENTS: usize = 17;
+    const FACT_PAIRS: usize = 20;
+    const BYTE_LIMIT: usize = 2_300;
+    const FACT_LIMIT: usize = 44;
+
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    for component in 0..COMPONENTS {
+        let root = format!("019fa100-0000-7000-8000-{component:012x}");
+        let child = format!("019fa101-0000-7000-8000-{component:012x}");
+        let events = codex_dense_lineage_events(component, FACT_PAIRS);
+        fs::write(
+            sessions.join(format!("rollout-{root}.jsonl")),
+            codex_lineage_rollout_with_events(
+                &root,
+                None,
+                SessionRelationshipKind::Root,
+                None,
+                &events,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            sessions.join(format!("rollout-{child}.jsonl")),
+            codex_lineage_rollout_with_events(
+                &child,
+                Some(&root),
+                SessionRelationshipKind::Forked,
+                Some(&root),
+                &events,
+            ),
+        )
+        .unwrap();
+    }
+
+    let registry = register_codex_tree(&sessions);
+    registry
+        .codex_generation
+        .as_ref()
+        .unwrap()
+        .set_generation_lineage_budget_limits(BYTE_LIMIT, FACT_LIMIT);
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+
+    let refreshed =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert!(refreshed.failed_routes.is_empty());
+    let observation = observed.lock().unwrap().clone().unwrap();
+    assert_eq!(observation.lineage_fact_source_scans, COMPONENTS as u64);
+    assert_eq!(observation.worker_starts_at_normalization, 0);
+    assert_eq!(
+        observation.worker_start_latch.starts(),
+        (COMPONENTS * 2) as u64
+    );
+    let (active, peak, current_bytes, peak_bytes, component_loads) = registry
+        .codex_generation
+        .as_ref()
+        .unwrap()
+        .generation_lineage_metrics()
+        .unwrap();
+    assert_eq!(active, 0);
+    assert_eq!(peak, 4);
+    assert_eq!(current_bytes, 0);
+    assert!(
+        (2_200..=BYTE_LIMIT).contains(&peak_bytes),
+        "lineage component peak was {peak_bytes} bytes"
+    );
+    assert_eq!(component_loads, COMPONENTS);
+
+    let records = core_records(&VerifiedIndex::open(&index).unwrap());
+    for component in 0..COMPONENTS {
+        let child = format!("019fa101-0000-7000-8000-{component:012x}");
+        assert_copied_result(
+            &records,
+            &child,
+            &format!("dense-component-{component:02}-result-019"),
+        );
+    }
+}
+
+#[test]
+fn codex_many_explicit_routes_share_one_linear_generation_fact_pass_and_lease() {
+    const ROUTES: usize = 24;
+
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("explicit-chain");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    for depth in 0..ROUTES {
+        let native_session_id = format!("019fa200-0000-7000-8000-{depth:012x}");
+        let parent = depth
+            .checked_sub(1)
+            .map(|parent| format!("019fa200-0000-7000-8000-{parent:012x}"));
+        let path = sessions.join(format!("route-{depth:02}.jsonl"));
+        fs::write(
+            &path,
+            codex_lineage_rollout(
+                &native_session_id,
+                parent.as_deref(),
+                if parent.is_some() {
+                    SessionRelationshipKind::Forked
+                } else {
+                    SessionRelationshipKind::Root
+                },
+                parent.as_deref(),
+                &format!("linear explicit route {depth:02}"),
+            ),
+        )
+        .unwrap();
+        register_codex_route(
+            &mut registry,
+            &path,
+            "codex_session_jsonl",
+            ProviderImportSupport::Explicit,
+            SourceBackedRouteSelection::ExplicitManual,
+        );
+    }
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+
+    let refreshed =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(refreshed.certified_source_count, ROUTES);
+    let observation = observed.lock().unwrap().clone().unwrap();
+    assert_eq!(observation.valid_sources, ROUTES);
+    assert_eq!(
+        observation.lineage_fact_source_scans,
+        ROUTES.saturating_sub(1) as u64
+    );
+    assert_eq!(observation.worker_start_latch.starts(), ROUTES as u64);
+    let (active, peak, current_bytes, _peak_bytes, component_loads) = registry
+        .codex_generation
+        .as_ref()
+        .unwrap()
+        .generation_lineage_metrics()
+        .unwrap();
+    assert_eq!(active, 0);
+    assert_eq!(peak, 1);
+    assert_eq!(current_bytes, 0);
+    assert_eq!(component_loads, 1);
+    assert_eq!(
+        core_records(&VerifiedIndex::open(&index).unwrap()).len(),
+        ROUTES
+    );
+}
+
+#[cfg(unix)]
+fn assert_codex_generation_rejects_parent_replacement_after_preparation(longer: bool) {
+    let temp = tempdir().unwrap();
+    let automatic = temp.path().join("automatic-child");
+    let explicit_parent = temp.path().join("explicit-parent.jsonl");
+    let replacement = temp.path().join("replacement-parent.jsonl");
+    let moved = temp.path().join("prepared-parent.jsonl");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&automatic).unwrap();
+    let parent = "019fa300-0000-7000-8000-000000000001";
+    let child = "019fa300-0000-7000-8000-000000000002";
+    let call = codex_lineage_call("prepared-parent-call", "git rev-parse --verify HEAD");
+    let old_result = codex_lineage_result(
+        "prepared-parent-call",
+        "prepared parent old output dddddddddddddddddddddddddddddddd",
+    );
+    let new_result = codex_lineage_result(
+        "prepared-parent-call",
+        "prepared parent new output eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    );
+    let old_parent = codex_lineage_rollout_with_events(
+        parent,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        &[call.clone(), old_result.clone()],
+    );
+    let mut replacement_events = vec![call.clone(), new_result];
+    if longer {
+        replacement_events.push(serde_json::json!({
+            "timestamp": "2026-08-06T12:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "long replacement tail"}]
+            }
+        }));
+    }
+    let replacement_parent = codex_lineage_rollout_with_events(
+        parent,
+        None,
+        SessionRelationshipKind::Root,
+        None,
+        &replacement_events,
+    );
+    if longer {
+        assert!(replacement_parent.len() > old_parent.len());
+    } else {
+        assert_eq!(replacement_parent.len(), old_parent.len());
+    }
+    fs::write(&explicit_parent, &old_parent).unwrap();
+    fs::write(&replacement, &replacement_parent).unwrap();
+    fs::write(
+        automatic.join(format!("rollout-{child}.jsonl")),
+        codex_lineage_rollout_with_events(
+            child,
+            Some(parent),
+            SessionRelationshipKind::Forked,
+            Some(parent),
+            &[call, old_result],
+        ),
+    )
+    .unwrap();
+
+    let mut registry = SourceBackedProviderRegistry::new();
+    register_codex_route(
+        &mut registry,
+        &automatic,
+        "codex_session_jsonl_tree",
+        ProviderImportSupport::Native,
+        SourceBackedRouteSelection::Automatic,
+    );
+    register_codex_route(
+        &mut registry,
+        &explicit_parent,
+        "codex_session_jsonl",
+        ProviderImportSupport::Explicit,
+        SourceBackedRouteSelection::ExplicitManual,
+    );
+    let seeded =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert!(seeded.failed_routes.is_empty());
+    let seeded_index = VerifiedIndex::open(&index).unwrap();
+    let seeded_generation = seeded_index.generation_id().to_owned();
+    let seeded_records = core_records(&seeded_index);
+
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    let explicit_parent_from_hook = explicit_parent.clone();
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+        fs::rename(&explicit_parent_from_hook, moved).unwrap();
+        fs::rename(replacement, explicit_parent_from_hook).unwrap();
+    });
+    let rejected =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    let observation = observed.lock().unwrap().clone().unwrap();
+    assert_eq!(observation.lineage_fact_source_scans, 1);
+    assert_eq!(observation.worker_starts_at_normalization, 0);
+    assert_eq!(observation.worker_start_latch.starts(), 0);
+    assert_eq!(rejected.failed_routes.len(), 2);
+    assert!(rejected.failed_routes.iter().all(|failure| {
+        failure.class == SourceBackedSourceFailureClass::SourceChanged && failure.carried_forward
+    }));
+    let retained = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(retained.generation_id(), seeded_generation);
+    assert_eq!(core_records(&retained), seeded_records);
+
+    let retried =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert!(retried.failed_routes.is_empty());
+    let retried_records = core_records(&VerifiedIndex::open(&index).unwrap());
+    assert!(retried_records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(parent)
+            && record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains("prepared parent new output"))
+    }));
+    assert!(!retried_records.iter().any(|record| {
+        record.provider_session_id.as_deref() == Some(parent)
+            && record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains("prepared parent old output"))
+    }));
+    if longer {
+        assert!(retried_records.iter().any(|record| {
+            record.content.normalized_body.as_deref() == Some("long replacement tail")
+        }));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_generation_rejects_same_length_parent_replacement_after_preparation() {
+    assert_codex_generation_rejects_parent_replacement_after_preparation(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_generation_rejects_longer_parent_replacement_after_preparation() {
+    assert_codex_generation_rejects_parent_replacement_after_preparation(true);
+}
+
+#[test]
+fn codex_transitive_root_normalization_quarantines_before_workers() {
+    let temp = tempdir().unwrap();
+    let automatic = temp.path().join("automatic-sessions");
+    let explicit = temp.path().join("explicit-sessions");
+    fs::create_dir_all(&automatic).unwrap();
+    fs::create_dir_all(&explicit).unwrap();
+    let root = "019fa000-0000-7000-8000-000000003280";
+    let fork = "019fa000-0000-7000-8000-000000003281";
+    let delegated = "019fa000-0000-7000-8000-000000003282";
+    let resumed = "019fa000-0000-7000-8000-000000003287";
+    let invalid = "019fa000-0000-7000-8000-000000003283";
+    let invalid_child = "019fa000-0000-7000-8000-000000003284";
+    let absent = "019fa000-0000-7000-8000-000000003289";
+    for (directory, id, parent, relationship, advisory, marker) in [
+        (
+            &automatic,
+            root,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            "normalized root",
+        ),
+        (
+            &explicit,
+            fork,
+            Some(root),
+            SessionRelationshipKind::Forked,
+            Some(fork),
+            "normalized fork",
+        ),
+        (
+            &automatic,
+            delegated,
+            Some(fork),
+            SessionRelationshipKind::Delegated,
+            Some(fork),
+            "normalized delegated",
+        ),
+        (
+            &explicit,
+            resumed,
+            Some(delegated),
+            SessionRelationshipKind::ResumedFrom,
+            Some(root),
+            "normalized resumed",
+        ),
+        (
+            &explicit,
+            invalid,
+            Some(absent),
+            SessionRelationshipKind::Forked,
+            Some(absent),
+            "rejected missing",
+        ),
+        (
+            &automatic,
+            invalid_child,
+            Some(invalid),
+            SessionRelationshipKind::Delegated,
+            Some(invalid),
+            "rejected descendant",
+        ),
+    ] {
+        fs::write(
+            directory.join(format!("rollout-{id}.jsonl")),
+            codex_lineage_rollout(id, parent, relationship, advisory, marker),
+        )
+        .unwrap();
+    }
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+    let staged = Arc::new(Mutex::new(None));
+    let staged_from_hook = Arc::clone(&staged);
+    super::super::set_after_codex_session_tree_stage_hook(move |counters| {
+        *staged_from_hook.lock().unwrap() = Some(counters);
+    });
+    let registry = register_codex_trees(&[
+        (&automatic, ProviderImportSupport::Native),
+        (&explicit, ProviderImportSupport::Explicit),
+    ]);
+    let index_path = temp.path().join("index");
+    let refreshed =
+        refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let observation = observed.lock().unwrap().clone().unwrap();
+    assert_eq!(observation.valid_sources, 4);
+    assert_eq!(observation.rejected_sources, 2);
+    assert_eq!(observation.worker_starts_at_normalization, 0);
+    assert_eq!(observation.worker_start_latch.starts(), 4);
+    let staged = staged.lock().unwrap().unwrap();
+    assert_eq!(staged.scanner_sources_started, 4);
+    assert_eq!(staged.scanner_sources_completed, 4);
+    assert_eq!(staged.staged_documents, 4);
+    assert_eq!(refreshed.commit.indexed_documents, 4);
+    assert_eq!(refreshed.certified_source_count, 4);
+    let records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(records.len(), 4);
+    let canonical_root = records[0].root_session_id;
+    assert!(records
+        .iter()
+        .all(|record| record.root_session_id == canonical_root));
+    assert!(records.iter().all(|record| !record
+        .content
+        .normalized_body
+        .as_deref()
+        .is_some_and(|body| body.starts_with("rejected"))));
+
+    let cold_ids = records
+        .iter()
+        .map(|record| {
+            (
+                record.content.normalized_body.clone().unwrap(),
+                record.event_id,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let warm_records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(warm_records.len(), 4);
+    assert!(warm_records
+        .iter()
+        .all(|record| record.root_session_id == canonical_root));
+    assert!(warm_records.iter().all(|record| {
+        cold_ids.get(record.content.normalized_body.as_deref().unwrap()) == Some(&record.event_id)
+    }));
+
+    let mut appended = serde_json::to_vec(&serde_json::json!({
+        "timestamp": "2026-08-06T12:00:02Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "normalized append"}]
+        }
+    }))
+    .unwrap();
+    appended.push(b'\n');
+    OpenOptions::new()
+        .append(true)
+        .open(automatic.join(format!("rollout-{delegated}.jsonl")))
+        .unwrap()
+        .write_all(&appended)
+        .unwrap();
+    refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let append_records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(append_records.len(), 5);
+    assert!(append_records
+        .iter()
+        .all(|record| record.root_session_id == canonical_root));
+    assert!(append_records
+        .iter()
+        .any(|record| { record.content.normalized_body.as_deref() == Some("normalized append") }));
+    assert!(append_records
+        .iter()
+        .filter(|record| { record.content.normalized_body.as_deref() != Some("normalized append") })
+        .all(|record| {
+            cold_ids.get(record.content.normalized_body.as_deref().unwrap())
+                == Some(&record.event_id)
+        }));
+
+    let new_root = "019fa000-0000-7000-8000-000000003279";
+    fs::write(
+        explicit.join(format!("rollout-{new_root}.jsonl")),
+        codex_lineage_rollout(
+            new_root,
+            None,
+            SessionRelationshipKind::Root,
+            Some(new_root),
+            "normalized new root",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        automatic.join(format!("rollout-{root}.jsonl")),
+        codex_lineage_rollout(
+            root,
+            Some(new_root),
+            SessionRelationshipKind::Forked,
+            Some(new_root),
+            "normalized root",
+        ),
+    )
+    .unwrap();
+    refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
+    let reparented_records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    assert_eq!(reparented_records.len(), 6);
+    let reparented_root = reparented_records[0].root_session_id;
+    assert_ne!(reparented_root, canonical_root);
+    assert!(reparented_records
+        .iter()
+        .all(|record| record.root_session_id == reparented_root));
+    assert!(reparented_records
+        .iter()
+        .filter(|record| cold_ids.contains_key(record.content.normalized_body.as_deref().unwrap()))
+        .all(|record| {
+            cold_ids.get(record.content.normalized_body.as_deref().unwrap())
+                == Some(&record.event_id)
+        }));
+}
+
+#[test]
+fn codex_all_invalid_lineage_fails_without_workers_or_publication() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let child = "019fa000-0000-7000-8000-000000003285";
+    let grandchild = "019fa000-0000-7000-8000-000000003286";
+    let absent = "019fa000-0000-7000-8000-000000003299";
+    fs::write(
+        sessions.join(format!("rollout-{child}.jsonl")),
+        codex_lineage_rollout(
+            child,
+            Some(absent),
+            SessionRelationshipKind::Forked,
+            Some(absent),
+            "all invalid one",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sessions.join(format!("rollout-{grandchild}.jsonl")),
+        codex_lineage_rollout(
+            grandchild,
+            Some(child),
+            SessionRelationshipKind::Delegated,
+            Some(child),
+            "all invalid two",
+        ),
+    )
+    .unwrap();
+    let observed = Arc::new(Mutex::new(None));
+    let observed_from_hook = Arc::clone(&observed);
+    install_after_codex_lineage_normalization_hook_v0(move |observation| {
+        *observed_from_hook.lock().unwrap() = Some(observation);
+    });
+    assert!(refresh_source_backed_generation(
+        &index,
+        &register_codex_tree(&sessions),
+        WriterOptions::default(),
+    )
+    .is_err());
+    let observation = observed.lock().unwrap().clone().unwrap();
+    assert_eq!(observation.valid_sources, 0);
+    assert_eq!(observation.rejected_sources, 2);
+    assert_eq!(observation.worker_starts_at_normalization, 0);
+    assert_eq!(observation.worker_start_latch.starts(), 0);
+    assert!(VerifiedIndex::open(&index).is_err());
 }
 
 #[test]

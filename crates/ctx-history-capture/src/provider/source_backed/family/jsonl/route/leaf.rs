@@ -415,6 +415,14 @@ pub(super) fn scan_leaves(
             "JSONL adapter mixed partitioned and unpartitioned leaf scans",
         ));
     }
+    let partition_wave_limit = adapter
+        .leaf_scan_partition_wave_limit()
+        .min(JSONL_PARTITION_COMPONENTS_PER_WAVE);
+    if saw_partition && partition_wave_limit == 0 {
+        return Err(route_invalid(
+            "JSONL adapter returned a zero partition wave limit",
+        ));
+    }
     let mut serial_worker = JsonlFamilyWorkerContext::default();
     #[cfg(test)]
     let scanner_probe = jsonl_family_scanner_probe(if saw_partition { 1 } else { worker_count });
@@ -494,7 +502,7 @@ pub(super) fn scan_leaves(
             },
         );
         let mut evidences = Vec::with_capacity(leaves.len());
-        for wave in partitions.chunks(JSONL_PARTITION_COMPONENTS_PER_WAVE) {
+        for wave in partitions.chunks(partition_wave_limit) {
             let mut begun = Vec::with_capacity(wave.len());
             for (partition, _) in wave {
                 if let Err(error) = adapter.begin_leaf_scan_partition(*partition) {

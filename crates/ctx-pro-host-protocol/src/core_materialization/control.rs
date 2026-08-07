@@ -214,6 +214,15 @@ pub struct FinishCoreMaterializationRequest {
 
 impl FinishCoreMaterializationRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.validate_fields()?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "finish Core materialization request exceeds its wire bound",
+        )
+    }
+
+    fn validate_fields(&self) -> Result<(), ProtocolError> {
         validate_sha256(&self.materialization_id, "Core materialization ID")?;
         self.head.validate()?;
         if let Some(receipt) = &self.expected_prior_receipt {
@@ -234,28 +243,204 @@ impl FinishCoreMaterializationRequest {
                 "Core materialization terminal counts are inconsistent",
             ));
         }
-        validate_encoded_bound(
+        Ok(())
+    }
+
+    pub fn canonical_digest(&self) -> Result<String, ProtocolError> {
+        self.validate_fields()?;
+        let encoded = encode_with_bound(
             self,
             MAX_CORE_CONTROL_WIRE_BYTES,
             "finish Core materialization request exceeds its wire bound",
+        )?;
+        Ok(hex_sha256(Sha256::digest(encoded)))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreMaterializationFinalizationPhase {
+    SealingInputs,
+    EmitReplay,
+    EmitFlat,
+    EmitEventIndex,
+    EmitSources,
+    ValidateCandidate,
+    ReadyToActivate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoreMaterializationFinalizationProgress {
+    pub materialization_id: String,
+    pub core_generation_id: String,
+    pub finish_request_digest: String,
+    pub materializer_revision: String,
+    pub phase: CoreMaterializationFinalizationPhase,
+    pub cursor_sha256: String,
+}
+
+impl CoreMaterializationFinalizationProgress {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_sha256(&self.materialization_id, "Core materialization ID")?;
+        validate_sha256(&self.core_generation_id, "Core generation ID")?;
+        validate_sha256(&self.finish_request_digest, "Core Finish request digest")?;
+        validate_identity(&self.materializer_revision, "Core materializer revision")?;
+        validate_sha256(&self.cursor_sha256, "Core finalization cursor")?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "Core materialization finalization progress exceeds its wire bound",
+        )
+    }
+
+    pub fn validate_for_finish(
+        &self,
+        request: &FinishCoreMaterializationRequest,
+        materializer_revision: &str,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        request.validate()?;
+        if self.materialization_id != request.materialization_id
+            || self.core_generation_id != request.head.core_generation_id
+            || self.finish_request_digest != request.canonical_digest()?
+            || self.materializer_revision != materializer_revision
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core finalization progress belongs to a different Finish request or materializer revision",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueCoreMaterializationRequest {
+    pub expected_progress: CoreMaterializationFinalizationProgress,
+}
+
+impl ContinueCoreMaterializationRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.expected_progress.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "continue Core materialization request exceeds its wire bound",
         )
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CoreMaterializationFinalizationPending {
+    pub progress: CoreMaterializationFinalizationProgress,
+    pub replayed: bool,
+}
+
+impl CoreMaterializationFinalizationPending {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.progress.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "Core materialization finalization pending response exceeds its wire bound",
+        )
+    }
+
+    pub fn validate_for_finish(
+        &self,
+        request: &FinishCoreMaterializationRequest,
+        materializer_revision: &str,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        self.progress
+            .validate_for_finish(request, materializer_revision)
+    }
+
+    pub fn validate_for_continue(
+        &self,
+        request: &ContinueCoreMaterializationRequest,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        request.validate()?;
+        if self.progress.materialization_id != request.expected_progress.materialization_id
+            || self.progress.core_generation_id != request.expected_progress.core_generation_id
+            || self.progress.finish_request_digest
+                != request.expected_progress.finish_request_digest
+            || self.progress.materializer_revision
+                != request.expected_progress.materializer_revision
+            || self.progress.phase < request.expected_progress.phase
+            || self.progress == request.expected_progress
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core finalization response did not advance the expected owner and cursor",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreMaterializationFinished {
+    pub materialization_id: String,
+    pub finish_request_digest: String,
     pub receipt: CoreMaterializationReceipt,
     pub replayed: bool,
 }
 
 impl CoreMaterializationFinished {
-    pub fn validate_for(
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_sha256(&self.materialization_id, "Core materialization ID")?;
+        validate_sha256(&self.finish_request_digest, "Core Finish request digest")?;
+        self.receipt.validate()?;
+        validate_encoded_bound(
+            self,
+            MAX_CORE_CONTROL_WIRE_BYTES,
+            "Core materialization finished response exceeds its wire bound",
+        )
+    }
+
+    pub fn validate_for_finish(
         &self,
         request: &FinishCoreMaterializationRequest,
+        materializer_revision: &str,
     ) -> Result<(), ProtocolError> {
+        self.validate()?;
         request.validate()?;
         self.receipt.validate_for_head(&request.head)?;
+        if self.materialization_id != request.materialization_id
+            || self.finish_request_digest != request.canonical_digest()?
+            || self.receipt.materializer_revision != materializer_revision
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core materialization finished response does not match its Finish request CAS",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_continue(
+        &self,
+        request: &ContinueCoreMaterializationRequest,
+    ) -> Result<(), ProtocolError> {
+        self.validate()?;
+        request.validate()?;
+        let expected = &request.expected_progress;
+        if self.materialization_id != expected.materialization_id
+            || self.finish_request_digest != expected.finish_request_digest
+            || self.receipt.core_generation_id != expected.core_generation_id
+            || self.receipt.materializer_revision != expected.materializer_revision
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "Core materialization finished response does not match its continuation CAS",
+            ));
+        }
         Ok(())
     }
 }

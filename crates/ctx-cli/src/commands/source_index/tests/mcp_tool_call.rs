@@ -45,6 +45,7 @@ fn exact_show_surfaces_omit_absence_and_keep_tool_outputs_log_only() {
             OutputFormat::Json,
             None,
             None,
+            None,
             &mut ui,
         )
         .unwrap();

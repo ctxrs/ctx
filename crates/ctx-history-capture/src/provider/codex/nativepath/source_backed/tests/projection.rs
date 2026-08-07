@@ -963,8 +963,8 @@ fn codex_forked_history_fails_closed_when_parent_session_is_unavailable() {
 
     assert!(matches!(
         ingest_codex_source_backed_v0(&sessions, &index),
-        Err(CodexSourceBackedErrorV0::Index(
-            IndexError::InvalidSessionRelationshipGraph(_)
+        Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(_)
         ))
     ));
 }

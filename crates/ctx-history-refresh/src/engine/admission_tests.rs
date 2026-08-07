@@ -381,6 +381,7 @@ fn crash_restart_preserves_a_logical_successors_non_null_generation_baseline() {
     recovered.state = SourceBackedRefreshState::Published;
     recovered.published_generation = Some(generation_one.clone());
     recovered.receipt = Some(SourceBackedRefreshReceipt {
+        zero_source_authority: Vec::new(),
         previous_generation: recovered.previous_generation.clone(),
         published_generation: generation_one,
         generation_changed: true,

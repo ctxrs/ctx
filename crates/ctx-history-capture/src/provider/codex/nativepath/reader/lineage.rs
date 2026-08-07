@@ -1,4 +1,6 @@
 use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
     mem::size_of,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -7,11 +9,16 @@ use std::{
 };
 
 use super::*;
+use crate::provider::codex::nativepath::checkpoint::{
+    CodexCertifiedLineageFactKindV0, CodexCertifiedLineageFactV0, CodexCertifiedLineageFactsV0,
+    MAX_CODEX_CERTIFIED_LINEAGE_FACTS,
+};
 use crate::provider::codex::nativepath::record::codex_lineage_call_id_digest;
 
-// One authority component owns one semantic budget. The shared JSONL runner
-// admits at most 16 components at a time, bounding live lineage fact vectors
-// at 1 GiB independently of total corpus breadth.
+// One authority component owns one semantic budget. The shared JSONL runner's
+// general ceiling is 16 components (1 GiB), while generation-wide Codex spill
+// leases narrow that to four components (256 MiB) independently of corpus
+// breadth.
 const MAX_LINEAGE_FACT_BYTES_PER_COMPONENT: usize = 64 * 1024 * 1024;
 pub(crate) const CODEX_LINEAGE_EXHAUSTED_SENTINEL: &str = "Codex lineage working set exhausted";
 // Keep a defensive logical-count ceiling, but derive it from the same fixed-
@@ -20,6 +27,7 @@ const MAX_LINEAGE_FACTS_PER_COMPONENT: usize =
     MAX_LINEAGE_FACT_BYTES_PER_COMPONENT / size_of::<CodexLineageFactV0>();
 const LINEAGE_FACT_GROWTH: usize = 64;
 const LINEAGE_CONTAINER_CHARGE: usize = 128;
+const LINEAGE_SPILL_DOMAIN: &[u8] = b"ctx/codex-lineage-facts-spill/v1\0";
 
 #[derive(Debug)]
 pub(crate) struct CodexLineageFactBudgetV0 {
@@ -27,6 +35,8 @@ pub(crate) struct CodexLineageFactBudgetV0 {
     facts: AtomicUsize,
     byte_limit: usize,
     fact_limit: usize,
+    #[cfg(test)]
+    peak_charged: AtomicUsize,
 }
 
 impl Default for CodexLineageFactBudgetV0 {
@@ -36,6 +46,8 @@ impl Default for CodexLineageFactBudgetV0 {
             facts: AtomicUsize::new(0),
             byte_limit: MAX_LINEAGE_FACT_BYTES_PER_COMPONENT,
             fact_limit: MAX_LINEAGE_FACTS_PER_COMPONENT,
+            #[cfg(test)]
+            peak_charged: AtomicUsize::new(0),
         }
     }
 }
@@ -48,6 +60,7 @@ impl CodexLineageFactBudgetV0 {
             facts: AtomicUsize::new(0),
             byte_limit,
             fact_limit,
+            peak_charged: AtomicUsize::new(0),
         }
     }
 
@@ -59,6 +72,11 @@ impl CodexLineageFactBudgetV0 {
         )
     }
 
+    #[cfg(test)]
+    pub(in crate::provider::codex::nativepath) fn peak_charge_for_test(&self) -> usize {
+        self.peak_charged.load(Ordering::Acquire)
+    }
+
     fn charge(&self, bytes: usize) -> Result<()> {
         self.charged
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -66,7 +84,11 @@ impl CodexLineageFactBudgetV0 {
                     .checked_add(bytes)
                     .filter(|next| *next <= self.byte_limit)
             })
-            .map(|_| ())
+            .map(|_previous| {
+                #[cfg(test)]
+                self.peak_charged
+                    .fetch_max(_previous.saturating_add(bytes), Ordering::AcqRel);
+            })
             .map_err(|_| lineage_exhausted())
     }
 
@@ -101,6 +123,13 @@ enum CodexLineageFactKindV0 {
 struct CodexLineageFactV0 {
     call_id_sha256: [u8; 32],
     kind: CodexLineageFactKindV0,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CodexLineageFactsSpillRecordV0 {
+    pub(crate) offset: u64,
+    pub(crate) length: u64,
+    pub(crate) sha256: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -267,6 +296,152 @@ impl CodexLineageFactsV0 {
         }
     }
 
+    pub(crate) fn certified_authority(&self) -> Option<CodexCertifiedLineageFactsV0> {
+        if !self.sealed || self.conservative || self.facts.len() > MAX_CODEX_CERTIFIED_LINEAGE_FACTS
+        {
+            return None;
+        }
+        Some(CodexCertifiedLineageFactsV0 {
+            facts: self
+                .facts
+                .iter()
+                .map(|fact| CodexCertifiedLineageFactV0 {
+                    call_id_sha256: fact.call_id_sha256,
+                    kind: match fact.kind {
+                        CodexLineageFactKindV0::Call => CodexCertifiedLineageFactKindV0::Call,
+                        CodexLineageFactKindV0::Result => CodexCertifiedLineageFactKindV0::Result,
+                        CodexLineageFactKindV0::Ambiguous => {
+                            CodexCertifiedLineageFactKindV0::Ambiguous
+                        }
+                    },
+                })
+                .collect(),
+            has_unattributed_ambiguity: self.has_unattributed_ambiguity,
+        })
+    }
+
+    pub(crate) fn from_certified_authority(
+        authority: &CodexCertifiedLineageFactsV0,
+        budget: Arc<CodexLineageFactBudgetV0>,
+    ) -> Result<Self> {
+        let mut facts = Self::new(budget)?;
+        for fact in &authority.facts {
+            facts.push_digest(
+                match fact.kind {
+                    CodexCertifiedLineageFactKindV0::Call => CodexLineageFactKindV0::Call,
+                    CodexCertifiedLineageFactKindV0::Result => CodexLineageFactKindV0::Result,
+                    CodexCertifiedLineageFactKindV0::Ambiguous => CodexLineageFactKindV0::Ambiguous,
+                },
+                fact.call_id_sha256,
+            )?;
+        }
+        facts.has_unattributed_ambiguity = authority.has_unattributed_ambiguity;
+        facts.seal();
+        Ok(facts)
+    }
+
+    pub(crate) fn spill_to(&mut self, file: &mut File) -> Result<CodexLineageFactsSpillRecordV0> {
+        self.seal();
+        let offset = file.stream_position()?;
+        let mut hasher = Sha256::new();
+        hasher.update(LINEAGE_SPILL_DOMAIN);
+        let mut write = |bytes: &[u8]| -> Result<()> {
+            file.write_all(bytes)?;
+            hasher.update(bytes);
+            Ok(())
+        };
+        write(&[1])?;
+        let flags = u8::from(self.has_unattributed_ambiguity) | (u8::from(self.conservative) << 1);
+        write(&[flags])?;
+        let count = u64::try_from(self.facts.len()).map_err(|_| lineage_accounting_invariant())?;
+        write(&count.to_le_bytes())?;
+        for fact in &self.facts {
+            let kind = match fact.kind {
+                CodexLineageFactKindV0::Call => 0,
+                CodexLineageFactKindV0::Result => 1,
+                CodexLineageFactKindV0::Ambiguous => 2,
+            };
+            write(&[kind])?;
+            write(&fact.call_id_sha256)?;
+        }
+        let end = file.stream_position()?;
+        Ok(CodexLineageFactsSpillRecordV0 {
+            offset,
+            length: end
+                .checked_sub(offset)
+                .ok_or_else(lineage_accounting_invariant)?,
+            sha256: hasher.finalize().into(),
+        })
+    }
+
+    pub(crate) fn restore_from(
+        file: &mut File,
+        record: CodexLineageFactsSpillRecordV0,
+        budget: Arc<CodexLineageFactBudgetV0>,
+    ) -> Result<Self> {
+        file.seek(SeekFrom::Start(record.offset))?;
+        let mut hasher = Sha256::new();
+        hasher.update(LINEAGE_SPILL_DOMAIN);
+        let mut read = |bytes: &mut [u8]| -> Result<()> {
+            file.read_exact(bytes)?;
+            hasher.update(&*bytes);
+            Ok(())
+        };
+        let mut version = [0_u8; 1];
+        read(&mut version)?;
+        if version != [1] {
+            return Err(lineage_spill_invalid());
+        }
+        let mut flags = [0_u8; 1];
+        read(&mut flags)?;
+        if flags[0] & !0b11 != 0 {
+            return Err(lineage_spill_invalid());
+        }
+        let mut count = [0_u8; 8];
+        read(&mut count)?;
+        let count = u64::from_le_bytes(count);
+        let expected_length = 10_u64
+            .checked_add(
+                count
+                    .checked_mul(33)
+                    .ok_or_else(lineage_accounting_invariant)?,
+            )
+            .ok_or_else(lineage_accounting_invariant)?;
+        if expected_length != record.length {
+            return Err(lineage_spill_invalid());
+        }
+        let conservative = flags[0] & 0b10 != 0;
+        if conservative && count != 0 {
+            return Err(lineage_spill_invalid());
+        }
+        let mut facts = Self::new(budget)?;
+        if conservative && !facts.conservative {
+            facts.discard_and_seal_conservatively(0);
+        }
+        for _ in 0..count {
+            let mut kind = [0_u8; 1];
+            read(&mut kind)?;
+            let kind = match kind[0] {
+                0 => CodexLineageFactKindV0::Call,
+                1 => CodexLineageFactKindV0::Result,
+                2 => CodexLineageFactKindV0::Ambiguous,
+                _ => return Err(lineage_spill_invalid()),
+            };
+            let mut digest = [0_u8; 32];
+            read(&mut digest)?;
+            facts.push_digest(kind, digest)?;
+        }
+        facts.has_unattributed_ambiguity = flags[0] & 0b1 != 0;
+        facts.seal();
+        if (!conservative && facts.conservative)
+            || (!conservative && facts.facts.len() != usize::try_from(count).unwrap_or(usize::MAX))
+            || <[u8; 32]>::from(hasher.finalize()) != record.sha256
+        {
+            return Err(lineage_spill_invalid());
+        }
+        Ok(facts)
+    }
+
     fn push(&mut self, kind: CodexLineageFactKindV0, call_id: &str) -> Result<()> {
         if call_id.is_empty() || self.sealed {
             self.has_unattributed_ambiguity = true;
@@ -406,6 +581,10 @@ fn lineage_accounting_invariant() -> CaptureError {
     CaptureError::SystemInvariant("Codex lineage fact accounting overflowed")
 }
 
+fn lineage_spill_invalid() -> CaptureError {
+    CaptureError::InvalidPayload("Codex lineage fact spill authentication failed".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,6 +717,44 @@ mod tests {
             facts.presence("duplicate", "duplicate"),
             CodexLineageFactPresenceV0::Unproven
         );
+    }
+
+    #[test]
+    fn task_owned_spill_round_trips_and_rejects_modified_bytes() {
+        let budget = Arc::new(CodexLineageFactBudgetV0::default());
+        let mut facts = CodexLineageFactsV0::new(Arc::clone(&budget)).unwrap();
+        facts
+            .record(CodexLineageRecordEvidence::Call("spilled-call"))
+            .unwrap();
+        facts
+            .record(CodexLineageRecordEvidence::Result("spilled-call"))
+            .unwrap();
+        let mut spill = tempfile::tempfile().unwrap();
+        let record = facts.spill_to(&mut spill).unwrap();
+        drop(facts);
+        assert_eq!(budget.charges_for_test(), (0, 0));
+
+        let restored =
+            CodexLineageFactsV0::restore_from(&mut spill, record, Arc::clone(&budget)).unwrap();
+        assert_eq!(
+            restored.presence("spilled-call", "spilled-call"),
+            CodexLineageFactPresenceV0::Present
+        );
+        drop(restored);
+        assert_eq!(budget.charges_for_test(), (0, 0));
+
+        let last = record.offset + record.length - 1;
+        spill.seek(SeekFrom::Start(last)).unwrap();
+        let mut byte = [0_u8; 1];
+        spill.read_exact(&mut byte).unwrap();
+        byte[0] ^= 1;
+        spill.seek(SeekFrom::Start(last)).unwrap();
+        spill.write_all(&byte).unwrap();
+        assert!(matches!(
+            CodexLineageFactsV0::restore_from(&mut spill, record, budget),
+            Err(CaptureError::InvalidPayload(detail))
+                if detail == "Codex lineage fact spill authentication failed"
+        ));
     }
 
     #[test]

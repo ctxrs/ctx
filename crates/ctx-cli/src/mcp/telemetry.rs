@@ -85,6 +85,7 @@ impl RequestDescriptor {
 pub(super) struct McpHandled<T> {
     pub(super) value: T,
     pub(super) pro_event: Option<PublicEventV1>,
+    pub(super) text_content: Option<String>,
 }
 
 impl<T> McpHandled<T> {
@@ -92,6 +93,7 @@ impl<T> McpHandled<T> {
         Self {
             value,
             pro_event: None,
+            text_content: None,
         }
     }
 
@@ -99,6 +101,15 @@ impl<T> McpHandled<T> {
         Self {
             value,
             pro_event: Some(pro_event),
+            text_content: None,
+        }
+    }
+
+    pub(super) fn with_text_content(value: T, text_content: String) -> Self {
+        Self {
+            value,
+            pro_event: None,
+            text_content: Some(text_content),
         }
     }
 }

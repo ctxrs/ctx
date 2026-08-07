@@ -26,6 +26,10 @@ pub(super) fn invalid_tool_request(message: impl Into<String>) -> Error {
 
 pub(super) fn tool_result(structured: Value) -> Value {
     let text = render_tool_text(&structured);
+    tool_result_with_text(structured, text)
+}
+
+pub(super) fn tool_result_with_text(structured: Value, text: String) -> Value {
     json!({
         "content": [
             {
@@ -127,6 +131,16 @@ pub(super) fn tool_error_result(err: Error) -> Value {
                     "text": "History changed while ctx was opening the searchable generation. Retry the same request.",
                 }
             ],
+            "structuredContent": structured,
+        });
+    }
+    if let Some(error) = err.downcast_ref::<ctx_history_refresh::GenerationQueryAuthorityError>() {
+        let detail = error.to_string();
+        let structured =
+            crate::commands::source_index::generation_query_authority_error_json(error);
+        return json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": detail.clone() }],
             "structuredContent": structured,
         });
     }

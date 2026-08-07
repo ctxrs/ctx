@@ -7,10 +7,11 @@ use crate::{
     ApplyCoreEventDeltaPageRequest, ApplyCoreEventDeltaPagesRequest,
     ApplyCoreSourceDeltaPageRequest, AuthorizationRequest, AuthorizationResult,
     BeginCoreMaterializationRequest, BlameRequest, BlameResult, ConfirmGraphKeyDeletionRequest,
-    CoreEventDeltaPageApplied, CoreEventDeltaPagesApplied, CoreEventStatePage,
-    CoreEventStatePageRequest, CoreMaterializationBegan, CoreMaterializationFinished,
-    CoreMaterializationReceipt, CoreSourceDeltaPageApplied, ErrorClass,
-    FinishCoreMaterializationRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
+    ContinueCoreMaterializationRequest, CoreEventDeltaPageApplied, CoreEventDeltaPagesApplied,
+    CoreEventStatePage, CoreEventStatePageRequest, CoreMaterializationBegan,
+    CoreMaterializationFinalizationPending, CoreMaterializationFinalizationProgress,
+    CoreMaterializationFinished, CoreMaterializationReceipt, CoreSourceDeltaPageApplied,
+    ErrorClass, FinishCoreMaterializationRequest, GraphKeyDeleted, GraphKeyDeletionPrepared,
     PrepareGraphKeyDeletionRequest, ProtocolError, FRAME_HEADER_BYTES, PROTOCOL_FINGERPRINT,
     PROTOCOL_VERSION,
 };
@@ -66,7 +67,7 @@ pub(crate) fn apply_core_source_delta_page_request_frame_wire_bytes_from_request
 ///
 /// UUIDs have a fixed 36-byte JSON representation. Callers that must admit a
 /// request before its transport sequence is available use `u64::MAX`; every
-/// actual Protocol V2 sequence is then no larger than the admitted frame.
+/// actual Protocol V3 sequence is then no larger than the admitted frame.
 pub fn apply_core_source_delta_page_request_frame_wire_bytes(
     sequence: u64,
     request: &ApplyCoreSourceDeltaPageRequest,
@@ -93,7 +94,7 @@ pub(crate) fn core_source_delta_page_applied_frame_wire_bytes_from_response_byte
 ///
 /// UUIDs have a fixed 36-byte JSON representation. Callers that must admit a
 /// response before its transport sequence is available use `u64::MAX`; every
-/// actual Protocol V2 sequence is then no larger than the admitted frame.
+/// actual Protocol V3 sequence is then no larger than the admitted frame.
 pub fn core_source_delta_page_applied_frame_wire_bytes(
     sequence: u64,
     response: &CoreSourceDeltaPageApplied,
@@ -169,7 +170,7 @@ impl<'de> Deserialize<'de> for HelperEnvelope {
 }
 
 // Core record pages intentionally carry complete records and can dominate this
-// enum's stack size. Boxing changes only the Rust representation, never wire V1.
+// enum's stack size. Boxing changes only the Rust representation, never wire V3.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -189,10 +190,14 @@ pub enum HostMessage {
     CoreEventStatePage(CoreEventStatePageRequest),
     ApplyCoreEventDeltaPage(ApplyCoreEventDeltaPageRequest),
     FinishCoreMaterialization(FinishCoreMaterializationRequest),
+    ContinueCoreMaterialization(ContinueCoreMaterializationRequest),
     Blame(BlameRequest),
     ApplyCoreEventDeltaPages(ApplyCoreEventDeltaPagesRequest),
 }
 
+// Complete query and Core page responses likewise dominate this wire enum's
+// in-memory size. Its serde representation remains the Protocol V3 authority.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -211,12 +216,13 @@ pub enum HelperMessage {
     CoreEventStatePage(CoreEventStatePage),
     CoreEventDeltaPageApplied(CoreEventDeltaPageApplied),
     CoreMaterializationFinished(CoreMaterializationFinished),
+    CoreMaterializationFinalizationPending(CoreMaterializationFinalizationPending),
     Blame(Box<BlameResult>),
     Error(ProtocolError),
     CoreEventDeltaPagesApplied(CoreEventDeltaPagesApplied),
 }
 
-/// Independently selectable helper behavior that exists in Protocol V2.
+/// Independently selectable helper behavior that exists in Protocol V3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -241,7 +247,7 @@ impl Capability {
     }
 }
 
-/// Exact Protocol V2 handshake. There is no compatibility range negotiation.
+/// Exact Protocol V3 handshake. There is no compatibility range negotiation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelloRequest {
@@ -284,6 +290,7 @@ pub struct StatusRequest {
 pub enum CoreProjectionCurrentness {
     NotMaterialized,
     Partial,
+    Finalizing,
     Stale,
     NeedsRebuild,
     Current,
@@ -466,9 +473,13 @@ pub struct ProStorageEvidence {
 
 impl ProStorageEvidence {
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        // V4 remains admissible only as authenticated status evidence while a
+        // private helper control-loads the prior active graph for migration.
+        // New publication evidence is V5; this DTO grants no EventIndex read
+        // compatibility between those storage generations.
         if self.graph_manifest_schema != 3
             || self.flat_format_version != 2
-            || self.materializer_checkpoint_version != 4
+            || !matches!(self.materializer_checkpoint_version, 4 | 5)
             || self.journal_pack_format_version != 3
             || self.legacy_journals_written != 0
         {
@@ -513,6 +524,8 @@ pub struct StatusResult {
     pub supported_operations: BTreeSet<ProOperation>,
     pub available_operations: BTreeSet<ProOperation>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub finalization_progress: Option<CoreMaterializationFinalizationProgress>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub storage_evidence: Option<ProStorageEvidence>,
 }
 
@@ -537,6 +550,9 @@ impl StatusResult {
                     "Pro storage evidence requires a completed Core receipt",
                 ));
             }
+        }
+        if let Some(progress) = &self.finalization_progress {
+            progress.validate()?;
         }
         if let Some(generation) = &self.requested_core_generation_id {
             validate_lower_sha256(generation, "requested Core generation")?;
@@ -588,7 +604,45 @@ impl StatusResult {
                     ));
                 }
             }
+            CoreProjectionCurrentness::Finalizing => {
+                let progress = self.finalization_progress.as_ref().ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "finalizing Core status requires durable progress",
+                    )
+                })?;
+                let prior_active = self.core_receipt.as_ref();
+                if self.requested_core_generation_id.as_deref()
+                    != Some(progress.core_generation_id.as_str())
+                    || prior_active.is_some_and(|receipt| {
+                        receipt.core_generation_id == progress.core_generation_id
+                    })
+                    || if prior_active.is_some() {
+                        !matches!(
+                            self.coverage,
+                            MaterializedCoverage::Complete
+                                | MaterializedCoverage::Empty
+                                | MaterializedCoverage::Abstained
+                        )
+                    } else {
+                        self.coverage != MaterializedCoverage::Partial
+                    }
+                {
+                    return Err(ProtocolError::new(
+                        ErrorClass::Sequence,
+                        "finalizing Core status does not match its target or prior active projection",
+                    ));
+                }
+            }
             CoreProjectionCurrentness::Partial | CoreProjectionCurrentness::NeedsRebuild => {}
+        }
+        if self.currentness != CoreProjectionCurrentness::Finalizing
+            && self.finalization_progress.is_some()
+        {
+            return Err(ProtocolError::new(
+                ErrorClass::Sequence,
+                "non-finalizing Core status cannot carry finalization progress",
+            ));
         }
         let terminal_coverage = matches!(
             self.coverage,
@@ -596,10 +650,13 @@ impl StatusResult {
                 | MaterializedCoverage::Empty
                 | MaterializedCoverage::Abstained
         );
-        if terminal_coverage != (self.currentness == CoreProjectionCurrentness::Current) {
+        let completed_snapshot = self.currentness == CoreProjectionCurrentness::Current
+            || (self.currentness == CoreProjectionCurrentness::Finalizing
+                && self.core_receipt.is_some());
+        if terminal_coverage != completed_snapshot {
             return Err(ProtocolError::new(
                 ErrorClass::Sequence,
-                "terminal materialized coverage requires a current Core projection",
+                "terminal materialized coverage requires a current or prior active Core projection",
             ));
         }
         if let Some(receipt) = &self.core_receipt {
@@ -631,7 +688,7 @@ impl StatusResult {
                 "available Pro operations must be a subset of supported operations",
             ));
         }
-        let globally_ready = self.currentness == CoreProjectionCurrentness::Current
+        let globally_ready = completed_snapshot
             && self.coverage == MaterializedCoverage::Complete
             && self.access.global_prerequisites_available();
         if !globally_ready && !self.available_operations.is_empty() {

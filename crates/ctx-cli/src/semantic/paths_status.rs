@@ -502,6 +502,22 @@ pub(super) fn read_daemon_job_status(path: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// Reads durable job authority without collapsing corruption or I/O failure
+/// into the ordinary absent-file state used by best-effort status reporting.
+pub(super) fn read_daemon_job_status_strict(path: &Path) -> Result<Option<Value>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read durable daemon job status {}", path.display()))
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("decode durable daemon job status {}", path.display()))
+        .map(Some)
+}
+
 pub(super) fn daemon_report(data_root: &Path) -> Value {
     daemon_report_with_disabled_status(data_root, true)
 }

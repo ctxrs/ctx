@@ -465,7 +465,7 @@ session therefore emits only a completion record with `events_returned: 0` and
 not an MCP pagination envelope.
 
 Event JSON remains one `event_window` object with `target: "event"`, `format`,
-`event`, and `events[]`.
+`event`, `events[]`, and `copied_lineage`.
 
 Event-range JSON from `ctx list events --format json` is one
 `event_range_page` with `schema_version: 1`, the pinned `generation_id`, the
@@ -553,6 +553,14 @@ with `error: "generation_changed/active_generation_race"`,
 `error_code: "generation_changed"`,
 `failure_kind: "active_generation_race"`, and `retryable: true`. Clients may
 retry the same command; this race is not returned as a successful result.
+
+JSON `search`, `show`, and `locate` also fail before query or rendering when an
+existing Core generation lacks valid publication authority. The one stderr
+object has equal `error` and `detail` text plus a stable `error_code` and
+boolean `retryable`. An uncertified empty generation reports
+`source_unavailable` and is retryable; malformed or unknown publication
+metadata reports `publication_authority_invalid` and is not retryable. These
+states are distinct from a genuinely missing Core generation.
 
 ## Locate
 
@@ -670,7 +678,33 @@ Each result can include:
 - `why_matched`;
 - `citations[]`;
 - `suggested_next_commands[]`;
+- `copied_lineage`;
 - `visibility`.
+
+`copied_lineage` is the same schema-v1 object on each search result and on an
+event-window envelope. Its current required fields are listed below;
+schema-v1 readers must ignore additional fields:
+
+- `schema_version: 1`;
+- `observed_count`, exact when `truncated` is false and otherwise a lower bound;
+- numeric `returned`, the number of retained occurrence rows;
+- `occurrences[]`, each with full `ctx_event_id`, `ctx_session_id`, direct
+  `copied_from_ctx_event_id` and `copied_from_ctx_session_id`, parent/root
+  session IDs, `session_relationship`, and BFS `depth`;
+- `relationship_counts`, keyed by relationship kind and subject to the same
+  exact-versus-lower-bound rule;
+- `truncated`.
+
+Search retains at most three occurrences after at most 64 reverse posting
+visits. Show event retains at most 20 after at most 4,096 visits. Both stop at
+depth 1,024. Selected-event and forward-origin resolution independently visits
+at most 2,048 exact event-identity postings, counting live and deleted rows,
+and fails with a typed bound error if more work would be required. The complete
+object is limited to 64 KiB. Preview retention alone does not make an otherwise
+complete count truncated. The current writer does not emit `more_available`,
+compact-ID fields, or an exhaustive cursor. CLI JSON and MCP structured content
+always use full UUIDs; compact aliases exist only in the separately rendered
+human/MCP text projection.
 
 `why_matched[]` can include text, metadata, or touched-file reasons. A touched
 file match is backed by normalized touched-file storage and can appear when

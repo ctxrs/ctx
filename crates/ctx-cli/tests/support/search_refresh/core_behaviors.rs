@@ -315,6 +315,82 @@ fn machine_readable_search_attempts_enabled_daemon_self_healing() {
     assert!(status.get("prior_epoch").is_none(), "{status:#}");
 }
 
+fn assert_generation_authority_machine_error(
+    temp: &TempDir,
+    arguments: &[&str],
+    generation_id: &str,
+    expected_code: &str,
+    expected_retryable: bool,
+) {
+    let output = ctx(temp)
+        .args(arguments)
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(
+        output.stdout.is_empty(),
+        "{arguments:?}: {:?}",
+        output.stdout
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{arguments:?}: {stderr}");
+    assert!(!stderr.contains("Error:"), "{arguments:?}: {stderr}");
+    let value: Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(
+        value["error_code"], expected_code,
+        "{arguments:?}: {value:#}"
+    );
+    assert_eq!(
+        value["retryable"], expected_retryable,
+        "{arguments:?}: {value:#}"
+    );
+    assert_eq!(value["error"], value["detail"], "{arguments:?}: {value:#}");
+    assert!(
+        value["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains(generation_id)),
+        "{arguments:?}: {value:#}"
+    );
+}
+
+#[test]
+fn query_authority_default_background_search_show_and_locate_use_typed_json() {
+    const MISSING_EVENT_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+    for (malformed, error_code, retryable) in [
+        (false, "source_unavailable", true),
+        (true, "publication_authority_invalid", false),
+    ] {
+        let temp = tempdir();
+        let data_root = search_refresh_data_root(&temp);
+        let generation_id = initialize_generation_only_core(&data_root);
+        if malformed {
+            republish_active_generation_metadata(&data_root, &generation_id, b"{".to_vec());
+        }
+
+        for arguments in [
+            vec!["search", "authority-oracle", "--format=json"],
+            vec![
+                "search",
+                "authority-oracle",
+                "--refresh=background",
+                "--format=json",
+            ],
+            vec!["show", "event", MISSING_EVENT_ID, "--format=json"],
+            vec!["locate", "event", MISSING_EVENT_ID, "--format=json"],
+        ] {
+            assert_generation_authority_machine_error(
+                &temp,
+                &arguments,
+                &generation_id,
+                error_code,
+                retryable,
+            );
+        }
+    }
+}
+
 #[test]
 fn persistent_daemon_passively_publishes_appended_source_without_foreground_command() {
     let temp = tempdir();

@@ -70,6 +70,25 @@ pub enum IndexError {
     UnsupportedActiveGenerationPointer(u32),
     #[error("the active generation pointer is malformed or non-canonical")]
     InvalidActiveGenerationPointer,
+    #[error("the durable generation-retention lease is malformed, non-canonical, or not owner-private; resolve the unfinished lease owner before publishing Core")]
+    InvalidGenerationRetentionLease,
+    #[error("unsupported durable generation-retention lease version {0}")]
+    UnsupportedGenerationRetentionLease(u32),
+    #[error("generation-retention lease owner kind or identity is invalid")]
+    InvalidGenerationRetentionLeaseOwner,
+    #[error(
+        "generation {requested_generation_id} cannot be leased because it is not the active or previous retained generation"
+    )]
+    GenerationRetentionLeaseTargetNotRetained { requested_generation_id: String },
+    #[error(
+        "generation {retained_generation_id} is already retained by unfinished owner kind {owner_kind}; only one durable generation-retention lease is allowed"
+    )]
+    GenerationRetentionLeaseConflict {
+        retained_generation_id: String,
+        owner_kind: String,
+    },
+    #[error("generation-retention lease changed ownership before release")]
+    GenerationRetentionLeaseOwnerMismatch,
     #[error("unsupported commit payload version {0}")]
     UnsupportedCommitPayload(u32),
     #[error("the lexical commit payload is not in canonical ctx JSON encoding")]
@@ -97,16 +116,12 @@ pub enum IndexError {
         "Core record contract fingerprint mismatch: expected {expected}, generation carries {actual}"
     )]
     CoreRecordContractMismatch { expected: String, actual: String },
-    #[cfg(test)]
     #[error("current publication republish source topology is unsupported: {0}")]
     CurrentRepublishSourceTopology(&'static str),
-    #[cfg(test)]
     #[error("current publication republish exceeds the file limit: {actual}/{maximum}")]
     CurrentRepublishFileLimit { actual: usize, maximum: usize },
-    #[cfg(test)]
     #[error("current publication republish exceeds the byte limit: {actual}/{maximum}")]
     CurrentRepublishByteLimit { actual: u64, maximum: u64 },
-    #[cfg(test)]
     #[error(
         "current publication republish needs {required} bytes of headroom, but only {available} are available"
     )]
@@ -135,7 +150,8 @@ pub enum IndexError {
     ConcurrentGenerationChange,
     #[error(
         "requested lexical generation {expected_generation_id} is not retained: \
-         active generation is {active_generation_id}, previous generation is {previous_generation_id:?}"
+         active generation is {active_generation_id}, previous generation is {previous_generation_id:?}, \
+         and no durable generation-retention lease matches"
     )]
     PinnedGenerationNotRetained {
         expected_generation_id: String,
@@ -278,6 +294,16 @@ pub enum IndexError {
     LexicalQueryTokensTooMany { observed: usize, maximum: usize },
     #[error("lexical result limit must not exceed {maximum} items, requested {requested}")]
     InvalidLexicalResultLimit { requested: usize, maximum: usize },
+    #[error(
+        "copied-event lineage occurrence limit must be between 1 and {maximum} items, requested {requested}"
+    )]
+    InvalidCopiedEventLineageOccurrenceLimit { requested: usize, maximum: usize },
+    #[error(
+        "copied-event lineage posting-visit limit must be between 1 and {maximum}, requested {requested}"
+    )]
+    InvalidCopiedEventLineagePostingVisitLimit { requested: usize, maximum: usize },
+    #[error("copied-event lineage exact event-identity lookup exceeded {maximum} posting visits")]
+    CopiedEventLineageExactIdentityPostingVisitLimitExceeded { maximum: usize },
     #[error("content scope {scope} cannot be combined with an exact event_type filter")]
     ContentScopeEventTypeConflict { scope: &'static str },
     #[error(

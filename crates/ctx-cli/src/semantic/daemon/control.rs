@@ -96,6 +96,7 @@ pub(super) fn run_daemon_enabled_update(
     } else {
         request_daemon_shutdown_and_wait(&data_root)?;
         super::super::daemon_supervisor::disable_daemon_supervisor(&data_root)?;
+        super::super::cancel_core_finalization_generation_lease(&data_root, "daemon was disabled")?;
         None
     };
     let supervisor = super::super::daemon_supervisor::daemon_supervisor_report(&data_root);

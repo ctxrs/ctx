@@ -85,10 +85,7 @@ impl CodexNativeScanner {
             self.opened.revalidate_same_object()?;
         }
         if let Some(owner) = self.owner.as_ref() {
-            validate_catalog_owner(
-                self.source.catalog_native_session_id.as_deref(),
-                &owner.native_session_id,
-            )?;
+            validate_catalog_owner(&self.source, owner.clone())?;
         }
 
         if let Some(lineage_facts) = self.lineage_facts.as_mut() {
@@ -170,7 +167,11 @@ impl CodexNativeScanner {
     }
 
     pub(super) fn finish_page(&mut self, mut page: CodexNativePage) -> Result<CodexNativePage> {
-        page.owner = self.owner.clone();
+        page.owner = self
+            .owner
+            .clone()
+            .map(|owner| validate_catalog_owner(&self.source, owner))
+            .transpose()?;
         page.next_safe_frontier = self.frontier();
         debug_assert!(page.physical_records <= MAX_CODEX_SOURCE_BACKED_PAGE_RECORDS);
         debug_assert!(page.units() <= MAX_CODEX_PAGE_UNITS);

@@ -26,6 +26,11 @@ mod writer_support;
 
 pub use durable_directory::durable_atomic_replace_file;
 
+pub use publication::{
+    acquire_generation_retention_lease, load_generation_retention_lease,
+    release_generation_retention_lease, GenerationRetentionLease,
+};
+
 pub use commit_contract::{
     CommitReceipt, PublicationDisposition, PublicationMetadataContext, PublishedGeneration,
     RevalidationTarget,
@@ -67,34 +72,37 @@ pub use preparation::{
 #[cfg(test)]
 pub(crate) use publication::manifest_path;
 #[cfg(test)]
+pub(crate) use publication::republish_current_for_qualification;
 pub(crate) use publication::{
-    best_effort_post_republish_cleanup, physical_integrity_digest,
-    republish_current_for_qualification,
-};
-pub(crate) use publication::{
-    canonical_commit_payload, create_candidate_generation, load_active_generation_pointer,
-    load_publication_for_metas, meta_generation, open_slot_index, payload_generation_id,
-    physical_integrity_audit, publish_active_generation_pointer,
-    reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
-    reclaim_unreferenced_manifests, reconcile_commit_error, scrub_and_certify_physical_integrity,
+    best_effort_post_republish_cleanup, canonical_commit_payload, create_candidate_generation,
+    load_active_generation_pointer, load_publication_for_metas, meta_generation, open_slot_index,
+    payload_generation_id, physical_integrity_audit, physical_integrity_digest,
+    publish_active_generation_pointer, reclaim_inactive_generation_directories,
+    reclaim_unreferenced_certifications, reclaim_unreferenced_manifests, reconcile_commit_error,
+    republish_current_with_publication_metadata, scrub_and_certify_physical_integrity,
     searcher_generation, sync_directory, sync_generation, verify_or_certify_physical_integrity,
     verify_physical_integrity, verify_publication_candidate, verify_searcher,
-    verify_searcher_structure, write_manifest, ActiveGenerationPointer, GenerationSlot,
-    PhysicalIntegrityAudit, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
+    verify_searcher_structure, write_manifest, ActiveGenerationPointer, CurrentRepublishOutcome,
+    GenerationSlot, PhysicalIntegrityAudit, PointerPublicationOutcome, GENERATION_WRITER_LOCK_FILE,
+    INDEX_GENERATIONS_DIRECTORY,
 };
 pub use query::{
-    AgentScope, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
-    CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters, CoreEventRangePage,
-    CoreEventRangeScope, CoreEventRangeSelection, CoreEventRecord, CoreSemanticEventPage,
-    CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan, EventRecord,
-    EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits,
+    AgentScope, CopiedEventLineage, CopiedEventLineageOccurrence, CopiedEventLineagePolicy,
+    CopiedEventLineageRelationshipCount, CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor,
+    CoreEventRangeDirection, CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters,
+    CoreEventRangePage, CoreEventRangeScope, CoreEventRangeSelection, CoreEventRecord,
+    CoreSemanticEventPage, CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan,
+    EventRecord, EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits,
     SearchContentScope, SemanticEligibility, SemanticEventCursor, SemanticEventPage,
     SemanticFilterProjection, SessionEventCoordinate, SessionEventCursor, SessionRecord,
     SourceEventCursor, SourceEventPage, StoredCoreEventRecord, StoredCoreRecordJson,
     StoredCoreSourceEventPage, DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS,
+    MAX_COPIED_EVENT_LINEAGE_DEPTH, MAX_COPIED_EVENT_LINEAGE_EXACT_IDENTITY_POSTING_VISITS,
+    MAX_COPIED_EVENT_LINEAGE_OCCURRENCES, MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS,
     MAX_CORE_EVENT_RANGE_PAGE_ITEMS, MAX_LEXICAL_QUERY_RESULTS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
     MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
-    MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS,
+    MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS, SEARCH_COPIED_EVENT_LINEAGE_POLICY,
+    SHOW_COPIED_EVENT_LINEAGE_POLICY,
 };
 pub use reader::VerifiedIndex;
 #[cfg(test)]
@@ -338,7 +346,7 @@ impl GenerationWriter {
         let root = directory.root_path().to_path_buf();
         fs::create_dir_all(root.join(MANIFEST_DIRECTORY))?;
         let generation_writer_lock = Lock {
-            filepath: PathBuf::from(".ctx-generation-writer.lock"),
+            filepath: PathBuf::from(GENERATION_WRITER_LOCK_FILE),
             is_blocking: false,
         };
         let preflight_lock =
@@ -369,14 +377,28 @@ impl GenerationWriter {
             }
         }
         if !pointer_requires_rebuild {
-            reclaim_inactive_generation_directories(&root, active_pointer.as_ref())?;
-            let retained_generation_ids = active_pointer
+            let retention_lease = load_generation_retention_lease(&root)?;
+            reclaim_inactive_generation_directories(
+                &root,
+                active_pointer.as_ref(),
+                retention_lease.as_ref(),
+            )?;
+            let mut retained_generation_ids = active_pointer
                 .iter()
                 .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
                 .map(|slot| slot.generation_id().to_owned())
                 .collect::<Vec<_>>();
+            retained_generation_ids.extend(
+                retention_lease
+                    .as_ref()
+                    .map(|lease| lease.generation_id().to_owned()),
+            );
             reclaim_unreferenced_manifests(&root, &retained_generation_ids)?;
-            reclaim_unreferenced_certifications(&root, active_pointer.as_ref())?;
+            reclaim_unreferenced_certifications(
+                &root,
+                active_pointer.as_ref(),
+                retention_lease.as_ref(),
+            )?;
         }
 
         let writer = (|| -> Result<Self> {

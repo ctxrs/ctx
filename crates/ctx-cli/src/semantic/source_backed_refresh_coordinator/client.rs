@@ -476,9 +476,7 @@ fn coordinate_source_backed_refresh_with_catalog(
         if operation == SourceBackedRefreshOperation::Import {
             bail!("explicit source catalog imports require daemon refresh mode `wait`");
         }
-        let pin = pin_published_generation(data_root)?.ok_or_else(|| {
-            anyhow!("the Core index does not exist; retry with daemon refresh enabled")
-        })?;
+        let pin = pin_active_verified_generation(data_root)?;
         return Ok(SourceBackedRefreshObservation {
             mode,
             status: "off".to_owned(),
@@ -1306,6 +1304,7 @@ mod progress_poll_tests {
                     ..SourceBackedRefreshCurrent::default()
                 },
                 route_results,
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
             };
             let response = json!({
@@ -1336,6 +1335,7 @@ mod progress_poll_tests {
                     false,
                 ),
             ],
+            zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
         };
         assert_eq!(

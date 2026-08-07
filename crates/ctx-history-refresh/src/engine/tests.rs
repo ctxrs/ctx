@@ -134,6 +134,7 @@ fn receipt_source_count_intersects_request_routes_with_certified_generation_rout
     let generation = writer.commit(|_| true).unwrap().generation_id;
     let verified = VerifiedIndex::open(temp.path()).unwrap();
     let receipt = SourceBackedRefreshReceipt {
+        zero_source_authority: Vec::new(),
         previous_generation: None,
         published_generation: generation,
         generation_changed: true,
@@ -216,6 +217,7 @@ impl SourceBackedRefreshExecutor for TestExecutor {
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
         route_results: Vec::new(),
+        zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
         verified_index: None,
         generation_id: generation_id.into(),
@@ -247,6 +249,64 @@ fn empty_test_publication(generation_id: impl Into<String>) -> SourceBackedRefre
     publication.certified_source_bytes = 0;
     publication.current = SourceBackedRefreshCurrent::default();
     publication
+}
+
+fn add_complete_empty_authority(
+    publication: &mut SourceBackedRefreshPublication,
+    route: SourceRouteIdentity,
+) {
+    publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+        route.as_str().to_owned(),
+        true,
+    )];
+    publication.zero_source_authority = vec![SourceBackedZeroSourceAuthority {
+        generation_id: publication.generation_id.clone(),
+        route_identity: route,
+        kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+    }];
+}
+
+#[test]
+fn maximum_route_authoritative_empty_receipt_fits_the_durable_bound() {
+    let generation_id = "44".repeat(32);
+    let mut publication = empty_test_publication(generation_id.clone());
+    let routes = (0_u16..SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT as u16)
+        .map(|index| {
+            SourceRouteIdentity::from_sha256(format!("{index:064x}"))
+                .expect("bounded route identity")
+        })
+        .collect::<Vec<_>>();
+    publication.route_results = routes
+        .iter()
+        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false))
+        .collect();
+    publication.zero_source_authority = routes
+        .iter()
+        .enumerate()
+        .map(|(index, route)| SourceBackedZeroSourceAuthority {
+            generation_id: generation_id.clone(),
+            route_identity: route.clone(),
+            kind: if index % 2 == 0 {
+                SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory
+            } else {
+                SourceBackedZeroSourceAuthorityKind::ConfirmedDeletion
+            },
+        })
+        .collect();
+
+    let receipt =
+        SourceBackedRefreshReceipt::from_verified_publication(None, generation_id, &publication)
+            .expect("the full bounded route set fits its terminal receipt");
+    let value = receipt.to_json();
+    let encoded = serde_json::to_vec(&value).unwrap();
+    assert!(encoded.len() <= SOURCE_REFRESH_RECEIPT_JSON_BUDGET_BYTES);
+    let decoded_routes = required_route_results(value.get("route_results")).unwrap();
+    let decoded_authority = crate::publication::parse_zero_source_authority(
+        value.get("zero_source_authority"),
+        &decoded_routes,
+    )
+    .unwrap();
+    assert_eq!(decoded_authority, publication.zero_source_authority);
 }
 
 fn request_id(response: &Value) -> String {

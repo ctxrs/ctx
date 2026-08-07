@@ -71,6 +71,7 @@ fn terminal_publication_rejects_route_rejections_beyond_committed_core_total() {
         },
         timings: SourceBackedRefreshTimings::default(),
         route_results: vec![result],
+        zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
         verified_index: None,
     };
@@ -183,6 +184,7 @@ fn successful_route_with_rejection_is_canonical_and_keeps_location_and_payload_t
         },
         timings: SourceBackedRefreshTimings::default(),
         route_results: vec![result],
+        zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
         verified_index: None,
     };
@@ -255,6 +257,7 @@ fn terminal_response_is_bounded_while_route_results_remain_exact() {
                 current: SourceBackedRefreshCurrent::default(),
                 timings: SourceBackedRefreshTimings::default(),
                 route_results,
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
                 verified_index: None,
             })

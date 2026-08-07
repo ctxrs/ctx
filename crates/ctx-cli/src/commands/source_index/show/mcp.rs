@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ctx_history_core::{MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
 use ctx_history_index::{
     CoreEventPageBudget, CoreEventRecord, SessionEventCoordinate, SessionEventCursor,
-    SessionRecord, VerifiedIndex,
+    SessionRecord, VerifiedIndex, SHOW_COPIED_EVENT_LINEAGE_POLICY,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -21,10 +21,13 @@ use super::{
     SessionEventSelector, CLI_SESSION_EVENT_PAGE_ITEMS,
 };
 use crate::commands::source_index::{
+    compact_presentation::CompactPresentation,
+    copied_lineage::copied_lineage_value,
     render::enforce_json_output_limit,
-    shared::{open_index, resolve_core_event, resolve_session},
+    shared::{index_root, open_index, resolve_core_event_with_refs, resolve_session_with_refs},
 };
 
+#[cfg(test)]
 pub(crate) fn mcp_show_session(
     data_root: &Path,
     id: &str,
@@ -33,8 +36,21 @@ pub(crate) fn mcp_show_session(
     cursor: Option<&str>,
     output_limit_bytes: usize,
 ) -> Result<Value> {
+    mcp_show_session_with_compact(data_root, id, mode, limit, cursor, output_limit_bytes)
+        .map(|(value, _)| value)
+}
+
+pub(crate) fn mcp_show_session_with_compact(
+    data_root: &Path,
+    id: &str,
+    mode: TranscriptMode,
+    limit: usize,
+    cursor: Option<&str>,
+    output_limit_bytes: usize,
+) -> Result<(Value, Value)> {
     let index = open_index(data_root)?;
-    let session = resolve_session(&index, id)?;
+    let compact = CompactPresentation::open(&index, &index_root(data_root))?;
+    let session = resolve_session_with_refs(&compact.resolver(), id)?;
     let cursor = cursor.map(decode_session_event_cursor).transpose()?;
     let (rendered, has_more, next_cursor) =
         collect_selected_session_page(&index, &session, mode, limit, cursor, output_limit_bytes)?;
@@ -54,7 +70,8 @@ pub(crate) fn mcp_show_session(
         .and_then(|id| Uuid::parse_str(id).ok())
         .unwrap_or_else(|| session.session_id.as_uuid());
     enforce_json_output_limit(&value, output_limit_bytes, event_id)?;
-    Ok(value)
+    let compact_value = compact.project(&value)?;
+    Ok((value, compact_value))
 }
 
 fn collect_selected_session_page(
@@ -188,6 +205,7 @@ fn decode_session_event_cursor(encoded: &str) -> Result<SessionEventCursor> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn mcp_show_event(
     data_root: &Path,
     id: &str,
@@ -196,10 +214,29 @@ pub(crate) fn mcp_show_event(
     window: Option<usize>,
     output_limit_bytes: usize,
 ) -> Result<Value> {
+    mcp_show_event_with_compact(data_root, id, before, after, window, output_limit_bytes)
+        .map(|(value, _)| value)
+}
+
+pub(crate) fn mcp_show_event_with_compact(
+    data_root: &Path,
+    id: &str,
+    before: usize,
+    after: usize,
+    window: Option<usize>,
+    output_limit_bytes: usize,
+) -> Result<(Value, Value)> {
     let index = open_index(data_root)?;
-    let selected = resolve_core_event(&index, id)?;
+    let compact = CompactPresentation::open(&index, &index_root(data_root))?;
+    let selected = resolve_core_event_with_refs(&compact.resolver(), id)?;
     let events = event_window(&index, &selected, before, after, window, output_limit_bytes)?;
-    let value = event_window_json(&selected, &events, OutputFormat::Json, output_limit_bytes)?;
+    let mut value = event_window_json(&selected, &events, OutputFormat::Json, output_limit_bytes)?;
+    value["copied_lineage"] = copied_lineage_value(
+        &index,
+        selected.event_id.as_uuid(),
+        SHOW_COPIED_EVENT_LINEAGE_POLICY,
+    )?;
     enforce_json_output_limit(&value, output_limit_bytes, selected.event_id.as_uuid())?;
-    Ok(value)
+    let compact_value = compact.project(&value)?;
+    Ok((value, compact_value))
 }

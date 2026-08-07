@@ -312,7 +312,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     .concat();
     let (_temp, path) = write_source(&contents);
     let (scan, _) = scan_collect(discover_one(&path, "checkpoint-owner"), None);
-    let checkpoint = scan.checkpoint([0; 32]).unwrap();
+    let checkpoint = scan.checkpoint([0; 32], None).unwrap();
     let encoded = checkpoint.encode().unwrap();
     let wire = String::from_utf8(encoded.clone()).unwrap();
 
@@ -325,7 +325,7 @@ fn checkpoint_round_trip_contains_control_state_but_no_event_body() {
     assert!(!wire.contains("command"));
     assert!(!wire.contains("arguments_preview"));
     let decoded_wire = serde_json::from_str::<Value>(&wire).unwrap();
-    assert_eq!(decoded_wire["version"], 9);
+    assert_eq!(decoded_wire["version"], 10);
     assert_eq!(
         decoded_wire["lineage_dependency_sha256"],
         json!(vec![0; 32])
@@ -369,7 +369,7 @@ fn terminal_checkpoint_boundary_tamper_rejects_during_decode() {
     .concat();
     let (_temp, path) = write_source(&contents);
     let (scan, _) = scan_collect(discover_one(&path, "terminal-tamper-owner"), None);
-    let checkpoint = scan.checkpoint([0; 32]).unwrap();
+    let checkpoint = scan.checkpoint([0; 32], None).unwrap();
     let mut wire = serde_json::from_slice::<Value>(&checkpoint.encode().unwrap()).unwrap();
 
     wire["boundary"]["complete_eof"] = json!(contents.len() as u64 - 1);
@@ -388,7 +388,7 @@ fn unchanged_replay_revalidates_raw_ordinal_boundary_and_digests() {
     let contents = format!("{complete}{partial}");
     let (_temp, path) = write_source(&contents);
     let (scan, _) = scan_collect(discover_one(&path, "checkpoint-validation-owner"), None);
-    let checkpoint = scan.checkpoint([0; 32]).unwrap();
+    let checkpoint = scan.checkpoint([0; 32], None).unwrap();
     let encoded = checkpoint.encode().unwrap();
 
     let mut bad_length = serde_json::from_slice::<Value>(&encoded).unwrap();

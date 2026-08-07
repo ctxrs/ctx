@@ -38,12 +38,17 @@ pub(super) fn run_uninstall(
     let target = default_helper_path(data_root);
     let initial_state = inspect_local_pro_uninstall_state(data_root)?;
     if !initial_state.data_artifact() && !initial_state.lifecycle_lock {
+        crate::semantic::cancel_core_finalization_generation_lease(
+            data_root,
+            "Pro was uninstalled",
+        )?;
         return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output, ui);
     }
     let Some(_lifecycle_lock) = LifecycleLock::acquire(&target, false)? else {
         return emit_uninstall_result(false, LocalProDataOutcome::Absent, json_output, ui);
     };
     let state = inspect_local_pro_uninstall_state(data_root)?;
+    crate::semantic::cancel_core_finalization_generation_lease(data_root, "Pro was uninstalled")?;
     pending_materialization::clear(data_root)?;
     if !delete_data && state.cleanup_phase {
         bail!(

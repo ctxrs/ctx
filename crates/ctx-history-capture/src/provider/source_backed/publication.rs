@@ -411,7 +411,14 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     let mut carried_unselected_route_ids = BTreeSet::new();
 
     let mut prepared_successful_route_outcomes = None;
-    let (commit, applied_removals, commit_duration, base_route_content, verified_publication) = {
+    let (
+        commit,
+        applied_removals,
+        complete_inventory_route_ids,
+        commit_duration,
+        base_route_content,
+        verified_publication,
+    ) = {
         let open = GenerationWriter::open(index_root, writer_options.clone())?;
         let mut writer = match open {
             GenerationWriterOpenOutcome::Ready(writer)
@@ -443,6 +450,75 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                 .difference(&selected_route_ids)
                 .cloned()
                 .collect();
+        }
+        if let Some(coordinator) = registry.codex_generation.as_ref() {
+            let selected_participants = registry
+                .routes
+                .iter()
+                .filter(|route| {
+                    route
+                        .metadata
+                        .route_identity
+                        .as_ref()
+                        .is_some_and(|identity| selected_route_ids.contains(identity))
+                })
+                .filter_map(|route| route.codex_generation_participant)
+                .collect::<Vec<_>>();
+            if !selected_participants.is_empty() {
+                let mut carried = Vec::new();
+                if let Some(base) = writer.base_manifest() {
+                    let base_sources = base
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            (
+                                source.observation().source().exact_descriptor_digest(),
+                                source,
+                            )
+                        })
+                        .collect::<HashMap<_, _>>();
+                    for route in &registry.routes {
+                        let (Some(route_identity), Some(participant)) = (
+                            route.metadata.route_identity.as_ref(),
+                            route.codex_generation_participant,
+                        ) else {
+                            continue;
+                        };
+                        if !carried_unselected_route_ids.contains(route_identity) {
+                            continue;
+                        }
+                        let sources = base
+                            .source_route(route_identity)
+                            .into_iter()
+                            .flat_map(|snapshot| snapshot.sources())
+                            .filter_map(|source_key| {
+                                base_sources
+                                    .get(&source_key.exact_descriptor_digest())
+                                    .filter(|source| {
+                                        source
+                                            .observation()
+                                            .source()
+                                            .exact_descriptor_eq(source_key)
+                                    })
+                                    .map(|source| (source_key.clone(), (**source).clone()))
+                            })
+                            .collect::<HashMap<_, _>>();
+                        carried.push(CodexGenerationCarriedRouteV0 {
+                            participant,
+                            sources,
+                        });
+                    }
+                }
+                coordinator
+                    .prepare(&selected_participants, carried)
+                    .map_err(|error| SourceBackedCoordinatorError::RouteScan {
+                        provider: CaptureProvider::Codex,
+                        source: SourceBackedRouteError::new(
+                            SourceBackedRouteErrorKind::InvalidSource,
+                            error.to_string(),
+                        ),
+                    })?;
+            }
         }
         let attempt_selected = selected_route_ids.clone();
         let mut attempt_carried = carried_unselected_route_ids.clone();
@@ -853,6 +929,15 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                 .iter()
                 .any(|owner| owner.inventory == *inventory)
         };
+        let complete_inventory_route_ids = complete_inventory_owners
+            .iter()
+            .filter_map(|owner| {
+                registry
+                    .routes
+                    .get(owner.route_index)
+                    .and_then(|route| route.metadata.route_identity.clone())
+            })
+            .collect::<BTreeSet<_>>();
         let (commit, verified_publication) = if let Some(factory) = metadata_factory.as_mut() {
             let published = writer
                 .commit_with_complete_inventory_revalidation_and_publication_metadata(
@@ -874,6 +959,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                             &logical_source_failures,
                             &record_rejections,
                             &outcomes,
+                            &complete_inventory_route_ids,
                             applied_removals.len(),
                         ))
                     },
@@ -898,6 +984,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         (
             commit,
             applied_removals,
+            complete_inventory_route_ids,
             commit_started.elapsed(),
             base_route_content,
             verified_publication,
@@ -965,6 +1052,7 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         selected_route_ids: selected_route_ids.into_iter().collect(),
         successful_route_ids: successful_route_ids.into_iter().collect(),
         successful_route_outcomes,
+        complete_inventory_route_ids: complete_inventory_route_ids.into_iter().collect(),
         carried_unselected_route_ids: carried_unselected_route_ids.into_iter().collect(),
         carried_failed_route_ids: failed_routes
             .values()

@@ -88,6 +88,67 @@ pub(crate) fn initialize_generation_only_core(data_root: &Path) -> String {
     core_receipt.generation_id
 }
 
+pub(crate) fn initialize_authoritative_empty_core(data_root: &Path) -> String {
+    let generation_id = initialize_generation_only_core(data_root);
+    let route_identity = "ab".repeat(32);
+    let receipt = json!({
+        "published_generation": generation_id,
+        "generation_changed": true,
+        "current": {
+            "current_source_count": 0,
+            "current_indexed_documents": 0,
+            "current_complete_records": 0,
+            "current_retained_records": 0,
+            "current_rejected_records": 0,
+            "current_ignored_records": 0,
+            "current_certified_source_bytes": 0,
+            "current_sources_with_rejections": 0,
+            "removed_source_count": 0,
+        },
+        "outcome": "completed",
+        "selected_route_total": 1,
+        "successful_route_total": 1,
+        "source_failure_total": 0,
+        "source_failures_omitted": 0,
+        "rejected_record_total": 0,
+        "rejection_diagnostics_omitted": 0,
+        "route_results": {(route_identity): ["s", true]},
+        "zero_source_authority": {
+            "generation_id": generation_id,
+            "route_kinds": "e",
+        },
+        "catalog_route_bindings": {},
+    });
+    republish_active_generation_metadata(
+        data_root,
+        &generation_id,
+        serde_json::to_vec(&json!({
+            "version": 2,
+            "request_id": "mcp-authoritative-empty-fixture",
+            "operation": "refresh",
+            "refresh_scope": {"kind": "all"},
+            "receipt": receipt,
+            "route_observations": [null],
+        }))
+        .unwrap(),
+    );
+    generation_id
+}
+
+pub(crate) fn republish_active_generation_metadata(
+    data_root: &Path,
+    generation_id: &str,
+    metadata: Vec<u8>,
+) {
+    let index_root = data_root.join("search").join("lexical");
+    GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap()
+        .republish_current_publication_metadata(generation_id, metadata)
+        .unwrap();
+}
+
 pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message: &str) -> PathBuf {
     fs::create_dir_all(root).unwrap();
     let path = root.join(format!("rollout-{session_id}.jsonl"));

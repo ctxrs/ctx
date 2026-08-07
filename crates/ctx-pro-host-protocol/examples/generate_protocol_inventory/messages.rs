@@ -94,6 +94,15 @@ fn host_messages(fingerprint: &str) -> Vec<(&'static str, HostMessage)> {
             "finish_core_materialization",
             HostMessage::FinishCoreMaterialization(finish_request()),
         ),
+        (
+            "continue_core_materialization",
+            HostMessage::ContinueCoreMaterialization(ContinueCoreMaterializationRequest {
+                expected_progress: finalization_progress(
+                    CoreMaterializationFinalizationPhase::EmitReplay,
+                    'd',
+                ),
+            }),
+        ),
         ("blame", HostMessage::Blame(blame_request())),
         (
             "apply_core_event_delta_pages",
@@ -166,10 +175,11 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 access: access(ProAccessState::Available),
                 supported_operations: operations(),
                 available_operations: operations(),
+                finalization_progress: None,
                 storage_evidence: Some(ProStorageEvidence {
                     graph_manifest_schema: 3,
                     flat_format_version: 2,
-                    materializer_checkpoint_version: 4,
+                    materializer_checkpoint_version: 5,
                     journal_pack_format_version: 3,
                     legacy_journals_written: 0,
                     journal_pages_written: 2,
@@ -226,10 +236,29 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
         ),
         (
             "core_materialization_finished",
-            HelperMessage::CoreMaterializationFinished(CoreMaterializationFinished {
-                receipt: receipt(),
-                replayed: false,
+            HelperMessage::CoreMaterializationFinished({
+                let finish = finish_request();
+                CoreMaterializationFinished {
+                    materialization_id: finish.materialization_id.clone(),
+                    finish_request_digest: finish
+                        .canonical_digest()
+                        .unwrap_or_else(|error| panic!("finish request digest: {}", error.message)),
+                    receipt: receipt(),
+                    replayed: false,
+                }
             }),
+        ),
+        (
+            "core_materialization_finalization_pending",
+            HelperMessage::CoreMaterializationFinalizationPending(
+                CoreMaterializationFinalizationPending {
+                    progress: finalization_progress(
+                        CoreMaterializationFinalizationPhase::EmitFlat,
+                        'e',
+                    ),
+                    replayed: false,
+                },
+            ),
         ),
         ("blame", HelperMessage::Blame(Box::new(blame_result()))),
         (
@@ -259,6 +288,22 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
             )
         },
     ]
+}
+
+fn finalization_progress(
+    phase: CoreMaterializationFinalizationPhase,
+    cursor: char,
+) -> CoreMaterializationFinalizationProgress {
+    CoreMaterializationFinalizationProgress {
+        materialization_id: materialization_id(),
+        core_generation_id: "a".repeat(64),
+        finish_request_digest: finish_request()
+            .canonical_digest()
+            .unwrap_or_else(|error| panic!("finish request digest: {}", error.message)),
+        materializer_revision: "golden-core-materializer-v1".to_owned(),
+        phase,
+        cursor_sha256: cursor.to_string().repeat(64),
+    }
 }
 
 pub(super) fn golden_vectors(fingerprint: &str) -> Value {

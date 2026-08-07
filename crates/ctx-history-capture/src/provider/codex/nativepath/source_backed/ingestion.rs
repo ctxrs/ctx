@@ -33,6 +33,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
     source_key: SourceKey,
     native_session_id: String,
     base: Option<&CertifiedSource>,
+    collect_lineage_facts: bool,
     context: &mut CodexJsonlFamilyLeafContextV0<'_>,
     mut emit: impl FnMut(
         CodexJsonlFamilyPublicationV0,
@@ -85,11 +86,19 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         (Some(base), Some(proof))
             if source.catalog_observation.len > proof.checkpoint.observation.len =>
         {
-            match CodexNativeScanner::new_source_backed_with_lineage_v0(
-                source.clone(),
-                Some(proof),
-                context.outcome_lineage.new_fact_set(&native_session_id)?,
-            ) {
+            let scanner = if collect_lineage_facts {
+                CodexNativeScanner::new_source_backed_with_lineage_v0(
+                    source.clone(),
+                    Some(proof),
+                    context.outcome_lineage.new_fact_set(&native_session_id)?,
+                )
+            } else {
+                CodexNativeScanner::new_source_backed_without_lineage_v0(
+                    source.clone(),
+                    Some(proof),
+                )
+            };
+            match scanner {
                 Ok(scanner) => Some((base, scanner)),
                 Err(error) if invalid_append_proof(&error) => None,
                 Err(error) => return Err(map_lineage_capture_error(error)),
@@ -102,11 +111,15 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         None => (
             None,
             CodexJsonlFamilyPublicationV0::Replace,
-            CodexNativeScanner::new_source_backed_with_lineage_v0(
-                source.clone(),
-                None,
-                context.outcome_lineage.new_fact_set(&native_session_id)?,
-            )
+            if collect_lineage_facts {
+                CodexNativeScanner::new_source_backed_with_lineage_v0(
+                    source.clone(),
+                    None,
+                    context.outcome_lineage.new_fact_set(&native_session_id)?,
+                )
+            } else {
+                CodexNativeScanner::new_source_backed_without_lineage_v0(source.clone(), None)
+            }
             .map_err(map_lineage_capture_error)?,
         ),
     };
@@ -149,13 +162,16 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
         }
     }
     let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
-    let lineage_facts = scan
-        .lineage_facts
-        .take()
-        .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
-    context
+    match scan.lineage_facts.take() {
+        Some(lineage_facts) if collect_lineage_facts => context
+            .outcome_lineage
+            .register(&native_session_id, lineage_facts)?,
+        None if !collect_lineage_facts => {}
+        Some(_) | None => return Err(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable),
+    }
+    let certified_lineage_facts = context
         .outcome_lineage
-        .register(&native_session_id, lineage_facts)?;
+        .certified_authority(&native_session_id)?;
     let scan_counters = scan.counters;
     let certificate = match (append_base, scan.disposition) {
         (None, CodexParseDisposition::FullGeneration) => certify_scan(
@@ -165,6 +181,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
             staged_documents,
             scan_counters,
             lineage_dependency_sha256,
+            certified_lineage_facts.clone(),
         )?,
         (Some(base), CodexParseDisposition::AppendDelta) => certify_scan(
             &source_key,
@@ -173,6 +190,7 @@ pub(super) fn scan_codex_jsonl_family_leaf_v0(
             staged_documents,
             scan_counters,
             lineage_dependency_sha256,
+            certified_lineage_facts,
         )?,
         _ => {
             return Err(CodexSourceBackedErrorV0::UnsupportedLifecycle(
@@ -362,7 +380,16 @@ fn ingest_codex_sources_with_options_v0(
     indexer_threads: usize,
     cold_options: ColdParallelOptionsV0,
 ) -> CodexSourceBackedResultV0<()> {
-    let outcome_lineage = Arc::new(CodexOutcomeLineageAuthorityV0::from_sources(&sources)?);
+    let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources)?;
+    if !normalized.rejections.is_empty() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(
+                "Codex lineage source graph contains rejected components".to_owned(),
+            ),
+        ));
+    }
+    sources = normalized.sources;
+    let outcome_lineage = Arc::new(normalized.authority);
     counters.catalog_sources =
         u64::try_from(sources.len()).map_err(|_| CodexSourceBackedErrorV0::CountOverflow)?;
     counters.catalog_source_bytes = sources.iter().fold(0_u64, |total, (source, _, _)| {
@@ -466,7 +493,16 @@ pub(crate) fn ingest_codex_sources_serial_v0(
     timings: &mut CodexSourceBackedPhaseTimingsV0,
     counters: &mut CodexSourceBackedCountersV0,
 ) -> CodexSourceBackedResultV0<()> {
-    let outcome_lineage = CodexOutcomeLineageAuthorityV0::from_sources(&sources)?;
+    let normalized = CodexOutcomeLineageAuthorityV0::normalize_sources(&sources)?;
+    if !normalized.rejections.is_empty() {
+        return Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(
+                "Codex lineage source graph contains rejected components".to_owned(),
+            ),
+        ));
+    }
+    let sources = normalized.sources;
+    let outcome_lineage = normalized.authority;
     let mut repository_attributor = crate::repository_attribution::RepositoryAttributor::default();
     let base_event_lookup = writer.base_event_identity_lookup();
     for (source, source_key, native_session_id) in sources {
@@ -600,6 +636,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
             .take()
             .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
         outcome_lineage.register(&native_session_id, lineage_facts)?;
+        let certified_lineage_facts = outcome_lineage.certified_authority(&native_session_id)?;
         counters.scanner_sources_completed = counters.scanner_sources_completed.saturating_add(1);
         timings.scanner_worker_busy += scanner_started.elapsed();
         timings.scan_and_stage += scan_started.elapsed();
@@ -620,6 +657,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     staged_for_source,
                     scan_counters,
                     lineage_dependency_sha256,
+                    certified_lineage_facts.clone(),
                 )?;
                 writer.certify_source(current)?;
                 if base.is_some() {
@@ -636,6 +674,7 @@ pub(crate) fn ingest_codex_sources_serial_v0(
                     staged_for_source,
                     scan_counters,
                     lineage_dependency_sha256,
+                    certified_lineage_facts,
                 )?;
                 let base_frontier = base
                     .frontier()
@@ -699,6 +738,77 @@ pub(super) fn prepare_replayed_lineage_v0(
         outcome_lineage.register(native_session_id, facts)?;
     }
     Ok(())
+}
+
+/// Scans each selected ancestor exactly once, component by component, and
+/// moves its sealed facts into the generation's capability-owned authenticated
+/// spill before starting the next component. Route-local partition leases load
+/// at most four components from that spill and never reread provider bodies.
+/// Terminal leaves receive an empty completed state without a body pass.
+pub(super) fn prepare_generation_lineage_v0(
+    sources: &[(CodexCatalogSource, SourceKey, String)],
+    outcome_lineage: &mut CodexOutcomeLineageAuthorityV0,
+) -> CodexSourceBackedResultV0<u64> {
+    let mut ordered = sources.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        outcome_lineage
+            .component_partition(&left.2)
+            .cmp(&outcome_lineage.component_partition(&right.2))
+            .then_with(|| {
+                outcome_lineage
+                    .depth(&left.2)
+                    .cmp(&outcome_lineage.depth(&right.2))
+            })
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+    });
+    let mut active_component = None;
+    let mut source_scans = 0_u64;
+    for (source, _, native_session_id) in ordered {
+        if !outcome_lineage.generation_participates(native_session_id)? {
+            continue;
+        }
+        let component = outcome_lineage
+            .component_partition(native_session_id)
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        if active_component.is_some_and(|active| active != component) {
+            outcome_lineage.spill_generation_component(
+                active_component.ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?,
+            )?;
+        }
+        active_component = Some(component);
+        if outcome_lineage.generation_fact_state_ready(native_session_id)? {
+            continue;
+        }
+        let facts = outcome_lineage.new_fact_set(native_session_id)?;
+        if !outcome_lineage.needs_descendant_facts(native_session_id)? {
+            outcome_lineage.register(native_session_id, facts)?;
+            continue;
+        }
+        let mut scanner =
+            CodexNativeScanner::new_source_backed_with_lineage_v0(source.clone(), None, facts)
+                .map_err(map_lineage_capture_error)?;
+        while scanner
+            .next_page()
+            .map_err(map_lineage_capture_error)?
+            .is_some()
+        {
+            scanner.release_transient_record_buffer();
+        }
+        let mut scan = scanner.finish().map_err(map_lineage_capture_error)?;
+        let facts = scan
+            .lineage_facts
+            .take()
+            .ok_or(CodexSourceBackedErrorV0::LineageWorkingSetUnavailable)?;
+        outcome_lineage.register(native_session_id, facts)?;
+        source_scans = source_scans
+            .checked_add(1)
+            .ok_or(CodexSourceBackedErrorV0::CountOverflow)?;
+    }
+    if let Some(component) = active_component {
+        outcome_lineage.spill_generation_component(component)?;
+    }
+    Ok(source_scans)
 }
 
 #[cfg(test)]

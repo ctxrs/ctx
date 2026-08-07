@@ -26,6 +26,9 @@ use ctx_history_index::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::codex::nativepath::{
+    CodexGenerationCarriedRouteV0, CodexGenerationNormalizationCoordinatorV0,
+};
 pub use super::providers::crush::native_path::source_backed::{
     CrushProjectDatabaseV0, CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,
 };

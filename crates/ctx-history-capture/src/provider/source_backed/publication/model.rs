@@ -179,6 +179,8 @@ pub struct SourceBackedRefreshReceipt {
     pub selected_route_ids: Vec<SourceRouteIdentity>,
     pub successful_route_ids: Vec<SourceRouteIdentity>,
     pub successful_route_outcomes: Vec<SourceBackedSuccessfulRouteOutcome>,
+    /// Successful routes whose terminal fence certified a complete inventory.
+    pub complete_inventory_route_ids: Vec<SourceRouteIdentity>,
     pub failed_routes: Vec<SourceBackedFailedRouteOutcome>,
     pub source_failures: SourceBackedSourceFailures,
     /// Failures confined to independently owned logical sources inside an
@@ -227,6 +229,7 @@ pub struct SourceBackedPublicationMetadataContext<'a> {
     logical_source_failures: &'a SourceBackedLogicalSourceFailures,
     record_rejections: &'a SourceBackedRecordRejections,
     successful_route_outcomes: &'a [SourceBackedSuccessfulRouteOutcome],
+    complete_inventory_route_ids: &'a BTreeSet<SourceRouteIdentity>,
     removed_source_count: usize,
 }
 
@@ -238,6 +241,7 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
         logical_source_failures: &'a SourceBackedLogicalSourceFailures,
         record_rejections: &'a SourceBackedRecordRejections,
         successful_route_outcomes: &'a [SourceBackedSuccessfulRouteOutcome],
+        complete_inventory_route_ids: &'a BTreeSet<SourceRouteIdentity>,
         removed_source_count: usize,
     ) -> Self {
         Self {
@@ -247,6 +251,7 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
             logical_source_failures,
             record_rejections,
             successful_route_outcomes,
+            complete_inventory_route_ids,
             removed_source_count,
         }
     }
@@ -265,6 +270,12 @@ impl<'a> SourceBackedPublicationMetadataContext<'a> {
 
     pub fn successful_route_outcomes(&self) -> &[SourceBackedSuccessfulRouteOutcome] {
         self.successful_route_outcomes
+    }
+
+    pub fn complete_inventory_route_ids(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &SourceRouteIdentity> {
+        self.complete_inventory_route_ids.iter()
     }
 
     pub fn failed_routes(&self) -> impl ExactSizeIterator<Item = &SourceBackedFailedRoute> {

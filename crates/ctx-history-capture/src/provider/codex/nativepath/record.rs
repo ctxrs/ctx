@@ -763,15 +763,12 @@ pub(super) fn parse_session_meta(line: &[u8]) -> Option<CodexSessionRow> {
             .as_ref()
             .map(|history_base| history_base.thread_id.as_str()),
     );
-    let root_native_session_id = payload
-        .session_id
-        .and_then(nonempty)
-        .filter(|root| root != &native_session_id)
-        .or_else(|| parent_native_session_id.clone());
+    let advisory_session_id = payload.session_id.and_then(nonempty);
     Some(CodexSessionRow {
         native_session_id,
         parent_native_session_id,
-        root_native_session_id,
+        advisory_session_id,
+        root_native_session_id: None,
         session_relationship,
         started_at,
         cwd: payload.cwd.and_then(nonempty),
@@ -966,6 +963,23 @@ mod session_relationship_tests {
         }));
         assert_eq!(row.parent_native_session_id.as_deref(), Some(parent));
         assert_eq!(row.session_relationship, SessionRelationshipKind::Delegated);
+    }
+
+    #[test]
+    fn payload_session_id_remains_advisory_until_graph_normalization() {
+        let parent = "019fa000-0000-7000-8000-000000000913";
+        let advisory = "019fa000-0000-7000-8000-000000000914";
+        let row = parse(serde_json::json!({
+            "id": "019fa000-0000-7000-8000-000000000915",
+            "session_id": advisory,
+            "timestamp": "2026-08-05T12:00:00Z",
+            "source": "cli",
+            "forked_from_id": parent,
+        }));
+        assert_eq!(row.parent_native_session_id.as_deref(), Some(parent));
+        assert_eq!(row.advisory_session_id.as_deref(), Some(advisory));
+        assert_eq!(row.root_native_session_id, None);
+        assert_eq!(row.session_relationship, SessionRelationshipKind::Forked);
     }
 
     #[test]

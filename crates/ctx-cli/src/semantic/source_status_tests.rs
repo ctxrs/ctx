@@ -42,16 +42,56 @@ impl io::Write for SharedWriter {
 fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String) {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
-    let generation_id = ctx_history_index::GenerationWriter::open(
+    let route_identity = "ab".repeat(32);
+    let publication = ctx_history_index::GenerationWriter::open(
         data_root.join("search/lexical"),
         ctx_history_index::WriterOptions::default(),
     )
     .unwrap()
     .into_writer()
     .unwrap()
-    .commit(|_| true)
-    .unwrap()
-    .generation_id;
+    .commit_with_publication_metadata(
+        |_| true,
+        |context| {
+            let generation_id = context.generation_id().to_owned();
+            let route = ctx_history_index::SourceRouteIdentity::from_sha256(
+                route_identity.clone(),
+            )
+            .map_err(|error| {
+                ctx_history_index::IndexError::PublicationMetadata(error.to_string())
+            })?;
+            let receipt = ctx_history_refresh::SourceBackedRefreshReceipt {
+                previous_generation: None,
+                published_generation: generation_id.clone(),
+                generation_changed: true,
+                published_explicit_source_catalog: None,
+                current: ctx_history_refresh::SourceBackedRefreshCurrent::default(),
+                route_results: vec![ctx_history_refresh::SourceBackedRefreshRouteResult::succeeded(
+                    route_identity.clone(),
+                    true,
+                )],
+                zero_source_authority: vec![
+                    ctx_history_refresh::SourceBackedZeroSourceAuthority {
+                        generation_id,
+                        route_identity: route,
+                        kind: ctx_history_refresh::SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                    },
+                ],
+                catalog_route_bindings: Vec::new(),
+            };
+            serde_json::to_vec(&json!({
+                "version": 2,
+                "request_id": "core-publication",
+                "operation": "refresh",
+                "refresh_scope": {"kind": "all"},
+                "receipt": receipt.to_json(),
+                "route_observations": [null],
+            }))
+            .map_err(|error| ctx_history_index::IndexError::PublicationMetadata(error.to_string()))
+        },
+    )
+    .unwrap();
+    let generation_id = publication.receipt().generation_id.clone();
     let catalog = load_explicit_source_catalog_authority(&data_root).unwrap();
     super::super::paths_status::write_daemon_job_status(
         &daemon_core_refresh_job_path(&data_root),
@@ -429,6 +469,64 @@ fn admission_pending_is_active_with_existing_and_empty_generations() {
 }
 
 #[test]
+fn authoritative_empty_stays_query_ready_when_the_latest_refresh_failed() {
+    let (_temp, data_root, generation_id) = core_publication_fixture();
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_core_refresh_job_path(&data_root),
+        &json!({
+            "status": "failed",
+            "request_id": "failed-after-authoritative-empty",
+            "request_state": "failed",
+            "published_generation": generation_id,
+            "last_error": "all_provider_terminal_coverage_unavailable",
+        }),
+    )
+    .unwrap();
+
+    let status = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    assert_eq!(status.report["lexical"]["status"], "ready");
+    assert_eq!(status.report["history_epoch"]["status"], "ready");
+    assert_eq!(status.report["refresh"]["status"], "unavailable");
+    assert_eq!(status.report["refresh"]["reason"], "core_refresh_failed");
+    assert_eq!(status.indexed_items, Some(0));
+}
+
+#[test]
+fn legacy_zero_source_publication_is_not_projected_as_ready() {
+    let (_temp, data_root, generation_id) = core_publication_fixture();
+    let index_root = data_root.join("search/lexical");
+    let current = VerifiedIndex::open(&index_root).unwrap();
+    let mut metadata: Value =
+        serde_json::from_slice(current.publication_metadata().unwrap()).unwrap();
+    metadata["version"] = json!(1);
+    metadata["receipt"]
+        .as_object_mut()
+        .unwrap()
+        .remove("zero_source_authority");
+    drop(current);
+    let writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer
+        .republish_current_publication_metadata(
+            &generation_id,
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+
+    let status = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    assert_eq!(status.report["lexical"]["status"], "unavailable");
+    assert_eq!(
+        status.report["lexical"]["reason"],
+        "zero_source_publication_uncertified"
+    );
+    assert_eq!(status.report["history_epoch"]["status"], "unavailable");
+    assert_eq!(status.indexed_items, None);
+    assert_eq!(status.indexed_sources, None);
+}
+
+#[test]
 fn refresh_report_is_partial_when_a_transcript_route_failed_or_rejected_records() {
     let daemon = json!({"running": true});
     for outcome in [
@@ -659,6 +757,18 @@ fn pro_helper_status_is_the_only_projection_readiness_authority() {
         "available_operations": [],
         "error_code": "stale_source",
     });
+    let helper_finalizing = json!({
+        "installed": true,
+        "ready": true,
+        "materialized": false,
+        "projection_currentness": "finalizing",
+        "materialized_coverage": "complete",
+        "repository_coverage": {},
+        "access_state": "active",
+        "supported_operations": ["file_blame"],
+        "available_operations": ["file_blame"],
+        "error_code": "finalizing",
+    });
     let completed_job = json!({
         "status": "completed",
         "pending": false,
@@ -690,6 +800,13 @@ fn pro_helper_status_is_the_only_projection_readiness_authority() {
         Some(&completed_job),
         "pro-catch-up.json",
     );
+    let finalizing = pro_projection_report_from_status(
+        Some("generation-1"),
+        false,
+        &helper_finalizing,
+        Some(&retry_job),
+        "pro-catch-up.json",
+    );
 
     assert_eq!(ready["authority"], "pro_helper_status");
     assert_eq!(ready["status"], "ready");
@@ -710,6 +827,9 @@ fn pro_helper_status_is_the_only_projection_readiness_authority() {
     assert_eq!(stale["receipt"]["generation_matches"], false);
     assert_eq!(stale["catch_up"]["status"], "completed");
     assert_eq!(stale["reason"], "stale_source");
+    assert_eq!(finalizing["status"], "pending");
+    assert_eq!(finalizing["reason"], "finalizing");
+    assert_eq!(finalizing["available_operations"], json!(["file_blame"]));
 
     let raced = pro_projection_report_from_status(
         Some("generation-1"),

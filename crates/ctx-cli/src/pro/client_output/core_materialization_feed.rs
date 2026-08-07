@@ -11,14 +11,17 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES;
 use ctx_history_index::{
-    CoreEventPageBudget, CoreSourceEventPagePlan, GenerationManifest, SourceEventCursor,
-    StoredCoreRecordJson, VerifiedIndex,
+    acquire_generation_retention_lease, load_generation_retention_lease,
+    release_generation_retention_lease, CoreEventPageBudget, CoreSourceEventPagePlan,
+    GenerationManifest, GenerationRetentionLease, SourceEventCursor, StoredCoreRecordJson,
+    VerifiedIndex,
 };
 use ctx_pro_host_protocol::{
     core_record_digests_from_encoded, ApplyCoreEventDeltaPagesRequest,
-    ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, Capability, CoreEventDelta,
-    CoreEventDeltaPage, CoreEventReplacement, CoreEventState, CoreEventStatePage,
-    CoreEventStatePageRequest, CoreEventTombstone, CoreGenerationHead, CoreMaterializationBegan,
+    ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, Capability,
+    ContinueCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage, CoreEventReplacement,
+    CoreEventState, CoreEventStatePage, CoreEventStatePageRequest, CoreEventTombstone,
+    CoreGenerationHead, CoreMaterializationBegan, CoreMaterializationFinalizationPending,
     CoreMaterializationFinished, CoreMaterializationReceipt, CoreMaterializationReceiptIdentity,
     CoreProjectionCurrentness, CoreSourceDelta, CoreSourceDeltaPage, CoreSourceDeltaPageApplied,
     CoreSourceReconciliation, CoreSourceState, ErrorClass, FinishCoreMaterializationRequest,
@@ -29,8 +32,12 @@ use ctx_pro_host_protocol::{
     MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
 };
 #[cfg(test)]
-use ctx_pro_host_protocol::{core_record_sha256, CoreSourceRemoval};
+use ctx_pro_host_protocol::{
+    core_record_sha256, CoreMaterializationFinalizationPhase,
+    CoreMaterializationFinalizationProgress, CoreSourceRemoval,
+};
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 
 use super::*;
 #[cfg(test)]
@@ -51,6 +58,7 @@ const CORE_RECORD_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget::new(
     MAX_CORE_RECORD_PAGE_ENCODED_PAYLOAD_BYTES,
     MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
 );
+const PRO_CORE_FINALIZATION_LEASE_OWNER_KIND: &str = "pro_core_finalization";
 #[path = "core_materialization_feed/batching.rs"]
 mod batching;
 #[path = "core_materialization_feed/ordered_prefetch.rs"]
@@ -83,6 +91,18 @@ pub(super) struct CoreMaterializationSyncReport {
     pub(super) replayed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(super) enum CoreMaterializationSyncProgress {
+    Finished(CoreMaterializationSyncReport),
+    FinalizationPending(CoreMaterializationFinalizationPending),
+}
+
+#[derive(Debug)]
+enum CoreMaterializationFinalizationStep {
+    Finished(CoreMaterializationFinished),
+    Pending(CoreMaterializationFinalizationPending),
+}
+
 trait CoreMaterializationConsumer {
     fn status(&mut self, request: StatusRequest) -> Result<ctx_pro_host_protocol::StatusResult>;
 
@@ -110,16 +130,39 @@ trait CoreMaterializationConsumer {
     fn finish(
         &mut self,
         request: FinishCoreMaterializationRequest,
-    ) -> Result<CoreMaterializationFinished>;
+    ) -> Result<CoreMaterializationFinalizationStep>;
+
+    fn continue_finalization(
+        &mut self,
+        request: ContinueCoreMaterializationRequest,
+    ) -> Result<CoreMaterializationFinalizationStep>;
 }
 
 struct ProtocolCoreMaterializationConsumer {
     client: ProClient,
+    data_root: std::path::PathBuf,
+    core_generation_id: String,
+    materializer_revision: Option<String>,
 }
 
 impl ProtocolCoreMaterializationConsumer {
     fn exchange(&mut self, message: HostMessage) -> Result<HelperMessage> {
         self.client.exchange(message, BATCH_TIMEOUT)
+    }
+}
+
+fn map_core_finalization_response(
+    message: HelperMessage,
+) -> Result<CoreMaterializationFinalizationStep> {
+    match message {
+        HelperMessage::CoreMaterializationFinished(response) => {
+            Ok(CoreMaterializationFinalizationStep::Finished(response))
+        }
+        HelperMessage::CoreMaterializationFinalizationPending(response) => {
+            Ok(CoreMaterializationFinalizationStep::Pending(response))
+        }
+        HelperMessage::Error(error) => Err(protocol_error(error)),
+        _ => bail!("invalid_response: helper returned a non-Core-finalization response"),
     }
 }
 
@@ -151,7 +194,10 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
         request: BeginCoreMaterializationRequest,
     ) -> Result<CoreMaterializationBegan> {
         match self.exchange(HostMessage::BeginCoreMaterialization(request))? {
-            HelperMessage::CoreMaterializationBegan(response) => Ok(response),
+            HelperMessage::CoreMaterializationBegan(response) => {
+                self.materializer_revision = Some(response.materializer_revision.clone());
+                Ok(response)
+            }
             HelperMessage::Error(error) => Err(protocol_error(error)),
             _ => bail!("invalid_response: helper returned a non-Core-begin response"),
         }
@@ -195,38 +241,207 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
     fn finish(
         &mut self,
         request: FinishCoreMaterializationRequest,
-    ) -> Result<CoreMaterializationFinished> {
-        match self.exchange(HostMessage::FinishCoreMaterialization(request))? {
-            HelperMessage::CoreMaterializationFinished(response) => Ok(response),
-            HelperMessage::Error(error) => Err(protocol_error(error)),
-            _ => bail!("invalid_response: helper returned a non-Core-finish response"),
+    ) -> Result<CoreMaterializationFinalizationStep> {
+        let materializer_revision = self.materializer_revision.as_deref().ok_or_else(|| {
+            anyhow!("invalid_response: Pro Finish has no acknowledged materializer revision")
+        })?;
+        acquire_finish_generation_lease(&self.data_root, &request, materializer_revision)?;
+        map_core_finalization_response(
+            self.exchange(HostMessage::FinishCoreMaterialization(request))?,
+        )
+    }
+
+    fn continue_finalization(
+        &mut self,
+        request: ContinueCoreMaterializationRequest,
+    ) -> Result<CoreMaterializationFinalizationStep> {
+        if request.expected_progress.core_generation_id != self.core_generation_id {
+            bail!("invalid_response: Pro finalization target changed before lease acquisition");
         }
+        acquire_progress_generation_lease(&self.data_root, &request.expected_progress)?;
+        map_core_finalization_response(
+            self.exchange(HostMessage::ContinueCoreMaterialization(request))?,
+        )
     }
 }
 
 pub(super) fn sync_generation_pinned_core(
     data_root: &Path,
     index: &VerifiedIndex,
-) -> Result<CoreMaterializationSyncReport> {
+) -> Result<CoreMaterializationSyncProgress> {
     let selection = CoreWorkerLaunchSelection::from_runtime();
     let required = BTreeSet::from([Capability::Status, Capability::CoreMaterialization]);
     let client = ProClient::connect(data_root, &required)?;
     let helper_artifact_sha256 = client.helper_artifact_sha256()?.to_owned();
-    let mut consumer = ProtocolCoreMaterializationConsumer { client };
+    let mut consumer = ProtocolCoreMaterializationConsumer {
+        client,
+        data_root: data_root.to_path_buf(),
+        core_generation_id: index.generation_id().to_owned(),
+        materializer_revision: None,
+    };
     let status = consumer.status(StatusRequest {
         requested_core_generation_id: Some(index.generation_id().to_owned()),
     })?;
     status
         .validate()
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    let mut report = sync_core_feed_with_launch(
-        index,
-        status.core_receipt.as_ref(),
-        &mut consumer,
-        selection,
-    )?;
-    report.helper_artifact_sha256 = helper_artifact_sha256;
-    Ok(report)
+    let mut progress = if status.currentness == CoreProjectionCurrentness::Finalizing {
+        continue_core_finalization(index, &status, &mut consumer, selection)?
+    } else {
+        sync_core_feed_progress_with_launch(
+            index,
+            status.core_receipt.as_ref(),
+            &mut consumer,
+            selection,
+        )?
+    };
+    if let CoreMaterializationSyncProgress::Finished(report) = &mut progress {
+        report.helper_artifact_sha256 = helper_artifact_sha256;
+    }
+    Ok(progress)
+}
+
+fn acquire_finish_generation_lease(
+    data_root: &Path,
+    finish: &FinishCoreMaterializationRequest,
+    materializer_revision: &str,
+) -> Result<GenerationRetentionLease> {
+    let finish_request_digest = finish
+        .canonical_digest()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    acquire_finalization_generation_lease(
+        data_root,
+        &finish.head.core_generation_id,
+        &finish.materialization_id,
+        &finish_request_digest,
+        materializer_revision,
+    )
+}
+
+fn acquire_progress_generation_lease(
+    data_root: &Path,
+    progress: &ctx_pro_host_protocol::CoreMaterializationFinalizationProgress,
+) -> Result<GenerationRetentionLease> {
+    progress
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+    acquire_finalization_generation_lease(
+        data_root,
+        &progress.core_generation_id,
+        &progress.materialization_id,
+        &progress.finish_request_digest,
+        &progress.materializer_revision,
+    )
+}
+
+fn acquire_finalization_generation_lease(
+    data_root: &Path,
+    core_generation_id: &str,
+    materialization_id: &str,
+    finish_request_digest: &str,
+    materializer_revision: &str,
+) -> Result<GenerationRetentionLease> {
+    let owner_id = finalization_job_id(
+        materialization_id,
+        finish_request_digest,
+        materializer_revision,
+    );
+    acquire_generation_retention_lease(
+        ctx_history_refresh::source_backed_index_root(data_root),
+        core_generation_id,
+        PRO_CORE_FINALIZATION_LEASE_OWNER_KIND,
+        &owner_id,
+    )
+    .map_err(|error| {
+        anyhow!(
+            "invalid_response: cannot retain exact Core generation before Pro finalization: {error}"
+        )
+    })
+}
+
+pub(crate) fn validate_core_finalization_generation_lease(
+    data_root: &Path,
+    progress: &ctx_pro_host_protocol::CoreMaterializationFinalizationProgress,
+) -> Result<()> {
+    progress
+        .validate()
+        .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+    let expected_owner_id = finalization_job_id(
+        &progress.materialization_id,
+        &progress.finish_request_digest,
+        &progress.materializer_revision,
+    );
+    let lease =
+        load_generation_retention_lease(ctx_history_refresh::source_backed_index_root(data_root))
+            .map_err(|error| {
+                anyhow!("invalid_response: durable Core generation lease is invalid: {error}")
+            })?
+            .ok_or_else(|| {
+                anyhow!("invalid_response: durable Pro finalization omitted its Core lease")
+            })?;
+    if lease.owner_kind() != PRO_CORE_FINALIZATION_LEASE_OWNER_KIND
+        || lease.owner_id() != expected_owner_id
+        || lease.generation_id() != progress.core_generation_id
+    {
+        bail!("invalid_response: durable Pro finalization lease belongs to a different job");
+    }
+    Ok(())
+}
+
+pub(crate) fn reconstruct_core_finalization_generation_lease(
+    data_root: &Path,
+    progress: &ctx_pro_host_protocol::CoreMaterializationFinalizationProgress,
+) -> Result<()> {
+    acquire_progress_generation_lease(data_root, progress)?;
+    validate_core_finalization_generation_lease(data_root, progress)
+}
+
+pub(crate) fn core_finalization_generation_lease(
+    data_root: &Path,
+) -> Result<Option<GenerationRetentionLease>> {
+    load_generation_retention_lease(ctx_history_refresh::source_backed_index_root(data_root))
+        .map_err(|error| {
+            anyhow!("invalid_response: durable Core generation lease is invalid: {error}")
+        })
+}
+
+pub(crate) fn release_core_finalization_generation_lease(
+    data_root: &Path,
+    expected_generation_id: Option<&str>,
+) -> Result<bool> {
+    let index_root = ctx_history_refresh::source_backed_index_root(data_root);
+    let Some(lease) = load_generation_retention_lease(&index_root).map_err(|error| {
+        anyhow!("invalid_response: durable Core generation lease is invalid: {error}")
+    })?
+    else {
+        return Ok(false);
+    };
+    if lease.owner_kind() != PRO_CORE_FINALIZATION_LEASE_OWNER_KIND
+        || expected_generation_id.is_some_and(|expected| lease.generation_id() != expected)
+    {
+        bail!("invalid_response: durable Core generation lease belongs to a different owner");
+    }
+    release_generation_retention_lease(index_root, &lease).map_err(|error| {
+        anyhow!("invalid_response: durable Core generation lease changed: {error}")
+    })
+}
+
+fn finalization_job_id(
+    materialization_id: &str,
+    finish_request_digest: &str,
+    materializer_revision: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-pro-core-finalization-retention-v1\0");
+    digest.update(materialization_id.as_bytes());
+    digest.update(finish_request_digest.as_bytes());
+    digest.update(
+        u64::try_from(materializer_revision.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(materializer_revision.as_bytes());
+    format!("{:x}", digest.finalize())
 }
 
 #[cfg(test)]
@@ -237,6 +452,20 @@ fn sync_core_feed<C: CoreMaterializationConsumer>(
 ) -> Result<CoreMaterializationSyncReport> {
     let selection = CoreWorkerLaunchSelection::from_runtime();
     sync_core_feed_with_launch(index, prior_receipt, consumer, selection)
+}
+
+#[cfg(test)]
+fn sync_core_feed_progress<C: CoreMaterializationConsumer>(
+    index: &VerifiedIndex,
+    prior_receipt: Option<&CoreMaterializationReceipt>,
+    consumer: &mut C,
+) -> Result<CoreMaterializationSyncProgress> {
+    sync_core_feed_progress_with_launch(
+        index,
+        prior_receipt,
+        consumer,
+        CoreWorkerLaunchSelection::from_runtime(),
+    )
 }
 
 #[cfg(test)]
@@ -254,12 +483,27 @@ fn sync_core_feed_with_options<C: CoreMaterializationConsumer>(
     )
 }
 
+#[cfg(test)]
 fn sync_core_feed_with_launch<C: CoreMaterializationConsumer>(
     index: &VerifiedIndex,
     prior_receipt: Option<&CoreMaterializationReceipt>,
     consumer: &mut C,
     selection: CoreWorkerLaunchSelection,
 ) -> Result<CoreMaterializationSyncReport> {
+    match sync_core_feed_progress_with_launch(index, prior_receipt, consumer, selection)? {
+        CoreMaterializationSyncProgress::Finished(report) => Ok(report),
+        CoreMaterializationSyncProgress::FinalizationPending(_) => {
+            bail!("finalization_pending: test caller expected a terminal Core receipt")
+        }
+    }
+}
+
+fn sync_core_feed_progress_with_launch<C: CoreMaterializationConsumer>(
+    index: &VerifiedIndex,
+    prior_receipt: Option<&CoreMaterializationReceipt>,
+    consumer: &mut C,
+    selection: CoreWorkerLaunchSelection,
+) -> Result<CoreMaterializationSyncProgress> {
     match sync_core_feed_attempt_with_launch(index, prior_receipt, consumer, selection) {
         Err(error) if crate::pro::stable_error_code(&error) == Some("needs_rebuild") => {
             sync_core_feed_attempt_with_launch(index, prior_receipt, consumer, selection)
@@ -273,7 +517,7 @@ fn sync_core_feed_attempt_with_launch<C: CoreMaterializationConsumer>(
     prior_receipt: Option<&CoreMaterializationReceipt>,
     consumer: &mut C,
     selection: CoreWorkerLaunchSelection,
-) -> Result<CoreMaterializationSyncReport> {
+) -> Result<CoreMaterializationSyncProgress> {
     let options = selection.execution_options();
     let credits = Arc::new(EncodedPageCredits::new(CORE_PREFETCH_ENCODED_BYTE_BUDGET));
     let instrumentation = Arc::new(CorePrefetchInstrumentation::default());
@@ -449,12 +693,128 @@ fn sync_core_feed_attempt_with_launch<C: CoreMaterializationConsumer>(
     finish
         .validate()
         .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-    let finished = consumer.finish(finish)?;
+    let (encoded_credit_final_bytes, encoded_credit_high_water_bytes) = credits.snapshot()?;
+    if encoded_credit_final_bytes != 0 {
+        bail!("internal: Core prefetch credits remained live after reconciliation");
+    }
+    #[cfg(not(test))]
+    let _ = encoded_credit_high_water_bytes;
+
+    match consumer.finish(finish.clone())? {
+        CoreMaterializationFinalizationStep::Pending(pending) => {
+            pending
+                .validate_for_finish(&finish, &began.materializer_revision)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            Ok(CoreMaterializationSyncProgress::FinalizationPending(
+                pending,
+            ))
+        }
+        CoreMaterializationFinalizationStep::Finished(finished) => {
+            finished
+                .validate_for_finish(&finish, &began.materializer_revision)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            validate_finished_core(
+                &head,
+                &finished,
+                &began.materializer_revision,
+                consumer,
+                selection,
+            )?;
+            Ok(CoreMaterializationSyncProgress::Finished(
+                CoreMaterializationSyncReport {
+                    receipt: finished.receipt,
+                    helper_artifact_sha256: String::new(),
+                    #[cfg(test)]
+                    changed_sources: u64::from(changed_sources),
+                    #[cfg(test)]
+                    removed_sources: u64::from(removed_sources),
+                    #[cfg(test)]
+                    event_delta_pages,
+                    #[cfg(test)]
+                    event_mutations,
+                    #[cfg(test)]
+                    prefetch: instrumentation
+                        .snapshot(encoded_credit_high_water_bytes, encoded_credit_final_bytes),
+                    replayed: began.replayed || finished.replayed,
+                },
+            ))
+        }
+    }
+}
+
+fn continue_core_finalization<C: CoreMaterializationConsumer>(
+    index: &VerifiedIndex,
+    status: &ctx_pro_host_protocol::StatusResult,
+    consumer: &mut C,
+    selection: CoreWorkerLaunchSelection,
+) -> Result<CoreMaterializationSyncProgress> {
+    let progress = status.finalization_progress.clone().ok_or_else(|| {
+        anyhow!("invalid_response: finalizing Core status omitted durable progress")
+    })?;
+    if progress.core_generation_id != index.generation_id() {
+        bail!("invalid_response: finalizing Core status belongs to a different generation");
+    }
+    let request = ContinueCoreMaterializationRequest {
+        expected_progress: progress,
+    };
+    request
+        .validate()
+        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+    match consumer.continue_finalization(request.clone())? {
+        CoreMaterializationFinalizationStep::Pending(pending) => {
+            pending
+                .validate_for_continue(&request)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            Ok(CoreMaterializationSyncProgress::FinalizationPending(
+                pending,
+            ))
+        }
+        CoreMaterializationFinalizationStep::Finished(finished) => {
+            finished
+                .validate_for_continue(&request)
+                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+            let sources = core_source_states(index.manifest())?;
+            let head = core_generation_head(index, &sources)?;
+            validate_finished_core(
+                &head,
+                &finished,
+                &request.expected_progress.materializer_revision,
+                consumer,
+                selection,
+            )?;
+            Ok(CoreMaterializationSyncProgress::Finished(
+                CoreMaterializationSyncReport {
+                    receipt: finished.receipt,
+                    helper_artifact_sha256: String::new(),
+                    #[cfg(test)]
+                    changed_sources: 0,
+                    #[cfg(test)]
+                    removed_sources: 0,
+                    #[cfg(test)]
+                    event_delta_pages: 0,
+                    #[cfg(test)]
+                    event_mutations: 0,
+                    #[cfg(test)]
+                    prefetch: CorePrefetchInstrumentationSnapshot::default(),
+                    replayed: finished.replayed,
+                },
+            ))
+        }
+    }
+}
+
+fn validate_finished_core<C: CoreMaterializationConsumer>(
+    head: &CoreGenerationHead,
+    finished: &CoreMaterializationFinished,
+    expected_materializer_revision: &str,
+    consumer: &mut C,
+    selection: CoreWorkerLaunchSelection,
+) -> Result<()> {
     finished
         .receipt
-        .validate_for_head(&head)
+        .validate_for_head(head)
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-    if finished.receipt.materializer_revision != began.materializer_revision {
+    if finished.receipt.materializer_revision != expected_materializer_revision {
         bail!("invalid_response: terminal Core receipt changed materializer revision");
     }
     let post_finish_status = consumer.status(StatusRequest {
@@ -473,30 +833,7 @@ fn sync_core_feed_attempt_with_launch<C: CoreMaterializationConsumer>(
         .as_ref()
         .ok_or_else(|| anyhow!("invalid_response: post-finish status omitted storage evidence"))?
         .journal_finish_activity;
-    selection.validate_observed_helper_peak(post_finish_status.core_preparation_peak_workers)?;
-    let (encoded_credit_final_bytes, encoded_credit_high_water_bytes) = credits.snapshot()?;
-    if encoded_credit_final_bytes != 0 {
-        bail!("internal: Core prefetch credits remained live after reconciliation");
-    }
-    #[cfg(not(test))]
-    let _ = encoded_credit_high_water_bytes;
-
-    Ok(CoreMaterializationSyncReport {
-        receipt: finished.receipt,
-        helper_artifact_sha256: String::new(),
-        #[cfg(test)]
-        changed_sources: u64::from(changed_sources),
-        #[cfg(test)]
-        removed_sources: u64::from(removed_sources),
-        #[cfg(test)]
-        event_delta_pages,
-        #[cfg(test)]
-        event_mutations,
-        #[cfg(test)]
-        prefetch: instrumentation
-            .snapshot(encoded_credit_high_water_bytes, encoded_credit_final_bytes),
-        replayed: began.replayed,
-    })
+    selection.validate_observed_helper_peak(post_finish_status.core_preparation_peak_workers)
 }
 
 fn replayed_core_feed_mode(

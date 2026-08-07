@@ -10,7 +10,8 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_history_core::{EventOrigin, SessionRelationshipKind};
 use ctx_history_index::{
-    EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
+    EventRecord, EventSearchCandidate, EventSearchFilters, VerifiedIndex,
+    MAX_LEXICAL_QUERY_RESULTS, SEARCH_COPIED_EVENT_LINEAGE_POLICY,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -36,9 +37,12 @@ use crate::{
 };
 
 use super::{
+    compact_presentation::{reference_needs_retained_peer, CompactPresentation},
+    compact_ref::CompactRefResolver,
+    copied_lineage::copied_lineage_value,
     render::{
         pretty_json_stdout_bytes, render_search_document, render_search_not_ready_document,
-        search_json,
+        search_json_with_lineages,
     },
     shared::{index_root, render_active_generation_race, ActiveGenerationRaceCommand},
 };
@@ -51,11 +55,12 @@ pub(super) use hydration::{
     SearchPresentationRetentionBudgetExceeded, SEARCH_PRESENTATION_HYDRATION_BUDGET,
     SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
 };
+#[cfg(test)]
+pub(super) use query::index_search_filters;
+use query::index_search_filters_with_refs;
 pub(crate) use query::SourceSearchRequest;
-pub(super) use query::{
-    index_search_filters, resolve_source_search_backend, NormalizedSearchQuery,
-};
 use query::{normalize_search_request, unsupported_semantic_scope, validate_search_request};
+pub(super) use query::{resolve_source_search_backend, NormalizedSearchQuery};
 
 const MAX_SESSION_DIVERSITY_CANDIDATES: usize = 64 * 1024;
 const MIN_CANDIDATE_BATCH: usize = 256;
@@ -241,14 +246,18 @@ fn run_search_inner(
         SearchContextObservation::unavailable()
     };
     let render_started = Instant::now();
+    let compact_value = (!json_output)
+        .then(|| CompactPresentation::open(&index, &index_root(&data_root))?.project(&value))
+        .transpose()?;
+    let render_value = compact_value.as_ref().unwrap_or(&value);
     let output_bytes = if args.format == JsonOutputFormat::Json {
         let output_bytes = pretty_json_stdout_bytes(&value)?;
         print_json(value)?;
         output_bytes
     } else {
-        let document = render_search_document(&value, args.verbose, ui.stdout_context());
+        let document = render_search_document(render_value, args.verbose, ui.stdout_context());
         let output_bytes = canonical_human_output_bytes(|context| {
-            render_search_document(&value, args.verbose, context)
+            render_search_document(render_value, args.verbose, context)
         });
         ui.write_stdout(&document)?;
         output_bytes
@@ -335,10 +344,18 @@ pub(super) fn render_semantic_fallback_warning(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn mcp_search(
-    mut request: SourceSearchRequest,
+    request: SourceSearchRequest,
     data_root: &Path,
 ) -> Result<(Value, SearchContextObservation)> {
+    mcp_search_with_compact(request, data_root).map(|(value, observation, _)| (value, observation))
+}
+
+pub(crate) fn mcp_search_with_compact(
+    mut request: SourceSearchRequest,
+    data_root: &Path,
+) -> Result<(Value, SearchContextObservation, Value)> {
     normalize_search_request(&mut request)?;
     let config = config::AppConfig::load(data_root)?;
     request.backend = Some(resolve_source_search_backend(&request, &config)?);
@@ -353,7 +370,9 @@ pub(crate) fn mcp_search(
     } else {
         SearchContextObservation::unavailable()
     };
-    Ok((value, observation))
+    let compact_value =
+        CompactPresentation::open(&index, &index_root(data_root))?.project(&value)?;
+    Ok((value, observation, compact_value))
 }
 
 pub(crate) fn validate_explicit_semantic_scope(request: &SourceSearchRequest) -> Result<()> {
@@ -425,7 +444,25 @@ where
 {
     validate_search_request(request)?;
     let mode = source_backed_refresh_mode(request.refresh);
-    let observation = coordinate(data_root, mode)?;
+    let observation = match coordinate(data_root, mode) {
+        Ok(observation) => observation,
+        Err(error) if mode == SourceBackedRefreshMode::Background => {
+            // Background refresh may report an uncertified empty generation as
+            // unavailable. At the query gateway, preserve the stricter typed
+            // R1 authority error instead of replacing it with refresh state.
+            if let Err(authority_error) = crate::semantic::pin_active_verified_generation(data_root)
+            {
+                if authority_error
+                    .downcast_ref::<ctx_history_refresh::GenerationQueryAuthorityError>()
+                    .is_some()
+                {
+                    return Err(authority_error);
+                }
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     if observation.mode != mode {
         return Err(anyhow!(
             "source-backed refresh coordinator returned mode {:?} for requested mode {:?}",
@@ -485,7 +522,20 @@ pub(super) fn search_existing_generation(
     refresh_source_count: usize,
 ) -> Result<(Value, SearchCollection, VerifiedIndex)> {
     validate_search_request(request)?;
-    let filters = index_search_filters(request, &index)?;
+    let input_references = CompactPresentation::open_if_needed(
+        &index,
+        &index_root(data_root),
+        request
+            .session
+            .as_deref()
+            .is_some_and(reference_needs_retained_peer),
+    )?;
+    let pinned_references = CompactRefResolver::new(&index, None);
+    let input_resolver = input_references
+        .as_ref()
+        .map(CompactPresentation::resolver)
+        .unwrap_or(pinned_references);
+    let filters = index_search_filters_with_refs(request, &index, &input_resolver)?;
     let query_started = Instant::now();
     let collection =
         collect_search_hits_with_backend(request, &index, data_root, semantic_weight, &filters)?;
@@ -495,13 +545,26 @@ pub(super) fn search_existing_generation(
         &collection.result_window.hits,
         &NormalizedSearchQuery::from_request(request),
     )?;
-    let value = search_json(
+    let copied_lineages = collection
+        .result_window
+        .hits
+        .iter()
+        .map(|hit| {
+            copied_lineage_value(
+                &index,
+                hit.event.event_id,
+                SEARCH_COPIED_EVENT_LINEAGE_POLICY,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let value = search_json_with_lineages(
         request,
         data_root,
         &index,
         &collection,
         &filters,
         &presentations,
+        &copied_lineages,
         refresh_status,
         refresh_source_count,
         query_duration,

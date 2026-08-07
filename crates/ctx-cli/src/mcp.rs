@@ -33,7 +33,7 @@ use pro::{
 use query_events::tool_query_events;
 use response::{
     error_response, invalid_request_response, invalid_tool_request, json_rpc_error,
-    success_response, tool_error_result, tool_result,
+    success_response, tool_error_result, tool_result, tool_result_with_text,
 };
 use response_bound::{
     bound_blame_mcp_response, bound_query_events_mcp_response, bound_show_mcp_response,
@@ -198,6 +198,7 @@ fn serve_stdio_loop(
         let McpHandled {
             value: response,
             pro_event,
+            ..
         } = handled;
         if let Some(response) = response {
             let encoded = serde_json::to_string(&response).map_err(|error| {
@@ -345,10 +346,12 @@ fn handle_message(
     let McpHandled {
         value: response,
         pro_event,
+        ..
     } = match result {
         Ok(handled) => McpHandled {
             value: success_response(id, handled.value),
             pro_event: handled.pro_event,
+            text_content: None,
         },
         Err(error) => McpHandled::plain({
             if let Some(object) = error.as_object() {
@@ -380,6 +383,7 @@ fn handle_message(
                 response
             }),
             pro_event,
+            text_content: None,
         },
         usage_invocation,
     )
@@ -486,16 +490,26 @@ fn handle_tools_call(
         "status" => McpHandled::plain(tool_status(data_root)),
         "sources" => McpHandled::plain(tool_sources(data_root)),
         "search" => match tool_search(&arguments, data_root) {
-            Ok((value, observation)) => {
+            Ok((value, observation, compact_value)) => {
                 if let Some(invocation) = usage_invocation.as_mut() {
                     invocation.bind_search_context(observation);
                 }
-                McpHandled::plain(Ok(value))
+                McpHandled::with_text_content(Ok(value), render_tool_text(&compact_value))
             }
             Err(error) => McpHandled::plain(Err(error)),
         },
-        "show_session" => McpHandled::plain(tool_show_session(&arguments, data_root)),
-        "show_event" => McpHandled::plain(tool_show_event(&arguments, data_root)),
+        "show_session" => match tool_show_session(&arguments, data_root) {
+            Ok((value, compact_value)) => {
+                McpHandled::with_text_content(Ok(value), render_tool_text(&compact_value))
+            }
+            Err(error) => McpHandled::plain(Err(error)),
+        },
+        "show_event" => match tool_show_event(&arguments, data_root) {
+            Ok((value, compact_value)) => {
+                McpHandled::with_text_content(Ok(value), render_tool_text(&compact_value))
+            }
+            Err(error) => McpHandled::plain(Err(error)),
+        },
         "query_events" => McpHandled::plain(tool_query_events(&arguments, data_root)),
         "pro_status" => tool_pro_status(data_root),
         "blame" => {
@@ -510,13 +524,20 @@ fn handle_tools_call(
         _ => unreachable!("known tool was validated above"),
     };
 
+    let McpHandled {
+        value,
+        pro_event,
+        text_content,
+    } = handled;
     (
         Ok(McpHandled {
-            value: match handled.value {
-                Ok(value) => tool_result(value),
-                Err(err) => tool_error_result(err),
+            value: match (value, text_content) {
+                (Ok(value), Some(text)) => tool_result_with_text(value, text),
+                (Ok(value), None) => tool_result(value),
+                (Err(err), _) => tool_error_result(err),
             },
-            pro_event: handled.pro_event,
+            pro_event,
+            text_content: None,
         }),
         usage_invocation,
     )
@@ -559,11 +580,11 @@ fn tool_sources(data_root: &Path) -> Result<Value> {
 fn tool_search(
     arguments: &Value,
     data_root: &Path,
-) -> Result<(Value, crate::local_usage::SearchContextObservation)> {
+) -> Result<(Value, crate::local_usage::SearchContextObservation, Value)> {
     let request = search_request(arguments)?;
     crate::commands::source_index::validate_explicit_semantic_scope(&request)?;
     recover_enabled_daemon_before_search(data_root);
-    crate::commands::source_index::mcp_search(request, data_root)
+    crate::commands::source_index::mcp_search_with_compact(request, data_root)
 }
 
 fn search_request(arguments: &Value) -> Result<crate::commands::source_index::SourceSearchRequest> {

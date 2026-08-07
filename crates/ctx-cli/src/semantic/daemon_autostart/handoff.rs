@@ -374,6 +374,10 @@ pub(crate) fn prepare_daemon_uninstall(data_root: &Path) -> Result<Value> {
                 root.display()
             ));
         }
+        super::super::cancel_core_finalization_generation_lease(
+            root,
+            "daemon was disabled for uninstall",
+        )?;
     }
     super::installation::remove_installation_daemon_coordination()
         .context("remove installation-wide ctx daemon coordination before uninstall")?;

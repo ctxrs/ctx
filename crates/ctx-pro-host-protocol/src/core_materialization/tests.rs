@@ -245,6 +245,187 @@ fn head(sources: &[CoreSourceState]) -> CoreGenerationHead {
     .unwrap()
 }
 
+fn finalization_progress(
+    materialization: char,
+    generation: char,
+    finish_request_digest: &str,
+    materializer_revision: &str,
+    phase: CoreMaterializationFinalizationPhase,
+    cursor: char,
+) -> CoreMaterializationFinalizationProgress {
+    CoreMaterializationFinalizationProgress {
+        materialization_id: materialization.to_string().repeat(64),
+        core_generation_id: generation.to_string().repeat(64),
+        finish_request_digest: finish_request_digest.to_owned(),
+        materializer_revision: materializer_revision.to_owned(),
+        phase,
+        cursor_sha256: cursor.to_string().repeat(64),
+    }
+}
+
+#[test]
+fn finalization_continuation_is_bounded_owner_bound_and_requires_progress() {
+    let source = source(9);
+    let finish = FinishCoreMaterializationRequest {
+        materialization_id: "d".repeat(64),
+        head: head(&[state(source, 1, 1)]),
+        expected_prior_receipt: None,
+        source_delta_pages: 1,
+        changed_sources: 1,
+        removed_sources: 0,
+        event_delta_pages: 1,
+        event_mutations: 1,
+    };
+    let finish_request_digest = finish.canonical_digest().unwrap();
+    let materializer_revision = "materializer-v1";
+    let first = CoreMaterializationFinalizationPending {
+        progress: finalization_progress(
+            'd',
+            'a',
+            &finish_request_digest,
+            materializer_revision,
+            CoreMaterializationFinalizationPhase::SealingInputs,
+            '1',
+        ),
+        replayed: false,
+    };
+    first
+        .validate_for_finish(&finish, materializer_revision)
+        .unwrap();
+    let terminal = CoreMaterializationFinished {
+        materialization_id: finish.materialization_id.clone(),
+        finish_request_digest: finish_request_digest.clone(),
+        receipt: CoreMaterializationReceipt {
+            core_generation_id: finish.head.core_generation_id.clone(),
+            core_record_contract_fingerprint: finish.head.core_record_contract_fingerprint.clone(),
+            source_snapshot_sha256: finish.head.source_snapshot_sha256.clone(),
+            materializer_revision: materializer_revision.to_owned(),
+            source_count: finish.head.source_count,
+            event_count: finish.head.event_count,
+        },
+        replayed: false,
+    };
+    terminal
+        .validate_for_finish(&finish, materializer_revision)
+        .unwrap();
+
+    let mut wrong_digest = terminal.clone();
+    wrong_digest.finish_request_digest = "f".repeat(64);
+    assert_eq!(
+        wrong_digest
+            .validate_for_finish(&finish, materializer_revision)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+    let mut wrong_revision = terminal.clone();
+    wrong_revision.receipt.materializer_revision = "materializer-v2".to_owned();
+    assert_eq!(
+        wrong_revision
+            .validate_for_finish(&finish, materializer_revision)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+
+    let request = ContinueCoreMaterializationRequest {
+        expected_progress: first.progress.clone(),
+    };
+    request.validate().unwrap();
+    terminal.validate_for_continue(&request).unwrap();
+    let advanced = CoreMaterializationFinalizationPending {
+        progress: finalization_progress(
+            'd',
+            'a',
+            &finish_request_digest,
+            materializer_revision,
+            CoreMaterializationFinalizationPhase::EmitReplay,
+            '2',
+        ),
+        replayed: false,
+    };
+    advanced.validate_for_continue(&request).unwrap();
+
+    let mut wrong_digest = advanced.clone();
+    wrong_digest.progress.finish_request_digest = "f".repeat(64);
+    assert_eq!(
+        wrong_digest
+            .validate_for_continue(&request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+    let mut wrong_revision = advanced.clone();
+    wrong_revision.progress.materializer_revision = "materializer-v2".to_owned();
+    assert_eq!(
+        wrong_revision
+            .validate_for_continue(&request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+
+    let replay = CoreMaterializationFinalizationPending {
+        replayed: true,
+        ..advanced.clone()
+    };
+    replay.validate_for_continue(&request).unwrap();
+
+    let unchanged = CoreMaterializationFinalizationPending {
+        progress: request.expected_progress.clone(),
+        replayed: true,
+    };
+    assert_eq!(
+        unchanged.validate_for_continue(&request).unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    let conflicting = CoreMaterializationFinalizationPending {
+        progress: finalization_progress(
+            'e',
+            'a',
+            &finish_request_digest,
+            materializer_revision,
+            CoreMaterializationFinalizationPhase::EmitReplay,
+            '2',
+        ),
+        replayed: false,
+    };
+    assert_eq!(
+        conflicting
+            .validate_for_continue(&request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+
+    let regressed = CoreMaterializationFinalizationPending {
+        progress: finalization_progress(
+            'd',
+            'a',
+            &finish_request_digest,
+            materializer_revision,
+            CoreMaterializationFinalizationPhase::SealingInputs,
+            '3',
+        ),
+        replayed: false,
+    };
+    let advanced_request = ContinueCoreMaterializationRequest {
+        expected_progress: advanced.progress,
+    };
+    assert_eq!(
+        regressed
+            .validate_for_continue(&advanced_request)
+            .unwrap_err()
+            .class,
+        ErrorClass::Sequence
+    );
+
+    let mut unknown = serde_json::to_value(request).unwrap();
+    unknown["conflict"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<ContinueCoreMaterializationRequest>(unknown).is_err());
+}
+
 fn reconciliation(source: &SourceKey, event_count: usize) -> CoreSourceReconciliation {
     CoreSourceReconciliation {
         materialize_index: 0,

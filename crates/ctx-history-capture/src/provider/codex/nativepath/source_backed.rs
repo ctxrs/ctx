@@ -19,7 +19,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
     CoreRecord, CoreRecordAnnotation, CoreRecordError, EventIdentityInput, NativeItemKey,
     NativeSessionKey, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceFrontier, SourceKey, SourceObservation, StableEntityId, TypedKey,
+    SessionRelationshipKind, SourceAnchor, SourceFrontier, SourceKey, SourceObservation,
+    StableEntityId, TypedKey,
 };
 #[cfg(test)]
 use ctx_history_core::{
@@ -34,10 +35,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
+    checkpoint::CodexCertifiedLineageFactsV0,
     discover_codex_catalog_sources,
     reader::{
-        opened_file_prefix_sha256, CodexLineageFactBudgetV0, CodexLineageFactsV0,
-        CodexParseDisposition, CodexScanCounters, CODEX_LINEAGE_EXHAUSTED_SENTINEL,
+        opened_file_prefix_sha256, reopen_codex_source_capability,
+        revalidate_codex_catalog_source_capability, CodexLineageFactBudgetV0,
+        CodexLineageFactsSpillRecordV0, CodexLineageFactsV0, CodexParseDisposition,
+        CodexScanCounters, CODEX_LINEAGE_EXHAUSTED_SENTINEL,
     },
     rows::{
         CodexProviderEventIdentityKindV0, CodexProviderEventIdentityV0, CodexSourceBackedRowV0,
@@ -68,9 +72,10 @@ const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
 const CODEX_SOURCE_REVISION_KIND: &str = "codex-ordinary-file-observation-v1";
-const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v9";
+const CODEX_FRONTIER_KIND: &str = "codex-nativepath-checkpoint-v10";
 const CODEX_PARSER_REVISION: &str =
-    "codex-nativepath-core-record-v20-exact-retrieval-json-authority";
+    "codex-nativepath-core-record-v21-transitive-root-normalization";
+const CODEX_GENERATION_LINEAGE_COMPONENTS_PER_WAVE: usize = 4;
 #[cfg(test)]
 const CODEX_INVENTORY_AUTHORITY_NAMESPACE: &str = "codex.sessions-root";
 #[cfg(test)]
@@ -394,24 +399,30 @@ pub struct CodexSourceBackedIngestReceiptV0 {
 mod catalog;
 #[cfg(test)]
 mod cold;
+mod generation;
 mod identity;
 mod ingestion;
 mod jsonl_family;
 mod lineage;
 
-use lineage::{map_lineage_capture_error, CodexOutcomeLineageAuthorityV0, CodexOutcomeOriginV0};
+use lineage::{
+    map_lineage_capture_error, CodexLineageRejectedSourceV0, CodexOutcomeLineageAuthorityV0,
+    CodexOutcomeOriginV0,
+};
 
 use catalog::discover_codex_session_tree_inventory_v0;
+pub(crate) use catalog::{
+    discover_codex_carried_session_tree_inventory_v0,
+    observe_codex_carried_explicit_session_source_backed_v0,
+    observe_codex_explicit_session_source_backed_v0, CodexExplicitSessionInventoryV0,
+    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeInventoryV0,
+};
 #[cfg(test)]
 pub(crate) use catalog::{
     discover_codex_session_tree_inventory_from_base_v0,
     discover_codex_session_tree_inventory_from_plans_v0,
     install_after_codex_catalog_authority_hook, install_after_codex_metadata_inventory_hook,
     managed_codex_session_source, writer_base_sources, CodexCatalogWorkV0,
-};
-pub(crate) use catalog::{
-    observe_codex_explicit_session_source_backed_v0, CodexExplicitSessionSourceBackedInputV0,
-    CodexSessionTreeInventoryV0,
 };
 #[cfg(test)]
 use cold::{
@@ -420,6 +431,12 @@ use cold::{
 };
 #[cfg(test)]
 use cold::{cold_scanner_worker_count_for_parallelism, take_cold_scanner_activity_v0};
+#[cfg(test)]
+pub(crate) use generation::install_after_codex_lineage_normalization_hook_v0;
+pub(crate) use generation::{
+    CodexGenerationCarriedRouteV0, CodexGenerationNormalizationCoordinatorV0,
+    CodexGenerationRouteV0,
+};
 use identity::{
     certify_scan, codex_core_record, codex_session_identity, codex_source_key, decode_append_proof,
     validate_owner, CodexEventIdentityStateV0,
@@ -427,8 +444,8 @@ use identity::{
 #[cfg(test)]
 use ingestion::{ingest_codex_source_backed_inner_v0, ingest_codex_source_backed_v0};
 use ingestion::{
-    prepare_replayed_lineage_v0, scan_codex_jsonl_family_leaf_v0, CodexJsonlFamilyLeafContextV0,
-    CodexJsonlFamilyPublicationV0,
+    prepare_generation_lineage_v0, prepare_replayed_lineage_v0, scan_codex_jsonl_family_leaf_v0,
+    CodexJsonlFamilyLeafContextV0, CodexJsonlFamilyPublicationV0,
 };
 pub(crate) use jsonl_family::{
     codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,

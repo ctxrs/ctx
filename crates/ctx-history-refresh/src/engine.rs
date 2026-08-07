@@ -1011,6 +1011,15 @@ impl CoreRefreshEngine {
                                 continuation
                                     .covered_route_results
                                     .insert(route.clone(), result.clone());
+                                if let Some(authority) = receipt
+                                    .zero_source_authority
+                                    .iter()
+                                    .find(|authority| authority.route_identity == *route)
+                                {
+                                    continuation
+                                        .covered_zero_source_authority
+                                        .insert(route.clone(), authority.clone());
+                                }
                             }
                         }
                     }
@@ -1065,9 +1074,13 @@ impl CoreRefreshEngine {
                     {
                         continue;
                     }
-                    continuation
-                        .covered_route_results
-                        .insert(route.clone(), result.clone());
+                    continuation.cover_route(
+                        route.clone(),
+                        result.clone(),
+                        attempt
+                            .as_ref()
+                            .and_then(|attempt| attempt.receipt.as_ref()),
+                    );
                 }
             }
             continuation.covered_removed_source_count = attempt

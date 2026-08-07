@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::commands::import::load_explicit_source_catalog_authority;
 use crate::{compact_json, config::AppConfig};
 
+use super::source_backed_refresh_coordinator::verified_generation_is_query_ready;
 use super::{
     paths_status::{
         daemon_core_refresh_job_path, daemon_jobs_path, daemon_report_with_disabled_status,
@@ -83,28 +84,31 @@ fn source_epoch_status_report_with_pro_query(
         &current_policy_hash,
         serde_json::to_value(&current_policy)?,
     );
-    let history_epoch = history_epoch_report(&lexical, index.as_ref());
-    let initialized =
-        index.is_some() && lexical.get("status").and_then(Value::as_str) != Some("unavailable");
+    let admitted_index = matches!(
+        lexical.get("status").and_then(Value::as_str),
+        Some("ready" | "stale")
+    )
+    .then_some(index.as_ref())
+    .flatten();
+    let history_epoch = history_epoch_report(&lexical, admitted_index);
+    let initialized = admitted_index.is_some();
     let generation_id = index.as_ref().map(|index| index.generation_id().to_owned());
+    let admitted_generation_id = admitted_index.map(|index| index.generation_id().to_owned());
     let daemon = source_daemon_report(data_root);
-    let catalog = catalog_report(generation_id.as_deref(), index.as_ref());
-    let mut semantic = semantic_report(data_root, config, index.as_ref());
+    let catalog = catalog_report(admitted_generation_id.as_deref(), admitted_index);
+    let mut semantic = semantic_report(data_root, config, admitted_index);
     attach_catch_up_status(
         &mut semantic,
         read_daemon_job_status(&daemon_semantic_job_path(data_root)),
     );
-    let pro = query_pro(data_root, index.as_ref());
-    let pro_projection = pro_projection_report(data_root, generation_id.as_deref(), &pro);
+    let pro = query_pro(data_root, admitted_index);
+    let pro_projection = pro_projection_report(data_root, admitted_generation_id.as_deref(), &pro);
     let refresh = refresh_report(refresh_job.as_ref(), generation_id.as_deref(), &daemon);
 
-    let indexed_items = index.as_ref().map(VerifiedIndex::document_count);
+    let indexed_items = admitted_index.map(VerifiedIndex::document_count);
     let indexed_events = indexed_items;
-    let indexed_sources = index
-        .as_ref()
-        .map(|index| index.manifest().sources.len() as u64);
-    let indexed_sessions = index
-        .as_ref()
+    let indexed_sources = admitted_index.map(|index| index.manifest().sources.len() as u64);
+    let indexed_sessions = admitted_index
         .map(|index| index.session_count())
         .transpose()?;
 
@@ -260,16 +264,22 @@ fn lexical_report(
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
-            let failed_without_indexed_history = request_state == Some("failed")
-                && manifest.sources.is_empty()
-                && index.document_count() == 0;
-            let (status, reason) = if failed_without_indexed_history {
-                (
+            let readiness = verified_generation_is_query_ready(&index);
+            let (status, reason, authority_error) = match readiness {
+                Ok(true) => {
+                    let (status, reason) = lexical_state(policy_matches);
+                    (status, reason, None)
+                }
+                Ok(false) => (
                     "unavailable",
-                    Some("core_refresh_failed_without_indexed_history"),
-                )
-            } else {
-                lexical_state(policy_matches)
+                    Some("zero_source_publication_uncertified"),
+                    None,
+                ),
+                Err(error) => (
+                    "unavailable",
+                    Some("publication_authority_invalid"),
+                    Some(format!("{error:#}")),
+                ),
             };
             let value = compact_json(json!({
                 "status": status,
@@ -282,6 +292,7 @@ fn lexical_report(
                 "indexed_documents": index.document_count(),
                 "certified_sources": manifest.sources.len(),
                 "certified_source_bytes": manifest.certified_source_bytes,
+                "publication_authority_error": authority_error,
                 "manifest_version": manifest.manifest_version,
                 "identity_version": manifest.identity_version,
                 "lexical_schema_version": manifest.lexical_schema_version,
@@ -526,7 +537,7 @@ fn pro_projection_report_from_status(
     } else {
         match currentness {
             Some("stale") => ("stale", json!("stale_source")),
-            Some("not_materialized" | "partial") => (
+            Some("not_materialized" | "partial" | "finalizing") => (
                 "pending",
                 lifecycle
                     .get("error_code")

@@ -31,11 +31,13 @@ pub(crate) use source::{
 pub(crate) use source::{CodexCatalogSource, CodexSourceIdentity};
 pub(crate) use source_backed::{
     codex_session_root_rank, CodexExplicitSessionJsonlFamilyAdapterV0,
-    CodexExplicitSessionSourceBackedInputV0, CodexSessionTreeJsonlFamilyAdapterV0,
+    CodexExplicitSessionSourceBackedInputV0, CodexGenerationCarriedRouteV0,
+    CodexGenerationNormalizationCoordinatorV0, CodexSessionTreeJsonlFamilyAdapterV0,
 };
 #[cfg(test)]
 pub(crate) use source_backed::{
-    install_after_codex_metadata_inventory_hook, CodexSourceBackedCountersV0,
+    install_after_codex_lineage_normalization_hook_v0, install_after_codex_metadata_inventory_hook,
+    CodexSourceBackedCountersV0,
 };
 #[cfg(test)]
 mod tests;

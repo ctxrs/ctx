@@ -26,6 +26,8 @@ use super::*;
 
 #[path = "tests/batching_replay.rs"]
 mod batching_replay;
+#[path = "tests/finalization.rs"]
+mod finalization;
 #[path = "tests/materialization.rs"]
 mod materialization;
 #[path = "tests/prefetch.rs"]
@@ -246,7 +248,12 @@ struct Consumer {
     event_state_response_loss_after: Option<u64>,
     event_response_loss_after: Option<u64>,
     lose_finish_response: bool,
+    terminal_finish_digest_override: Option<String>,
     rebuild_required_finishes: u8,
+    finish_pending: Option<CoreMaterializationFinalizationPending>,
+    continue_pending: Option<CoreMaterializationFinalizationPending>,
+    finalization_progress: Option<CoreMaterializationFinalizationProgress>,
+    continue_requests: Vec<ContinueCoreMaterializationRequest>,
     delta_pages: Vec<CoreSourceDeltaPage>,
     state_requests: Vec<CoreEventStatePageRequest>,
     event_pages: Vec<CoreEventDeltaPage>,
@@ -351,7 +358,9 @@ impl CoreMaterializationConsumer for Consumer {
                 bail!(error.clone());
             }
         }
-        let currentness = if self.finish.is_some() {
+        let currentness = if self.finalization_progress.is_some() {
+            CoreProjectionCurrentness::Finalizing
+        } else if self.finish.is_some() {
             CoreProjectionCurrentness::Current
         } else {
             self.replay_status_currentness
@@ -363,13 +372,15 @@ impl CoreMaterializationConsumer for Consumer {
                 .clone()
                 .or(request.requested_core_generation_id),
         };
-        Ok(status::result(
+        let mut status = status::result(
             request,
             currentness,
             self.last_receipt.clone(),
             self.core_preparation_peak_workers,
             self.journal_finish_activity.clone(),
-        ))
+        );
+        status.finalization_progress = self.finalization_progress.clone();
+        Ok(status)
     }
 
     fn begin(
@@ -684,14 +695,23 @@ impl CoreMaterializationConsumer for Consumer {
     fn finish(
         &mut self,
         request: FinishCoreMaterializationRequest,
-    ) -> Result<CoreMaterializationFinished> {
+    ) -> Result<CoreMaterializationFinalizationStep> {
         self.finish_requests.push(request.clone());
         if self.rebuild_required_finishes != 0 {
             self.rebuild_required_finishes -= 1;
             self.known_accumulators.clear();
             bail!("needs_rebuild");
         }
+        if let Some(pending) = self.finish_pending.clone() {
+            self.finalization_progress = Some(pending.progress.clone());
+            self.finish = Some(request);
+            return Ok(CoreMaterializationFinalizationStep::Pending(pending));
+        }
+        let materialization_id = request.materialization_id.clone();
+        let finish_request_digest = request.canonical_digest().unwrap();
         let response = CoreMaterializationFinished {
+            materialization_id,
+            finish_request_digest,
             receipt: CoreMaterializationReceipt {
                 core_generation_id: request.head.core_generation_id.clone(),
                 core_record_contract_fingerprint: request
@@ -711,7 +731,47 @@ impl CoreMaterializationConsumer for Consumer {
             self.lose_finish_response = false;
             bail!("synthetic_finish_response_lost: committed Core finish");
         }
-        Ok(response)
+        Ok(CoreMaterializationFinalizationStep::Finished(response))
+    }
+
+    fn continue_finalization(
+        &mut self,
+        request: ContinueCoreMaterializationRequest,
+    ) -> Result<CoreMaterializationFinalizationStep> {
+        self.continue_requests.push(request.clone());
+        if self.finalization_progress.as_ref() != Some(&request.expected_progress) {
+            bail!("invalid_request: conflicting Core finalization continuation");
+        }
+        if let Some(pending) = self.continue_pending.take() {
+            self.finalization_progress = Some(pending.progress.clone());
+            return Ok(CoreMaterializationFinalizationStep::Pending(pending));
+        }
+        let finish = self
+            .finish
+            .as_ref()
+            .ok_or_else(|| anyhow!("invalid_request: no Core materialization to continue"))?;
+        let response = CoreMaterializationFinished {
+            materialization_id: request.expected_progress.materialization_id.clone(),
+            finish_request_digest: self
+                .terminal_finish_digest_override
+                .take()
+                .unwrap_or_else(|| request.expected_progress.finish_request_digest.clone()),
+            receipt: CoreMaterializationReceipt {
+                core_generation_id: finish.head.core_generation_id.clone(),
+                core_record_contract_fingerprint: finish
+                    .head
+                    .core_record_contract_fingerprint
+                    .clone(),
+                source_snapshot_sha256: finish.head.source_snapshot_sha256.clone(),
+                materializer_revision: self.revision.clone(),
+                source_count: finish.head.source_count,
+                event_count: finish.head.event_count,
+            },
+            replayed: false,
+        };
+        self.finalization_progress = None;
+        self.last_receipt = Some(response.receipt.clone());
+        Ok(CoreMaterializationFinalizationStep::Finished(response))
     }
 }
 

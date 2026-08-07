@@ -11,6 +11,8 @@ pub(super) struct ManualAllContinuation {
     pub(super) predecessor_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
     pub(super) invalidated_routes: BTreeSet<SourceRouteIdentity>,
     pub(super) covered_route_results: BTreeMap<SourceRouteIdentity, SourceBackedRefreshRouteResult>,
+    pub(super) covered_zero_source_authority:
+        BTreeMap<SourceRouteIdentity, SourceBackedZeroSourceAuthority>,
     pub(super) covered_removed_source_count: usize,
     pub(super) covered_timings: SourceBackedRefreshTimings,
 }
@@ -33,6 +35,7 @@ impl ManualAllContinuation {
             predecessor_event_watermarks,
             invalidated_routes: BTreeSet::new(),
             covered_route_results: BTreeMap::new(),
+            covered_zero_source_authority: BTreeMap::new(),
             covered_removed_source_count: 0,
             covered_timings: SourceBackedRefreshTimings::default(),
         }
@@ -60,11 +63,35 @@ impl ManualAllContinuation {
             self.covered_removed_source_count = 0;
             self.covered_timings = SourceBackedRefreshTimings::default();
         }
+        self.covered_zero_source_authority.remove(route);
+    }
+
+    pub(super) fn cover_route(
+        &mut self,
+        route: SourceRouteIdentity,
+        result: SourceBackedRefreshRouteResult,
+        receipt: Option<&SourceBackedRefreshReceipt>,
+    ) {
+        self.covered_route_results.insert(route.clone(), result);
+        if let Some(authority) = receipt.and_then(|receipt| {
+            receipt
+                .zero_source_authority
+                .iter()
+                .find(|authority| authority.route_identity == route)
+        }) {
+            self.covered_zero_source_authority
+                .insert(route, authority.clone());
+        }
     }
 
     pub(super) fn covered_publication(&self) -> SourceBackedRefreshCoveredPublication {
         SourceBackedRefreshCoveredPublication {
             route_results: self.covered_route_results.values().cloned().collect(),
+            zero_source_authority: self
+                .covered_zero_source_authority
+                .values()
+                .cloned()
+                .collect(),
             removed_source_count: self.covered_removed_source_count,
             timings: self.covered_timings,
         }
@@ -97,6 +124,11 @@ impl ManualAllContinuation {
             .iter()
             .map(|(route, result)| (route.as_str().to_owned(), result.compact_json()))
             .collect::<serde_json::Map<_, _>>();
+        let covered_zero_source_authority = self
+            .covered_zero_source_authority
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         compact_json(json!({
             "predecessor_request_id": self.predecessor_request_id,
             "predecessor_finished": self.predecessor_finished,
@@ -113,6 +145,10 @@ impl ManualAllContinuation {
                 .map(SourceRouteIdentity::as_str)
                 .collect::<Vec<_>>(),
             "covered_route_results": covered_route_results,
+            "covered_zero_source_authority": crate::publication::zero_source_authority_json(
+                &covered_zero_source_authority,
+                &self.covered_route_results.values().cloned().collect::<Vec<_>>(),
+            ),
             "covered_removed_source_count": self.covered_removed_source_count,
             "covered_timings": self.covered_timings.to_json(),
         }))
@@ -236,6 +272,13 @@ impl ManualAllContinuation {
                 Ok((route, result))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let covered_zero_source_authority = crate::publication::parse_zero_source_authority(
+            value.get("covered_zero_source_authority"),
+            &covered_route_results.values().cloned().collect::<Vec<_>>(),
+        )?
+        .into_iter()
+        .map(|authority| (authority.route_identity.clone(), authority))
+        .collect::<BTreeMap<_, _>>();
         let covered_outside_fence = covered_route_results
             .keys()
             .filter(|route| !admission_route_observations.contains_key(*route))
@@ -245,6 +288,14 @@ impl ManualAllContinuation {
             bail!(
                 "logical refresh demand covers routes outside its admission fence: {}",
                 covered_outside_fence.join(", ")
+            );
+        }
+        if covered_zero_source_authority
+            .keys()
+            .any(|route| !covered_route_results.contains_key(route))
+        {
+            bail!(
+                "logical refresh demand carries zero-source authority outside its covered routes"
             );
         }
         let covered_removed_source_count = value
@@ -280,6 +331,7 @@ impl ManualAllContinuation {
             predecessor_event_watermarks,
             invalidated_routes,
             covered_route_results,
+            covered_zero_source_authority,
             covered_removed_source_count,
             covered_timings,
         })
@@ -487,6 +539,61 @@ impl SourceBackedRefreshCoverageCertificate {
 #[cfg(test)]
 mod coverage_certificate_tests {
     use super::*;
+
+    #[test]
+    fn manual_continuation_persists_and_rebinds_covered_empty_authority() {
+        let route = SourceRouteIdentity::from_sha256("80".repeat(32)).unwrap();
+        let result = SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), false);
+        let receipt = SourceBackedRefreshReceipt {
+            previous_generation: None,
+            published_generation: "predecessor-generation".to_owned(),
+            generation_changed: true,
+            published_explicit_source_catalog: None,
+            current: SourceBackedRefreshCurrent::default(),
+            route_results: vec![result.clone()],
+            zero_source_authority: vec![SourceBackedZeroSourceAuthority {
+                generation_id: "predecessor-generation".to_owned(),
+                route_identity: route.clone(),
+                kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+            }],
+            catalog_route_bindings: Vec::new(),
+        };
+        let mut continuation = ManualAllContinuation::new(
+            "predecessor".to_owned(),
+            BTreeMap::from([(route.clone(), None)]),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        continuation.cover_route(route.clone(), result, Some(&receipt));
+        let mut recovered = ManualAllContinuation::from_json(&continuation.to_json()).unwrap();
+        let mut publication = SourceBackedRefreshPublication {
+            generation_id: "continuation-generation".to_owned(),
+            published_explicit_source_catalog: None,
+            unsupported_routes: 0,
+            certified_source_count: 0,
+            certified_source_bytes: 0,
+            current: SourceBackedRefreshCurrent::default(),
+            timings: SourceBackedRefreshTimings::default(),
+            route_results: Vec::new(),
+            zero_source_authority: Vec::new(),
+            catalog_route_bindings: Vec::new(),
+            verified_index: None,
+        };
+
+        recovered
+            .covered_publication()
+            .apply_receipt(&mut publication);
+        assert_eq!(publication.zero_source_authority.len(), 1);
+        assert_eq!(
+            publication.zero_source_authority[0].generation_id,
+            publication.generation_id
+        );
+        assert_eq!(publication.zero_source_authority[0].route_identity, route);
+
+        recovered.invalidate_route(&route);
+        assert!(recovered.covered_zero_source_authority.is_empty());
+    }
 
     #[test]
     fn matching_post_publication_observation_covers_through_seen_event() {

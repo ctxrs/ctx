@@ -193,6 +193,7 @@ impl CodexSourceScan {
     pub(crate) fn checkpoint(
         &self,
         lineage_dependency_sha256: [u8; 32],
+        certified_lineage_facts: Option<super::checkpoint::CodexCertifiedLineageFactsV0>,
     ) -> Option<CodexNativeCheckpoint> {
         Some(CodexNativeCheckpoint::new(
             self.after_observation.clone(),
@@ -206,6 +207,7 @@ impl CodexSourceScan {
             &self.pending_tool_authorities,
             self.owner.clone()?,
             lineage_dependency_sha256,
+            certified_lineage_facts,
         ))
     }
 
@@ -221,7 +223,7 @@ impl CodexSourceScan {
             self.source.source_path.clone(),
         )?;
         Ok(self
-            .checkpoint([0; 32])
+            .checkpoint([0; 32], None)
             .map(|checkpoint| CodexAppendProof::new(identity, generation, checkpoint)))
     }
 }
@@ -268,6 +270,13 @@ impl CodexNativeScanner {
         lineage_facts: CodexLineageFactsV0,
     ) -> Result<Self> {
         Self::new_with_lineage(source, proof, Some(lineage_facts))
+    }
+
+    pub(crate) fn new_source_backed_without_lineage_v0(
+        source: CodexCatalogSource,
+        proof: Option<&CodexAppendProof>,
+    ) -> Result<Self> {
+        Self::new_with_lineage(source, proof, None)
     }
 }
 
@@ -322,11 +331,12 @@ pub(crate) use checkpoint::revalidate_codex_source_observation;
 use checkpoint::*;
 pub(crate) use checkpoint::{
     open_codex_source_capability, opened_file_observation as opened_codex_file_observation,
-    opened_file_prefix_sha256,
+    opened_file_prefix_sha256, reopen_codex_source_capability,
+    revalidate_codex_catalog_source_capability,
 };
 use identity::*;
 use lineage::CodexLineageFactMarkV0;
 pub(crate) use lineage::{
-    CodexLineageFactBudgetV0, CodexLineageFactPresenceV0, CodexLineageFactsV0,
-    CODEX_LINEAGE_EXHAUSTED_SENTINEL,
+    CodexLineageFactBudgetV0, CodexLineageFactPresenceV0, CodexLineageFactsSpillRecordV0,
+    CodexLineageFactsV0, CODEX_LINEAGE_EXHAUSTED_SENTINEL,
 };

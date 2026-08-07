@@ -68,6 +68,7 @@ fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt(
                     )
                     .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                     SourceBackedPublicationMetadata {
+                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
                         request_id: request_id.clone(),
                         operation,
                         refresh_scope: scope.clone(),
@@ -245,7 +246,8 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
                 .commit_with_publication_metadata(
                     |_| true,
                     |context| {
-                        let publication = empty_test_publication(context.generation_id());
+                        let mut publication = empty_test_publication(context.generation_id());
+                        add_complete_empty_authority(&mut publication, route_identity(0x97));
                         let receipt = SourceBackedRefreshReceipt::from_verified_publication(
                             None,
                             context.generation_id().to_owned(),
@@ -253,6 +255,7 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
                         )
                         .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                         SourceBackedPublicationMetadata {
+                            version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
                             request_id: metadata_request_id.clone(),
                             operation: SourceBackedRefreshOperation::Refresh,
                             refresh_scope: SourceBackedRefreshScope::All,
@@ -417,6 +420,7 @@ fn pointer_crash_recovers_exact_manual_all_continuation_receipt_without_recaptur
                     .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                     *expected.lock().unwrap() = Some(receipt.to_json());
                     SourceBackedPublicationMetadata {
+                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
                         request_id: request_id.clone(),
                         operation,
                         refresh_scope: scope.clone(),

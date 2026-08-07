@@ -32,6 +32,7 @@ fn successful_publication(generation_id: &str) -> SourceBackedRefreshPublication
         current: Default::default(),
         timings: Default::default(),
         route_results: Vec::new(),
+        zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
         verified_index: None,
     }

@@ -10,13 +10,13 @@ use crate::{
 
 use super::{
     canonical_commit_payload, certify_activated_generation, lexical_index_settings,
-    load_active_generation_pointer, load_publication_for_metas, meta_generation, open_slot_index,
-    payload_generation_id, physical_integrity_audit, publish_active_generation_pointer,
-    reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
-    reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, slot_path,
-    sync_generation, verify_complete_searcher, verify_searcher, write_manifest,
-    ActiveGenerationPointer, GenerationSlot, PhysicalIntegrityAudit, PointerPublicationOutcome,
-    INDEX_GENERATIONS_DIRECTORY,
+    load_active_generation_pointer, load_generation_retention_lease, load_publication_for_metas,
+    meta_generation, open_slot_index, payload_generation_id, physical_integrity_audit,
+    publish_active_generation_pointer, reclaim_inactive_generation_directories,
+    reclaim_unreferenced_certifications, reclaim_unreferenced_manifests, reconcile_commit_error,
+    searcher_generation, slot_path, sync_generation, verify_complete_searcher, verify_searcher,
+    write_manifest, ActiveGenerationPointer, GenerationSlot, PhysicalIntegrityAudit,
+    PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
 };
 
 mod clone;
@@ -65,11 +65,33 @@ impl RepublishRecovery {
 }
 
 /// Replays atomic publication over an already-current generation for fault and
-/// disk qualification without introducing a compatibility path.
+/// disk qualification without changing its payload or owner metadata.
+#[cfg(test)]
 pub(crate) fn republish_current_for_qualification(
     root: &Path,
     pointer: &ActiveGenerationPointer,
     options: &WriterOptions,
+) -> Result<CurrentRepublishOutcome> {
+    republish_current(root, pointer, options, None)
+}
+
+/// Atomically replaces only the owner metadata of an already-current
+/// generation while preserving its exact manifest, segments, and generation
+/// identity.
+pub(crate) fn republish_current_with_publication_metadata(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    options: &WriterOptions,
+    publication_metadata: Arc<[u8]>,
+) -> Result<CurrentRepublishOutcome> {
+    republish_current(root, pointer, options, Some(publication_metadata))
+}
+
+fn republish_current(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    options: &WriterOptions,
+    replacement_publication_metadata: Option<Arc<[u8]>>,
 ) -> Result<CurrentRepublishOutcome> {
     let current_index = open_slot_index(root, pointer.active())?;
     validate_schema(&current_index.schema())?;
@@ -108,7 +130,7 @@ pub(crate) fn republish_current_for_qualification(
         &candidate_path,
         &candidate_directory_name,
         &current_metas,
-        current_publication.metadata,
+        replacement_publication_metadata.or(current_publication.metadata),
         current_publication.manifest,
         current_publication.generation_id,
     );
@@ -408,6 +430,13 @@ fn load_pointer_for_republish_reconciliation(
     })
 }
 
+#[cfg(not(test))]
+fn load_pointer_for_republish_reconciliation(
+    root: &Path,
+) -> Result<Option<ActiveGenerationPointer>> {
+    load_active_generation_pointer(root)
+}
+
 /// Cleanup after a visible republish is opportunistic. Query authority already
 /// changed atomically, so reclamation failures must never be reported as a
 /// failed republish.
@@ -415,16 +444,23 @@ pub(crate) fn best_effort_post_republish_cleanup(root: &Path, pointer: &ActiveGe
     if republish_checkpoint(RepublishStage::PostPublicationCleanup, Some(root)).is_err() {
         return;
     }
-    let _ = reclaim_inactive_generation_directories(root, Some(pointer));
-    let retained_generation_ids = std::iter::once(pointer.active())
+    let Ok(retention_lease) = load_generation_retention_lease(root) else {
+        return;
+    };
+    let _ = reclaim_inactive_generation_directories(root, Some(pointer), retention_lease.as_ref());
+    let mut retained_generation_ids = std::iter::once(pointer.active())
         .chain(pointer.previous())
         .map(|slot| slot.generation_id().to_owned())
         .collect::<Vec<_>>();
+    retained_generation_ids.extend(
+        retention_lease
+            .as_ref()
+            .map(|lease| lease.generation_id().to_owned()),
+    );
     let _ = reclaim_unreferenced_manifests(root, &retained_generation_ids);
-    let _ = reclaim_unreferenced_certifications(root, Some(pointer));
+    let _ = reclaim_unreferenced_certifications(root, Some(pointer), retention_lease.as_ref());
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RepublishStage {
     BeforeCandidateCreation,
@@ -437,6 +473,11 @@ pub(crate) enum RepublishStage {
     AfterCandidateVerification,
     BeforePointerPublication,
     PostPublicationCleanup,
+}
+
+#[cfg(not(test))]
+fn republish_checkpoint(_stage: RepublishStage, _path: Option<&Path>) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

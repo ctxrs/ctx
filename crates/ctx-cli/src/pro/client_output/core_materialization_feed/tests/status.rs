@@ -24,6 +24,7 @@ pub(super) fn result(
             ctx_pro_host_protocol::MaterializedCoverage::Abstained
         }
         CoreProjectionCurrentness::Partial
+        | CoreProjectionCurrentness::Finalizing
         | CoreProjectionCurrentness::Stale
         | CoreProjectionCurrentness::NeedsRebuild => {
             ctx_pro_host_protocol::MaterializedCoverage::Partial
@@ -35,7 +36,7 @@ pub(super) fn result(
             .map(|_| ctx_pro_host_protocol::ProStorageEvidence {
                 graph_manifest_schema: 3,
                 flat_format_version: 2,
-                materializer_checkpoint_version: 4,
+                materializer_checkpoint_version: 5,
                 journal_pack_format_version: 3,
                 legacy_journals_written: 0,
                 journal_pages_written: 2,
@@ -56,6 +57,7 @@ pub(super) fn result(
         },
         supported_operations: BTreeSet::new(),
         available_operations: BTreeSet::new(),
+        finalization_progress: None,
         storage_evidence,
     }
 }

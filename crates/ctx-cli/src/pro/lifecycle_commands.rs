@@ -505,9 +505,9 @@ pub(super) fn lifecycle_status_value(helper: ProStatus, preserved_data: bool) ->
                 Some("ctx pro manage"),
                 "subscription_or_trial_ended",
             ),
-            Some("not_materialized" | "needs_rebuild" | "partial" | "needs_resume") => {
-                ("catch_up_required", Some("ctx pro"), "graph_not_current")
-            }
+            Some(
+                "not_materialized" | "needs_rebuild" | "partial" | "finalizing" | "needs_resume",
+            ) => ("catch_up_required", Some("ctx pro"), "graph_not_current"),
             Some("helper_upgrade_required" | "protocol_mismatch") => {
                 ("repair_required", Some("ctx pro"), "helper_incompatible")
             }

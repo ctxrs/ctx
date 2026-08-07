@@ -91,6 +91,66 @@ pub const MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS: usize = 4_097;
 /// Maximum retained centered event-window coordinates.
 pub const MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS: usize = 101;
 
+/// Maximum copied-event occurrences retained by one bounded lineage query.
+pub const MAX_COPIED_EVENT_LINEAGE_OCCURRENCES: usize = 20;
+
+/// Maximum exact origin-digest postings visited by one bounded lineage query.
+pub const MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS: usize = 4_096;
+
+/// Absolute maximum exact event-identity postings visited by one lineage query.
+///
+/// This independent ceiling covers both live and deleted postings while the
+/// selected event and its forward origin chain are resolved.
+pub const MAX_COPIED_EVENT_LINEAGE_EXACT_IDENTITY_POSTING_VISITS: usize = 2_048;
+
+/// Maximum number of copied-event edges traversed from the canonical event.
+pub const MAX_COPIED_EVENT_LINEAGE_DEPTH: usize = 1_024;
+
+/// Bounded post-ranking lineage policy for one selected search result.
+pub const SEARCH_COPIED_EVENT_LINEAGE_POLICY: CopiedEventLineagePolicy =
+    CopiedEventLineagePolicy::new(3, 64);
+
+/// Bounded lineage-detail policy for one selected show-event response.
+pub const SHOW_COPIED_EVENT_LINEAGE_POLICY: CopiedEventLineagePolicy =
+    CopiedEventLineagePolicy::new(20, 4_096);
+
+/// Caller-selected work and preview-retention ceilings for copied-event lineage.
+///
+/// The query always remains generation-pinned and depth-bounded. Search and
+/// show callers should pass their named policies above so presentation cannot
+/// accidentally widen either product surface. `maximum_occurrences` never
+/// stops traversal; it only caps retained preview rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopiedEventLineagePolicy {
+    pub maximum_occurrences: usize,
+    pub maximum_posting_visits: usize,
+}
+
+impl CopiedEventLineagePolicy {
+    pub const fn new(maximum_occurrences: usize, maximum_posting_visits: usize) -> Self {
+        Self {
+            maximum_occurrences,
+            maximum_posting_visits,
+        }
+    }
+
+    pub(super) fn validate(self) -> Result<()> {
+        if !(1..=MAX_COPIED_EVENT_LINEAGE_OCCURRENCES).contains(&self.maximum_occurrences) {
+            return Err(IndexError::InvalidCopiedEventLineageOccurrenceLimit {
+                requested: self.maximum_occurrences,
+                maximum: MAX_COPIED_EVENT_LINEAGE_OCCURRENCES,
+            });
+        }
+        if !(1..=MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS).contains(&self.maximum_posting_visits) {
+            return Err(IndexError::InvalidCopiedEventLineagePostingVisitLimit {
+                requested: self.maximum_posting_visits,
+                maximum: MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Default retained-byte ceiling for complete Core pages.
 ///
 /// One individually valid Core record always makes progress even when it is
@@ -571,6 +631,62 @@ pub struct EventRecord {
     pub workspace: Option<String>,
     pub cwd: Option<String>,
     pub touched_files: Vec<String>,
+}
+
+/// One inherited-session occurrence reached from a canonical event.
+///
+/// All identities are full stable IDs from the same stored Core record. The
+/// direct copied-from pair identifies the exact event edge, while the parent,
+/// root, and relationship fields describe the occurrence's session lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopiedEventLineageOccurrence {
+    pub event_id: StableEntityId,
+    pub session_id: StableEntityId,
+    pub copied_from_event_id: StableEntityId,
+    pub copied_from_session_id: StableEntityId,
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: StableEntityId,
+    pub session_relationship: SessionRelationshipKind,
+    pub depth: usize,
+}
+
+/// Observed inherited-session count for one relationship kind.
+///
+/// Counts are exact only when the containing lineage result is not truncated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopiedEventLineageRelationshipCount {
+    pub session_relationship: SessionRelationshipKind,
+    pub observed_count: u64,
+}
+
+/// One bounded reverse copied-event lineage result from a pinned generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopiedEventLineage {
+    pub generation_id: String,
+    pub selected_event_id: StableEntityId,
+    pub selected_session_id: StableEntityId,
+    pub canonical_event_id: StableEntityId,
+    pub canonical_session_id: StableEntityId,
+    pub selected_depth: usize,
+    /// Exact when `truncated` is false; otherwise a lower bound.
+    pub observed_count: u64,
+    /// Number of retained preview rows; this may be smaller than an exact
+    /// `observed_count` without making the traversal truncated.
+    pub returned: usize,
+    pub occurrences: Vec<CopiedEventLineageOccurrence>,
+    pub relationship_counts: Vec<CopiedEventLineageRelationshipCount>,
+    /// True only when a traversal-work or depth ceiling prevented completion.
+    /// A full preview with additional exactly counted rows remains false.
+    pub truncated: bool,
+}
+
+impl CopiedEventLineage {
+    /// Returns the total only when every reverse edge was traversed within all
+    /// posting, depth, byte, and other traversal-work ceilings. Preview
+    /// retention alone never makes a count inexact.
+    pub fn exact_observed_count(&self) -> Option<u64> {
+        (!self.truncated).then_some(self.observed_count)
+    }
 }
 
 /// One verified event plus its complete generation-owned Core data.

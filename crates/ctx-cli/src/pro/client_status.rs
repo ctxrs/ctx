@@ -72,7 +72,7 @@ pub(crate) struct HelperSmoke {
     pub(crate) capabilities: BTreeSet<Capability>,
 }
 
-/// Starts an explicit staged helper and completes the exact Protocol V1 hello.
+/// Starts an explicit staged helper and completes the exact Protocol V3 hello.
 /// This does not consult or mutate the installed-helper lifecycle state.
 pub(crate) fn smoke_helper_at_path(data_root: &Path, path: &Path) -> Result<HelperSmoke> {
     smoke_helper_at_path_with_authorization(data_root, path, None)
@@ -360,6 +360,7 @@ pub(super) fn status_outcome(
         CoreProjectionCurrentness::NotMaterialized => Some("not_materialized"),
         CoreProjectionCurrentness::NeedsRebuild => Some("needs_rebuild"),
         CoreProjectionCurrentness::Partial => Some("partial"),
+        CoreProjectionCurrentness::Finalizing => Some("finalizing"),
         CoreProjectionCurrentness::Stale => Some("stale_source"),
         CoreProjectionCurrentness::Current => None,
     };

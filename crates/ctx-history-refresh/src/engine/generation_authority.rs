@@ -5,6 +5,7 @@ use super::*;
 pub struct PinnedCorePublication {
     receipt: SourceBackedRefreshReceipt,
     verified_index: Arc<VerifiedIndex>,
+    query_ready: bool,
 }
 
 impl fmt::Debug for PinnedCorePublication {
@@ -29,9 +30,11 @@ impl PinnedCorePublication {
                 receipt.published_generation
             );
         }
+        let query_ready = verified_generation_is_query_ready(&verified_index)?;
         Ok(Arc::new(Self {
             receipt,
             verified_index,
+            query_ready,
         }))
     }
 
@@ -46,6 +49,10 @@ impl PinnedCorePublication {
 
     pub fn verified_index_ref(&self) -> &VerifiedIndex {
         self.verified_index.as_ref()
+    }
+
+    pub fn is_query_ready(&self) -> bool {
+        self.query_ready
     }
 
     #[cfg(test)]
@@ -118,6 +125,7 @@ impl CoreRefreshEngine {
         self.lock_state()
             .pinned_core_publication
             .as_ref()
+            .filter(|authority| authority.is_query_ready())
             .map(Arc::clone)
     }
 }

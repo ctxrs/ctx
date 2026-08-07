@@ -149,6 +149,7 @@ impl ProviderObservationFixture {
                     true,
                 )?;
                 Ok(SourceBackedRefreshPublication {
+                    zero_source_authority: Vec::new(),
                     generation_id,
                     published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
                     unsupported_routes: 0,
@@ -845,6 +846,16 @@ fn explicit_finite_idle_exit_remains_due_with_retry_and_refresh_pending() {
 }
 
 #[test]
+fn explicit_finite_idle_exit_can_defer_pending_pro_finalization() {
+    assert!(daemon_should_attempt_finite_idle_shutdown(
+        Some(StdDuration::ZERO),
+        Some(Instant::now()),
+        false,
+        false,
+    ));
+}
+
+#[test]
 fn persistent_default_never_has_a_finite_idle_exit() {
     assert!(!daemon_should_attempt_finite_idle_shutdown(
         None,
@@ -857,13 +868,13 @@ fn persistent_default_never_has_a_finite_idle_exit() {
 #[test]
 fn due_consumer_retry_wait_loop_blocks_and_wakes_when_query_becomes_idle() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let generation = ctx_history_index::GenerationWriter::open(
-        super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
-        ctx_history_index::WriterOptions::default(),
+    let generation = crate::semantic::source_backed_refresh_coordinator::publish_authoritative_empty_generation_for_test(
+        &super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
+        "daemon-consumer-retry-idle-fixture",
+        ctx_history_refresh::RefreshOperation::Refresh,
+        ctx_history_capture::SourceBackedRefreshScope::All,
+        None,
     )?
-    .into_writer()
-    .map_err(crate::semantic::committed_generation_recovery_error)?
-    .commit(|_| true)?
     .generation_id;
     let wakeup = Arc::new(super::super::daemon_wakeup::DaemonWakeup::default());
     let activity = Arc::new(
@@ -998,13 +1009,13 @@ fn pending_source_refresh_wait_respects_retry_backoff() {
 #[test]
 fn continuous_query_wait_loop_reaches_consumer_retry_fairness_deadline() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let generation = ctx_history_index::GenerationWriter::open(
-        super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
-        ctx_history_index::WriterOptions::default(),
+    let generation = crate::semantic::source_backed_refresh_coordinator::publish_authoritative_empty_generation_for_test(
+        &super::super::source_backed_refresh_coordinator::source_backed_index_root(temp.path()),
+        "daemon-consumer-retry-fairness-fixture",
+        ctx_history_refresh::RefreshOperation::Refresh,
+        ctx_history_capture::SourceBackedRefreshScope::All,
+        None,
     )?
-    .into_writer()
-    .map_err(crate::semantic::committed_generation_recovery_error)?
-    .commit(|_| true)?
     .generation_id;
     let wakeup = Arc::new(super::super::daemon_wakeup::DaemonWakeup::default());
     let activity = Arc::new(
@@ -1159,6 +1170,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 let receipt = writer.commit(|_| true)?;
                 Ok(SourceBackedRefreshPublication {
                     route_results: Vec::new(),
+                    zero_source_authority: Vec::new(),
                     catalog_route_bindings: Vec::new(),
                     verified_index: None,
                     generation_id: receipt.generation_id,
@@ -1268,6 +1280,7 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
                     executor_route.as_str().to_owned(),
                     true,
                 )],
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
                 verified_index: None,
                 generation_id: receipt.generation_id,

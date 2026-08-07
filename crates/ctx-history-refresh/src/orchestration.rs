@@ -13,6 +13,7 @@ use registry_issues::selected_registry_route_count;
 pub(super) use registry_issues::{
     automatic_registry_route_failures, reject_blocking_automatic_registry_issues,
 };
+use registry_issues::{automatic_registry_route_less_blockers, RouteLessRegistryBlockers};
 
 pub(super) struct SourceBackedRefreshPlan<'a> {
     pub(super) explicit_source_catalog: Option<&'a ExplicitSourceCatalogAuthority>,
@@ -29,6 +30,12 @@ struct MergedSourceBackedRegistry {
     requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     retained_generation: Option<VerifiedIndex>,
     requested_catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
+}
+
+enum SourceBackedInventoryDisposition {
+    AuthoritativeContent,
+    AuthoritativeEmpty(Vec<SourceBackedZeroSourceAuthority>),
+    UnsupportedOrUnavailable(ZeroSourcePublicationBlocked),
 }
 
 pub(super) fn execute_source_backed_refresh(
@@ -255,6 +262,20 @@ pub(super) fn refresh_all_provider_sources_route_local(
     } else {
         Vec::new()
     };
+    let route_less_blockers =
+        automatic_registry_route_less_blockers(&build.issues, &registry_failures);
+    let previous_nonempty_routes = retained_generation
+        .as_ref()
+        .map(|generation| {
+            generation
+                .manifest()
+                .source_routes()
+                .iter()
+                .filter(|route| !route.sources().is_empty())
+                .map(|route| route.route_identity().clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
     // `All` is a logical request over every route in this request's registry.
     // Express it to Core as an exact set so routes committed by an earlier
     // request-scoped explicit overlay are carried as read authority instead of
@@ -305,97 +326,118 @@ pub(super) fn refresh_all_provider_sources_route_local(
     // to the captured state or conservatively forces the next warm refresh.
     let admitted_route_observations = admitted_route_observations(&build.registry, &physical_scope);
     let (executor, _issues) = build.into_refresh_executor(WriterOptions::default());
-    let mut receipt = executor
-        .refresh_scope_with_detailed_progress_and_publication_metadata(
-            index_root,
-            physical_scope,
-            report_progress,
-            |context| {
-                run_after_capture_scan_before_metadata_hook();
-                let successful_route_outcomes = context.successful_route_outcomes();
-                let failed_routes = context.failed_route_outcomes();
-                let source_failures = context.source_failures();
-                let route_results = provider_route_results(
-                    ProviderPublicationFacts {
-                        selected_route_ids: &context
-                            .selected_route_ids()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        successful_route_outcomes,
-                        failed_routes: &failed_routes,
-                        source_failures: &source_failures,
-                        logical_source_failures: context.logical_source_failures(),
-                        record_rejections: context.record_rejections(),
-                        manifest: context.manifest(),
-                    },
-                    &registry_failures,
-                    &expected_selected_route_ids,
+    let mut terminal_coverage_error = None;
+    let refresh_result = executor.refresh_scope_with_detailed_progress_and_publication_metadata(
+        index_root,
+        physical_scope,
+        report_progress,
+        |context| {
+            run_after_capture_scan_before_metadata_hook();
+            let successful_route_outcomes = context.successful_route_outcomes();
+            let failed_routes = context.failed_route_outcomes();
+            let source_failures = context.source_failures();
+            let route_results = provider_route_results(
+                ProviderPublicationFacts {
+                    selected_route_ids: &context.selected_route_ids().cloned().collect::<Vec<_>>(),
+                    successful_route_outcomes,
+                    failed_routes: &failed_routes,
+                    source_failures: &source_failures,
+                    logical_source_failures: context.logical_source_failures(),
+                    record_rejections: context.record_rejections(),
+                    manifest: context.manifest(),
+                },
+                &registry_failures,
+                &expected_selected_route_ids,
+            )
+            .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+            let current = SourceBackedRefreshCurrent::from_sources(
+                &context.manifest().sources,
+                context.removed_source_count(),
+            )
+            .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+            let (published_explicit_source_catalog, catalog_route_bindings) =
+                reconcile_published_catalog_witness(
+                    previous_explicit_source_catalog.as_ref(),
+                    &previous_catalog_route_bindings,
+                    requested_explicit_source_catalog.as_ref(),
+                    &requested_catalog_route_bindings,
+                    context.manifest(),
+                    &route_results,
                 )
                 .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                let current = SourceBackedRefreshCurrent::from_sources(
-                    &context.manifest().sources,
-                    context.removed_source_count(),
-                )
-                .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                let (published_explicit_source_catalog, catalog_route_bindings) =
-                    reconcile_published_catalog_witness(
-                        previous_explicit_source_catalog.as_ref(),
-                        &previous_catalog_route_bindings,
-                        requested_explicit_source_catalog.as_ref(),
-                        &requested_catalog_route_bindings,
-                        context.manifest(),
-                        &route_results,
-                    )
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                let mut publication = SourceBackedRefreshPublication {
-                    generation_id: context.generation_id().to_owned(),
-                    published_explicit_source_catalog,
-                    unsupported_routes: route_results
-                        .iter()
-                        .filter(|result| result.outcome.failure_class() == Some("incompatible"))
-                        .count(),
-                    certified_source_count: current.source_count,
-                    certified_source_bytes: current.certified_source_bytes,
-                    current,
-                    route_results,
-                    catalog_route_bindings,
-                    timings: SourceBackedRefreshTimings::default(),
-                    verified_index: None,
-                };
-                covered_publication.apply_receipt(&mut publication);
-                let terminal = SourceBackedRefreshReceipt::from_verified_publication(
-                    previous_generation.clone(),
-                    context.generation_id().to_owned(),
-                    &publication,
-                )
-                .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                let route_observations = successful_route_outcomes
+            let mut publication = SourceBackedRefreshPublication {
+                generation_id: context.generation_id().to_owned(),
+                published_explicit_source_catalog,
+                unsupported_routes: route_results
                     .iter()
-                    .filter(|outcome| outcome.logical_source_failure_total == 0)
-                    .filter(|outcome| {
-                        context
-                            .manifest()
-                            .source_route(&outcome.route_identity)
-                            .is_some_and(|route| route.missing_state().is_none())
-                    })
-                    .filter_map(|outcome| {
-                        admitted_route_observations
-                            .get(&outcome.route_identity)
-                            .cloned()
-                            .map(|observation| (outcome.route_identity.clone(), observation))
-                    })
-                    .collect();
-                SourceBackedPublicationMetadata {
-                    request_id: request_id.to_owned(),
-                    operation,
-                    refresh_scope: scope.clone(),
-                    receipt: terminal.to_json(),
-                    route_observations,
+                    .filter(|result| result.outcome.failure_class() == Some("incompatible"))
+                    .count(),
+                certified_source_count: current.source_count,
+                certified_source_bytes: current.certified_source_bytes,
+                current,
+                route_results,
+                zero_source_authority: Vec::new(),
+                catalog_route_bindings,
+                timings: SourceBackedRefreshTimings::default(),
+                verified_index: None,
+            };
+            covered_publication.apply_receipt(&mut publication);
+            publication.zero_source_authority = match classify_inventory_disposition(
+                &publication,
+                &context.complete_inventory_route_ids().cloned().collect(),
+                &previous_nonempty_routes,
+                &route_less_blockers,
+            ) {
+                SourceBackedInventoryDisposition::AuthoritativeContent => Vec::new(),
+                SourceBackedInventoryDisposition::AuthoritativeEmpty(authority) => authority,
+                SourceBackedInventoryDisposition::UnsupportedOrUnavailable(error) => {
+                    let detail = error.to_string();
+                    terminal_coverage_error = Some(error);
+                    return Err(IndexError::PublicationMetadata(detail));
                 }
-                .encode()
-            },
-        )
-        .context("run capture-owned source-backed refresh")?;
+            };
+            let terminal = SourceBackedRefreshReceipt::from_verified_publication(
+                previous_generation.clone(),
+                context.generation_id().to_owned(),
+                &publication,
+            )
+            .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+            let route_observations = successful_route_outcomes
+                .iter()
+                .filter(|outcome| outcome.logical_source_failure_total == 0)
+                .filter(|outcome| {
+                    context
+                        .manifest()
+                        .source_route(&outcome.route_identity)
+                        .is_some_and(|route| route.missing_state().is_none())
+                })
+                .filter_map(|outcome| {
+                    admitted_route_observations
+                        .get(&outcome.route_identity)
+                        .cloned()
+                        .map(|observation| (outcome.route_identity.clone(), observation))
+                })
+                .collect();
+            SourceBackedPublicationMetadata {
+                version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+                request_id: request_id.to_owned(),
+                operation,
+                refresh_scope: scope.clone(),
+                receipt: terminal.to_json(),
+                route_observations,
+            }
+            .encode()
+        },
+    );
+    let mut receipt = match refresh_result {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            if let Some(error) = terminal_coverage_error {
+                return Err(error.into());
+            }
+            return Err(error).context("run capture-owned source-backed refresh");
+        }
+    };
     let unsupported_routes = receipt.unsupported_routes.len();
     let (disposition, verified_index) = receipt.take_verified_publication().ok_or_else(|| {
         anyhow!("capture-owned metadata publication returned no exact verified generation")
@@ -458,19 +500,170 @@ pub(super) fn refresh_all_provider_sources_route_local(
             &route_results,
         )?;
     let mut publication = SourceBackedRefreshPublication {
-        generation_id: receipt.commit.generation_id,
+        generation_id: receipt.commit.generation_id.clone(),
         published_explicit_source_catalog,
         unsupported_routes,
         certified_source_count: receipt.certified_source_count,
         certified_source_bytes: receipt.certified_source_bytes,
         current,
         route_results,
+        zero_source_authority: Vec::new(),
         catalog_route_bindings,
         timings,
         verified_index: Some(Arc::new(verified_index)),
     };
     covered_publication.apply(&mut publication);
+    publication.zero_source_authority = match classify_inventory_disposition(
+        &publication,
+        &receipt
+            .complete_inventory_route_ids
+            .iter()
+            .cloned()
+            .collect(),
+        &previous_nonempty_routes,
+        &route_less_blockers,
+    ) {
+        SourceBackedInventoryDisposition::AuthoritativeContent => Vec::new(),
+        SourceBackedInventoryDisposition::AuthoritativeEmpty(authority) => authority,
+        SourceBackedInventoryDisposition::UnsupportedOrUnavailable(error) => {
+            return Err(error.into())
+        }
+    };
+    let verified_index = publication
+        .verified_index
+        .as_ref()
+        .ok_or_else(|| anyhow!("reused Core refresh publication lost its exact verified pin"))?;
+    if publication.current.source_count == 0 && !verified_generation_is_query_ready(verified_index)?
+    {
+        let terminal = SourceBackedRefreshReceipt::from_verified_publication(
+            previous_generation,
+            publication.generation_id.clone(),
+            &publication,
+        )?;
+        let route_observations = receipt
+            .successful_route_outcomes
+            .iter()
+            .filter(|outcome| outcome.logical_source_failure_total == 0)
+            .filter(|outcome| {
+                receipt
+                    .commit
+                    .manifest()
+                    .source_route(&outcome.route_identity)
+                    .is_some_and(|route| route.missing_state().is_none())
+            })
+            .filter_map(|outcome| {
+                admitted_route_observations
+                    .get(&outcome.route_identity)
+                    .cloned()
+                    .map(|observation| (outcome.route_identity.clone(), observation))
+            })
+            .collect();
+        let metadata = SourceBackedPublicationMetadata {
+            version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+            request_id: request_id.to_owned(),
+            operation,
+            refresh_scope: scope.clone(),
+            receipt: terminal.to_json(),
+            route_observations,
+        }
+        .encode()?;
+        let writer = GenerationWriter::open(index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(committed_generation_recovery_error)?;
+        let recertified = Arc::new(
+            writer.republish_current_publication_metadata(&publication.generation_id, metadata)?,
+        );
+        let durable_metadata = SourceBackedPublicationMetadata::decode(&recertified)?;
+        if durable_metadata.request_id != request_id
+            || durable_metadata.operation != operation
+            || durable_metadata.refresh_scope != scope
+            || !durable_metadata.certifies_generation(&recertified)
+        {
+            bail!("recertified Core source-refresh metadata does not match its exact request");
+        }
+        publication.verified_index = Some(recertified);
+    }
     Ok(publication)
+}
+
+fn classify_inventory_disposition(
+    publication: &SourceBackedRefreshPublication,
+    complete_inventory_routes: &BTreeSet<SourceRouteIdentity>,
+    previous_nonempty_routes: &BTreeSet<SourceRouteIdentity>,
+    route_less_blockers: &RouteLessRegistryBlockers,
+) -> SourceBackedInventoryDisposition {
+    if route_less_blockers.total != 0 && publication.route_results.is_empty() {
+        return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
+            route_less_blockers.publication_error(),
+        );
+    }
+    if publication.current.source_count != 0 {
+        return SourceBackedInventoryDisposition::AuthoritativeContent;
+    }
+    if route_less_blockers.total != 0 {
+        return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
+            route_less_blockers.publication_error(),
+        );
+    }
+    if publication.route_results.is_empty() {
+        return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
+            ZeroSourcePublicationBlocked::new(
+                "zero-source publication has no executable certified route",
+            ),
+        );
+    }
+    let covered = publication
+        .zero_source_authority
+        .iter()
+        .map(|authority| (authority.route_identity.clone(), authority.kind))
+        .collect::<BTreeMap<_, _>>();
+    let mut authority = Vec::with_capacity(publication.route_results.len());
+    for result in &publication.route_results {
+        if !result.outcome.is_success() {
+            return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
+                ZeroSourcePublicationBlocked::new(format!(
+                    "zero-source publication route {} did not complete authoritatively",
+                    result.route_identity,
+                )),
+            );
+        }
+        let Ok(route_identity) = SourceRouteIdentity::from_sha256(result.route_identity.clone())
+        else {
+            return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
+                ZeroSourcePublicationBlocked::new(
+                    "zero-source publication contains an invalid route identity",
+                ),
+            );
+        };
+        let kind = covered
+            .get(&route_identity)
+            .copied()
+            .or_else(|| {
+                previous_nonempty_routes
+                    .contains(&route_identity)
+                    .then_some(SourceBackedZeroSourceAuthorityKind::ConfirmedDeletion)
+            })
+            .or_else(|| {
+                complete_inventory_routes
+                    .contains(&route_identity)
+                    .then_some(SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory)
+            });
+        let Some(kind) = kind else {
+            return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
+                ZeroSourcePublicationBlocked::new(format!(
+                    "zero-source publication route {} has neither a complete empty inventory nor confirmed deletion",
+                    route_identity.as_str(),
+                )),
+            );
+        };
+        authority.push(SourceBackedZeroSourceAuthority {
+            generation_id: publication.generation_id.clone(),
+            route_identity,
+            kind,
+        });
+    }
+    authority.sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
+    SourceBackedInventoryDisposition::AuthoritativeEmpty(authority)
 }
 
 pub(super) fn exclusive_scan_stage_duration(
@@ -501,6 +694,7 @@ fn publication_from_terminal_receipt(
         certified_source_bytes: receipt.current.certified_source_bytes,
         current: receipt.current,
         route_results: receipt.route_results,
+        zero_source_authority: receipt.zero_source_authority,
         catalog_route_bindings: receipt.catalog_route_bindings,
         timings,
         verified_index,

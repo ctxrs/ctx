@@ -592,6 +592,23 @@ pub(super) fn validate_owner(
             actual: owner.native_session_id.clone(),
         });
     }
+    match (
+        owner.parent_native_session_id.as_ref(),
+        owner.root_native_session_id.as_ref(),
+        owner.session_relationship,
+    ) {
+        (None, Some(root), SessionRelationshipKind::Root) if root == native_session_id => {}
+        (Some(_), Some(_), relationship)
+            if relationship != SessionRelationshipKind::Root
+                && relationship != SessionRelationshipKind::RelatedUnknown => {}
+        _ => {
+            return Err(CodexSourceBackedErrorV0::Capture(
+                CaptureError::InvalidPayload(
+                    "Codex scanner owner is not a normalized lineage tuple".to_owned(),
+                ),
+            ))
+        }
+    }
     Ok(())
 }
 
@@ -630,6 +647,7 @@ pub(super) fn certify_scan(
     staged_documents: u64,
     scan_counters: CodexScanCounters,
     lineage_dependency_sha256: [u8; 32],
+    certified_lineage_facts: Option<CodexCertifiedLineageFactsV0>,
 ) -> CodexSourceBackedResultV0<CertifiedSource> {
     if scan_counters.retained_records != staged_documents {
         return Err(CodexSourceBackedErrorV0::ScanCountMismatch);
@@ -637,7 +655,7 @@ pub(super) fn certify_scan(
     let counts = cumulative_counts(base, scan, staged_documents, scan_counters)?;
     let opening = source_observation(source_key, &scan.before_observation)?;
     let closing = source_observation(source_key, &scan.after_observation)?;
-    let frontier = match scan.checkpoint(lineage_dependency_sha256) {
+    let frontier = match scan.checkpoint(lineage_dependency_sha256, certified_lineage_facts) {
         Some(checkpoint) => Some(SourceFrontier::new(
             CODEX_FRONTIER_KIND,
             TypedKey::bytes(checkpoint.encode()?)?,

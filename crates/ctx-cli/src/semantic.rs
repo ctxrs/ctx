@@ -109,6 +109,7 @@ pub(crate) use source_status::source_epoch_status_report;
 mod source_backed_pro_catch_up;
 pub(crate) use source_backed_pro_catch_up::wait_for_completed_generation as wait_for_source_backed_pro_generation;
 pub(crate) use source_backed_pro_catch_up::{
+    cancel_core_finalization_generation_lease,
     helper_recheck_targets as source_backed_pro_recheck_targets,
     publish_helper_recheck_intent as publish_source_backed_pro_recheck,
     wake_helper_recheck as wake_source_backed_pro_recheck,

@@ -87,7 +87,7 @@ fn mcp_status_exactly_matches_cli_json_for_pristine_unavailable_state() {
 fn mcp_status_exactly_matches_cli_json_for_existing_healthy_generation() {
     let temp = tempdir();
     let root = data_root(&temp);
-    initialize_generation_only_core(&root);
+    initialize_authoritative_empty_core(&root);
 
     let (cli, result) =
         assert_cli_mcp_status_parity(&temp, &[("CTX_LOCAL_USAGE_ENABLED", "false")]);
@@ -864,7 +864,7 @@ fn mcp_search_applies_source_backed_identity_filters() {
 }
 
 #[test]
-fn mcp_search_validates_inputs_and_reports_uninitialized_source_index() {
+fn mcp_search_validates_inputs_and_reports_fail_closed_source_unavailability() {
     let temp = tempdir();
     let responses = mcp_roundtrip(
         &temp,
@@ -941,13 +941,14 @@ fn mcp_search_validates_inputs_and_reports_uninitialized_source_index() {
     assert!(mcp_content_text(hidden_provider).contains("provider must be one of"));
     let alias_result = &responses[3]["result"];
     assert_eq!(alias_result["isError"], true);
-    assert!(alias_result["structuredContent"]["error_code"].is_null());
-    assert!(alias_result["structuredContent"]["error"]
-        .as_str()
-        .unwrap()
-        .contains("the Core index does not exist; retry with daemon refresh enabled"));
-    assert!(mcp_content_text(alias_result)
-        .contains("the Core index does not exist; retry with daemon refresh enabled"));
+    assert_eq!(
+        alias_result["structuredContent"],
+        json!({
+            "error": "source_unavailable",
+            "error_code": "source_unavailable",
+        })
+    );
+    assert_eq!(mcp_content_text(alias_result), "source_unavailable");
     assert!(
         !temp.path().join("search/lexical").exists(),
         "MCP search must not create an uninitialized Core index"

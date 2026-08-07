@@ -9,6 +9,33 @@ use ctx_history_core::platform_security::restrict_private_directory;
 
 use super::*;
 
+#[test]
+fn query_authority_errors_remain_typed_in_mcp_results() {
+    for (error, code, retryable) in [
+        (
+            ctx_history_refresh::GenerationQueryAuthorityError::UncertifiedEmpty {
+                generation_id: "11".repeat(32),
+            },
+            "source_unavailable",
+            true,
+        ),
+        (
+            ctx_history_refresh::GenerationQueryAuthorityError::Invalid {
+                generation_id: "22".repeat(32),
+                detail: "unsupported metadata version".to_owned(),
+            },
+            "publication_authority_invalid",
+            false,
+        ),
+    ] {
+        let result = tool_error_result(anyhow::Error::new(error));
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["error_code"], code);
+        assert_eq!(result["structuredContent"]["retryable"], retryable);
+        assert!(result["structuredContent"]["detail"].is_string());
+    }
+}
+
 #[derive(Clone, Copy)]
 enum OutputFailure {
     None,

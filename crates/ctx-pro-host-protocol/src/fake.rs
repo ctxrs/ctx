@@ -45,7 +45,7 @@ impl FakeBlameFailure {
     }
 }
 
-/// Deterministic in-process Protocol V2 helper used by public conformance tests.
+/// Deterministic in-process Protocol V3 helper used by public conformance tests.
 #[derive(Debug)]
 pub struct FakeHelper {
     helper_version: String,
@@ -137,6 +137,7 @@ impl FakeHelper {
                     },
                     supported_operations: BTreeSet::new(),
                     available_operations: BTreeSet::new(),
+                    finalization_progress: None,
                     storage_evidence: None,
                 })
             }
@@ -145,7 +146,7 @@ impl FakeHelper {
             }
             _ if !self.negotiated => HelperMessage::Error(ProtocolError::new(
                 ErrorClass::ProtocolMismatch,
-                "exact Protocol V2 hello must be the first request",
+                "exact Protocol V3 hello must be the first request",
             )),
             _ => HelperMessage::Error(ProtocolError::new(
                 ErrorClass::ProtocolMismatch,

@@ -31,10 +31,12 @@ use crate::{
         daemon::{daemon_wait_duration, install_daemon_test_job_hooks, DaemonTestJobHooks},
         source_backed_refresh_coordinator::EventWatermark,
         source_backed_refresh_coordinator::{
-            coordinate_source_backed_refresh, source_backed_index_root, CoreRefreshEngine,
-            SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshMode,
-            SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-            SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
+            coordinate_source_backed_refresh, publish_authoritative_empty_generation_for_test,
+            publish_authoritative_empty_generation_with_route_results_for_test,
+            source_backed_index_root, CoreRefreshEngine, SourceBackedRefreshCurrent,
+            SourceBackedRefreshExecution, SourceBackedRefreshMode, SourceBackedRefreshPublication,
+            SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure,
+            SourceBackedRefreshTimings,
         },
         source_epoch_status_report,
     },
@@ -44,14 +46,16 @@ use crate::{
 use super::{
     background_refresh_rest, daemon_consumer_retry_due, daemon_core_refresh_job_path,
     daemon_job_should_backoff, daemon_mode_runs_core_pro_catch_up,
-    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, persist_pro_status,
+    daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path,
+    newer_active_pro_generation_is_pending, persist_pro_status, pin_scheduled_pro_target,
     prepare_pro_retry_for_generation, preserve_daemon_background_refresh_recovery_provenance,
-    read_daemon_job_status, read_pro_status, record_daemon_job_retry, record_source_refresh_retry,
+    read_daemon_job_status, read_pro_status, reconcile_core_finalization_generation_lease,
+    record_daemon_job_retry, record_source_refresh_retry,
     restore_daemon_background_refresh_cadence, restore_daemon_consumer_retries,
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
-    run_pending_core_refresh, run_pro_catch_up_with_retry, write_daemon_job_status,
-    DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
-    SourceBackedProCoreAuthority, DAEMON_BACKGROUND_REFRESH_MAX_REST,
+    run_pending_core_pro_catch_up_with, run_pending_core_refresh, run_pro_catch_up_with_retry,
+    write_daemon_job_status, DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
+    SourceBackedProCatchUpRun, SourceBackedProCoreAuthority, DAEMON_BACKGROUND_REFRESH_MAX_REST,
     DAEMON_BACKGROUND_REFRESH_MIN_REST,
 };
 
@@ -72,14 +76,13 @@ fn daemon_args() -> DaemonRunArgs {
 }
 
 fn publish_empty_core_generation(data_root: &Path) -> String {
-    ctx_history_index::GenerationWriter::open(
-        source_backed_index_root(data_root),
-        ctx_history_index::WriterOptions::default(),
+    publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(data_root),
+        "daemon-scheduler-empty-core-fixture",
+        ctx_history_refresh::RefreshOperation::Refresh,
+        SourceBackedRefreshScope::All,
+        None,
     )
-    .unwrap()
-    .into_writer()
-    .unwrap()
-    .commit(|_| true)
     .unwrap()
     .generation_id
 }
@@ -87,29 +90,31 @@ fn publish_empty_core_generation(data_root: &Path) -> String {
 #[path = "daemon_scheduler_tests/refresh_retry.rs"]
 mod refresh_retry;
 
-fn publish_empty_authoritative_generation(index_root: &Path) -> SourceBackedRefreshPublication {
-    let receipt = GenerationWriter::open(index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap()
-        .commit(|_| true)
-        .unwrap();
-    SourceBackedRefreshPublication {
-        route_results: Vec::new(),
-        catalog_route_bindings: Vec::new(),
-        verified_index: None,
-        generation_id: receipt.generation_id.clone(),
-        published_explicit_source_catalog: None,
-        unsupported_routes: 0,
-        certified_source_count: 0,
-        certified_source_bytes: 0,
-        current: SourceBackedRefreshCurrent::default(),
-        timings: SourceBackedRefreshTimings {
-            discovery_us: 1,
-            scan_stage_us: 1,
-            commit_us: 1,
-        },
-    }
+fn publish_empty_authoritative_generation(
+    execution: &SourceBackedRefreshExecution<'_>,
+) -> SourceBackedRefreshPublication {
+    publish_empty_authoritative_generation_with_route_results(execution, None)
+}
+
+fn publish_empty_authoritative_generation_with_route_results(
+    execution: &SourceBackedRefreshExecution<'_>,
+    route_results: Option<Vec<SourceBackedRefreshRouteResult>>,
+) -> SourceBackedRefreshPublication {
+    let mut publication = publish_authoritative_empty_generation_with_route_results_for_test(
+        execution.index_root,
+        execution.request_id,
+        execution.operation,
+        execution.scope.clone(),
+        execution.explicit_source_catalog.cloned(),
+        route_results,
+    )
+    .unwrap();
+    publication.timings = SourceBackedRefreshTimings {
+        discovery_us: 1,
+        scan_stage_us: 1,
+        commit_us: 1,
+    };
+    publication
 }
 
 fn readiness_source() -> ctx_history_core::SourceKey {
@@ -307,6 +312,7 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
             "ab".repeat(32),
             true,
         )],
+        zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
         verified_index: None,
         generation_id: receipt.generation_id,
@@ -499,6 +505,7 @@ fn startup_seeded_manual_all_continuation_scans_each_route_once() {
                 .collect::<Vec<_>>();
             let mut publication = SourceBackedRefreshPublication {
                 route_results,
+                zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
                 verified_index: None,
                 generation_id: receipt.generation_id,
@@ -633,7 +640,7 @@ fn one_core_cycle_then_scheduler_drains_optional_consumers() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
-            Ok(publish_empty_authoritative_generation(execution.index_root))
+            Ok(publish_empty_authoritative_generation(&execution))
         },
     ));
     coordinator.enqueue_for_test(None);
@@ -845,7 +852,7 @@ fn nonretryable_pro_attempt_is_generation_guarded() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
-            Ok(publish_empty_authoritative_generation(execution.index_root))
+            Ok(publish_empty_authoritative_generation(&execution))
         },
     ));
     coordinator.enqueue_for_test(None);
@@ -914,7 +921,7 @@ fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
     let temp = tempfile::tempdir().unwrap();
     let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
         |execution: SourceBackedRefreshExecution<'_>| {
-            Ok(publish_empty_authoritative_generation(execution.index_root))
+            Ok(publish_empty_authoritative_generation(&execution))
         },
     ));
     coordinator.enqueue_for_test(None);
@@ -973,14 +980,297 @@ fn local_completed_pro_status_cannot_suppress_scheduler_validation() {
 }
 
 #[test]
-fn pro_catch_up_requests_immediate_drain_only_after_materializer_work() {
-    let replay = super::core_pro_catch_up_iteration(false);
+fn pro_catch_up_requests_immediate_drain_after_work_or_a_successful_yield() {
+    let replay = super::core_pro_catch_up_iteration(false, false);
     assert!(!replay.did_work);
     assert!(!replay.continue_immediately);
 
-    let materialized = super::core_pro_catch_up_iteration(true);
+    let materialized = super::core_pro_catch_up_iteration(true, false);
     assert!(materialized.did_work);
     assert!(materialized.continue_immediately);
+
+    let pending = super::core_pro_catch_up_iteration(false, true);
+    assert!(!pending.did_work);
+    assert!(pending.continue_immediately);
+
+    let status = json!({
+        "status": "pending",
+        "pending": true,
+        "retryable": false,
+        "reason": "finalizing",
+    });
+    assert!(!daemon_job_should_backoff(&status));
+    let mut backoff = DaemonRetryBackoff::default();
+    let recorded = record_daemon_job_retry(&mut backoff, status);
+    assert_eq!(recorded["reason"], "finalizing");
+    assert_eq!(backoff.consecutive_failures, 0);
+}
+
+#[test]
+fn durable_finalization_pending_bypasses_same_generation_attempt_guard() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_semantic_catch_up_generation(temp.path(), 1);
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "pending",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "finalization_progress": {
+                "materialization_id": "a".repeat(64),
+                "core_generation_id": generation,
+                "finish_request_digest": "c".repeat(64),
+                "materializer_revision": "materializer-v1",
+                "phase": "emit_replay",
+                "cursor_sha256": "b".repeat(64),
+            },
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+            "reason": "finalizing",
+            "consecutive_failures": 0,
+            "retry_after_ms": null,
+            "retry_not_before_at_ms": null,
+        }),
+    )
+    .unwrap();
+    let mut runtime = DaemonRuntime::default();
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+
+    let scheduled = run_pending_core_pro_catch_up(temp.path(), &mut runtime, None).unwrap();
+
+    assert!(
+        scheduled.is_some(),
+        "durable finalization must retain and reuse the stable Core pin"
+    );
+    assert_eq!(
+        runtime.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(generation.as_str())
+    );
+    assert_eq!(pinned_generation(temp.path()), generation);
+}
+
+#[test]
+fn fresh_restart_pins_durable_finalizing_target_before_newer_active_core() {
+    let temp = tempfile::tempdir().unwrap();
+    let finalizing_generation = publish_semantic_catch_up_generation(temp.path(), 1);
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "pending",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": finalizing_generation,
+            "receipt_core_generation_id": null,
+            "finalization_progress": {
+                "materialization_id": "a".repeat(64),
+                "core_generation_id": finalizing_generation,
+                "finish_request_digest": "c".repeat(64),
+                "materializer_revision": "materializer-v1",
+                "phase": "emit_replay",
+                "cursor_sha256": "b".repeat(64),
+            },
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+            "reason": "finalizing",
+            "consecutive_failures": 0,
+            "retry_after_ms": null,
+            "retry_not_before_at_ms": null,
+        }),
+    )
+    .unwrap();
+    reconcile_core_finalization_generation_lease(temp.path()).unwrap();
+    let mut active_generation = String::new();
+    for revision in 2..=4 {
+        active_generation = publish_semantic_catch_up_generation(temp.path(), revision);
+    }
+    assert_ne!(active_generation, finalizing_generation);
+
+    let (scheduled_generation, scheduled_pin) = pin_scheduled_pro_target(temp.path())
+        .unwrap()
+        .expect("durable finalization target");
+    assert_eq!(scheduled_generation, finalizing_generation);
+    assert_eq!(scheduled_pin.generation_id(), finalizing_generation);
+    assert!(newer_active_pro_generation_is_pending(temp.path(), &finalizing_generation).unwrap());
+    let queued = super::core_pro_catch_up_iteration(false, true);
+    assert!(queued.continue_immediately);
+}
+
+#[test]
+fn completing_old_finalizing_target_selects_newer_active_core_on_next_scheduler_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let finalizing_generation = publish_semantic_catch_up_generation(temp.path(), 1);
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "pending",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": finalizing_generation,
+            "receipt_core_generation_id": null,
+            "finalization_progress": {
+                "materialization_id": "a".repeat(64),
+                "core_generation_id": finalizing_generation,
+                "finish_request_digest": "c".repeat(64),
+                "materializer_revision": "materializer-v1",
+                "phase": "emit_replay",
+                "cursor_sha256": "b".repeat(64),
+            },
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+            "reason": "finalizing",
+            "consecutive_failures": 0,
+            "retry_after_ms": null,
+            "retry_not_before_at_ms": null,
+        }),
+    )
+    .unwrap();
+    let active_generation = publish_semantic_catch_up_generation(temp.path(), 2);
+    assert_ne!(active_generation, finalizing_generation);
+
+    fn completed_status(generation: &str, attempts: u64) -> Value {
+        json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "completed",
+            "pending": false,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": generation,
+            "attempts": attempts,
+            "last_attempt_at_ms": 2,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+        })
+    }
+
+    let mut runtime = DaemonRuntime::default();
+    let mut selected = Vec::new();
+    let old = run_pending_core_pro_catch_up_with(
+        temp.path(),
+        &mut runtime,
+        None,
+        |data_root, _runtime, generation, authority| {
+            assert_eq!(generation, finalizing_generation);
+            assert_eq!(authority.generation_id(), finalizing_generation);
+            selected.push(generation.to_owned());
+            let status = completed_status(generation, 2);
+            persist_pro_status(data_root, &status)?;
+            Ok(SourceBackedProCatchUpRun {
+                status,
+                did_work: true,
+                continuation_pending: false,
+            })
+        },
+    )
+    .unwrap()
+    .expect("old finalizing target scheduler turn");
+    assert!(old.continue_immediately);
+    assert!(runtime.sidecar_drain.pro_attempted_generation.is_none());
+
+    let newer = run_pending_core_pro_catch_up_with(
+        temp.path(),
+        &mut runtime,
+        None,
+        |data_root, _runtime, generation, authority| {
+            assert_eq!(generation, active_generation);
+            assert_eq!(authority.generation_id(), active_generation);
+            selected.push(generation.to_owned());
+            let status = completed_status(generation, 1);
+            persist_pro_status(data_root, &status)?;
+            Ok(SourceBackedProCatchUpRun {
+                status,
+                did_work: true,
+                continuation_pending: false,
+            })
+        },
+    )
+    .unwrap()
+    .expect("newer active Core scheduler turn");
+
+    assert!(newer.did_work);
+    assert_eq!(selected, [finalizing_generation, active_generation.clone()]);
+    assert_eq!(
+        runtime.sidecar_drain.pro_attempted_generation.as_deref(),
+        Some(active_generation.as_str())
+    );
+    assert_eq!(
+        read_pro_status(temp.path()).unwrap()["core_generation_id"],
+        active_generation
+    );
+}
+
+#[test]
+fn foreground_query_defers_the_next_finalization_quantum() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let finalizing = json!({
+        "schema_version": 1,
+        "owner": "daemon",
+        "kind": "source_backed_pro_catch_up",
+        "status": "pending",
+        "pending": true,
+        "retryable": false,
+        "core_generation_id": generation,
+        "receipt_core_generation_id": null,
+        "finalization_progress": {
+            "materialization_id": "a".repeat(64),
+            "core_generation_id": generation,
+            "finish_request_digest": "c".repeat(64),
+            "materializer_revision": "materializer-v1",
+            "phase": "emit_replay",
+            "cursor_sha256": "b".repeat(64),
+        },
+        "attempts": 1,
+        "last_attempt_at_ms": 1,
+        "last_attempt_duration_us": 1,
+        "error_code": null,
+        "last_error": null,
+        "reason": "finalizing",
+        "consecutive_failures": 0,
+        "retry_after_ms": null,
+        "retry_not_before_at_ms": null,
+    });
+    persist_pro_status(temp.path(), &finalizing).unwrap();
+    let activity = Arc::new(crate::semantic::query_service::DaemonQueryActivity::new());
+    let _request = activity.begin_request().expect("foreground query");
+    let mut runtime = DaemonRuntime::default();
+
+    let deferred = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        false,
+        Some(activity.as_ref()),
+        None,
+    )
+    .unwrap();
+
+    assert!(!deferred.did_work);
+    assert!(!deferred.continue_immediately);
+    assert_eq!(read_pro_status(temp.path()).unwrap(), finalizing);
 }
 
 #[test]

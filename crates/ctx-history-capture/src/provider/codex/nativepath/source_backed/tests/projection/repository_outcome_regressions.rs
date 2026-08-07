@@ -254,8 +254,8 @@ fn codex_post_fork_execution_fails_closed_on_an_unavailable_older_ancestor() {
 
     assert!(matches!(
         ingest_codex_source_backed_v0(&sessions, &index),
-        Err(CodexSourceBackedErrorV0::Index(
-            IndexError::InvalidSessionRelationshipGraph(_)
+        Err(CodexSourceBackedErrorV0::Capture(
+            CaptureError::InvalidPayload(_)
         ))
     ));
 }

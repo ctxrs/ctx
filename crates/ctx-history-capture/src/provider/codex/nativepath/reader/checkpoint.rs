@@ -595,6 +595,12 @@ pub(super) fn observed_opened_file(
             "Codex catalog observation changed before NativePath admission".to_owned(),
         ));
     }
+    // The strong ordinary-file observation already binds an unchanged file's
+    // identity and change token. Keep exact no-op admission metadata-only;
+    // growth still proves the complete frozen prefix below.
+    if current == source.catalog_observation {
+        return Ok(source.catalog_observation.clone());
+    }
     let expected_prefix = source.catalog_prefix_sha256.ok_or_else(|| {
         CaptureError::SystemInvariant("Codex catalog prefix digest is unavailable")
     })?;
@@ -677,6 +683,16 @@ pub(crate) fn open_codex_source_capability(
     if let Some(opened) = source.opened.as_ref() {
         return Ok(Arc::clone(opened));
     }
+    reopen_codex_source_capability(source)
+}
+
+/// Reopens the authority-relative directory entry instead of consulting a
+/// previously retained leaf capability. Generation preparation uses this to
+/// prove that the path still names the cataloged ordinary file before any
+/// route worker can consume prepared lineage facts.
+pub(crate) fn reopen_codex_source_capability(
+    source: &CodexCatalogSource,
+) -> Result<Arc<OpenedProviderSourceFile>> {
     match (
         source.authority_root.as_ref(),
         source.authority_relative_path.as_ref(),
@@ -689,6 +705,20 @@ pub(crate) fn open_codex_source_capability(
         _ => Err(CaptureError::SystemInvariant(
             "Codex source route authority is incomplete",
         )),
+    }
+}
+
+pub(crate) fn revalidate_codex_catalog_source_capability(
+    source: &CodexCatalogSource,
+    opened: &OpenedProviderSourceFile,
+) -> Result<()> {
+    match observed_opened_file(source, opened) {
+        Ok(_) => Ok(()),
+        // This proof is used only after generation discovery has admitted the
+        // catalog observation. A later ordinary-file mismatch is a retryable
+        // replacement race, not a permanently invalid transcript.
+        Err(CaptureError::InvalidPayload(_)) => Err(CaptureError::SourceChangedDuringCapture),
+        Err(error) => Err(error),
     }
 }
 
@@ -903,15 +933,39 @@ fn hash_opened_file_range(
 }
 
 pub(super) fn validate_catalog_owner(
-    catalog_owner: Option<&str>,
-    scanned_owner: &str,
-) -> Result<()> {
-    if catalog_owner.is_some_and(|catalog_owner| catalog_owner != scanned_owner) {
+    source: &CodexCatalogSource,
+    mut scanned_owner: CodexSessionRow,
+) -> Result<CodexSessionRow> {
+    let catalog_owner = source.catalog_native_session_id.as_deref();
+    let catalog_root = source.catalog_root_native_session_id.as_deref();
+    if catalog_owner != Some(scanned_owner.native_session_id.as_str())
+        || source.catalog_parent_native_session_id != scanned_owner.parent_native_session_id
+        || source.catalog_session_relationship != scanned_owner.session_relationship
+        || source.catalog_advisory_session_id != scanned_owner.advisory_session_id
+        || catalog_root.is_none()
+        || scanned_owner
+            .root_native_session_id
+            .as_deref()
+            .is_some_and(|scanned_root| Some(scanned_root) != catalog_root)
+    {
         return Err(CaptureError::InvalidPayload(
-            "Codex catalog owner changed before NativePath admission".to_owned(),
+            "Codex normalized catalog owner changed before NativePath admission".to_owned(),
         ));
     }
-    Ok(())
+    scanned_owner.root_native_session_id = catalog_root.map(str::to_owned);
+    Ok(scanned_owner)
+}
+
+pub(super) fn validate_checkpoint_catalog_owner(
+    source: &CodexCatalogSource,
+    scanned_owner: CodexSessionRow,
+) -> Result<CodexSessionRow> {
+    if scanned_owner.root_native_session_id.is_none() {
+        return Err(CaptureError::InvalidPayload(
+            "Codex checkpoint owner is not normalized".to_owned(),
+        ));
+    }
+    validate_catalog_owner(source, scanned_owner)
 }
 
 pub(super) fn source_changed_during_scan() -> CaptureError {

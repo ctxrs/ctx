@@ -10,7 +10,7 @@ use super::{
 };
 use crate::presentation_limit::MCP_PRESENTATION_MAX_OUTPUT_BYTES;
 
-pub(super) fn tool_show_session(arguments: &Value, data_root: &Path) -> Result<Value> {
+pub(super) fn tool_show_session(arguments: &Value, data_root: &Path) -> Result<(Value, Value)> {
     let session_id = optional_string(arguments, "ctx_session_id")?
         .ok_or_else(|| invalid_tool_request("ctx_session_id is required"))?;
     validate_ctx_id(&session_id, "ctx_session_id", "session")?;
@@ -22,7 +22,7 @@ pub(super) fn tool_show_session(arguments: &Value, data_root: &Path) -> Result<V
         )));
     }
     let cursor = optional_session_cursor(arguments)?;
-    crate::commands::source_index::mcp_show_session(
+    crate::commands::source_index::mcp_show_session_with_compact(
         data_root,
         &session_id,
         mode,
@@ -48,7 +48,7 @@ fn optional_session_cursor(arguments: &Value) -> Result<Option<String>> {
     }
 }
 
-pub(super) fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<Value> {
+pub(super) fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<(Value, Value)> {
     let event_id = optional_string(arguments, "ctx_event_id")?
         .ok_or_else(|| invalid_tool_request("ctx_event_id is required"))?;
     validate_ctx_id(&event_id, "ctx_event_id", "event")?;
@@ -63,7 +63,7 @@ pub(super) fn tool_show_event(arguments: &Value, data_root: &Path) -> Result<Val
             "show_event before/after/window must be {MAX_EVENT_WINDOW} or less"
         )));
     }
-    crate::commands::source_index::mcp_show_event(
+    crate::commands::source_index::mcp_show_event_with_compact(
         data_root,
         &event_id,
         before,
