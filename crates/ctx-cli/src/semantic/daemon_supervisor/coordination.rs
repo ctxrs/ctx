@@ -21,6 +21,17 @@ impl SupervisorInstallationLock {
         let (file, _) = open_or_create_pid_lock_file(&path)
             .with_context(|| format!("open ctx supervisor installation lock {}", path.display()))?;
         secure_private_file_permissions(&path)?;
+        if cfg!(debug_assertions) {
+            if let Some(waiting_path) = std::env::var_os("CTX_SUPERVISOR_LOCK_WAITING_FOR_TESTS") {
+                let waiting_path = std::path::PathBuf::from(waiting_path);
+                fs::write(&waiting_path, b"waiting\n").with_context(|| {
+                    format!(
+                        "write ctx supervisor installation lock test marker {}",
+                        waiting_path.display()
+                    )
+                })?;
+            }
+        }
         fs2::FileExt::lock_exclusive(&file).with_context(|| {
             format!(
                 "acquire ctx supervisor installation lock {}",

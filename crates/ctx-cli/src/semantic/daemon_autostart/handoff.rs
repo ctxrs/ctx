@@ -95,6 +95,16 @@ pub(crate) struct DaemonUpgradeHandoff {
     release_on_drop: bool,
 }
 
+struct UpgradeHandoffRestartAuthority {
+    replacement_executable: PathBuf,
+}
+
+impl UpgradeHandoffRestartAuthority {
+    fn spawn(&self, command: &mut Command) -> io::Result<Child> {
+        spawn_daemon_child_for_upgrade_handoff(command, &self.replacement_executable)
+    }
+}
+
 impl DaemonUpgradeHandoff {
     pub(crate) fn wait_for_installation_quiescence(&self) -> Result<()> {
         wait_for_installation_daemon_quiescence_for(
@@ -139,6 +149,7 @@ impl DaemonUpgradeHandoff {
     /// Release the upgrade fence and restart the current auto-daemon after a
     /// verified forward publication succeeds.
     pub(crate) fn resume_with(mut self, executable: &Path) -> Result<()> {
+        let restart_authority = self.authenticated_restart_authority(executable)?;
         let restart_trigger = self
             .restart_trigger
             .or_else(|| read_daemon_restart_request(&self.data_root).map(|(_, trigger)| trigger));
@@ -162,7 +173,8 @@ impl DaemonUpgradeHandoff {
                             trigger,
                             Some(&self.handoff_id),
                         );
-                        let mut child = spawn_daemon_child(&mut command)
+                        let mut child = restart_authority
+                            .spawn(&mut command)
                             .context("restart ctx daemon after upgrade")?;
                         wait_for_replacement_daemon(&self.data_root, &mut child)?;
                     }
@@ -170,15 +182,40 @@ impl DaemonUpgradeHandoff {
             }
         }
         remove_daemon_restart_requests(&self.data_root);
-        restart_acknowledged_installation_daemons(
+        restart_acknowledged_installation_daemons_with(
             executable,
             &self.handoff_id,
             Some(&self.data_root),
+            |command| restart_authority.spawn(command),
         )?;
         if self.release_on_drop {
             self.complete_release()?;
         }
         Ok(())
+    }
+
+    fn authenticated_restart_authority(
+        &self,
+        executable: &Path,
+    ) -> Result<UpgradeHandoffRestartAuthority> {
+        let current = read_daemon_upgrade_handoff(&self.data_root)
+            .ok_or_else(|| anyhow!("daemon upgrade handoff disappeared before restart"))?;
+        let identity_matches = current.get("handoff_id").and_then(Value::as_str)
+            == Some(self.handoff_id.as_str())
+            && current.get("phase").and_then(Value::as_str) == Some("ready")
+            && current
+                .get("owner_pid")
+                .and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+                == Some(process::id());
+        if !identity_matches {
+            return Err(anyhow!(
+                "current process does not own the ready daemon upgrade handoff"
+            ));
+        }
+        Ok(UpgradeHandoffRestartAuthority {
+            replacement_executable: executable.to_path_buf(),
+        })
     }
 
     /// Keep the fence owned by a platform replacement helper after apply

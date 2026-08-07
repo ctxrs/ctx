@@ -2,13 +2,14 @@
 
 mod support;
 
+use fs2::FileExt as _;
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -165,6 +166,10 @@ fn assert_autostart_supervisor_is_fenced(
         expected_receipt,
         "autostart mutated the supervisor receipt"
     );
+    assert_supervisor_artifacts_unchanged(environment_root, probe_log);
+}
+
+fn assert_supervisor_artifacts_unchanged(environment_root: &Path, probe_log: &Path) {
     assert!(
         !probe_log.exists(),
         "autostart invoked the native supervisor"
@@ -186,6 +191,107 @@ fn assert_autostart_supervisor_is_fenced(
             artifact.display()
         );
     }
+}
+
+fn wait_for_marker(child: &mut Child, marker: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if marker.exists() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("observe supervisor lock waiter") {
+            panic!("supervisor lock waiter exited before blocking: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("supervisor admission did not reach the installation lock");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn supervisor_waiter_rechecks_uninstall_fence_after_installation_lock() {
+    let temp = tempdir();
+    let (supervisor_probe_bin, supervisor_probe_log) =
+        install_supervisor_command_probe(temp.path());
+    let install = copied_ctx_binary(&temp);
+    let marker = install.with_file_name(format!(
+        "{}.install.json",
+        install.file_name().unwrap().to_string_lossy()
+    ));
+    fs::write(
+        &marker,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "manager": "ctx-hosted-installer",
+            "install_attempt_id": "ia_supervisor_lock_recheck",
+            "install_path": install,
+            "platform": platform_key(),
+            "channel": "stable",
+            "version": "1.0.0",
+            "sha256": sha256(&install),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let canonical_root = temp.path().join("canonical-root");
+    let daemon_root = canonical_root.join("daemon");
+    fs::create_dir_all(&daemon_root).unwrap();
+    let installation_lock_path = daemon_root.join("supervisor-installation.lock");
+    let installation_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&installation_lock_path)
+        .unwrap();
+    installation_lock.lock_exclusive().unwrap();
+
+    let waiting_marker = temp.path().join("supervisor-lock-waiting");
+    let mut attempt = isolated_command(&install, temp.path());
+    attempt
+        .env("PATH", &supervisor_probe_bin)
+        .env("CTX_SUPERVISOR_LOCK_WAITING_FOR_TESTS", &waiting_marker)
+        .args(["daemon", "enable", "--format=json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut attempt = attempt.spawn().expect("start supervisor lock waiter");
+    wait_for_marker(&mut attempt, &waiting_marker, Duration::from_secs(15));
+
+    let mut prepare = isolated_command(&install, temp.path());
+    prepare.args([
+        "upgrade",
+        "--hosted-transaction",
+        "uninstall-prepare",
+        "--install-path",
+        install.to_str().unwrap(),
+        "--attempt-id",
+        "ia_supervisor_lock_recheck",
+    ]);
+    assert_eq!(successful_json(prepare)["daemon_admission_fenced"], true);
+
+    installation_lock.unlock().unwrap();
+    drop(installation_lock);
+    let output = attempt
+        .wait_with_output()
+        .expect("finish supervisor waiter");
+    assert!(
+        !output.status.success(),
+        "supervisor waiter crossed uninstall fence"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("fenced by hosted uninstall"),
+        "unexpected supervisor waiter failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !canonical_root.join("daemon/supervisor.json").exists(),
+        "supervisor waiter wrote a receipt after uninstall fencing"
+    );
+    assert_supervisor_artifacts_unchanged(temp.path(), &supervisor_probe_log);
 }
 
 #[test]

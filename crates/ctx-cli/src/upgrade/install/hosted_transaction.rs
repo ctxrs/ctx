@@ -128,7 +128,7 @@ fn hosted_uninstall_is_active_for(install_path: &Path) -> Result<bool> {
     Ok(validated_hosted_uninstall_journal(install_path)?.is_some())
 }
 
-fn hosted_uninstall_is_active_for_executable(executable_path: &Path) -> Result<bool> {
+pub(crate) fn hosted_uninstall_is_active_for_executable(executable_path: &Path) -> Result<bool> {
     if hosted_uninstall_is_active_for(executable_path)? {
         return Ok(true);
     }
