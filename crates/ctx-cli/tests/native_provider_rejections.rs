@@ -739,22 +739,27 @@ fn symlinked_default_source_is_not_admitted_beside_a_valid_source() {
 
 #[cfg(unix)]
 #[test]
-fn symlinked_default_source_is_excluded_before_inventory() {
+fn symlinked_default_source_is_rejected_before_inventory() {
     let temp = finite_daemon_test_root();
     write_symlinked_claude_inventory_source(&temp);
 
-    let report =
-        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
-    assert_eq!(report["outcome"], "success", "{report:#}");
-    assert_eq!(report["totals"]["current_source_count"], 0, "{report:#}");
-    assert_eq!(
-        report["totals"]["current_indexed_documents"], 0,
-        "{report:#}"
+    let error = source_refresh_failure(ctx(&temp).args([
+        "import",
+        "--all",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert!(
+        error.contains("code=all_provider_terminal_coverage_unavailable"),
+        "{error}"
     );
-
-    let sources =
-        json_output(ctx(&temp).args(["sources", "--provider", "claude", "--format=json"]));
-    assert_eq!(sources["sources"], json!([]), "{sources:#}");
+    assert!(
+        error.contains(
+            "claude the selected history path uses a symlink component; use a trusted real path with --path"
+        ),
+        "{error}"
+    );
 }
 
 #[test]
