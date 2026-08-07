@@ -371,7 +371,12 @@ fn run_codex_fd_budget_child() {
         ..WriterOptions::default()
     };
     let refreshed = super::super::family::jsonl::with_family_scanner_workers(16, || {
-        refresh_source_backed_generation(&index, &registry, writer_options)
+        refresh_source_backed_generation_with_work_budget_for_test(
+            &index,
+            &registry,
+            writer_options,
+            16,
+        )
     });
     let scanner_workers = super::super::family::jsonl::jsonl_family_scanner_max_worker_count();
     sampling.store(false, Ordering::Release);
