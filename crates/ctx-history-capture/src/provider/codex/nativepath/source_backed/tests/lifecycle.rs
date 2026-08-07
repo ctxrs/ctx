@@ -574,6 +574,7 @@ fn source_backed_worker_failure_does_not_publish_a_generation() {
     let before_generation = before.generation_id().to_owned();
     let before_sources = before.manifest().sources.clone();
     let before_events = search_event_ids(&before, "visible baseline sentinel");
+    let failing_native_session_id = "019fa000-0000-7000-8000-000000000034";
 
     for (native_session_id, sentinel) in [
         (
@@ -584,10 +585,7 @@ fn source_backed_worker_failure_does_not_publish_a_generation() {
             "019fa000-0000-7000-8000-000000000033",
             "uncommittedfailuremarker two",
         ),
-        (
-            "019fa000-0000-7000-8000-000000000034",
-            "uncommittedfailuremarker three",
-        ),
+        (failing_native_session_id, "uncommittedfailuremarker three"),
         (
             "019fa000-0000-7000-8000-000000000035",
             "uncommittedfailuremarker four",
@@ -605,14 +603,15 @@ fn source_backed_worker_failure_does_not_publish_a_generation() {
         &index,
         ColdParallelOptionsV0 {
             scanner_workers: Some(2),
-            fail_source_index: Some(2),
+            fail_native_session_id: Some(failing_native_session_id),
             ..ColdParallelOptionsV0::default()
         },
     )
     .unwrap_err();
     assert!(matches!(
         error,
-        CodexSourceBackedErrorV0::InjectedColdWorkerFailure { source_index: 2 }
+        CodexSourceBackedErrorV0::InjectedColdWorkerFailure { native_session_id }
+            if native_session_id == failing_native_session_id
     ));
     let (started, completed, peak) = take_cold_scanner_activity_v0().unwrap();
     assert!(started >= 1);
