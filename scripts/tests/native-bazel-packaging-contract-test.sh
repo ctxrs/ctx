@@ -89,6 +89,17 @@ for required in \
     exit 1
   }
 done
+for required in \
+  'load("@rules_shell//shell:sh_binary.bzl", "sh_binary")' \
+  'payload_name = name + "_payload"' \
+  'srcs = [":" + payload_name]' \
+  'use_bash_launcher = True'; do
+  grep -Fq -- "${required}" "${release_routes}" || {
+    printf 'Public release route lacks the native shell launcher contract: %s\n' \
+      "${required}" >&2
+    exit 1
+  }
+done
 python3 - "${mingw_repository}" <<'PY'
 from pathlib import Path
 import re
