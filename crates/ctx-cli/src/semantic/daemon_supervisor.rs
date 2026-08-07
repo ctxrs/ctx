@@ -147,6 +147,11 @@ impl NativeSupervisorBackend for PlatformNativeSupervisor {
 }
 
 pub(super) fn ensure_daemon_supervisor(data_root: &Path) -> Result<DaemonSupervisorStart> {
+    if crate::upgrade::installation_hosted_uninstall_is_active().unwrap_or(true) {
+        return Err(anyhow!(
+            "ctx daemon supervisor mutation is fenced by hosted uninstall"
+        ));
+    }
     let Some(executable) = safely_supported_managed_install(data_root)? else {
         let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
         write_supervisor_receipt(

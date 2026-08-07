@@ -45,12 +45,14 @@ fn isolated_command(binary: &Path, root: &Path) -> Command {
         .env("CTX_DATA_ROOT", root.join("canonical-root"))
         .env("CTX_ANALYTICS_ENABLED", "false")
         .env("CTX_LOCAL_USAGE_ENABLED", "false")
-        .env("CTX_DAEMON_AUTOSTART_OFF", "1")
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_DATA_HOME", root.join("data"))
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_RUNTIME_DIR", root.join("runtime"))
-        .env("TMPDIR", root.join("tmp"));
+        .env("TMPDIR", root.join("tmp"))
+        .env_remove("CI")
+        .env_remove("CTX_DAEMON_AUTOSTART_OFF")
+        .env_remove("CTX_DAEMON_BACKGROUND_CHILD");
     command
 }
 
@@ -119,9 +121,78 @@ fn assert_fresh_daemon_is_fenced(binary: &Path, environment_root: &Path, data_ro
     );
 }
 
+fn install_supervisor_command_probe(root: &Path) -> (PathBuf, PathBuf) {
+    let probe_bin = root.join("supervisor-probe-bin");
+    fs::create_dir_all(&probe_bin).unwrap();
+    let body = b"#!/bin/sh\nprobe_dir=${0%/*}\nprintf '%s\\n' \"$*\" >> \"$probe_dir/invocations\"\nexit 97\n";
+    for command in ["systemctl", "launchctl"] {
+        let path = probe_bin.join(command);
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let log = probe_bin.join("invocations");
+    (probe_bin, log)
+}
+
+fn assert_autostart_supervisor_is_fenced(
+    binary: &Path,
+    environment_root: &Path,
+    data_root: &Path,
+    probe_bin: &Path,
+    probe_log: &Path,
+    expected_receipt: Option<&[u8]>,
+) {
+    let mut attempt = isolated_command(binary, environment_root);
+    attempt
+        .env("PATH", probe_bin)
+        .arg("--data-root")
+        .arg(data_root)
+        .args(["daemon", "enable", "--format=json"]);
+    let output = attempt.output().expect("attempt daemon autostart");
+    assert!(
+        !output.status.success(),
+        "autostart entered uninstall window"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("hosted_uninstall_active"),
+        "unexpected autostart failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let receipt = data_root.join("daemon").join("supervisor.json");
+    assert_eq!(
+        fs::read(receipt).ok().as_deref(),
+        expected_receipt,
+        "autostart mutated the supervisor receipt"
+    );
+    assert!(
+        !probe_log.exists(),
+        "autostart invoked the native supervisor"
+    );
+    for artifact in [
+        environment_root
+            .join("config")
+            .join("systemd")
+            .join("user")
+            .join("ctx.service"),
+        environment_root
+            .join("Library")
+            .join("LaunchAgents")
+            .join("rs.ctx.daemon.plist"),
+    ] {
+        assert!(
+            !artifact.exists(),
+            "autostart recreated native supervisor artifact {}",
+            artifact.display()
+        );
+    }
+}
+
 #[test]
 fn fresh_custom_root_daemon_cannot_enter_after_all_root_proof_before_helper_commit() {
     let temp = tempdir();
+    let (supervisor_probe_bin, supervisor_probe_log) =
+        install_supervisor_command_probe(temp.path());
     let install = copied_ctx_binary(&temp);
     let marker = install.with_file_name(format!(
         "{}.install.json",
@@ -179,6 +250,8 @@ fn fresh_custom_root_daemon_cannot_enter_after_all_root_proof_before_helper_comm
         journal.is_file(),
         "all-root proof removed the uninstall fence"
     );
+    let canonical_root = temp.path().join("canonical-root");
+    let supervisor_receipt = fs::read(canonical_root.join("daemon/supervisor.json")).ok();
 
     assert_fresh_daemon_is_fenced(
         &install,
@@ -189,6 +262,22 @@ fn fresh_custom_root_daemon_cannot_enter_after_all_root_proof_before_helper_comm
         &helper,
         temp.path(),
         &temp.path().join("fresh-helper-custom-root"),
+    );
+    assert_autostart_supervisor_is_fenced(
+        &install,
+        temp.path(),
+        &canonical_root,
+        &supervisor_probe_bin,
+        &supervisor_probe_log,
+        supervisor_receipt.as_deref(),
+    );
+    assert_autostart_supervisor_is_fenced(
+        &helper,
+        temp.path(),
+        &canonical_root,
+        &supervisor_probe_bin,
+        &supervisor_probe_log,
+        supervisor_receipt.as_deref(),
     );
 
     let mut arm = isolated_command(&helper, temp.path());
@@ -219,5 +308,13 @@ fn fresh_custom_root_daemon_cannot_enter_after_all_root_proof_before_helper_comm
         &helper,
         temp.path(),
         &temp.path().join("post-commit-helper-custom-root"),
+    );
+    assert_autostart_supervisor_is_fenced(
+        &helper,
+        temp.path(),
+        &canonical_root,
+        &supervisor_probe_bin,
+        &supervisor_probe_log,
+        supervisor_receipt.as_deref(),
     );
 }
