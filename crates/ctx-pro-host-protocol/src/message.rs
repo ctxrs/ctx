@@ -473,13 +473,13 @@ pub struct ProStorageEvidence {
 
 impl ProStorageEvidence {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        // V4 remains admissible only as authenticated status evidence while a
-        // private helper control-loads the prior active graph for migration.
-        // New publication evidence is V5; this DTO grants no EventIndex read
-        // compatibility between those storage generations.
+        // V4 and V5 remain admissible only as authenticated status evidence
+        // while a private helper control-loads a prior active graph for
+        // migration. New publication evidence is V6; this DTO grants no
+        // EventIndex read compatibility between those storage generations.
         if self.graph_manifest_schema != 3
             || self.flat_format_version != 2
-            || !matches!(self.materializer_checkpoint_version, 4 | 5)
+            || !matches!(self.materializer_checkpoint_version, 4 | 5 | 6)
             || self.journal_pack_format_version != 3
             || self.legacy_journals_written != 0
         {
