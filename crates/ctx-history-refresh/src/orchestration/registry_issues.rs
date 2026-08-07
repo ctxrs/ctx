@@ -116,10 +116,29 @@ pub(super) fn automatic_registry_route_less_blockers(
     let mut blockers = RouteLessRegistryBlockers::default();
     for issue in issues {
         let detail = match issue {
+            SourceBackedAutomaticRegistryIssue::Discovery(issue)
+                if matches!(
+                    issue.kind,
+                    DiscoveryIssueKind::NoDiskHistory
+                        | DiscoveryIssueKind::InsufficientOfficialEvidence
+                ) =>
+            {
+                continue;
+            }
             SourceBackedAutomaticRegistryIssue::Discovery(issue) => {
                 format!("{} {}", issue.provider.as_str(), issue.reason,)
             }
             SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } => {
+                if !source.exists
+                    && matches!(
+                        reason,
+                        SourceBackedAutomaticUnavailableReason::SourceStatus(
+                            ProviderSourceStatus::Missing | ProviderSourceStatus::Unsupported
+                        ) | SourceBackedAutomaticUnavailableReason::UnsupportedFormat { .. }
+                    )
+                {
+                    continue;
+                }
                 if automatic_registry_issue_route_identity(source)
                     .ok()
                     .is_some_and(|route| represented_routes.contains(&route))

@@ -789,6 +789,38 @@ fn cold_refresh_with_only_failed_routes_does_not_publish_ready_data() {
 }
 
 #[test]
+fn certified_missing_route_certifies_a_complete_empty_inventory() {
+    let temp = tempdir().unwrap();
+    let mut source = fixture_provider_source_at(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        ProviderImportSupport::Native,
+        temp.path().join("missing-history.jsonl"),
+    );
+    source.status = ProviderSourceStatus::Missing;
+    source.exists = false;
+    let route = SourceBackedRoute::certified_missing(
+        source,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+    )
+    .unwrap();
+    let route_identity = route.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+
+    let refresh =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+
+    assert!(refresh.sources.is_empty());
+    assert_eq!(refresh.successful_route_outcomes.len(), 1);
+    assert_eq!(
+        refresh.successful_route_outcomes[0].route_identity,
+        route_identity
+    );
+    assert_eq!(refresh.complete_inventory_route_ids, vec![route_identity]);
+}
+
+#[test]
 fn warm_missing_route_in_grace_remains_usable_when_a_new_cold_route_fails() {
     let provider = CaptureProvider::Gemini;
     let format = GEMINI_CLI_SOURCE_FORMAT;

@@ -256,30 +256,13 @@ fn trae_encrypted_current_database_is_unknown_and_never_imported() {
         .failure()
         .get_output()
         .clone();
-    let imported: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(imported["outcome"], "failure", "{imported:#}");
-    assert_eq!(imported["failure_scope"], "source", "{imported:#}");
-    assert_eq!(imported["totals"]["failed_sources"], 1, "{imported:#}");
-    assert_eq!(
-        imported["totals"]["current_source_count"], 0,
-        "{imported:#}"
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("all_provider_terminal_coverage_unavailable")
+            && stderr.contains("SQLCipher-encrypted relational history"),
+        "{stderr}"
     );
-    assert_eq!(
-        imported["totals"]["current_indexed_documents"], 0,
-        "{imported:#}"
-    );
-    let trae_failure = imported["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|source| source["provider"] == "trae")
-        .unwrap_or_else(|| panic!("missing Trae source failure in {imported:#}"));
-    assert_eq!(trae_failure["status"], "failure");
-    assert_eq!(trae_failure["source_failure_class"], "incompatible");
-    assert!(trae_failure["detail"]
-        .as_str()
-        .unwrap()
-        .contains("SQLCipher-encrypted relational history"));
 
     let stderr = failure_stderr(ctx(&temp).args([
         "import",
