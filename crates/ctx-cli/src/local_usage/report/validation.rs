@@ -46,8 +46,8 @@ pub(in crate::local_usage) fn validate_rows_for_schema(
     schema_version: i64,
 ) -> Result<(), UsageStoreError> {
     match schema_version {
-        1 => validate_rows_v1(conn),
-        2 => validate_rows(conn),
+        store::LEGACY_SCHEMA_VERSION => validate_rows_v1(conn),
+        store::PREVIOUS_SCHEMA_VERSION | store::SCHEMA_VERSION => validate_rows(conn),
         version => Err(UsageStoreError::SchemaVersion(version)),
     }
 }
@@ -160,6 +160,19 @@ pub(in crate::local_usage) fn validate_rows(conn: &Connection) -> Result<(), Usa
         let not_applicable = row.context_coverage == "not_applicable"
             && row.delivered_context_bytes == 0
             && row.matched_normalized_session_bytes == 0;
+        let delivered_output_valid = match row.definition_version {
+            1 => {
+                (row.surface == "cli" && row.delivered_output_bytes == 0)
+                    || (row.surface == "mcp" && row.delivered_output_bytes > 0)
+            }
+            2 => {
+                row.delivered_output_bytes > 0
+                    || (row.surface == "cli"
+                        && row.outcome == "failure"
+                        && row.delivered_output_bytes == 0)
+            }
+            _ => false,
+        };
         if !common_row_is_valid(
             &row.day,
             row.definition_version,
@@ -176,13 +189,10 @@ pub(in crate::local_usage) fn validate_rows(conn: &Connection) -> Result<(), Usa
             row.citation_count,
             row.definition_version == 1,
         ) || !matches!(row.definition_version, 1 | 2)
-            || row.delivered_output_bytes < 0
+            || !delivered_output_valid
             || row.delivered_context_bytes < 0
             || row.matched_normalized_session_bytes < 0
             || !(complete || unavailable || not_applicable)
-            || (row.definition_version == 1
-                && ((row.surface == "cli" && row.delivered_output_bytes != 0)
-                    || (row.surface == "mcp" && row.delivered_output_bytes <= 0)))
         {
             return Err(UsageStoreError::Integrity);
         }

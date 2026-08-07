@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{
     utc_day, UsageStoreError, APPLICATION_ID, LEGACY_SCHEMA_VERSION, MAX_DATABASE_BYTES,
-    PAGE_SIZE_BYTES, SCHEMA_VERSION,
+    PAGE_SIZE_BYTES, PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 
 pub(super) const DAILY_USAGE_SCHEMA_V1: &str = r#"
@@ -163,7 +163,7 @@ pub(super) fn legacy_daily_usage_schema_v1() -> String {
     DAILY_USAGE_SCHEMA_V1.replacen(BLAME_VALUE_CLASS_CHECK, "", 1)
 }
 
-const DAILY_USAGE_SCHEMA: &str = r#"
+pub(super) const DAILY_USAGE_SCHEMA_V2: &str = r#"
 CREATE TABLE daily_usage (
     day_utc TEXT NOT NULL
         CHECK (
@@ -365,6 +365,38 @@ CREATE TABLE daily_usage (
 ) WITHOUT ROWID, STRICT;
 "#;
 
+const V2_DELIVERED_OUTPUT_BYTES_COLUMN: &str =
+    "    delivered_output_bytes INTEGER NOT NULL CHECK (delivered_output_bytes >= 0),";
+
+const CURRENT_DELIVERED_OUTPUT_BYTES_COLUMN: &str = r#"    delivered_output_bytes INTEGER NOT NULL
+        CHECK (
+            delivered_output_bytes >= 0
+            AND (
+                (
+                    definition_version = 1
+                    AND (
+                        (surface = 'cli' AND delivered_output_bytes = 0)
+                        OR (surface = 'mcp' AND delivered_output_bytes > 0)
+                    )
+                )
+                OR (
+                    definition_version = 2
+                    AND (
+                        delivered_output_bytes > 0
+                        OR (surface = 'cli' AND outcome = 'failure')
+                    )
+                )
+            )
+        ),"#;
+
+fn daily_usage_schema() -> String {
+    DAILY_USAGE_SCHEMA_V2.replacen(
+        V2_DELIVERED_OUTPUT_BYTES_COLUMN,
+        CURRENT_DELIVERED_OUTPUT_BYTES_COLUMN,
+        1,
+    )
+}
+
 pub(super) const LEGACY_MAINTENANCE_SCHEMA: &str = r#"
 CREATE TABLE maintenance (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -423,7 +455,8 @@ pub(super) fn initialize_schema(conn: &mut Connection) -> Result<(), UsageStoreE
         return Err(UsageStoreError::SchemaIdentity);
     }
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(DAILY_USAGE_SCHEMA)?;
+    let current_schema = daily_usage_schema();
+    transaction.execute_batch(&current_schema)?;
     transaction.execute_batch(MAINTENANCE_SCHEMA)?;
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -439,15 +472,17 @@ pub(super) fn migrate_to_current<T>(
     if version == SCHEMA_VERSION {
         return Ok(());
     }
-    if version != LEGACY_SCHEMA_VERSION {
+    if !matches!(version, LEGACY_SCHEMA_VERSION | PREVIOUS_SCHEMA_VERSION) {
         return Err(UsageStoreError::SchemaVersion(version));
     }
     super::super::report::validate_rows_for_schema(conn, version)?;
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch("ALTER TABLE daily_usage RENAME TO daily_usage_v1;")?;
-    transaction.execute_batch(DAILY_USAGE_SCHEMA)?;
-    transaction.execute_batch(
-        r#"
+    transaction.execute_batch("ALTER TABLE daily_usage RENAME TO daily_usage_previous;")?;
+    let current_schema = daily_usage_schema();
+    transaction.execute_batch(&current_schema)?;
+    if version == LEGACY_SCHEMA_VERSION {
+        transaction.execute_batch(
+            r#"
         INSERT INTO daily_usage (
             day_utc, definition_version, ctx_version, surface, operation, outcome,
             value_class, duration_bucket, target_type, pro_outcome, context_coverage,
@@ -460,10 +495,28 @@ pub(super) fn migrate_to_current<T>(
             calls, result_count, citation_count,
             CASE WHEN surface = 'mcp' THEN response_bytes ELSE 0 END,
             0, 0
-        FROM daily_usage_v1;
-        DROP TABLE daily_usage_v1;
+        FROM daily_usage_previous;
         "#,
-    )?;
+        )?;
+    } else {
+        transaction.execute_batch(
+            r#"
+        INSERT INTO daily_usage (
+            day_utc, definition_version, ctx_version, surface, operation, outcome,
+            value_class, duration_bucket, target_type, pro_outcome, context_coverage,
+            calls, result_count, citation_count, delivered_output_bytes,
+            delivered_context_bytes, matched_normalized_session_bytes
+        )
+        SELECT
+            day_utc, definition_version, ctx_version, surface, operation, outcome,
+            value_class, duration_bucket, target_type, pro_outcome, context_coverage,
+            calls, result_count, citation_count, delivered_output_bytes,
+            delivered_context_bytes, matched_normalized_session_bytes
+        FROM daily_usage_previous;
+        "#,
+        )?;
+    }
+    transaction.execute_batch("DROP TABLE daily_usage_previous;")?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     verify_schema(&transaction)?;
     super::super::report::validate_rows(&transaction)?;
@@ -494,8 +547,12 @@ pub(in crate::local_usage) fn verify_supported_schema(
     verify_schema_object_allowlist(conn)?;
     match user_version {
         LEGACY_SCHEMA_VERSION => verify_daily_schema_v1(conn)?,
+        PREVIOUS_SCHEMA_VERSION => {
+            verify_daily_schema(conn, DAILY_USAGE_SCHEMA_V2, EXPECTED_DAILY_COLUMNS)?;
+        }
         SCHEMA_VERSION => {
-            verify_daily_schema(conn, DAILY_USAGE_SCHEMA, EXPECTED_DAILY_COLUMNS)?;
+            let current_schema = daily_usage_schema();
+            verify_daily_schema(conn, &current_schema, EXPECTED_DAILY_COLUMNS)?;
         }
         _ => return Err(UsageStoreError::SchemaVersion(user_version)),
     }

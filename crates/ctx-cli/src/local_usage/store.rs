@@ -32,14 +32,18 @@ use file_family::{
 pub(crate) use migration::verify_report_dates;
 use migration::{initialize_schema, migrate_to_current, reject_future_daily_dates, verify_schema};
 #[cfg(test)]
-use migration::{legacy_daily_usage_schema_v1, DAILY_USAGE_SCHEMA_V1, LEGACY_MAINTENANCE_SCHEMA};
+use migration::{
+    legacy_daily_usage_schema_v1, DAILY_USAGE_SCHEMA_V1, DAILY_USAGE_SCHEMA_V2,
+    LEGACY_MAINTENANCE_SCHEMA,
+};
 pub(super) use migration::{v1_uses_legacy_blame_schema, verify_supported_schema};
 use write::record_at as write_record_at;
 
 pub(crate) const USAGE_FILE: &str = "usage.sqlite";
 const APPLICATION_ID: i64 = 0x4354_5855;
-const LEGACY_SCHEMA_VERSION: i64 = 1;
-const SCHEMA_VERSION: i64 = 2;
+pub(super) const LEGACY_SCHEMA_VERSION: i64 = 1;
+pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = 2;
+pub(super) const SCHEMA_VERSION: i64 = 3;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 const PAGE_SIZE_BYTES: i64 = 4 * 1024;
 const MAX_DATABASE_BYTES: i64 = 6 * 1024 * 1024;
@@ -161,6 +165,66 @@ pub(super) fn create_legacy_impossible_blame_v1_fixture_for_test(
 ) -> Result<(), UsageStoreError> {
     let legacy_schema = legacy_daily_usage_schema_v1();
     create_v1_fixture_for_test(data_root, &legacy_schema, "possible")
+}
+
+#[cfg(test)]
+pub(super) fn create_v2_fixture_for_test(
+    data_root: &Path,
+    surface: &str,
+    outcome: &str,
+    delivered_output_bytes: i64,
+) -> Result<(), UsageStoreError> {
+    establish_private_data_root(data_root)?;
+    verify_private_directory_and_owner(data_root)?;
+    let path = usage_path(data_root);
+    if path.exists() {
+        return Err(UsageStoreError::SchemaIdentity);
+    }
+    let mut conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.pragma_update(None, "page_size", PAGE_SIZE_BYTES)?;
+    let day = utc_day(SystemTime::now());
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(DAILY_USAGE_SCHEMA_V2)?;
+    transaction.execute_batch(LEGACY_MAINTENANCE_SCHEMA)?;
+    let operation = if surface == "mcp" { "status" } else { "doctor" };
+    transaction.execute(
+        r#"
+        INSERT INTO daily_usage (
+            day_utc, definition_version, ctx_version, surface, operation, outcome,
+            value_class, duration_bucket, target_type, pro_outcome, context_coverage,
+            calls, result_count, citation_count, delivered_output_bytes,
+            delivered_context_bytes, matched_normalized_session_bytes
+        ) VALUES (
+            ?1, 2, '0.26.0-schema-v2', ?2, ?3, ?4, 'not_applicable',
+            'under_10_ms', 'not_applicable', 'not_applicable', 'not_applicable',
+            1, 0, 0, ?5, 0, 0
+        )
+        "#,
+        params![day, surface, operation, outcome, delivered_output_bytes],
+    )?;
+    transaction.execute(
+        "INSERT INTO maintenance(singleton, last_retention_day) VALUES (1, ?1)",
+        [day],
+    )?;
+    transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+    transaction.pragma_update(None, "user_version", PREVIOUS_SCHEMA_VERSION)?;
+    transaction.commit()?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    });
+    drop(conn);
+    protect_sqlite_files(&path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -447,12 +511,12 @@ fn open_writable_with_migration_hook(
     let schema_version = verify_supported_schema(&conn)?;
     super::report::validate_rows_for_schema(&conn, schema_version)?;
     configure_transient(&conn, busy_timeout)?;
-    if schema_version == LEGACY_SCHEMA_VERSION {
-        // A quiescent v1 store can have a WAL-mode main header without
+    if schema_version != SCHEMA_VERSION {
+        // A quiescent predecessor store can have a WAL-mode main header without
         // auxiliaries. Opening it natively creates fresh WAL/SHM files, which
         // cannot be part of the pre-open family guard. Return to rollback
         // journal mode before migration so the guarded family is main-only
-        // again; v2 persistent configuration restores WAL after commit.
+        // again; current persistent configuration restores WAL after commit.
         let journal_mode: String =
             conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
         match journal_mode.as_str() {
