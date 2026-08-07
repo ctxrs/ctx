@@ -251,7 +251,9 @@ struct Consumer {
     terminal_finish_digest_override: Option<String>,
     rebuild_required_finishes: u8,
     finish_pending: Option<CoreMaterializationFinalizationPending>,
-    continue_pending: Option<CoreMaterializationFinalizationPending>,
+    continue_pending: VecDeque<CoreMaterializationFinalizationPending>,
+    continue_error_after: Option<(usize, String)>,
+    continue_response_loss_after: Option<usize>,
     finalization_progress: Option<CoreMaterializationFinalizationProgress>,
     continue_requests: Vec<ContinueCoreMaterializationRequest>,
     delta_pages: Vec<CoreSourceDeltaPage>,
@@ -742,8 +744,16 @@ impl CoreMaterializationConsumer for Consumer {
         if self.finalization_progress.as_ref() != Some(&request.expected_progress) {
             bail!("invalid_request: conflicting Core finalization continuation");
         }
-        if let Some(pending) = self.continue_pending.take() {
+        if let Some((after, message)) = &self.continue_error_after {
+            if *after == self.continue_requests.len() {
+                bail!(message.clone());
+            }
+        }
+        if let Some(pending) = self.continue_pending.pop_front() {
             self.finalization_progress = Some(pending.progress.clone());
+            if self.continue_response_loss_after == Some(self.continue_requests.len()) {
+                bail!("synthetic_continue_response_lost: committed Core finalization quantum");
+            }
             return Ok(CoreMaterializationFinalizationStep::Pending(pending));
         }
         let finish = self
