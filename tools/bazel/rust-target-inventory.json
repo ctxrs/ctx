@@ -15,6 +15,7 @@
         "test:daemon_config_reload": "//crates/ctx-cli:daemon_config_reload_tests",
         "test:explicit_path_revision_upgrade": "//crates/ctx-cli:explicit_path_revision_upgrade_tests",
         "test:history_source_plugins": "//crates/ctx-cli:history_source_plugins_tests",
+        "test:hosted_uninstall_fence": "//crates/ctx-cli:hosted_uninstall_fence_tests",
         "test:import_change_reporting": "//crates/ctx-cli:import_change_reporting_tests",
         "test:index": "//crates/ctx-cli:index_tests",
         "test:integrations": "//crates/ctx-cli:integrations_tests",
