@@ -484,7 +484,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#1@64c8afd2f04c16a3",
+        "run_cli#1@2912ee43f3606c5f",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -492,7 +492,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#2@638b02f9a8248d06",
+        "run_cli#2@64c8afd2f04c16a3",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -500,7 +500,15 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#3@1f99826fdc74e99b",
+        "run_cli#3@638b02f9a8248d06",
+        PrintMacro,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        UNIT
+    ),
+    allow!(
+        DISPATCH,
+        "run_cli#4@1f99826fdc74e99b",
         PrintMacro,
         MachineProtocol,
         "generic machine-mode command error",

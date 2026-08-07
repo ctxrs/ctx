@@ -95,16 +95,27 @@ def local_unix() -> None:
 
 
 def orphan(pid_file: Path) -> None:
+    ready_reader, ready_writer = os.pipe()
     child = os.fork()
     if child == 0:
+        os.close(ready_reader)
         os.setsid()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         for descriptor in (0, 1, 2):
             try:
                 os.close(descriptor)
             except OSError:
                 pass
+        os.write(ready_writer, b"1")
+        os.close(ready_writer)
         time.sleep(30)
         os._exit(0)
+    os.close(ready_writer)
+    try:
+        if os.read(ready_reader, 1) != b"1":
+            raise RuntimeError("orphan did not become ready")
+    finally:
+        os.close(ready_reader)
     pid_file.write_text(f"{child}\n", encoding="ascii")
     print(f"spawned:{child}", flush=True)
 
@@ -133,7 +144,6 @@ def main() -> None:
         print("signaled", flush=True)
         os.kill(os.getpid(), signal.SIGTERM)
     elif mode == "timeout":
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         print("waiting", flush=True)
         time.sleep(30)
     elif mode == "invalid-utf8":
