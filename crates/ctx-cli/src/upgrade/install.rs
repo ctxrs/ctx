@@ -17,7 +17,10 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::{bail, Result};
 
-pub(crate) use hosted_transaction::installation_hosted_uninstall_is_active;
+pub(crate) use hosted_transaction::{
+    hosted_uninstall_is_active_for_executable as installation_hosted_uninstall_is_active_for_executable,
+    installation_hosted_uninstall_is_active,
+};
 pub(in crate::upgrade) use hosted_transaction::{
     run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,
 };

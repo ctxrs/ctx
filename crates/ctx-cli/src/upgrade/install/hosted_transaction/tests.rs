@@ -179,6 +179,21 @@ fn hosted_uninstall_admission_fence_fails_closed_on_identity_changes() {
 }
 
 #[test]
+fn upgrade_handoff_explicit_restart_path_preserves_uninstall_validation() {
+    let (_temp, install, digest, source) = fixture();
+    fs::copy(&source, &install).unwrap();
+    fs::write(install_marker_path(&install), marker(&install, &digest)).unwrap();
+    assert!(!hosted_uninstall_is_active_for_executable(&install).unwrap());
+
+    let journal = new_uninstall_journal(&install, "ia_87654321").unwrap();
+    write_initial_journal(&journal_path(&install), &journal).unwrap();
+    assert!(hosted_uninstall_is_active_for_executable(&install).unwrap());
+
+    fs::write(install_marker_path(&install), b"changed marker").unwrap();
+    assert!(hosted_uninstall_is_active_for_executable(&install).is_err());
+}
+
+#[test]
 fn hosted_uninstall_helper_uses_the_installation_admission_fence() {
     let (_temp, install, digest, source) = fixture();
     fs::copy(&source, &install).unwrap();
