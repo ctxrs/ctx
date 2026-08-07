@@ -145,6 +145,9 @@ pub(super) fn maybe_autostart_daemon_inner(
     config: &AppConfig,
     trigger: DaemonTriggerCommandArg,
 ) {
+    if autostart::hosted_uninstall_fences_daemon_autostart() {
+        return;
+    }
     if daemon_autostart_suppression_reason().is_none()
         && super::daemon_supervisor::ensure_daemon_supervisor(data_root).is_err()
     {
