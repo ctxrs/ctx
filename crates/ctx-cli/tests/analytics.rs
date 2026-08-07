@@ -510,8 +510,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let generation_id = initialize_generation_only_core(&data_root);
-    assert!(!generation_id.is_empty());
+    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
     assert!(data_root.join("search/lexical").is_dir());
     assert!(!data_root.join("work.sqlite").exists());
     let private_query = "prompt text source-body-secret /home/alice/private/acme-secret \
@@ -637,8 +636,7 @@ fn search_analytics_reports_empty_source_backed_generation() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let generation_id = initialize_generation_only_core(&data_root);
-    assert!(!generation_id.is_empty());
+    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
 
     ctx(&temp)
         .args(["search", "activation telemetry", "--refresh", "off"])

@@ -74,7 +74,7 @@ fn search_refresh_off_requires_existing_core_generation_without_creating_one() {
     let stderr = failure_stderr(ctx(&temp).args(["search", "anything", "--refresh", "off"]));
 
     assert!(
-        stderr.contains("There is no current searchable generation"),
+        stderr.contains("source_unavailable: active verified Core generation is missing"),
         "{stderr}"
     );
     assert!(

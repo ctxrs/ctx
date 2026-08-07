@@ -248,7 +248,7 @@ fn definitions_are_reported_separately_and_definition_one_never_drives_estimates
     );
     insert_row(
         &connection,
-        2,
+        1,
         "cli",
         "doctor",
         "not_applicable",
@@ -257,6 +257,20 @@ fn definitions_are_reported_separately_and_definition_one_never_drives_estimates
         0,
         0,
         0,
+        0,
+        0,
+    );
+    insert_row(
+        &connection,
+        2,
+        "cli",
+        "doctor",
+        "not_applicable",
+        "not_applicable",
+        1,
+        0,
+        0,
+        1,
         0,
         0,
     );
@@ -273,7 +287,7 @@ fn definitions_are_reported_separately_and_definition_one_never_drives_estimates
         vec![1, 2]
     );
     let legacy = definition(&report, 1);
-    assert_eq!(legacy["summary"]["calls"], 3);
+    assert_eq!(legacy["summary"]["calls"], 4);
     assert_eq!(legacy["summary"]["delivered_output_bytes"], 1_500);
     assert_eq!(legacy["summary"]["complete_context_eligible_calls"], 0);
     assert_eq!(definition(&report, 2)["summary"]["calls"], 1);

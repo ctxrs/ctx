@@ -787,7 +787,7 @@ fn search_refresh_wait_recovers_after_invalid_source_is_removed() {
         "--format=json",
     ]));
     assert!(
-        uncommitted.contains("the Core index does not exist"),
+        uncommitted.contains("source_unavailable: active verified Core generation is missing"),
         "{uncommitted}"
     );
     let failed = assert_daemon_refresh_failure(&temp, 0, None);
