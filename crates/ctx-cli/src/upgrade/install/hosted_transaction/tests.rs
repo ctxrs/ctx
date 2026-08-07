@@ -121,13 +121,92 @@ fn hosted_transaction_receipts_keep_the_stable_machine_schema() {
 
     let helper = uninstall_helper_path(&install);
     let uninstall_value = uninstall_receipt(&journal, &helper, "armed");
-    assert_eq!(uninstall_value["schema_version"], 1);
+    assert_eq!(uninstall_value["schema_version"], 2);
     assert_eq!(uninstall_value["command"], "hosted_uninstall_transaction");
     assert_eq!(uninstall_value["status"], "armed");
+    assert_eq!(uninstall_value["daemon_admission_fenced"], true);
     assert_eq!(
         uninstall_value["helper_path"],
         helper.to_string_lossy().as_ref()
     );
+}
+
+#[test]
+fn hosted_uninstall_journal_fences_daemon_admission_through_commit() {
+    let (_temp, install, digest, source) = fixture();
+    fs::copy(&source, &install).unwrap();
+    fs::write(install_marker_path(&install), marker(&install, &digest)).unwrap();
+    let path = journal_path(&install);
+    let mut journal = new_uninstall_journal(&install, "ia_87654321").unwrap();
+    write_initial_journal(&path, &journal).unwrap();
+
+    for phase in [
+        Phase::Prepared,
+        Phase::HelperStaged,
+        Phase::Armed,
+        Phase::RemovingBinary,
+        Phase::BinaryRemoved,
+        Phase::RemovingMarker,
+        Phase::Committed,
+    ] {
+        journal.phase = phase;
+        write_journal(&path, &journal).unwrap();
+        assert!(
+            hosted_uninstall_is_active_for(&install).unwrap(),
+            "{phase:?}"
+        );
+    }
+
+    remove_journal(&path).unwrap();
+    assert!(!hosted_uninstall_is_active_for(&install).unwrap());
+}
+
+#[test]
+fn hosted_uninstall_admission_fence_fails_closed_on_identity_changes() {
+    let (_temp, install, digest, source) = fixture();
+    fs::copy(&source, &install).unwrap();
+    fs::write(install_marker_path(&install), marker(&install, &digest)).unwrap();
+    let path = journal_path(&install);
+    let journal = new_uninstall_journal(&install, "ia_87654321").unwrap();
+    write_initial_journal(&path, &journal).unwrap();
+
+    fs::write(&install, b"changed ctx").unwrap();
+    assert!(hosted_uninstall_is_active_for(&install).is_err());
+
+    fs::copy(&source, &install).unwrap();
+    fs::write(install_marker_path(&install), b"changed marker").unwrap();
+    assert!(hosted_uninstall_is_active_for(&install).is_err());
+}
+
+#[test]
+fn hosted_uninstall_helper_uses_the_installation_admission_fence() {
+    let (_temp, install, digest, source) = fixture();
+    fs::copy(&source, &install).unwrap();
+    fs::write(install_marker_path(&install), marker(&install, &digest)).unwrap();
+    let journal = new_uninstall_journal(&install, "ia_87654321").unwrap();
+    write_initial_journal(&journal_path(&install), &journal).unwrap();
+    let helper = uninstall_helper_path(&install);
+    fs::copy(&install, &helper).unwrap();
+
+    assert!(hosted_uninstall_is_active_for_executable(&helper).unwrap());
+    remove_journal(&journal_path(&install)).unwrap();
+    assert!(hosted_uninstall_is_active_for_executable(&helper).unwrap());
+    write_initial_journal(&journal_path(&install), &journal).unwrap();
+    fs::write(&helper, b"changed helper").unwrap();
+    assert!(hosted_uninstall_is_active_for_executable(&helper).is_err());
+}
+
+#[test]
+fn hosted_journal_rejects_cross_kind_phases() {
+    let (_temp, install, digest, _source) = fixture();
+    let mut journal = owned_install_journal(&install, &digest, NEW_OWNERSHIP, "ia_12345678");
+    journal.phase = Phase::HelperStaged;
+    assert!(validate_journal(&journal, &install, TransactionKind::Install).is_err());
+
+    journal.kind = TransactionKind::Uninstall;
+    journal.phase = Phase::BinaryStaged;
+    journal.binding_sha256 = journal_binding(&journal);
+    assert!(validate_journal(&journal, &install, TransactionKind::Uninstall).is_err());
 }
 
 #[test]

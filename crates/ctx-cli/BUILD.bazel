@@ -376,6 +376,12 @@ ctx_cli_integration_test(
 )
 
 ctx_cli_integration_test(
+    name = "hosted_uninstall_fence_tests",
+    src = "tests/hosted_uninstall_fence.rs",
+    extra_crates = ["sha2"],
+)
+
+ctx_cli_integration_test(
     name = "import_change_reporting_tests",
     src = "tests/import_change_reporting.rs",
 )
