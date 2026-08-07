@@ -21,11 +21,20 @@ pub(crate) fn daemon_autostart_suppression_reason() -> Option<&'static str> {
     }
 }
 
+pub(super) fn hosted_uninstall_fences_daemon_autostart() -> bool {
+    crate::upgrade::installation_hosted_uninstall_is_active().unwrap_or(true)
+}
+
 pub(crate) fn autostart_daemon_and_wait(
     data_root: &Path,
     config: &AppConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
+    if hosted_uninstall_fences_daemon_autostart() {
+        return Err(anyhow!(
+            "ctx daemon start was suppressed (hosted_uninstall_active); retry after it clears or run `ctx setup --no-daemon`"
+        ));
+    }
     if daemon_autostart_suppression_reason().is_none() {
         super::super::daemon_supervisor::ensure_daemon_supervisor(data_root)
             .context("establish persistent ctx daemon supervision")?;
@@ -251,6 +260,11 @@ pub(super) fn request_daemon_autostart(
     config: &AppConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonAutostartRequest> {
+    if hosted_uninstall_fences_daemon_autostart() {
+        return Ok(DaemonAutostartRequest::Suppressed(
+            "hosted_uninstall_active",
+        ));
+    }
     // Suppression disables spawning, not reuse. Test harnesses and managed
     // callers can intentionally provide an already-owned daemon while
     // forbidding any additional detached process.
@@ -892,6 +906,34 @@ pub(super) fn configure_narrow_daemon_environment(command: &mut Command) {
 }
 
 pub(super) fn spawn_daemon_child(command: &mut Command) -> io::Result<Child> {
+    if hosted_uninstall_fences_daemon_autostart() {
+        return Err(hosted_uninstall_daemon_fence_error());
+    }
+    spawn_daemon_child_after_hosted_uninstall_admission(command)
+}
+
+pub(super) fn spawn_daemon_child_for_upgrade_handoff(
+    command: &mut Command,
+    replacement_executable: &Path,
+) -> io::Result<Child> {
+    if crate::upgrade::installation_hosted_uninstall_is_active_for_executable(
+        replacement_executable,
+    )
+    .unwrap_or(true)
+    {
+        return Err(hosted_uninstall_daemon_fence_error());
+    }
+    spawn_daemon_child_after_hosted_uninstall_admission(command)
+}
+
+fn hosted_uninstall_daemon_fence_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "ctx daemon autostart is fenced by hosted uninstall",
+    )
+}
+
+fn spawn_daemon_child_after_hosted_uninstall_admission(command: &mut Command) -> io::Result<Child> {
     validate_daemon_pro_channel_environment(command)?;
     crate::process_environment::sanitize_release_authority_env(command);
     command.spawn()

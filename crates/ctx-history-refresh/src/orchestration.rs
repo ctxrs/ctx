@@ -620,10 +620,15 @@ fn classify_inventory_disposition(
     let mut authority = Vec::with_capacity(publication.route_results.len());
     for result in &publication.route_results {
         if !result.outcome.is_success() {
+            let source_detail = result
+                .source_failures
+                .first()
+                .map(|failure| format!(": {}", failure.detail))
+                .unwrap_or_default();
             return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
                 ZeroSourcePublicationBlocked::new(format!(
-                    "zero-source publication route {} did not complete authoritatively",
-                    result.route_identity,
+                    "zero-source publication route {} did not complete authoritatively{}",
+                    result.route_identity, source_detail,
                 )),
             );
         }

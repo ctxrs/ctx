@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::marker::{install_marker_path, is_valid_install_attempt_id};
 use crate::upgrade::{platform_key, sha256_hex};
@@ -16,6 +18,9 @@ const JOURNAL_SUFFIX: &str = "hosted-install-transaction.json";
 const MAX_MARKER_BYTES: u64 = 64 * 1024;
 const MAX_OWNERSHIP_BYTES: u64 = 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+const UNINSTALL_RECEIPT_SCHEMA_VERSION: u32 = 2;
+#[cfg(not(test))]
+static HOSTED_UNINSTALL_FENCE_OBSERVED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
@@ -99,6 +104,88 @@ pub(in crate::upgrade) fn run(args: HostedTransactionArgs) -> Result<()> {
         HostedTransactionAction::UninstallArm => uninstall_arm(args, install_path),
         HostedTransactionAction::UninstallCommit => uninstall_commit(args, install_path),
     }
+}
+
+pub(crate) fn installation_hosted_uninstall_is_active() -> Result<bool> {
+    #[cfg(not(test))]
+    if HOSTED_UNINSTALL_FENCE_OBSERVED.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+    let executable_path = super::marker::current_install_path()?;
+    let active = hosted_uninstall_is_active_for_executable(&executable_path)?;
+    // Once this process has observed an identity-validated uninstall, it must
+    // never enter daemon ownership. The journal only disappears after this
+    // executable has been removed, and caching avoids hashing it at every
+    // admission checkpoint.
+    #[cfg(not(test))]
+    if active {
+        HOSTED_UNINSTALL_FENCE_OBSERVED.store(true, Ordering::Release);
+    }
+    Ok(active)
+}
+
+fn hosted_uninstall_is_active_for(install_path: &Path) -> Result<bool> {
+    Ok(validated_hosted_uninstall_journal(install_path)?.is_some())
+}
+
+pub(crate) fn hosted_uninstall_is_active_for_executable(executable_path: &Path) -> Result<bool> {
+    if hosted_uninstall_is_active_for(executable_path)? {
+        return Ok(true);
+    }
+    let Some(install_path) = uninstall_install_path_for_helper(executable_path) else {
+        return Ok(false);
+    };
+    let Some(journal) = validated_hosted_uninstall_journal(&install_path)? else {
+        // A dedicated uninstall helper must never own a daemon, including the
+        // short interval after commit removes the journal and installed image
+        // but before the orchestrator removes the helper itself.
+        return Ok(true);
+    };
+    verify_file_digest(
+        executable_path,
+        &journal.binary_sha256,
+        MAX_BINARY_BYTES,
+        "hosted uninstall helper executable",
+    )?;
+    Ok(true)
+}
+
+fn validated_hosted_uninstall_journal(install_path: &Path) -> Result<Option<Journal>> {
+    let Some(journal) = read_journal(&journal_path(install_path))? else {
+        return Ok(None);
+    };
+    let kind = journal.kind;
+    validate_journal(&journal, install_path, kind)?;
+    if kind != TransactionKind::Uninstall {
+        return Ok(None);
+    }
+    verify_file_digest(
+        install_path,
+        &journal.binary_sha256,
+        MAX_BINARY_BYTES,
+        "hosted uninstall fenced executable",
+    )?;
+    verify_file_digest(
+        &journal.marker_path,
+        &journal.marker_sha256,
+        MAX_MARKER_BYTES,
+        "hosted uninstall fenced marker",
+    )?;
+    Ok(Some(journal))
+}
+
+fn uninstall_install_path_for_helper(helper_path: &Path) -> Option<PathBuf> {
+    let helper_name = helper_path.file_name()?.to_str()?;
+    #[cfg(windows)]
+    let suffix = ".hosted-uninstall-helper.exe";
+    #[cfg(not(windows))]
+    let suffix = ".hosted-uninstall-helper";
+    let install_name = helper_name.strip_prefix('.')?.strip_suffix(suffix)?;
+    if install_name.is_empty() {
+        return None;
+    }
+    let install_path = helper_path.with_file_name(install_name);
+    (uninstall_helper_path(&install_path) == helper_path).then_some(install_path)
 }
 
 fn reject_unexpected_inputs(args: &HostedTransactionArgs) -> Result<()> {
@@ -564,10 +651,11 @@ fn install_receipt(journal: &Journal) -> Value {
 
 fn uninstall_receipt(journal: &Journal, helper: &Path, status: &str) -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": UNINSTALL_RECEIPT_SCHEMA_VERSION,
         "command": "hosted_uninstall_transaction",
         "ok": true,
         "status": status,
+        "daemon_admission_fenced": true,
         "attempt_id": journal.attempt_id,
         "install_path": journal.install_path,
         "helper_path": helper,
@@ -757,6 +845,7 @@ fn validate_journal(journal: &Journal, install_path: &Path, kind: TransactionKin
             .as_deref()
             .is_some_and(|value| !is_normalized_sha256(value))
         || journal.binding_sha256 != journal_binding(journal)
+        || !phase_matches_kind(journal.phase, kind)
     {
         bail!("hosted transaction journal identity is invalid");
     }
@@ -798,6 +887,35 @@ fn validate_journal(journal: &Journal, install_path: &Path, kind: TransactionKin
             .zip(journal.ownership_sha256.as_ref())
             .map(|(path, digest)| (path.as_path(), digest.as_str())),
     )
+}
+
+fn phase_matches_kind(phase: Phase, kind: TransactionKind) -> bool {
+    match kind {
+        TransactionKind::Install => matches!(
+            phase,
+            Phase::Prepared
+                | Phase::BinaryStaged
+                | Phase::PublishingBinary
+                | Phase::BinaryPublished
+                | Phase::PublishingOwnership
+                | Phase::OwnershipPublished
+                | Phase::PublishingMarker
+                | Phase::MarkerPublished
+                | Phase::Committed
+        ),
+        TransactionKind::Uninstall => matches!(
+            phase,
+            Phase::Prepared
+                | Phase::HelperStaged
+                | Phase::Armed
+                | Phase::RemovingBinary
+                | Phase::BinaryRemoved
+                | Phase::RemovingOwnership
+                | Phase::OwnershipRemoved
+                | Phase::RemovingMarker
+                | Phase::Committed
+        ),
+    }
 }
 
 fn journal_binding(journal: &Journal) -> String {

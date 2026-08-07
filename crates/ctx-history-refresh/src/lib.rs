@@ -24,7 +24,7 @@ use ctx_history_capture::{
     automatic_source_backed_route_identity, build_automatic_source_backed_registry_from_report,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     source_backed_route_inventory, validate_provider_source_roots_outside_data_root,
-    DiscoveryContext, DiscoveryReport, ProviderSourceStatus, RouteObservation,
+    DiscoveryContext, DiscoveryIssueKind, DiscoveryReport, ProviderSourceStatus, RouteObservation,
     SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
     SourceBackedCoordinatorError,
     SourceBackedCurrentSourceProgress as CaptureSourceBackedCurrentSourceProgress,

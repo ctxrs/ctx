@@ -15,6 +15,9 @@ pub use command::{run, UpgradeArgs};
 pub(crate) use diagnostics::managed_install_executable;
 pub(crate) use diagnostics::upgrade_diagnostics;
 pub(crate) use install::is_valid_install_attempt_id;
+pub(crate) use install::{
+    installation_hosted_uninstall_is_active, installation_hosted_uninstall_is_active_for_executable,
+};
 pub(crate) use legacy_automatic::run_legacy_automatic_upgrade_bridge;
 pub(crate) use state::{
     active_installation_upgrade_attempt_id, installation_daemon_coordination_paths,

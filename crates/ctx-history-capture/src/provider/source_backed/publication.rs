@@ -937,6 +937,15 @@ fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
                     .get(owner.route_index)
                     .and_then(|route| route.metadata.route_identity.clone())
             })
+            .chain(
+                registry
+                    .routes
+                    .iter()
+                    .filter(|route| !route.certified_missing_paths.is_empty())
+                    .filter_map(|route| route.metadata.route_identity.as_ref())
+                    .filter(|route_identity| successful_this_attempt.contains(*route_identity))
+                    .cloned(),
+            )
             .collect::<BTreeSet<_>>();
         let (commit, verified_publication) = if let Some(factory) = metadata_factory.as_mut() {
             let published = writer

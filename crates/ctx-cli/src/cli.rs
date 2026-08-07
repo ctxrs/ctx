@@ -136,7 +136,7 @@ pub(crate) struct SetupArgs {
     #[arg(
         long,
         alias = "no-import",
-        help = "Prepare local history inventory without importing searchable history"
+        help = "Deprecated and ignored; setup follows its normal refresh lifecycle"
     )]
     pub(crate) catalog_only: bool,
     #[arg(

@@ -484,7 +484,7 @@ pub(super) fn inventory() -> Value {
                 "flat_format_version": 2,
                 "materializer_checkpoint": {
                     "legacy_control_load": 4,
-                    "current_publication": 5,
+                    "current_publication": 6,
                     "event_index_cross_version_reads": "forbidden"
                 },
                 "journal_pack_format_version": 3,

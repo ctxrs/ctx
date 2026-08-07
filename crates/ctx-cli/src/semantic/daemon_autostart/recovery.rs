@@ -5,6 +5,20 @@ pub(super) fn restart_acknowledged_installation_daemons(
     attempt_id: &str,
     skip_root: Option<&Path>,
 ) -> Result<()> {
+    restart_acknowledged_installation_daemons_with(
+        executable,
+        attempt_id,
+        skip_root,
+        spawn_daemon_child,
+    )
+}
+
+pub(super) fn restart_acknowledged_installation_daemons_with(
+    executable: &Path,
+    attempt_id: &str,
+    skip_root: Option<&Path>,
+    mut spawn: impl FnMut(&mut Command) -> io::Result<Child>,
+) -> Result<()> {
     for restart in read_installation_daemon_restarts(executable, attempt_id)? {
         if skip_root.is_some_and(|root| root == restart.data_root) {
             let _ = fs::remove_file(restart.registration_path);
@@ -28,7 +42,7 @@ pub(super) fn restart_acknowledged_installation_daemons(
             restart.loop_interval_seconds,
             None,
         );
-        let mut child = spawn_daemon_child(&mut command).with_context(|| {
+        let mut child = spawn(&mut command).with_context(|| {
             format!(
                 "restart ctx daemon for {} after installation upgrade",
                 restart.data_root.display()

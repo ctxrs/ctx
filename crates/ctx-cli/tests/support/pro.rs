@@ -85,6 +85,14 @@ pub(crate) fn write_python_helper(path: &Path, body: &str) {
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
 ))]
 pub(crate) fn initialize_current_query_store(data_root: &Path) {
+    let _generation_id = initialize_current_query_store_generation(data_root);
+}
+
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_fixtures)
+))]
+pub(crate) fn initialize_current_query_store_generation(data_root: &Path) -> String {
     initialize_pro_installation_identity(data_root);
     let generation_id = initialize_provider_neutral_core_projection(data_root);
     assert!(!generation_id.is_empty());
@@ -92,6 +100,7 @@ pub(crate) fn initialize_current_query_store(data_root: &Path) {
         !data_root.join("work.sqlite").exists(),
         "Pro query fixtures must use only the fresh source-backed epoch"
     );
+    generation_id
 }
 
 #[cfg(all(
@@ -131,12 +140,13 @@ import hashlib, json, pathlib, struct, sys
 REVISION = __REVISION__
 STATE = pathlib.Path(__STATE_PATH__)
 LOG = pathlib.Path(__LOG_PATH__)
+PROTOCOL_VERSION = __PROTOCOL_VERSION__
 
 def receive():
     header = sys.stdin.buffer.read(12)
     if not header:
         return None
-    if len(header) != 12 or header[:6] != b'CTXPRO':
+    if len(header) != 12 or header[:6] != b'CTXPRO' or struct.unpack('>H', header[6:8])[0] != PROTOCOL_VERSION:
         sys.exit(20)
     size = struct.unpack('>I', header[8:12])[0]
     return json.loads(sys.stdin.buffer.read(size))
@@ -148,7 +158,7 @@ def send(request, kind, body):
       'message': {'kind': kind, 'body': body}
     }
     payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', PROTOCOL_VERSION) + struct.pack('>I', len(payload)) + payload)
     sys.stdout.buffer.flush()
 
 def stored_receipt():
@@ -164,7 +174,7 @@ def status_body(requested_generation):
       'currentness': 'current' if current else 'not_materialized',
       'requested_core_generation_id': requested_generation,
       'core_receipt': receipt if current else None,
-      'coverage': 'empty' if current else 'not_materialized',
+      'coverage': ('empty' if receipt['event_count'] == 0 else 'abstained') if current else 'not_materialized',
       'repository_coverage': {
         'repository_candidate_events': 0,
         'logical_binding_events': 0,
@@ -181,10 +191,11 @@ def status_body(requested_generation):
       },
       'supported_operations': [],
       'available_operations': [],
+      'finalization_progress': None,
       'storage_evidence': {
         'graph_manifest_schema': 3,
         'flat_format_version': 2,
-        'materializer_checkpoint_version': 4,
+        'materializer_checkpoint_version': 6,
         'journal_pack_format_version': 3,
         'legacy_journals_written': 0,
         'journal_pages_written': 1,
@@ -203,7 +214,7 @@ if hello is None or hello['message']['kind'] != 'hello':
 with LOG.open('a') as stream:
     stream.write('start:' + REVISION + '\n')
 send(hello, 'hello', {
-  'protocol_version': 2,
+  'protocol_version': PROTOCOL_VERSION,
   'protocol_fingerprint': '__PROTOCOL_FINGERPRINT__',
   'helper_version': 'same-generation-fixture-' + REVISION,
   'authorization_challenge_base64url': 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -246,6 +257,7 @@ while True:
         })
     elif kind == 'finish_core_materialization':
         head = body['head']
+        finish_request_digest = hashlib.sha256(json.dumps(body, separators=(',', ':')).encode()).hexdigest()
         receipt = {
           'core_generation_id': head['core_generation_id'],
           'core_record_contract_fingerprint': head['core_record_contract_fingerprint'],
@@ -257,11 +269,20 @@ while True:
         STATE.write_text(json.dumps(receipt, separators=(',', ':')))
         with LOG.open('a') as stream:
             stream.write('finish:' + REVISION + '\n')
-        send(request, 'core_materialization_finished', {'receipt': receipt, 'replayed': False})
+        send(request, 'core_materialization_finished', {
+          'materialization_id': body['materialization_id'],
+          'finish_request_digest': finish_request_digest,
+          'receipt': receipt,
+          'replayed': False
+        })
     else:
         sys.exit(22)
 "#;
     let helper = HELPER
+        .replace(
+            "__PROTOCOL_VERSION__",
+            &ctx_pro_host_protocol::PROTOCOL_VERSION.to_string(),
+        )
         .replace(
             "__REVISION__",
             &serde_json::to_string(materializer_revision).unwrap(),
@@ -454,16 +475,18 @@ pub(crate) fn write_status_helper(path: &Path) {
     const HELPER: &str = r#"#!/usr/bin/python3
 import json, struct, sys
 
+PROTOCOL_VERSION = __PROTOCOL_VERSION__
+
 def receive():
     header = sys.stdin.buffer.read(12)
-    if len(header) != 12 or header[:6] != b'CTXPRO':
+    if len(header) != 12 or header[:6] != b'CTXPRO' or struct.unpack('>H', header[6:8])[0] != PROTOCOL_VERSION:
         sys.exit(20)
     size = struct.unpack('>I', header[8:12])[0]
     return json.loads(sys.stdin.buffer.read(size))
 
 def send(value):
     payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', PROTOCOL_VERSION) + struct.pack('>I', len(payload)) + payload)
     sys.stdout.buffer.flush()
 
 hello = receive()
@@ -473,7 +496,7 @@ send({
   'sequence': hello['sequence'],
   'request_id': hello['request_id'],
   'message': {'kind':'hello','body':{
-    'protocol_version':2,
+    'protocol_version':PROTOCOL_VERSION,
     'protocol_fingerprint':'__PROTOCOL_FINGERPRINT__',
     'helper_version':'fake-status-v1',
     'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -496,7 +519,7 @@ receipt = {
 storage_evidence = {
   'graph_manifest_schema':3,
   'flat_format_version':2,
-  'materializer_checkpoint_version':4,
+  'materializer_checkpoint_version':6,
   'journal_pack_format_version':3,
   'legacy_journals_written':0,
   'journal_pages_written':2,
@@ -531,11 +554,16 @@ send({
     },
     'supported_operations':['file_blame','commit_blame','pull_request_blame'],
     'available_operations':[],
+    'finalization_progress':None,
     'storage_evidence':storage_evidence
   }}
 })
 "#;
     let helper = HELPER
+        .replace(
+            "__PROTOCOL_VERSION__",
+            &ctx_pro_host_protocol::PROTOCOL_VERSION.to_string(),
+        )
         .replace(
             "__PROTOCOL_FINGERPRINT__",
             ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
@@ -618,16 +646,18 @@ fn write_blame_helper_with_options(
     const HELPER: &str = r#"#!/usr/bin/python3
 import json, os, struct, sys
 
+PROTOCOL_VERSION = __PROTOCOL_VERSION__
+
 def receive():
     header = sys.stdin.buffer.read(12)
-    if len(header) != 12 or header[:6] != b'CTXPRO':
+    if len(header) != 12 or header[:6] != b'CTXPRO' or struct.unpack('>H', header[6:8])[0] != PROTOCOL_VERSION:
         sys.exit(20)
     size = struct.unpack('>I', header[8:12])[0]
     return json.loads(sys.stdin.buffer.read(size))
 
 def send(value):
     payload = json.dumps(value, separators=(',', ':')).encode()
-    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
+    sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', PROTOCOL_VERSION) + struct.pack('>I', len(payload)) + payload)
     sys.stdout.buffer.flush()
 
 def status_body(request):
@@ -659,10 +689,11 @@ def status_body(request):
       },
       'supported_operations':['file_blame','commit_blame','pull_request_blame'],
       'available_operations':['file_blame','commit_blame','pull_request_blame'],
+      'finalization_progress':None,
       'storage_evidence':{
         'graph_manifest_schema':3,
         'flat_format_version':2,
-        'materializer_checkpoint_version':4,
+        'materializer_checkpoint_version':6,
         'journal_pack_format_version':3,
         'legacy_journals_written':0,
         'journal_pages_written':2,
@@ -686,7 +717,7 @@ send({
   'sequence': hello['sequence'],
   'request_id': hello['request_id'],
   'message': {'kind':'hello','body':{
-    'protocol_version':2,
+    'protocol_version':PROTOCOL_VERSION,
     'protocol_fingerprint':'__PROTOCOL_FINGERPRINT__',
     'helper_version':'fake-blame-v1',
     'authorization_challenge_base64url':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -983,6 +1014,10 @@ send({
 "#;
     let helper = HELPER
         .replace(
+            "__PROTOCOL_VERSION__",
+            &ctx_pro_host_protocol::PROTOCOL_VERSION.to_string(),
+        )
+        .replace(
             "__PROTOCOL_FINGERPRINT__",
             ctx_pro_host_protocol::PROTOCOL_FINGERPRINT,
         )
@@ -1030,8 +1065,10 @@ pub(crate) fn write_startup_error_helper(path: &Path, error_class: &str) {
         r#"#!/usr/bin/python3
 import json, struct, sys
 
+PROTOCOL_VERSION = __PROTOCOL_VERSION__
+
 header = sys.stdin.buffer.read(12)
-if len(header) != 12 or header[:6] != b'CTXPRO':
+if len(header) != 12 or header[:6] != b'CTXPRO' or struct.unpack('>H', header[6:8])[0] != PROTOCOL_VERSION:
     sys.exit(20)
 size = struct.unpack('>I', header[8:12])[0]
 hello = json.loads(sys.stdin.buffer.read(size))
@@ -1045,9 +1082,13 @@ response = {{
   }}}}
 }}
 payload = json.dumps(response, separators=(',', ':')).encode()
-sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', 2) + struct.pack('>I', len(payload)) + payload)
+sys.stdout.buffer.write(b'CTXPRO' + struct.pack('>H', PROTOCOL_VERSION) + struct.pack('>I', len(payload)) + payload)
 sys.stdout.buffer.flush()
 "#
+    )
+    .replace(
+        "__PROTOCOL_VERSION__",
+        &ctx_pro_host_protocol::PROTOCOL_VERSION.to_string(),
     );
     write_python_helper(path, &helper);
 }

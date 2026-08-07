@@ -147,8 +147,10 @@ impl NativeSupervisorBackend for PlatformNativeSupervisor {
 }
 
 pub(super) fn ensure_daemon_supervisor(data_root: &Path) -> Result<DaemonSupervisorStart> {
+    ensure_hosted_uninstall_supervisor_admission()?;
     let Some(executable) = safely_supported_managed_install(data_root)? else {
         let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
+        ensure_hosted_uninstall_supervisor_admission()?;
         write_supervisor_receipt(
             data_root,
             &SupervisorReceipt {
@@ -181,6 +183,10 @@ fn ensure_native_supervisor_with(
     backend: &dyn NativeSupervisorBackend,
 ) -> Result<DaemonSupervisorStart> {
     let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
+    // The uninstall path disables supervisor state under this same lock. Once
+    // admitted here, every artifact, manager, start, and receipt mutation below
+    // remains serialized ahead of that disable.
+    ensure_hosted_uninstall_supervisor_admission()?;
     let artifact = backend.artifact_path(data_root)?;
 
     if backend.verify_registration(data_root, executable).is_ok() {
@@ -351,6 +357,26 @@ fn ensure_native_supervisor_with(
     }
 }
 
+fn ensure_hosted_uninstall_supervisor_admission() -> Result<()> {
+    if crate::upgrade::installation_hosted_uninstall_is_active().unwrap_or(true) {
+        return Err(anyhow!(
+            "ctx daemon supervisor mutation is fenced by hosted uninstall"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_hosted_uninstall_supervisor_admission_for_executable(executable: &Path) -> Result<()> {
+    if crate::upgrade::installation_hosted_uninstall_is_active_for_executable(executable)
+        .unwrap_or(true)
+    {
+        return Err(anyhow!(
+            "ctx daemon supervisor mutation is fenced by hosted uninstall"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn disable_daemon_supervisor(data_root: &Path) -> Result<()> {
     let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
     let backend = PlatformNativeSupervisor;
@@ -500,6 +526,7 @@ fn resume_daemon_supervisor_after_upgrade_with(
     release_upgrade_fence: impl FnOnce() -> Result<()>,
 ) -> Result<DaemonSupervisorUpgradeResume> {
     let _installation_lock = SupervisorInstallationLock::acquire(data_root)?;
+    ensure_hosted_uninstall_supervisor_admission_for_executable(executable)?;
     if backend.verify_registration(data_root, executable).is_err() {
         return Ok(DaemonSupervisorUpgradeResume::Fallback);
     }

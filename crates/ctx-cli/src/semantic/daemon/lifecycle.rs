@@ -64,7 +64,8 @@ pub(super) fn daemon_should_attempt_finite_idle_shutdown(
     idle_exit.is_some_and(|limit| idle_since.is_some_and(|idle| idle.elapsed() >= limit))
 }
 
-pub(super) fn installation_upgrade_blocks_current_process(data_root: &Path) -> bool {
-    !super::current_process_owns_daemon_upgrade_handoff(data_root)
-        && crate::upgrade::installation_upgrade_is_active().unwrap_or(false)
+pub(super) fn installation_lifecycle_blocks_current_process(data_root: &Path) -> bool {
+    crate::upgrade::installation_hosted_uninstall_is_active().unwrap_or(true)
+        || (!super::current_process_owns_daemon_upgrade_handoff(data_root)
+            && crate::upgrade::installation_upgrade_is_active().unwrap_or(false))
 }

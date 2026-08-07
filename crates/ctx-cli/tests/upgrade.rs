@@ -1274,17 +1274,31 @@ fn ordinary_release_binary_ignores_upgrade_test_harness_authority() {
         ctx_from_binary(&temp, &binary).args(["upgrade", "check"]),
         &release,
     ));
-    let ordinary_marker = hosted_install_marker_path(&fs::canonicalize(&binary).unwrap());
+    let ordinary_binary = fs::canonicalize(&binary).unwrap();
+    let ordinary_marker = hosted_install_marker_path(&ordinary_binary);
+    let ordinary_directory = ordinary_binary.parent().unwrap();
+    let ordinary_path_failures = [
+        format!(
+            "ctx executable is not an owner-safe regular file: {}",
+            ordinary_binary.display()
+        ),
+        format!(
+            "ctx executable directory is not owner-safe: {}",
+            ordinary_directory.display()
+        ),
+        format!("read ctx install marker {}", ordinary_marker.display()),
+    ];
 
     assert!(
-        stderr.contains(&format!(
-            "read ctx install marker {}",
-            ordinary_marker.display()
-        )),
+        ordinary_path_failures
+            .iter()
+            .any(|failure| stderr.contains(failure)),
         "{stderr}"
     );
+    let fake_target = fs::canonicalize(&release.target).unwrap();
     assert!(
-        !stderr.contains(&install_marker_path(&release.target).display().to_string())
+        !stderr.contains(&fake_target.display().to_string())
+            && !stderr.contains(&install_marker_path(&release.target).display().to_string())
             && !stderr.contains("download release metadata")
             && !stderr.contains("metadata signature"),
         "ordinary release binary accepted test-harness target authority: {stderr}"

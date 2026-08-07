@@ -1,5 +1,14 @@
 use std::path::Path;
+#[cfg(ctx_pro_qualification)]
+use std::{
+    io::{Read as _, Write as _},
+    process::{Child, ExitStatus, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
+#[cfg(ctx_pro_qualification)]
+use anyhow::Context as _;
 use anyhow::{anyhow, bail, Result};
 use ctx_pro_host_protocol::{
     base64url, installation_key_thumbprint, installation_proof_bytes, AuthorizationRequest,
@@ -13,6 +22,13 @@ use super::credential_vault::{
     CredentialRecord, CredentialRecordKind, PlatformCredentialVault,
     VaultInstallationChallengeSigner,
 };
+#[cfg(ctx_pro_qualification)]
+use super::qualification_authorizer::QualificationAuthorizerCommand;
+
+#[cfg(ctx_pro_qualification)]
+const QUALIFICATION_AUTHORIZER_MAX_RESPONSE_BYTES: usize = 256 * 1024;
+#[cfg(ctx_pro_qualification)]
+const QUALIFICATION_AUTHORIZER_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Supplies a challenge-bound authorization request to the Pro helper.
 ///
@@ -28,6 +44,148 @@ pub(crate) trait AuthorizationProvider {
     ) -> Result<AuthorizationRequest>;
 }
 
+#[cfg(ctx_pro_qualification)]
+pub(crate) struct QualificationAuthorizationProvider {
+    command: QualificationAuthorizerCommand,
+}
+
+#[cfg(ctx_pro_qualification)]
+impl QualificationAuthorizationProvider {
+    pub(crate) fn from_process_environment() -> Result<Option<Self>> {
+        QualificationAuthorizerCommand::from_process_environment()
+            .map(|command| command.map(|command| Self { command }))
+    }
+}
+
+#[cfg(ctx_pro_qualification)]
+impl AuthorizationProvider for QualificationAuthorizationProvider {
+    fn authorization_for_challenge(
+        &self,
+        challenge: &[u8; AUTHORIZATION_CHALLENGE_BYTES],
+    ) -> Result<AuthorizationRequest> {
+        #[derive(serde::Serialize)]
+        struct AuthorizerRequest<'a> {
+            schema_version: u8,
+            challenge_base64url: &'a str,
+        }
+
+        let challenge_base64url = base64url(challenge);
+        let input = serde_json::to_vec(&AuthorizerRequest {
+            schema_version: 1,
+            challenge_base64url: &challenge_base64url,
+        })
+        .context("authorization_failed: encode qualification authorizer request")?;
+
+        let prepared = self.command.prepare_execution()?;
+        let mut command = std::process::Command::new(prepared.program());
+        prepared.configure_command(&mut command);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+
+        let mut child = command
+            .spawn()
+            .context("authorization_failed: start qualification authorizer")?;
+        drop(prepared);
+        let Some(stdout) = child.stdout.take() else {
+            terminate_qualification_authorizer(&mut child);
+            let _ = child.wait();
+            bail!("authorization_failed: qualification authorizer stdout was unavailable");
+        };
+        let reader = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut output = Vec::new();
+            stdout
+                .take((QUALIFICATION_AUTHORIZER_MAX_RESPONSE_BYTES + 1) as u64)
+                .read_to_end(&mut output)?;
+            Ok(output)
+        });
+
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| {
+                anyhow!("authorization_failed: qualification authorizer stdin was unavailable")
+            })
+            .and_then(|mut stdin| {
+                stdin
+                    .write_all(&input)
+                    .context("authorization_failed: write qualification authorizer request")
+            });
+        if let Err(error) = write_result {
+            terminate_qualification_authorizer(&mut child);
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(error);
+        }
+
+        let status = match wait_for_qualification_authorizer(&mut child) {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = reader.join();
+                return Err(error);
+            }
+        };
+        let output = reader
+            .join()
+            .map_err(|_| anyhow!("authorization_failed: qualification authorizer reader failed"))?
+            .context("authorization_failed: read qualification authorizer response")?;
+        if output.is_empty() || output.len() > QUALIFICATION_AUTHORIZER_MAX_RESPONSE_BYTES {
+            bail!("invalid_response: qualification authorizer response size is invalid");
+        }
+        if !status.success() {
+            bail!("authorization_failed: qualification authorizer failed");
+        }
+        let request: AuthorizationRequest = serde_json::from_slice(&output)
+            .context("invalid_response: qualification authorizer returned malformed JSON")?;
+        if request.challenge_base64url != challenge_base64url {
+            bail!("invalid_response: qualification authorizer returned the wrong challenge");
+        }
+        Ok(request)
+    }
+}
+
+#[cfg(ctx_pro_qualification)]
+fn wait_for_qualification_authorizer(child: &mut Child) -> Result<ExitStatus> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if started.elapsed() < QUALIFICATION_AUTHORIZER_TIMEOUT => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                terminate_qualification_authorizer(child);
+                let _ = child.wait();
+                bail!("authorization_failed: qualification authorizer timed out");
+            }
+            Err(error) => {
+                terminate_qualification_authorizer(child);
+                let _ = child.wait();
+                return Err(error)
+                    .context("authorization_failed: wait for qualification authorizer");
+            }
+        }
+    }
+}
+
+#[cfg(ctx_pro_qualification)]
+fn terminate_qualification_authorizer(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if let Ok(process_group) = i32::try_from(child.id()).map(|pid| -pid) {
+            if unsafe { libc::kill(process_group, libc::SIGKILL) } == 0 {
+                return;
+            }
+        }
+    }
+    let _ = child.kill();
+}
 /// Signs one helper challenge with an installation-bound platform key.
 pub(crate) trait InstallationChallengeSigner {
     fn public_key(&self) -> Result<[u8; INSTALLATION_PUBLIC_KEY_BYTES]>;

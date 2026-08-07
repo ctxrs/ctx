@@ -55,6 +55,8 @@ impl GenerationWriter {
                 route_identity.as_str().to_owned(),
             ));
         }
+        self.route_publication_revalidations
+            .push((route_identity.clone(), Box::new(revalidate_missing)));
         let Some(base) = self.base_manifest.as_ref() else {
             return Ok(CertifiedMissingRouteOutcome {
                 retained_sources: Vec::new(),
@@ -80,8 +82,6 @@ impl GenerationWriter {
             None => SourceRouteMissingState::first(observation),
         };
         let retained_sources = base_route.sources().to_vec();
-        self.route_publication_revalidations
-            .push((route_identity.clone(), Box::new(revalidate_missing)));
         if state.consecutive_missing().get() >= delete_after_consecutive_observations {
             let source_key_field = self.fields.source_key;
             for source in &retained_sources {

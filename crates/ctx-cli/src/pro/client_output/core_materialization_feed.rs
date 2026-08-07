@@ -59,6 +59,10 @@ const CORE_RECORD_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget::new(
     MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
 );
 const PRO_CORE_FINALIZATION_LEASE_OWNER_KIND: &str = "pro_core_finalization";
+// Reuse one authenticated helper across fast quanta, but yield the daemon turn
+// after a finite residency. Every exchange retains the independent RPC watchdog.
+const CORE_FINALIZATION_BURST_MAX_REQUESTS: usize = 256;
+const CORE_FINALIZATION_BURST_MAX_ELAPSED: Duration = Duration::from_secs(30);
 #[path = "core_materialization_feed/batching.rs"]
 mod batching;
 #[path = "core_materialization_feed/ordered_prefetch.rs"]
@@ -103,7 +107,24 @@ enum CoreMaterializationFinalizationStep {
     Pending(CoreMaterializationFinalizationPending),
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CoreFinalizationBurstLimits {
+    max_requests: usize,
+    max_elapsed: Duration,
+}
+
+impl CoreFinalizationBurstLimits {
+    const PRODUCTION: Self = Self {
+        max_requests: CORE_FINALIZATION_BURST_MAX_REQUESTS,
+        max_elapsed: CORE_FINALIZATION_BURST_MAX_ELAPSED,
+    };
+}
+
 trait CoreMaterializationConsumer {
+    fn authenticated_final_deadline_unix(&self) -> Option<i64> {
+        None
+    }
+
     fn status(&mut self, request: StatusRequest) -> Result<ctx_pro_host_protocol::StatusResult>;
 
     fn begin(
@@ -181,6 +202,12 @@ impl ProClient {
 }
 
 impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
+    fn authenticated_final_deadline_unix(&self) -> Option<i64> {
+        self.client
+            .entitlement_schedule
+            .map(|schedule| schedule.grace_deadline_unix)
+    }
+
     fn status(&mut self, request: StatusRequest) -> Result<ctx_pro_host_protocol::StatusResult> {
         match self.exchange(HostMessage::Status(request))? {
             HelperMessage::Status(response) => Ok(response),
@@ -748,57 +775,121 @@ fn continue_core_finalization<C: CoreMaterializationConsumer>(
     consumer: &mut C,
     selection: CoreWorkerLaunchSelection,
 ) -> Result<CoreMaterializationSyncProgress> {
+    let authenticated_final_deadline_unix = consumer.authenticated_final_deadline_unix();
+    continue_core_finalization_burst_with(
+        index,
+        status,
+        consumer,
+        selection,
+        CoreFinalizationBurstLimits::PRODUCTION,
+        authenticated_final_deadline_unix,
+        Instant::now,
+        crate::pro::commercial_lifecycle::unix_time,
+        || false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continue_core_finalization_burst_with<C, Now, UnixNow, Cancelled>(
+    index: &VerifiedIndex,
+    status: &ctx_pro_host_protocol::StatusResult,
+    consumer: &mut C,
+    selection: CoreWorkerLaunchSelection,
+    limits: CoreFinalizationBurstLimits,
+    authenticated_final_deadline_unix: Option<i64>,
+    mut now: Now,
+    mut unix_now: UnixNow,
+    mut is_cancelled: Cancelled,
+) -> Result<CoreMaterializationSyncProgress>
+where
+    C: CoreMaterializationConsumer,
+    Now: FnMut() -> Instant,
+    UnixNow: FnMut() -> Result<i64>,
+    Cancelled: FnMut() -> bool,
+{
+    if limits.max_requests == 0 {
+        bail!("internal: Core finalization burst request bound is zero");
+    }
     let progress = status.finalization_progress.clone().ok_or_else(|| {
         anyhow!("invalid_response: finalizing Core status omitted durable progress")
     })?;
     if progress.core_generation_id != index.generation_id() {
         bail!("invalid_response: finalizing Core status belongs to a different generation");
     }
-    let request = ContinueCoreMaterializationRequest {
-        expected_progress: progress,
+    let mut pending = CoreMaterializationFinalizationPending {
+        progress,
+        replayed: true,
     };
-    request
-        .validate()
-        .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
-    match consumer.continue_finalization(request.clone())? {
-        CoreMaterializationFinalizationStep::Pending(pending) => {
-            pending
-                .validate_for_continue(&request)
-                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-            Ok(CoreMaterializationSyncProgress::FinalizationPending(
-                pending,
-            ))
+    let started = now();
+    let mut requests = 0_usize;
+    loop {
+        if is_cancelled() {
+            bail!("helper_cancelled: Core finalization continuation burst cancelled");
         }
-        CoreMaterializationFinalizationStep::Finished(finished) => {
-            finished
-                .validate_for_continue(&request)
-                .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
-            let sources = core_source_states(index.manifest())?;
-            let head = core_generation_head(index, &sources)?;
-            validate_finished_core(
-                &head,
-                &finished,
-                &request.expected_progress.materializer_revision,
-                consumer,
-                selection,
-            )?;
-            Ok(CoreMaterializationSyncProgress::Finished(
-                CoreMaterializationSyncReport {
-                    receipt: finished.receipt,
-                    helper_artifact_sha256: String::new(),
-                    #[cfg(test)]
-                    changed_sources: 0,
-                    #[cfg(test)]
-                    removed_sources: 0,
-                    #[cfg(test)]
-                    event_delta_pages: 0,
-                    #[cfg(test)]
-                    event_mutations: 0,
-                    #[cfg(test)]
-                    prefetch: CorePrefetchInstrumentationSnapshot::default(),
-                    replayed: finished.replayed,
-                },
-            ))
+        if requests >= limits.max_requests
+            || now().saturating_duration_since(started) >= limits.max_elapsed
+        {
+            return Ok(CoreMaterializationSyncProgress::FinalizationPending(
+                pending,
+            ));
+        }
+        if let Some(final_deadline_unix) = authenticated_final_deadline_unix {
+            let current_unix = unix_now()?;
+            if current_unix > final_deadline_unix {
+                bail!(
+                    "entitlement_expired: authenticated Pro entitlement reached its final deadline"
+                );
+            }
+        }
+
+        let request = ContinueCoreMaterializationRequest {
+            expected_progress: pending.progress.clone(),
+        };
+        request
+            .validate()
+            .map_err(|error| anyhow!("invalid_request: {}", error.message))?;
+        requests = requests.saturating_add(1);
+        // Exchanges are deliberately serial. Each one retains ProClient's
+        // ordinary 60-second watchdog and advances the chain only after the
+        // returned durable cursor passes its continuation CAS validation.
+        match consumer.continue_finalization(request.clone())? {
+            CoreMaterializationFinalizationStep::Pending(next_pending) => {
+                next_pending
+                    .validate_for_continue(&request)
+                    .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+                pending = next_pending;
+            }
+            CoreMaterializationFinalizationStep::Finished(finished) => {
+                finished
+                    .validate_for_continue(&request)
+                    .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
+                let sources = core_source_states(index.manifest())?;
+                let head = core_generation_head(index, &sources)?;
+                validate_finished_core(
+                    &head,
+                    &finished,
+                    &request.expected_progress.materializer_revision,
+                    consumer,
+                    selection,
+                )?;
+                return Ok(CoreMaterializationSyncProgress::Finished(
+                    CoreMaterializationSyncReport {
+                        receipt: finished.receipt,
+                        helper_artifact_sha256: String::new(),
+                        #[cfg(test)]
+                        changed_sources: 0,
+                        #[cfg(test)]
+                        removed_sources: 0,
+                        #[cfg(test)]
+                        event_delta_pages: 0,
+                        #[cfg(test)]
+                        event_mutations: 0,
+                        #[cfg(test)]
+                        prefetch: CorePrefetchInstrumentationSnapshot::default(),
+                        replayed: finished.replayed,
+                    },
+                ));
+            }
         }
     }
 }

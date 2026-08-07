@@ -584,36 +584,34 @@ fn publication_pin_certificate(source: &SourceKey) -> CertifiedSource {
 
 fn publish_pin_fixture(
     execution: &SourceBackedRefreshExecution<'_>,
-    nonempty: bool,
+    alternate_source: bool,
 ) -> Result<SourceBackedRefreshPublication> {
     let mut writer =
         ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?;
-    if nonempty {
-        let source = publication_pin_source();
-        writer.begin_source(source.clone())?;
-        writer.add_core_record(publication_pin_record(&source))?;
-        writer.certify_source(publication_pin_certificate(&source))?;
+    let source = publication_pin_source();
+    writer.begin_source(source.clone())?;
+    let mut record = publication_pin_record(&source);
+    if alternate_source {
+        record
+            .metadata
+            .insert("fixture_revision".to_owned(), json!(2));
     }
+    writer.add_core_record(record)?;
+    writer.certify_source(publication_pin_certificate(&source))?;
     let commit = writer.commit(|_| true)?;
-    let mut publication = if nonempty {
-        test_publication(commit.generation_id)
-    } else {
-        empty_test_publication(commit.generation_id)
+    let mut publication = test_publication(commit.generation_id);
+    publication.certified_source_count = 1;
+    publication.certified_source_bytes = 128;
+    publication.current = SourceBackedRefreshCurrent {
+        source_count: 1,
+        indexed_documents: 1,
+        complete_records: 1,
+        retained_records: 1,
+        certified_source_bytes: 128,
+        ..SourceBackedRefreshCurrent::default()
     };
-    if nonempty {
-        publication.certified_source_count = 1;
-        publication.certified_source_bytes = 128;
-        publication.current = SourceBackedRefreshCurrent {
-            source_count: 1,
-            indexed_documents: 1,
-            complete_records: 1,
-            retained_records: 1,
-            certified_source_bytes: 128,
-            ..SourceBackedRefreshCurrent::default()
-        };
-    }
     publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
     let selected = match &execution.scope {
         SourceBackedRefreshScope::All => BTreeSet::new(),

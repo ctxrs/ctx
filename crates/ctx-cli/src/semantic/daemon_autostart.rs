@@ -64,6 +64,7 @@ use autostart::{
 use autostart::{
     configured_daemon_autostart_command, daemon_autostart_command, daemon_restart_allowed,
     daemon_restart_trigger, parse_daemon_trigger, request_daemon_autostart, spawn_daemon_child,
+    spawn_daemon_child_for_upgrade_handoff,
 };
 
 pub(crate) use handoff::prepare_daemon_uninstall;
@@ -94,7 +95,7 @@ use installation::{
 
 pub(super) use recovery::resume_completed_installation_daemons;
 use recovery::{
-    restart_acknowledged_installation_daemons, wait_for_daemon_ready_ack,
+    restart_acknowledged_installation_daemons_with, wait_for_daemon_ready_ack,
     wait_for_replacement_daemon,
 };
 
@@ -145,6 +146,9 @@ pub(super) fn maybe_autostart_daemon_inner(
     config: &AppConfig,
     trigger: DaemonTriggerCommandArg,
 ) {
+    if autostart::hosted_uninstall_fences_daemon_autostart() {
+        return;
+    }
     if daemon_autostart_suppression_reason().is_none()
         && super::daemon_supervisor::ensure_daemon_supervisor(data_root).is_err()
     {

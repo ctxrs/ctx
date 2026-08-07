@@ -214,15 +214,15 @@ class ObserverTests(unittest.TestCase):
             },
         )
 
-        timed_out = self.run_fixture("timeout", timeout_ms=80)
+        timed_out = self.run_fixture("timeout", timeout_ms=500)
         self.assertEqual(
-            timed_out["observed"]["termination"]["kind"], "timeout"
-        )
-        self.assertEqual(
-            timed_out["observed"]["termination"]["timeout_ms"], 80
-        )
-        self.assertEqual(
-            timed_out["observed"]["termination"]["signal"], signal.SIGKILL
+            timed_out["observed"]["termination"],
+            {
+                "kind": "timeout",
+                "timeout_ms": 500,
+                "signal": signal.SIGTERM,
+                "signal_name": "SIGTERM",
+            },
         )
         self.assertEqual(
             timed_out["observed"]["plain_projection"]["text"], "waiting\n"

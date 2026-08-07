@@ -85,6 +85,15 @@ impl ProClient {
         bind_status_identity: bool,
         protocol_fingerprint: String,
     ) -> Result<Self> {
+        #[cfg(ctx_pro_qualification)]
+        let qualification_authorization =
+            QualificationAuthorizationProvider::from_process_environment()?;
+        #[cfg(ctx_pro_qualification)]
+        let authorization = authorization.or_else(|| {
+            qualification_authorization
+                .as_ref()
+                .map(|provider| provider as &dyn AuthorizationProvider)
+        });
         // Commit and PR blame are graph-only Query sessions and never authorize repository
         // access. Do not make those requests depend on the caller's Git installation. Every
         // other helper session preserves the existing startup binding, including file blame,

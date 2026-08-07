@@ -634,6 +634,8 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             "setup",
             vec![
                 "Usage: ctx setup",
+                "--catalog-only",
+                "Deprecated and ignored; setup follows its normal refresh lifecycle",
                 "--semantic",
                 "Enable local semantic search in config",
                 "--format <FORMAT>",

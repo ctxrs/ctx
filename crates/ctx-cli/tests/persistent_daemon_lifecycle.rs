@@ -406,8 +406,9 @@ mod native {
                 source_failure
                     .get(5)
                     .and_then(Value::as_str)
-                    .is_some_and(|error| error
-                        .contains("Codex catalog owner changed before NativePath admission")),
+                    .is_some_and(|error| error.contains(
+                        "Codex normalized catalog owner changed before NativePath admission"
+                    )),
                 "{failed_job:#}"
             );
             assert_eq!(

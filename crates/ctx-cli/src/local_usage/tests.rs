@@ -57,7 +57,9 @@ pub(super) fn private_tempdir() -> tempfile::TempDir {
 }
 
 pub(super) fn operation(name: &'static str) -> CompletedOperation {
-    CompletedOperation::cli(name, true, Duration::from_millis(4))
+    let mut operation = CompletedOperation::cli(name, true, Duration::from_millis(4));
+    operation.delivered_output_bytes = 1;
+    operation
 }
 
 #[test]

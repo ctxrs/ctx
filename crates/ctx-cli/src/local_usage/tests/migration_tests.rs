@@ -65,3 +65,69 @@ fn legacy_impossible_blame_row_remains_definition_one_without_relabeling() {
     assert_eq!(legacy.summary.pro_blame.possible_only_requests, 1);
     assert_eq!(legacy.summary.pro_blame.none_requests, 0);
 }
+
+#[test]
+fn valid_schema_two_rows_migrate_without_changing_definition_semantics() {
+    let root = private_tempdir();
+    store::create_v2_fixture_for_test(root.path(), "cli", "success", 23).unwrap();
+    let path = store::usage_path(root.path());
+    let before = fs::read(&path).unwrap();
+
+    let detached_report = read_report(root.path(), true, true);
+    let detached_definition = &detached_report.definitions.unwrap()[0];
+    assert_eq!(detached_definition.definition_version, 2);
+    assert_eq!(detached_definition.summary.calls, 1);
+    assert_eq!(detached_definition.summary.delivered_output_bytes, 23);
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    store::record(root.path(), operation("doctor")).unwrap();
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_version, 3);
+    drop(connection);
+    let report = read_report(root.path(), true, true);
+    let definition = &report.definitions.unwrap()[0];
+    assert_eq!(definition.definition_version, 2);
+    assert_eq!(definition.summary.calls, 2);
+    assert_eq!(definition.summary.delivered_output_bytes, 24);
+}
+
+#[test]
+fn schema_two_cli_failure_without_output_remains_migration_compatible() {
+    let root = private_tempdir();
+    store::create_v2_fixture_for_test(root.path(), "cli", "failure", 0).unwrap();
+    store::record(root.path(), operation("doctor")).unwrap();
+
+    let report = read_report(root.path(), true, true);
+    let definition = &report.definitions.unwrap()[0];
+    assert_eq!(definition.definition_version, 2);
+    assert_eq!(definition.summary.calls, 2);
+    assert_eq!(definition.summary.successful_calls, 1);
+    assert_eq!(definition.summary.failed_calls, 1);
+    assert_eq!(definition.summary.delivered_output_bytes, 1);
+}
+
+#[test]
+fn impossible_schema_two_zero_output_rows_fail_closed_without_migration() {
+    for (surface, outcome) in [("cli", "success"), ("mcp", "failure")] {
+        let root = private_tempdir();
+        store::create_v2_fixture_for_test(root.path(), surface, outcome, 0).unwrap();
+        let path = store::usage_path(root.path());
+        let before = fs::read(&path).unwrap();
+
+        let report = read_report(root.path(), true, true);
+        assert_eq!(report.state, "error", "{surface} {outcome}");
+        assert!(report.definitions.is_none());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(store::record(root.path(), operation("doctor")).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let connection = rusqlite::Connection::open(path).unwrap();
+        let user_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 2);
+    }
+}

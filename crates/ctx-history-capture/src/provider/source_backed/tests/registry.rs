@@ -789,6 +789,38 @@ fn cold_refresh_with_only_failed_routes_does_not_publish_ready_data() {
 }
 
 #[test]
+fn certified_missing_route_certifies_a_complete_empty_inventory() {
+    let temp = tempdir().unwrap();
+    let mut source = fixture_provider_source_at(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        ProviderImportSupport::Native,
+        temp.path().join("missing-history.jsonl"),
+    );
+    source.status = ProviderSourceStatus::Missing;
+    source.exists = false;
+    let route = SourceBackedRoute::certified_missing(
+        source,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+    )
+    .unwrap();
+    let route_identity = route.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+
+    let refresh =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+
+    assert!(refresh.sources.is_empty());
+    assert_eq!(refresh.successful_route_outcomes.len(), 1);
+    assert_eq!(
+        refresh.successful_route_outcomes[0].route_identity,
+        route_identity
+    );
+    assert_eq!(refresh.complete_inventory_route_ids, vec![route_identity]);
+}
+
+#[test]
 fn warm_missing_route_in_grace_remains_usable_when_a_new_cold_route_fails() {
     let provider = CaptureProvider::Gemini;
     let format = GEMINI_CLI_SOURCE_FORMAT;
@@ -1207,6 +1239,90 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
         VerifiedIndex::open(temp.path()).unwrap().document_count(),
         0
     );
+}
+
+fn certified_missing_registry_at(
+    path: impl Into<PathBuf>,
+) -> (SourceBackedProviderRegistry, SourceRouteIdentity) {
+    let mut source = fixture_provider_source_at(
+        CaptureProvider::Gemini,
+        GEMINI_CLI_SOURCE_FORMAT,
+        ProviderImportSupport::Native,
+        path,
+    );
+    source.status = ProviderSourceStatus::Missing;
+    source.exists = false;
+    let route = SourceBackedRoute::certified_missing(
+        source,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+    )
+    .unwrap();
+    let route_identity = route.metadata.route_identity.clone().unwrap();
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(route);
+    (registry, route_identity)
+}
+
+#[test]
+fn cold_certified_missing_route_reappearance_at_precommit_cannot_publish_empty() {
+    let temp = tempdir().unwrap();
+    let reappearing_path = temp.path().join("cold-reappearing-history.jsonl");
+    let (registry, route_identity) = certified_missing_registry_at(reappearing_path.clone());
+
+    install_before_source_backed_commit_hook_for_test(move || {
+        fs::write(reappearing_path, b"reappeared before cold commit\n").unwrap();
+    });
+    let error = refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default())
+        .expect_err("cold missing route must be revalidated at the publication fence");
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Index(IndexError::SourceInvalidated(ref invalidated))
+            if invalidated == route_identity.as_str()
+    ));
+    assert!(matches!(
+        VerifiedIndex::open(temp.path()),
+        Err(IndexError::MissingActiveGenerationPointer)
+    ));
+}
+
+#[test]
+fn previously_empty_certified_missing_route_reappearance_at_precommit_retains_base() {
+    let temp = tempdir().unwrap();
+    let empty_registry = inventory_replay_registry(Arc::new(Mutex::new(Vec::new())));
+    let initial =
+        refresh_source_backed_generation(temp.path(), &empty_registry, WriterOptions::default())
+            .unwrap();
+    assert!(initial.sources.is_empty());
+    let [empty_route] = initial.commit.manifest().source_routes() else {
+        panic!("one previously empty route expected");
+    };
+    assert!(empty_route.sources().is_empty());
+    let route_identity = empty_route.route_identity().clone();
+
+    let reappearing_path = temp.path().join("empty-reappearing-history.jsonl");
+    let (missing_registry, missing_identity) =
+        certified_missing_registry_at(reappearing_path.clone());
+    assert_eq!(missing_identity, route_identity);
+    install_before_source_backed_commit_hook_for_test(move || {
+        fs::write(reappearing_path, b"reappeared before empty commit\n").unwrap();
+    });
+    let error =
+        refresh_source_backed_generation(temp.path(), &missing_registry, WriterOptions::default())
+            .expect_err(
+                "previously empty missing route must be revalidated at the publication fence",
+            );
+
+    assert!(matches!(
+        error,
+        SourceBackedCoordinatorError::Index(IndexError::SourceInvalidated(ref invalidated))
+            if invalidated == route_identity.as_str()
+    ));
+    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(retained.generation_id(), initial.commit.generation_id);
+    let retained_route = retained.manifest().source_route(&route_identity).unwrap();
+    assert!(retained_route.sources().is_empty());
+    assert_eq!(retained.document_count(), 0);
 }
 
 #[test]
