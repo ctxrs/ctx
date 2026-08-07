@@ -23,7 +23,7 @@ use tempfile::tempdir;
 mod support;
 use support::{
     copied_ctx_binary, ctx, ctx_from_binary, daemon_test_root, data_root,
-    initialize_current_query_store, initialize_empty_current_query_store, write_blame_helper,
+    initialize_current_query_store, initialize_current_query_store_generation, write_blame_helper,
     write_core_materialization_helper,
 };
 
@@ -208,7 +208,7 @@ fn live_daemon_rebuilds_replaced_helper_without_a_new_core_generation() {
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
     .unwrap();
-    let generation = initialize_empty_current_query_store(&data_root);
+    let generation = initialize_current_query_store_generation(&data_root);
     let helper = temp.path().join("ctx-pro-materializer");
     let helper_state = temp.path().join("materializer-state.json");
     let helper_log = temp.path().join("materializer-log.txt");
