@@ -39,6 +39,12 @@ grep -Fq 'load("@rules_python//python:defs.bzl", "py_library")' \
   exit 1
 }
 
+grep -Fq 'bazel_dep(name = "rules_shell", version = "0.8.0")' \
+  "${module_definition}" || {
+  echo 'Windows release launchers require rules_shell with the shebang-safe entrypoint' >&2
+  exit 1
+}
+
 python3 - "${module_lock}" <<'PY'
 import json
 from pathlib import Path
