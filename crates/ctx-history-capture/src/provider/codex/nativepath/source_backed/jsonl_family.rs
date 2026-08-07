@@ -27,27 +27,43 @@ const CODEX_LINEAGE_EXHAUSTED_DETAIL: &str =
 const CODEX_LINEAGE_UNAVAILABLE_DETAIL: &str = "Codex lineage working set is unavailable";
 const CODEX_GENERATION_TERMINAL_PARTITION_V0: u64 = u64::MAX;
 
-fn bind_generation_source_capability_v0(
-    source: &mut CodexCatalogSource,
-) -> Result<(Arc<OpenedProviderSourceFile>, JsonlFileObservation)> {
+fn observe_generation_source_capability_v0(
+    source: &CodexCatalogSource,
+) -> Result<JsonlFileObservation> {
     let opened = reopen_codex_source_capability(source)?;
     revalidate_codex_catalog_source_capability(source, &opened)?;
-    let observation = observe_opened_file(&source.source_path, &opened)?;
-    source.opened = Some(Arc::clone(&opened));
-    Ok((opened, observation))
+    observe_opened_file(&source.source_path, &opened)
 }
 
 fn codex_lineage_rejected_leaf_v0(
     rejected: CodexLineageRejectedSourceV0,
     authority_path: PathBuf,
 ) -> Result<JsonlFamilyRejectedLeaf> {
-    let proof = TypedKey::bytes(serde_json::to_vec(&rejected.proof)?)
+    let native_session_id = rejected.source.catalog_native_session_id.as_deref().ok_or(
+        CaptureError::SystemInvariant(
+            "rejected Codex lineage source has no native session identity",
+        ),
+    )?;
+    let source = codex_source_key(native_session_id)
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    Ok(JsonlFamilyRejectedLeaf::bind_observed(
+    let diagnostic = rejected.proof.root_conflict_diagnostic_detail();
+    let proof_bytes = serde_json::to_vec(&rejected.proof)?;
+    let proof = TypedKey::bytes(proof_bytes)
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let terminal_source = rejected.source.clone();
+    let opened = reopen_codex_source_capability(&terminal_source)?;
+    revalidate_codex_catalog_source_capability(&terminal_source, &opened)?;
+    Ok(JsonlFamilyRejectedLeaf::bind_observed_with_terminal(
         rejected.source.source_path,
         authority_path,
         proof,
         1,
+        source,
+        move || {
+            let opened = reopen_codex_source_capability(&terminal_source)?;
+            revalidate_codex_catalog_source_capability(&terminal_source, &opened)
+        },
+        diagnostic,
     ))
 }
 
@@ -70,7 +86,7 @@ fn scan_codex_session_jsonl_leaf_v0(
     worker: &mut JsonlFamilyWorkerContext,
     emit_page: &mut dyn FnMut(JsonlFamilyPublication, Vec<CoreRecord>) -> Result<()>,
 ) -> Result<JsonlFamilyOptimizedLeafOutcome> {
-    let (plan, outcome_lineage) = {
+    let (mut plan, outcome_lineage) = {
         let state = state.lock().map_err(|_| codex_family_state_error())?;
         let plan = state.plans.get(leaf.source()).cloned().ok_or_else(|| {
             CaptureError::InvalidPayload(
@@ -87,6 +103,9 @@ fn scan_codex_session_jsonl_leaf_v0(
     if plan.0.source_path != leaf.source_path() {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
+    // Generation preparation retains root authority and route observations,
+    // while each scheduled worker holds only its own exact leaf capability.
+    plan.0.opened = Some(leaf.open_for_optimized_scan()?);
     let mut scan_context = CodexJsonlFamilyLeafContextV0 {
         base_event_lookup,
         outcome_lineage: &outcome_lineage,
@@ -509,7 +528,7 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
             ));
         }
         let outcome_lineage = prepared.authority;
-        let mut normalized_sources = prepared.sources;
+        let normalized_sources = prepared.sources;
         let mut rejected_leaves = Vec::with_capacity(prepared.rejections.len());
         for rejected in prepared.rejections {
             let authority_path = rejected.source.authority_relative_path.clone().ok_or(
@@ -526,7 +545,7 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
         for index in ordered_sources {
             let (source, source_key, native_session_id) =
                 normalized_sources
-                    .get_mut(index)
+                    .get(index)
                     .ok_or(CaptureError::SystemInvariant(
                         "Codex generation source ordering changed",
                     ))?;
@@ -541,7 +560,7 @@ impl CodexSessionTreeJsonlFamilyAdapterV0 {
                         "Codex catalog source has no authority path",
                     ))?;
             let observation = if self.generation.is_some() {
-                bind_generation_source_capability_v0(source)?.1
+                observe_generation_source_capability_v0(source)?
             } else {
                 let opened = authority.open_file(&authority_path)?;
                 observe_opened_file(&source.source_path, &opened)?
@@ -880,11 +899,11 @@ impl CodexExplicitSessionJsonlFamilyAdapterV0 {
         })?;
         let authority = Arc::new(ProviderSourceRoot::open(parent)?);
         let outcome_lineage = prepared.authority;
-        let mut plans = prepared.sources;
+        let plans = prepared.sources;
         let mut leaves = Vec::with_capacity(plans.len());
-        for plan in &mut plans {
+        for plan in &plans {
             let observation = if self.generation.is_some() {
-                bind_generation_source_capability_v0(&mut plan.0)?.1
+                observe_generation_source_capability_v0(&plan.0)?
             } else {
                 let opened = authority.open_file(&authority_path)?;
                 observe_opened_file(&plan.0.source_path, &opened)?

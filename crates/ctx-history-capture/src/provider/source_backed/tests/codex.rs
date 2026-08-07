@@ -1,9 +1,23 @@
 use std::{fs::OpenOptions, io::Write};
 
+#[cfg(target_os = "linux")]
+use std::{
+    process::Command,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    thread,
+    time::Duration,
+};
+
 use ctx_history_core::{EventOrigin, SessionRelationshipKind};
 
 use super::*;
 use crate::provider::codex::nativepath::install_after_codex_lineage_normalization_hook_v0;
+
+#[cfg(target_os = "linux")]
+const CODEX_FD_BUDGET_CHILD_ENV: &str = "CTX_TEST_CODEX_FD_BUDGET_CHILD";
+#[cfg(target_os = "linux")]
+const CODEX_FD_BUDGET_TEST: &str =
+    "provider::source_backed::tests::codex::codex_generation_bounds_leaf_fds_under_soft_nofile_1024";
 
 fn prompt_line(session_id: &str, ts: i64, text: &str) -> Vec<u8> {
     let mut line = serde_json::to_vec(&serde_json::json!({
@@ -254,6 +268,162 @@ fn register_codex_trees(roots: &[(&Path, ProviderImportSupport)]) -> SourceBacke
     )
     .unwrap();
     registry
+}
+
+#[cfg(target_os = "linux")]
+fn set_soft_nofile_limit(limit: libc::rlim_t) {
+    let mut current = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: this runs only in the isolated child process below, before any
+    // refresh worker starts. The child exits without restoring its soft limit.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut current) },
+        0
+    );
+    assert!(
+        current.rlim_max >= limit,
+        "hard RLIMIT_NOFILE {} is below required test limit {limit}",
+        current.rlim_max
+    );
+    current.rlim_cur = limit;
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &current) }, 0);
+    let mut observed = current;
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut observed) },
+        0
+    );
+    assert_eq!(observed.rlim_cur, limit);
+}
+
+#[cfg(target_os = "linux")]
+fn open_fd_count() -> usize {
+    fs::read_dir("/proc/self/fd").unwrap().count()
+}
+
+#[cfg(target_os = "linux")]
+fn run_codex_fd_budget_child() {
+    const TREE_SOURCES: usize = 2_048;
+    const EXPLICIT_SOURCES: usize = 16;
+    const SOFT_NOFILE: libc::rlim_t = 1_024;
+    const MAX_OPEN_FDS: usize = 256;
+
+    set_soft_nofile_limit(SOFT_NOFILE);
+    let temp = tempdir().unwrap();
+    let tree = temp.path().join("automatic-tree");
+    let explicit = temp.path().join("explicit-routes");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&tree).unwrap();
+    fs::create_dir_all(&explicit).unwrap();
+    for source in 0..TREE_SOURCES {
+        let native_session_id = format!("019fb000-0000-7000-8000-{source:012x}");
+        fs::write(
+            tree.join(format!("rollout-{native_session_id}.jsonl")),
+            codex_lineage_rollout(
+                &native_session_id,
+                None,
+                SessionRelationshipKind::Root,
+                None,
+                "bounded automatic leaf",
+            ),
+        )
+        .unwrap();
+    }
+    let mut registry = register_codex_tree(&tree);
+    for source in 0..EXPLICIT_SOURCES {
+        let native_session_id = format!("019fb001-0000-7000-8000-{source:012x}");
+        let path = explicit.join(format!("route-{source:02}.jsonl"));
+        fs::write(
+            &path,
+            codex_lineage_rollout(
+                &native_session_id,
+                None,
+                SessionRelationshipKind::Root,
+                None,
+                "bounded explicit leaf",
+            ),
+        )
+        .unwrap();
+        register_codex_route(
+            &mut registry,
+            &path,
+            "codex_session_jsonl",
+            ProviderImportSupport::Explicit,
+            SourceBackedRouteSelection::ExplicitManual,
+        );
+    }
+
+    let baseline = open_fd_count();
+    let sampling = Arc::new(AtomicBool::new(true));
+    let peak = Arc::new(AtomicUsize::new(baseline));
+    let sampling_from_thread = Arc::clone(&sampling);
+    let peak_from_thread = Arc::clone(&peak);
+    let monitor = thread::spawn(move || {
+        while sampling_from_thread.load(Ordering::Acquire) {
+            peak_from_thread.fetch_max(open_fd_count(), Ordering::Relaxed);
+            thread::sleep(Duration::from_millis(1));
+        }
+        peak_from_thread.fetch_max(open_fd_count(), Ordering::Relaxed);
+    });
+    let writer_options = WriterOptions {
+        indexer_threads: 1,
+        ..WriterOptions::default()
+    };
+    let refreshed = super::super::family::jsonl::with_family_scanner_workers(16, || {
+        refresh_source_backed_generation(&index, &registry, writer_options)
+    });
+    let scanner_workers = super::super::family::jsonl::jsonl_family_scanner_max_worker_count();
+    sampling.store(false, Ordering::Release);
+    monitor.join().unwrap();
+
+    let refreshed = refreshed.unwrap();
+    let high_water = peak.load(Ordering::Relaxed);
+    assert!(refreshed.failed_routes.is_empty());
+    assert_eq!(
+        scanner_workers, 16,
+        "FD regression did not exercise 16 workers"
+    );
+    assert_eq!(
+        refreshed.certified_source_count,
+        TREE_SOURCES + EXPLICIT_SOURCES
+    );
+    assert!(
+        high_water <= MAX_OPEN_FDS,
+        "Codex refresh FD high-water {high_water} exceeded bound {MAX_OPEN_FDS} (baseline {baseline})"
+    );
+    eprintln!(
+        "CODEX_FD_BUDGET_RECEIPT soft_nofile={SOFT_NOFILE} sources={} routes={} scanner_workers={scanner_workers} baseline_fds={baseline} peak_fds={high_water} bound={MAX_OPEN_FDS}",
+        TREE_SOURCES + EXPLICIT_SOURCES,
+        EXPLICIT_SOURCES + 1,
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn codex_generation_bounds_leaf_fds_under_soft_nofile_1024() {
+    if std::env::var_os(CODEX_FD_BUDGET_CHILD_ENV).is_some() {
+        run_codex_fd_budget_child();
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            CODEX_FD_BUDGET_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CODEX_FD_BUDGET_CHILD_ENV, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "soft-NOFILE Codex refresh child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
@@ -1534,6 +1704,327 @@ fn codex_transitive_root_normalization_quarantines_before_workers() {
 }
 
 #[test]
+fn codex_root_conflict_projects_typed_source_failures_while_valid_peer_publishes() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("private-codex-sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let root_a = "019fa000-0000-7000-8000-0000000032a0";
+    let child_a = "019fa000-0000-7000-8000-0000000032a1";
+    let root_b = "019fa000-0000-7000-8000-0000000032b0";
+    let invalid_root_marker = "privaterootacanary328";
+    let invalid_child_marker = "privatechildacanary328";
+    let valid_marker = "validrootbcanary328";
+    for (id, parent, relationship, advisory, marker) in [
+        (
+            root_a,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            invalid_root_marker,
+        ),
+        (
+            child_a,
+            Some(root_a),
+            SessionRelationshipKind::Delegated,
+            Some(root_b),
+            invalid_child_marker,
+        ),
+        (
+            root_b,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            valid_marker,
+        ),
+    ] {
+        fs::write(
+            sessions.join(format!("rollout-{id}.jsonl")),
+            codex_lineage_rollout(id, parent, relationship, advisory, marker),
+        )
+        .unwrap();
+    }
+    let registry = register_codex_tree(&sessions);
+
+    let refreshed =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(refreshed.certified_source_count, 1);
+    assert_eq!(refreshed.commit.indexed_documents, 1);
+    assert_eq!(refreshed.logical_source_failures.total(), 2);
+    assert_eq!(refreshed.successful_route_outcomes.len(), 1);
+    assert_eq!(
+        refreshed.successful_route_outcomes[0].logical_source_failure_total,
+        2
+    );
+    assert_eq!(refreshed.record_rejections.total(), 0);
+    assert_eq!(
+        refreshed.record_completion(),
+        SourceBackedRecordCompletion::Completed
+    );
+    for failure in refreshed.logical_source_failures.failures() {
+        assert_eq!(failure.class, SourceBackedSourceFailureClass::Unreadable);
+        assert!(!failure.carried_forward);
+        for expected in [
+            format!("computed_root_native_session_id={root_a}"),
+            format!("conflicting_advisory_session_id={root_b}"),
+            format!("evidence_source_record=session_meta:{child_a}"),
+            format!("computed_root_source_record=session_meta:{root_a}"),
+            format!("advisory_source_record=session_meta:{root_b}"),
+        ] {
+            assert!(failure.detail.contains(&expected), "{}", failure.detail);
+        }
+        assert!(!failure.detail.contains(sessions.to_str().unwrap()));
+        assert!(!failure.detail.contains(invalid_root_marker));
+        assert!(!failure.detail.contains(invalid_child_marker));
+    }
+    let verified = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        verified
+            .search_event_candidates(valid_marker, 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(verified
+        .search_event_candidates(invalid_root_marker, 8)
+        .unwrap()
+        .is_empty());
+    assert!(verified
+        .search_event_candidates(invalid_child_marker, 8)
+        .unwrap()
+        .is_empty());
+    let generation = verified.generation_id().to_owned();
+
+    let replay =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(replay.commit.generation_id, generation);
+    assert_eq!(replay.logical_source_failures.total(), 2);
+    assert_eq!(replay.record_rejections.total(), 0);
+}
+
+#[test]
+fn codex_warm_root_conflict_quarantines_owned_component_and_publishes_peer_update() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("codex-sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let root_a = "019fa000-0000-7000-8000-0000000033a0";
+    let child_a = "019fa000-0000-7000-8000-0000000033a1";
+    let root_b = "019fa000-0000-7000-8000-0000000033b0";
+    let root_a_marker = "warmrootacanary328";
+    let child_a_marker = "warmchildacanary328";
+    let old_peer_marker = "warmoldpeercanary328";
+    let new_peer_marker = "warmnewpeercanary328";
+    let root_a_path = sessions.join(format!("rollout-{root_a}.jsonl"));
+    let child_a_path = sessions.join(format!("rollout-{child_a}.jsonl"));
+    let root_b_path = sessions.join(format!("rollout-{root_b}.jsonl"));
+    fs::write(
+        &root_a_path,
+        codex_lineage_rollout(
+            root_a,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            root_a_marker,
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &child_a_path,
+        codex_lineage_rollout(
+            child_a,
+            Some(root_a),
+            SessionRelationshipKind::Delegated,
+            Some(root_a),
+            child_a_marker,
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &root_b_path,
+        codex_lineage_rollout(
+            root_b,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            old_peer_marker,
+        ),
+    )
+    .unwrap();
+    let registry = register_codex_tree(&sessions);
+
+    let initial =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(initial.certified_source_count, 3);
+    assert!(initial.logical_source_failures.is_empty());
+    let initial_generation = initial.commit.generation_id;
+
+    fs::write(
+        &child_a_path,
+        codex_lineage_rollout(
+            child_a,
+            Some(root_a),
+            SessionRelationshipKind::Delegated,
+            Some(root_b),
+            child_a_marker,
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &root_b_path,
+        codex_lineage_rollout(
+            root_b,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            new_peer_marker,
+        ),
+    )
+    .unwrap();
+
+    let refreshed =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert_ne!(refreshed.commit.generation_id, initial_generation);
+    assert_eq!(refreshed.certified_source_count, 1);
+    assert_eq!(refreshed.logical_source_failures.total(), 2);
+    assert_eq!(refreshed.logical_source_failures.failures().len(), 2);
+    assert_eq!(refreshed.logical_source_failures.omitted(), 0);
+    assert_eq!(refreshed.record_rejections.total(), 0);
+    assert_eq!(
+        refreshed.record_completion(),
+        SourceBackedRecordCompletion::Completed
+    );
+    assert_eq!(refreshed.successful_route_outcomes.len(), 1);
+    assert_eq!(
+        refreshed.successful_route_outcomes[0].logical_source_failure_total,
+        2
+    );
+    for failure in refreshed.logical_source_failures.failures() {
+        assert!(!failure.carried_forward);
+        for expected in [
+            format!("computed_root_native_session_id={root_a}"),
+            format!("conflicting_advisory_session_id={root_b}"),
+            format!("evidence_source_record=session_meta:{child_a}"),
+            format!("computed_root_source_record=session_meta:{root_a}"),
+            format!("advisory_source_record=session_meta:{root_b}"),
+        ] {
+            assert!(failure.detail.contains(&expected), "{}", failure.detail);
+        }
+        assert!(!failure.detail.contains(sessions.to_str().unwrap()));
+        assert!(!failure.detail.contains(root_a_marker));
+        assert!(!failure.detail.contains(child_a_marker));
+    }
+    let verified = VerifiedIndex::open(&index).unwrap();
+    assert_eq!(
+        verified
+            .search_event_candidates(new_peer_marker, 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    for removed_marker in [root_a_marker, child_a_marker, old_peer_marker] {
+        assert!(
+            verified
+                .search_event_candidates(removed_marker, 8)
+                .unwrap()
+                .is_empty(),
+            "stale marker remained published: {removed_marker}"
+        );
+    }
+}
+
+#[test]
+fn codex_many_root_conflicts_keep_exact_total_and_bounded_capture_diagnostics() {
+    const CONFLICTING_CHILDREN: usize = 65;
+    const REJECTED_SOURCES: usize = CONFLICTING_CHILDREN + 1;
+
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("private-bounded-codex-conflicts");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let root_a = "019fa000-0000-7000-8000-000000003500";
+    let root_b = "019fa000-0000-7000-8000-0000000035b0";
+    let evidence_child = "019fa000-0000-7000-8001-000000000000";
+    let private_marker = "private bounded capture root conflict 328";
+    let valid_marker = "boundedcapturerootconflictvalidpeer328";
+    fs::write(
+        sessions.join(format!("rollout-{root_a}.jsonl")),
+        codex_lineage_rollout(
+            root_a,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            private_marker,
+        ),
+    )
+    .unwrap();
+    for index in 0..CONFLICTING_CHILDREN {
+        let child = format!("019fa000-0000-7000-8001-{index:012x}");
+        fs::write(
+            sessions.join(format!("rollout-{child}.jsonl")),
+            codex_lineage_rollout(
+                &child,
+                Some(root_a),
+                SessionRelationshipKind::Delegated,
+                Some(if index == 0 { root_b } else { root_a }),
+                private_marker,
+            ),
+        )
+        .unwrap();
+    }
+    fs::write(
+        sessions.join(format!("rollout-{root_b}.jsonl")),
+        codex_lineage_rollout(
+            root_b,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            valid_marker,
+        ),
+    )
+    .unwrap();
+    let registry = register_codex_tree(&sessions);
+
+    let refreshed =
+        refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
+    assert_eq!(refreshed.certified_source_count, 1);
+    assert_eq!(refreshed.logical_source_failures.total(), REJECTED_SOURCES);
+    assert_eq!(refreshed.logical_source_failures.failures().len(), 64);
+    assert_eq!(refreshed.logical_source_failures.omitted(), 2);
+    assert_eq!(refreshed.successful_route_outcomes.len(), 1);
+    assert_eq!(
+        refreshed.successful_route_outcomes[0].logical_source_failure_total,
+        REJECTED_SOURCES
+    );
+    assert_eq!(refreshed.record_rejections.total(), 0);
+    assert_eq!(
+        refreshed.record_completion(),
+        SourceBackedRecordCompletion::Completed
+    );
+    for failure in refreshed.logical_source_failures.failures() {
+        for expected in [
+            format!("computed_root_native_session_id={root_a}"),
+            format!("conflicting_advisory_session_id={root_b}"),
+            format!("evidence_source_record=session_meta:{evidence_child}"),
+            format!("computed_root_source_record=session_meta:{root_a}"),
+            format!("advisory_source_record=session_meta:{root_b}"),
+        ] {
+            assert!(failure.detail.contains(&expected), "{}", failure.detail);
+        }
+        assert!(!failure.detail.contains(sessions.to_str().unwrap()));
+        assert!(!failure.detail.contains(private_marker));
+    }
+    assert_eq!(
+        VerifiedIndex::open(&index)
+            .unwrap()
+            .search_event_candidates(valid_marker, 8)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn codex_all_invalid_lineage_fails_without_workers_or_publication() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
@@ -1580,6 +2071,64 @@ fn codex_all_invalid_lineage_fails_without_workers_or_publication() {
     assert_eq!(observation.rejected_sources, 2);
     assert_eq!(observation.worker_starts_at_normalization, 0);
     assert_eq!(observation.worker_start_latch.starts(), 0);
+    assert!(VerifiedIndex::open(&index).is_err());
+}
+
+#[test]
+fn codex_all_invalid_root_conflict_failure_exposes_path_safe_proof() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("private-codex-sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let root = "019fa000-0000-7000-8000-0000000032c0";
+    let child = "019fa000-0000-7000-8000-0000000032c1";
+    let missing_advisory = "019fa000-0000-7000-8000-0000000032ff";
+    let private_marker = "private all-invalid root-conflict message content";
+    fs::write(
+        sessions.join(format!("rollout-{root}.jsonl")),
+        codex_lineage_rollout(
+            root,
+            None,
+            SessionRelationshipKind::Root,
+            None,
+            private_marker,
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sessions.join(format!("rollout-{child}.jsonl")),
+        codex_lineage_rollout(
+            child,
+            Some(root),
+            SessionRelationshipKind::Delegated,
+            Some(missing_advisory),
+            private_marker,
+        ),
+    )
+    .unwrap();
+
+    let error = refresh_source_backed_generation(
+        &index,
+        &register_codex_tree(&sessions),
+        WriterOptions::default(),
+    )
+    .unwrap_err();
+    let SourceBackedCoordinatorError::NoUsableSourceRoutes { failed_routes } = error else {
+        panic!("expected an unusable Codex route, got {error:?}");
+    };
+    assert_eq!(failed_routes.len(), 1);
+    let detail = &failed_routes[0].detail;
+    for expected in [
+        format!("computed_root_native_session_id={root}"),
+        format!("conflicting_advisory_session_id={missing_advisory}"),
+        format!("evidence_source_record=session_meta:{child}"),
+        format!("computed_root_source_record=session_meta:{root}"),
+        "advisory_source_record=unavailable".to_owned(),
+    ] {
+        assert!(detail.contains(&expected), "{detail}");
+    }
+    assert!(!detail.contains(sessions.to_str().unwrap()));
+    assert!(!detail.contains(private_marker));
     assert!(VerifiedIndex::open(&index).is_err());
 }
 
