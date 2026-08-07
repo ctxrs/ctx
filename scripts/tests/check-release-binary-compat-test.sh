@@ -452,7 +452,7 @@ mutate_and_fail linux_type linux-x64 "${linux_x64}" 's/Type: SharedObject/Type: 
 mutate_and_fail linux_missing_relro linux-x64 "${linux_x64}" \
   '/Type: PT_GNU_RELRO/d' 'expected exactly one GNU_RELRO program header'
 mutate_and_fail linux_exec_stack linux-x64 "${linux_x64}" \
-  '0,/PF_W (0x2)/s//PF_W (0x2)\
+  '1,/PF_W (0x2)/s/PF_W (0x2)/PF_W (0x2)\
       PF_X (0x1)/' 'GNU_STACK is executable'
 mutate_and_fail linux_missing_bind_now linux-x64 "${linux_x64}" \
   '/FLAGS[[:space:]]*BIND_NOW/d' 'missing BIND_NOW dynamic flag'
@@ -565,7 +565,7 @@ mutate_and_fail freebsd_type freebsd-x64 "${freebsd}" 's/Type: SharedObject/Type
 mutate_and_fail freebsd_missing_relro freebsd-x64 "${freebsd}" \
   '/Type: PT_GNU_RELRO/d' 'expected exactly one GNU_RELRO program header'
 mutate_and_fail freebsd_exec_stack freebsd-x64 "${freebsd}" \
-  '0,/PF_W (0x2)/s//PF_W (0x2)\
+  '1,/PF_W (0x2)/s/PF_W (0x2)/PF_W (0x2)\
       PF_X (0x1)/' 'GNU_STACK is executable'
 mutate_and_fail freebsd_missing_bind_now freebsd-x64 "${freebsd}" \
   '/FLAGS[[:space:]]*BIND_NOW/d' 'missing BIND_NOW dynamic flag'
