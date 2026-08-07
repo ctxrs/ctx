@@ -211,7 +211,7 @@ pub enum HelperMessage {
     CoreEventStatePage(CoreEventStatePage),
     CoreEventDeltaPageApplied(CoreEventDeltaPageApplied),
     CoreMaterializationFinished(CoreMaterializationFinished),
-    Blame(BlameResult),
+    Blame(Box<BlameResult>),
     Error(ProtocolError),
     CoreEventDeltaPagesApplied(CoreEventDeltaPagesApplied),
 }

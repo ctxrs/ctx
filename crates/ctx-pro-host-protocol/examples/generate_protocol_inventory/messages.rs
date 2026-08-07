@@ -231,7 +231,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 replayed: false,
             }),
         ),
-        ("blame", HelperMessage::Blame(blame_result())),
+        ("blame", HelperMessage::Blame(Box::new(blame_result()))),
         (
             "error",
             HelperMessage::Error(ProtocolError::new(

@@ -28,7 +28,7 @@ const MAX_EXACT_OUTCOME_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum UnscopedOutcomeObservation {
-    Exact(RepositoryOutcomeObservation),
+    Exact(Box<RepositoryOutcomeObservation>),
     DeferredCommit(DeferredCommitObservation),
     DeferredCommitOperation(DeferredCommitOperationObservation),
     DeferredCherryPick(DeferredCherryPickObservation),
@@ -36,7 +36,7 @@ pub(crate) enum UnscopedOutcomeObservation {
 
 impl From<RepositoryOutcomeObservation> for UnscopedOutcomeObservation {
     fn from(value: RepositoryOutcomeObservation) -> Self {
-        Self::Exact(value)
+        Self::Exact(Box::new(value))
     }
 }
 
@@ -228,7 +228,7 @@ pub(crate) fn linked_outcome_evidence(
                 provider_native_repository_aliases: aliases,
                 outcome_operation_repository_path: operation_path,
                 outcome_output_repository_path: output_path,
-                outcomes: vec![(*outcome).into()],
+                outcomes: vec![UnscopedOutcomeObservation::Exact(outcome)],
                 pull_request_associations: Vec::new(),
                 abstentions: operation_unlinked
                     .then_some((

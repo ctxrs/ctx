@@ -1841,6 +1841,7 @@ fn operation_event_and_pull_request_shapes_are_explicit() {
         result: oid('a'),
     }];
     let linkage = commit.linkage.clone();
+    let repository_geometry_sha256 = [8; 32];
     commit.produced_object_ids.clear();
     commit.commit_operation = Some(RepositoryCommitOperationEvent {
         event_id: repository_commit_operation_event_id(
@@ -1860,21 +1861,42 @@ fn operation_event_and_pull_request_shapes_are_explicit() {
         unlinked_results: Vec::new(),
         mapping_completeness: RepositoryCommitMappingCompleteness::Complete,
         state: RepositoryCommitOperationState::Asserted,
-        proof: RepositoryCommitOperationProof::RepositoryVerifiedYield(
+        proof: RepositoryCommitOperationProof::RepositoryVerifiedYield(Box::new(
             RepositoryVerifiedYieldProof {
                 command_pre_head: Some(oid('b')),
                 sequencer_pre_head: None,
                 exact_source_oids: vec![oid('b')],
                 command_post_head: oid('a'),
-                repository_geometry_before_sha256: [8; 32],
-                repository_geometry_after_sha256: [8; 32],
+                repository_geometry_before_sha256: repository_geometry_sha256,
+                repository_geometry_after_sha256: repository_geometry_sha256,
                 exact_result_map_sha256: repository_result_map_sha256(&mappings),
                 drift_excluded: true,
                 mutation_excluded: true,
             },
-        ),
+        )),
     });
     commit.validate_contract().unwrap();
+    let proof = &commit.commit_operation.as_ref().unwrap().proof;
+    let proof_wire = serde_json::to_value(proof).unwrap();
+    assert_eq!(
+        proof_wire,
+        serde_json::json!({
+            "kind": "repository_verified_yield",
+            "command_pre_head": oid('b'),
+            "sequencer_pre_head": null,
+            "exact_source_oids": [oid('b')],
+            "command_post_head": oid('a'),
+            "repository_geometry_before_sha256": repository_geometry_sha256,
+            "repository_geometry_after_sha256": repository_geometry_sha256,
+            "exact_result_map_sha256": repository_result_map_sha256(&mappings),
+            "drift_excluded": true,
+            "mutation_excluded": true,
+        })
+    );
+    assert_eq!(
+        &serde_json::from_value::<RepositoryCommitOperationProof>(proof_wire).unwrap(),
+        proof
+    );
     assert_eq!(
         commit
             .commit_operation

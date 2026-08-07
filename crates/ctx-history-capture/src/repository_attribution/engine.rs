@@ -548,7 +548,7 @@ fn resolve_deferred_commit_observations(
     for observation in observations {
         let deferred = match observation {
             UnscopedOutcomeObservation::Exact(outcome) => {
-                exact.push(outcome);
+                exact.push(*outcome);
                 continue;
             }
             UnscopedOutcomeObservation::DeferredCommitOperation(deferred) => {

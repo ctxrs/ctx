@@ -56,6 +56,10 @@ fn exact_result_and_structured_oid_precedence_are_fail_closed() {
         exact_outcome(&exact.outcomes[0]).produced_object_ids[0].hex,
         oid
     );
+    assert_eq!(
+        serde_json::to_value(&exact.outcomes[0]).unwrap(),
+        serde_json::json!({"Exact": exact_outcome(&exact.outcomes[0])})
+    );
 
     let mut short = input("git commit -m exact", &output);
     short.structured_commit_oid = Some("0123456");

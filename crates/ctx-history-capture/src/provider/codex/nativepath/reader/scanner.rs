@@ -17,21 +17,6 @@ fn result_terminal_authority_is_ambiguous(record: &[u8]) -> bool {
     !crate::common::json::raw_object_keys_are_unique(record)
 }
 
-#[cfg(test)]
-mod terminal_authority_tests {
-    use super::result_terminal_authority_is_ambiguous;
-
-    #[test]
-    fn duplicate_selector_cannot_hide_terminal_authority() {
-        assert!(result_terminal_authority_is_ambiguous(
-            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call","output":"hidden"},"payload":{"type":"message","role":"user","content":[]}}"#,
-        ));
-        assert!(!result_terminal_authority_is_ambiguous(
-            br#"{"type":"response_item","payload":{"type":"message","role":"user","content":[]}}"#,
-        ));
-    }
-}
-
 fn observe_result_terminal_call_id(
     authority: &mut CodexMcpTerminalAuthority,
     record: &[u8],
@@ -514,5 +499,20 @@ impl CodexNativeScanner {
                 ))?;
             page.physical_records = page.physical_records.saturating_add(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_authority_tests {
+    use super::result_terminal_authority_is_ambiguous;
+
+    #[test]
+    fn duplicate_selector_cannot_hide_terminal_authority() {
+        assert!(result_terminal_authority_is_ambiguous(
+            br#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call","output":"hidden"},"payload":{"type":"message","role":"user","content":[]}}"#,
+        ));
+        assert!(!result_terminal_authority_is_ambiguous(
+            br#"{"type":"response_item","payload":{"type":"message","role":"user","content":[]}}"#,
+        ));
     }
 }
