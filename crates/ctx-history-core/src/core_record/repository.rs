@@ -764,7 +764,7 @@ impl RepositoryCommitOperationEvent {
             unlinked_results: Vec::new(),
             mapping_completeness: RepositoryCommitMappingCompleteness::Complete,
             state: RepositoryCommitOperationState::Asserted,
-            proof: RepositoryCommitOperationProof::RepositoryVerifiedYield(proof),
+            proof: RepositoryCommitOperationProof::RepositoryVerifiedYield(Box::new(proof)),
         };
         event.validate_contract(linkage)?;
         Ok(event)
@@ -1028,7 +1028,7 @@ pub enum RepositoryCommitOperationState {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RepositoryCommitOperationProof {
     RecordExact,
-    RepositoryVerifiedYield(RepositoryVerifiedYieldProof),
+    RepositoryVerifiedYield(Box<RepositoryVerifiedYieldProof>),
 }
 
 impl RepositoryCommitOperationProof {
