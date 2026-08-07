@@ -40,7 +40,7 @@ impl InstallationDaemonLease {
                 return Err(error).context("acquire ctx installation daemon lease");
             }
         }
-        if !allow_active_upgrade && crate::upgrade::installation_upgrade_is_active()? {
+        if installation_daemon_admission_is_fenced(allow_active_upgrade)? {
             let _ = fs2::FileExt::unlock(&lock);
             return Ok(None);
         }
@@ -59,7 +59,7 @@ impl InstallationDaemonLease {
             status: "live",
         };
         lease.write_status("live", None)?;
-        if !allow_active_upgrade && crate::upgrade::installation_upgrade_is_active()? {
+        if installation_daemon_admission_is_fenced(allow_active_upgrade)? {
             lease.status = "removed";
             let _ = fs::remove_file(&lease.registration_path);
             return Ok(None);
@@ -102,6 +102,11 @@ impl InstallationDaemonLease {
             })),
         )
     }
+}
+
+fn installation_daemon_admission_is_fenced(allow_active_upgrade: bool) -> Result<bool> {
+    Ok(crate::upgrade::installation_hosted_uninstall_is_active()?
+        || (!allow_active_upgrade && crate::upgrade::installation_upgrade_is_active()?))
 }
 
 impl Drop for InstallationDaemonLease {

@@ -281,6 +281,11 @@ pub(super) fn request_daemon_autostart(
     if !daemon_autostart_allowed(data_root, config) {
         return Ok(DaemonAutostartRequest::Suppressed("not_allowed"));
     }
+    if crate::upgrade::installation_hosted_uninstall_is_active().unwrap_or(true) {
+        return Ok(DaemonAutostartRequest::Suppressed(
+            "hosted_uninstall_active",
+        ));
+    }
     if crate::upgrade::installation_upgrade_is_active().unwrap_or(false) {
         return Ok(DaemonAutostartRequest::Suppressed(
             "installation_upgrade_active",

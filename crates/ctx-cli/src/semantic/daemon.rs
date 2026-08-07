@@ -270,7 +270,7 @@ pub(super) fn run_daemon_inner(
     if !config.daemon.enabled && !args.force {
         return Ok(daemon_report(data_root));
     }
-    if installation_upgrade_blocks_current_process(data_root) {
+    if installation_lifecycle_blocks_current_process(data_root) {
         return Ok(daemon_report(data_root));
     }
     if daemon_upgrade_handoff_blocks_current_process(data_root) {
@@ -279,10 +279,11 @@ pub(super) fn run_daemon_inner(
     let Some(lock) = DaemonLock::acquire(data_root)? else {
         return Ok(daemon_report(data_root));
     };
-    // Close the check/acquire race with an upgrader that fenced daemon starts
-    // after the first observation but before this process acquired ownership.
+    // Close the check/acquire race with an installation lifecycle owner that
+    // fenced daemon starts after the first observation but before this process
+    // acquired ownership.
     if daemon_upgrade_handoff_blocks_current_process(data_root)
-        || installation_upgrade_blocks_current_process(data_root)
+        || installation_lifecycle_blocks_current_process(data_root)
     {
         drop(lock);
         return Ok(daemon_report(data_root));
@@ -499,7 +500,7 @@ pub(super) fn run_daemon_inner(
             }
             if prepared_auto_upgrade.is_some()
                 || daemon_upgrade_handoff_blocks_current_process(data_root)
-                || installation_upgrade_blocks_current_process(data_root)
+                || installation_lifecycle_blocks_current_process(data_root)
             {
                 break;
             }
@@ -697,7 +698,7 @@ pub(super) fn run_daemon_inner(
                 );
             }
             if daemon_upgrade_handoff_blocks_current_process(data_root)
-                || installation_upgrade_blocks_current_process(data_root)
+                || installation_lifecycle_blocks_current_process(data_root)
             {
                 break;
             }
