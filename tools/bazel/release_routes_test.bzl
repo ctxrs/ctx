@@ -213,7 +213,7 @@ def release_route_analysis_test_suite(name):
         )
         _route_analysis_test(
             name = test_name,
-            route = route_name,
+            route = route_name + "_payload",
             tags = ["release-gate"],
             target_id = spec.id,
             target_triple = spec.triple,

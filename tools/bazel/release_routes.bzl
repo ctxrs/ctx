@@ -1,5 +1,6 @@
 """Target-configured public CLI release packaging routes."""
 
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load(":release_inventory.bzl", "PUBLIC_RELEASE_ROUTES")
 
 ReleaseRouteInfo = provider(
@@ -98,9 +99,9 @@ exec "${{packager}}" \
         target_id = target_id,
     )
 
-def _release_route_impl(ctx):
+def _release_route_payload_impl(ctx):
     route = PUBLIC_RELEASE_ROUTES[ctx.attr.target_id]
-    launcher = ctx.actions.declare_file(ctx.label.name)
+    launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
     ctx.actions.write(
         output = launcher,
         content = _launcher_content(ctx.attr.target_id),
@@ -148,7 +149,7 @@ def _release_route_impl(ctx):
     )
     runfiles = runfiles.merge(ctx.attr.sbom_tool[DefaultInfo].default_runfiles)
     return [
-        DefaultInfo(executable = launcher, runfiles = runfiles),
+        DefaultInfo(files = depset([launcher]), runfiles = runfiles),
         ReleaseRouteInfo(
             available = True,
             platform = route[0],
@@ -157,9 +158,8 @@ def _release_route_impl(ctx):
         ),
     ]
 
-_release_route = rule(
-    implementation = _release_route_impl,
-    executable = True,
+_release_route_payload = rule(
+    implementation = _release_route_payload_impl,
     attrs = {
         "advisory_gate": attr.label(
             cfg = "exec",
@@ -226,8 +226,10 @@ def public_cli_release_route(
     llvm_readobj = None
     if target_id == "windows-x64":
         llvm_readobj = "@ctx_llvm_mingw//:bin/llvm-readobj.exe"
-    _release_route(
-        name = name,
+    payload_name = name + "_payload"
+    route_tags = ["manual", "release-gate", "release-tool"]
+    _release_route_payload(
+        name = payload_name,
         advisory_gate = advisory_gate,
         artifact = artifact,
         cargo_lock = "//:release_cargo_lock",
@@ -240,7 +242,14 @@ def public_cli_release_route(
         sbom_tool = sbom_tool,
         target_id = target_id,
         target_matrix = "//:release_target_matrix",
-        tags = ["manual", "release-gate", "release-tool"],
+        tags = route_tags,
+    )
+    sh_binary(
+        name = name,
+        srcs = [":" + payload_name],
+        data = [":" + payload_name],
+        tags = route_tags,
+        use_bash_launcher = True,
     )
 
 def _advisory_launcher_content(target_id):
