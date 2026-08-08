@@ -240,6 +240,7 @@ fn prepared_request_reuses_stored_core_json_and_matches_legacy_frames_byte_for_b
     };
     expected_request.validate().unwrap();
 
+    reset_prepared_record_body_writes();
     let mut builder = EventDeltaPageBatchBuilder::new().unwrap();
     let mut page_builder = EventDeltaPageBuilder::new(
         TEST_MATERIALIZATION_ID,
@@ -267,9 +268,11 @@ fn prepared_request_reuses_stored_core_json_and_matches_legacy_frames_byte_for_b
         )
         .unwrap();
     let prepared = builder.take_request().unwrap();
+    assert_eq!(prepared_record_body_writes(), 0);
     let canonical_request = serde_json::to_vec(&expected_request).unwrap();
     let mut manual_request = Vec::new();
     prepared.write_request_json(&mut manual_request).unwrap();
+    assert_eq!(prepared_record_body_writes(), 2);
     assert_eq!(manual_request, canonical_request);
     assert_eq!(prepared.encoded_request_bytes(), canonical_request.len());
     assert_eq!(
@@ -290,27 +293,126 @@ fn prepared_request_reuses_stored_core_json_and_matches_legacy_frames_byte_for_b
         }
     );
 
-    let sequence = 17;
     let request_id = uuid::Uuid::from_u128(0x1234);
-    let expected_envelope = ctx_pro_host_protocol::HostEnvelope {
-        sequence,
-        request_id,
-        message: HostMessage::ApplyCoreEventDeltaPages(expected_request.clone()),
-    };
-    let mut canonical_frame = Vec::new();
-    ctx_pro_host_protocol::write_frame(&mut canonical_frame, &expected_envelope).unwrap();
-    let mut prepared_frame = Vec::new();
-    prepared
-        .write_frame(&mut prepared_frame, sequence, request_id)
-        .unwrap();
-    assert_eq!(prepared_frame, canonical_frame);
-    let decoded: ctx_pro_host_protocol::HostEnvelope =
-        ctx_pro_host_protocol::read_frame(&mut prepared_frame.as_slice()).unwrap();
-    assert_eq!(decoded, expected_envelope);
-    let HostMessage::ApplyCoreEventDeltaPages(request) = &decoded.message else {
-        panic!("prepared frame decoded as the wrong request kind")
-    };
-    request.validate().unwrap();
+    for sequence in [0, 9, 10, 99, 100, 999, 1_000, u64::MAX] {
+        let expected_envelope = ctx_pro_host_protocol::HostEnvelope {
+            sequence,
+            request_id,
+            message: HostMessage::ApplyCoreEventDeltaPages(expected_request.clone()),
+        };
+        let mut canonical_frame = Vec::new();
+        ctx_pro_host_protocol::write_frame(&mut canonical_frame, &expected_envelope).unwrap();
+        reset_prepared_record_body_writes();
+        let mut prepared_frame = Vec::new();
+        prepared
+            .write_frame(&mut prepared_frame, sequence, request_id)
+            .unwrap();
+        assert_eq!(prepared_record_body_writes(), 2);
+        assert_eq!(prepared_frame, canonical_frame);
+        assert_eq!(
+            prepared_event_delta_pages_frame_payload_bytes(
+                sequence,
+                prepared.encoded_request_bytes()
+            )
+            .unwrap(),
+            canonical_frame.len() - ctx_pro_host_protocol::FRAME_HEADER_BYTES
+        );
+        let decoded: ctx_pro_host_protocol::HostEnvelope =
+            ctx_pro_host_protocol::read_frame(&mut prepared_frame.as_slice()).unwrap();
+        assert_eq!(decoded, expected_envelope);
+        let HostMessage::ApplyCoreEventDeltaPages(request) = &decoded.message else {
+            panic!("prepared frame decoded as the wrong request kind")
+        };
+        request.validate().unwrap();
+    }
+}
+
+#[test]
+fn prepared_multi_page_split_retry_uses_carried_lengths_and_single_pass_frames() {
+    let source = source("prepared-split-retry.jsonl");
+    let pages = single_delta_event_pages(&source, 3, 17);
+    reset_prepared_record_body_writes();
+    let mut builder = EventDeltaPageBatchBuilder::new().unwrap();
+    for page in pages {
+        assert!(builder
+            .try_push(prepared_event_delta_page_from_typed(page).unwrap())
+            .unwrap()
+            .is_none());
+    }
+    let request = builder.take_request().unwrap();
+    assert_eq!(prepared_record_body_writes(), 0);
+
+    let mut attempts = Vec::new();
+    let request_id = uuid::Uuid::from_u128(0x5678);
+    reset_prepared_record_body_writes();
+    apply_prepared_batched_event_delta_pages_with(request, &mut |request, _remaining| {
+        let sequence = u64::try_from(attempts.len()).unwrap();
+        let mut frame = Vec::new();
+        request
+            .write_frame(&mut frame, sequence, request_id)
+            .unwrap();
+        let envelope: ctx_pro_host_protocol::HostEnvelope =
+            ctx_pro_host_protocol::read_frame(&mut frame.as_slice()).unwrap();
+        let HostMessage::ApplyCoreEventDeltaPages(typed) = &envelope.message else {
+            panic!("prepared frame decoded as the wrong request kind")
+        };
+        attempts.push(
+            typed
+                .pages
+                .iter()
+                .map(|page| page.page_index)
+                .collect::<Vec<_>>(),
+        );
+        let mut canonical = Vec::new();
+        ctx_pro_host_protocol::write_frame(&mut canonical, &envelope).unwrap();
+        assert_eq!(frame, canonical);
+        if typed.pages.len() > 1 {
+            Ok(HelperMessage::Error(
+                ctx_pro_host_protocol::ProtocolError::new(
+                    ErrorClass::Bounds,
+                    "synthetic pre-mutation bound",
+                ),
+            ))
+        } else {
+            Ok(successful_plural_response(&envelope.message))
+        }
+    })
+    .unwrap();
+
+    assert_eq!(
+        attempts,
+        vec![vec![0, 1, 2], vec![0], vec![1, 2], vec![1], vec![2]]
+    );
+    assert_eq!(prepared_record_body_writes(), 8);
+}
+
+#[test]
+fn carried_length_overflow_paths_remain_typed_and_bounded() {
+    let frame_error =
+        prepared_event_delta_pages_frame_payload_bytes(u64::MAX, usize::MAX).unwrap_err();
+    assert_eq!(
+        frame_error.to_string(),
+        "invalid_request: Core event frame length overflowed"
+    );
+
+    let source = source("carried-length-overflow.jsonl");
+    let reconciliation = reconciliation(&source);
+    let mut builder = EventDeltaPageBuilder::new(
+        TEST_MATERIALIZATION_ID,
+        TEST_GENERATION_ID,
+        &reconciliation,
+        0,
+    )
+    .unwrap();
+    builder.wire_bytes = usize::MAX;
+    let delta = PreparedEventDelta::from_typed(CoreEventDelta::Added(record(
+        &source,
+        1,
+        "body".to_owned(),
+    )))
+    .unwrap();
+    assert!(builder.try_push(delta).unwrap().is_some());
+    assert!(builder.is_empty());
 }
 
 #[test]
