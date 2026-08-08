@@ -177,7 +177,7 @@ fn helper_messages(fingerprint: &str) -> Vec<(&'static str, HelperMessage)> {
                 available_operations: operations(),
                 finalization_progress: None,
                 storage_evidence: Some(ProStorageEvidence {
-                    graph_manifest_schema: 3,
+                    graph_manifest_schema: 4,
                     flat_format_version: 2,
                     materializer_checkpoint_version: 8,
                     journal_pack_format_version: 3,
