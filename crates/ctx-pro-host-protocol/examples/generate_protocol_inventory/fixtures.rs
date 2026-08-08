@@ -1,10 +1,11 @@
 use super::*;
 use ctx_history_core::{
-    core_record_contract_fingerprint, derive_event_id, derive_session_id, CoreContent,
-    CoreContentPolicyStatus, CoreDiscoveryExclusion, EventIdentityInput, EventOrigin,
-    NativeItemKey, NativeSessionKey, RepositoryCandidateEvidence, RepositoryCandidateKind,
-    SessionIdentityInput, SessionRelationshipKind, SourceAnchor, TypedKey,
-    CORE_CONTENT_POLICY_REVISION, CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
+    core_record_accumulator_leaf_digest, core_record_contract_fingerprint, core_record_leaf_digest,
+    derive_event_id, derive_session_id, CoreContent, CoreContentPolicyStatus,
+    CoreDiscoveryExclusion, EventIdentityInput, EventOrigin, NativeItemKey, NativeSessionKey,
+    RepositoryCandidateEvidence, RepositoryCandidateKind, SessionIdentityInput,
+    SessionRelationshipKind, SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION,
+    CORE_NORMALIZATION_REVISION, CORE_RECORD_VERSION,
 };
 
 pub(super) fn source(lineage: u8) -> SourceKey {
@@ -18,20 +19,12 @@ pub(super) fn source(lineage: u8) -> SourceKey {
     .expect("golden source")
 }
 
-pub(super) fn source_state(lineage: u8, revision: u8, event_count: u64) -> CoreSourceState {
-    CoreSourceState {
-        source: source(lineage),
-        core_record_accumulator: format!("{revision:064x}"),
-        event_count,
-    }
-}
-
 pub(super) fn source_removal() -> CoreSourceRemoval {
     CoreSourceRemoval { source: source(2) }
 }
 
 pub(super) fn source_deltas() -> Vec<CoreSourceDelta> {
-    let mut deltas = vec![CoreSourceDelta::Present(source_state(1, 1, 1))];
+    let mut deltas = vec![CoreSourceDelta::Present(golden_source_state())];
     deltas.sort_by_key(|delta| delta.source().identity().digest());
     deltas
 }
@@ -45,7 +38,7 @@ pub(super) fn head() -> CoreGenerationHead {
         3,
         2,
         "c".repeat(64),
-        &[source_state(1, 1, 1)],
+        &[golden_source_state()],
     )
     .expect("golden head")
 }
@@ -152,10 +145,29 @@ pub(super) fn record() -> CoreRecord {
     }
 }
 
+fn golden_source_state() -> CoreSourceState {
+    let record = record();
+    let encoded = record.encode_stored().expect("golden Core record encoding");
+    let leaf = core_record_leaf_digest(record.event_id, &encoded).expect("golden Core record leaf");
+    let accumulator = core_record_accumulator_leaf_digest(record.event_id, &leaf)
+        .expect("golden Core record accumulator");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded_accumulator = String::with_capacity(64);
+    for byte in accumulator {
+        encoded_accumulator.push(HEX[usize::from(byte >> 4)] as char);
+        encoded_accumulator.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    CoreSourceState {
+        source: source(1),
+        core_record_accumulator: encoded_accumulator,
+        event_count: 1,
+    }
+}
+
 pub(super) fn reconciliation() -> CoreSourceReconciliation {
     CoreSourceReconciliation {
         materialize_index: 0,
-        delta: CoreSourceDelta::Present(source_state(1, 1, 1)),
+        delta: CoreSourceDelta::Present(golden_source_state()),
     }
 }
 
