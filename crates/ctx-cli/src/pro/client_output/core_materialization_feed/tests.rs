@@ -234,6 +234,8 @@ struct Consumer {
     source_response_mutation: Option<SourceResponseMutation>,
     wrong_event_page_index: bool,
     source_exchanges: u64,
+    source_request_data_item_visits: u64,
+    source_request_bytes: u64,
     source_page_applications: u64,
     source_feed_terminal: bool,
     status_generation_override: Option<String>,
@@ -417,6 +419,14 @@ impl CoreMaterializationConsumer for Consumer {
         request: ApplyCoreSourceDeltaPageRequest,
     ) -> Result<CoreSourceDeltaPageApplied> {
         request.validate().map_err(|error| anyhow!(error.message))?;
+        self.source_request_data_item_visits = self
+            .source_request_data_item_visits
+            .checked_add(u64::try_from(request.page.deltas.len()).unwrap())
+            .unwrap();
+        self.source_request_bytes = self
+            .source_request_bytes
+            .checked_add(u64::try_from(serde_json::to_vec(&request).unwrap().len()).unwrap())
+            .unwrap();
         let page = request.page;
         assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
         let acknowledgement_page_index = request.acknowledgement_page_index;

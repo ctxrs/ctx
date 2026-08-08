@@ -353,21 +353,20 @@ fn source_page_admission_uses_exact_wire_index_at_decimal_transitions() {
         );
         assert_eq!(
             pages[usize::try_from(transition + 2).unwrap()].deltas.len(),
-            2
+            1
         );
         assert_eq!(
-            serde_json::to_vec(&pages[usize::try_from(transition + 2).unwrap()])
-                .unwrap()
-                .len(),
-            maximum_wire_bytes
+            pages[usize::try_from(transition + 3).unwrap()].deltas.len(),
+            1
         );
         assert_eq!(
             pages.last().map(|page| page.page_index),
-            Some(transition + 2)
+            Some(transition + 4)
         );
         for (expected_index, page) in pages.iter().enumerate() {
             assert_eq!(page.page_index, u32::try_from(expected_index).unwrap());
             assert_eq!(page.terminal, expected_index + 1 == pages.len());
+            assert_eq!(page.deltas.is_empty(), page.terminal);
             assert!(serde_json::to_vec(page).unwrap().len() <= maximum_wire_bytes);
             page.validate().unwrap();
         }
@@ -382,15 +381,20 @@ fn source_page_admission_enforces_the_protocol_wire_bound() {
 
     assert_eq!(MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, 4_194_304);
     let pages = build_delta_pages(&materialization_id, &generation_id, deltas).unwrap();
+    let (terminal, data_pages) = pages.split_last().unwrap();
 
-    assert!(pages.len() > 1);
-    for (index, page) in pages.iter().enumerate() {
+    assert!(data_pages.len() > 1);
+    assert!(terminal.terminal);
+    assert!(terminal.deltas.is_empty());
+    terminal.validate().unwrap();
+    for (index, page) in data_pages.iter().enumerate() {
         let wire_bytes = serde_json::to_vec(page).unwrap().len();
         assert!(wire_bytes <= MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES);
         assert_eq!(page.page_index, u32::try_from(index).unwrap());
-        assert_eq!(page.terminal, index + 1 == pages.len());
+        assert!(!page.terminal);
+        assert!(!page.deltas.is_empty());
         page.validate().unwrap();
-        if let Some(next) = pages.get(index + 1) {
+        if let Some(next) = data_pages.get(index + 1) {
             let next_delta_bytes = serde_json::to_vec(&next.deltas[0]).unwrap().len();
             assert!(
                 page.deltas.len() == MAX_CORE_SOURCE_DELTA_PAGE_ITEMS
@@ -410,7 +414,7 @@ fn source_page_admission_rejects_an_oversized_singleton_with_typed_error() {
             &materialization_id,
             &generation_id,
             0,
-            true,
+            false,
             vec![delta.clone()],
         )
         .unwrap(),
@@ -434,6 +438,31 @@ fn source_page_admission_rejects_an_oversized_singleton_with_typed_error() {
         error.to_string(),
         "invalid_request: one Core source delta exceeds its wire bound"
     );
+}
+
+#[test]
+fn source_page_admission_rejects_an_oversized_terminal_sentinel() {
+    let materialization_id = "d".repeat(64);
+    let generation_id = "a".repeat(64);
+    let terminal_bytes = serde_json::to_vec(
+        &CoreSourceDeltaPage::new(&materialization_id, &generation_id, 0, true, Vec::new())
+            .unwrap(),
+    )
+    .unwrap()
+    .len();
+
+    let error = build_delta_pages_with_wire_bound(
+        &materialization_id,
+        &generation_id,
+        Vec::new(),
+        terminal_bytes - 1,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CoreSourceDeltaPageBuildError::OversizedTerminalSentinel
+    ));
 }
 
 #[test]
@@ -682,12 +711,12 @@ fn partial_materialization_resumes_from_source_page_zero_with_complete_finish_co
     consumer.replay_status_currentness = Some(CoreProjectionCurrentness::Partial);
     let report = sync_core_feed(&index, None, &mut consumer).unwrap();
 
-    assert_eq!(consumer.delta_pages.len(), 1);
     assert_eq!(consumer.delta_pages[0], committed_page);
-    assert_eq!(consumer.source_page_applications, 1);
+    assert_eq!(consumer.delta_pages.len(), 2);
+    assert_eq!(consumer.source_page_applications, 2);
     assert_eq!(
         consumer.source_acknowledgement_requests,
-        vec![(0, 0), (0, 0)]
+        vec![(0, 0), (0, 0), (1, 0)]
     );
     let acknowledgement = &consumer.source_acknowledgements[&0][0];
     assert_eq!(acknowledgement.page_index, 0);
@@ -700,7 +729,7 @@ fn partial_materialization_resumes_from_source_page_zero_with_complete_finish_co
     assert_eq!(report.event_delta_pages, 1);
     assert_eq!(report.event_mutations, 1);
     let finish = consumer.finish.as_ref().unwrap();
-    assert_eq!(finish.source_delta_pages, 1);
+    assert_eq!(finish.source_delta_pages, 2);
     assert_eq!(finish.changed_sources, 1);
     assert_eq!(finish.event_delta_pages, 1);
     assert_eq!(finish.event_mutations, 1);
@@ -868,7 +897,7 @@ fn partial_mixed_committed_prefix_and_new_suffix_is_singleton_bounded() {
 }
 
 #[test]
-fn journaled_source_state_and_event_retries_are_exact_and_divergence_fails_closed() {
+fn journaled_retries_are_exact_and_old_terminal_data_layout_fails_closed() {
     let (_temp, index) =
         single_source_index("exact-duplicate-retry.jsonl", vec!["body".to_owned()]);
     let mut consumer = Consumer::new();
@@ -882,8 +911,11 @@ fn journaled_source_state_and_event_retries_are_exact_and_divergence_fails_close
         })
         .unwrap();
     assert!(source_response.replayed);
+    assert!(!source_page.terminal);
+    assert!(!source_page.deltas.is_empty());
     let mut divergent_source = source_page;
-    divergent_source.terminal = !divergent_source.terminal;
+    divergent_source.terminal = true;
+    divergent_source.validate().unwrap();
     let error = consumer
         .apply_source_delta(ApplyCoreSourceDeltaPageRequest {
             page: divergent_source,

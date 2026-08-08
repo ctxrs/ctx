@@ -17,12 +17,23 @@ fn finish_for(index: &VerifiedIndex, revision: &str) -> FinishCoreMaterializatio
         head: head.clone(),
         expected_prior_receipt: None,
     };
+    let materialization_id =
+        ctx_pro_host_protocol::core_materialization_id(&begin, revision).unwrap();
+    let source_delta_pages = u32::try_from(
+        build_delta_pages(
+            &materialization_id,
+            &head.core_generation_id,
+            core_snapshot_deltas(&sources),
+        )
+        .unwrap()
+        .len(),
+    )
+    .unwrap();
     FinishCoreMaterializationRequest {
-        materialization_id: ctx_pro_host_protocol::core_materialization_id(&begin, revision)
-            .unwrap(),
+        materialization_id,
         head,
         expected_prior_receipt: None,
-        source_delta_pages: 1,
+        source_delta_pages,
         changed_sources: 1,
         removed_sources: 0,
         event_delta_pages: 1,

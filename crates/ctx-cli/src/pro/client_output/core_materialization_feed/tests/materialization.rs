@@ -694,6 +694,9 @@ fn large_native_key_removals_without_receipt_drive_all_acknowledgements_idempote
         u64::try_from(REMOVAL_COUNT).unwrap()
     );
     assert_eq!(consumer.source_page_applications, 1);
+    assert_eq!(consumer.delta_pages.len(), 1);
+    assert!(consumer.delta_pages[0].terminal);
+    assert!(consumer.delta_pages[0].deltas.is_empty());
     assert_eq!(
         consumer.finish.as_ref().unwrap().removed_sources,
         u32::try_from(REMOVAL_COUNT).unwrap()
@@ -756,6 +759,8 @@ fn large_native_key_removals_without_receipt_drive_all_acknowledgements_idempote
     }
 
     let source_page = consumer.delta_pages[0].clone();
+    assert!(source_page.terminal);
+    assert!(source_page.deltas.is_empty());
     let original_responses = responses.clone();
     for (index, expected) in original_responses.into_iter().enumerate() {
         let replayed = consumer
@@ -891,7 +896,7 @@ fn source_acknowledgement_sequence_and_global_identity_fail_closed() {
         (SourceResponseMutation::StalePresent, "stale current source"),
         (
             SourceResponseMutation::RemoveCurrent,
-            "removes a current source",
+            "stored-minus-snapshot removals are valid only on the terminal source page",
         ),
         (
             SourceResponseMutation::SkipMaterializeIndex,

@@ -65,6 +65,153 @@ fn sync_serial(
     .unwrap()
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SourceRequestMetrics {
+    data_item_visits: u64,
+    request_bytes: u64,
+}
+
+fn source_request_metrics(
+    pages: &[CoreSourceDeltaPage],
+    terminal_acknowledgement_pages: usize,
+) -> SourceRequestMetrics {
+    let mut metrics = SourceRequestMetrics::default();
+    for (page_position, page) in pages.iter().enumerate() {
+        let request_count = if page_position + 1 == pages.len() {
+            terminal_acknowledgement_pages
+        } else {
+            1
+        };
+        for acknowledgement_page_index in 0..request_count {
+            let request = ApplyCoreSourceDeltaPageRequest {
+                page: page.clone(),
+                acknowledgement_page_index: u32::try_from(acknowledgement_page_index).unwrap(),
+            };
+            request.validate().unwrap();
+            metrics.data_item_visits = metrics
+                .data_item_visits
+                .checked_add(u64::try_from(page.deltas.len()).unwrap())
+                .unwrap();
+            metrics.request_bytes = metrics
+                .request_bytes
+                .checked_add(u64::try_from(serde_json::to_vec(&request).unwrap().len()).unwrap())
+                .unwrap();
+        }
+    }
+    metrics
+}
+
+#[test]
+fn source_page_feed_is_linear_for_5916_current_sources_and_maximum_prior_removals() {
+    const CURRENT_SOURCE_COUNT: usize = 5_916;
+    const PRIOR_REMOVAL_COUNT: usize = MAX_CORE_SOURCE_STATES;
+
+    let materialization_id = "d".repeat(64);
+    let generation_id = "a".repeat(64);
+    let deltas = ordered_source_deltas(CURRENT_SOURCE_COUNT, 32);
+    let pages = build_delta_pages(&materialization_id, &generation_id, deltas).unwrap();
+    let (terminal_page, data_pages) = pages.split_last().unwrap();
+    assert_eq!(
+        data_pages.len(),
+        CURRENT_SOURCE_COUNT.div_ceil(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS)
+    );
+    assert!(data_pages
+        .iter()
+        .all(|page| !page.terminal && !page.deltas.is_empty()));
+    assert!(terminal_page.terminal);
+    assert!(terminal_page.deltas.is_empty());
+
+    let mut consumer = Consumer::new();
+    for source_index in 0..PRIOR_REMOVAL_COUNT {
+        let removed = source(&format!("prior-removal-{source_index:05}.jsonl"));
+        assert!(consumer
+            .known_sources
+            .insert(removed.identity().digest(), removed)
+            .is_none());
+    }
+
+    let mut changed_sources = 0_u64;
+    let mut removed_sources = 0_u64;
+    for page in pages.clone() {
+        let mut acknowledgement_page_index = 0_u32;
+        loop {
+            let request = ApplyCoreSourceDeltaPageRequest {
+                page: page.clone(),
+                acknowledgement_page_index,
+            };
+            let identity = request.acknowledgement_identity();
+            let applied = consumer.apply_source_delta(request).unwrap();
+            applied.validate_for_identity(&identity).unwrap();
+            changed_sources = changed_sources
+                .checked_add(u64::from(applied.changed_sources))
+                .unwrap();
+            removed_sources = removed_sources
+                .checked_add(u64::from(applied.removed_sources))
+                .unwrap();
+            if applied.acknowledgement_terminal {
+                break;
+            }
+            acknowledgement_page_index = acknowledgement_page_index.checked_add(1).unwrap();
+        }
+    }
+
+    let removal_acknowledgement_pages =
+        PRIOR_REMOVAL_COUNT.div_ceil(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS);
+    let mut expected_requests = data_pages
+        .iter()
+        .map(|page| (page.page_index, 0))
+        .collect::<Vec<_>>();
+    expected_requests.extend(
+        (0..removal_acknowledgement_pages)
+            .map(|index| (terminal_page.page_index, u32::try_from(index).unwrap())),
+    );
+
+    assert_eq!(
+        changed_sources,
+        u64::try_from(CURRENT_SOURCE_COUNT).unwrap()
+    );
+    assert_eq!(removed_sources, u64::try_from(PRIOR_REMOVAL_COUNT).unwrap());
+    assert_eq!(consumer.source_acknowledgement_requests, expected_requests);
+    assert_eq!(consumer.delta_pages, pages);
+    assert_eq!(
+        consumer.source_page_applications,
+        u64::try_from(pages.len()).unwrap()
+    );
+    assert_eq!(
+        consumer.source_request_data_item_visits,
+        u64::try_from(CURRENT_SOURCE_COUNT).unwrap()
+    );
+
+    // Measurement-only reconstruction of the prior public layout. It is not a
+    // compatibility path: the final populated page carried `terminal: true`
+    // and was resent for every acknowledgement page containing its changed
+    // sources plus all prior removals.
+    let mut old_layout_pages = data_pages.to_vec();
+    let old_terminal_page = old_layout_pages.last_mut().unwrap();
+    old_terminal_page.terminal = true;
+    old_terminal_page.validate().unwrap();
+    let old_terminal_acknowledgement_pages = PRIOR_REMOVAL_COUNT
+        .checked_add(old_terminal_page.deltas.len())
+        .unwrap()
+        .div_ceil(MAX_CORE_SOURCE_DELTA_PAGE_ITEMS);
+    let before = source_request_metrics(&old_layout_pages, old_terminal_acknowledgement_pages);
+    let after = SourceRequestMetrics {
+        data_item_visits: consumer.source_request_data_item_visits,
+        request_bytes: consumer.source_request_bytes,
+    };
+
+    assert_eq!(before.data_item_visits, 7_708);
+    assert_eq!(after.data_item_visits, 5_916);
+    assert!(after.request_bytes < before.request_bytes);
+    eprintln!(
+        "source_page_proportionality current_sources={CURRENT_SOURCE_COUNT} prior_removals={PRIOR_REMOVAL_COUNT} before_data_item_visits={} after_data_item_visits={} before_request_bytes={} after_request_bytes={} old_terminal_acknowledgements={old_terminal_acknowledgement_pages} new_terminal_acknowledgements={removal_acknowledgement_pages}",
+        before.data_item_visits,
+        after.data_item_visits,
+        before.request_bytes,
+        after.request_bytes,
+    );
+}
+
 #[test]
 fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() {
     for (source_format, source_name) in [
