@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    core_source_delta_exact_eq, encoded_len, invalid_contract, validate_encoded_bound,
-    validate_sha256, CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied, ErrorClass,
-    ProtocolError, SourceKey, MAX_CORE_CONTROL_WIRE_BYTES,
+    core_source_delta_exact_eq, invalid_contract, validate_encoded_bound, validate_sha256,
+    CoreEventDelta, CoreEventDeltaPage, CoreEventDeltaPageApplied, ErrorClass, ProtocolError,
+    SourceKey, MAX_CORE_CONTROL_WIRE_BYTES,
 };
 
 pub const MAX_CORE_EVENT_DELTA_PAGES: usize = 16;
@@ -21,12 +21,7 @@ pub struct ApplyCoreEventDeltaPagesRequest {
 
 impl ApplyCoreEventDeltaPagesRequest {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        validate_event_delta_page_envelope(self.pages.iter(), CoreEventDeltaPage::validate)?;
-        validate_encoded_bound(
-            self,
-            MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES,
-            "Core event delta page batch exceeds its aggregate wire bound",
-        )
+        self.validate_and_encoded_len().map(|_| ())
     }
 
     /// Validates an ordered envelope of prepared pages using the complete
@@ -35,29 +30,7 @@ impl ApplyCoreEventDeltaPagesRequest {
         pages: impl ExactSizeIterator<Item = &'a CoreEventDeltaPage>,
     ) -> Result<(), ProtocolError> {
         let pages = pages.collect::<Vec<_>>();
-        validate_event_delta_page_envelope(pages.iter().copied(), CoreEventDeltaPage::validate)?;
-        let encoded_request_bytes = pages.iter().enumerate().try_fold(
-            b"{\"pages\":[]}".len(),
-            |total, (index, page)| -> Result<usize, ProtocolError> {
-                let page_bytes = encoded_len(*page)?;
-                total
-                    .checked_add(usize::from(index != 0))
-                    .and_then(|total| total.checked_add(page_bytes))
-                    .ok_or_else(|| {
-                        ProtocolError::new(
-                            ErrorClass::Bounds,
-                            "Core event delta page batch length overflowed",
-                        )
-                    })
-            },
-        )?;
-        if encoded_request_bytes > MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES {
-            return Err(ProtocolError::new(
-                ErrorClass::Bounds,
-                "Core event delta page batch exceeds its aggregate wire bound",
-            ));
-        }
-        Ok(())
+        validate_event_delta_page_envelope(pages.iter().copied()).map(|_| ())
     }
 
     /// Captures only the fields needed to validate the ordered batch
@@ -90,8 +63,8 @@ impl ApplyCoreEventDeltaPagesRequest {
         &self,
         encoded_request_bytes: usize,
     ) -> Result<CoreEventDeltaPagesAcknowledgementIdentity, ProtocolError> {
-        self.validate()?;
-        if encoded_request_bytes != encoded_len(self)? {
+        let validated_encoded_request_bytes = self.validate_and_encoded_len()?;
+        if encoded_request_bytes != validated_encoded_request_bytes {
             return Err(ProtocolError::new(
                 ErrorClass::InvalidRequest,
                 "prepared Core event delta page batch length does not match canonical JSON",
@@ -115,12 +88,15 @@ impl ApplyCoreEventDeltaPagesRequest {
             pages,
         })
     }
+
+    fn validate_and_encoded_len(&self) -> Result<usize, ProtocolError> {
+        validate_event_delta_page_envelope(self.pages.iter())
+    }
 }
 
 fn validate_event_delta_page_envelope<'a>(
     mut pages: impl ExactSizeIterator<Item = &'a CoreEventDeltaPage>,
-    validate_page: fn(&CoreEventDeltaPage) -> Result<(), ProtocolError>,
-) -> Result<(), ProtocolError> {
+) -> Result<usize, ProtocolError> {
     if pages.len() == 0 || pages.len() > MAX_CORE_EVENT_DELTA_PAGES {
         return Err(ProtocolError::new(
             ErrorClass::Bounds,
@@ -131,7 +107,8 @@ fn validate_event_delta_page_envelope<'a>(
     let first = pages
         .next()
         .expect("non-empty Core event envelope was checked above");
-    validate_page(first)?;
+    let mut encoded_page_bytes = Vec::with_capacity(pages.len() + 1);
+    encoded_page_bytes.push(first.validate_and_encoded_len()?);
     let mut prior_page_index = first.page_index;
     let mut prior_event_id = first.deltas.last().map(|delta| delta.event_id().digest());
     let mut prior_terminal = first.terminal;
@@ -140,7 +117,7 @@ fn validate_event_delta_page_envelope<'a>(
     let mut prior_reconciliation = &first.reconciliation.delta;
     let mut seen_sources = vec![prior_source];
     for page in pages {
-        validate_page(page)?;
+        encoded_page_bytes.push(page.validate_and_encoded_len()?);
         if page.materialization_id != first.materialization_id
             || page.core_generation_id != first.core_generation_id
         {
@@ -183,7 +160,34 @@ fn validate_event_delta_page_envelope<'a>(
         prior_reconciliation = &page.reconciliation.delta;
     }
 
-    Ok(())
+    let encoded_request_bytes =
+        checked_core_event_delta_pages_request_len(encoded_page_bytes.into_iter())?;
+    if encoded_request_bytes > MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES {
+        return Err(ProtocolError::new(
+            ErrorClass::Bounds,
+            "Core event delta page batch exceeds its aggregate wire bound",
+        ));
+    }
+    Ok(encoded_request_bytes)
+}
+
+pub(super) fn checked_core_event_delta_pages_request_len(
+    encoded_page_bytes: impl Iterator<Item = usize>,
+) -> Result<usize, ProtocolError> {
+    encoded_page_bytes.enumerate().try_fold(
+        b"{\"pages\":[]}".len(),
+        |total, (index, page_bytes)| {
+            total
+                .checked_add(usize::from(index != 0))
+                .and_then(|total| total.checked_add(page_bytes))
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorClass::Bounds,
+                        "Core event delta page batch length overflowed",
+                    )
+                })
+        },
+    )
 }
 
 fn batch_sequence_error() -> ProtocolError {

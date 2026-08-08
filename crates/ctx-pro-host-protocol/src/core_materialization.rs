@@ -688,6 +688,12 @@ pub struct CoreEventDeltaPage {
 
 impl CoreEventDeltaPage {
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        self.validate_and_encoded_len().map(|_| ())
+    }
+
+    /// Runs the complete public page validation and returns the exact compact
+    /// JSON length measured by that validation pass.
+    pub(super) fn validate_and_encoded_len(&self) -> Result<usize, ProtocolError> {
         validate_core_event_delta_page_header(
             &self.materialization_id,
             &self.core_generation_id,
@@ -738,11 +744,14 @@ impl CoreEventDeltaPage {
                 "Core event delta page exceeds its selected-content byte bound",
             ));
         }
-        validate_encoded_bound(
-            self,
-            MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,
-            "Core event delta page exceeds its wire bound",
-        )
+        let encoded_bytes = encoded_len(self)?;
+        if encoded_bytes > MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES {
+            return Err(ProtocolError::new(
+                ErrorClass::Bounds,
+                "Core event delta page exceeds its wire bound",
+            ));
+        }
+        Ok(encoded_bytes)
     }
 
     pub fn content_bytes(&self) -> Result<usize, ProtocolError> {

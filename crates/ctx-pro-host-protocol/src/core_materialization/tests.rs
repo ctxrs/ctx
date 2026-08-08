@@ -568,6 +568,35 @@ fn event_delta_pages_request(
     ApplyCoreEventDeltaPagesRequest { pages }
 }
 
+fn event_delta_pages_request_with_large_nested_bodies() -> ApplyCoreEventDeltaPagesRequest {
+    let mut request = event_delta_pages_request(3, true);
+    for (index, page) in request.pages.iter_mut().enumerate() {
+        let CoreEventDelta::Added(record) = &mut page.deltas[0] else {
+            panic!("expected added Core event");
+        };
+        record.content.normalized_body = Some(format!(
+            "{}normalized-tail-{index}",
+            "large body line with unicode 🦀\n".repeat(16 * 1024)
+        ));
+        let escaped = format!(
+            "{}structured-tail-{index}",
+            "nested\0line\nquote\"slash\\".repeat(16 * 1024)
+        );
+        record.content.structured_content = Some(serde_json::json!({
+            "outer": {
+                "messages": [{
+                    "parts": [
+                        {"kind": "text", "body": escaped},
+                        {"kind": "metadata", "values": [index, index + 1, index + 2]},
+                    ],
+                }],
+            },
+        }));
+        record.validate_contract().unwrap();
+    }
+    request
+}
+
 fn multi_source_event_delta_pages_request(
     pages_per_source: &[usize],
 ) -> ApplyCoreEventDeltaPagesRequest {
@@ -955,6 +984,12 @@ fn event_delta_page_batch_enforces_exact_aggregate_encoded_request_bound() {
     let mut request =
         request_with_encoded_wire_bytes(MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES);
     request.validate().unwrap();
+    ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(request.pages.iter()).unwrap();
+    request
+        .acknowledgement_identity_for_prepared_request(
+            MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES,
+        )
+        .unwrap();
 
     let CoreEventDelta::Added(record) = &mut request.pages[0].deltas[0] else {
         panic!("expected added Core event");
@@ -965,32 +1000,111 @@ fn event_delta_page_batch_enforces_exact_aggregate_encoded_request_bound() {
         MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES + 1
     );
     request.pages[0].validate().unwrap();
-    assert_eq!(request.validate().unwrap_err().class, ErrorClass::Bounds);
+    let expected = request.validate().unwrap_err();
+    assert_eq!(expected.class, ErrorClass::Bounds);
+    assert_eq!(
+        ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(request.pages.iter())
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        request
+            .acknowledgement_identity_for_prepared_request(
+                MAX_CORE_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES + 1,
+            )
+            .unwrap_err(),
+        expected
+    );
 }
 
 #[test]
-fn prepared_event_delta_page_batch_checks_complete_pages_and_exact_length() {
-    let request = event_delta_pages_request(2, true);
+fn prepared_event_delta_page_batch_reuses_exact_large_nested_lengths_and_identity() {
+    let request = event_delta_pages_request_with_large_nested_bodies();
     let encoded_request_bytes = serde_json::to_vec(&request).unwrap().len();
-    ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(request.pages.iter()).unwrap();
-    request
-        .acknowledgement_identity_for_prepared_request(encoded_request_bytes)
-        .unwrap();
+    assert!(encoded_request_bytes > 1024 * 1024);
+
+    let encoded_page_bytes = request
+        .pages
+        .iter()
+        .map(|page| {
+            let measured = page.validate_and_encoded_len().unwrap();
+            assert_eq!(measured, serde_json::to_vec(page).unwrap().len());
+            measured
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        request
-            .acknowledgement_identity_for_prepared_request(encoded_request_bytes - 1)
-            .unwrap_err()
-            .class,
-        ErrorClass::InvalidRequest
+        event_delta_pages::checked_core_event_delta_pages_request_len(
+            encoded_page_bytes.into_iter()
+        )
+        .unwrap(),
+        encoded_request_bytes
     );
 
-    let mut invalid = request;
-    invalid.pages[0].materialization_id = "not-a-digest".to_owned();
+    request.validate().unwrap();
+    ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(request.pages.iter()).unwrap();
+    let ordinary_identity = request.acknowledgement_identity().unwrap();
+    let prepared_identity = request
+        .acknowledgement_identity_for_prepared_request(encoded_request_bytes)
+        .unwrap();
+    assert_eq!(prepared_identity, ordinary_identity);
+
+    let mismatch = ProtocolError::new(
+        ErrorClass::InvalidRequest,
+        "prepared Core event delta page batch length does not match canonical JSON",
+    );
+    for mismatched_bytes in [
+        encoded_request_bytes - 1,
+        encoded_request_bytes + 1,
+        usize::MAX,
+    ] {
+        assert_eq!(
+            request
+                .acknowledgement_identity_for_prepared_request(mismatched_bytes)
+                .unwrap_err(),
+            mismatch
+        );
+    }
+}
+
+#[test]
+fn prepared_and_typed_event_delta_page_batch_rejections_are_identical() {
+    let assert_rejection_parity = |request: &ApplyCoreEventDeltaPagesRequest| {
+        let expected = request.validate().unwrap_err();
+        assert_eq!(
+            ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(request.pages.iter())
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            request
+                .acknowledgement_identity_for_prepared_request(
+                    serde_json::to_vec(request).unwrap().len(),
+                )
+                .unwrap_err(),
+            expected
+        );
+    };
+
+    assert_rejection_parity(&ApplyCoreEventDeltaPagesRequest { pages: Vec::new() });
+
+    let mut malformed_page = event_delta_pages_request(2, true);
+    malformed_page.pages[0].materialization_id = "not-a-digest".to_owned();
+    assert_rejection_parity(&malformed_page);
+
+    let mut invalid_sequence = event_delta_pages_request(2, true);
+    invalid_sequence.pages[1].page_index += 1;
+    assert_rejection_parity(&invalid_sequence);
+}
+
+#[test]
+fn prepared_event_delta_page_batch_length_accounting_rejects_overflow() {
     assert_eq!(
-        ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(invalid.pages.iter())
-            .unwrap_err()
-            .class,
-        ErrorClass::InvalidRequest
+        event_delta_pages::checked_core_event_delta_pages_request_len([usize::MAX].into_iter())
+            .unwrap_err(),
+        ProtocolError::new(
+            ErrorClass::Bounds,
+            "Core event delta page batch length overflowed"
+        )
     );
 }
 
@@ -1049,29 +1163,42 @@ fn event_delta_page_batch_retains_every_constituent_page_bound() {
     };
 
     let too_many_items = request(vec!["x".to_owned(); MAX_CORE_EVENT_DELTA_PAGE_ITEMS + 1]);
+    let too_many_items_error = too_many_items.validate().unwrap_err();
+    assert_eq!(too_many_items_error.class, ErrorClass::Bounds);
     assert_eq!(
-        too_many_items.validate().unwrap_err().class,
-        ErrorClass::Bounds
+        ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(too_many_items.pages.iter())
+            .unwrap_err(),
+        too_many_items_error
     );
 
     let too_much_content = request(vec![
         "x".repeat(MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES / 2 + 1),
         "y".repeat(MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES / 2),
     ]);
-    assert!(too_much_content
-        .validate()
-        .unwrap_err()
+    let too_much_content_error = too_much_content.validate().unwrap_err();
+    assert!(too_much_content_error
         .message
         .contains("selected-content byte bound"));
+    assert_eq!(
+        ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(too_much_content.pages.iter())
+            .unwrap_err(),
+        too_much_content_error
+    );
 
     let wire_expansion_bytes = MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES / 6 + 1;
     assert!(wire_expansion_bytes < MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES);
     let too_many_wire_bytes = request(vec!["\0".repeat(wire_expansion_bytes)]);
-    assert!(too_many_wire_bytes
-        .validate()
-        .unwrap_err()
+    let too_many_wire_bytes_error = too_many_wire_bytes.validate().unwrap_err();
+    assert!(too_many_wire_bytes_error
         .message
         .contains("page exceeds its wire bound"));
+    assert_eq!(
+        ApplyCoreEventDeltaPagesRequest::validate_prepared_envelope(
+            too_many_wire_bytes.pages.iter()
+        )
+        .unwrap_err(),
+        too_many_wire_bytes_error
+    );
 }
 
 #[test]
