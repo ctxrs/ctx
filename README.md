@@ -9,7 +9,7 @@ Those sessions are full of useful context:
 - decisions, constraints, intent, and rejected approaches from you
 - bug investigations, refactors, file paths, commands, patches, and notes from previous agents
 
-ctx indexes those logs into SQLite on your machine, then gives current and future agents a CLI for finding the prior discussion, command, or failed attempt before they repeat it.
+ctx indexes those logs into a local search index on your machine, then gives current and future agents a CLI for finding the prior discussion, command, or failed attempt before they repeat it.
 
 ## Install and set up ctx
 
@@ -36,9 +36,9 @@ By structuring agent history into sessions, events, metadata, and indexed fields
 
 ## How it works
 
-Your past agent sessions are stored in local provider history files. ctx discovers supported sources, imports the real persisted records, and stores normalized session, event, and touched-file metadata in a local SQLite database optimized for retrieval.
+Your past agent sessions are stored in local provider history files. ctx discovers supported sources, imports the real persisted records, and publishes immutable Core/Tantivy search generations built from normalized sessions, events, and touched-file metadata.
 
-ctx is written in Rust and stores a local SQLite index, so searches are fast, scriptable, and do not require a background service.
+ctx is written in Rust. Searches read the verified local Core/Tantivy generation, so they are fast, scriptable, and stay on your machine.
 
 The index is local and private by default. Transcript text is preserved rather than hiding local paths or secret-shaped strings, so review copied output before sharing it outside the machine.
 
@@ -54,9 +54,6 @@ ctx search --file crates/foo/src/lib.rs
 
 # Or search multiple terms
 ctx search --term "failed migration" --term rollback --term "cursor rename"
-
-# Advanced: inspect exact local index data with read-only SQL
-ctx sql "SELECT provider, COUNT(*) AS sessions FROM ctx_sessions GROUP BY provider"
 
 # Results include matching sessions, snippets, and ctx IDs
 # evt_01h...  ses_01h...  codex  "migration expected the old cursor name" ...
@@ -93,7 +90,7 @@ For the full pipeline, see [How ctx works](https://ctx.rs/concepts/how-it-works)
 
 ## Supported agent histories
 
-Support means ctx can discover or read that harness's persisted local history and import it into the local search index. Use `ctx sources --json` on your machine to see which sources are currently `importable`.
+Support means ctx can discover or read that harness's persisted local history and import it into the local search index. Use `ctx sources --format json` on your machine to see which sources are currently `importable`.
 
 | Agent harness | Support |
 | --- | --- |
@@ -157,6 +154,6 @@ ctx keeps retrieval tied to sessions and events, so another agent can inspect th
 | [SDKs](docs/sdks.md) | Use ctx agent history search from TypeScript, Python, Rust, Go, JVM, Swift, or .NET code. |
 | [Custom history plugins](docs/history-source-plugins.md) | Build an advanced local adapter for agent formats ctx does not support natively. |
 | [Cursor](https://ctx.rs/agents/cursor) | Import Cursor agent transcripts and ask Cursor to cite retrieved local history before editing. |
-| [How it works](https://ctx.rs/concepts/how-it-works) | Understand discovery, import, SQLite storage, search refresh, and cited retrieval. |
+| [How it works](https://ctx.rs/concepts/how-it-works) | Understand discovery, import, local search storage, search refresh, and cited retrieval. |
 | [Supported agents](https://ctx.rs/concepts/supported-agents) | See which agent histories ctx can discover, import, and search today. |
-| [CLI reference](https://ctx.rs/reference/cli) | Review setup, status, sources, import, show, locate, search, SQL, MCP, and doctor. |
+| [CLI reference](https://ctx.rs/reference/cli) | Review setup, status, sources, import, show, locate, search, MCP, and doctor. |
