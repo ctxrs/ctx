@@ -549,11 +549,11 @@ fn storage_evidence_is_strict_and_required_nullable() {
 }
 
 #[test]
-fn storage_evidence_accepts_v4_through_v7_only() {
+fn storage_evidence_accepts_v4_through_v8_only() {
     let evidence = ProStorageEvidence {
         graph_manifest_schema: 3,
         flat_format_version: 2,
-        materializer_checkpoint_version: 7,
+        materializer_checkpoint_version: 8,
         journal_pack_format_version: 3,
         legacy_journals_written: 0,
         journal_pages_written: 2,
@@ -564,13 +564,21 @@ fn storage_evidence_accepts_v4_through_v7_only() {
             started_after_preparation: true,
         },
     };
+    evidence.validate().unwrap();
+
+    let mut invalid_v8 = evidence.clone();
+    invalid_v8.legacy_journals_written = 1;
+    assert_eq!(
+        invalid_v8.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
 
     for checkpoint_version in [4, 5, 6, 7] {
         let mut accepted = evidence.clone();
         accepted.materializer_checkpoint_version = checkpoint_version;
         accepted.validate().unwrap();
     }
-    for checkpoint_version in [0, 3, 8, u16::MAX] {
+    for checkpoint_version in [0, 3, 9, u16::MAX] {
         let mut rejected = evidence.clone();
         rejected.materializer_checkpoint_version = checkpoint_version;
         assert_eq!(rejected.validate().unwrap_err().class, ErrorClass::Sequence);
