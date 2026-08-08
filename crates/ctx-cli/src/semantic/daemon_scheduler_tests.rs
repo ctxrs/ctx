@@ -3,6 +3,7 @@ mod background_refresh;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -29,6 +30,7 @@ use crate::{
     output::JsonOutputFormat,
     semantic::{
         daemon::{daemon_wait_duration, install_daemon_test_job_hooks, DaemonTestJobHooks},
+        daemon_wakeup::DaemonWakeup,
         source_backed_refresh_coordinator::EventWatermark,
         source_backed_refresh_coordinator::{
             coordinate_source_backed_refresh, publish_authoritative_empty_generation_for_test,
@@ -55,11 +57,29 @@ use super::{
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
     run_pending_core_pro_catch_up_with, run_pending_core_refresh, run_pro_catch_up_with_retry,
     write_daemon_job_status, DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
-    SourceBackedProCatchUpRun, SourceBackedProCoreAuthority, DAEMON_BACKGROUND_REFRESH_MAX_REST,
-    DAEMON_BACKGROUND_REFRESH_MIN_REST,
+    ProFinalizationYieldControl, SourceBackedProCatchUpRun, SourceBackedProCoreAuthority,
+    DAEMON_BACKGROUND_REFRESH_MAX_REST, DAEMON_BACKGROUND_REFRESH_MIN_REST,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
+
+#[test]
+fn pro_finalization_yield_control_observes_shutdown_and_config_disable() {
+    let temp = tempfile::tempdir().unwrap();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut shutdown_control = ProFinalizationYieldControl::new(Some(Arc::clone(&wakeup)));
+
+    wakeup.signal_shutdown();
+    assert!(shutdown_control.requested(temp.path()));
+
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = false\n",
+    )
+    .unwrap();
+    let mut config_control = ProFinalizationYieldControl::new(None);
+    assert!(config_control.requested(temp.path()));
+}
 
 fn daemon_args() -> DaemonRunArgs {
     DaemonRunArgs {

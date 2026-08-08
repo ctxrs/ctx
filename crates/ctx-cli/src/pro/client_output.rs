@@ -20,8 +20,9 @@ pub(crate) enum CoreMaterializationSyncOutcome {
 pub(crate) fn sync_core_materialization(
     data_root: &Path,
     index: &ctx_history_index::VerifiedIndex,
+    should_yield: &mut dyn FnMut() -> bool,
 ) -> Result<CoreMaterializationSyncOutcome> {
-    match core_materialization_feed::sync_generation_pinned_core(data_root, index)? {
+    match core_materialization_feed::sync_generation_pinned_core(data_root, index, should_yield)? {
         core_materialization_feed::CoreMaterializationSyncProgress::Finished(report) => {
             Ok(CoreMaterializationSyncOutcome::Finished {
                 did_work: !report.replayed,

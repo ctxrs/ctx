@@ -134,6 +134,7 @@ pub(super) struct DaemonRuntime {
     pub(super) consumer_retry_deferral: DaemonConsumerRetryDeferral,
     pub(super) background_refresh_cadence: DaemonBackgroundRefreshCadence,
     pub(super) config: AppConfig,
+    pub(super) wakeup: Option<Arc<DaemonWakeup>>,
 }
 
 #[cfg(test)]
@@ -320,6 +321,7 @@ pub(super) fn run_daemon_inner(
         let mut failed = false;
         let mut runtime = DaemonRuntime {
             config: config.clone(),
+            wakeup: Some(Arc::clone(&wakeup)),
             ..DaemonRuntime::default()
         };
         let mut config_reload = DaemonConfigReloadState::pending(config);
@@ -594,7 +596,7 @@ pub(super) fn run_daemon_inner(
                 &config_reload.to_json(),
             )?;
             failed |= iteration.failed;
-            if continue_immediately {
+            if continue_immediately && !wakeup.has_pending() {
                 continue;
             }
             observe_daemon_query_activity(
