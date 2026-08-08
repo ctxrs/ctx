@@ -236,7 +236,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         CLI_BUILD,
-        "main#2@885cbe6e55e728c7",
+        "main#2@148f1a006bdde4df",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -244,7 +244,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         CLI_BUILD,
-        "main#3@cfdf571c6929ef24",
+        "main#3@885cbe6e55e728c7",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -252,7 +252,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         CLI_BUILD,
-        "main#4@56760ef03ecfb333",
+        "main#4@cfdf571c6929ef24",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -260,7 +260,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         CLI_BUILD,
-        "main#5@0acadf523050c898",
+        "main#5@56760ef03ecfb333",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -268,7 +268,15 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         CLI_BUILD,
-        "main#6@17e10d71b62c3756",
+        "main#6@0acadf523050c898",
+        PrintMacro,
+        MachineProtocol,
+        CARGO_DIRECTIVE,
+        GATE
+    ),
+    allow!(
+        CLI_BUILD,
+        "main#7@17e10d71b62c3756",
         PrintMacro,
         MachineProtocol,
         CARGO_DIRECTIVE,
@@ -484,7 +492,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#1@64c8afd2f04c16a3",
+        "run_cli#1@2912ee43f3606c5f",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -492,7 +500,7 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#2@638b02f9a8248d06",
+        "run_cli#2@64c8afd2f04c16a3",
         PrintMacro,
         MachineProtocol,
         JSON_PROTOCOL,
@@ -500,7 +508,15 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
-        "run_cli#3@1f99826fdc74e99b",
+        "run_cli#3@638b02f9a8248d06",
+        PrintMacro,
+        MachineProtocol,
+        JSON_PROTOCOL,
+        UNIT
+    ),
+    allow!(
+        DISPATCH,
+        "run_cli#4@1f99826fdc74e99b",
         PrintMacro,
         MachineProtocol,
         "generic machine-mode command error",
