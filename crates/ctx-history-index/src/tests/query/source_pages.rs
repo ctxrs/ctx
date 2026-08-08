@@ -178,6 +178,39 @@ fn source_event_pages_order_across_segments_isolate_and_do_not_duplicate() {
 }
 
 #[test]
+fn source_event_page_manifest_source_identity_boundaries() {
+    let temp = tempdir().unwrap();
+    let mut sources = (0..9)
+        .map(|sequence| source(&format!("manifest-boundary-{sequence}.jsonl")))
+        .collect::<Vec<_>>();
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (sequence, source) in sources.iter().enumerate().rev() {
+        writer.begin_source(source.clone()).unwrap();
+        writer
+            .add_core_record(document(source, sequence as u64 + 1, "boundary body"))
+            .unwrap();
+        writer.certify_source(certificate(source, 1, 1)).unwrap();
+    }
+    writer.commit(|_| true).unwrap();
+
+    sources.sort_by_key(|source| source.identity().digest());
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    for target in [
+        &sources[0],
+        &sources[sources.len() / 2],
+        sources.last().unwrap(),
+    ] {
+        let page = index.source_event_page(target, None, 1).unwrap();
+        assert!(page.terminal);
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].source.exact_descriptor_eq(target));
+    }
+}
+
+#[test]
 fn stored_core_source_page_retains_canonical_round_trip_bytes() {
     let temp = tempdir().unwrap();
     let source = source("stored-core-page.jsonl");
