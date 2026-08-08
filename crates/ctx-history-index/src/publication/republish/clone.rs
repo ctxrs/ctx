@@ -168,25 +168,26 @@ mod unix {
 
         fn from_stat(stat: &libc::stat) -> Self {
             Self {
-                device: stat.st_dev,
+                device: u64::try_from(stat.st_dev).unwrap_or(u64::MAX),
                 inode: stat.st_ino,
                 bytes: u64::try_from(stat.st_size).unwrap_or(u64::MAX),
-                mode: stat.st_mode,
+                mode: u32::from(stat.st_mode),
             }
         }
 
         fn is_regular(self) -> bool {
-            self.mode & libc::S_IFMT == libc::S_IFREG
+            self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
         }
 
         fn is_directory(self) -> bool {
-            self.mode & libc::S_IFMT == libc::S_IFDIR
+            self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
         }
 
         fn is_same_object(self, other: Self) -> bool {
             self.device == other.device
                 && self.inode == other.inode
-                && (self.mode & libc::S_IFMT) == (other.mode & libc::S_IFMT)
+                && (self.mode & u32::from(libc::S_IFMT))
+                    == (other.mode & u32::from(libc::S_IFMT))
         }
     }
 
