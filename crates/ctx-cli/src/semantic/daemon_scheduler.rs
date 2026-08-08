@@ -589,7 +589,10 @@ fn run_pro_catch_up_with_retry(
             continuation_pending: false,
         });
     }
-    let run = run_after_core_publication(data_root, core_generation_id, authority)?;
+    let mut yield_control = ProFinalizationYieldControl::new(runtime.wakeup.clone(), runtime.force);
+    let run = run_after_core_publication(data_root, core_generation_id, authority, &mut || {
+        yield_control.requested(data_root)
+    })?;
     let status = record_daemon_job_retry(&mut runtime.pro_retry, run.status);
     persist_pro_status(data_root, &status)?;
     Ok(SourceBackedProCatchUpRun {
@@ -597,6 +600,42 @@ fn run_pro_catch_up_with_retry(
         did_work: run.did_work,
         continuation_pending: run.continuation_pending,
     })
+}
+
+const PRO_FINALIZATION_CONFIG_POLL_INTERVAL: StdDuration = StdDuration::from_secs(1);
+
+struct ProFinalizationYieldControl {
+    wakeup: Option<Arc<DaemonWakeup>>,
+    force: bool,
+    next_config_poll: Instant,
+}
+
+impl ProFinalizationYieldControl {
+    fn new(wakeup: Option<Arc<DaemonWakeup>>, force: bool) -> Self {
+        Self {
+            wakeup,
+            force,
+            next_config_poll: Instant::now(),
+        }
+    }
+
+    fn requested(&mut self, data_root: &Path) -> bool {
+        if self
+            .wakeup
+            .as_deref()
+            .is_some_and(DaemonWakeup::has_pending)
+        {
+            return true;
+        }
+        let now = Instant::now();
+        if now < self.next_config_poll {
+            return false;
+        }
+        self.next_config_poll = now + PRO_FINALIZATION_CONFIG_POLL_INTERVAL;
+        AppConfig::load(data_root).is_ok_and(|config| {
+            (!self.force && !config.daemon.enabled) || config.daemon.mode.runs_only_source_refresh()
+        })
+    }
 }
 
 fn prepare_pro_retry_for_generation(
@@ -998,6 +1037,7 @@ pub(super) fn daemon_deadline_has_min_budget(deadline: Option<Instant>, min_secs
 }
 use std::{
     path::Path,
+    sync::Arc,
     time::{Duration as StdDuration, Instant},
 };
 
@@ -1013,12 +1053,15 @@ use crate::{
         DaemonBacklogV1, DaemonBackoffV1, DaemonCoverageV1, DaemonCycleStateV1,
         DaemonHistoryFreshnessV1,
     },
-    compact_json, DaemonRunArgs, DaemonStartModeArg,
+    compact_json,
+    config::AppConfig,
+    DaemonRunArgs, DaemonStartModeArg,
 };
 
 use super::{
     daemon::{DaemonIteration, DaemonRuntime},
     daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff, SemanticFailureClass},
+    daemon_wakeup::DaemonWakeup,
     daemon_worker::{
         daemon_semantic_failed_job, daemon_semantic_retry_backoff_job, run_daemon_semantic_job,
     },

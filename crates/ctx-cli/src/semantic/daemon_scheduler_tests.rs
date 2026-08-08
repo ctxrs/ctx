@@ -3,6 +3,7 @@ mod background_refresh;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -29,6 +30,7 @@ use crate::{
     output::JsonOutputFormat,
     semantic::{
         daemon::{daemon_wait_duration, install_daemon_test_job_hooks, DaemonTestJobHooks},
+        daemon_wakeup::DaemonWakeup,
         source_backed_refresh_coordinator::EventWatermark,
         source_backed_refresh_coordinator::{
             coordinate_source_backed_refresh, publish_authoritative_empty_generation_for_test,
@@ -55,11 +57,143 @@ use super::{
     run_daemon_scheduler_cycle_with_activity, run_pending_core_pro_catch_up,
     run_pending_core_pro_catch_up_with, run_pending_core_refresh, run_pro_catch_up_with_retry,
     write_daemon_job_status, DaemonBackgroundRefreshCadence, DaemonRetryBackoff, DaemonRuntime,
-    SourceBackedProCatchUpRun, SourceBackedProCoreAuthority, DAEMON_BACKGROUND_REFRESH_MAX_REST,
-    DAEMON_BACKGROUND_REFRESH_MIN_REST,
+    ProFinalizationYieldControl, SourceBackedProCatchUpRun, SourceBackedProCoreAuthority,
+    DAEMON_BACKGROUND_REFRESH_MAX_REST, DAEMON_BACKGROUND_REFRESH_MIN_REST,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
+
+#[test]
+fn pro_finalization_yield_control_observes_shutdown_and_config_disable() {
+    let temp = tempfile::tempdir().unwrap();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut shutdown_control = ProFinalizationYieldControl::new(Some(Arc::clone(&wakeup)), false);
+
+    wakeup.signal_shutdown();
+    assert!(shutdown_control.requested(temp.path()));
+
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = false\n",
+    )
+    .unwrap();
+    let mut config_control = ProFinalizationYieldControl::new(None, false);
+    assert!(config_control.requested(temp.path()));
+
+    let mut forced_control = ProFinalizationYieldControl::new(None, true);
+    assert!(!forced_control.requested(temp.path()));
+
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = false\nmode = \"source-refresh-only\"\n",
+    )
+    .unwrap();
+    let mut forced_source_only_control = ProFinalizationYieldControl::new(None, true);
+    assert!(forced_source_only_control.requested(temp.path()));
+}
+
+#[test]
+fn forced_disabled_daemon_advances_pending_finalization_and_can_exit_finitely() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("config.toml"),
+        "[daemon]\nenabled = false\n",
+    )
+    .unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    persist_pro_status(
+        temp.path(),
+        &json!({
+            "schema_version": 1,
+            "owner": "daemon",
+            "kind": "source_backed_pro_catch_up",
+            "status": "pending",
+            "pending": true,
+            "retryable": false,
+            "core_generation_id": generation,
+            "receipt_core_generation_id": null,
+            "finalization_progress": {
+                "materialization_id": "a".repeat(64),
+                "core_generation_id": generation,
+                "finish_request_digest": "c".repeat(64),
+                "materializer_revision": "materializer-v1",
+                "phase": "validate_candidate",
+                "cursor_sha256": "b".repeat(64),
+            },
+            "attempts": 1,
+            "last_attempt_at_ms": 1,
+            "last_attempt_duration_us": 1,
+            "error_code": null,
+            "last_error": null,
+            "reason": "finalizing",
+            "consecutive_failures": 0,
+            "retry_after_ms": null,
+            "retry_not_before_at_ms": null,
+        }),
+    )
+    .unwrap();
+    let mut runtime = DaemonRuntime {
+        config: AppConfig::load(temp.path()).unwrap(),
+        force: true,
+        ..DaemonRuntime::default()
+    };
+    runtime.sidecar_drain.pro_attempted_generation = Some(generation.clone());
+    let mut progress_calls = 0_u32;
+
+    let progressed = run_pending_core_pro_catch_up_with(
+        temp.path(),
+        &mut runtime,
+        None,
+        |data_root, runtime, selected, authority| {
+            assert_eq!(selected, generation);
+            assert_eq!(authority.generation_id(), generation);
+            let mut yield_control =
+                ProFinalizationYieldControl::new(runtime.wakeup.clone(), runtime.force);
+            assert!(!yield_control.requested(data_root));
+            progress_calls += 1;
+            let status = json!({
+                "schema_version": 1,
+                "owner": "daemon",
+                "kind": "source_backed_pro_catch_up",
+                "status": "completed",
+                "pending": false,
+                "retryable": false,
+                "core_generation_id": selected,
+                "receipt_core_generation_id": selected,
+                "attempts": 2,
+                "last_attempt_at_ms": 2,
+                "last_attempt_duration_us": 1,
+                "error_code": null,
+                "last_error": null,
+            });
+            persist_pro_status(data_root, &status)?;
+            Ok(SourceBackedProCatchUpRun {
+                status,
+                did_work: true,
+                continuation_pending: false,
+            })
+        },
+    )
+    .unwrap()
+    .expect("forced disabled daemon should run pending finalization");
+
+    assert!(progressed.did_work);
+    assert!(progressed.continue_immediately);
+    assert_eq!(progress_calls, 1);
+    assert_eq!(read_pro_status(temp.path()).unwrap()["status"], "completed");
+    let drained = run_pending_core_pro_catch_up_with(
+        temp.path(),
+        &mut runtime,
+        None,
+        |_data_root, _runtime, _generation, _authority| {
+            panic!("completed finalization must not launch again")
+        },
+    )
+    .unwrap();
+    assert!(drained.is_none());
+    // With no continuation or relaunch left, the finite daemon can enter its
+    // existing idle-exit path instead of livelocking on pending finalization.
+}
 
 fn daemon_args() -> DaemonRunArgs {
     DaemonRunArgs {

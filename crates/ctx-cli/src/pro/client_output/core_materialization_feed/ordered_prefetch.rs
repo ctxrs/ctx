@@ -36,6 +36,8 @@ pub(super) struct CorePrefetchInstrumentationSnapshot {
     pub(super) materialized_pages: usize,
     pub(super) decoded_records: usize,
     pub(super) decoded_record_bytes: usize,
+    pub(super) record_payload_sha256_traversals: usize,
+    pub(super) record_payload_sha256_bytes: usize,
     pub(super) encoded_credit_high_water_bytes: usize,
     pub(super) encoded_credit_final_bytes: usize,
     pub(super) cancelled_waits_or_sends: usize,
@@ -51,6 +53,10 @@ pub(super) struct CorePrefetchInstrumentation {
     materialized_pages: AtomicUsize,
     decoded_records: AtomicUsize,
     decoded_record_bytes: AtomicUsize,
+    #[cfg(test)]
+    record_payload_sha256_traversals: AtomicUsize,
+    #[cfg(test)]
+    record_payload_sha256_bytes: AtomicUsize,
     cancelled_waits_or_sends: AtomicUsize,
 }
 
@@ -88,6 +94,14 @@ impl CorePrefetchInstrumentation {
             .fetch_add(record_bytes, AtomicOrdering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub(super) fn record_payload_sha256_traversed(&self, encoded_bytes: usize) {
+        self.record_payload_sha256_traversals
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        self.record_payload_sha256_bytes
+            .fetch_add(encoded_bytes, AtomicOrdering::Relaxed);
+    }
+
     fn cancelled(&self) {
         self.cancelled_waits_or_sends
             .fetch_add(1, AtomicOrdering::Relaxed);
@@ -107,6 +121,12 @@ impl CorePrefetchInstrumentation {
             materialized_pages: self.materialized_pages.load(AtomicOrdering::Relaxed),
             decoded_records: self.decoded_records.load(AtomicOrdering::Relaxed),
             decoded_record_bytes: self.decoded_record_bytes.load(AtomicOrdering::Relaxed),
+            record_payload_sha256_traversals: self
+                .record_payload_sha256_traversals
+                .load(AtomicOrdering::Relaxed),
+            record_payload_sha256_bytes: self
+                .record_payload_sha256_bytes
+                .load(AtomicOrdering::Relaxed),
             encoded_credit_high_water_bytes,
             encoded_credit_final_bytes,
             cancelled_waits_or_sends: self.cancelled_waits_or_sends.load(AtomicOrdering::Relaxed),
@@ -536,9 +556,9 @@ fn prepare_planned_current_page(
         .into_iter()
         .map(|item| {
             let encoded = item.stored_json.encoded_core_record()?;
-            let core_record_sha256 = core_record_digests_from_encoded(&item.core_record, encoded)
-                .map_err(|error| anyhow!("invalid_request: {}", error.message))?
-                .core_record_sha256;
+            #[cfg(test)]
+            instrumentation.record_payload_sha256_traversed(encoded.len());
+            let core_record_sha256 = core_record_sha256_from_encoded(encoded);
             Ok(PreparedCurrentRecord {
                 record: item.core_record,
                 stored_json: PreparedCoreRecordJson::Stored(item.stored_json),

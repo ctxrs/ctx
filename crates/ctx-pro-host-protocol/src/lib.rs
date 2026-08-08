@@ -90,8 +90,8 @@ pub use query_lineage::{
 mod core_materialization;
 pub use core_materialization::{
     core_materialization_id, core_record_digests, core_record_digests_from_encoded,
-    core_record_leaf_sha256, core_record_sha256, core_source_snapshot_sha256,
-    ApplyCoreEventDeltaPageRequest, ApplyCoreEventDeltaPagesRequest,
+    core_record_leaf_sha256, core_record_sha256, core_record_sha256_from_encoded,
+    core_source_snapshot_sha256, ApplyCoreEventDeltaPageRequest, ApplyCoreEventDeltaPagesRequest,
     ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest,
     ContinueCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage,
     CoreEventDeltaPageAcknowledgementIdentity, CoreEventDeltaPageApplied,

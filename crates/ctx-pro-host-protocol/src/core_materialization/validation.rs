@@ -32,7 +32,13 @@ pub struct CoreRecordDigests {
 
 pub fn core_record_sha256(record: &CoreRecord) -> Result<String, ProtocolError> {
     let encoded = encode_core_record(record)?;
-    Ok(hex_sha256(Sha256::digest(encoded)))
+    Ok(core_record_sha256_from_encoded(&encoded))
+}
+
+/// Computes only the canonical record-state SHA from exact validated stored
+/// Core JSON, without re-encoding the record or computing its frozen leaf.
+pub fn core_record_sha256_from_encoded(encoded: &[u8]) -> String {
+    hex_sha256(Sha256::digest(encoded))
 }
 
 /// Returns the frozen Core-record leaf while the exact `CoreRecord` is still
@@ -59,7 +65,7 @@ pub fn core_record_digests_from_encoded(
     encoded: &[u8],
 ) -> Result<CoreRecordDigests, ProtocolError> {
     Ok(CoreRecordDigests {
-        core_record_sha256: hex_sha256(Sha256::digest(encoded)),
+        core_record_sha256: core_record_sha256_from_encoded(encoded),
         core_record_leaf_sha256: hex_sha256(core_record_leaf_digest(record, encoded)?),
     })
 }

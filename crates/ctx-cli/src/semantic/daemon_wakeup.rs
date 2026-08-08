@@ -276,6 +276,10 @@ impl DaemonWakeup {
         self.signal(WAKE_SHUTDOWN);
     }
 
+    pub(super) fn has_pending(&self) -> bool {
+        self.lock_state().pending != 0
+    }
+
     fn signal(&self, reason: u8) {
         let mut state = self.lock_state();
         state.pending |= reason;

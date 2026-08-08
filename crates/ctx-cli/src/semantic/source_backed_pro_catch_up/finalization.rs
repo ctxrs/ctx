@@ -34,6 +34,7 @@ pub(in crate::semantic) fn run_after_core_publication(
     data_root: &Path,
     core_generation_id: &str,
     authority: SourceBackedProCoreAuthority<'_>,
+    should_yield: &mut dyn FnMut() -> bool,
 ) -> Result<SourceBackedProCatchUpRun> {
     if authority.generation_id() != core_generation_id {
         return record_preflight_error(
@@ -55,20 +56,22 @@ pub(in crate::semantic) fn run_after_core_publication(
         },
         preflight_core_materialization,
         |data_root, index| {
-            Ok(match sync_core_materialization(data_root, index)? {
-                CoreMaterializationSyncOutcome::Finished {
-                    receipt,
-                    did_work,
-                    helper_artifact_sha256,
-                } => ProCatchUpSyncOutcome::Finished {
-                    receipt,
-                    did_work,
-                    helper_artifact_sha256,
+            Ok(
+                match sync_core_materialization(data_root, index, should_yield)? {
+                    CoreMaterializationSyncOutcome::Finished {
+                        receipt,
+                        did_work,
+                        helper_artifact_sha256,
+                    } => ProCatchUpSyncOutcome::Finished {
+                        receipt,
+                        did_work,
+                        helper_artifact_sha256,
+                    },
+                    CoreMaterializationSyncOutcome::FinalizationPending { pending } => {
+                        ProCatchUpSyncOutcome::FinalizationPending { pending }
+                    }
                 },
-                CoreMaterializationSyncOutcome::FinalizationPending { pending } => {
-                    ProCatchUpSyncOutcome::FinalizationPending { pending }
-                }
-            })
+            )
         },
     )
 }

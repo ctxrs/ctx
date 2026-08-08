@@ -6,6 +6,34 @@ mod pages;
 mod search;
 mod sessions;
 
+#[cfg(test)]
+std::thread_local! {
+    static MANIFEST_SOURCE_IDENTITY_COMPARISONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn retained_manifest_source_by_identity<'a>(
+    sources: &'a [ctx_history_core::CertifiedSource],
+    source: &SourceKey,
+) -> Option<&'a ctx_history_core::CertifiedSource> {
+    let identity_digest = source.identity().digest();
+    let index = sources
+        .binary_search_by(|candidate| {
+            #[cfg(test)]
+            MANIFEST_SOURCE_IDENTITY_COMPARISONS.with(|comparisons| {
+                comparisons.set(comparisons.get().saturating_add(1));
+            });
+            candidate
+                .observation()
+                .source()
+                .identity()
+                .digest()
+                .cmp(&identity_digest)
+        })
+        .ok()?;
+    sources.get(index)
+}
+
 impl VerifiedIndex {
     /// Counts distinct live session identities from the merged Tantivy term
     /// dictionaries without reading stored event bodies.
@@ -128,11 +156,7 @@ impl VerifiedIndex {
     }
 
     fn validate_source_event_source(&self, source: &SourceKey) -> Result<()> {
-        let retained = self
-            .manifest
-            .sources
-            .iter()
-            .find(|candidate| candidate.observation().source() == source)
+        let retained = retained_manifest_source_by_identity(&self.manifest.sources, source)
             .ok_or_else(|| {
                 IndexError::SourceEventSourceNotRetained(source.identity().to_string())
             })?;
@@ -594,4 +618,177 @@ pub(super) fn core_event_page_budget_admits(
         && retained_content_bytes
             .checked_add(candidate_content_bytes)
             .is_some_and(|total| total <= budget.maximum_content_bytes)
+}
+
+#[cfg(test)]
+mod manifest_source_lookup_tests {
+    use std::{hint::black_box, time::Instant};
+
+    use ctx_history_core::{
+        CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceObservation, TypedKey,
+    };
+
+    use super::*;
+
+    const FULL_CORPUS_SOURCE_COUNT: usize = 5_916;
+    const SCALED_SOURCE_COUNT: usize = FULL_CORPUS_SOURCE_COUNT * 4;
+
+    fn source(sequence: usize) -> SourceKey {
+        SourceKey::derive(
+            "codex",
+            "codex_session_jsonl",
+            "session",
+            1,
+            SourceAnchor::provider_native(
+                "session-file",
+                TypedKey::utf8(format!("manifest-source-{sequence:05}.jsonl")).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn certificate(source: SourceKey) -> CertifiedSource {
+        let observation = SourceObservation::new(source, "regular-file-v1", vec![1]).unwrap();
+        CertifiedSource::certify(
+            observation.clone(),
+            observation,
+            "codex-parser-v1",
+            [1; 32],
+            ScannedSourceCounts {
+                complete_records: 1,
+                retained_records: 1,
+                indexed_documents: 1,
+                certified_bytes: 10,
+                ..ScannedSourceCounts::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn sorted_manifest_sources(cardinality: usize) -> Vec<CertifiedSource> {
+        let mut sources = (0..cardinality)
+            .map(|sequence| certificate(source(sequence)))
+            .collect::<Vec<_>>();
+        sources.sort_by_key(|candidate| candidate.observation().source().identity().digest());
+        assert!(sources.windows(2).all(|pair| {
+            pair[0].observation().source().identity().digest()
+                < pair[1].observation().source().identity().digest()
+        }));
+        sources
+    }
+
+    fn reset_comparisons() {
+        MANIFEST_SOURCE_IDENTITY_COMPARISONS.with(|comparisons| comparisons.set(0));
+    }
+
+    fn comparisons() -> usize {
+        MANIFEST_SOURCE_IDENTITY_COMPARISONS.with(std::cell::Cell::get)
+    }
+
+    fn comparison_bound(cardinality: usize) -> usize {
+        (usize::BITS - (cardinality - 1).leading_zeros()) as usize + 1
+    }
+
+    fn lookup_comparisons(sources: &[CertifiedSource], target: &SourceKey) -> usize {
+        reset_comparisons();
+        let retained = retained_manifest_source_by_identity(sources, target).unwrap();
+        assert!(retained.observation().source().exact_descriptor_eq(target));
+        comparisons()
+    }
+
+    #[test]
+    fn manifest_source_identity_lookup_preserves_exact_descriptor_semantics() {
+        let sources = sorted_manifest_sources(31);
+        for index in [0, sources.len() / 2, sources.len() - 1] {
+            let target = sources[index].observation().source();
+            assert!(lookup_comparisons(&sources, target) <= comparison_bound(sources.len()));
+        }
+
+        let absent = source(usize::MAX);
+        reset_comparisons();
+        assert!(retained_manifest_source_by_identity(&sources, &absent).is_none());
+        assert!(comparisons() <= comparison_bound(sources.len()));
+
+        let retained = sources[sources.len() / 2].observation().source();
+        let changed_descriptor = SourceKey::derive(
+            retained.provider(),
+            "codex_prompt_history_jsonl",
+            retained.schema_variant(),
+            retained.provider_identity_version(),
+            retained.anchor().clone(),
+        )
+        .unwrap();
+        assert_eq!(changed_descriptor, *retained);
+        assert!(!changed_descriptor.exact_descriptor_eq(retained));
+        let found = retained_manifest_source_by_identity(&sources, &changed_descriptor).unwrap();
+        assert_eq!(found.observation().source(), retained);
+        assert!(!found
+            .observation()
+            .source()
+            .exact_descriptor_eq(&changed_descriptor));
+    }
+
+    #[test]
+    fn manifest_source_identity_lookup_is_logarithmic_at_full_corpus_cardinality() {
+        let full_corpus = sorted_manifest_sources(FULL_CORPUS_SOURCE_COUNT);
+        let full_corpus_target = full_corpus.last().unwrap().observation().source();
+        let full_corpus_comparisons = lookup_comparisons(&full_corpus, full_corpus_target);
+        assert!(full_corpus_comparisons <= comparison_bound(FULL_CORPUS_SOURCE_COUNT));
+
+        let scaled = sorted_manifest_sources(SCALED_SOURCE_COUNT);
+        let scaled_target = scaled.last().unwrap().observation().source();
+        let scaled_comparisons = lookup_comparisons(&scaled, scaled_target);
+        assert!(scaled_comparisons <= comparison_bound(SCALED_SOURCE_COUNT));
+        assert!(scaled_comparisons <= full_corpus_comparisons + 2);
+    }
+
+    #[test]
+    #[ignore = "focused linear/binary manifest-source lookup benchmark; invoke explicitly"]
+    fn source_event_page_manifest_validation_benchmark_report() {
+        const LOOKUPS: usize = 4_096;
+
+        for cardinality in [FULL_CORPUS_SOURCE_COUNT, SCALED_SOURCE_COUNT] {
+            let sources = sorted_manifest_sources(cardinality);
+            let target = sources.last().unwrap().observation().source().clone();
+
+            let mut linear_comparisons = 0_usize;
+            let linear_started = Instant::now();
+            for _ in 0..LOOKUPS {
+                let retained = sources
+                    .iter()
+                    .find(|candidate| {
+                        linear_comparisons = linear_comparisons.saturating_add(1);
+                        candidate.observation().source() == &target
+                    })
+                    .unwrap();
+                black_box(retained);
+            }
+            let linear_elapsed = linear_started.elapsed();
+
+            reset_comparisons();
+            let binary_started = Instant::now();
+            for _ in 0..LOOKUPS {
+                let retained =
+                    retained_manifest_source_by_identity(black_box(&sources), black_box(&target))
+                        .unwrap();
+                black_box(retained);
+            }
+            let binary_elapsed = binary_started.elapsed();
+            let binary_comparisons = comparisons();
+
+            assert_eq!(linear_comparisons, cardinality * LOOKUPS);
+            assert!(binary_comparisons <= comparison_bound(cardinality) * LOOKUPS);
+            eprintln!(
+                "manifest_sources={cardinality} lookups={LOOKUPS} \
+                 linear_comparisons_per_lookup={} binary_comparisons_per_lookup={:.2} \
+                 linear_ns_per_lookup={} binary_ns_per_lookup={} elapsed_speedup={:.2}x",
+                linear_comparisons / LOOKUPS,
+                binary_comparisons as f64 / LOOKUPS as f64,
+                linear_elapsed.as_nanos() / LOOKUPS as u128,
+                binary_elapsed.as_nanos() / LOOKUPS as u128,
+                linear_elapsed.as_secs_f64() / binary_elapsed.as_secs_f64().max(f64::EPSILON),
+            );
+        }
+    }
 }

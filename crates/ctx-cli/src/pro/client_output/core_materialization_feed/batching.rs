@@ -2,6 +2,20 @@ use super::*;
 
 pub(super) const MAX_CORE_EVENT_DELTA_BATCH_EXCHANGES: usize = MAX_CORE_EVENT_DELTA_PAGES * 2 - 1;
 
+const EMPTY_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES: usize = b"{\"pages\":[]}".len();
+const HOST_ENVELOPE_SEQUENCE_PREFIX_BYTES: usize = b"{\"sequence\":".len();
+const HOST_ENVELOPE_REQUEST_ID_PREFIX_BYTES: usize = b",\"request_id\":".len();
+const HOST_ENVELOPE_UUID_WIRE_BYTES: usize = 38;
+const HOST_ENVELOPE_EVENT_DELTA_PAGES_PREFIX_BYTES: usize =
+    b",\"message\":{\"kind\":\"apply_core_event_delta_pages\",\"body\":".len();
+const HOST_ENVELOPE_SUFFIX_BYTES: usize = b"}}".len();
+const ADDED_EVENT_DELTA_PREFIX_BYTES: usize = b"{\"kind\":\"added\",\"value\":".len();
+const ADDED_EVENT_DELTA_SUFFIX_BYTES: usize = b"}".len();
+const REPLACED_EVENT_DELTA_PREFIX_BYTES: usize =
+    b"{\"kind\":\"replaced\",\"value\":{\"prior_core_record_sha256\":".len();
+const REPLACED_EVENT_DELTA_RECORD_PREFIX_BYTES: usize = b",\"record\":".len();
+const REPLACED_EVENT_DELTA_SUFFIX_BYTES: usize = b"}}".len();
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EventDeltaExchangeMode {
     Normal,
@@ -167,6 +181,7 @@ pub(super) struct PreparedEventDelta {
     delta: CoreEventDelta,
     record_json: Option<PreparedCoreRecordJson>,
     content_bytes: usize,
+    wire_bytes: Option<usize>,
 }
 
 impl PreparedEventDelta {
@@ -176,6 +191,7 @@ impl PreparedEventDelta {
             delta: CoreEventDelta::Added(record.record),
             record_json: Some(record.stored_json),
             content_bytes,
+            wire_bytes: None,
         }
     }
 
@@ -191,6 +207,7 @@ impl PreparedEventDelta {
             }),
             record_json: Some(record.stored_json),
             content_bytes,
+            wire_bytes: None,
         }
     }
 
@@ -199,6 +216,7 @@ impl PreparedEventDelta {
             delta: CoreEventDelta::Tombstoned(tombstone),
             record_json: None,
             content_bytes: 0,
+            wire_bytes: None,
         }
     }
 
@@ -216,11 +234,14 @@ impl PreparedEventDelta {
                 content_bytes,
             }
         });
-        Ok(Self {
+        let mut prepared = Self {
             delta,
             record_json,
             content_bytes,
-        })
+            wire_bytes: None,
+        };
+        prepared.ensure_wire_bytes()?;
+        Ok(prepared)
     }
 
     #[cfg(test)]
@@ -231,6 +252,21 @@ impl PreparedEventDelta {
     #[cfg(test)]
     pub(super) const fn content_bytes(&self) -> usize {
         self.content_bytes
+    }
+
+    fn ensure_wire_bytes(&mut self) -> Result<usize> {
+        if let Some(wire_bytes) = self.wire_bytes {
+            return Ok(wire_bytes);
+        }
+        let wire_bytes = prepared_event_delta_encoded_len(self)?;
+        self.wire_bytes = Some(wire_bytes);
+        Ok(wire_bytes)
+    }
+
+    fn carried_wire_bytes(&self) -> Result<usize> {
+        self.wire_bytes.ok_or_else(|| {
+            anyhow!("internal: Core event delta reached page assembly without a carried length")
+        })
     }
 }
 
@@ -265,13 +301,15 @@ impl EventDeltaPageBuilder {
 
     pub(super) fn try_push(
         &mut self,
-        delta: PreparedEventDelta,
+        mut delta: PreparedEventDelta,
     ) -> Result<Option<PreparedEventDelta>> {
         if self.deltas.len() == MAX_CORE_EVENT_DELTA_PAGE_ITEMS {
             return Ok(Some(delta));
         }
 
-        let Some((content_bytes, wire_bytes)) = self.prospective_bytes(&delta)? else {
+        let delta_wire_bytes = delta.ensure_wire_bytes()?;
+        let Some((content_bytes, wire_bytes)) = self.prospective_bytes(&delta, delta_wire_bytes)
+        else {
             return Ok(Some(delta));
         };
         if content_bytes > MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES
@@ -286,12 +324,13 @@ impl EventDeltaPageBuilder {
         Ok(None)
     }
 
-    pub(super) fn push_split_overflow(&mut self, delta: PreparedEventDelta) -> Result<()> {
+    pub(super) fn push_split_overflow(&mut self, mut delta: PreparedEventDelta) -> Result<()> {
         if !self.deltas.is_empty() {
             bail!("internal: Core event overflow page was not empty");
         }
+        let delta_wire_bytes = delta.ensure_wire_bytes()?;
         let (content_bytes, wire_bytes) = self
-            .prospective_bytes(&delta)?
+            .prospective_bytes(&delta, delta_wire_bytes)
             .ok_or_else(|| anyhow!("invalid_request: Core event delta page bytes overflowed"))?;
         self.deltas.push(delta);
         self.content_bytes = content_bytes;
@@ -299,12 +338,15 @@ impl EventDeltaPageBuilder {
         Ok(())
     }
 
-    fn prospective_bytes(&self, delta: &PreparedEventDelta) -> Result<Option<(usize, usize)>> {
+    fn prospective_bytes(
+        &self,
+        delta: &PreparedEventDelta,
+        delta_wire_bytes: usize,
+    ) -> Option<(usize, usize)> {
         let delta_content_bytes = delta.content_bytes;
         let Some(content_bytes) = self.content_bytes.checked_add(delta_content_bytes) else {
-            return Ok(None);
+            return None;
         };
-        let delta_wire_bytes = prepared_event_delta_encoded_len(delta)?;
         // The empty envelope already includes `[]`. A first delta replaces the
         // empty vector contents; every later delta adds one comma as well.
         let separator_bytes = usize::from(!self.deltas.is_empty());
@@ -313,9 +355,9 @@ impl EventDeltaPageBuilder {
             .checked_add(separator_bytes)
             .and_then(|bytes| bytes.checked_add(delta_wire_bytes))
         else {
-            return Ok(None);
+            return None;
         };
-        Ok(Some((content_bytes, wire_bytes)))
+        Some((content_bytes, wire_bytes))
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -351,6 +393,7 @@ pub(super) struct PreparedEventDeltaPage {
 pub(super) struct PreparedEventDeltaPagesRequest {
     request: ApplyCoreEventDeltaPagesRequest,
     record_json: Vec<Vec<Option<PreparedCoreRecordJson>>>,
+    page_wire_bytes: Vec<usize>,
     encoded_request_bytes: usize,
 }
 
@@ -394,6 +437,7 @@ impl PreparedEventDeltaPagesRequest {
     }
 
     pub(super) fn write_request_json(&self, writer: &mut impl Write) -> Result<()> {
+        self.validate_alignment()?;
         write_all(writer, b"{\"pages\":[")?;
         for (index, (page, record_json)) in
             self.request.pages.iter().zip(&self.record_json).enumerate()
@@ -430,16 +474,16 @@ impl PreparedEventDeltaPagesRequest {
         sequence: u64,
         request_id: uuid::Uuid,
     ) -> Result<()> {
-        let mut encoded = EncodedLength::default();
-        self.write_host_envelope_json(&mut encoded, sequence, request_id)?;
-        if encoded.bytes > ctx_pro_host_protocol::MAX_FRAME_PAYLOAD_BYTES {
+        let payload_bytes =
+            prepared_event_delta_pages_frame_payload_bytes(sequence, self.encoded_request_bytes)?;
+        if payload_bytes > ctx_pro_host_protocol::MAX_FRAME_PAYLOAD_BYTES {
             bail!(
                 "invalid_request: prepared Core event frame has {} payload bytes; maximum is {}",
-                encoded.bytes,
+                payload_bytes,
                 ctx_pro_host_protocol::MAX_FRAME_PAYLOAD_BYTES
             );
         }
-        let payload_len = u32::try_from(encoded.bytes)
+        let payload_len = u32::try_from(payload_bytes)
             .map_err(|_| anyhow!("invalid_request: Core event frame length overflowed"))?;
         write_all(writer, ctx_pro_host_protocol::FRAME_MAGIC)?;
         write_all(
@@ -464,10 +508,12 @@ impl PreparedEventDeltaPagesRequest {
     fn split_off(&mut self, at: usize) -> Result<Self> {
         let pages = self.request.pages.split_off(at);
         let record_json = self.record_json.split_off(at);
+        let page_wire_bytes = self.page_wire_bytes.split_off(at);
         self.remeasure()?;
         let mut right = Self {
             request: ApplyCoreEventDeltaPagesRequest { pages },
             record_json,
+            page_wire_bytes,
             encoded_request_bytes: 0,
         };
         right.remeasure()?;
@@ -475,9 +521,21 @@ impl PreparedEventDeltaPagesRequest {
     }
 
     fn remeasure(&mut self) -> Result<()> {
-        let mut encoded = EncodedLength::default();
-        self.write_request_json(&mut encoded)?;
-        self.encoded_request_bytes = encoded.bytes;
+        self.validate_alignment()?;
+        self.encoded_request_bytes = checked_json_items_len(
+            EMPTY_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES,
+            self.page_wire_bytes.iter().copied().map(Ok),
+            "Core event delta page batch length overflowed",
+        )?;
+        Ok(())
+    }
+
+    fn validate_alignment(&self) -> Result<()> {
+        if self.request.pages.len() != self.record_json.len()
+            || self.request.pages.len() != self.page_wire_bytes.len()
+        {
+            bail!("internal: prepared Core event page bytes were misaligned");
+        }
         Ok(())
     }
 }
@@ -490,8 +548,7 @@ pub(super) struct EventDeltaPageBatchBuilder {
 
 impl EventDeltaPageBatchBuilder {
     pub(super) fn new() -> Result<Self> {
-        let empty_wire_bytes =
-            encoded_json_len(&ApplyCoreEventDeltaPagesRequest { pages: Vec::new() })?;
+        let empty_wire_bytes = EMPTY_EVENT_DELTA_PAGES_REQUEST_WIRE_BYTES;
         Ok(Self {
             pages: Vec::new(),
             empty_wire_bytes,
@@ -543,24 +600,82 @@ impl EventDeltaPageBatchBuilder {
     }
 
     pub(super) fn take_request(&mut self) -> Result<PreparedEventDeltaPagesRequest> {
+        let encoded_request_bytes = self.wire_bytes;
         self.wire_bytes = self.empty_wire_bytes;
         let pages = std::mem::take(&mut self.pages);
-        let (pages, record_json): (Vec<_>, Vec<_>) = pages
+        let (pages_and_records, page_wire_bytes): (Vec<_>, Vec<_>) = pages
             .into_iter()
-            .map(|page| (page.page, page.record_json))
+            .map(|page| ((page.page, page.record_json), page.wire_bytes))
             .unzip();
-        let mut request = PreparedEventDeltaPagesRequest {
+        let (pages, record_json): (Vec<_>, Vec<_>) = pages_and_records.into_iter().unzip();
+        let request = PreparedEventDeltaPagesRequest {
             request: ApplyCoreEventDeltaPagesRequest { pages },
             record_json,
-            encoded_request_bytes: 0,
+            page_wire_bytes,
+            encoded_request_bytes,
         };
-        request.remeasure()?;
+        request.validate_alignment()?;
         Ok(request)
     }
 
     pub(super) fn is_empty(&self) -> bool {
         self.pages.is_empty()
     }
+}
+
+fn checked_encoded_sum(
+    parts: impl IntoIterator<Item = usize>,
+    overflow_message: &'static str,
+) -> Result<usize> {
+    parts.into_iter().try_fold(0_usize, |total, part| {
+        total
+            .checked_add(part)
+            .ok_or_else(|| anyhow!("invalid_request: {overflow_message}"))
+    })
+}
+
+fn checked_json_items_len(
+    empty_wire_bytes: usize,
+    item_wire_bytes: impl IntoIterator<Item = Result<usize>>,
+    overflow_message: &'static str,
+) -> Result<usize> {
+    item_wire_bytes.into_iter().enumerate().try_fold(
+        empty_wire_bytes,
+        |total, (index, item_wire_bytes)| {
+            let item_wire_bytes = item_wire_bytes?;
+            total
+                .checked_add(usize::from(index != 0))
+                .and_then(|total| total.checked_add(item_wire_bytes))
+                .ok_or_else(|| anyhow!("invalid_request: {overflow_message}"))
+        },
+    )
+}
+
+const fn u64_decimal_bytes(mut value: u64) -> usize {
+    let mut bytes = 1;
+    while value >= 10 {
+        value /= 10;
+        bytes += 1;
+    }
+    bytes
+}
+
+pub(super) fn prepared_event_delta_pages_frame_payload_bytes(
+    sequence: u64,
+    encoded_request_bytes: usize,
+) -> Result<usize> {
+    checked_encoded_sum(
+        [
+            HOST_ENVELOPE_SEQUENCE_PREFIX_BYTES,
+            u64_decimal_bytes(sequence),
+            HOST_ENVELOPE_REQUEST_ID_PREFIX_BYTES,
+            HOST_ENVELOPE_UUID_WIRE_BYTES,
+            HOST_ENVELOPE_EVENT_DELTA_PAGES_PREFIX_BYTES,
+            encoded_request_bytes,
+            HOST_ENVELOPE_SUFFIX_BYTES,
+        ],
+        "Core event frame length overflowed",
+    )
 }
 
 #[derive(Default)]
@@ -601,9 +716,28 @@ fn write_json_value(writer: &mut impl Write, value: &impl serde::Serialize) -> R
 }
 
 fn prepared_event_delta_encoded_len(delta: &PreparedEventDelta) -> Result<usize> {
-    let mut encoded = EncodedLength::default();
-    write_prepared_event_delta_json(&mut encoded, &delta.delta, delta.record_json.as_ref())?;
-    Ok(encoded.bytes)
+    match (&delta.delta, delta.record_json.as_ref()) {
+        (CoreEventDelta::Added(_), Some(record_json)) => checked_encoded_sum(
+            [
+                ADDED_EVENT_DELTA_PREFIX_BYTES,
+                record_json.bytes()?.len(),
+                ADDED_EVENT_DELTA_SUFFIX_BYTES,
+            ],
+            "Core event delta length overflowed",
+        ),
+        (CoreEventDelta::Replaced(replacement), Some(record_json)) => checked_encoded_sum(
+            [
+                REPLACED_EVENT_DELTA_PREFIX_BYTES,
+                encoded_json_len(&replacement.prior_core_record_sha256)?,
+                REPLACED_EVENT_DELTA_RECORD_PREFIX_BYTES,
+                record_json.bytes()?.len(),
+                REPLACED_EVENT_DELTA_SUFFIX_BYTES,
+            ],
+            "Core event delta length overflowed",
+        ),
+        (CoreEventDelta::Tombstoned(_), None) => encoded_json_len(&delta.delta),
+        _ => bail!("internal: prepared Core event delta record bytes were misaligned"),
+    }
 }
 
 fn write_prepared_event_delta_json(
@@ -614,6 +748,8 @@ fn write_prepared_event_delta_json(
     match (delta, record_json) {
         (CoreEventDelta::Added(_), Some(record_json)) => {
             write_all(writer, b"{\"kind\":\"added\",\"value\":")?;
+            #[cfg(test)]
+            note_prepared_record_body_write();
             write_all(writer, record_json.bytes()?)?;
             write_all(writer, b"}")
         }
@@ -624,12 +760,34 @@ fn write_prepared_event_delta_json(
             )?;
             write_json_value(writer, &replacement.prior_core_record_sha256)?;
             write_all(writer, b",\"record\":")?;
+            #[cfg(test)]
+            note_prepared_record_body_write();
             write_all(writer, record_json.bytes()?)?;
             write_all(writer, b"}}")
         }
         (CoreEventDelta::Tombstoned(_), None) => write_json_value(writer, delta),
         _ => bail!("internal: prepared Core event delta record bytes were misaligned"),
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PREPARED_RECORD_BODY_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_prepared_record_body_write() {
+    PREPARED_RECORD_BODY_WRITES.set(PREPARED_RECORD_BODY_WRITES.get().saturating_add(1));
+}
+
+#[cfg(test)]
+pub(super) fn reset_prepared_record_body_writes() {
+    PREPARED_RECORD_BODY_WRITES.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn prepared_record_body_writes() -> usize {
+    PREPARED_RECORD_BODY_WRITES.get()
 }
 
 fn write_prepared_event_delta_page_json(
@@ -726,6 +884,25 @@ pub(super) fn prepared_event_delta_page(
     deltas: Vec<PreparedEventDelta>,
     expected_wire_bytes: usize,
 ) -> Result<PreparedEventDeltaPage> {
+    let empty_page = unvalidated_event_delta_page(
+        materialization_id,
+        generation_id,
+        reconciliation,
+        page_index,
+        terminal,
+        Vec::new(),
+    );
+    let carried_wire_bytes = checked_json_items_len(
+        encoded_json_len(&empty_page)?,
+        deltas.iter().map(PreparedEventDelta::carried_wire_bytes),
+        "Core event delta page length overflowed",
+    )?;
+    if carried_wire_bytes != expected_wire_bytes {
+        bail!("internal: carried Core event delta page length was not exact");
+    }
+    if carried_wire_bytes > MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES {
+        bail!("invalid_request: Core event delta page exceeds its wire bound");
+    }
     let (deltas, record_json): (Vec<_>, Vec<_>) = deltas
         .into_iter()
         .map(|delta| (delta.delta, delta.record_json))
@@ -738,18 +915,10 @@ pub(super) fn prepared_event_delta_page(
         terminal,
         deltas,
     );
-    let mut encoded = EncodedLength::default();
-    write_prepared_event_delta_page_json(&mut encoded, &page, &record_json)?;
-    if encoded.bytes != expected_wire_bytes {
-        bail!("internal: carried Core event delta page length was not exact");
-    }
-    if encoded.bytes > MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES {
-        bail!("invalid_request: Core event delta page exceeds its wire bound");
-    }
     Ok(PreparedEventDeltaPage {
         page,
         record_json,
-        wire_bytes: encoded.bytes,
+        wire_bytes: carried_wire_bytes,
     })
 }
 

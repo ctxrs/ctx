@@ -16,8 +16,13 @@ use ctx_history_index::{
     GenerationManifest, GenerationRetentionLease, SourceEventCursor, StoredCoreRecordJson,
     VerifiedIndex,
 };
+#[cfg(test)]
 use ctx_pro_host_protocol::{
-    core_record_digests_from_encoded, ApplyCoreEventDeltaPagesRequest,
+    core_record_sha256, CoreMaterializationFinalizationPhase,
+    CoreMaterializationFinalizationProgress, CoreSourceRemoval,
+};
+use ctx_pro_host_protocol::{
+    core_record_sha256_from_encoded, ApplyCoreEventDeltaPagesRequest,
     ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, Capability,
     ContinueCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage, CoreEventReplacement,
     CoreEventState, CoreEventStatePage, CoreEventStatePageRequest, CoreEventTombstone,
@@ -30,11 +35,6 @@ use ctx_pro_host_protocol::{
     MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,
     MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
     MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
-};
-#[cfg(test)]
-use ctx_pro_host_protocol::{
-    core_record_sha256, CoreMaterializationFinalizationPhase,
-    CoreMaterializationFinalizationProgress, CoreSourceRemoval,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -59,10 +59,11 @@ const CORE_RECORD_PAGE_BUDGET: CoreEventPageBudget = CoreEventPageBudget::new(
     MAX_CORE_EVENT_DELTA_PAGE_CONTENT_BYTES,
 );
 const PRO_CORE_FINALIZATION_LEASE_OWNER_KIND: &str = "pro_core_finalization";
-// Reuse one authenticated helper across fast quanta, but yield the daemon turn
-// after a finite residency. Every exchange retains the independent RPC watchdog.
-const CORE_FINALIZATION_BURST_MAX_REQUESTS: usize = 256;
-const CORE_FINALIZATION_BURST_MAX_ELAPSED: Duration = Duration::from_secs(30);
+// Reuse one authenticated helper across enough bounded quanta to amortize
+// recovery and authorization. Live daemon control signals can yield sooner,
+// and every exchange retains the independent RPC watchdog.
+const CORE_FINALIZATION_BURST_MAX_REQUESTS: usize = 4_096;
+const CORE_FINALIZATION_BURST_MAX_ELAPSED: Duration = Duration::from_secs(10 * 60);
 #[path = "core_materialization_feed/batching.rs"]
 mod batching;
 #[path = "core_materialization_feed/ordered_prefetch.rs"]
@@ -295,6 +296,7 @@ impl CoreMaterializationConsumer for ProtocolCoreMaterializationConsumer {
 pub(super) fn sync_generation_pinned_core(
     data_root: &Path,
     index: &VerifiedIndex,
+    should_yield: &mut dyn FnMut() -> bool,
 ) -> Result<CoreMaterializationSyncProgress> {
     let selection = CoreWorkerLaunchSelection::from_runtime();
     let required = BTreeSet::from([Capability::Status, Capability::CoreMaterialization]);
@@ -313,7 +315,7 @@ pub(super) fn sync_generation_pinned_core(
         .validate()
         .map_err(|error| anyhow!("invalid_response: {}", error.message))?;
     let mut progress = if status.currentness == CoreProjectionCurrentness::Finalizing {
-        continue_core_finalization(index, &status, &mut consumer, selection)?
+        continue_core_finalization(index, &status, &mut consumer, selection, should_yield)?
     } else {
         sync_core_feed_progress_with_launch(
             index,
@@ -774,6 +776,7 @@ fn continue_core_finalization<C: CoreMaterializationConsumer>(
     status: &ctx_pro_host_protocol::StatusResult,
     consumer: &mut C,
     selection: CoreWorkerLaunchSelection,
+    should_yield: &mut dyn FnMut() -> bool,
 ) -> Result<CoreMaterializationSyncProgress> {
     let authenticated_final_deadline_unix = consumer.authenticated_final_deadline_unix();
     continue_core_finalization_burst_with(
@@ -785,12 +788,13 @@ fn continue_core_finalization<C: CoreMaterializationConsumer>(
         authenticated_final_deadline_unix,
         Instant::now,
         crate::pro::commercial_lifecycle::unix_time,
+        should_yield,
         || false,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn continue_core_finalization_burst_with<C, Now, UnixNow, Cancelled>(
+fn continue_core_finalization_burst_with<C, Now, UnixNow, Yield, Cancelled>(
     index: &VerifiedIndex,
     status: &ctx_pro_host_protocol::StatusResult,
     consumer: &mut C,
@@ -799,12 +803,14 @@ fn continue_core_finalization_burst_with<C, Now, UnixNow, Cancelled>(
     authenticated_final_deadline_unix: Option<i64>,
     mut now: Now,
     mut unix_now: UnixNow,
+    mut should_yield: Yield,
     mut is_cancelled: Cancelled,
 ) -> Result<CoreMaterializationSyncProgress>
 where
     C: CoreMaterializationConsumer,
     Now: FnMut() -> Instant,
     UnixNow: FnMut() -> Result<i64>,
+    Yield: FnMut() -> bool,
     Cancelled: FnMut() -> bool,
 {
     if limits.max_requests == 0 {
@@ -825,6 +831,11 @@ where
     loop {
         if is_cancelled() {
             bail!("helper_cancelled: Core finalization continuation burst cancelled");
+        }
+        if should_yield() {
+            return Ok(CoreMaterializationSyncProgress::FinalizationPending(
+                pending,
+            ));
         }
         if requests >= limits.max_requests
             || now().saturating_duration_since(started) >= limits.max_elapsed
@@ -1031,6 +1042,8 @@ fn core_snapshot_deltas(sources: &[CoreSourceState]) -> Vec<CoreSourceDelta> {
 enum CoreSourceDeltaPageBuildError {
     #[error("invalid_request: one Core source delta exceeds its wire bound")]
     OversizedSingleton,
+    #[error("invalid_request: Core source terminal sentinel exceeds its wire bound")]
+    OversizedTerminalSentinel,
     #[error("invalid_request: Core delta page index overflowed")]
     PageIndexOverflow,
     #[error("invalid_request: Core source delta page byte accounting overflowed")]
@@ -1061,9 +1074,13 @@ fn build_delta_pages_with_wire_bound(
     maximum_wire_bytes: usize,
 ) -> Result<Vec<CoreSourceDeltaPage>, CoreSourceDeltaPageBuildError> {
     if deltas.is_empty() {
-        return CoreSourceDeltaPage::new(materialization_id, generation_id, 0, true, Vec::new())
-            .map(|page| vec![page])
-            .map_err(|error| CoreSourceDeltaPageBuildError::InvalidPage(error.message));
+        return terminal_source_delta_page(
+            materialization_id,
+            generation_id,
+            0,
+            maximum_wire_bytes,
+        )
+        .map(|page| vec![page]);
     }
 
     let mut pages = Vec::new();
@@ -1072,24 +1089,20 @@ fn build_delta_pages_with_wire_bound(
     let mut encoded_delta_items_bytes = 0_usize;
     let mut empty_nonterminal_wire_bytes =
         empty_source_delta_page_wire_bytes(materialization_id, generation_id, page_index, false)?;
-    let mut remaining = deltas.into_iter().peekable();
+    let remaining = deltas.into_iter();
 
     // A populated page is exactly its empty envelope plus each independently
     // encoded delta and the intervening commas. Charge every delta once, but
-    // rebuild the tiny envelope whenever page_index or terminal changes.
-    while let Some(delta) = remaining.next() {
-        let terminal = remaining.peek().is_none();
+    // rebuild the tiny envelope whenever page_index changes. Populated source
+    // pages are always nonterminal; one empty terminal page follows them so
+    // paged removal acknowledgements never replay source data.
+    for delta in remaining {
         let encoded_delta_bytes = encoded_json_len(&delta)?;
         let candidate_delta_items_bytes = encoded_delta_items_bytes
             .checked_add(usize::from(!current.is_empty()))
             .and_then(|bytes| bytes.checked_add(encoded_delta_bytes))
             .ok_or(CoreSourceDeltaPageBuildError::ByteCountOverflow)?;
-        let empty_wire_bytes = if terminal {
-            empty_source_delta_page_wire_bytes(materialization_id, generation_id, page_index, true)?
-        } else {
-            empty_nonterminal_wire_bytes
-        };
-        let candidate_wire_bytes = empty_wire_bytes
+        let candidate_wire_bytes = empty_nonterminal_wire_bytes
             .checked_add(candidate_delta_items_bytes)
             .ok_or(CoreSourceDeltaPageBuildError::ByteCountOverflow)?;
 
@@ -1118,17 +1131,7 @@ fn build_delta_pages_with_wire_bound(
                 page_index,
                 false,
             )?;
-            let singleton_empty_wire_bytes = if terminal {
-                empty_source_delta_page_wire_bytes(
-                    materialization_id,
-                    generation_id,
-                    page_index,
-                    true,
-                )?
-            } else {
-                empty_nonterminal_wire_bytes
-            };
-            if singleton_empty_wire_bytes
+            if empty_nonterminal_wire_bytes
                 .checked_add(encoded_delta_bytes)
                 .is_none_or(|bytes| bytes > maximum_wire_bytes)
             {
@@ -1146,10 +1149,38 @@ fn build_delta_pages_with_wire_bound(
         materialization_id,
         generation_id,
         page_index,
-        true,
+        false,
         current,
     )?);
+    page_index = page_index
+        .checked_add(1)
+        .ok_or(CoreSourceDeltaPageBuildError::PageIndexOverflow)?;
+    pages.push(terminal_source_delta_page(
+        materialization_id,
+        generation_id,
+        page_index,
+        maximum_wire_bytes,
+    )?);
     Ok(pages)
+}
+
+fn terminal_source_delta_page(
+    materialization_id: &str,
+    generation_id: &str,
+    page_index: u32,
+    maximum_wire_bytes: usize,
+) -> Result<CoreSourceDeltaPage, CoreSourceDeltaPageBuildError> {
+    let page = validated_source_delta_page(
+        materialization_id,
+        generation_id,
+        page_index,
+        true,
+        Vec::new(),
+    )?;
+    if encoded_json_len(&page)? > maximum_wire_bytes {
+        return Err(CoreSourceDeltaPageBuildError::OversizedTerminalSentinel);
+    }
+    Ok(page)
 }
 
 fn validated_source_delta_page(

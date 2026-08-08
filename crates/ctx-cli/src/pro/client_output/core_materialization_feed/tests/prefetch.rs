@@ -197,6 +197,14 @@ fn ordered_prefetch_is_byte_exact_and_bounded_across_workers_and_skew() {
         assert!(sequential.encoded_credit_high_water_bytes <= CORE_PREFETCH_ENCODED_BYTE_BUDGET);
         assert_eq!(sequential.planned_pages, sequential.materialized_pages);
         assert_eq!(sequential.decoded_records, record_count);
+        assert_eq!(
+            sequential.record_payload_sha256_traversals,
+            sequential.decoded_records
+        );
+        assert_eq!(
+            sequential.record_payload_sha256_bytes,
+            sequential.decoded_record_bytes
+        );
 
         for parallelism in [2, 4, 8] {
             let (actual_bytes, actual_digest, prefetch) =
@@ -217,6 +225,14 @@ fn ordered_prefetch_is_byte_exact_and_bounded_across_workers_and_skew() {
                 prefetch.encoded_credit_high_water_bytes
             );
             assert_eq!(prefetch.planned_pages, prefetch.materialized_pages);
+            assert_eq!(
+                prefetch.record_payload_sha256_traversals, prefetch.decoded_records,
+                "case={case:?} workers={parallelism}"
+            );
+            assert_eq!(
+                prefetch.record_payload_sha256_bytes, prefetch.decoded_record_bytes,
+                "case={case:?} workers={parallelism}"
+            );
             match case {
                 PrefetchFixture::OversizedSingletonAmongNormalSources => {
                     assert_eq!(prefetch.workers_launched, parallelism);
@@ -508,4 +524,117 @@ fn ordered_core_host_prefetch_microbenchmark() {
                 .collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+#[ignore = "focused Core-feed record SHA traversal microbenchmark"]
+fn core_feed_record_sha_traversal_microbenchmark() {
+    const RECORDS: usize = MAX_CORE_EVENT_DELTA_PAGE_ITEMS;
+    const BODY_BYTES: usize = CORE_PREFETCH_PAGE_ENCODED_BYTE_BUDGET / RECORDS;
+    const SAMPLES: usize = 7;
+
+    #[derive(Clone, Copy)]
+    enum Mode {
+        LegacyCombined,
+        RecordOnly,
+    }
+
+    fn run(
+        records: &[(ctx_history_core::CoreRecord, Vec<u8>)],
+        mode: Mode,
+    ) -> (Duration, CorePrefetchInstrumentationSnapshot, u8) {
+        let instrumentation = CorePrefetchInstrumentation::default();
+        let mut checksum = 0_u8;
+        let started = Instant::now();
+        for (record, encoded) in records {
+            let digest = match mode {
+                Mode::LegacyCombined => {
+                    // The discarded leaf and retained record digest each traverse
+                    // the complete encoded payload in the former feed path.
+                    instrumentation.record_payload_sha256_traversed(encoded.len());
+                    instrumentation.record_payload_sha256_traversed(encoded.len());
+                    ctx_pro_host_protocol::core_record_digests_from_encoded(record, encoded)
+                        .unwrap()
+                        .core_record_sha256
+                }
+                Mode::RecordOnly => {
+                    instrumentation.record_payload_sha256_traversed(encoded.len());
+                    core_record_sha256_from_encoded(encoded)
+                }
+            };
+            checksum ^= digest.as_bytes()[0];
+            black_box(&digest);
+        }
+        (started.elapsed(), instrumentation.snapshot(0, 0), checksum)
+    }
+
+    let source = source("record-sha-traversal-benchmark.jsonl");
+    let records = (0..RECORDS)
+        .map(|index| {
+            let record = record(
+                &source,
+                u64::try_from(index + 1).unwrap(),
+                "h".repeat(BODY_BYTES),
+            );
+            let encoded = record.encode_stored().unwrap();
+            (record, encoded)
+        })
+        .collect::<Vec<_>>();
+    let encoded_bytes = records
+        .iter()
+        .map(|(_, encoded)| encoded.len())
+        .sum::<usize>();
+
+    black_box(run(&records, Mode::LegacyCombined));
+    black_box(run(&records, Mode::RecordOnly));
+
+    let mut legacy_samples = Vec::with_capacity(SAMPLES);
+    let mut record_only_samples = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        let modes = if sample % 2 == 0 {
+            [Mode::LegacyCombined, Mode::RecordOnly]
+        } else {
+            [Mode::RecordOnly, Mode::LegacyCombined]
+        };
+        for mode in modes {
+            let (elapsed, snapshot, checksum) = run(&records, mode);
+            match mode {
+                Mode::LegacyCombined => {
+                    assert_eq!(snapshot.record_payload_sha256_traversals, RECORDS * 2);
+                    assert_eq!(snapshot.record_payload_sha256_bytes, encoded_bytes * 2);
+                    legacy_samples.push((elapsed, checksum));
+                }
+                Mode::RecordOnly => {
+                    assert_eq!(snapshot.record_payload_sha256_traversals, RECORDS);
+                    assert_eq!(snapshot.record_payload_sha256_bytes, encoded_bytes);
+                    record_only_samples.push((elapsed, checksum));
+                }
+            }
+        }
+    }
+    assert!(legacy_samples
+        .iter()
+        .zip(&record_only_samples)
+        .all(|((_, legacy), (_, record_only))| legacy == record_only));
+    legacy_samples.sort_unstable_by_key(|sample| sample.0);
+    record_only_samples.sort_unstable_by_key(|sample| sample.0);
+    let legacy_median = legacy_samples[SAMPLES / 2].0;
+    let record_only_median = record_only_samples[SAMPLES / 2].0;
+    eprintln!(
+        "core_feed_record_sha records={RECORDS} encoded_bytes={encoded_bytes} legacy_traversals={} legacy_payload_bytes={} legacy_median_ms={:.3} record_only_traversals={} record_only_payload_bytes={} record_only_median_ms={:.3} legacy_samples_ms={:?} record_only_samples_ms={:?}",
+        RECORDS * 2,
+        encoded_bytes * 2,
+        legacy_median.as_secs_f64() * 1_000.0,
+        RECORDS,
+        encoded_bytes,
+        record_only_median.as_secs_f64() * 1_000.0,
+        legacy_samples
+            .iter()
+            .map(|sample| sample.0.as_secs_f64() * 1_000.0)
+            .collect::<Vec<_>>(),
+        record_only_samples
+            .iter()
+            .map(|sample| sample.0.as_secs_f64() * 1_000.0)
+            .collect::<Vec<_>>()
+    );
 }

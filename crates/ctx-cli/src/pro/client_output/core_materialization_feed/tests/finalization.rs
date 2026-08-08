@@ -17,12 +17,23 @@ fn finish_for(index: &VerifiedIndex, revision: &str) -> FinishCoreMaterializatio
         head: head.clone(),
         expected_prior_receipt: None,
     };
+    let materialization_id =
+        ctx_pro_host_protocol::core_materialization_id(&begin, revision).unwrap();
+    let source_delta_pages = u32::try_from(
+        build_delta_pages(
+            &materialization_id,
+            &head.core_generation_id,
+            core_snapshot_deltas(&sources),
+        )
+        .unwrap()
+        .len(),
+    )
+    .unwrap();
     FinishCoreMaterializationRequest {
-        materialization_id: ctx_pro_host_protocol::core_materialization_id(&begin, revision)
-            .unwrap(),
+        materialization_id,
         head,
         expected_prior_receipt: None,
-        source_delta_pages: 1,
+        source_delta_pages,
         changed_sources: 1,
         removed_sources: 0,
         event_delta_pages: 1,
@@ -105,6 +116,7 @@ fn continuation_completion_rejects_changed_finish_digest_and_revision() {
             &status,
             &mut consumer,
             CoreWorkerLaunchSelection::explicit_test(1),
+            &mut || false,
         )
         .unwrap_err();
         assert!(
@@ -181,6 +193,7 @@ fn finish_yields_once_then_one_restart_session_chains_pending_to_completion() {
         &status,
         &mut consumer,
         CoreWorkerLaunchSelection::explicit_test(1),
+        &mut || false,
     )
     .unwrap() else {
         panic!("one continuation session should reach the terminal receipt");
@@ -250,6 +263,7 @@ fn continuation_chains_only_validated_nonstale_ordered_matching_cursors() {
             &status,
             &mut consumer,
             CoreWorkerLaunchSelection::explicit_test(1),
+            &mut || false,
         )
         .unwrap_err();
         assert!(
@@ -262,12 +276,12 @@ fn continuation_chains_only_validated_nonstale_ordered_matching_cursors() {
 
 #[test]
 fn production_continuation_burst_is_large_but_still_bounded() {
-    assert_eq!(CoreFinalizationBurstLimits::PRODUCTION.max_requests, 256);
+    assert_eq!(CoreFinalizationBurstLimits::PRODUCTION.max_requests, 4_096);
     assert_eq!(
         CoreFinalizationBurstLimits::PRODUCTION.max_elapsed,
-        Duration::from_secs(30)
+        Duration::from_secs(10 * 60)
     );
-    assert!(CoreFinalizationBurstLimits::PRODUCTION.max_elapsed < BATCH_TIMEOUT);
+    assert!(BATCH_TIMEOUT < CoreFinalizationBurstLimits::PRODUCTION.max_elapsed);
 }
 
 #[test]
@@ -307,6 +321,7 @@ fn continuation_burst_yields_truthfully_at_the_fixed_request_bound() {
             None,
             || started,
             || Ok(0),
+            || false,
             || false,
         )
         .unwrap()
@@ -363,6 +378,7 @@ fn continuation_burst_yields_truthfully_at_the_elapsed_bound() {
             || observations.pop_front().unwrap(),
             || Ok(0),
             || false,
+            || false,
         )
         .unwrap()
     else {
@@ -413,6 +429,7 @@ fn continuation_burst_does_not_start_after_its_elapsed_budget() {
             || observations.pop_front().unwrap(),
             || Ok(0),
             || false,
+            || false,
         )
         .unwrap()
     else {
@@ -458,6 +475,7 @@ fn continuation_burst_stops_before_another_exchange_when_cancelled() {
         None,
         || started,
         || Ok(0),
+        || false,
         || {
             cancellation_checks = cancellation_checks.saturating_add(1);
             cancellation_checks > 1
@@ -470,6 +488,59 @@ fn continuation_burst_stops_before_another_exchange_when_cancelled() {
     );
     assert_eq!(consumer.continue_requests.len(), 1);
     assert_eq!(consumer.finalization_progress, Some(first.progress));
+    assert_eq!(consumer.continue_pending.len(), 1);
+}
+
+#[test]
+fn continuation_burst_yields_truthfully_when_daemon_control_is_pending() {
+    let (_temp, index) = single_source_index(
+        "finalization-daemon-control-yield.jsonl",
+        vec!["body".to_owned()],
+    );
+    let initial = progress_for(
+        &index,
+        CoreMaterializationFinalizationPhase::EmitEventIndex,
+        '0',
+        "test-core-materializer-v1",
+    );
+    let first = advanced_pending(&initial, 1);
+    let mut consumer = Consumer::new();
+    consumer.finalization_progress = Some(initial);
+    consumer.finish = Some(finish_for(&index, "test-core-materializer-v1"));
+    consumer.continue_pending.push_back(first.clone());
+    consumer
+        .continue_pending
+        .push_back(advanced_pending(&first.progress, 2));
+    let status = consumer
+        .status(StatusRequest {
+            requested_core_generation_id: Some(index.generation_id().to_owned()),
+        })
+        .unwrap();
+    let started = Instant::now();
+    let mut yield_checks = 0_usize;
+    let CoreMaterializationSyncProgress::FinalizationPending(observed) =
+        continue_core_finalization_burst_with(
+            &index,
+            &status,
+            &mut consumer,
+            CoreWorkerLaunchSelection::explicit_test(1),
+            CoreFinalizationBurstLimits::PRODUCTION,
+            None,
+            || started,
+            || Ok(0),
+            || {
+                yield_checks = yield_checks.saturating_add(1);
+                yield_checks > 1
+            },
+            || false,
+        )
+        .unwrap()
+    else {
+        panic!("daemon control must preserve truthful Pending status");
+    };
+    assert_eq!(observed, first);
+    assert_eq!(consumer.continue_requests.len(), 1);
+    assert_eq!(consumer.finalization_progress, Some(observed.progress));
     assert_eq!(consumer.continue_pending.len(), 1);
 }
 
@@ -514,6 +585,7 @@ fn continuation_burst_propagates_exchange_errors_without_losing_the_last_cursor(
             || started,
             || Ok(0),
             || false,
+            || false,
         )
         .unwrap_err();
         assert_eq!(error.to_string(), message);
@@ -553,6 +625,7 @@ fn continuation_burst_never_starts_after_the_authenticated_final_deadline() {
         Some(100),
         || started,
         || Ok(101),
+        || false,
         || false,
     )
     .unwrap_err();
@@ -599,6 +672,7 @@ fn continuation_burst_stops_when_the_final_deadline_elapses_between_exchanges() 
         || started,
         || Ok(unix_observations.pop_front().unwrap()),
         || false,
+        || false,
     )
     .unwrap_err();
     assert!(error.to_string().contains("entitlement_expired"));
@@ -634,6 +708,7 @@ fn lost_continue_response_restarts_from_the_helpers_durable_cursor() {
         &status,
         &mut first_session,
         CoreWorkerLaunchSelection::explicit_test(1),
+        &mut || false,
     )
     .unwrap_err();
     assert!(error.to_string().contains("response_lost"));
@@ -673,6 +748,7 @@ fn lost_continue_response_restarts_from_the_helpers_durable_cursor() {
             None,
             || started,
             || Ok(0),
+            || false,
             || false,
         )
         .unwrap()
@@ -971,6 +1047,21 @@ fn run_authenticated_process_burst(
     helper_path: &Path,
     index: &VerifiedIndex,
 ) -> CoreMaterializationSyncProgress {
+    run_authenticated_process_burst_with_limits(
+        data_root,
+        helper_path,
+        index,
+        CoreFinalizationBurstLimits::PRODUCTION,
+    )
+}
+
+#[cfg(unix)]
+fn run_authenticated_process_burst_with_limits(
+    data_root: &Path,
+    helper_path: &Path,
+    index: &VerifiedIndex,
+    limits: CoreFinalizationBurstLimits,
+) -> CoreMaterializationSyncProgress {
     let required = BTreeSet::from([Capability::Status, Capability::CoreMaterialization]);
     let client = ProClient::connect_to_path_with_authorization_mode(
         data_root,
@@ -997,11 +1088,18 @@ fn run_authenticated_process_burst(
         })
         .unwrap();
     status.validate().unwrap();
-    continue_core_finalization(
+    let authenticated_final_deadline_unix = consumer.authenticated_final_deadline_unix();
+    continue_core_finalization_burst_with(
         index,
         &status,
         &mut consumer,
         CoreWorkerLaunchSelection::explicit_test(1),
+        limits,
+        authenticated_final_deadline_unix,
+        Instant::now,
+        crate::pro::commercial_lifecycle::unix_time,
+        || false,
+        || false,
     )
     .unwrap()
 }
@@ -1101,13 +1199,8 @@ fn one_authenticated_client_lifetime_services_a_bounded_cursor_burst() {
 #[test]
 #[ignore = "focused authenticated helper lifetime/exchange-count microbenchmark"]
 fn authenticated_helper_lifetime_count_microbenchmark() {
-    const PRIOR_BURST_MAX_REQUESTS: usize = 16;
-    const BEFORE_HELPER_LIFETIMES: usize = 7_461;
-    const BEFORE_WALL: &str = "53:38.58";
-    const BEFORE_USER_CPU_SECONDS: u64 = 2_690;
-    const BEFORE_SYSTEM_CPU_SECONDS: u64 = 744;
-    const SEPARATE_SEGMENT_CAP_FAILURE: usize = 4_097;
-    const MEASURED_EXCHANGES: usize = 65;
+    const PRIOR_BURST_MAX_REQUESTS: usize = 256;
+    const MEASURED_EXCHANGES: usize = 1_025;
     let terminal_after = MEASURED_EXCHANGES;
     let temp = tempdir().unwrap();
     let data_root = temp.path().join("data");
@@ -1128,7 +1221,7 @@ fn authenticated_helper_lifetime_count_microbenchmark() {
         serde_json::to_vec(&serde_json::json!({
             "kind": "pending",
             "continue_count": 0,
-            "progress": initial,
+            "progress": initial.clone(),
         }))
         .unwrap(),
     )
@@ -1141,6 +1234,44 @@ fn authenticated_helper_lifetime_count_microbenchmark() {
         &receipt,
     );
 
+    let prior_limits = CoreFinalizationBurstLimits {
+        max_requests: PRIOR_BURST_MAX_REQUESTS,
+        max_elapsed: Duration::from_secs(30),
+    };
+    let prior_started = Instant::now();
+    let mut prior_measured_lifetimes = 0_usize;
+    loop {
+        prior_measured_lifetimes = prior_measured_lifetimes.saturating_add(1);
+        if matches!(
+            run_authenticated_process_burst_with_limits(
+                &data_root,
+                &helper_path,
+                &index,
+                prior_limits,
+            ),
+            CoreMaterializationSyncProgress::Finished(_)
+        ) {
+            break;
+        }
+    }
+    let prior_elapsed = prior_started.elapsed();
+    let prior_measured_hellos = process_log_count(&log_path, "hello");
+    let prior_measured_authorizations = process_log_count(&log_path, "authorize");
+    let prior_measured_exchanges = process_log_count(&log_path, "continue:");
+
+    fs::write(
+        &state_path,
+        serde_json::to_vec(&serde_json::json!({
+            "kind": "pending",
+            "continue_count": 0,
+            "progress": initial,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(&log_path, []).unwrap();
+
+    let measured_started = Instant::now();
     let mut measured_lifetimes = 0_usize;
     loop {
         measured_lifetimes = measured_lifetimes.saturating_add(1);
@@ -1151,6 +1282,7 @@ fn authenticated_helper_lifetime_count_microbenchmark() {
             break;
         }
     }
+    let measured_elapsed = measured_started.elapsed();
     let measured_hellos = process_log_count(&log_path, "hello");
     let measured_authorizations = process_log_count(&log_path, "authorize");
     let measured_exchanges = process_log_count(&log_path, "continue:");
@@ -1161,29 +1293,29 @@ fn authenticated_helper_lifetime_count_microbenchmark() {
         measured_lifetimes,
         terminal_after.div_ceil(CORE_FINALIZATION_BURST_MAX_REQUESTS)
     );
-    let prior_measured_lifetimes = terminal_after.div_ceil(PRIOR_BURST_MAX_REQUESTS);
+    assert_eq!(prior_measured_exchanges, terminal_after);
+    assert_eq!(prior_measured_hellos, prior_measured_lifetimes);
+    assert_eq!(prior_measured_authorizations, prior_measured_lifetimes);
+    assert_eq!(
+        prior_measured_lifetimes,
+        terminal_after.div_ceil(PRIOR_BURST_MAX_REQUESTS)
+    );
     assert_eq!(prior_measured_lifetimes, 5);
     assert_eq!(measured_lifetimes, 1);
+    assert!(
+        measured_elapsed < prior_elapsed,
+        "amortized helper wall {measured_elapsed:?} did not beat prior wall {prior_elapsed:?}"
+    );
     let measured_reduction_percent =
         100.0 * (1.0 - measured_lifetimes as f64 / prior_measured_lifetimes as f64);
     assert!(measured_reduction_percent >= 80.0);
 
-    let projected_prior_burst_lifetimes =
-        BEFORE_HELPER_LIFETIMES.div_ceil(PRIOR_BURST_MAX_REQUESTS);
-    let projected_burst_lifetimes =
-        BEFORE_HELPER_LIFETIMES.div_ceil(CORE_FINALIZATION_BURST_MAX_REQUESTS);
-    let projected_reduction_from_prior_percent =
-        100.0 * (1.0 - projected_burst_lifetimes as f64 / projected_prior_burst_lifetimes as f64);
-    let projected_reduction_from_original_percent =
-        100.0 * (1.0 - projected_burst_lifetimes as f64 / BEFORE_HELPER_LIFETIMES as f64);
     eprintln!(
-        "authenticated_finalization_burst before_lifetimes={BEFORE_HELPER_LIFETIMES} before_wall={BEFORE_WALL} before_user_cpu_seconds={BEFORE_USER_CPU_SECONDS} before_system_cpu_seconds={BEFORE_SYSTEM_CPU_SECONDS} separate_segment_cap_failure={SEPARATE_SEGMENT_CAP_FAILURE} prior_burst_max_requests={PRIOR_BURST_MAX_REQUESTS} production_burst_max_requests={CORE_FINALIZATION_BURST_MAX_REQUESTS} production_burst_max_elapsed_seconds={} measured_exchanges={measured_exchanges} prior_measured_connect_hello_lifetimes={prior_measured_lifetimes} measured_connect_hello_lifetimes={measured_lifetimes} measured_reduction_from_prior_percent={measured_reduction_percent:.2} projected_prior_burst_lifetimes={projected_prior_burst_lifetimes} projected_burst_lifetimes={projected_burst_lifetimes} projected_reduction_from_prior_percent={projected_reduction_from_prior_percent:.2} projected_reduction_from_original_percent={projected_reduction_from_original_percent:.2}",
+        "authenticated_finalization_burst prior_burst_max_requests={PRIOR_BURST_MAX_REQUESTS} production_burst_max_requests={CORE_FINALIZATION_BURST_MAX_REQUESTS} production_burst_max_elapsed_seconds={} measured_exchanges={measured_exchanges} prior_measured_connect_hello_lifetimes={prior_measured_lifetimes} prior_measured_wall_seconds={:.6} measured_connect_hello_lifetimes={measured_lifetimes} measured_wall_seconds={:.6} measured_lifetime_reduction_percent={measured_reduction_percent:.2}",
         CORE_FINALIZATION_BURST_MAX_ELAPSED.as_secs(),
+        prior_elapsed.as_secs_f64(),
+        measured_elapsed.as_secs_f64(),
     );
-    assert_eq!(projected_prior_burst_lifetimes, 467);
-    assert_eq!(projected_burst_lifetimes, 30);
-    assert!(projected_reduction_from_prior_percent > 90.0);
-    assert!(projected_reduction_from_original_percent > 99.0);
 }
 
 #[test]

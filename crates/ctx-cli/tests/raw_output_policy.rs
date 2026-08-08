@@ -1408,10 +1408,10 @@ fn production_raw_output_inventory_is_closed() {
     assert_eq!(
         build_script_counts,
         BTreeMap::from([
-            ("build.rs", 6),
+            ("build.rs", 7),
             ("crates/ctx-semantic-model/build.rs", 2),
         ]),
-        "Cargo build-script output authority must remain exactly six CLI directives and two model directives"
+        "Cargo build-script output authority must remain exactly seven CLI directives and two model directives"
     );
     let diff = compare_policy(sites, ALLOWLIST);
     assert!(diff.is_closed(), "{}", diff.render());

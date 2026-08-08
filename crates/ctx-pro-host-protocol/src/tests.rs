@@ -549,11 +549,48 @@ fn storage_evidence_is_strict_and_required_nullable() {
 }
 
 #[test]
-fn storage_evidence_accepts_legacy_control_v4_v5_and_current_v6() {
+fn storage_evidence_accepts_checkpoint_v4_through_v8_only() {
     let evidence = ProStorageEvidence {
         graph_manifest_schema: 3,
         flat_format_version: 2,
-        materializer_checkpoint_version: 6,
+        materializer_checkpoint_version: 8,
+        journal_pack_format_version: 3,
+        legacy_journals_written: 0,
+        journal_pages_written: 2,
+        journal_packs_written: 1,
+        journal_finish_activity: JournalFinishActivity {
+            worker_limit: 1,
+            peak_workers: 1,
+            started_after_preparation: true,
+        },
+    };
+    evidence.validate().unwrap();
+
+    let mut invalid_v8 = evidence.clone();
+    invalid_v8.legacy_journals_written = 1;
+    assert_eq!(
+        invalid_v8.validate().unwrap_err().class,
+        ErrorClass::Sequence
+    );
+
+    for checkpoint_version in [4, 5, 6, 7] {
+        let mut accepted = evidence.clone();
+        accepted.materializer_checkpoint_version = checkpoint_version;
+        accepted.validate().unwrap();
+    }
+    for checkpoint_version in [0, 3, 9, u16::MAX] {
+        let mut rejected = evidence.clone();
+        rejected.materializer_checkpoint_version = checkpoint_version;
+        assert_eq!(rejected.validate().unwrap_err().class, ErrorClass::Sequence);
+    }
+}
+
+#[test]
+fn storage_evidence_accepts_graph_manifest_v3_and_v4_only() {
+    let evidence = ProStorageEvidence {
+        graph_manifest_schema: 4,
+        flat_format_version: 2,
+        materializer_checkpoint_version: 8,
         journal_pack_format_version: 3,
         legacy_journals_written: 0,
         journal_pages_written: 2,
@@ -565,14 +602,14 @@ fn storage_evidence_accepts_legacy_control_v4_v5_and_current_v6() {
         },
     };
 
-    for checkpoint_version in [4, 5, 6] {
+    for graph_manifest_schema in [3, 4] {
         let mut accepted = evidence.clone();
-        accepted.materializer_checkpoint_version = checkpoint_version;
+        accepted.graph_manifest_schema = graph_manifest_schema;
         accepted.validate().unwrap();
     }
-    for checkpoint_version in [0, 3, 7, u16::MAX] {
+    for graph_manifest_schema in [0, 1, 2, 5, u16::MAX] {
         let mut rejected = evidence.clone();
-        rejected.materializer_checkpoint_version = checkpoint_version;
+        rejected.graph_manifest_schema = graph_manifest_schema;
         assert_eq!(rejected.validate().unwrap_err().class, ErrorClass::Sequence);
     }
 }
