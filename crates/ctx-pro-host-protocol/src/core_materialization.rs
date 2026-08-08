@@ -22,7 +22,8 @@ pub(crate) use validation::encoded_len;
 use validation::{canonical_sha256, compact_json_encoded_len};
 pub use validation::{
     core_materialization_id, core_record_digests, core_record_digests_from_encoded,
-    core_record_leaf_sha256, core_record_sha256, core_source_snapshot_sha256, CoreRecordDigests,
+    core_record_leaf_sha256, core_record_sha256, core_record_sha256_from_encoded,
+    core_source_snapshot_sha256, CoreRecordDigests,
 };
 use validation::{
     core_record_content_bytes, core_source_delta_exact_eq, invalid_contract,

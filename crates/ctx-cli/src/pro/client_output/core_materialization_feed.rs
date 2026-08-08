@@ -16,8 +16,13 @@ use ctx_history_index::{
     GenerationManifest, GenerationRetentionLease, SourceEventCursor, StoredCoreRecordJson,
     VerifiedIndex,
 };
+#[cfg(test)]
 use ctx_pro_host_protocol::{
-    core_record_digests_from_encoded, ApplyCoreEventDeltaPagesRequest,
+    core_record_sha256, CoreMaterializationFinalizationPhase,
+    CoreMaterializationFinalizationProgress, CoreSourceRemoval,
+};
+use ctx_pro_host_protocol::{
+    core_record_sha256_from_encoded, ApplyCoreEventDeltaPagesRequest,
     ApplyCoreSourceDeltaPageRequest, BeginCoreMaterializationRequest, Capability,
     ContinueCoreMaterializationRequest, CoreEventDelta, CoreEventDeltaPage, CoreEventReplacement,
     CoreEventState, CoreEventStatePage, CoreEventStatePageRequest, CoreEventTombstone,
@@ -30,11 +35,6 @@ use ctx_pro_host_protocol::{
     MAX_CORE_EVENT_DELTA_PAGE_ITEMS, MAX_CORE_EVENT_DELTA_PAGE_WIRE_BYTES,
     MAX_CORE_EVENT_STATE_PAGE_ITEMS, MAX_CORE_SOURCE_DELTA_PAGE_ITEMS,
     MAX_CORE_SOURCE_DELTA_PAGE_WIRE_BYTES, MAX_CORE_SOURCE_STATES,
-};
-#[cfg(test)]
-use ctx_pro_host_protocol::{
-    core_record_sha256, CoreMaterializationFinalizationPhase,
-    CoreMaterializationFinalizationProgress, CoreSourceRemoval,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};

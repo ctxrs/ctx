@@ -184,18 +184,10 @@ fn prepared_request_reuses_stored_core_json_and_matches_legacy_frames_byte_for_b
     let added_record = added.core_record.clone();
     let replacement_record = replacement.core_record.clone();
     let tombstoned_event_id = tombstoned.core_record.event_id;
-    let added_sha256 = core_record_digests_from_encoded(
-        &added.core_record,
-        added.stored_json.encoded_core_record().unwrap(),
-    )
-    .unwrap()
-    .core_record_sha256;
-    let replacement_sha256 = core_record_digests_from_encoded(
-        &replacement.core_record,
-        replacement.stored_json.encoded_core_record().unwrap(),
-    )
-    .unwrap()
-    .core_record_sha256;
+    let added_sha256 =
+        core_record_sha256_from_encoded(added.stored_json.encoded_core_record().unwrap());
+    let replacement_sha256 =
+        core_record_sha256_from_encoded(replacement.stored_json.encoded_core_record().unwrap());
     let prepared_deltas = vec![
         PreparedEventDelta::added(PreparedCurrentRecord {
             record: added.core_record,
@@ -936,6 +928,7 @@ fn producer_reads_only_pinned_core_records() {
     }
     assert!(source.contains("plan_core_source_event_page_with_budget"));
     assert!(source.contains("materialize_stored_core_source_event_page"));
-    assert!(source.contains("core_record_digests_from_encoded"));
+    assert!(source.contains("core_record_sha256_from_encoded"));
+    assert!(!source.contains("core_record_digests_from_encoded"));
     assert!(!source.contains("MaterializeCoreRecordPage"));
 }

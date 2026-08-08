@@ -15,6 +15,7 @@ use ctx_history_core::{
     SessionRelationshipKind, SourceAnchor, TypedKey, CORE_CONTENT_POLICY_REVISION,
     CORE_REPOSITORY_ASSOCIATION_POLICY_REVISION,
 };
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::*;
@@ -186,12 +187,18 @@ fn added_and_replaced_deltas_expose_exact_record_to_leaf_helper() {
     let expected = core_record_digests(&record).unwrap();
     let stored_json = record.encode_stored().unwrap();
     let decoded = CoreRecord::decode_stored(&stored_json).unwrap();
+    let independent_record_sha256 = format!("{:x}", Sha256::digest(&stored_json));
     assert_eq!(decoded, record);
     assert_eq!(decoded.encode_stored().unwrap(), stored_json);
     assert_eq!(
         core_record_digests_from_encoded(&decoded, &stored_json).unwrap(),
         expected
     );
+    assert_eq!(
+        core_record_sha256_from_encoded(&stored_json),
+        independent_record_sha256
+    );
+    assert_eq!(expected.core_record_sha256, independent_record_sha256);
     for digest in [
         &expected.core_record_sha256,
         &expected.core_record_leaf_sha256,
