@@ -589,7 +589,7 @@ fn run_pro_catch_up_with_retry(
             continuation_pending: false,
         });
     }
-    let mut yield_control = ProFinalizationYieldControl::new(runtime.wakeup.clone());
+    let mut yield_control = ProFinalizationYieldControl::new(runtime.wakeup.clone(), runtime.force);
     let run = run_after_core_publication(data_root, core_generation_id, authority, &mut || {
         yield_control.requested(data_root)
     })?;
@@ -606,13 +606,15 @@ const PRO_FINALIZATION_CONFIG_POLL_INTERVAL: StdDuration = StdDuration::from_sec
 
 struct ProFinalizationYieldControl {
     wakeup: Option<Arc<DaemonWakeup>>,
+    force: bool,
     next_config_poll: Instant,
 }
 
 impl ProFinalizationYieldControl {
-    fn new(wakeup: Option<Arc<DaemonWakeup>>) -> Self {
+    fn new(wakeup: Option<Arc<DaemonWakeup>>, force: bool) -> Self {
         Self {
             wakeup,
+            force,
             next_config_poll: Instant::now(),
         }
     }
@@ -631,7 +633,7 @@ impl ProFinalizationYieldControl {
         }
         self.next_config_poll = now + PRO_FINALIZATION_CONFIG_POLL_INTERVAL;
         AppConfig::load(data_root).is_ok_and(|config| {
-            !config.daemon.enabled || config.daemon.mode.runs_only_source_refresh()
+            (!self.force && !config.daemon.enabled) || config.daemon.mode.runs_only_source_refresh()
         })
     }
 }

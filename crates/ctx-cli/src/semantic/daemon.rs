@@ -135,6 +135,7 @@ pub(super) struct DaemonRuntime {
     pub(super) background_refresh_cadence: DaemonBackgroundRefreshCadence,
     pub(super) config: AppConfig,
     pub(super) wakeup: Option<Arc<DaemonWakeup>>,
+    pub(super) force: bool,
 }
 
 #[cfg(test)]
@@ -322,6 +323,7 @@ pub(super) fn run_daemon_inner(
         let mut runtime = DaemonRuntime {
             config: config.clone(),
             wakeup: Some(Arc::clone(&wakeup)),
+            force: args.force,
             ..DaemonRuntime::default()
         };
         let mut config_reload = DaemonConfigReloadState::pending(config);
