@@ -68,7 +68,7 @@ def validate_check_text(check_text: str) -> None:
         ";;",
         "release)",
         "run_bazel build //... --config=ci",
-        "run_bazel test //:release_tests --config=test",
+        "run_bazel test //:nightly_tests --config=test",
         ";;",
         "esac",
     ]
@@ -122,7 +122,7 @@ def validate_build_text(build_text: str) -> None:
         ):
             continue
         name = _call_name(node.value)
-        if name in {"ci_tests", "nightly_tests", "release_tests"}:
+        if name in {"ci_tests", "nightly_tests"}:
             if name in suites:
                 raise ContractError(f"duplicate //:{name} suite")
             suites[name] = node.value
@@ -130,10 +130,9 @@ def validate_build_text(build_text: str) -> None:
     expected = {
         "ci_tests": _shape("CI_TESTS"),
         "nightly_tests": _shape('[":ci_tests"] + NIGHTLY_TESTS'),
-        "release_tests": _shape('[":nightly_tests"]'),
     }
     if set(suites) != set(expected):
-        raise ContractError("the ci_tests/nightly_tests/release_tests suites are required")
+        raise ContractError("the ci_tests/nightly_tests suites are required")
     for name, expected_tests in expected.items():
         tests = _keyword(suites[name], "tests")
         if tests is None or ast.dump(tests, include_attributes=False) != expected_tests:

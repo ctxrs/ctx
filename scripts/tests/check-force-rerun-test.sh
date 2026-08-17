@@ -181,7 +181,11 @@ for mode in ci nightly release; do
   fi
   grep -Fqx 'arg=//...' "${CTX_FAKE_BAZEL_LOG}" \
     || fail "${mode} mode did not lint the full workspace"
-  grep -Fqx "arg=//:${mode}_tests" "${CTX_FAKE_BAZEL_LOG}" \
+  suite="${mode}_tests"
+  if [[ "${mode}" == release ]]; then
+    suite="nightly_tests"
+  fi
+  grep -Fqx "arg=//:${suite}" "${CTX_FAKE_BAZEL_LOG}" \
     || fail "${mode} mode did not execute its owning suite"
   [[ "$(grep -c '^arg=--config=ci$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
     || fail "${mode} mode did not use the inherited lint config exactly once"

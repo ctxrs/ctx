@@ -9,10 +9,16 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 
 
 HEX_40 = re.compile(r"[0-9a-f]{40}")
+RECIPE_PIN = re.compile(
+    r'^readonly (RUST_VERSION|RUST_COMMIT|ZIG_VERSION|CARGO_ZIGBUILD_VERSION)="([^"\n]+)"$',
+    re.MULTILINE,
+)
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 
 
 def sha256(path: Path) -> str:
@@ -30,6 +36,76 @@ def target(matrix: Path, platform: str) -> dict[str, object]:
     if len(matches) != 1:
         raise ValueError("release target matrix does not contain the exact platform")
     return matches[0]
+
+
+def factory_inputs(matrix: Path) -> dict[str, object]:
+    path = matrix.with_name("release-factory-inputs-v1.json")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    linux_host = value.get("linux_host") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("kind") != "ctx-release-factory-inputs"
+        or not isinstance(linux_host, dict)
+        or set(linux_host) != {"arch", "authority", "os_id", "os_version"}
+        or any(not isinstance(item, str) or not item for item in linux_host.values())
+    ):
+        raise ValueError("release factory input contract is malformed")
+    return value
+
+
+def exact_recipe(matrix: Path, selected: dict[str, object], supplied: Path) -> Path:
+    label = selected.get("public_construction_label")
+    if not isinstance(label, str) or not label or Path(label).is_absolute():
+        raise ValueError("release target construction label is malformed")
+    matrix_path = matrix.resolve(strict=True)
+    root = matrix_path.parent.parent
+    expected = (root / label).resolve(strict=True)
+    recipe = supplied.resolve(strict=True)
+    try:
+        metadata = supplied.lstat()
+    except OSError as error:
+        raise ValueError("release factory recipe is unavailable") from error
+    if (
+        not expected.is_relative_to(root)
+        or recipe != expected
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        raise ValueError("release factory recipe does not match the target contract")
+    return recipe
+
+
+def recipe_pins(recipe: Path) -> dict[str, str]:
+    source = recipe.read_text(encoding="utf-8")
+    pins: dict[str, str] = {}
+    for name, value in RECIPE_PIN.findall(source):
+        if name in pins:
+            raise ValueError(f"release factory recipe repeats {name}")
+        pins[name] = value
+    required = {
+        "RUST_VERSION",
+        "RUST_COMMIT",
+        "ZIG_VERSION",
+        "CARGO_ZIGBUILD_VERSION",
+    }
+    if set(pins) != required:
+        raise ValueError("release factory recipe toolchain pins are incomplete")
+    if (
+        VERSION.fullmatch(pins["RUST_VERSION"]) is None
+        or HEX_40.fullmatch(pins["RUST_COMMIT"]) is None
+        or pins["RUST_COMMIT"] == "0" * 40
+        or VERSION.fullmatch(pins["ZIG_VERSION"]) is None
+        or VERSION.fullmatch(pins["CARGO_ZIGBUILD_VERSION"]) is None
+    ):
+        raise ValueError("release factory recipe toolchain pins are malformed")
+    return pins
+
+
+def expected_rust_version(pins: dict[str, str]) -> re.Pattern[str]:
+    version = re.escape(pins["RUST_VERSION"])
+    commit = re.escape(pins["RUST_COMMIT"][:9])
+    return re.compile(rf"rustc {version} \({commit} [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}\)")
 
 
 def clean_source(repo: Path, commit: str) -> None:
@@ -81,11 +157,40 @@ def main() -> int:
         repo = args.source_repo.resolve(strict=True)
         clean_source(repo, args.source_commit)
         selected = target(args.matrix, args.platform)
+        inputs = factory_inputs(args.matrix)
+        recipe = exact_recipe(args.matrix, selected, args.recipe)
+        pins = recipe_pins(recipe)
+        linux_host = inputs["linux_host"]
+        if not isinstance(linux_host, dict):
+            raise ValueError("release factory Linux host contract is malformed")
+        expected_builder_os = (
+            f'{linux_host.get("os_id")}-{linux_host.get("os_version")}-'
+            f'{linux_host.get("arch")}'
+        )
+        if (
+            args.builder_authority != linux_host.get("authority")
+            or args.builder_os != expected_builder_os
+        ):
+            raise ValueError("builder identity does not match the factory input contract")
+        if (
+            args.zig_version != pins["ZIG_VERSION"]
+            or args.cargo_zigbuild_version != pins["CARGO_ZIGBUILD_VERSION"]
+            or expected_rust_version(pins).fullmatch(args.rust_version) is None
+        ):
+            raise ValueError("observed toolchain does not match the factory recipe")
         is_macos = selected["os"] == "macos"
         if is_macos != bool(args.macos_sdk_sha256):
             raise ValueError("macOS SDK identity is required exactly for macOS targets")
         if is_macos != bool(args.macos_sdk_authority):
             raise ValueError("macOS SDK authority is required exactly for macOS targets")
+        if is_macos:
+            macos_sdk = inputs.get("macos_sdk")
+            if (
+                not isinstance(macos_sdk, dict)
+                or args.macos_sdk_sha256 != macos_sdk.get("archive_sha256")
+                or args.macos_sdk_authority != macos_sdk.get("authority")
+            ):
+                raise ValueError("macOS SDK identity does not match the factory input contract")
         if (args.local_runtime_status == "passed") != (
             args.local_runtime_authority == "authoritative"
         ):
@@ -97,7 +202,7 @@ def main() -> int:
                 "authority": args.builder_authority,
                 "image_id": None,
                 "os": args.builder_os,
-                "recipe_sha256": sha256(args.recipe),
+                "recipe_sha256": sha256(recipe),
             },
             "cargo_lock_sha256": sha256(args.cargo_lock),
             "gates": {
@@ -114,11 +219,8 @@ def main() -> int:
             "linux_build": selected["linux_build"],
             "platform": args.platform,
             "release_factory": {
-                "authority": "linux-cross-cargo-zigbuild-v1",
+                "authority": selected["public_construction_authority"],
                 "cargo_zigbuild_version": args.cargo_zigbuild_version,
-                "glibc_max": selected.get("linux_build", {}).get("glibc_max")
-                if isinstance(selected.get("linux_build"), dict)
-                else None,
                 "macos_sdk_sha256": args.macos_sdk_sha256,
                 "macos_sdk_authority": args.macos_sdk_authority,
                 "zig_version": args.zig_version,

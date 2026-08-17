@@ -95,6 +95,6 @@ case "${mode}" in
     ;;
   release)
     run_bazel build //... --config=ci
-    run_bazel test //:release_tests --config=test
+    run_bazel test //:nightly_tests --config=test
     ;;
 esac

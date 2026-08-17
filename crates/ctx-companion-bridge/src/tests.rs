@@ -23,7 +23,10 @@ use sha2::{Digest as _, Sha256};
 use super::*;
 use crate::{
     slot::PreparedPair,
-    verifier::{embedded_authority_for_tests, embedded_state_schema_for_tests, PairVerifier},
+    verifier::{
+        embedded_authority_for_tests, embedded_state_schema_for_tests,
+        embedded_target_matrix_for_tests, PairVerifier,
+    },
 };
 
 const CORE_BYTES: &[u8] = b"#!/bin/sh\nexit 0\n";
@@ -169,6 +172,7 @@ fn fixed_contract_paths_and_embedded_root_authority_are_exact() {
         include_bytes!("../../../contracts/ctx-managed-pair-release-authority-v1.json");
     let root_state_schema =
         include_bytes!("../../../contracts/ctx-managed-pair-state-v1.schema.json");
+    let root_target_matrix = include_bytes!("../../../contracts/release-targets-v1.json");
     assert_eq!(MANAGED_PAIR_ENVELOPE_FILENAME, "managed-pair-envelope.json");
     assert_eq!(MANAGED_PAIR_STATE_FILENAME, "managed-pair-state.json");
     assert_eq!(
@@ -185,6 +189,11 @@ fn fixed_contract_paths_and_embedded_root_authority_are_exact() {
     );
     assert_eq!(embedded_authority_for_tests(), root_authority);
     assert_eq!(embedded_state_schema_for_tests(), root_state_schema);
+    assert_eq!(embedded_target_matrix_for_tests(), root_target_matrix);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(embedded_target_matrix_for_tests())),
+        "1cf089c8f494c9662428518ce07ff91a3ceb28fe4ac4d75b6a9d7dd3f16c75a5"
+    );
     let registry: serde_json::Value =
         serde_json::from_slice(embedded_authority_for_tests()).unwrap();
     assert_eq!(registry["contract"], "ctx-managed-pair-release-authority");
@@ -816,7 +825,7 @@ fn production_verifier_uses_root_authority_and_rejects_an_invalid_signature() {
             "id": target.id,
             "os": target.os,
         },
-        "target_matrix_sha256": "53ae5ee64c9a98d0f3bdc3ff0994cd68fec35eea4277bcfed31cc16410f39628",
+        "target_matrix_sha256": "1cf089c8f494c9662428518ce07ff91a3ceb28fe4ac4d75b6a9d7dd3f16c75a5",
     });
     let payload = serde_json::to_vec(&manifest).unwrap();
     let envelope = serde_json::to_vec(&serde_json::json!({

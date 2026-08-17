@@ -25,10 +25,12 @@ const EMBEDDED_AUTHORITY: &[u8] =
     include_bytes!("../../../contracts/ctx-managed-pair-release-authority-v1.json");
 const EMBEDDED_STATE_SCHEMA: &[u8] =
     include_bytes!("../../../contracts/ctx-managed-pair-state-v1.schema.json");
+#[cfg(test)]
+const EMBEDDED_TARGET_MATRIX: &[u8] = include_bytes!("../../../contracts/release-targets-v1.json");
 const STATE_SCHEMA_SHA256: &str =
     "bc81eae66d02e436e3f97cbcc5e019508cf9591be05eb8e4bf86ad4659e7dbe1";
 const TARGET_MATRIX_SHA256: &str =
-    "53ae5ee64c9a98d0f3bdc3ff0994cd68fec35eea4277bcfed31cc16410f39628";
+    "1cf089c8f494c9662428518ce07ff91a3ceb28fe4ac4d75b6a9d7dd3f16c75a5";
 const MAX_ENVELOPE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 16 * 1024;
@@ -714,6 +716,11 @@ pub(crate) fn embedded_authority_for_tests() -> &'static [u8] {
 #[cfg(test)]
 pub(crate) fn embedded_state_schema_for_tests() -> &'static [u8] {
     EMBEDDED_STATE_SCHEMA
+}
+
+#[cfg(test)]
+pub(crate) fn embedded_target_matrix_for_tests() -> &'static [u8] {
+    EMBEDDED_TARGET_MATRIX
 }
 
 #[cfg(test)]

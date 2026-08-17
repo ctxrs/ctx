@@ -23,7 +23,7 @@ query() {
 }
 
 query 'kind(".*_test rule", //...)' | LC_ALL=C sort -u >"$tmp/all-tests.txt"
-query 'tests(//:release_tests) intersect kind(".*_test rule", //...)' \
+query 'tests(//:nightly_tests) intersect kind(".*_test rule", //...)' \
   | LC_ALL=C sort -u >"$tmp/release-tests.txt"
 query 'attr("tags", "manual", kind(".*_test rule", //...))' \
   | LC_ALL=C sort -u >"$tmp/manual-tests.txt"

@@ -167,7 +167,7 @@ complete deterministic test suite. The complete public merge gate remains
 `scripts/check.sh --mode=ci`.
 The named check first builds `//...` under `--config=ci`; that configuration
 inherits the strict Clippy aspect and `-Dwarnings`. It then runs the owning
-`//:ci_tests`, `//:nightly_tests`, or `//:release_tests` suite under the
+`//:ci_tests` or `//:nightly_tests` suite under the
 deterministic test configuration, so test execution does not reapply the lint
 aspect.
 Performance sanity, serialized auto-upgrade acceptance, persistent-daemon soak,
@@ -256,11 +256,12 @@ versions, factory recipe, and macOS SDK digest where applicable. It records
 static inspection in the factory and deliberately leaves native runtime proof
 to the five fan-out jobs.
 
-With no mode flag, the staging helper validates and stages the five CLI binaries
-paired with the five legacy runtime transports. `--with-semantic` preserves
-those pairs and adds the ten exact Semantic assets. Linux inputs must carry
-their sealed per-platform completion identities; Semantic assets are instead
-validated directly through their manifests, checksums, and canonical catalog.
+With no mode flag, the staging helper validates and stages the five CLI
+binaries plus their SBOMs and notices. Semantic models and runtime transports
+are constructed and handed off by the separate Semantic release graph; they
+are not accepted by the Core GitHub staging command. When the factory runs
+with `--skip-runtimes`, Core staging requires its aggregate Core completion
+marker, not per-platform Linux runtime completion identities.
 
 Aggregate staging also writes a separate release-authority handoff directory;
 it does not add those files to the GitHub Release asset set or `SHA256SUMS`.
@@ -268,29 +269,35 @@ The handoff retains all five canonical per-target candidate manifests and their
 digest sidecars. It also retains the Windows executable and candidate evidence
 under their exact construction names (`ctx.exe`, `ctx.exe.build-info.json`,
 `ctx.exe.cdx.json`, `ctx.exe.size.json`, and
-`ctx.exe.third-party-notices.txt`), plus exact copies of `SHA256SUMS` and the
-Windows runtime archive. `release_bundle.py` publishes this fresh, exact
-17-file directory atomically without replacement.
+`ctx.exe.third-party-notices.txt`). The remaining leaves are exact copies of
+the 15-entry Core `SHA256SUMS`, `ctx-release-factory.json`, and
+`ctx-core.release-complete.json`, plus the canonical
+`ctx-core-github-handoff.json` document and its checksum. `release_bundle.py`
+publishes this fresh, exact 20-file directory atomically without replacement.
 
-After the final `SHA256SUMS` exists, the Windows manifest is finalized to bind
-the literal `SHA256SUMS` and
-`ctx-onnxruntime-windows-x64.zip` names, their exact bytes and SHA-256 values,
-and the exact `lib/onnxruntime.dll` name, size, and SHA-256 value. Its digest
-sidecar is convenience input and is not authority. The production verifier
+The canonical handoff document records the clean source commit and the exact
+name, size, and SHA-256 of all five candidate manifests, `SHA256SUMS`, the
+factory manifest, and the factory completion marker. Its digest is the
+aggregate Core GitHub authority identifier. The production verifier therefore
 accepts only the complete handoff and an independently obtained expected
-manifest digest:
+digest of the exact canonical `ctx-core-github-handoff.json` bytes:
 
 ```bash
 python3 -I scripts/release-sbom.py verify-release \
   --handoff-dir target/github-release-authority \
-  --expected-manifest-sha256 HEX_DIGEST
+  --expected-handoff-sha256 HEX_DIGEST
 ```
 
-The command requires the exact handoff inventory, verifies the release-bound
-manifest and every Windows input it names, and prints the verified digest. It
-does not sign, attest, authenticate, or select the expected digest. The
-authority integrating this interface must supply that digest independently of
-the handoff and its sidecars.
+The command requires the exact 20-file inventory and canonical handoff schema.
+It verifies all five candidate-manifest records and digest sidecars, the exact
+15-entry Core `SHA256SUMS` order and its factory-byte bindings, the canonical
+factory/completion identities and their mutual file bindings, and the retained
+Windows artifact, build information, SBOM, size report, and notices byte for
+byte through the Windows candidate. It prints the authenticated handoff
+digest. It does not sign, attest, authenticate, or select that digest. The
+integrating authority must supply the expected digest independently of the
+handoff; neither `ctx-core-github-handoff.json.sha256` nor any candidate digest
+sidecar is authority by itself.
 
 Pass an explicit third directory when staging for a release build:
 

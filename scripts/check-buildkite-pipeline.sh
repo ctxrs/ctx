@@ -9,6 +9,8 @@ for required in \
   scripts/release/build-public-candidate-on-linux.sh \
   scripts/validate-public-cli-factory-artifact.sh \
   scripts/stage-github-release-assets.sh \
+  scripts/stage-semantic-release-handoff.sh \
+  scripts/build-onnxruntime-sidecar.sh \
   scripts/check-sdks.sh; do
   [[ -f "${required}" ]] || {
     printf 'Buildkite release input missing: %s\n' "${required}" >&2
@@ -41,17 +43,18 @@ try:
         ],
         text=True,
     )
-except (OSError, subprocess.CalledProcessError) as error:
+except (OSError, subprocess.CalledProcessError):
     fail("Ruby YAML parser is required for the pipeline contract")
 value = json.loads(encoded)
 steps = value.get("steps") if isinstance(value, dict) else None
 if not isinstance(steps, list):
     fail("steps are missing")
-keyed = {
-    step.get("key"): step
-    for step in steps
-    if isinstance(step, dict) and isinstance(step.get("key"), str)
-}
+if not all(isinstance(step, dict) and isinstance(step.get("key"), str) for step in steps):
+    fail("every top-level step must have one explicit key; global waits are prohibited")
+keyed = {step["key"]: step for step in steps}
+if len(keyed) != len(steps):
+    fail("step keys must be unique")
+
 required = {
     "public-smoke",
     "public-nightly",
@@ -69,6 +72,7 @@ required = {
     "semantic-coreml-archive",
     "semantic-runtime-linux-cuda12",
     "semantic-runtime-windows-ml",
+    "semantic-runtime-portable",
     "semantic-release-handoff",
 }
 if set(keyed) != required:
@@ -77,15 +81,67 @@ if set(keyed) != required:
         f"extra={sorted(set(keyed)-required)}"
     )
 
-for key, mode in (
-    ("public-smoke", "ci"),
-    ("public-nightly", "nightly"),
-    ("public-release", "release"),
+ordinary_condition = (
+    'build.source != "schedule" && '
+    'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") != "1" && '
+    'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") != "1"'
+)
+nightly_condition = (
+    'build.source == "schedule" && '
+    'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") != "1" && '
+    'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") != "1"'
+)
+core_release_condition = (
+    'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && '
+    'build.branch == "main" && build.pull_request.id == null'
+)
+core_native_condition = (
+    'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && '
+    'build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && '
+    'build.branch == "main" && build.pull_request.id == null'
+)
+semantic_condition = (
+    'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && '
+    'build.branch == "main" && build.pull_request.id == null'
+)
+
+for key, mode, condition in (
+    ("public-smoke", "ci", ordinary_condition),
+    ("public-nightly", "nightly", nightly_condition),
+    ("public-release", "release", core_release_condition),
 ):
-    if keyed[key].get("command", "").strip() != (
+    step = keyed[key]
+    if step.get("command", "").strip() != (
         f"bash scripts/buildkite-public-ci.sh --mode={mode}"
     ):
         fail(f"{key} does not own the exact {mode} validation route")
+    if step.get("if") != condition:
+        fail(f"{key} has the wrong non-overlapping route condition")
+
+swift = keyed["sdk-swift-required"]
+if swift.get("if") != ordinary_condition:
+    fail("Swift SDK qualification must remain on ordinary CI, outside release graphs")
+if swift.get("command", "").strip() != (
+    "swift --version\n"
+    "CTX_SDK_RUN_LOCAL_SMOKE=0 bash scripts/check-sdks.sh "
+    "--groups=swift --required-groups=swift"
+):
+    fail("Swift SDK qualification must invoke its exact fail-closed command")
+if swift.get("depends_on") is not None or swift.get("soft_fail") or swift.get("skip"):
+    fail("Swift SDK qualification must remain an independent required ordinary-CI step")
+if swift.get("agents") != {
+    "queue": "ctx-release-macos-arm64",
+    "os": "darwin",
+    "arch": "arm64",
+}:
+    fail("Swift SDK qualification has the wrong native runner")
+if (
+    swift.get("concurrency") != 1
+    or swift.get("concurrency_group")
+    != "ctx/sdk-swift-required/ctx-release-macos-arm64"
+    or swift.get("timeout_in_minutes") != 30
+):
+    fail("Swift SDK qualification lost its bounded host contract")
 
 linux_x64_selector = {
     "queue": "release-linux-managed",
@@ -101,12 +157,12 @@ public_release_selector = {
     "ctx-release-unshare-clone-fs": "true",
 }
 linux_x64_keys = {
-    "public-release",
     "public-cli-linux-factory",
     "public-cli-linux-x64-native-smoke",
     "github-release-candidate",
     "semantic-model-archives",
     "semantic-runtime-linux-cuda12",
+    "semantic-runtime-portable",
     "semantic-release-handoff",
 }
 for key, step in keyed.items():
@@ -116,7 +172,7 @@ for key, step in keyed.items():
             fail("public-release must require task-bind and exact CLONE_FS authority")
     elif key in linux_x64_keys:
         if agents != linux_x64_selector:
-            fail(f"{key} must require the exact Linux x86_64 release authority selector")
+            fail(f"{key} must require the exact Linux x86_64 release selector")
     elif any(
         tag in agents
         for tag in (
@@ -126,28 +182,30 @@ for key, step in keyed.items():
             "ctx-release-unshare-clone-fs",
         )
     ):
-        fail(f"{key} must not require Linux x86_64 release authority tags")
+        fail(f"{key} must not require Linux x86_64 release tags")
 
 for key in ("public-cli-linux-x64-native-smoke", "public-cli-linux-aarch64-native-smoke"):
     if keyed[key].get("env") != {
         "CTX_PUBLIC_CLI_RUNTIME_AUTHORITY_BASELINE": "ubuntu-24.04"
     }:
-        fail(f"{key} must require the Ubuntu 24.04 runtime authority")
+        fail(f"{key} must require the Ubuntu 24.04 execution authority")
 
 factory = keyed["public-cli-linux-factory"]
 factory_command = factory.get("command", "")
-agents = factory.get("agents", {})
-if agents != linux_x64_selector:
-    fail("factory must use the managed Linux x86_64 release queue")
+if factory.get("if") != core_release_condition:
+    fail("factory has the wrong Core release condition")
 if (
-    "build-public-candidate-on-linux.sh" not in factory_command
-    or "--macos-sdk" not in factory_command
+    factory_command.count("build-public-candidate-on-linux.sh") != 1
+    or factory_command.count("--macos-sdk") != 1
+    or factory_command.count("--skip-runtimes") != 1
 ):
-    fail("factory must invoke the one Linux construction entry point with an SDK")
-if factory.get("secrets"):
-    fail("factory must acquire Apple signing values only at the signing boundary")
+    fail("factory must invoke one five-target Core-only Linux construction route")
+if "build-onnxruntime-sidecar.sh" in factory_command or "semantic" in factory_command.lower():
+    fail("factory must not construct semantic assets")
+if factory.get("depends_on") is not None or factory.get("secrets"):
+    fail("factory must be independent and acquire signing values only at signing")
 if factory.get("artifact_paths") != ["target/public-cli-artifacts/*"]:
-    fail("factory must upload its complete candidate directory")
+    fail("factory must upload its complete Core candidate directory")
 
 native = {
     "public-cli-linux-x64-native-smoke": (
@@ -186,17 +244,10 @@ def require_core_validator_call(key: str, platform: str, command: str) -> None:
 
 for key, (platform, queue, os_name, arch) in native.items():
     step = keyed[key]
-    if key == "public-cli-macos-arm64-native-smoke":
-        expected_dependency = ["public-cli-linux-factory", "semantic-coreml-archive"]
-    elif key == "public-cli-macos-x64-native-smoke":
-        expected_dependency = [
-            "public-cli-linux-factory",
-            "public-cli-macos-x64-runtime-producer",
-        ]
-    else:
-        expected_dependency = "public-cli-linux-factory"
-    if step.get("depends_on") != expected_dependency:
-        fail(f"{key} has the wrong strict production dependencies")
+    if step.get("depends_on") != "public-cli-linux-factory":
+        fail(f"{key} must depend only on the Core factory")
+    if step.get("if") != core_native_condition:
+        fail(f"{key} has the wrong Core native-release condition")
     agents = step.get("agents", {})
     if (agents.get("queue"), agents.get("os"), agents.get("arch")) != (
         queue,
@@ -205,14 +256,26 @@ for key, (platform, queue, os_name, arch) in native.items():
     ):
         fail(f"{key} has the wrong native runner")
     command = step.get("command", "")
-    if "download-linux-factory-artifacts.sh" not in command:
-        fail(f"{key} must download factory artifacts")
+    if command.count("download-linux-factory-artifacts.sh") != 1:
+        fail(f"{key} must download exactly one Core factory artifact set")
     require_core_validator_call(key, platform, command)
+    for marker in (
+        "onnxruntime",
+        "coreml",
+        "semantic",
+        "--runtime-archive",
+        "--runtime-platform",
+    ):
+        if marker in command.lower():
+            fail(f"{key} must not consume semantic model/runtime input ({marker})")
     if re.search(r"cargo (?:build|zigbuild)|bazelw run //:ctx_release", command):
         fail(f"{key} must never rebuild the candidate")
+    if step.get("artifact_paths") != [
+        f"target/public-cli-native-smoke/{platform}/candidate-smoke.json",
+        f"target/public-cli-native-smoke/{platform}/ctx-{platform}.native-execution.json",
+    ]:
+        fail(f"{key} must upload only its exact Core validation evidence")
 
-for key, (platform, _queue, _os_name, _arch) in native.items():
-    command = keyed[key].get("command", "")
     output = f"target/public-cli-native-smoke/{platform}"
     mutated = command.replace(
         output,
@@ -228,79 +291,130 @@ for key, (platform, _queue, _os_name, _arch) in native.items():
     else:
         fail(f"{key} accepted a companion/pair-envelope validator mutation")
 
-coreml_archive = (
-    "target/public-cli-artifacts/"
-    "ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz"
-)
-macos_arm_command = keyed["public-cli-macos-arm64-native-smoke"].get("command", "")
-if (
-    macos_arm_command.count(f'"{coreml_archive}*"') != 1
-    or macos_arm_command.count("--step semantic-coreml-archive") != 1
-    or macos_arm_command.count(f"--coreml-archive {coreml_archive}") != 1
-):
-    fail("macos-arm64 native smoke must download and bind the exact candidate Core ML set")
-if "https://cli.ctx.rs" in macos_arm_command:
-    fail("macos-arm64 native smoke must not fetch a published Core ML asset")
-
-producer = keyed["public-cli-macos-x64-runtime-producer"]
-if (
-    "build-onnxruntime-sidecar.sh macos-x64" not in producer.get("command", "")
-    or "stage-github-release-assets.sh --transcode-runtime macos-x64" not in producer.get("command", "")
-    or producer.get("depends_on") is not None
-):
-    fail("macos-x64 runtime producer must own only runtime construction")
-if producer.get("secrets"):
-    fail("macos-x64 producer must acquire Apple values only at signing")
-if "download-linux-factory-artifacts.sh" in producer.get("command", ""):
-    fail("macos-x64 runtime producer must not consume factory CLI artifacts")
-if producer.get("artifact_paths") != [
-    "target/public-cli-artifacts/ctx-onnxruntime-macos-x64*"
-]:
-    fail("macos-x64 runtime producer must upload only its exact runtime artifact set")
-if "build-onnxruntime-sidecar.sh macos-x64" in keyed[
-    "public-cli-macos-x64-native-smoke"
-].get("command", ""):
-    fail("macos-x64 native lane must not source-build its runtime")
-handoff = keyed["semantic-release-handoff"]
-if "public-cli-macos-x64-runtime-producer" not in handoff.get("depends_on", []):
-    fail("Semantic handoff must reuse the macos-x64 native runtime")
-
 candidate = keyed["github-release-candidate"]
-expected_dependencies = [
+expected_candidate_dependencies = [
     "public-release",
-    "sdk-swift-required",
     "public-cli-linux-factory",
     "public-cli-linux-x64-native-smoke",
     "public-cli-linux-aarch64-native-smoke",
     "public-cli-macos-arm64-native-smoke",
-    "public-cli-macos-x64-runtime-producer",
     "public-cli-macos-x64-native-smoke",
     "public-cli-windows-x64-native-smoke",
 ]
-if candidate.get("depends_on") != expected_dependencies:
-    fail("candidate staging has the wrong strict dependency set")
+if candidate.get("depends_on") != expected_candidate_dependencies:
+    fail("Core candidate staging has the wrong strict dependency set")
+if candidate.get("if") != core_native_condition:
+    fail("Core candidate staging has the wrong release condition")
 if candidate.get("allow_dependency_failure") or candidate.get("soft_fail"):
-    fail("candidate staging must fail closed")
+    fail("Core candidate staging must fail closed")
 candidate_command = candidate.get("command", "")
 if (
-    'download-linux-factory-artifacts.sh "*"' not in candidate_command
-    or "stage-github-release-assets.sh" not in candidate_command
-    or "CTX_PUBLIC_RELEASE_SOURCE_COMMIT" not in candidate_command
+    candidate_command.count('download-linux-factory-artifacts.sh "*"') != 1
+    or candidate_command.count("stage-github-release-assets.sh") != 1
+    or candidate_command.count("CTX_PUBLIC_RELEASE_SOURCE_COMMIT") != 1
+    or "target/public-cli-native-smoke" not in candidate_command
+    or "mv target/public-cli-native-smoke" in candidate_command
 ):
-    fail("candidate staging must consume the complete factory output and bind HEAD")
-for proof in (
-    "linux-x64",
-    "linux-aarch64",
-    "macos-arm64",
-    "macos-x64",
-    "windows-x64",
+    fail(
+        "Core candidate staging must keep the sealed factory immutable, "
+        "consume separate native proofs, and bind HEAD"
+    )
+for marker in ("onnxruntime", "coreml", "semantic", "sdk-swift-required"):
+    if marker in candidate_command.lower():
+        fail(f"Core candidate staging must not consume {marker}")
+for proof in native.values():
+    platform = proof[0]
+    if f"ctx-{platform}.native-execution.json" not in candidate_command:
+        fail(f"Core candidate staging must consume native {platform} proof")
+
+semantic_keys = {
+    "public-cli-macos-x64-runtime-producer",
+    "semantic-model-archives",
+    "semantic-coreml-archive",
+    "semantic-runtime-linux-cuda12",
+    "semantic-runtime-windows-ml",
+    "semantic-runtime-portable",
+    "semantic-release-handoff",
+}
+for key in semantic_keys:
+    if keyed[key].get("if") != semantic_condition:
+        fail(f"{key} must use the independent Semantic matrix condition")
+
+portable = keyed["semantic-runtime-portable"]
+portable_command = portable.get("command", "")
+if portable.get("depends_on") is not None:
+    fail("portable Semantic runtime construction must be independent")
+for platform in ("linux-x64", "linux-aarch64", "macos-arm64"):
+    if platform not in portable_command:
+        fail(f"portable Semantic runtime construction is missing {platform}")
+if "windows-x64" in portable_command:
+    fail("portable Semantic runtime construction must not build Windows CPU runtime")
+if (
+    portable_command.count("build-onnxruntime-sidecar.sh") != 1
+    or portable_command.count("stage-github-release-assets.sh") != 1
+    or "public-cli-linux-factory" in portable_command
 ):
-    if f"ctx-{proof}.native-execution.json" not in candidate_command:
-        fail(f"candidate staging must consume native {proof} proof")
+    fail("portable Semantic runtime construction must own its runtime loop")
+if portable.get("artifact_paths") != [
+    "target/public-cli-artifacts/ctx-onnxruntime-linux-x64*",
+    "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64*",
+    "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64*",
+]:
+    fail("portable Semantic runtime construction must upload only Unix CPU runtimes")
+
+macos_x64_runtime = keyed["public-cli-macos-x64-runtime-producer"]
+if (
+    "build-onnxruntime-sidecar.sh macos-x64" not in macos_x64_runtime.get("command", "")
+    or "stage-github-release-assets.sh --transcode-runtime macos-x64"
+    not in macos_x64_runtime.get("command", "")
+    or macos_x64_runtime.get("depends_on") is not None
+):
+    fail("macos-x64 Semantic runtime producer must remain independent")
+if "download-linux-factory-artifacts.sh" in macos_x64_runtime.get("command", ""):
+    fail("macos-x64 Semantic runtime producer must not consume Core artifacts")
+
+handoff = keyed["semantic-release-handoff"]
+expected_semantic_dependencies = [
+    "semantic-model-archives",
+    "semantic-coreml-archive",
+    "semantic-runtime-linux-cuda12",
+    "semantic-runtime-windows-ml",
+    "semantic-runtime-portable",
+    "public-cli-macos-x64-runtime-producer",
+]
+if handoff.get("depends_on") != expected_semantic_dependencies:
+    fail("Semantic handoff has the wrong independent producer set")
+handoff_command = handoff.get("command", "")
+if handoff_command.count("--step semantic-runtime-portable") != 3:
+    fail("Semantic handoff must gather its three portable CPU runtime families")
+for forbidden in (
+    "public-release",
+    "public-cli-linux-factory",
+    "sdk-swift-required",
+):
+    if forbidden in handoff_command:
+        fail(f"Semantic handoff must not consume Core/SDK input ({forbidden})")
+
+core_keys = {
+    "public-release",
+    "public-cli-linux-factory",
+    *native.keys(),
+    "github-release-candidate",
+}
+for key in core_keys:
+    dependencies = keyed[key].get("depends_on", [])
+    if isinstance(dependencies, str):
+        dependencies = [dependencies]
+    if set(dependencies) & (semantic_keys | {"sdk-swift-required"}):
+        fail(f"{key} crosses from the Core graph into SDK/Semantic work")
+for key in semantic_keys:
+    dependencies = keyed[key].get("depends_on", [])
+    if isinstance(dependencies, str):
+        dependencies = [dependencies]
+    if set(dependencies) & (core_keys | {"sdk-swift-required"}):
+        fail(f"{key} crosses from the Semantic graph into Core/SDK work")
 
 for step in steps:
-    if not isinstance(step, dict):
-        continue
     command = str(step.get("command", ""))
     match = re.search(
         r"(?<![$])[$](?:[{][^}\n]+[}]|[A-Za-z_][A-Za-z0-9_]*)", command
@@ -309,8 +423,8 @@ for step in steps:
         fail(f"{step.get('key')} exposes {match.group(0)} to Buildkite interpolation")
 
 print(
-    "Buildkite release pipeline: one Linux factory, five exact-byte "
-    "three-argument Core validators, strict staging"
+    "Buildkite release pipeline: independent Core/SDK/Semantic graphs, "
+    "five exact-byte Core validators"
 )
 PY
 
@@ -318,4 +432,4 @@ python3 scripts/tests/buildkite-windowsml-artifact-path-test.py "${pipeline}"
 bash scripts/tests/buildkite-public-ci-cache-test.sh
 bash scripts/tests/check-sdks-required-groups-test.sh
 python3 scripts/check-sdk-ci-pipeline.py \
-  "${pipeline}" scripts/buildkite-public-ci.sh scripts/check-sdks.sh
+  scripts/buildkite-public-ci.sh scripts/check-sdks.sh

@@ -28,6 +28,7 @@ command_dir="${test_root}/commands"
 output_dir="${test_root}/output"
 mkdir -p \
   "${repo_root}/contracts" \
+  "${repo_root}/scripts/release" \
   "${repo_root}/scripts" \
   "${artifact_dir}" \
   "${command_dir}"
@@ -40,6 +41,9 @@ cp \
   "${source_root}/scripts/check-public-cli-build-info.py" \
   "${source_root}/scripts/validate-public-cli-factory-artifact.sh" \
   "${repo_root}/scripts/"
+cp \
+  "${source_root}/scripts/release/build-public-candidate-on-linux.sh" \
+  "${repo_root}/scripts/release/"
 validator="${repo_root}/scripts/validate-public-cli-factory-artifact.sh"
 
 artifact="${artifact_dir}/ctx"
@@ -52,11 +56,19 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 
 artifact = Path(os.environ["ARTIFACT"])
 root = Path(os.environ["REPO_ROOT"])
 matrix = json.loads((root / "contracts/release-targets-v1.json").read_text())
 target = next(item for item in matrix["targets"] if item["id"] == "linux-x64")
+recipe = root / target["public_construction_label"]
+recipe_source = recipe.read_text()
+pins = dict(re.findall(
+    r'^readonly (RUST_VERSION|RUST_COMMIT|ZIG_VERSION|CARGO_ZIGBUILD_VERSION)="([^"\n]+)"$',
+    recipe_source,
+    re.MULTILINE,
+))
 source = {"clean": True, "commit": "a" * 40}
 build_info = {
     "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
@@ -65,6 +77,7 @@ build_info = {
         "authority": "ctx-release-factory-ubuntu24-x86_64-v1",
         "image_id": None,
         "os": "ubuntu-24.04-x86_64",
+        "recipe_sha256": hashlib.sha256(recipe.read_bytes()).hexdigest(),
     },
     "cargo_lock_sha256": hashlib.sha256((root / "Cargo.lock").read_bytes()).hexdigest(),
     "gates": {
@@ -73,17 +86,25 @@ build_info = {
         "static": "passed",
         "static_abi": "passed",
     },
-    "inspector": {"authority": "ctx-release-static-llvm-v1", "tool": "llvm"},
+    "inspector": {
+        "authority": "ctx-release-static-llvm-v1",
+        "image_id": None,
+        "tool": "llvm",
+    },
     "linux_build": target["linux_build"],
     "platform": "linux-x64",
     "release_factory": {
         "authority": "linux-cross-cargo-zigbuild-v1",
-        "cargo_zigbuild_version": "0.23.0",
+        "cargo_zigbuild_version": pins["CARGO_ZIGBUILD_VERSION"],
         "macos_sdk_authority": None,
         "macos_sdk_sha256": None,
-        "zig_version": "0.15.2",
+        "zig_version": pins["ZIG_VERSION"],
     },
-    "runtime": {"authority": "native-fanout-deferred-v1"},
+    "representative_cpu_proof": {"profile": None, "qemu_version": None},
+    "runtime": {"authority": "native-fanout-deferred-v1", "image_id": None},
+    "rust_version": (
+        f"rustc {pins['RUST_VERSION']} ({pins['RUST_COMMIT'][:9]} 2026-07-01)"
+    ),
     "schema_version": 1,
     "source": source,
     "target": target["public_rust_target"],
@@ -188,9 +209,9 @@ PY
 if PATH="${command_dir}:/usr/bin:/bin" \
   CTX_TEST_CARGO_MARKER="${cargo_marker}" \
   "${checker[@]}" >"${test_root}/null-stdout" 2>"${test_root}/null-stderr"; then
-  fail "checker accepted a null Linux build contract"
+  fail "checker accepted a null Linux ABI contract"
 fi
-grep -Fq "does not match the matrix build contract" "${test_root}/null-stderr" || \
+grep -Fq "does not match the matrix ABI contract" "${test_root}/null-stderr" || \
   fail "checker rejected null Linux metadata for an unexpected reason"
 cp "${test_root}/exact-build-info.json" "${artifact}.build-info.json"
 

@@ -29,7 +29,7 @@ HELPER_FACTORY_RUST_TARGETS = {
 }
 STRING_FIELDS = set(
     """
-    arch archive bazel_platform helper_artifact helper_factory_rust_target
+    arch archive helper_artifact helper_factory_rust_target
     helper_rust_target id managed_pair_bin_dir managed_pair_companion_slot
     managed_pair_core_slot official_companion_rust_target os platform_signature
     public_artifact public_construction_authority public_construction_label
@@ -37,10 +37,7 @@ STRING_FIELDS = set(
     """.split()
 )
 TARGET_FIELDS = STRING_FIELDS | {"diagnostic_authorities", "linux_build"}
-LINUX_FIELDS = set(
-    "builder_image glibc_max rust_commit rust_sysroot rust_toolchain "
-    "ubuntu_snapshot".split()
-)
+LINUX_FIELDS = {"glibc_max"}
 
 
 def require_string_fields(value: dict[str, Any], fields: set[str], label: str) -> None:
@@ -59,16 +56,7 @@ def validate_linux_build(target: dict[str, Any]) -> None:
     if set(linux_build) != LINUX_FIELDS:
         raise ValueError("Linux build contract has missing or unexpected fields")
     require_string_fields(linux_build, LINUX_FIELDS, "Linux build contract")
-    if (
-        re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", linux_build["builder_image"])
-        is None
-        or re.fullmatch(r"\d{8}T\d{6}Z", linux_build["ubuntu_snapshot"]) is None
-        or re.fullmatch(r"\d+\.\d+", linux_build["glibc_max"]) is None
-        or re.fullmatch(r"\d+\.\d+\.\d+", linux_build["rust_toolchain"]) is None
-        or re.fullmatch(r"[0-9a-f]{40}", linux_build["rust_commit"]) is None
-        or linux_build["rust_commit"] == "0" * 40
-        or not linux_build["rust_sysroot"].startswith("/opt/rustup/toolchains/")
-    ):
+    if re.fullmatch(r"\d+\.\d+", linux_build["glibc_max"]) is None:
         raise ValueError("Linux build contract has malformed immutable pins")
 
 
@@ -126,11 +114,6 @@ def validate_target(target: dict[str, Any]) -> None:
         or re.fullmatch(r"native-[a-z0-9_-]+", target["runtime_authority"]) is None
         or re.fullmatch(r"[A-Za-z0-9._-]+", target["public_artifact"]) is None
         or re.fullmatch(r"[A-Za-z0-9._-]+", target["helper_artifact"]) is None
-        or re.fullmatch(
-            r"//tools/bazel/platforms:release_[a-z0-9_]+",
-            target["bazel_platform"],
-        )
-        is None
     ):
         raise ValueError("release target contains an unsupported policy value or path")
     validate_linux_build(target)

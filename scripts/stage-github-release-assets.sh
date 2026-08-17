@@ -3,20 +3,14 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: scripts/stage-github-release-assets.sh [ARTIFACT_DIR] [OUT_DIR] [AUTHORITY_DIR]
-       scripts/stage-github-release-assets.sh --with-semantic [ARTIFACT_DIR] [OUT_DIR] [AUTHORITY_DIR]
+Usage: scripts/stage-github-release-assets.sh [ARTIFACT_DIR] [OUT_DIR] [AUTHORITY_DIR] [NATIVE_PROOF_DIR]
        scripts/stage-github-release-assets.sh --transcode-runtime PLATFORM [ARTIFACT_DIR]
 
-Stages public GitHub Release assets from built public CLI artifacts.
+Stages the five public Core GitHub Release assets and their existing
+SBOM/notices evidence from one sealed factory candidate.
 
 Inputs default to target/public-cli-artifacts.
 Outputs default to target/github-release-assets.
-
-Every ONNX Runtime sidecar is required. Release assembly fails closed when a
-platform runtime is absent.
-
-The additive --with-semantic mode validates and stages the nine signed Semantic
-assets after preserving the five prebuilt runtime assets.
 
 The transcode mode converts a validated builder-owned Unix .tar.zst sidecar
 to the deterministic .tar.gz transport consumed by release installers. It is
@@ -25,7 +19,6 @@ USAGE
 }
 
 mode="stage"
-include_semantic="0"
 case "${1:-}" in
   --transcode-runtime)
     [[ "$#" -ge 2 && "$#" -le 3 ]] || {
@@ -37,16 +30,7 @@ case "${1:-}" in
     artifact_dir="${3:-target/public-cli-artifacts}"
     out_dir=""
     authority_dir=""
-    ;;
-  --with-semantic)
-    [[ "$#" -le 4 ]] || {
-      usage
-      exit 2
-    }
-    include_semantic="1"
-    artifact_dir="${2:-target/public-cli-artifacts}"
-    out_dir="${3:-target/github-release-assets}"
-    authority_dir="${4:-${out_dir}.authority}"
+    native_proof_dir=""
     ;;
   -h|--help)
     usage
@@ -58,17 +42,18 @@ case "${1:-}" in
     exit 2
     ;;
   *)
-    [[ "$#" -le 3 ]] || {
+    [[ "$#" -le 4 ]] || {
       usage
       exit 2
     }
     artifact_dir="${1:-target/public-cli-artifacts}"
     out_dir="${2:-target/github-release-assets}"
     authority_dir="${3:-${out_dir}.authority}"
+    native_proof_dir="${4:-${CTX_PUBLIC_NATIVE_PROOF_DIR:-target/public-cli-native-smoke}}"
     ;;
 esac
 
-if [[ "${artifact_dir}" == -* || "${out_dir}" == -* || "${authority_dir}" == -* ]]; then
+if [[ "${artifact_dir}" == -* || "${out_dir}" == -* || "${authority_dir}" == -* || "${native_proof_dir}" == -* ]]; then
   printf 'staging modes cannot be combined\n' >&2
   usage
   exit 2
@@ -250,6 +235,12 @@ if [[ "${requested_artifact_dir}" != /* ]]; then
 fi
 python3 -I "${bundle_tool}" require-directory \
   --directory "${requested_artifact_dir}"
+requested_native_proof_dir="${native_proof_dir}"
+if [[ "${requested_native_proof_dir}" != /* ]]; then
+  requested_native_proof_dir="${repo_root}/${requested_native_proof_dir}"
+fi
+python3 -I "${bundle_tool}" require-directory \
+  --directory "${requested_native_proof_dir}"
 
 stage_asset() {
   local source_name="$1"
@@ -342,6 +333,7 @@ validate_staged_cli_evidence() {
     --source-commit "${source_commit}" >/dev/null
   python3 -I scripts/release-sbom.py verify-bundle \
     --artifact "${staged_path}" \
+    --candidate-artifact-name "${source_name}" \
     --build-info "${build_info_path}" \
     --sbom "${sbom_path}" \
     --notices "${notices_path}" \
@@ -349,102 +341,15 @@ validate_staged_cli_evidence() {
     --candidate-manifest "${candidate_manifest}"
 }
 
-runtime_asset_name() {
-  local platform="$1"
-
-  case "${platform}" in
-    linux-x64) printf 'ctx-onnxruntime-linux-x64.tar.gz\n' ;;
-    linux-aarch64) printf 'ctx-onnxruntime-linux-aarch64.tar.gz\n' ;;
-    macos-arm64) printf 'ctx-onnxruntime-macos-arm64.tar.gz\n' ;;
-    macos-x64) printf 'ctx-onnxruntime-macos-x64.tar.gz\n' ;;
-    windows-x64) printf 'ctx-onnxruntime-windows-x64.zip\n' ;;
-    *)
-      printf 'unknown platform for ONNX Runtime staging: %s\n' "${platform}" >&2
-      exit 2
-      ;;
-  esac
-}
-
-stage_runtime_asset() {
-  local platform="$1"
-  local asset_name
-
-  asset_name="$(runtime_asset_name "${platform}")"
-
-  require_regular_input \
-    "${artifact_dir%/}/${asset_name}" "required ONNX Runtime sidecar"
-  stage_asset "${asset_name}" "${asset_name}" 0644
-}
-
-validate_staged_runtime_asset() {
-  local platform="$1"
-  local asset_name archive
-
-  asset_name="$(runtime_asset_name "${platform}")"
-  archive="${out_dir%/}/${asset_name}"
-  require_regular_input "${archive}" "staged ONNX Runtime sidecar"
-
-  if [[ "${platform}" == "windows-x64" ]]; then
-    bash scripts/build-onnxruntime-sidecar.sh --validate \
-      "${platform}" "${archive}"
-  else
-    python3 - "${archive}" "${platform}" <<'PY'
-import posixpath
-import stat
-import sys
-import tarfile
-
-archive, platform = sys.argv[1:]
-library = "libonnxruntime.dylib" if platform.startswith("macos-") else "libonnxruntime.so"
-expected_files = {
-    "LICENSE",
-    "ThirdPartyNotices.txt",
-    "VERSION_NUMBER",
-    "GIT_COMMIT_ID",
-    f"lib/{library}",
-}
-expected = expected_files | {"lib"}
-seen = set()
-with tarfile.open(archive, "r:gz") as bundle:
-    for member in bundle.getmembers():
-        raw = member.name
-        name = posixpath.normpath(raw.rstrip("/"))
-        if (
-            not raw
-            or "\\" in raw
-            or raw.startswith("/")
-            or name in ("", ".", "..")
-            or name.startswith("../")
-            or raw != name
-        ):
-            raise SystemExit(f"unsafe runtime archive path: {raw!r}")
-        if name in seen:
-            raise SystemExit(f"duplicate runtime archive entry: {name}")
-        seen.add(name)
-        if name not in expected:
-            raise SystemExit(f"unexpected runtime archive entry: {name}")
-        if member.mode & 0o7000:
-            raise SystemExit(f"unsafe permission bits on runtime archive entry: {name}")
-        if name == "lib":
-            if not member.isdir():
-                raise SystemExit("runtime lib entry is not a directory")
-        elif not member.isfile():
-            raise SystemExit(f"runtime archive entry is not a regular file: {name}")
-    if seen != expected:
-        raise SystemExit("runtime archive entries do not exactly match the expected layout")
-PY
-  fi
-}
-
 stage_complete_candidate() {
 local artifact_dir="$1"
 local out_dir="$2"
-local include_semantic="$3"
-local source_commit="$4"
-local repo_root="$5"
-local authority_dir="$6"
-local authority_candidate required_runtime_asset cli_dest semantic_fields semantic_asset
-local authority_candidates required_runtime_assets semantic_assets
+local source_commit="$3"
+local repo_root="$4"
+local authority_dir="$5"
+local native_proof_dir="$6"
+local authority_candidate cli_dest
+local authority_candidates
 
 [[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || {
   printf 'completed GitHub staging source commit is invalid\n' >&2
@@ -470,45 +375,22 @@ stage_authority_leaf() {
   fi
 }
 
-required_runtime_assets=(
-  ctx-onnxruntime-linux-x64.tar.gz
-  ctx-onnxruntime-linux-aarch64.tar.gz
-  ctx-onnxruntime-macos-arm64.tar.gz
-  ctx-onnxruntime-macos-x64.tar.gz
-  ctx-onnxruntime-windows-x64.zip
-)
-for required_runtime_asset in "${required_runtime_assets[@]}"; do
-  require_regular_input \
-    "${artifact_dir%/}/${required_runtime_asset}" \
-    "required ONNX Runtime sidecar"
-done
-
-validate_macos_signing_evidence() (
+validate_macos_cli_signing_evidence() (
   set -euo pipefail
   local platform="$1"
   local binary="${out_dir%/}/ctx-${platform}"
-  local runtime="${out_dir%/}/ctx-onnxruntime-${platform}.tar.gz"
   local binary_checksum="${artifact_dir%/}/ctx-${platform}.sha256"
-  local runtime_checksum="${artifact_dir%/}/ctx-onnxruntime-${platform}.tar.gz.sha256"
   local cli_evidence="${artifact_dir%/}/ctx-${platform}.signing.json"
-  local runtime_evidence="${artifact_dir%/}/ctx-onnxruntime-${platform}.signing.json"
   local cli_attestation="${artifact_dir%/}/ctx-${platform}.attestation.json"
   local cli_attestation_cms="${artifact_dir%/}/ctx-${platform}.attestation.cms"
-  local runtime_attestation="${artifact_dir%/}/ctx-onnxruntime-${platform}.attestation.json"
-  local runtime_attestation_cms="${artifact_dir%/}/ctx-onnxruntime-${platform}.attestation.cms"
-  local release_attestation="${artifact_dir%/}/ctx-onnxruntime-${platform}.release-attestation.json"
-  local release_attestation_cms="${artifact_dir%/}/ctx-onnxruntime-${platform}.release-attestation.cms"
   local build_info="${artifact_dir%/}/ctx-${platform}.build-info.json"
-  local source_commit work nested producer_input
+  local source_commit producer_input
 
   # JSON records diagnostics and archive bindings. The Developer ID CMS
   # checks below are the cross-platform authorization for executable bytes.
   for producer_input in \
-    "${binary_checksum}" "${runtime_checksum}" \
-    "${cli_evidence}" "${runtime_evidence}" "${build_info}" \
-    "${cli_attestation}" "${cli_attestation_cms}" \
-    "${runtime_attestation}" "${runtime_attestation_cms}" \
-    "${release_attestation}" "${release_attestation_cms}"; do
+    "${binary_checksum}" "${cli_evidence}" "${build_info}" \
+    "${cli_attestation}" "${cli_attestation_cms}"; do
     require_regular_input "${producer_input}" "macOS release producer input"
     [[ -s "${producer_input}" ]] || {
       printf 'macOS release producer input is empty: %s\n' "${producer_input}" >&2
@@ -516,7 +398,6 @@ validate_macos_signing_evidence() (
     }
   done
   require_regular_input "${binary}" "staged macOS CLI"
-  require_regular_input "${runtime}" "staged macOS runtime"
   source_commit="$(python3 - "${build_info}" "${platform}" <<'PY'
 import json
 import re
@@ -546,41 +427,6 @@ PY
   CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
     scripts/verify-macos-release-attestation.sh \
     "${platform}" cli "${binary}" "${cli_attestation}" "${cli_attestation_cms}"
-
-  work="$(mktemp -d "${TMPDIR:-/tmp}/ctx-stage-macos-signing.XXXXXX")"
-  trap 'rm -rf "${work}"' EXIT
-  nested="${work}/libonnxruntime.dylib"
-  python3 - "${runtime}" "${nested}" <<'PY'
-import shutil
-import sys
-import tarfile
-
-archive, output = sys.argv[1:]
-with tarfile.open(archive, "r:gz") as bundle:
-    matches = [member for member in bundle.getmembers() if member.name == "lib/libonnxruntime.dylib"]
-    if len(matches) != 1 or not matches[0].isfile():
-        raise SystemExit("macOS runtime must contain one regular lib/libonnxruntime.dylib")
-    source = bundle.extractfile(matches[0])
-    if source is None:
-        raise SystemExit("could not read macOS runtime dylib")
-    with source, open(output, "wb") as destination:
-        shutil.copyfileobj(source, destination)
-PY
-  python3 scripts/macos-release-signing-evidence.py verify-archive \
-    --evidence "${runtime_evidence}" \
-    --platform "${platform}" \
-    --archive "${runtime}" \
-    --checksum "${runtime_checksum}" \
-    --nested-artifact "${nested}" \
-    --role release
-  CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
-    scripts/verify-macos-release-attestation.sh \
-    "${platform}" runtime "${nested}" \
-    "${runtime_attestation}" "${runtime_attestation_cms}"
-  CTX_MACOS_RELEASE_SOURCE_COMMIT="${source_commit}" \
-    scripts/verify-macos-release-attestation.sh --runtime-archive \
-    "${platform}" "${runtime}" "${nested}" \
-    "${release_attestation}" "${release_attestation_cms}"
 )
 
 mkdir -p "${out_dir}"
@@ -600,20 +446,6 @@ rm -f \
   "${out_dir%/}/ctx-macos-arm64" \
   "${out_dir%/}/ctx-macos-x64" \
   "${out_dir%/}/ctx-windows-x64.exe" \
-  "${out_dir%/}/ctx-onnxruntime-linux-x64.tar.gz" \
-  "${out_dir%/}/ctx-onnxruntime-linux-aarch64.tar.gz" \
-  "${out_dir%/}/ctx-onnxruntime-macos-arm64.tar.gz" \
-  "${out_dir%/}/ctx-onnxruntime-macos-x64.tar.gz" \
-  "${out_dir%/}/ctx-onnxruntime-windows-x64.zip" \
-  "${out_dir%/}/ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz" \
-  "${out_dir%/}/ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz" \
-  "${out_dir%/}/ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz" \
-  "${out_dir%/}/ctx-onnxruntime-linux-x64.tar.zst" \
-  "${out_dir%/}/ctx-onnxruntime-linux-aarch64.tar.zst" \
-  "${out_dir%/}/ctx-onnxruntime-macos-arm64.tar.zst" \
-  "${out_dir%/}/ctx-onnxruntime-macos-x64.tar.zst" \
-  "${out_dir%/}/ctx-windowsml-windows-x64.zip" \
-  "${out_dir%/}/ctx-onnxruntime-linux-x64-cuda12.tar.zst" \
   "${out_dir%/}/SHA256SUMS"
 
 stage_asset ctx ctx-linux-x64
@@ -626,40 +458,6 @@ stage_asset ctx-macos-x64 ctx-macos-x64
 stage_cli_evidence ctx-macos-x64 ctx-macos-x64
 stage_asset ctx.exe ctx-windows-x64.exe
 stage_cli_evidence ctx.exe ctx-windows-x64.exe
-stage_runtime_asset linux-x64
-stage_runtime_asset linux-aarch64
-stage_runtime_asset macos-arm64
-stage_runtime_asset macos-x64
-stage_runtime_asset windows-x64
-
-if [[ "${include_semantic}" == "1" ]]; then
-  semantic_fields="$(mktemp "${TMPDIR:-/tmp}/ctx-semantic-release.XXXXXX")"
-  semantic_assets=(
-    ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
-    ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz
-    ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz
-    ctx-onnxruntime-linux-x64.tar.zst
-    ctx-onnxruntime-linux-aarch64.tar.zst
-    ctx-onnxruntime-macos-arm64.tar.zst
-    ctx-onnxruntime-macos-x64.tar.zst
-    ctx-windowsml-windows-x64.zip
-    ctx-onnxruntime-linux-x64-cuda12.tar.zst
-  )
-  for semantic_asset in "${semantic_assets[@]}"; do
-    require_regular_input \
-      "${artifact_dir%/}/${semantic_asset}.sha256" \
-      "Semantic producer checksum"
-    require_regular_input \
-      "${artifact_dir%/}/${semantic_asset}.asset.json" \
-      "Semantic producer record"
-  done
-  bash scripts/construct-semantic-release-catalog.sh \
-    "${artifact_dir}" "${semantic_fields}"
-  for semantic_asset in "${semantic_assets[@]}"; do
-    stage_asset "${semantic_asset}" "${semantic_asset}" 0644
-  done
-  rm -f "${semantic_fields}"
-fi
 
 authority_candidates=(
   ctx.candidate.json
@@ -670,16 +468,12 @@ authority_candidates=(
 )
 for authority_candidate in "${authority_candidates[@]}"; do
   authority_source="${artifact_dir%/}/${authority_candidate}"
-  authority_destination="${authority_dir%/}/${authority_candidate}"
-  if [[ "${authority_candidate}" == "ctx.exe.candidate.json" ]]; then
-    authority_destination="${authority_dir%/}/.ctx.exe.candidate.base.json"
-  fi
-  stage_authority_leaf "${authority_source}" "$(basename "${authority_destination}")"
+  stage_authority_leaf "${authority_source}" "${authority_candidate}"
 done
 
 # The authority handoff retains the exact Windows construction names. The
-# public release executable remains ctx-windows-x64.exe in SHA256SUMS; equality
-# of its bytes with handoff/ctx.exe is checked by bind-release below.
+# public release executable remains ctx-windows-x64.exe in SHA256SUMS; both are
+# copied from the already verified Core bytes.
 stage_authority_leaf "${out_dir%/}/ctx-windows-x64.exe" ctx.exe
 stage_authority_leaf \
   "${artifact_dir%/}/ctx.exe.build-info.json" ctx.exe.build-info.json
@@ -692,8 +486,10 @@ stage_authority_leaf \
   ctx.exe.third-party-notices.txt
 stage_authority_leaf "${out_dir%/}/SHA256SUMS" SHA256SUMS
 stage_authority_leaf \
-  "${out_dir%/}/ctx-onnxruntime-windows-x64.zip" \
-  ctx-onnxruntime-windows-x64.zip
+  "${artifact_dir%/}/ctx-release-factory.json" ctx-release-factory.json
+stage_authority_leaf \
+  "${artifact_dir%/}/ctx-core.release-complete.json" \
+  ctx-core.release-complete.json
 
 validate_staged_cli_evidence \
   ctx ctx-linux-x64 linux-x64 \
@@ -709,48 +505,106 @@ validate_staged_cli_evidence \
   "${authority_dir%/}/ctx-macos-x64.candidate.json"
 validate_staged_cli_evidence \
   ctx.exe ctx-windows-x64.exe windows-x64 \
-  "${authority_dir%/}/.ctx.exe.candidate.base.json" \
+  "${authority_dir%/}/ctx.exe.candidate.json" \
   ctx.exe "${authority_dir}"
 for native_platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
   native_artifact="ctx-${native_platform}"
-  [[ "${native_platform}" == "linux-x64" ]] && native_artifact="ctx"
-  [[ "${native_platform}" == "windows-x64" ]] && native_artifact="ctx.exe"
+  [[ "${native_platform}" == "windows-x64" ]] && native_artifact="ctx-windows-x64.exe"
   python3 -I scripts/native-execution-proof.py verify \
     --platform "${native_platform}" \
-    --artifact "${authority_dir%/}/${native_artifact}" \
-    --proof "${artifact_dir%/}/ctx-${native_platform}.native-execution.json"
+    --artifact "${out_dir%/}/${native_artifact}" \
+    --proof "${native_proof_dir%/}/${native_platform}/ctx-${native_platform}.native-execution.json"
 done
-validate_staged_runtime_asset linux-x64
-validate_staged_runtime_asset linux-aarch64
-validate_staged_runtime_asset macos-arm64
-validate_staged_runtime_asset macos-x64
-validate_staged_runtime_asset windows-x64
-validate_macos_signing_evidence macos-arm64
-validate_macos_signing_evidence macos-x64
-
-python3 -I scripts/release-sbom.py bind-release \
-  --artifact "${authority_dir%/}/ctx.exe" \
-  --build-info "${authority_dir%/}/ctx.exe.build-info.json" \
-  --sbom "${authority_dir%/}/ctx.exe.cdx.json" \
-  --notices "${authority_dir%/}/ctx.exe.third-party-notices.txt" \
-  --size-report "${authority_dir%/}/ctx.exe.size.json" \
-  --candidate-manifest \
-    "${authority_dir%/}/.ctx.exe.candidate.base.json" \
-  --release-sums "${authority_dir%/}/SHA256SUMS" \
-  --runtime-archive \
-    "${authority_dir%/}/ctx-onnxruntime-windows-x64.zip" \
-  --output-manifest "${authority_dir%/}/ctx.exe.candidate.json" \
-  --manifest-sha256-output \
-    "${authority_dir%/}/ctx.exe.candidate.json.sha256" >/dev/null
-rm "${authority_dir%/}/.ctx.exe.candidate.base.json"
+validate_macos_cli_signing_evidence macos-arm64
+validate_macos_cli_signing_evidence macos-x64
 
 for authority_candidate in "${authority_candidates[@]}"; do
-  if [[ "${authority_candidate}" != "ctx.exe.candidate.json" ]]; then
-    printf '%s\n' \
-      "$(sha256_file "${authority_dir%/}/${authority_candidate}")" \
-      >"${authority_dir%/}/${authority_candidate}.sha256"
-  fi
+  printf '%s\n' \
+    "$(sha256_file "${authority_dir%/}/${authority_candidate}")" \
+    >"${authority_dir%/}/${authority_candidate}.sha256"
 done
+python3 - "${authority_dir}" "${source_commit}" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+source_commit = sys.argv[2]
+candidates = (
+    "ctx-linux-aarch64.candidate.json",
+    "ctx.candidate.json",
+    "ctx-macos-arm64.candidate.json",
+    "ctx-macos-x64.candidate.json",
+    "ctx.exe.candidate.json",
+)
+release_assets = {
+    "ctx-linux-aarch64",
+    "ctx-linux-aarch64.cdx.json",
+    "ctx-linux-aarch64.third-party-notices.txt",
+    "ctx-linux-x64",
+    "ctx-linux-x64.cdx.json",
+    "ctx-linux-x64.third-party-notices.txt",
+    "ctx-macos-arm64",
+    "ctx-macos-arm64.cdx.json",
+    "ctx-macos-arm64.third-party-notices.txt",
+    "ctx-macos-x64",
+    "ctx-macos-x64.cdx.json",
+    "ctx-macos-x64.third-party-notices.txt",
+    "ctx-windows-x64.exe",
+    "ctx-windows-x64.exe.cdx.json",
+    "ctx-windows-x64.exe.third-party-notices.txt",
+}
+
+
+def record(name):
+    path = root / name
+    raw = path.read_bytes()
+    return {
+        "file": name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+
+
+sums_record = record("SHA256SUMS")
+sums = {}
+for line in (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+    match = re.fullmatch(r"([0-9a-f]{64})  ([^/]+)", line)
+    if match is None or match.group(2) in sums:
+        raise SystemExit("Core SHA256SUMS is malformed")
+    sums[match.group(2)] = match.group(1)
+if set(sums) != release_assets:
+    raise SystemExit("Core SHA256SUMS inventory is not exact")
+document = {
+    "candidate_manifests": [record(name) for name in candidates],
+    "factory_completion": record("ctx-core.release-complete.json"),
+    "factory_manifest": record("ctx-release-factory.json"),
+    "kind": "ctx-public-core-github-handoff",
+    "release_sums": sums_record,
+    "schema_version": 1,
+    "source_commit": source_commit,
+}
+encoded = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+output = root / "ctx-core-github-handoff.json"
+descriptor = os.open(
+    output,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+    0o644,
+)
+try:
+    with os.fdopen(descriptor, "wb", closefd=False) as destination:
+        destination.write(encoded)
+        destination.flush()
+        os.fsync(destination.fileno())
+finally:
+    os.close(descriptor)
+PY
+printf '%s\n' \
+  "$(sha256_file "${authority_dir%/}/ctx-core-github-handoff.json")" \
+  >"${authority_dir%/}/ctx-core-github-handoff.json.sha256"
 authority_expected="$({
   for authority_candidate in "${authority_candidates[@]}"; do
     printf '%s\n%s.sha256\n' \
@@ -758,12 +612,15 @@ authority_expected="$({
   done
   printf '%s\n' \
     SHA256SUMS \
+    ctx-core-github-handoff.json \
+    ctx-core-github-handoff.json.sha256 \
+    ctx-core.release-complete.json \
     ctx.exe \
     ctx.exe.build-info.json \
     ctx.exe.cdx.json \
     ctx.exe.size.json \
     ctx.exe.third-party-notices.txt \
-    ctx-onnxruntime-windows-x64.zip
+    ctx-release-factory.json
 } | LC_ALL=C sort)"
 authority_actual="$(find "${authority_dir}" -mindepth 1 -maxdepth 1 \
   -printf '%f\n' | LC_ALL=C sort)"
@@ -773,16 +630,9 @@ if [[ "${authority_actual}" != "${authority_expected}" ]]; then
 fi
 }
 
-python3 -I "${bundle_tool}" verify \
-  --candidate-dir "${requested_artifact_dir}" \
-  --platform linux-x64 \
-  --source-commit "${source_commit}" \
-  --allow-extra
-python3 -I "${bundle_tool}" verify \
-  --candidate-dir "${requested_artifact_dir}" \
-  --platform linux-aarch64 \
-  --source-commit "${source_commit}" \
-  --allow-extra
+python3 -I scripts/release/seal-linux-factory-candidate.py \
+  --verify-core-only --candidate-dir "${requested_artifact_dir}" \
+  --source-commit "${source_commit}" >/dev/null
 
 if [[ "${out_dir}" != /* ]]; then
   out_dir="${repo_root}/${out_dir}"
@@ -800,8 +650,9 @@ staged_authority="$(mktemp -d \
 trap 'rm -rf -- "${staged_out}" "${staged_authority}"' EXIT
 artifact_dir="${requested_artifact_dir}"
 stage_complete_candidate \
-  "${artifact_dir}" "${staged_out}" "${include_semantic}" \
-  "${source_commit}" "${repo_root}" "${staged_authority}"
+  "${artifact_dir}" "${staged_out}" \
+  "${source_commit}" "${repo_root}" "${staged_authority}" \
+  "${requested_native_proof_dir}"
 python3 -I "${bundle_tool}" commit-directory \
   --stage-dir "${staged_out}" \
   --output-dir "${out_dir}"

@@ -136,65 +136,48 @@ print("Buildkite release test authority: task-local TMPDIR and unshare(CLONE_FS)
 PY
 }
 
-run_apt_get() {
-  if command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
-  else
-    "$@"
-  fi
-}
-
-install_ubuntu_tools() {
-  local required_packages=(
-    build-essential \
-    ca-certificates \
-    curl \
-    dbus-daemon \
-    default-jdk-headless \
-    dotnet-sdk-8.0 \
-    git \
-    jq \
-    nodejs \
-    npm \
-    openssl \
-    pkg-config \
-    python3 \
-    python3-build \
-    python3-pip \
-    python3-venv \
-    ripgrep \
-    ruby \
-    unzip \
+require_preinstalled_tools() {
+  local required_commands=(
+    bash
+    cc
+    c++
+    curl
+    dbus-daemon
+    dotnet
+    git
+    java
+    javac
+    jq
+    make
+    node
+    npm
+    openssl
+    pkg-config
+    python3
+    rg
+    ruby
+    unzip
     zip
   )
-  local missing_packages=()
-  local package
-  for package in "${required_packages[@]}"; do
-    if [[ "${package}" == "npm" ]] && command -v npm >/dev/null 2>&1; then
-      continue
-    fi
-    if ! dpkg-query -W -f='${Status}\n' "${package}" 2>/dev/null \
-      | grep -Fqx 'install ok installed'; then
-      missing_packages+=("${package}")
-    fi
+  local missing_commands=()
+  local tool
+  for tool in "${required_commands[@]}"; do
+    command -v "${tool}" >/dev/null 2>&1 || missing_commands+=("${tool}")
   done
-
-  if (( "${#missing_packages[@]}" == 0 )); then
-    printf 'Buildkite hosted Linux tool packages already installed\n'
-    return 0
-  fi
-
-  command -v apt-get >/dev/null 2>&1 || {
-    printf 'apt-get is required to install missing Buildkite tools: %s\n' \
-      "${missing_packages[*]}" >&2
+  if (( "${#missing_commands[@]}" > 0 )); then
+    printf 'Buildkite worker image is unprepared; missing required commands: %s\n' \
+      "${missing_commands[*]}" >&2
     exit 127
-  }
-
-  printf 'Installing missing Buildkite tool packages: %s\n' "${missing_packages[*]}"
-  run_apt_get apt-get -o DPkg::Lock::Timeout=300 update
-  run_apt_get env DEBIAN_FRONTEND=noninteractive apt-get \
-    -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
-    "${missing_packages[@]}"
+  fi
+  if [[ ! -r /etc/ssl/certs/ca-certificates.crt ]]; then
+    printf 'Buildkite worker image is unprepared; CA certificate bundle is unreadable\n' >&2
+    exit 127
+  fi
+  if ! python3 -c 'import build, pip, venv' >/dev/null 2>&1; then
+    printf 'Buildkite worker image is unprepared; Python build, pip, and venv modules are required\n' >&2
+    exit 127
+  fi
+  printf 'Buildkite worker image has all required preinstalled tools\n'
 }
 
 configure_bazelisk() {
@@ -227,7 +210,7 @@ print_tool_versions() {
 
 init_buildkite_job_tool_env
 preflight_release_test_authority
-install_ubuntu_tools
+require_preinstalled_tools
 configure_bazelisk
 print_tool_versions
 bash scripts/check-sdks.sh --groups=contracts,typescript,python,go,jvm,dotnet --required-groups=contracts,typescript,python,go,jvm,dotnet

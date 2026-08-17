@@ -19,6 +19,8 @@ cp "${source_root}/scripts/stage-github-release-assets.sh" \
   "${repo_root}/scripts/stage-github-release-assets.sh"
 cp "${source_root}/scripts/release/release_bundle.py" \
   "${repo_root}/scripts/release/release_bundle.py"
+cp "${source_root}/scripts/release/seal-linux-factory-candidate.py" \
+  "${repo_root}/scripts/release/seal-linux-factory-candidate.py"
 ln -s "${source_root}/contracts/release-targets-v1.json" \
   "${repo_root}/contracts/release-targets-v1.json"
 for dependency in \
@@ -56,8 +58,20 @@ exit 0
 SH
 cat > "${fake_bin}/python3" <<'SH'
 #!/bin/sh
+if [ "${1:-}" = - ] && [ -d "${2:-}" ] && [ "${#3}" -eq 40 ]; then
+  exec "${CTX_REAL_PYTHON3:?}" "$@"
+fi
 case "$*" in
   *release_bundle.py*)
+    exec "${CTX_REAL_PYTHON3:?}" "$@"
+    ;;
+  *seal-linux-factory-candidate.py*)
+    exec "${CTX_REAL_PYTHON3:?}" "$@"
+    ;;
+  *native-execution-proof.py*)
+    exec "${CTX_REAL_PYTHON3:?}" "$@"
+    ;;
+  *ctx-release-factory.json*)
     exec "${CTX_REAL_PYTHON3:?}" "$@"
     ;;
 esac
@@ -81,70 +95,6 @@ case "$*" in
       printf 'fake signing rejected unsigned staged artifact\n' >&2
       exit 1
     fi
-    ;;
-  *release-sbom.py\ bind-release*)
-    output_manifest=""
-    digest_output=""
-    artifact=""
-    build_info=""
-    sbom=""
-    notices=""
-    size_report=""
-    candidate_manifest=""
-    release_sums=""
-    runtime_archive=""
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --artifact|--build-info|--sbom|--notices|--size-report|--candidate-manifest|--release-sums|--runtime-archive)
-          option="$1"
-          shift
-          case "$option" in
-            --artifact) artifact="$1" ;;
-            --build-info) build_info="$1" ;;
-            --sbom) sbom="$1" ;;
-            --notices) notices="$1" ;;
-            --size-report) size_report="$1" ;;
-            --candidate-manifest) candidate_manifest="$1" ;;
-            --release-sums) release_sums="$1" ;;
-            --runtime-archive) runtime_archive="$1" ;;
-          esac
-          ;;
-        --output-manifest)
-          shift
-          output_manifest="$1"
-          ;;
-        --manifest-sha256-output)
-          shift
-          digest_output="$1"
-          ;;
-      esac
-      shift
-    done
-    [ -n "$output_manifest" ] && [ -n "$digest_output" ]
-    authority_root="$(dirname "${artifact:?}")"
-    case "$authority_root" in
-      */.github-release-authority.*) ;;
-      *)
-        printf 'release binder did not use the fresh authority handoff\n' >&2
-        exit 1
-        ;;
-    esac
-    [ "$(basename "$artifact")" = ctx.exe ]
-    [ "$(basename "$build_info")" = ctx.exe.build-info.json ]
-    [ "$(basename "$sbom")" = ctx.exe.cdx.json ]
-    [ "$(basename "$notices")" = ctx.exe.third-party-notices.txt ]
-    [ "$(basename "$size_report")" = ctx.exe.size.json ]
-    [ "$(basename "$candidate_manifest")" = .ctx.exe.candidate.base.json ]
-    [ "$(basename "$release_sums")" = SHA256SUMS ]
-    [ "$(basename "$runtime_archive")" = ctx-onnxruntime-windows-x64.zip ]
-    for handoff_input in \
-      "$build_info" "$sbom" "$notices" "$size_report" \
-      "$candidate_manifest" "$release_sums" "$runtime_archive"; do
-      [ "$(dirname "$handoff_input")" = "$authority_root" ]
-    done
-    printf '{"kind":"ctx-public-cli-candidate","release_sums":{},"runtime":{}}\n' \
-      >"$output_manifest"
-    sha256sum "$output_manifest" | awk '{print $1}' >"$digest_output"
     ;;
   *release-sbom.py\ verify-bundle*)
     printf '%s\n' "$*" >> "${CTX_FAKE_SBOM_LOG:?}"
@@ -250,7 +200,7 @@ for binary in "${cli_sources[@]}"; do
   printf '{}\n' > "${matrix}/${binary}.size.json"
   printf '{}\n' > "${matrix}/${binary}.candidate.json"
 done
-for binary in ctx ctx-linux-aarch64; do
+for binary in "${cli_sources[@]}"; do
   printf 'ctx 1.0.0\n' > "${matrix}/${binary}.version"
   printf '{"status":"clean"}\n' \
     > "${matrix}/${binary}.dependency-advisory.json"
@@ -267,19 +217,22 @@ for platform in macos-arm64 macos-x64; do
   printf 'cms\n' \
     > "${matrix}/ctx-onnxruntime-${platform}.release-attestation.cms"
 done
+proof_root="${tmp_dir}/native-proofs"
 for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
   binary="ctx-${platform}"
   [[ "${platform}" == "linux-x64" ]] && binary="ctx"
   [[ "${platform}" == "windows-x64" ]] && binary="ctx.exe"
+  mkdir -p "${proof_root}/${platform}"
   printf '%s\n' '{"kind":"ctx-native-candidate-smoke","schema_version":1,"status":"passed"}' \
-    > "${matrix}/native-smoke-${platform}.json"
+    > "${proof_root}/${platform}/candidate-smoke.json"
   CTX_NATIVE_PROOF_ARTIFACT="${matrix}/${binary}" \
     "${real_python3}" -I "${source_root}/scripts/native-execution-proof.py" create \
       --platform "${platform}" \
       --artifact "${matrix}/${binary}" \
-      --smoke-result "${matrix}/native-smoke-${platform}.json" \
-      --output "${matrix}/ctx-${platform}.native-execution.json" >/dev/null
+      --smoke-result "${proof_root}/${platform}/candidate-smoke.json" \
+      --output "${proof_root}/${platform}/ctx-${platform}.native-execution.json" >/dev/null
 done
+export CTX_PUBLIC_NATIVE_PROOF_DIR="${proof_root}"
 
 seal_linux_fixture() {
   local platform="$1"
@@ -318,15 +271,128 @@ seal_linux_fixture() {
     --source-commit "${commit}" >/dev/null
   cp "${candidate}/ctx-${platform}.release-complete.json" "${source_dir}/"
 }
+
+seal_core_fixture() {
+  local candidate="$1"
+  local commit="$2"
+  "${real_python3}" - "${candidate}" "${commit}" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+source_commit = sys.argv[2]
+targets = (
+    ("linux-arm64", "ctx-linux-aarch64"),
+    ("linux-x64", "ctx"),
+    ("macos-arm64", "ctx-macos-arm64"),
+    ("macos-x64", "ctx-macos-x64"),
+    ("windows-x64", "ctx.exe"),
+)
+leaves = ["ctx-release-factory.json"]
+for _, binary in targets:
+    leaves.extend(
+        (
+            binary,
+            f"{binary}.build-info.json",
+            f"{binary}.candidate.json",
+            f"{binary}.cdx.json",
+            f"{binary}.cdx.json.sha256",
+            f"{binary}.dependency-advisory.json",
+            f"{binary}.sha256",
+            f"{binary}.size.json",
+            f"{binary}.third-party-notices.txt",
+            f"{binary}.third-party-notices.txt.sha256",
+            f"{binary}.version",
+        )
+    )
+records = []
+for name in sorted(leaves):
+    path = root / name
+    value = path.lstat()
+    records.append(
+        {
+            "name": name,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "size": value.st_size,
+        }
+    )
+payload = {
+    "files": records,
+    "kind": "ctx-public-core-release-completion",
+    "schema_version": 1,
+    "source_commit": source_commit,
+    "targets": [target_id for target_id, _ in targets],
+}
+marker = root / "ctx-core.release-complete.json"
+marker.write_text(
+    json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+os.chmod(marker, 0o600)
+PY
+}
+
 seal_linux_fixture linux-x64 ctx "${matrix}" "${source_commit}" head
 seal_linux_fixture \
   linux-aarch64 ctx-linux-aarch64 "${matrix}" "${source_commit}" head
+"${real_python3}" - "${matrix}/ctx-release-factory.json" \
+  "${source_commit}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path, source_commit = sys.argv[1:]
+root = Path(path).parent
+files = []
+for leaf in sorted(root.iterdir(), key=lambda item: item.name):
+    if leaf.is_file() and not leaf.name.startswith(".") and leaf.name != Path(path).name:
+        raw = leaf.read_bytes()
+        files.append(
+            {"file": leaf.name, "sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
+        )
+value = {
+    "files": files,
+    "kind": "ctx-linux-release-factory",
+    "releasable": True,
+    "runtime_sidecars_included": True,
+    "schema_version": 1,
+    "selected_targets": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "macos-x64",
+        "windows-x64",
+    ],
+    "source_commit": source_commit,
+    "version": "1.0.0",
+}
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(value, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+PY
+chmod 0755 \
+  "${matrix}/ctx" \
+  "${matrix}/ctx-linux-aarch64" \
+  "${matrix}/ctx-macos-arm64" \
+  "${matrix}/ctx-macos-x64"
+seal_core_fixture "${matrix}" "${source_commit}"
+# Buildkite artifact downloads preserve bytes, not Unix executable mode.
+chmod 0644 \
+  "${matrix}/ctx" \
+  "${matrix}/ctx-linux-aarch64" \
+  "${matrix}/ctx-macos-arm64" \
+  "${matrix}/ctx-macos-x64"
 
 forged_commit="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 forged_matrix="${tmp_dir}/forged-source"
 cp -a "${matrix}" "${forged_matrix}"
 rm "${forged_matrix}/ctx-linux-x64.release-complete.json" \
-  "${forged_matrix}/ctx-linux-aarch64.release-complete.json"
+  "${forged_matrix}/ctx-linux-aarch64.release-complete.json" \
+  "${forged_matrix}/ctx-core.release-complete.json"
 seal_linux_fixture linux-x64 ctx \
   "${forged_matrix}" "${forged_commit}" forged
 seal_linux_fixture linux-aarch64 ctx-linux-aarch64 \
@@ -360,11 +426,6 @@ default_assets=(
   ctx-linux-x64
   ctx-macos-arm64
   ctx-macos-x64
-  ctx-onnxruntime-linux-aarch64.tar.gz
-  ctx-onnxruntime-linux-x64.tar.gz
-  ctx-onnxruntime-macos-arm64.tar.gz
-  ctx-onnxruntime-macos-x64.tar.gz
-  ctx-onnxruntime-windows-x64.zip
   ctx-windows-x64.exe
 )
 cli_evidence_assets=(
@@ -380,11 +441,6 @@ cli_evidence_assets=(
   ctx-windows-x64.exe.third-party-notices.txt
 )
 default_assets+=("${cli_evidence_assets[@]}")
-semantic_assets=(
-  "${default_assets[@]}"
-  "${semantic_runtimes[@]}"
-  "${extra_semantic_assets[@]}"
-)
 
 assert_exact_assets() {
   local output="$1"
@@ -411,9 +467,9 @@ CTX_FAKE_SBOM_LOG="${default_sbom_log}" \
   CTX_REAL_PYTHON3="${real_python3}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${matrix}" "${default_output}"
-assert_exact_assets "${default_output}" 20 "${default_assets[@]}"
+assert_exact_assets "${default_output}" 15 "${default_assets[@]}"
 default_authority="${default_output}.authority"
-test "$(find "${default_authority}" -maxdepth 1 -type f | wc -l)" -eq 17
+test "$(find "${default_authority}" -maxdepth 1 -type f | wc -l)" -eq 20
 for candidate in \
   ctx.candidate.json \
   ctx-linux-aarch64.candidate.json \
@@ -425,24 +481,42 @@ for candidate in \
   test "$(sha256sum "${default_authority}/${candidate}" | awk '{print $1}')" = \
     "$(cat "${default_authority}/${candidate}.sha256")"
 done
-grep -Fq '"release_sums"' "${default_authority}/ctx.exe.candidate.json"
-grep -Fq '"runtime"' "${default_authority}/ctx.exe.candidate.json"
+! grep -Fq '"release_sums"' "${default_authority}/ctx.exe.candidate.json"
+! grep -Fq '"runtime"' "${default_authority}/ctx.exe.candidate.json"
 for handoff_input in \
   ctx.exe \
   ctx.exe.build-info.json \
   ctx.exe.cdx.json \
   ctx.exe.size.json \
   ctx.exe.third-party-notices.txt \
-  SHA256SUMS \
-  ctx-onnxruntime-windows-x64.zip; do
+  ctx-core.release-complete.json \
+  ctx-core-github-handoff.json \
+  ctx-core-github-handoff.json.sha256 \
+  ctx-release-factory.json \
+  SHA256SUMS; do
   test -s "${default_authority}/${handoff_input}"
 done
+test "$(sha256sum "${default_authority}/ctx-core-github-handoff.json" \
+  | awk '{print $1}')" = \
+  "$(cat "${default_authority}/ctx-core-github-handoff.json.sha256")"
+"${real_python3}" - "${default_authority}/ctx-core-github-handoff.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    value = json.load(source)
+assert value["kind"] == "ctx-public-core-github-handoff"
+assert len(value["candidate_manifests"]) == 5
+assert value["release_sums"]["file"] == "SHA256SUMS"
+assert value["factory_completion"]["file"] == "ctx-core.release-complete.json"
+PY
 test ! -e "${default_authority}/ctx-windows-x64.exe"
 cmp "${default_authority}/ctx.exe" "${default_output}/ctx-windows-x64.exe"
 cmp "${default_authority}/SHA256SUMS" "${default_output}/SHA256SUMS"
-cmp "${default_authority}/ctx-onnxruntime-windows-x64.zip" \
-  "${default_output}/ctx-onnxruntime-windows-x64.zip"
+test -z "$(find "${default_output}" "${default_authority}" -maxdepth 1 \
+  -type f -name '*runtime*' -print -quit)"
 test "$(wc -l < "${default_sbom_log}")" -eq 5
+grep -Fq -- "--candidate-artifact-name ctx " "${default_sbom_log}"
 test "$(wc -l < "${default_build_info_log}")" -eq 5
 test "$(grep -Fc -- "--source-commit ${source_commit}" "${default_build_info_log}")" -eq 5
 grep -Fq -- "--artifact ${tmp_dir}/.github-release-assets." \
@@ -451,22 +525,103 @@ grep -Fq -- "--artifact ${tmp_dir}/.github-release-assets." \
   "${default_sbom_log}"
 grep -Fq -- "--artifact ${tmp_dir}/.github-release-authority." \
   "${default_sbom_log}"
-grep -Fq -- "/ctx.exe --build-info ${tmp_dir}/.github-release-authority." \
+grep -Fq -- "/ctx.exe --candidate-artifact-name ctx.exe --build-info ${tmp_dir}/.github-release-authority." \
   "${default_sbom_log}"
 grep -Fq -- "--sbom ${tmp_dir}/.github-release-assets." \
   "${default_sbom_log}"
 ! grep -Fq -- "--artifact ${matrix}/" "${default_build_info_log}"
 ! grep -Fq -- "--artifact ${matrix}/" "${default_sbom_log}"
 
-semantic_output="${tmp_dir}/semantic"
-CTX_FAKE_SBOM_LOG="${tmp_dir}/semantic-sbom.log" \
-  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/semantic-build-info.log" \
-  CTX_REAL_PYTHON3="${real_python3}" \
-  PATH="${fake_bin}:${PATH}" \
-  /bin/bash "${stage}" \
-  --with-semantic "${matrix}" "${semantic_output}"
-assert_exact_assets "${semantic_output}" 29 "${semantic_assets[@]}"
-test "$(find "${semantic_output}.authority" -maxdepth 1 -type f | wc -l)" -eq 17
+core_only_candidate="${tmp_dir}/core-only-candidate"
+cp -a "${matrix}" "${core_only_candidate}"
+rm -f \
+  "${core_only_candidate}/ctx-core.release-complete.json" \
+  "${core_only_candidate}/ctx-linux-x64.release-complete.json" \
+  "${core_only_candidate}/ctx-linux-aarch64.release-complete.json"
+for sidecar in \
+  "${legacy_runtimes[@]}" \
+  "${semantic_runtimes[@]}" \
+  "${extra_semantic_assets[@]}"; do
+  rm -f \
+    "${core_only_candidate}/${sidecar}" \
+    "${core_only_candidate}/${sidecar}.sha256" \
+    "${core_only_candidate}/${sidecar}.asset.json"
+done
+rm -f "${core_only_candidate}"/ctx-onnxruntime-macos-*.signing.json \
+  "${core_only_candidate}"/ctx-onnxruntime-macos-*.attestation.json \
+  "${core_only_candidate}"/ctx-onnxruntime-macos-*.attestation.cms \
+  "${core_only_candidate}"/ctx-onnxruntime-macos-*.release-attestation.json \
+  "${core_only_candidate}"/ctx-onnxruntime-macos-*.release-attestation.cms
+"${real_python3}" - "${core_only_candidate}/ctx-release-factory.json" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as source:
+    value = json.load(source)
+value["runtime_sidecars_included"] = False
+root = Path(path).parent
+files = []
+for leaf in sorted(root.iterdir(), key=lambda item: item.name):
+    if (
+        leaf.is_file()
+        and not leaf.name.startswith(".")
+        and leaf.name not in {Path(path).name, "ctx-core.release-complete.json"}
+    ):
+        raw = leaf.read_bytes()
+        files.append(
+            {"file": leaf.name, "sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
+        )
+value["files"] = files
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(value, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+PY
+seal_core_fixture "${core_only_candidate}" "${source_commit}"
+core_only_output="${tmp_dir}/core-only-output"
+CTX_FAKE_SBOM_LOG="${tmp_dir}/core-only-sbom.log" \
+  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/core-only-build-info.log" \
+  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${core_only_candidate}" "${core_only_output}"
+assert_exact_assets "${core_only_output}" 15 "${default_assets[@]}"
+test -z "$(find "${core_only_output}" "${core_only_output}.authority" \
+  -maxdepth 1 -type f -name '*runtime*' -print -quit)"
+
+nonreleasable_candidate="${tmp_dir}/nonreleasable-candidate"
+cp -a "${matrix}" "${nonreleasable_candidate}"
+rm "${nonreleasable_candidate}/ctx-core.release-complete.json"
+"${real_python3}" - "${nonreleasable_candidate}/ctx-release-factory.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as source:
+    value = json.load(source)
+value["releasable"] = False
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(value, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+PY
+seal_core_fixture "${nonreleasable_candidate}" "${source_commit}"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${nonreleasable_candidate}" \
+  "${tmp_dir}/nonreleasable-output" \
+  >"${tmp_dir}/nonreleasable.out" 2>"${tmp_dir}/nonreleasable.err"; then
+  printf 'GitHub stager accepted a nonreleasable Core manifest\n' >&2
+  exit 1
+fi
+grep -Fq 'not the exact releasable five-target source' \
+  "${tmp_dir}/nonreleasable.err"
+
+if PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" --with-semantic \
+  "${matrix}" "${tmp_dir}/semantic" \
+  >"${tmp_dir}/semantic.out" 2>"${tmp_dir}/semantic.err"; then
+  printf 'Core GitHub stager unexpectedly accepted semantic handoff mode\n' >&2
+  exit 1
+fi
+grep -Fq 'unknown staging mode: --with-semantic' "${tmp_dir}/semantic.err"
 
 stale_authority="${tmp_dir}/stale-authority"
 mkdir "${stale_authority}"
@@ -529,65 +684,28 @@ if CTX_FAKE_SBOM_LOG="${tmp_dir}/unsigned-sbom.log" \
   exit 1
 fi
 test -e "${tmp_dir}/unsigned.flag"
-grep -Fq 'fake signing rejected unsigned staged artifact' \
+grep -Fq 'native execution proof is for different artifact' \
   "${tmp_dir}/unsigned.err"
 test ! -e "${tmp_dir}/unsigned-output"
 
 printf 'retired proof payload\n' > "${matrix}/ctx-linux-x64.native-runtime-proof.txt"
 ignored_proof_output="${tmp_dir}/ignored-proof"
-CTX_FAKE_SBOM_LOG="${tmp_dir}/ignored-proof-sbom.log" \
+if CTX_FAKE_SBOM_LOG="${tmp_dir}/ignored-proof-sbom.log" \
   CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/ignored-proof-build-info.log" \
   CTX_REAL_PYTHON3="${real_python3}" \
   PATH="${fake_bin}:${PATH}" \
-  /bin/bash "${stage}" "${matrix}" "${ignored_proof_output}"
-assert_exact_assets "${ignored_proof_output}" 20 "${default_assets[@]}"
-test ! -e "${ignored_proof_output}/ctx-linux-x64.native-runtime-proof.txt"
-
-printf 'mutated runtime bytes\n' >> "${matrix}/ctx-onnxruntime-linux-x64.tar.gz"
-if CTX_FAKE_SBOM_LOG="${tmp_dir}/checksum-mutation-sbom.log" \
-  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/checksum-mutation-build-info.log" \
-  CTX_REAL_PYTHON3="${real_python3}" \
-  PATH="${fake_bin}:${PATH}" /bin/bash "${stage}" \
-  "${matrix}" "${tmp_dir}/checksum-mutation" \
-  >"${tmp_dir}/checksum-mutation.out" 2>"${tmp_dir}/checksum-mutation.err"
-then
-  printf 'release staging accepted runtime bytes that differ from the checksum\n' >&2
+  /bin/bash "${stage}" "${matrix}" "${ignored_proof_output}" \
+  >"${tmp_dir}/ignored-proof.out" 2>"${tmp_dir}/ignored-proof.err"; then
+  printf 'GitHub stager ignored an unsealed extra factory leaf\n' >&2
   exit 1
 fi
-grep -Fq 'release leaf does not match completion marker' \
-  "${tmp_dir}/checksum-mutation.err"
-
-printf 'synthetic %s\n' ctx-onnxruntime-linux-x64.tar.gz \
-  > "${matrix}/ctx-onnxruntime-linux-x64.tar.gz"
-cp -a "${matrix}" "${tmp_dir}/runtime-race"
-runtime_race_candidate="${tmp_dir}/runtime-race"
-runtime_race_leaf="${runtime_race_candidate}/ctx-onnxruntime-linux-x64.tar.gz"
-printf 'foreign runtime bytes\n' >"${tmp_dir}/foreign-runtime"
-if CTX_FAKE_SBOM_LOG="${tmp_dir}/runtime-race-sbom.log" \
-  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/runtime-race-build-info.log" \
-  CTX_FAKE_INSTALL_SUBSTITUTE_LEAF="${runtime_race_leaf}" \
-  CTX_FAKE_INSTALL_SUBSTITUTE_FOREIGN="${tmp_dir}/foreign-runtime" \
-  CTX_FAKE_INSTALL_SUBSTITUTION_FLAG="${tmp_dir}/runtime-race.flag" \
-  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
-  /bin/bash "${stage}" "${runtime_race_candidate}" \
-  "${tmp_dir}/runtime-race-output" \
-  >"${tmp_dir}/runtime-race.out" 2>"${tmp_dir}/runtime-race.err"
-then
-  printf 'GitHub stager ignored a source runtime name substitution\n' >&2
-  exit 1
-fi
-grep -Eq 'checksum mismatch|does not match completion marker' \
-  "${tmp_dir}/runtime-race.err"
-if [[ -e "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.gz" ]]; then
-  cmp \
-    "${runtime_race_leaf}.original" \
-    "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.gz"
-  ! grep -Fq 'foreign runtime bytes' \
-    "${tmp_dir}/runtime-race-output/ctx-onnxruntime-linux-x64.tar.gz"
-fi
+grep -Fq 'Core factory file inventory is not exact' \
+  "${tmp_dir}/ignored-proof.err"
+test ! -e "${ignored_proof_output}"
+rm "${matrix}/ctx-linux-x64.native-runtime-proof.txt"
 
 cp -a "${matrix}" "${tmp_dir}/missing-marker"
-rm "${tmp_dir}/missing-marker/ctx-linux-x64.release-complete.json"
+rm "${tmp_dir}/missing-marker/ctx-core.release-complete.json"
 if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${tmp_dir}/missing-marker" \
   "${tmp_dir}/missing-marker-output" \
@@ -595,7 +713,7 @@ if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
   printf 'GitHub stager accepted a candidate without completion identity\n' >&2
   exit 1
 fi
-grep -Fq 'release completion marker is invalid' \
+grep -Fq 'Core release completion marker is invalid' \
   "${tmp_dir}/missing-marker.err"
 
 if CTX_PUBLIC_RELEASE_SOURCE_COMMIT="${forged_commit}" \
@@ -687,10 +805,6 @@ fi
 grep -Fq "must not contain '..'" "${tmp_dir}/parent-component.err"
 test ! -e "${tmp_dir}/parent-component-output"
 
-# Restore the runtime mutation so a deterministic source-root substitution
-# reaches the validators after initial candidate verification.
-printf 'synthetic %s\n' ctx-onnxruntime-linux-x64.tar.gz \
-  > "${matrix}/ctx-onnxruntime-linux-x64.tar.gz"
 substitution_external="${tmp_dir}/substitution-external"
 mkdir "${substitution_external}"
 printf 'sentinel\n' >"${substitution_external}/sentinel"

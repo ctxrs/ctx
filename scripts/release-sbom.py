@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -13,7 +11,6 @@ import re
 import stat
 import sys
 from typing import Any
-import zipfile
 
 _SCRIPT_DIRECTORY = os.fspath(Path(__file__).resolve().parent)
 sys.path.insert(0, _SCRIPT_DIRECTORY)
@@ -48,86 +45,119 @@ finally:
 del _SCRIPT_DIRECTORY
 
 
-WINDOWS_TARGET_ID = "windows-x64"
-WINDOWS_CONSTRUCTION_ARTIFACT = "ctx.exe"
-WINDOWS_RELEASE_ARTIFACT = "ctx-windows-x64.exe"
 RELEASE_SUMS = "SHA256SUMS"
-WINDOWS_RUNTIME_ARCHIVE = "ctx-onnxruntime-windows-x64.zip"
-WINDOWS_RUNTIME_DLL = "lib/onnxruntime.dll"
+HANDOFF_DOCUMENT = "ctx-core-github-handoff.json"
+FACTORY_MANIFEST = "ctx-release-factory.json"
+FACTORY_COMPLETION = "ctx-core.release-complete.json"
 SUM_LINE = re.compile(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]{0,127})")
 MAX_RELEASE_SUMS_BYTES = 64 * 1024
-MAX_RUNTIME_ARCHIVE_BYTES = 256 * 1024 * 1024
-MAX_RUNTIME_DLL_BYTES = 512 * 1024 * 1024
-MAX_RUNTIME_EXPANDED_BYTES = 1024 * 1024 * 1024
-LEGACY_RELEASE_ASSETS = (
-    "ctx-linux-x64",
-    "ctx-linux-x64.cdx.json",
-    "ctx-linux-x64.third-party-notices.txt",
-    "ctx-linux-aarch64",
-    "ctx-linux-aarch64.cdx.json",
-    "ctx-linux-aarch64.third-party-notices.txt",
-    "ctx-macos-arm64",
-    "ctx-macos-arm64.cdx.json",
-    "ctx-macos-arm64.third-party-notices.txt",
-    "ctx-macos-x64",
-    "ctx-macos-x64.cdx.json",
-    "ctx-macos-x64.third-party-notices.txt",
-    WINDOWS_RELEASE_ARTIFACT,
-    f"{WINDOWS_RELEASE_ARTIFACT}.cdx.json",
-    f"{WINDOWS_RELEASE_ARTIFACT}.third-party-notices.txt",
-    "ctx-onnxruntime-linux-x64.tar.gz",
-    "ctx-onnxruntime-linux-aarch64.tar.gz",
-    "ctx-onnxruntime-macos-arm64.tar.gz",
-    "ctx-onnxruntime-macos-x64.tar.gz",
-    WINDOWS_RUNTIME_ARCHIVE,
+MAX_HANDOFF_JSON_BYTES = 1024 * 1024
+MAX_FACTORY_JSON_BYTES = 16 * 1024 * 1024
+MAX_COMPLETION_JSON_BYTES = 16 * 1024 * 1024
+MAX_CANDIDATE_JSON_BYTES = 16 * 1024 * 1024
+MAX_HANDOFF_LEAF_BYTES = 256 * 1024 * 1024
+
+# Candidate order is part of the canonical handoff schema emitted by
+# stage-github-release-assets.sh.
+CORE_TARGETS = (
+    (
+        "linux-arm64",
+        "linux-aarch64",
+        "aarch64-unknown-linux-gnu",
+        "ctx-linux-aarch64",
+    ),
+    ("linux-x64", "linux-x64", "x86_64-unknown-linux-gnu", "ctx"),
+    ("macos-arm64", "macos-arm64", "aarch64-apple-darwin", "ctx-macos-arm64"),
+    ("macos-x64", "macos-x64", "x86_64-apple-darwin", "ctx-macos-x64"),
+    ("windows-x64", "windows-x64", "x86_64-pc-windows-gnu", "ctx.exe"),
 )
-SEMANTIC_RELEASE_ASSETS = (
-    "ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz",
-    "ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz",
-    "ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz",
-    "ctx-onnxruntime-linux-x64.tar.zst",
-    "ctx-onnxruntime-linux-aarch64.tar.zst",
-    "ctx-onnxruntime-macos-arm64.tar.zst",
-    "ctx-onnxruntime-macos-x64.tar.zst",
-    "ctx-windowsml-windows-x64.zip",
-    "ctx-onnxruntime-linux-x64-cuda12.tar.zst",
+CORE_CANDIDATE_MANIFESTS = tuple(
+    f"{binary}.candidate.json" for _, _, _, binary in CORE_TARGETS
 )
-WINDOWS_RUNTIME_FILES = {
-    "LICENSE",
-    "ThirdPartyNotices.txt",
-    "VERSION_NUMBER",
-    "GIT_COMMIT_ID",
-    "MICROSOFT_VC_RUNTIME_LICENSE.rtf",
-    WINDOWS_RUNTIME_DLL,
-    "lib/msvcp140.dll",
-    "lib/msvcp140_1.dll",
-    "lib/vcruntime140.dll",
-    "lib/vcruntime140_1.dll",
-}
-WINDOWS_RUNTIME_ENTRIES = WINDOWS_RUNTIME_FILES | {"lib"}
-RELEASE_AUTHORITY_CANDIDATES = (
-    "ctx.candidate.json",
-    "ctx-linux-aarch64.candidate.json",
-    "ctx-macos-arm64.candidate.json",
-    "ctx-macos-x64.candidate.json",
-    "ctx.exe.candidate.json",
+CORE_RELEASE_SOURCES = (
+    ("ctx-linux-x64", "ctx"),
+    ("ctx-linux-aarch64", "ctx-linux-aarch64"),
+    ("ctx-macos-arm64", "ctx-macos-arm64"),
+    ("ctx-macos-x64", "ctx-macos-x64"),
+    ("ctx-windows-x64.exe", "ctx.exe"),
 )
-WINDOWS_RELEASE_HANDOFF_INPUTS = (
-    WINDOWS_CONSTRUCTION_ARTIFACT,
-    f"{WINDOWS_CONSTRUCTION_ARTIFACT}.build-info.json",
-    f"{WINDOWS_CONSTRUCTION_ARTIFACT}.cdx.json",
-    f"{WINDOWS_CONSTRUCTION_ARTIFACT}.size.json",
-    f"{WINDOWS_CONSTRUCTION_ARTIFACT}.third-party-notices.txt",
-    RELEASE_SUMS,
-    WINDOWS_RUNTIME_ARCHIVE,
+CORE_RELEASE_BINDINGS = tuple(
+    (release_name + suffix, source_name + suffix)
+    for release_name, source_name in CORE_RELEASE_SOURCES
+    for suffix in ("", ".cdx.json", ".third-party-notices.txt")
+)
+CORE_RELEASE_ASSETS = tuple(name for name, _ in CORE_RELEASE_BINDINGS)
+CORE_FACTORY_SUFFIXES = (
+    "",
+    ".build-info.json",
+    ".candidate.json",
+    ".cdx.json",
+    ".cdx.json.sha256",
+    ".dependency-advisory.json",
+    ".sha256",
+    ".size.json",
+    ".third-party-notices.txt",
+    ".third-party-notices.txt.sha256",
+    ".version",
+)
+CORE_FACTORY_LEAVES = tuple(
+    sorted(
+        f"{binary}{suffix}"
+        for _, _, _, binary in CORE_TARGETS
+        for suffix in CORE_FACTORY_SUFFIXES
+    )
+)
+CORE_COMPLETION_LEAVES = tuple(sorted((FACTORY_MANIFEST, *CORE_FACTORY_LEAVES)))
+WINDOWS_HANDOFF_LEAVES = (
+    "ctx.exe",
+    "ctx.exe.build-info.json",
+    "ctx.exe.cdx.json",
+    "ctx.exe.size.json",
+    "ctx.exe.third-party-notices.txt",
 )
 RELEASE_AUTHORITY_HANDOFF_LEAVES = tuple(
     sorted(
-        WINDOWS_RELEASE_HANDOFF_INPUTS
-        + RELEASE_AUTHORITY_CANDIDATES
-        + tuple(f"{name}.sha256" for name in RELEASE_AUTHORITY_CANDIDATES)
+        (
+            RELEASE_SUMS,
+            HANDOFF_DOCUMENT,
+            f"{HANDOFF_DOCUMENT}.sha256",
+            FACTORY_COMPLETION,
+            FACTORY_MANIFEST,
+            *WINDOWS_HANDOFF_LEAVES,
+            *CORE_CANDIDATE_MANIFESTS,
+            *(f"{name}.sha256" for name in CORE_CANDIDATE_MANIFESTS),
+        )
     )
 )
+CANDIDATE_FIELDS = {
+    "schema_version",
+    "kind",
+    "construction",
+    "product",
+    "version",
+    "target",
+    "source",
+    "artifact",
+    "evidence",
+    "tantivy",
+}
+CANDIDATE_EVIDENCE_FIELDS = {
+    "binary_size_report",
+    "build_info",
+    "candidate_schema",
+    "cargo_lock",
+    "ctx_history_index_manifest",
+    "ctx_history_index_format_manifest",
+    "ctx_history_index_query_manifest",
+    "cyclonedx_sbom",
+    "license_materials_inventory",
+    "module_file",
+    "module_lock",
+    "target_dependency_inventory",
+    "target_matrix",
+    "third_party_notices",
+    "workspace_manifest",
+}
 
 
 def release_sums_record(path: Path) -> tuple[dict[str, str], dict[str, object]]:
@@ -150,110 +180,15 @@ def release_sums_record(path: Path) -> tuple[dict[str, str], dict[str, object]]:
             raise ValueError(f"release SHA256SUMS repeats {name}")
         entries[name] = digest
     names = tuple(entries)
-    if names not in (
-        LEGACY_RELEASE_ASSETS,
-        LEGACY_RELEASE_ASSETS + SEMANTIC_RELEASE_ASSETS,
-    ):
+    if names != CORE_RELEASE_ASSETS:
         raise ValueError(
-            "release SHA256SUMS does not have the exact canonical 20- or "
-            "29-entry release inventory and order"
+            "Core SHA256SUMS does not have the exact canonical 15-entry "
+            "inventory and order"
         )
     return entries, {
         "file": RELEASE_SUMS,
         "sha256": sha256_bytes(payload),
         "size_bytes": len(payload),
-    }
-
-
-def safe_zip_name(name: str) -> str:
-    parts = name.rstrip("/").split("/")
-    if (
-        not name
-        or "\\" in name
-        or name.startswith("/")
-        or re.match(r"^[A-Za-z]:", name)
-        or any(part in ("", ".", "..") for part in parts)
-    ):
-        raise ValueError(f"Windows runtime archive has unsafe path {name!r}")
-    return "/".join(parts)
-
-
-def windows_runtime_record(path: Path) -> dict[str, object]:
-    if path.name != WINDOWS_RUNTIME_ARCHIVE:
-        raise ValueError(
-            f"Windows runtime archive must be named {WINDOWS_RUNTIME_ARCHIVE}"
-        )
-    archive_bytes = regular_bytes(
-        path, "Windows runtime archive", MAX_RUNTIME_ARCHIVE_BYTES
-    )
-    archive_sha256 = sha256_bytes(archive_bytes)
-    archive_size = len(archive_bytes)
-    try:
-        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-            entries: dict[str, zipfile.ZipInfo] = {}
-            expanded_size = 0
-            for record in archive.infolist():
-                name = safe_zip_name(record.filename)
-                if name in entries:
-                    raise ValueError(f"Windows runtime archive repeats {name}")
-                mode = record.external_attr >> 16
-                if record.flag_bits & 1 or stat.S_ISLNK(mode) or mode & 0o7000:
-                    raise ValueError(
-                        f"Windows runtime archive has unsafe entry {name}"
-                    )
-                if name not in WINDOWS_RUNTIME_ENTRIES:
-                    raise ValueError(
-                        f"Windows runtime archive has unexpected entry {name}"
-                    )
-                if name == "lib":
-                    if not record.is_dir():
-                        raise ValueError(
-                            "Windows runtime archive lib entry is not a directory"
-                        )
-                elif record.is_dir() or record.file_size <= 0:
-                    raise ValueError(
-                        f"Windows runtime archive entry is not a non-empty file: {name}"
-                    )
-                expanded_size += record.file_size
-                if expanded_size > MAX_RUNTIME_EXPANDED_BYTES:
-                    raise ValueError(
-                        "Windows runtime archive exceeds its expanded size limit"
-                    )
-                entries[name] = record
-            if set(entries) != WINDOWS_RUNTIME_ENTRIES:
-                missing = sorted(WINDOWS_RUNTIME_ENTRIES - set(entries))
-                raise ValueError(
-                    "Windows runtime archive entries do not exactly match the "
-                    f"legacy sidecar layout; missing: {missing}"
-                )
-            dll = entries.get(WINDOWS_RUNTIME_DLL)
-            if dll is None or dll.is_dir():
-                raise ValueError(
-                    f"Windows runtime archive does not contain {WINDOWS_RUNTIME_DLL}"
-                )
-            if dll.file_size <= 0 or dll.file_size > MAX_RUNTIME_DLL_BYTES:
-                raise ValueError("Windows runtime DLL has an invalid size")
-            digest = hashlib.sha256()
-            observed = 0
-            with archive.open(dll) as source:
-                for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                    observed += len(chunk)
-                    if observed > MAX_RUNTIME_DLL_BYTES:
-                        raise ValueError("Windows runtime DLL exceeds its size limit")
-                    digest.update(chunk)
-            if observed != dll.file_size:
-                raise ValueError("Windows runtime DLL ended before its declared size")
-    except (OSError, KeyError, zipfile.BadZipFile) as error:
-        raise ValueError("Windows runtime archive is not a valid ZIP") from error
-    return {
-        "file": WINDOWS_RUNTIME_ARCHIVE,
-        "sha256": archive_sha256,
-        "size_bytes": archive_size,
-        "dll": {
-            "file": WINDOWS_RUNTIME_DLL,
-            "sha256": digest.hexdigest(),
-            "size_bytes": observed,
-        },
     }
 
 
@@ -266,36 +201,45 @@ def atomic_write(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def exclusive_write(path: Path, payload: bytes) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as destination:
-            destination.write(payload)
-            destination.flush()
-            os.fsync(destination.fileno())
-    finally:
-        os.close(descriptor)
-
-
-def canonical_path(path: Path) -> Path:
-    return Path(os.path.abspath(path)).resolve(strict=False)
-
-
-def release_handoff_binding(path: Path) -> tuple[int, int, int, int, int, tuple[str, ...]]:
+def release_handoff_binding(path: Path) -> tuple[object, ...]:
     try:
         metadata = path.lstat()
-        names = tuple(sorted(entry.name for entry in path.iterdir()))
     except OSError as error:
         raise ValueError(f"release authority handoff is unavailable: {path}") from error
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise ValueError(f"release authority handoff is not a directory: {path}")
+    try:
+        names = tuple(sorted(entry.name for entry in path.iterdir()))
+    except OSError as error:
+        raise ValueError(f"release authority handoff is unavailable: {path}") from error
     if names != RELEASE_AUTHORITY_HANDOFF_LEAVES:
         raise ValueError(
             "release authority handoff does not have the exact production inventory"
+        )
+    leaves: list[tuple[object, ...]] = []
+    for name in names:
+        leaf = path / name
+        try:
+            leaf_metadata = leaf.lstat()
+        except OSError as error:
+            raise ValueError(f"release authority leaf is unavailable: {leaf}") from error
+        if (
+            stat.S_ISLNK(leaf_metadata.st_mode)
+            or not stat.S_ISREG(leaf_metadata.st_mode)
+            or leaf_metadata.st_size <= 0
+            or leaf_metadata.st_size > MAX_HANDOFF_LEAF_BYTES
+        ):
+            raise ValueError(f"release authority leaf is invalid: {leaf}")
+        leaves.append(
+            (
+                name,
+                leaf_metadata.st_dev,
+                leaf_metadata.st_ino,
+                leaf_metadata.st_mode,
+                leaf_metadata.st_size,
+                leaf_metadata.st_mtime_ns,
+                leaf_metadata.st_ctime_ns,
+            )
         )
     return (
         metadata.st_dev,
@@ -304,28 +248,361 @@ def release_handoff_binding(path: Path) -> tuple[int, int, int, int, int, tuple[
         metadata.st_mtime_ns,
         metadata.st_ctime_ns,
         names,
+        tuple(leaves),
     )
+
+
+def digest_sidecar(path: Path, label: str) -> str:
+    payload = regular_bytes(path, label, 128)
+    try:
+        value = payload.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{label} is not ASCII") from error
+    if not value.endswith("\n") or value.count("\n") != 1:
+        raise ValueError(f"{label} is not canonical SHA-256 text")
+    digest = value[:-1]
+    if HEX_64.fullmatch(digest) is None or digest == "0" * 64:
+        raise ValueError(f"{label} is not canonical SHA-256 text")
+    return digest
+
+
+def actual_record(
+    path: Path, label: str, maximum: int = MAX_HANDOFF_LEAF_BYTES
+) -> tuple[dict[str, object], bytes]:
+    payload = regular_bytes(path, label, maximum)
+    return {
+        "file": path.name,
+        "sha256": sha256_bytes(payload),
+        "size_bytes": len(payload),
+    }, payload
+
+
+def require_document_record(
+    value: object,
+    expected: dict[str, object],
+    label: str,
+) -> None:
+    if value != expected:
+        raise ValueError(f"Core handoff does not bind the exact {label}")
+
+
+def factory_manifest_records(
+    value: dict[str, Any], source_commit: str
+) -> dict[str, dict[str, object]]:
+    target_ids = [target_id for target_id, _, _, _ in CORE_TARGETS]
+    if (
+        set(value)
+        != {
+            "files",
+            "kind",
+            "releasable",
+            "runtime_sidecars_included",
+            "schema_version",
+            "selected_targets",
+            "source_commit",
+            "version",
+        }
+        or value.get("kind") != "ctx-linux-release-factory"
+        or value.get("schema_version") != 1
+        or value.get("source_commit") != source_commit
+        or value.get("selected_targets") != target_ids
+        or value.get("releasable") is not True
+        or not isinstance(value.get("runtime_sidecars_included"), bool)
+        or not isinstance(value.get("version"), str)
+        or VERSION.fullmatch(value["version"]) is None
+    ):
+        raise ValueError("Core factory manifest identity is malformed")
+    files = value.get("files")
+    if not isinstance(files, list):
+        raise ValueError("Core factory manifest file inventory is malformed")
+    records: dict[str, dict[str, object]] = {}
+    ordered_names: list[str] = []
+    for record in files:
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"file", "sha256", "size_bytes"}
+            or not isinstance(record.get("file"), str)
+            or not record["file"]
+            or record["file"].startswith(".")
+            or Path(record["file"]).name != record["file"]
+            or HEX_64.fullmatch(str(record.get("sha256"))) is None
+            or record.get("sha256") == "0" * 64
+            or type(record.get("size_bytes")) is not int
+            or record["size_bytes"] <= 0
+            or record["file"] in records
+            or record["file"] in {FACTORY_MANIFEST, FACTORY_COMPLETION}
+        ):
+            raise ValueError("Core factory manifest file inventory is malformed")
+        name = record["file"]
+        ordered_names.append(name)
+        records[name] = record
+    if ordered_names != sorted(ordered_names) or set(CORE_FACTORY_LEAVES) - set(records):
+        raise ValueError("Core factory manifest does not bind the complete Core factory")
+    return records
+
+
+def completion_records(
+    value: dict[str, Any], source_commit: str
+) -> dict[str, dict[str, object]]:
+    target_ids = [target_id for target_id, _, _, _ in CORE_TARGETS]
+    if (
+        set(value) != {"files", "kind", "schema_version", "source_commit", "targets"}
+        or value.get("kind") != "ctx-public-core-release-completion"
+        or value.get("schema_version") != 1
+        or value.get("source_commit") != source_commit
+        or value.get("targets") != target_ids
+    ):
+        raise ValueError("Core factory completion identity is malformed")
+    files = value.get("files")
+    if not isinstance(files, list) or len(files) != len(CORE_COMPLETION_LEAVES):
+        raise ValueError("Core factory completion file inventory is malformed")
+    records: dict[str, dict[str, object]] = {}
+    for expected_name, record in zip(CORE_COMPLETION_LEAVES, files, strict=True):
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"name", "sha256", "size"}
+            or record.get("name") != expected_name
+            or HEX_64.fullmatch(str(record.get("sha256"))) is None
+            or record.get("sha256") == "0" * 64
+            or type(record.get("size")) is not int
+            or record["size"] <= 0
+        ):
+            raise ValueError("Core factory completion file inventory is malformed")
+        records[expected_name] = record
+    return records
+
+
+def verify_factory_completion_binding(
+    factory: dict[str, dict[str, object]],
+    completion: dict[str, dict[str, object]],
+    factory_record: dict[str, object],
+) -> None:
+    completion_factory = completion[FACTORY_MANIFEST]
+    if (
+        completion_factory["sha256"] != factory_record["sha256"]
+        or completion_factory["size"] != factory_record["size_bytes"]
+    ):
+        raise ValueError("Core factory completion does not bind the factory manifest")
+    for name in CORE_FACTORY_LEAVES:
+        factory_leaf = factory[name]
+        completion_leaf = completion[name]
+        if (
+            factory_leaf["sha256"] != completion_leaf["sha256"]
+            or factory_leaf["size_bytes"] != completion_leaf["size"]
+        ):
+            raise ValueError(
+                f"Core factory and completion bindings disagree for {name}"
+            )
+
+
+def verify_retained_factory_leaf(
+    name: str,
+    record: dict[str, object],
+    factory: dict[str, dict[str, object]],
+    completion: dict[str, dict[str, object]],
+) -> None:
+    if (
+        factory[name]["sha256"] != record["sha256"]
+        or factory[name]["size_bytes"] != record["size_bytes"]
+        or completion[name]["sha256"] != record["sha256"]
+        or completion[name]["size"] != record["size_bytes"]
+    ):
+        raise ValueError(f"Core handoff does not retain exact factory bytes for {name}")
+
+
+def verify_candidate_identity(
+    candidate: dict[str, Any],
+    target: tuple[str, str, str, str],
+    source_commit: str,
+    version: str,
+    factory: dict[str, dict[str, object]],
+) -> None:
+    target_id, platform, rust_triple, binary = target
+    artifact = factory[binary]
+    if (
+        set(candidate) != CANDIDATE_FIELDS
+        or candidate.get("schema_version") != 1
+        or candidate.get("kind") != "ctx-public-cli-candidate"
+        or candidate.get("product") != "core"
+        or candidate.get("version") != version
+        or candidate.get("source") != {"clean": True, "commit": source_commit}
+        or candidate.get("construction")
+        != {
+            "authority": "linux-cross-cargo-zigbuild-v1",
+            "label": "scripts/release/build-public-candidate-on-linux.sh",
+        }
+        or candidate.get("target")
+        != {"id": target_id, "platform": platform, "rust_triple": rust_triple}
+        or candidate.get("artifact")
+        != {
+            "file": binary,
+            "sha256": artifact["sha256"],
+            "size_bytes": artifact["size_bytes"],
+        }
+    ):
+        raise ValueError(f"Core candidate identity is malformed for {target_id}")
+    evidence = candidate.get("evidence")
+    if not isinstance(evidence, dict) or set(evidence) != CANDIDATE_EVIDENCE_FIELDS:
+        raise ValueError(f"Core candidate evidence is malformed for {target_id}")
+    for name, record in evidence.items():
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"file", "sha256"}
+            or not isinstance(record.get("file"), str)
+            or not record["file"]
+            or HEX_64.fullmatch(str(record.get("sha256"))) is None
+        ):
+            raise ValueError(f"Core candidate evidence is malformed for {target_id}")
+    retained_evidence = {
+        "binary_size_report": f"{binary}.size.json",
+        "build_info": f"{binary}.build-info.json",
+        "cyclonedx_sbom": f"{binary}.cdx.json",
+        "third_party_notices": f"{binary}.third-party-notices.txt",
+    }
+    for evidence_name, leaf_name in retained_evidence.items():
+        if evidence[evidence_name] != {
+            "file": leaf_name,
+            "sha256": factory[leaf_name]["sha256"],
+        }:
+            raise ValueError(
+                f"Core candidate does not bind exact {evidence_name} for {target_id}"
+            )
 
 
 def verify_release_handoff(args: argparse.Namespace) -> str:
     handoff = args.handoff_dir
     before = release_handoff_binding(handoff)
-    args.artifact = handoff / WINDOWS_CONSTRUCTION_ARTIFACT
-    args.build_info = handoff / f"{WINDOWS_CONSTRUCTION_ARTIFACT}.build-info.json"
-    args.sbom = handoff / f"{WINDOWS_CONSTRUCTION_ARTIFACT}.cdx.json"
-    args.notices = handoff / f"{WINDOWS_CONSTRUCTION_ARTIFACT}.third-party-notices.txt"
-    args.size_report = handoff / f"{WINDOWS_CONSTRUCTION_ARTIFACT}.size.json"
-    args.candidate_manifest = handoff / f"{WINDOWS_CONSTRUCTION_ARTIFACT}.candidate.json"
-    args.release_sums = handoff / RELEASE_SUMS
-    args.runtime_archive = handoff / WINDOWS_RUNTIME_ARCHIVE
-    digest = verify_bundle_only(
-        args,
-        release_bound=True,
-        expected_manifest_sha256=args.expected_manifest_sha256,
+
+    handoff_document, handoff_bytes = read_canonical_json(
+        handoff / HANDOFF_DOCUMENT,
+        "Core GitHub handoff document",
+        MAX_HANDOFF_JSON_BYTES,
     )
+    handoff_sha256 = sha256_bytes(handoff_bytes)
+    expected = args.expected_handoff_sha256
+    if HEX_64.fullmatch(expected) is None or expected == "0" * 64:
+        raise ValueError("expected Core handoff digest is invalid")
+    if handoff_sha256 != expected:
+        raise ValueError(
+            "Core handoff digest does not match the independently supplied "
+            "expected handoff digest"
+        )
+    if digest_sidecar(
+        handoff / f"{HANDOFF_DOCUMENT}.sha256", "Core handoff digest sidecar"
+    ) != handoff_sha256:
+        raise ValueError("Core handoff digest sidecar does not match the handoff")
+
+    source_commit = handoff_document.get("source_commit")
+    if (
+        set(handoff_document)
+        != {
+            "candidate_manifests",
+            "factory_completion",
+            "factory_manifest",
+            "kind",
+            "release_sums",
+            "schema_version",
+            "source_commit",
+        }
+        or handoff_document.get("kind") != "ctx-public-core-github-handoff"
+        or handoff_document.get("schema_version") != 1
+        or not isinstance(source_commit, str)
+        or HEX_40.fullmatch(source_commit) is None
+        or source_commit == "0" * 40
+    ):
+        raise ValueError("Core GitHub handoff document identity is malformed")
+
+    candidate_records = handoff_document.get("candidate_manifests")
+    if not isinstance(candidate_records, list) or len(candidate_records) != len(
+        CORE_CANDIDATE_MANIFESTS
+    ):
+        raise ValueError("Core handoff candidate manifest inventory is malformed")
+    candidates: dict[str, dict[str, Any]] = {}
+    retained_records: dict[str, dict[str, object]] = {}
+    candidate_digests: dict[str, str] = {}
+    for name, declared in zip(CORE_CANDIDATE_MANIFESTS, candidate_records, strict=True):
+        candidate, payload = read_canonical_json(
+            handoff / name, f"Core candidate manifest {name}", MAX_CANDIDATE_JSON_BYTES
+        )
+        record = {
+            "file": name,
+            "sha256": sha256_bytes(payload),
+            "size_bytes": len(payload),
+        }
+        require_document_record(declared, record, f"candidate manifest {name}")
+        if digest_sidecar(
+            handoff / f"{name}.sha256", f"Core candidate digest sidecar {name}"
+        ) != record["sha256"]:
+            raise ValueError(f"Core candidate digest sidecar does not match {name}")
+        candidates[name] = candidate
+        retained_records[name] = record
+        candidate_digests[name] = str(record["sha256"])
+
+    sums, sums_record = release_sums_record(handoff / RELEASE_SUMS)
+    require_document_record(
+        handoff_document.get("release_sums"), sums_record, RELEASE_SUMS
+    )
+
+    factory_document, factory_bytes = read_canonical_json(
+        handoff / FACTORY_MANIFEST, "Core factory manifest", MAX_FACTORY_JSON_BYTES
+    )
+    factory_record = {
+        "file": FACTORY_MANIFEST,
+        "sha256": sha256_bytes(factory_bytes),
+        "size_bytes": len(factory_bytes),
+    }
+    require_document_record(
+        handoff_document.get("factory_manifest"), factory_record, FACTORY_MANIFEST
+    )
+    completion_document, completion_bytes = read_canonical_json(
+        handoff / FACTORY_COMPLETION,
+        "Core factory completion",
+        MAX_COMPLETION_JSON_BYTES,
+    )
+    completion_record = {
+        "file": FACTORY_COMPLETION,
+        "sha256": sha256_bytes(completion_bytes),
+        "size_bytes": len(completion_bytes),
+    }
+    require_document_record(
+        handoff_document.get("factory_completion"),
+        completion_record,
+        FACTORY_COMPLETION,
+    )
+    factory = factory_manifest_records(factory_document, source_commit)
+    completion = completion_records(completion_document, source_commit)
+    verify_factory_completion_binding(factory, completion, factory_record)
+
+    version = str(factory_document["version"])
+    for target, name in zip(CORE_TARGETS, CORE_CANDIDATE_MANIFESTS, strict=True):
+        verify_candidate_identity(
+            candidates[name], target, source_commit, version, factory
+        )
+        verify_retained_factory_leaf(name, retained_records[name], factory, completion)
+
+    for release_name, source_name in CORE_RELEASE_BINDINGS:
+        if sums[release_name] != factory[source_name]["sha256"]:
+            raise ValueError(
+                f"Core SHA256SUMS does not bind {release_name} to the factory bytes"
+            )
+
+    for name in WINDOWS_HANDOFF_LEAVES:
+        record, _ = actual_record(handoff / name, f"Windows Core handoff leaf {name}")
+        retained_records[name] = record
+        verify_retained_factory_leaf(name, record, factory, completion)
+
+    args.artifact = handoff / "ctx.exe"
+    args.build_info = handoff / "ctx.exe.build-info.json"
+    args.sbom = handoff / "ctx.exe.cdx.json"
+    args.notices = handoff / "ctx.exe.third-party-notices.txt"
+    args.size_report = handoff / "ctx.exe.size.json"
+    args.candidate_manifest = handoff / "ctx.exe.candidate.json"
+    if verify_bundle_only(args) != candidate_digests["ctx.exe.candidate.json"]:
+        raise ValueError("Windows candidate changed while its exact bytes were verified")
+
     if release_handoff_binding(handoff) != before:
         raise ValueError("release authority handoff changed while verified")
-    return digest
+    return handoff_sha256
 
 
 def read_canonical_json(path: Path, label: str, maximum: int) -> tuple[dict[str, Any], bytes]:
@@ -341,9 +618,6 @@ def read_canonical_json(path: Path, label: str, maximum: int) -> tuple[dict[str,
 
 def verify_bundle_only(
     args: argparse.Namespace,
-    *,
-    release_bound: bool = False,
-    expected_manifest_sha256: str | None = None,
 ) -> str:
     artifact_sha256 = sha256_file(
         args.artifact, "Core artifact", 256 * 1024 * 1024
@@ -353,39 +627,20 @@ def verify_bundle_only(
         args.candidate_manifest, "candidate manifest", 16 * 1024 * 1024
     )
     candidate_sha256 = sha256_bytes(candidate_bytes)
-    if expected_manifest_sha256 is not None:
-        if (
-            HEX_64.fullmatch(expected_manifest_sha256) is None
-            or expected_manifest_sha256 == "0" * 64
-        ):
-            raise ValueError("expected candidate manifest digest is invalid")
-        if candidate_sha256 != expected_manifest_sha256:
-            raise ValueError(
-                "candidate manifest digest does not match the independently "
-                "supplied expected digest"
-            )
-    expected_top = {
-        "schema_version",
-        "kind",
-        "construction",
-        "product",
-        "version",
-        "target",
-        "source",
-        "artifact",
-        "evidence",
-        "tantivy",
-    }
-    if release_bound:
-        expected_top.update(("release_sums", "runtime"))
+    candidate_artifact_name = args.candidate_artifact_name or args.artifact.name
     if (
-        set(candidate) != expected_top
+        not candidate_artifact_name
+        or Path(candidate_artifact_name).name != candidate_artifact_name
+    ):
+        raise ValueError("candidate artifact name is invalid")
+    if (
+        set(candidate) != CANDIDATE_FIELDS
         or candidate.get("schema_version") != 1
         or candidate.get("kind") != "ctx-public-cli-candidate"
         or candidate.get("product") != "core"
         or candidate.get("artifact")
         != {
-            "file": args.artifact.name,
+            "file": candidate_artifact_name,
             "sha256": artifact_sha256,
             "size_bytes": artifact_size,
         }
@@ -433,24 +688,7 @@ def verify_bundle_only(
         "third_party_notices": args.notices,
     }
     evidence = candidate.get("evidence")
-    expected_evidence = {
-        "binary_size_report",
-        "build_info",
-        "candidate_schema",
-        "cargo_lock",
-        "ctx_history_index_manifest",
-        "ctx_history_index_format_manifest",
-        "ctx_history_index_query_manifest",
-        "cyclonedx_sbom",
-        "license_materials_inventory",
-        "module_file",
-        "module_lock",
-        "target_dependency_inventory",
-        "target_matrix",
-        "third_party_notices",
-        "workspace_manifest",
-    }
-    if not isinstance(evidence, dict) or set(evidence) != expected_evidence:
+    if not isinstance(evidence, dict) or set(evidence) != CANDIDATE_EVIDENCE_FIELDS:
         raise ValueError("candidate manifest evidence is malformed")
     for name, record in evidence.items():
         if (
@@ -542,69 +780,7 @@ def verify_bundle_only(
         or any(name == "rust-stemmers" for name, _, _ in closure_identities)
     ):
         raise ValueError("candidate manifest Tantivy contract is malformed")
-    if release_bound:
-        if (
-            target["id"] != WINDOWS_TARGET_ID
-            or candidate["artifact"]["file"] != WINDOWS_CONSTRUCTION_ARTIFACT
-        ):
-            raise ValueError(
-                "release-bound candidate manifest is not the Windows factory candidate"
-            )
-        sums, sums_record = release_sums_record(args.release_sums)
-        runtime_record = windows_runtime_record(args.runtime_archive)
-        if candidate.get("release_sums") != sums_record:
-            raise ValueError("candidate manifest does not bind exact release SHA256SUMS")
-        if candidate.get("runtime") != runtime_record:
-            raise ValueError("candidate manifest does not bind exact Windows runtime and DLL")
-        if sums[WINDOWS_RELEASE_ARTIFACT] != artifact_sha256:
-            raise ValueError(
-                f"release SHA256SUMS does not bind {WINDOWS_RELEASE_ARTIFACT} "
-                "to the candidate artifact"
-            )
-        if sums[WINDOWS_RUNTIME_ARCHIVE] != runtime_record["sha256"]:
-            raise ValueError(
-                f"release SHA256SUMS does not bind {WINDOWS_RUNTIME_ARCHIVE} "
-                "to the candidate runtime"
-            )
     return candidate_sha256
-
-
-def bind_release_candidate(args: argparse.Namespace) -> tuple[bytes, bytes]:
-    verified_candidate_sha256 = verify_bundle_only(args)
-    candidate, candidate_bytes = read_canonical_json(
-        args.candidate_manifest, "candidate manifest", 16 * 1024 * 1024
-    )
-    if sha256_bytes(candidate_bytes) != verified_candidate_sha256:
-        raise ValueError("candidate manifest changed while release binding was verified")
-    target = candidate.get("target")
-    artifact = candidate.get("artifact")
-    if (
-        not isinstance(target, dict)
-        or target.get("id") != WINDOWS_TARGET_ID
-        or target.get("platform") != WINDOWS_TARGET_ID
-        or not isinstance(artifact, dict)
-        or artifact.get("file") != WINDOWS_CONSTRUCTION_ARTIFACT
-    ):
-        raise ValueError(
-            "release binding requires the exact Windows factory construction candidate"
-        )
-    sums, sums_record = release_sums_record(args.release_sums)
-    runtime_record = windows_runtime_record(args.runtime_archive)
-    if sums[WINDOWS_RELEASE_ARTIFACT] != artifact["sha256"]:
-        raise ValueError(
-            f"release SHA256SUMS does not bind {WINDOWS_RELEASE_ARTIFACT} "
-            "to the candidate artifact"
-        )
-    if sums[WINDOWS_RUNTIME_ARCHIVE] != runtime_record["sha256"]:
-        raise ValueError(
-            f"release SHA256SUMS does not bind {WINDOWS_RUNTIME_ARCHIVE} "
-            "to the candidate runtime"
-        )
-    candidate["release_sums"] = sums_record
-    candidate["runtime"] = runtime_record
-    payload = canonical(candidate)
-    digest = sha256_bytes(payload)
-    return payload, f"{digest}\n".encode("ascii")
 
 
 def require_full_arguments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -656,7 +832,6 @@ def main() -> int:
             "generate",
             "verify",
             "verify-bundle",
-            "bind-release",
             "verify-release",
         ),
     )
@@ -682,19 +857,16 @@ def main() -> int:
     parser.add_argument("--notices-output", type=Path)
     parser.add_argument("--size-report-output", type=Path)
     parser.add_argument("--candidate-manifest", type=Path)
+    parser.add_argument("--candidate-artifact-name")
     parser.add_argument("--sbom", type=Path)
     parser.add_argument("--notices", type=Path)
     parser.add_argument("--size-report", type=Path)
-    parser.add_argument("--release-sums", type=Path)
-    parser.add_argument("--runtime-archive", type=Path)
-    parser.add_argument("--output-manifest", type=Path)
-    parser.add_argument("--manifest-sha256-output", type=Path)
-    parser.add_argument("--expected-manifest-sha256")
+    parser.add_argument("--expected-handoff-sha256")
     parser.add_argument("--handoff-dir", type=Path)
     args = parser.parse_args()
     try:
         if args.mode == "verify-release":
-            required = ("handoff_dir", "expected_manifest_sha256")
+            required = ("handoff_dir", "expected_handoff_sha256")
             missing = [
                 "--" + name.replace("_", "-")
                 for name in required
@@ -707,8 +879,6 @@ def main() -> int:
                 "build_info",
                 "candidate_manifest",
                 "notices",
-                "release_sums",
-                "runtime_archive",
                 "sbom",
                 "size_report",
             )
@@ -719,7 +889,7 @@ def main() -> int:
             print(verify_release_handoff(args))
             return 0
 
-        if args.mode in ("verify-bundle", "bind-release"):
+        if args.mode == "verify-bundle":
             required = (
                 "artifact",
                 "build_info",
@@ -728,9 +898,6 @@ def main() -> int:
                 "sbom",
                 "size_report",
             )
-            if args.mode == "bind-release":
-                required += ("release_sums", "runtime_archive")
-                required += ("output_manifest", "manifest_sha256_output")
             missing = [
                 "--" + name.replace("_", "-")
                 for name in required
@@ -738,31 +905,7 @@ def main() -> int:
             ]
             if missing:
                 parser.error(f"{args.mode} requires " + ", ".join(missing))
-            if args.mode == "verify-bundle":
-                print(verify_bundle_only(args))
-            elif args.mode == "bind-release":
-                outputs = (args.output_manifest, args.manifest_sha256_output)
-                inputs = (
-                    args.artifact,
-                    args.build_info,
-                    args.candidate_manifest,
-                    args.notices,
-                    args.release_sums,
-                    args.runtime_archive,
-                    args.sbom,
-                    args.size_report,
-                )
-                canonical_outputs = tuple(canonical_path(path) for path in outputs)
-                canonical_inputs = {canonical_path(path) for path in inputs}
-                if (
-                    len(set(canonical_outputs)) != len(canonical_outputs)
-                    or canonical_inputs.intersection(canonical_outputs)
-                ):
-                    parser.error("bind-release inputs and outputs must be distinct")
-                manifest, digest = bind_release_candidate(args)
-                exclusive_write(args.output_manifest, manifest)
-                exclusive_write(args.manifest_sha256_output, digest)
-                print(digest.decode("ascii").strip())
+            print(verify_bundle_only(args))
             return 0
 
         require_full_arguments(parser, args)

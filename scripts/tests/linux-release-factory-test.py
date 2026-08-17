@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -34,6 +35,7 @@ inventory = load(INVENTORY, "cargo_release_inventory")
 build_info = load(BUILD_INFO, "linux_factory_build_info")
 build_info_check = load(BUILD_INFO_CHECK, "check_public_cli_build_info")
 release_sbom = load(RELEASE_SBOM, "release_sbom")
+sealer = load(SEALER, "seal_linux_factory_candidate")
 
 
 class LinuxReleaseFactoryTest(unittest.TestCase):
@@ -146,6 +148,30 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
         self.assertIn('python_with_tomli=(env "PYTHONPATH=${repo_root}/${tomli_dir}" python3 -S)', source)
         self.assertNotIn('export PYTHONPATH=', source)
 
+    def test_release_matrix_has_one_narrow_linux_abi_authority(self) -> None:
+        value = json.loads(
+            (ROOT / "contracts" / "release-targets-v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        for target_value in value["targets"]:
+            self.assertNotIn("bazel_platform", target_value)
+            if target_value["os"] == "linux":
+                self.assertEqual(
+                    target_value["linux_build"], {"glibc_max": "2.35"}
+                )
+            else:
+                self.assertIsNone(target_value["linux_build"])
+        serialized = json.dumps(value)
+        for stale_field in (
+            "builder_image",
+            "rust_commit",
+            "rust_sysroot",
+            "rust_toolchain",
+            "ubuntu_snapshot",
+        ):
+            self.assertNotIn(stale_field, serialized)
+
     def test_factory_sealer_loads_its_sibling_under_isolated_python(self) -> None:
         subprocess.run(
             [sys.executable, "-I", os.fspath(SEALER), "--help"],
@@ -153,6 +179,106 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def test_core_only_seal_binds_all_five_artifacts_and_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "candidate"
+            candidate.mkdir()
+            for leaf in sealer.expected_core_release_leaves():
+                if leaf == sealer.FACTORY_MANIFEST:
+                    continue
+                (candidate / leaf).write_text(f"fixture {leaf}\n", encoding="utf-8")
+            source_commit = "a" * 40
+            files = []
+            for path in sorted(candidate.iterdir(), key=lambda item: item.name):
+                raw = path.read_bytes()
+                files.append(
+                    {
+                        "file": path.name,
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "size_bytes": len(raw),
+                    }
+                )
+            manifest = {
+                "files": files,
+                "kind": "ctx-linux-release-factory",
+                "releasable": True,
+                "runtime_sidecars_included": False,
+                "schema_version": 1,
+                "selected_targets": [
+                    "linux-arm64",
+                    "linux-x64",
+                    "macos-arm64",
+                    "macos-x64",
+                    "windows-x64",
+                ],
+                "source_commit": source_commit,
+                "version": "1.0.0",
+            }
+            (candidate / sealer.FACTORY_MANIFEST).write_text(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    os.fspath(SEALER),
+                    "--core-only",
+                    "--candidate-dir",
+                    os.fspath(candidate),
+                    "--source-commit",
+                    source_commit,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            marker = candidate / sealer.CORE_COMPLETION_LEAF
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["targets"],
+                ["linux-arm64", "linux-x64", "macos-arm64", "macos-x64", "windows-x64"],
+            )
+            self.assertEqual(
+                {record["name"] for record in payload["files"]},
+                set(sealer.expected_core_release_leaves()),
+            )
+            (candidate / "ctx-macos-x64").chmod(0o600)
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    os.fspath(SEALER),
+                    "--verify-core-only",
+                    "--candidate-dir",
+                    os.fspath(candidate),
+                    "--source-commit",
+                    source_commit,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (candidate / "ctx-macos-x64").write_text(
+                "substituted bytes\n", encoding="utf-8"
+            )
+            with self.assertRaises(subprocess.CalledProcessError):
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        os.fspath(SEALER),
+                        "--verify-core-only",
+                        "--candidate-dir",
+                        os.fspath(candidate),
+                        "--source-commit",
+                        source_commit,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
     def test_factory_target_selection_defaults_to_all_and_accepts_known_ids(self) -> None:
         source = (ROOT / "scripts" / "release" / "build-public-candidate-on-linux.sh").read_text()
@@ -232,7 +358,7 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
         self.assertIn("verify-windows-authenticode.ps1", validator)
         self.assertNotIn("powershell.exe", launcher.lower())
 
-    def test_factory_partial_candidates_are_explicitly_non_promotable(self) -> None:
+    def test_factory_requires_complete_core_but_not_runtimes_for_promotion(self) -> None:
         source = (ROOT / "scripts" / "release" / "build-public-candidate-on-linux.sh").read_text()
         self.assertIn("selection_complete=1", source)
         self.assertIn("runtimes_built=0", source)
@@ -241,9 +367,12 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
             source,
         )
         self.assertIn(
-            '"releasable": official and selection_complete and runtimes_built',
+            'if [[ "${official}" == "1" && "${selection_complete}" == "1" ]]; then',
             source,
         )
+        self.assertIn('"releasable": official and selection_complete', source)
+        self.assertIn('"runtime_sidecars_included": runtimes_built', source)
+        self.assertIn("--core-only --candidate-dir", source)
         self.assertIn('"version": version', source)
         self.assertIn('"selected_targets": selected_targets', source)
         self.assertIn('factory_status="non-promotable"', source)
@@ -306,10 +435,9 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
         factory_inputs_path = ROOT / "contracts" / "release-factory-inputs-v1.json"
         factory_inputs = json.loads(factory_inputs_path.read_text(encoding="utf-8"))
         selected = build_info.target(matrix, platform)
-        linux_x64 = build_info.target(matrix, "linux-x64")
-        linux_build = linux_x64["linux_build"]
-        self.assertIsInstance(linux_build, dict)
         host = factory_inputs["linux_host"]
+        recipe = ROOT / "scripts" / "release" / "build-public-candidate-on-linux.sh"
+        pins = build_info.recipe_pins(recipe)
         artifact = root / f"{platform}.artifact"
         output = root / f"{platform}.build-info.json"
         artifact.write_bytes(f"factory artifact: {platform}\n".encode())
@@ -327,11 +455,9 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
             "--platform",
             platform,
             "--recipe",
-            os.fspath(
-                ROOT / "scripts" / "release" / "build-public-candidate-on-linux.sh"
-            ),
+            os.fspath(recipe),
             "--rust-version",
-            f"rustc {linux_build['rust_toolchain']} (fixture)",
+            f"rustc {pins['RUST_VERSION']} ({pins['RUST_COMMIT'][:9]} 2026-07-01)",
             "--source-commit",
             source_commit,
             "--source-repo",
@@ -343,9 +469,9 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
             "--local-runtime-authority",
             "not_run",
             "--zig-version",
-            "0.15.2",
+            pins["ZIG_VERSION"],
             "--cargo-zigbuild-version",
-            "0.23.0",
+            pins["CARGO_ZIGBUILD_VERSION"],
             "--builder-authority",
             host["authority"],
             "--builder-os",
@@ -397,18 +523,27 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
         ).strip()
         return source_repo, source_commit
 
-    def test_factory_linux_build_info_equals_matrix_and_rejects_mutation(self) -> None:
+    def test_factory_build_info_binds_matrix_abi_for_all_targets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source_repo, source_commit = self._factory_source(root)
-            for platform in ("linux-x64", "linux-aarch64"):
+            for platform in (
+                "linux-x64",
+                "linux-aarch64",
+                "macos-arm64",
+                "macos-x64",
+                "windows-x64",
+            ):
                 with self.subTest(platform=platform):
                     artifact, output, selected = self._write_factory_build_info(
                         root, platform, source_repo, source_commit
                     )
                     value = json.loads(output.read_text(encoding="utf-8"))
-                    self.assertIsInstance(selected["linux_build"], dict)
                     self.assertEqual(value["linux_build"], selected["linux_build"])
+                    self.assertEqual(
+                        value["builder"]["os"], "ubuntu-24.04-x86_64"
+                    )
+                    self.assertNotIn("glibc_max", value["release_factory"])
                     build_info_check.validate(
                         artifact,
                         output,
@@ -419,53 +554,57 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
                         ROOT / "contracts" / "release-factory-inputs-v1.json",
                     )
 
-                    mismatched = dict(selected["linux_build"])
-                    mismatched["glibc_max"] = "0.0"
-                    for label, mutation in (("null", None), ("mismatch", mismatched)):
-                        with self.subTest(platform=platform, mutation=label):
-                            value["linux_build"] = mutation
-                            output.write_text(
-                                json.dumps(value, sort_keys=True, separators=(",", ":"))
-                                + "\n",
-                                encoding="utf-8",
-                            )
-                            with self.assertRaisesRegex(
-                                ValueError, "does not match the matrix build contract"
-                            ):
-                                build_info_check.validate(
-                                    artifact,
-                                    output,
-                                    ROOT / "contracts" / "release-targets-v1.json",
-                                    platform,
-                                    source_commit,
-                                    ROOT / "Cargo.lock",
-                                    ROOT
-                                    / "contracts"
-                                    / "release-factory-inputs-v1.json",
-                                )
-
-    def test_factory_non_linux_build_info_remains_exactly_matrix_null(self) -> None:
+    def test_factory_build_info_rejects_stale_builder_toolchain_and_recipe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source_repo, source_commit = self._factory_source(root)
-            for platform in ("macos-arm64", "macos-x64", "windows-x64"):
-                with self.subTest(platform=platform):
-                    artifact, output, selected = self._write_factory_build_info(
-                        root, platform, source_repo, source_commit
+            artifact, output, _ = self._write_factory_build_info(
+                root, "linux-x64", source_repo, source_commit
+            )
+            valid = json.loads(output.read_text(encoding="utf-8"))
+
+            mutations = {
+                "builder authority": lambda value: value["builder"].__setitem__(
+                    "authority", "ctx-release-factory-ubuntu22-x86_64-v1"
+                ),
+                "builder OS": lambda value: value["builder"].__setitem__(
+                    "os", "ubuntu-22.04-x86_64"
+                ),
+                "recipe": lambda value: value["builder"].__setitem__(
+                    "recipe_sha256", "0" * 64
+                ),
+                "Rust": lambda value: value.__setitem__(
+                    "rust_version", "rustc 1.96.0 (000000000 2026-01-01)"
+                ),
+                "Zig": lambda value: value["release_factory"].__setitem__(
+                    "zig_version", "0.14.1"
+                ),
+                "cargo-zigbuild": lambda value: value[
+                    "release_factory"
+                ].__setitem__("cargo_zigbuild_version", "0.22.1"),
+                "stale Linux build": lambda value: value["linux_build"].__setitem__(
+                    "builder_image", "stale"
+                ),
+            }
+            for label, mutate in mutations.items():
+                with self.subTest(mutation=label):
+                    value = copy.deepcopy(valid)
+                    mutate(value)
+                    output.write_text(
+                        json.dumps(value, sort_keys=True, separators=(",", ":"))
+                        + "\n",
+                        encoding="utf-8",
                     )
-                    value = json.loads(output.read_text(encoding="utf-8"))
-                    self.assertIsNone(selected["linux_build"])
-                    self.assertEqual(value["linux_build"], selected["linux_build"])
-                    self.assertIsNone(value["release_factory"]["glibc_max"])
-                    build_info_check.validate(
-                        artifact,
-                        output,
-                        ROOT / "contracts" / "release-targets-v1.json",
-                        platform,
-                        source_commit,
-                        ROOT / "Cargo.lock",
-                        ROOT / "contracts" / "release-factory-inputs-v1.json",
-                    )
+                    with self.assertRaises(ValueError):
+                        build_info_check.validate(
+                            artifact,
+                            output,
+                            ROOT / "contracts" / "release-targets-v1.json",
+                            "linux-x64",
+                            source_commit,
+                            ROOT / "Cargo.lock",
+                            ROOT / "contracts" / "release-factory-inputs-v1.json",
+                        )
 
     def test_factory_does_not_expose_apple_credentials_to_builds(self) -> None:
         source = (ROOT / "scripts" / "release" / "build-public-candidate-on-linux.sh").read_text()

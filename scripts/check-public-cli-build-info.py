@@ -15,6 +15,10 @@ from typing import Any
 VERSION = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
+RECIPE_PIN = re.compile(
+    r'^readonly (RUST_VERSION|RUST_COMMIT|ZIG_VERSION|CARGO_ZIGBUILD_VERSION)="([^"\n]+)"$',
+    re.MULTILINE,
+)
 
 
 def regular(path: Path, label: str, maximum: int) -> bytes:
@@ -53,6 +57,77 @@ def target_by_id(matrix: object, platform: str) -> dict[str, Any]:
     if len(matches) != 1:
         raise ValueError("release-target matrix does not contain the exact target")
     return matches[0]
+
+
+def factory_recipe(
+    matrix_path: Path, target: dict[str, Any]
+) -> tuple[bytes, dict[str, str]]:
+    label = target.get("public_construction_label")
+    if not isinstance(label, str) or not label or Path(label).is_absolute():
+        raise ValueError("release target construction label is malformed")
+    root = matrix_path.resolve(strict=True).parent.parent
+    recipe_path = root / label
+    try:
+        if not recipe_path.resolve(strict=True).is_relative_to(root):
+            raise ValueError("release target construction label escapes the repository")
+    except OSError as error:
+        raise ValueError("release factory recipe is unavailable") from error
+    recipe_bytes = regular(recipe_path, "release factory recipe", 2 * 1024 * 1024)
+    try:
+        source = recipe_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("release factory recipe is not UTF-8") from error
+    pins: dict[str, str] = {}
+    for name, value in RECIPE_PIN.findall(source):
+        if name in pins:
+            raise ValueError(f"release factory recipe repeats {name}")
+        pins[name] = value
+    required = {
+        "RUST_VERSION",
+        "RUST_COMMIT",
+        "ZIG_VERSION",
+        "CARGO_ZIGBUILD_VERSION",
+    }
+    if set(pins) != required:
+        raise ValueError("release factory recipe toolchain pins are incomplete")
+    if (
+        VERSION.fullmatch(pins["RUST_VERSION"]) is None
+        or not lower_hex(pins["RUST_COMMIT"], 40)
+        or pins["RUST_COMMIT"] == "0" * 40
+        or VERSION.fullmatch(pins["ZIG_VERSION"]) is None
+        or VERSION.fullmatch(pins["CARGO_ZIGBUILD_VERSION"]) is None
+    ):
+        raise ValueError("release factory recipe toolchain pins are malformed")
+    return recipe_bytes, pins
+
+
+def factory_inputs(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(regular(path, "release factory inputs", 256 * 1024))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("release factory input contract is malformed") from error
+    linux_host = value.get("linux_host") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("kind") != "ctx-release-factory-inputs"
+        or not isinstance(linux_host, dict)
+        or set(linux_host) != {"arch", "authority", "os_id", "os_version"}
+        or any(not isinstance(item, str) or not item for item in linux_host.values())
+    ):
+        raise ValueError("release factory input contract is malformed")
+    return value
+
+
+def rust_version_matches(observed: object, pins: dict[str, str]) -> bool:
+    if not isinstance(observed, str):
+        return False
+    version = re.escape(pins["RUST_VERSION"])
+    commit = re.escape(pins["RUST_COMMIT"][:9])
+    return re.fullmatch(
+        rf"rustc {version} \({commit} [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}\)",
+        observed,
+    ) is not None
 
 
 def validate(
@@ -95,10 +170,30 @@ def validate(
     builder = value.get("builder")
     runtime = value.get("runtime")
     inspector = value.get("inspector")
+    release_factory = value.get("release_factory")
+    expected_top = {
+        "artifact_sha256",
+        "build_system",
+        "builder",
+        "cargo_lock_sha256",
+        "gates",
+        "inspector",
+        "linux_build",
+        "platform",
+        "release_factory",
+        "representative_cpu_proof",
+        "runtime",
+        "rust_version",
+        "schema_version",
+        "source",
+        "target",
+    }
     if (
-        value.get("schema_version") != 1
+        set(value) != expected_top
+        or value.get("schema_version") != 1
         or value.get("platform") != platform
         or value.get("target") != target.get("public_rust_target")
+        or value.get("build_system") != "cargo-zigbuild"
         or value.get("artifact_sha256") != artifact_sha256
         or not lower_hex(value.get("cargo_lock_sha256"), 64)
         or (
@@ -119,101 +214,101 @@ def validate(
         )
     if value.get("linux_build") != linux_build:
         raise ValueError(
-            f"{release_label} build-info does not match the matrix build contract"
+            f"{release_label} build-info does not match the matrix ABI contract"
         )
     if (
         not isinstance(gates, dict)
+        or set(gates)
+        != {"local_runtime", "local_runtime_authority", "static", "static_abi"}
         or gates.get("static") != "passed"
         or gates.get("static_abi") != "passed"
+        or gates.get("local_runtime") != "not_run"
+        or gates.get("local_runtime_authority") != "not_run"
     ):
         raise ValueError(
-            f"{release_label} build-info does not record passed static ABI gates"
+            f"{release_label} build-info does not record factory and static ABI gates"
         )
     build_info_sha256 = hashlib.sha256(build_info_bytes).hexdigest()
-    release_factory = value.get("release_factory")
     if target.get("public_construction_authority") != "linux-cross-cargo-zigbuild-v1":
         raise ValueError(
             f"{release_label} build-info uses a non-factory construction authority"
         )
     if target.get("public_construction_authority") == "linux-cross-cargo-zigbuild-v1":
+        recipe_bytes, pins = factory_recipe(matrix_path, target)
+        inputs_path = factory_inputs_path or matrix_path.with_name(
+            "release-factory-inputs-v1.json"
+        )
+        inputs = factory_inputs(inputs_path)
+        linux_host = inputs["linux_host"]
+        if not isinstance(linux_host, dict):
+            raise ValueError("release factory Linux host contract is unavailable")
         expected_sdk_sha256 = None
-        try:
-            factory_inputs = json.loads(
-                (
-                    factory_inputs_path
-                    or Path("contracts/release-factory-inputs-v1.json")
-                ).read_bytes()
-            )
-            linux_host = factory_inputs["linux_host"]
-            if linux_host != {
-                "arch": "x86_64",
-                "authority": "ctx-release-factory-ubuntu24-x86_64-v1",
-                "os_id": "ubuntu",
-                "os_version": "24.04",
-            }:
-                raise ValueError("release factory Linux host contract is invalid")
-            expected_builder_authority = linux_host["authority"]
-            expected_builder_os = (
-                f'{linux_host["os_id"]}-{linux_host["os_version"]}-'
-                f'{linux_host["arch"]}'
-            )
-            if target.get("os") == "macos":
-                expected_sdk_sha256 = factory_inputs["macos_sdk"]["archive_sha256"]
-                expected_sdk_authority = factory_inputs["macos_sdk"]["authority"]
-        except (KeyError, OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
-            raise ValueError("release factory input contract is unavailable")
+        expected_sdk_authority = None
+        expected_builder_authority = linux_host["authority"]
+        expected_builder_os = (
+            f'{linux_host["os_id"]}-{linux_host["os_version"]}-'
+            f'{linux_host["arch"]}'
+        )
+        if target.get("os") == "macos":
+            macos_sdk = inputs.get("macos_sdk")
+            if not isinstance(macos_sdk, dict):
+                raise ValueError("release factory macOS SDK contract is unavailable")
+            expected_sdk_sha256 = macos_sdk.get("archive_sha256")
+            expected_sdk_authority = macos_sdk.get("authority")
         if (
             not isinstance(release_factory, dict)
-            or release_factory.get("authority") != "linux-cross-cargo-zigbuild-v1"
-            or release_factory.get("zig_version") != "0.15.2"
-            or release_factory.get("cargo_zigbuild_version") != "0.23.0"
-            or (
-                target.get("os") == "macos"
-                and release_factory.get("macos_sdk_sha256") != expected_sdk_sha256
-            )
-            or (
-                target.get("os") == "macos"
-                and release_factory.get("macos_sdk_authority")
-                != expected_sdk_authority
-            )
-            or (
-                target.get("os") != "macos"
-                and release_factory.get("macos_sdk_sha256") is not None
-            )
+            or set(release_factory)
+            != {
+                "authority",
+                "cargo_zigbuild_version",
+                "macos_sdk_authority",
+                "macos_sdk_sha256",
+                "zig_version",
+            }
+            or release_factory.get("authority")
+            != target.get("public_construction_authority")
+            or release_factory.get("zig_version") != pins["ZIG_VERSION"]
+            or release_factory.get("cargo_zigbuild_version")
+            != pins["CARGO_ZIGBUILD_VERSION"]
+            or release_factory.get("macos_sdk_sha256") != expected_sdk_sha256
+            or release_factory.get("macos_sdk_authority")
+            != expected_sdk_authority
+            or not rust_version_matches(value.get("rust_version"), pins)
         ):
             raise ValueError(
                 f"{release_label} build-info does not bind the pinned Linux factory"
             )
-        for label, identity in (
-            ("builder", builder),
-            ("inspector", inspector),
-            ("runtime", runtime),
-        ):
-            if (
-                not isinstance(identity, dict)
-                or not isinstance(identity.get("authority"), str)
-                or not identity["authority"]
-            ):
-                raise ValueError(f"{release_label} {label} authority is missing")
-        if not isinstance(inspector.get("tool"), str) or not inspector["tool"]:
-            raise ValueError(f"{release_label} inspector tool identity is missing")
         if (
-            builder.get("authority") != expected_builder_authority
+            not isinstance(builder, dict)
+            or set(builder) != {"authority", "image_id", "os", "recipe_sha256"}
+            or builder.get("authority") != expected_builder_authority
+            or builder.get("image_id") is not None
             or builder.get("os") != expected_builder_os
+            or builder.get("recipe_sha256")
+            != hashlib.sha256(recipe_bytes).hexdigest()
         ):
             raise ValueError(
-                f"{release_label} builder authority or OS identity is incorrect"
+                f"{release_label} builder provenance does not match the factory inputs and recipe"
             )
-    if target.get("os") != "linux":
-        return build_info_sha256
-
-    if (
-        gates.get("local_runtime") != "not_run"
-        or gates.get("local_runtime_authority") != "not_run"
-    ):
-        raise ValueError(
-            "cross-built Linux build-info must leave native runtime proof to the fan-out"
-        )
+        if (
+            not isinstance(inspector, dict)
+            or set(inspector) != {"authority", "image_id", "tool"}
+            or not isinstance(inspector.get("authority"), str)
+            or not inspector["authority"]
+            or inspector.get("image_id") is not None
+            or not isinstance(inspector.get("tool"), str)
+            or not inspector["tool"]
+        ):
+            raise ValueError(f"{release_label} inspector tool identity is missing")
+        if (
+            runtime
+            != {"authority": "native-fanout-deferred-v1", "image_id": None}
+            or value.get("representative_cpu_proof")
+            != {"profile": None, "qemu_version": None}
+        ):
+            raise ValueError(
+                f"{release_label} runtime provenance is not factory-deferred"
+            )
     return build_info_sha256
 
 
@@ -316,7 +411,6 @@ def main() -> int:
     parser.add_argument(
         "--factory-inputs",
         type=Path,
-        default=Path("contracts/release-factory-inputs-v1.json"),
     )
     args = parser.parse_args()
     if args.source_commit is not None and (

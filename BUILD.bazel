@@ -599,6 +599,7 @@ sh_test(
         "scripts/macos-release-publisher-policy.sh",
         "scripts/native-execution-proof.py",
         "scripts/release/release_bundle.py",
+        "scripts/release/seal-linux-factory-candidate.py",
         "scripts/release-sbom.py",
         "scripts/release_sbom/__init__.py",
         "scripts/release_sbom/dependency_materials.py",
@@ -651,7 +652,6 @@ sh_test(
         "scripts/semantic_release_assets/common.py",
         "scripts/semantic_release_assets/contracts.py",
         "scripts/smoke-daemon-semantic-release.sh",
-        "scripts/write-public-cli-build-info.py",
     ],
     tags = ["release-gate"],
     target_compatible_with = ["@platforms//os:linux"],
@@ -805,6 +805,7 @@ sh_test(
         "contracts/release-factory-inputs-v1.json",
         "contracts/release-targets-v1.json",
         "scripts/check-public-cli-build-info.py",
+        "scripts/release/build-public-candidate-on-linux.sh",
         "scripts/verify-windows-authenticode.ps1",
         "scripts/validate-public-cli-factory-artifact.sh",
     ],
@@ -1371,9 +1372,4 @@ test_suite(
     tests = [
         ":ci_tests",
     ] + NIGHTLY_TESTS,
-)
-
-test_suite(
-    name = "release_tests",
-    tests = [":nightly_tests"],
 )

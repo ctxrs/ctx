@@ -42,20 +42,21 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
             windows["public_construction_authority"],
             "linux-cross-cargo-zigbuild-v1",
         )
-        self.assertEqual(
-            windows["bazel_platform"],
-            "//tools/bazel/platforms:release_windows_x64_gnu",
-        )
+        self.assertNotIn("bazel_platform", windows)
         self.assertIsNone(windows["linux_build"])
         linux = next(
             target for target in value["targets"] if target["id"] == "linux-x64"
         )
-        self.assertEqual(linux["linux_build"]["glibc_max"], "2.35")
-        self.assertEqual(linux["linux_build"]["rust_toolchain"], "1.97.1")
-        self.assertEqual(
-            linux["linux_build"]["rust_sysroot"],
-            "/opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu",
-        )
+        self.assertEqual(linux["linux_build"], {"glibc_max": "2.35"})
+        serialized = json.dumps(value)
+        for stale_field in (
+            "builder_image",
+            "rust_commit",
+            "rust_sysroot",
+            "rust_toolchain",
+            "ubuntu_snapshot",
+        ):
+            self.assertNotIn(stale_field, serialized)
 
     def test_advisory_scanner_must_cover_every_release_target(self) -> None:
         value = matrix.load_and_validate()
@@ -124,7 +125,6 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
             public_artifact="ctx-freebsd-x64",
             helper_artifact="ctx-pro-freebsd-x64",
             public_construction_label="scripts/release/build-public-candidate-on-linux.sh",
-            bazel_platform="//tools/bazel/platforms:release_freebsd_x64",
             runtime_authority="native-freebsd-x86_64",
             linux_build=None,
         )
@@ -152,7 +152,7 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported policy value or path"):
                 matrix.load_and_validate(path)
 
-    def test_linux_build_baseline_drift_is_rejected(self) -> None:
+    def test_linux_abi_baseline_drift_is_rejected(self) -> None:
         value = matrix.load_and_validate()
         linux = next(
             target for target in value["targets"] if target["id"] == "linux-x64"
@@ -162,6 +162,29 @@ class ReleaseTargetMatrixTest(unittest.TestCase):
             path = Path(directory) / "matrix.json"
             path.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "malformed immutable pins"):
+                matrix.load_and_validate(path)
+
+    def test_bazel_platform_cannot_reenter_the_target_shape(self) -> None:
+        value = matrix.load_and_validate()
+        value["targets"][0]["bazel_platform"] = (
+            "//tools/bazel/platforms:release_linux_arm64"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matrix.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing or unexpected fields"):
+                matrix.load_and_validate(path)
+
+    def test_stale_linux_builder_metadata_is_rejected(self) -> None:
+        value = matrix.load_and_validate()
+        linux = next(
+            target for target in value["targets"] if target["id"] == "linux-x64"
+        )
+        linux["linux_build"]["builder_image"] = "ubuntu:22.04"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matrix.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing or unexpected fields"):
                 matrix.load_and_validate(path)
 
 if __name__ == "__main__":

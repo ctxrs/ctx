@@ -19,6 +19,7 @@ PROD_SRCS = glob(["src/**/*.rs"], exclude = RUST_PROD_SRC_EXCLUDES)
 COMPILE_DATA = [
     "//:contracts/ctx-managed-pair-release-authority-v1.json",
     "//:contracts/ctx-managed-pair-state-v1.schema.json",
+    "//:release_target_matrix",
 ]
 
 rust_library(

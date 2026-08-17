@@ -366,13 +366,17 @@ class ManagedPairContractsTest(unittest.TestCase):
 
     def test_rsa_verifier_rejects_noncanonical_signature_integer_s_plus_n(self) -> None:
         value = manifest("linux-x64")
-        value["release_name"] = "v1.2.2"
         value["release_authority_key_id"] = "test-staging"
-        signed = envelope(value)
-        signature = base64.b64decode(signed["signature_base64"], validate=True)
         modulus, _ = contracts.rsa_public_numbers(test_authorities()["staging"]["public_key_pem"])
-        noncanonical = int.from_bytes(signature, "big") + modulus
-        self.assertLess(noncanonical, 1 << (len(signature) * 8))
+        for patch in range(100):
+            value["release_name"] = f"v1.2.{patch}"
+            signed = envelope(value)
+            signature = base64.b64decode(signed["signature_base64"], validate=True)
+            noncanonical = int.from_bytes(signature, "big") + modulus
+            if noncanonical < 1 << (len(signature) * 8):
+                break
+        else:
+            self.fail("could not construct a fixed-width noncanonical RSA integer")
         signed["signature_base64"] = base64.b64encode(noncanonical.to_bytes(len(signature), "big")).decode("ascii")
         self.assertFalse(
             contracts.verify_detached_signature(

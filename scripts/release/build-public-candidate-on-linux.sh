@@ -39,8 +39,9 @@ CTX_OSV_DATABASE_METADATA, and the Ubuntu 24.04 x86_64 host declared in
 contracts/release-factory-inputs-v1.json. Selecting a macOS target also
 requires --macos-sdk; official macOS selection signs and notarizes those
 selected binaries. Official Windows selection applies Azure Artifact Signing
-on this Linux host before checksums and manifests are sealed. A filtered or
---skip-runtimes candidate is non-promotable.
+on this Linux host before checksums and manifests are sealed. A filtered
+candidate is non-promotable. --skip-runtimes still emits the sealed five-target
+Core candidate; it omits only independently published semantic sidecars.
 The host may be a direct installation, VM, container, or Buildkite image.
 USAGE
 }
@@ -529,7 +530,7 @@ if [[ "${runtimes_built}" == "1" ]]; then
 fi
 
 candidate_releasable=0
-if [[ "${official}" == "1" && "${selection_complete}" == "1" && "${runtimes_built}" == "1" ]]; then
+if [[ "${official}" == "1" && "${selection_complete}" == "1" ]]; then
   candidate_releasable=1
 fi
 
@@ -554,11 +555,17 @@ doc={
     "source_commit": commit,
     "version": version,
     "selected_targets": selected_targets,
-    "releasable": official and selection_complete and runtimes_built,
+    "releasable": official and selection_complete,
+    "runtime_sidecars_included": runtimes_built,
     "files": files,
 }
 (root/"ctx-release-factory.json").write_text(json.dumps(doc,sort_keys=True,separators=(",",":"))+"\n")
 PY
+if [[ "${candidate_releasable}" == "1" ]]; then
+  python3 -I scripts/release/seal-linux-factory-candidate.py \
+    --core-only --candidate-dir "${artifact_stage}" \
+    --source-commit "${source_commit}" >/dev/null
+fi
 mv "${artifact_stage}" "${output_dir}"
 trap - EXIT
 rm -rf "${stage_dir}" "${sdk_cleanup:-}"

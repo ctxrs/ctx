@@ -12,7 +12,7 @@ trap 'rm -rf "${tmp}"' EXIT
 export CTX_PUBLIC_CLI_RUNTIME_AUTHORITY_BASELINE=ubuntu-24.04
 
 release_root="${tmp}/release-root"
-mkdir -p "${release_root}/contracts" "${release_root}/scripts"
+mkdir -p "${release_root}/contracts" "${release_root}/scripts/release"
 for release_script in \
   check-public-cli-build-info.py \
   dev-install-from-metadata.sh \
@@ -28,6 +28,8 @@ cp -L "${repo_root}/contracts/release-targets-v1.json" \
   "${release_root}/contracts/release-targets-v1.json"
 cp -L "${repo_root}/contracts/release-factory-inputs-v1.json" \
   "${release_root}/contracts/release-factory-inputs-v1.json"
+cp -L "${repo_root}/scripts/release/build-public-candidate-on-linux.sh" \
+  "${release_root}/scripts/release/build-public-candidate-on-linux.sh"
 test -f "${release_root}/contracts/release-targets-v1.json"
 test ! -L "${release_root}/contracts/release-targets-v1.json"
 cat > "${tmp}/ubuntu-24.04-os-release" <<'EOF'
@@ -505,55 +507,86 @@ sed \
   "${fake_ctx}" > "${cpu_ctx}"
 chmod 755 "${cpu_ctx}"
 printf 'synthetic lock\n' > "${tmp}/Cargo.lock"
-recipe="${repo_root}/scripts/release/build-public-candidate-on-linux.sh"
-recipe_sha256="$(sha256sum "${recipe}" | awk '{print $1}')"
-python3 "${repo_root}/scripts/write-public-cli-build-info.py" \
-  --output "${cpu_ctx}.build-info.json" \
-  --artifact "${cpu_ctx}" \
-  --cargo-lock "${tmp}/Cargo.lock" \
-  --platform linux-x64 \
-  --target x86_64-unknown-linux-gnu \
-  --source-commit 0123456789abcdef0123456789abcdef01234567 \
-  --source-clean true \
-  --rust-version "rustc 1.97.1 (8bab26f4f 2026-07-14)" \
-  --expected-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 \
-  --actual-builder-base sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 \
-  --builder-image-id sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  --builder-recipe-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
-  --runtime-image-id sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-  --inspector-image-id sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
-  --linux-builder-image docker.io/library/ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982 \
-  --linux-ubuntu-snapshot 20260701T000000Z \
-  --linux-glibc-max 2.35 \
-  --linux-rust-toolchain 1.97.1 \
-  --linux-rust-commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452 \
-  --linux-rust-sysroot /opt/rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu \
-  --static-status passed \
-  --local-runtime-status passed \
-  --local-runtime-authority authoritative
-python3 - "${cpu_ctx}.build-info.json" "${recipe_sha256}" <<'PY'
+recipe="${release_root}/scripts/release/build-public-candidate-on-linux.sh"
+python3 - \
+  "${cpu_ctx}" \
+  "${tmp}/Cargo.lock" \
+  "${release_root}/contracts/release-targets-v1.json" \
+  "${release_root}/contracts/release-factory-inputs-v1.json" \
+  "${recipe}" <<'PY'
+import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 
-path = Path(sys.argv[1])
-value = json.loads(path.read_bytes())
-value["builder"]["recipe_sha256"] = sys.argv[2]
-value["builder"]["authority"] = "ctx-release-factory-ubuntu24-x86_64-v1"
-value["builder"]["os"] = "ubuntu-24.04-x86_64"
-value["inspector"]["authority"] = "ctx-release-static-llvm-v1"
-value["inspector"]["tool"] = "LLVM version 20"
-value["runtime"]["authority"] = "native-fanout-deferred-v1"
-value["gates"]["local_runtime"] = "not_run"
-value["gates"]["local_runtime_authority"] = "not_run"
-value["release_factory"] = {
-    "authority": "linux-cross-cargo-zigbuild-v1",
-    "cargo_zigbuild_version": "0.23.0",
-    "macos_sdk_authority": None,
-    "macos_sdk_sha256": None,
-    "zig_version": "0.15.2",
+artifact, cargo_lock, matrix_path, inputs_path, recipe = map(Path, sys.argv[1:])
+matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+inputs = json.loads(inputs_path.read_text(encoding="utf-8"))
+target = next(item for item in matrix["targets"] if item["id"] == "linux-x64")
+host = inputs["linux_host"]
+pins = dict(re.findall(
+    r'^readonly (RUST_VERSION|RUST_COMMIT|ZIG_VERSION|CARGO_ZIGBUILD_VERSION)="([^"\n]+)"$',
+    recipe.read_text(encoding="utf-8"),
+    re.MULTILINE,
+))
+if set(pins) != {
+    "RUST_VERSION",
+    "RUST_COMMIT",
+    "ZIG_VERSION",
+    "CARGO_ZIGBUILD_VERSION",
+}:
+    raise SystemExit("factory recipe toolchain pins are incomplete")
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+value = {
+    "artifact_sha256": sha256(artifact),
+    "build_system": "cargo-zigbuild",
+    "builder": {
+        "authority": host["authority"],
+        "image_id": None,
+        "os": f'{host["os_id"]}-{host["os_version"]}-{host["arch"]}',
+        "recipe_sha256": sha256(recipe),
+    },
+    "cargo_lock_sha256": sha256(cargo_lock),
+    "gates": {
+        "local_runtime": "not_run",
+        "local_runtime_authority": "not_run",
+        "static": "passed",
+        "static_abi": "passed",
+    },
+    "inspector": {
+        "authority": "ctx-release-static-llvm-v1",
+        "image_id": None,
+        "tool": "LLVM version 20",
+    },
+    "linux_build": target["linux_build"],
+    "platform": "linux-x64",
+    "release_factory": {
+        "authority": target["public_construction_authority"],
+        "cargo_zigbuild_version": pins["CARGO_ZIGBUILD_VERSION"],
+        "macos_sdk_authority": None,
+        "macos_sdk_sha256": None,
+        "zig_version": pins["ZIG_VERSION"],
+    },
+    "representative_cpu_proof": {"profile": None, "qemu_version": None},
+    "runtime": {"authority": "native-fanout-deferred-v1", "image_id": None},
+    "rust_version": (
+        f'rustc {pins["RUST_VERSION"]} ({pins["RUST_COMMIT"][:9]} 2026-07-01)'
+    ),
+    "schema_version": 1,
+    "source": {
+        "clean": True,
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+    },
+    "target": target["public_rust_target"],
 }
-path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+artifact.with_name(f"{artifact.name}.build-info.json").write_text(
+    json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
 PY
 
 runtime_payload="${tmp}/runtime-payload"

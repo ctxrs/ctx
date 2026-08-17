@@ -14,9 +14,11 @@ routine entry points.
 
 Each named mode first builds `//...` with `--config=ci`, whose checked-in
 configuration inherits the strict Clippy aspect with `-Dwarnings`. It then runs
-the corresponding `//:ci_tests`, `//:nightly_tests`, or `//:release_tests`
-suite with the deterministic test configuration, without applying the lint
-aspect a second time.
+`//:ci_tests` for `ci` and `//:nightly_tests` for both `nightly` and `release`,
+with the deterministic test configuration and without applying the lint aspect
+a second time. Release mode differs only by its exact-clean-candidate Rust
+crate-size preflight; it does not maintain a duplicate suite that aliases
+nightly.
 
 During editing, run the smallest owning test and then the affected selector.
 Build-graph changes, unresolved comparison bases, selector failures, and

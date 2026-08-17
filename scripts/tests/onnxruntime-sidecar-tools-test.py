@@ -316,13 +316,15 @@ class ManifestTests(unittest.TestCase):
             self.assertNotIn("macos-release-signing-evidence.py", text, path.name)
             self.assertNotIn("temporary_output", text, path.name)
 
-    def test_macos_x64_validation_consumes_the_finalized_runtime_producer(self) -> None:
+    def test_macos_x64_runtime_is_semantic_only(self) -> None:
         pipeline = (REPO_ROOT / ".buildkite" / "pipeline.yml").read_text()
         producer = pipeline.index('key: "public-cli-macos-x64-runtime-producer"')
         validator = pipeline.index('key: "public-cli-macos-x64-native-smoke"')
+        handoff = pipeline.index('key: "semantic-release-handoff"')
         producer_end = pipeline.index("\n  - label:", producer)
         producer_block = pipeline[producer:producer_end]
         validator_block = pipeline[validator:producer] if validator < producer else pipeline[validator:]
+        handoff_block = pipeline[handoff:]
         self.assertIn("build-onnxruntime-sidecar.sh macos-x64", producer_block)
         self.assertIn("stage-github-release-assets.sh --transcode-runtime macos-x64", producer_block)
         self.assertNotIn("depends_on:", producer_block)
@@ -332,10 +334,13 @@ class ManifestTests(unittest.TestCase):
             producer_block,
         )
         self.assertNotIn('target/public-cli-artifacts/ctx-macos-x64', producer_block)
-        self.assertIn("--step public-cli-macos-x64-runtime-producer", validator_block)
-        self.assertIn('"public-cli-macos-x64-runtime-producer"', validator_block)
+        self.assertNotIn("--step public-cli-macos-x64-runtime-producer", validator_block)
+        self.assertNotIn('"public-cli-macos-x64-runtime-producer"', validator_block)
+        self.assertNotIn("onnxruntime", validator_block)
         self.assertNotIn("build-onnxruntime-sidecar.sh macos-x64", validator_block)
         self.assertNotIn("stage-github-release-assets.sh --transcode-runtime macos-x64", validator_block)
+        self.assertIn('"public-cli-macos-x64-runtime-producer"', handoff_block)
+        self.assertIn("--step public-cli-macos-x64-runtime-producer", handoff_block)
 
         stager = (REPO_ROOT / "scripts" / "stage-github-release-assets.sh").read_text()
         transcode_start = stager.index("transcode_runtime_asset()")
