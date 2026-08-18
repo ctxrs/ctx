@@ -91,9 +91,6 @@ for asset in "${semantic_assets[@]}"; do
     "$(sha256sum "${success_output}/${asset}" | awk '{print $1}')  ${asset}" \
     "${success_output}/SHA256SUMS"
 done
-test ! -e "${matrix}/ctx-linux-x64.release-complete.json"
-test ! -e "${matrix}/ctx-linux-aarch64.release-complete.json"
-
 missing="${tmp_dir}/missing"
 cp -a "${matrix}" "${missing}"
 rm "${missing}/${semantic_assets[0]}"

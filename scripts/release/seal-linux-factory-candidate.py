@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal runtime-complete Linux bundles or the shared five-target Core output."""
+"""Seal or verify the shared five-target Core release output."""
 
 from __future__ import annotations
 
@@ -10,9 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
-import tempfile
 
 
 def load_release_bundle():
@@ -167,8 +165,7 @@ def _core_identity(source_commit: str) -> dict[str, object]:
 def _core_file_record(
     path: Path, name: str, *, durable: bool = False
 ) -> dict[str, object]:
-    record = release_bundle._file_record(path, name, durable=durable)
-    return {key: record[key] for key in ("name", "sha256", "size")}
+    return release_bundle._file_record(path, name, durable=durable)
 
 
 def seal_core_candidate(candidate: Path, source_commit: str) -> str:
@@ -275,28 +272,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate-dir", required=True, type=Path)
     parser.add_argument("--source-commit", required=True)
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--core-only", action="store_true")
-    mode.add_argument("--verify-core-only", action="store_true")
+    parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
     candidate = args.candidate_dir.resolve(strict=True)
-    if args.core_only:
-        print(seal_core_candidate(candidate, args.source_commit))
-        return 0
-    if args.verify_core_only:
+    if args.verify:
         verify_core_candidate(candidate, args.source_commit)
         print("Core release completion verified")
         return 0
-    for platform in ("linux-x64", "linux-aarch64"):
-        with tempfile.TemporaryDirectory(
-            prefix=f"ctx-{platform}-seal-", dir=candidate.parent
-        ) as temporary:
-            stage = Path(temporary)
-            for name in release_bundle.expected_release_leaves(platform):
-                shutil.copy2(candidate / name, stage / name)
-            release_bundle.seal_bundle(stage, platform, args.source_commit)
-            marker = stage / f"ctx-{platform}.release-complete.json"
-            shutil.copy2(marker, candidate / marker.name)
+    print(seal_core_candidate(candidate, args.source_commit))
     return 0
 
 

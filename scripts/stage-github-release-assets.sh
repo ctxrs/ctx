@@ -631,7 +631,7 @@ fi
 }
 
 python3 -I scripts/release/seal-linux-factory-candidate.py \
-  --verify-core-only --candidate-dir "${requested_artifact_dir}" \
+  --verify --candidate-dir "${requested_artifact_dir}" \
   --source-commit "${source_commit}" >/dev/null
 
 if [[ "${out_dir}" != /* ]]; then

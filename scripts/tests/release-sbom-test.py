@@ -937,7 +937,7 @@ repository = "https://example.invalid/{name}"
             (factory_root / name).write_bytes(payload)
         subprocess.run(
             [sys.executable, "-I", str(SEALER), "--candidate-dir", str(factory_root),
-             "--source-commit", COMMIT, "--core-only"],
+             "--source-commit", COMMIT],
             check=True, capture_output=True, text=True,
         )
         completion_payload = (factory_root / FACTORY_COMPLETION).read_bytes()

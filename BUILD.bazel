@@ -645,7 +645,6 @@ sh_test(
         "scripts/dev-install-from-metadata.sh",
         "scripts/public-cli-host-runtime-evidence.sh",
         "scripts/public-cli-runtime-authority.sh",
-        "scripts/release/release_bundle.py",
         "scripts/release/build-public-candidate-on-linux.sh",
         "scripts/semantic-release-assets.py",
         "scripts/semantic_release_assets/__init__.py",

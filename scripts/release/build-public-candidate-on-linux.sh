@@ -543,7 +543,7 @@ doc={
 PY
 if [[ "${candidate_releasable}" == "1" ]]; then
   python3 -I scripts/release/seal-linux-factory-candidate.py \
-    --core-only --candidate-dir "${artifact_stage}" \
+    --candidate-dir "${artifact_stage}" \
     --source-commit "${source_commit}" >/dev/null
 fi
 mv "${artifact_stage}" "${output_dir}"

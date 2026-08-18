@@ -623,55 +623,15 @@ if find "${tmp}/onnx-runs" -name packaged-runtime-proof.txt -print -quit | grep 
   exit 1
 fi
 
-candidate="${tmp}/completed-candidate"
+candidate="${tmp}/nested-inputs"
 mkdir "${candidate}"
-candidate_leaves=(
-  ctx
-  ctx.build-info.json
-  ctx.candidate.json
-  ctx.cdx.json
-  ctx.cdx.json.sha256
-  ctx.dependency-advisory.json
-  ctx.sha256
-  ctx.size.json
-  ctx.third-party-notices.txt
-  ctx.third-party-notices.txt.sha256
-  ctx.version
-  ctx-onnxruntime-linux-x64.tar.gz
-  ctx-onnxruntime-linux-x64.tar.gz.sha256
-  ctx-onnxruntime-linux-x64.tar.zst
-  ctx-onnxruntime-linux-x64.tar.zst.asset.json
-  ctx-onnxruntime-linux-x64.tar.zst.sha256
-)
-for leaf in "${candidate_leaves[@]}"; do
-  case "${leaf}" in
-    ctx)
-      cp "${cpu_ctx}" "${candidate}/${leaf}"
-      chmod 0755 "${candidate}/${leaf}"
-      ;;
-    ctx.build-info.json)
-      cp "${cpu_ctx}.build-info.json" "${candidate}/${leaf}"
-      ;;
-    ctx.version)
-      printf 'ctx 0.25.0\n' > "${candidate}/${leaf}"
-      ;;
-    ctx-onnxruntime-linux-x64.tar.gz)
-      cp "${runtime_archive}" "${candidate}/${leaf}"
-      ;;
-    ctx-onnxruntime-linux-x64.tar.gz.sha256)
-      cp "${runtime_archive}.sha256" "${candidate}/${leaf}"
-      ;;
-    *)
-      printf 'completed candidate leaf %s\n' "${leaf}" > "${candidate}/${leaf}"
-      ;;
-  esac
-done
-candidate_commit=0123456789abcdef0123456789abcdef01234567
-bundle_tool="${repo_root}/scripts/release/release_bundle.py"
-seal_sha256="$(python3 -I "${bundle_tool}" seal \
-  --candidate-dir "${candidate}" \
-  --platform linux-x64 \
-  --source-commit "${candidate_commit}")"
+cp "${cpu_ctx}" "${candidate}/ctx"
+chmod 0755 "${candidate}/ctx"
+cp "${cpu_ctx}.build-info.json" "${candidate}/ctx.build-info.json"
+cp "${runtime_archive}" "${candidate}/ctx-onnxruntime-linux-x64.tar.gz"
+cp "${runtime_archive}.sha256" \
+  "${candidate}/ctx-onnxruntime-linux-x64.tar.gz.sha256"
+printf 'ctx 0.25.0\n' > "${candidate}/ctx.version"
 mkdir -p "${release_root}/tests/fixtures/custom-history-jsonl"
 printf '{}\n' > \
   "${release_root}/tests/fixtures/custom-history-jsonl/basic.jsonl"
@@ -719,11 +679,6 @@ if ! bash -ceu '
   cat "${tmp}/nested-onnx.err" >&2
   exit 1
 fi
-python3 -I "${bundle_tool}" verify \
-  --candidate-dir "${candidate}" \
-  --platform linux-x64 \
-  --source-commit "${candidate_commit}" \
-  --seal-sha256 "${seal_sha256}"
 grep -Fq 'ctx semantic smoke ok:' "${tmp}/nested-onnx.out"
 grep -Fq '"status":"passed"' \
   "${nested_smoke_root}/candidate-smoke.json"

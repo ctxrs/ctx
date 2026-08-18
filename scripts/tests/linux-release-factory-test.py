@@ -224,7 +224,6 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
                     sys.executable,
                     "-I",
                     os.fspath(SEALER),
-                    "--core-only",
                     "--candidate-dir",
                     os.fspath(candidate),
                     "--source-commit",
@@ -250,7 +249,7 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
                     sys.executable,
                     "-I",
                     os.fspath(SEALER),
-                    "--verify-core-only",
+                    "--verify",
                     "--candidate-dir",
                     os.fspath(candidate),
                     "--source-commit",
@@ -269,7 +268,7 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
                         sys.executable,
                         "-I",
                         os.fspath(SEALER),
-                        "--verify-core-only",
+                        "--verify",
                         "--candidate-dir",
                         os.fspath(candidate),
                         "--source-commit",
@@ -371,7 +370,8 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
         )
         self.assertIn('"releasable": official and selection_complete', source)
         self.assertIn('"runtime_sidecars_included": False', source)
-        self.assertIn("--core-only --candidate-dir", source)
+        self.assertIn("seal-linux-factory-candidate.py", source)
+        self.assertNotIn("--core-only", source)
         self.assertIn('"version": version', source)
         self.assertIn('"selected_targets": selected_targets', source)
         self.assertIn('factory_status="non-promotable"', source)

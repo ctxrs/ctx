@@ -46,7 +46,6 @@ git -C "${repo_root}" \
   commit -qm 'create release staging fixture'
 source_commit="$(git -C "${repo_root}" rev-parse --verify HEAD^{commit})"
 stage="${repo_root}/scripts/stage-github-release-assets.sh"
-bundle_tool="${repo_root}/scripts/release/release_bundle.py"
 
 fake_bin="${tmp_dir}/bin"
 matrix="${tmp_dir}/matrix"
@@ -181,18 +180,6 @@ for platform in macos-arm64 macos-x64; do
   printf '{}\n' > "${matrix}/ctx-${platform}.attestation.json"
   printf 'cms\n' > "${matrix}/ctx-${platform}.attestation.cms"
 done
-runtime_source="${tmp_dir}/runtime-source"
-cp -a "${matrix}" "${runtime_source}"
-for platform in linux-x64 linux-aarch64; do
-  runtime="ctx-onnxruntime-${platform}"
-  for archive in tar.gz tar.zst; do
-    printf 'synthetic %s.%s\n' "${runtime}" "${archive}" \
-      >"${runtime_source}/${runtime}.${archive}"
-    sha256sum "${runtime_source}/${runtime}.${archive}" | awk '{print $1}' \
-      >"${runtime_source}/${runtime}.${archive}.sha256"
-  done
-  printf '{}\n' >"${runtime_source}/${runtime}.tar.zst.asset.json"
-done
 proof_root="${tmp_dir}/native-proofs"
 for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
   binary="ctx-${platform}"
@@ -209,44 +196,6 @@ for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
       --output "${proof_root}/${platform}/ctx-${platform}.native-execution.json" >/dev/null
 done
 export CTX_PUBLIC_NATIVE_PROOF_DIR="${proof_root}"
-
-seal_linux_fixture() {
-  local platform="$1"
-  local binary="$2"
-  local source_dir="$3"
-  local commit="$4"
-  local tag="$5"
-  local runtime="ctx-onnxruntime-${platform}"
-  local candidate="${tmp_dir}/candidate-${platform}-${tag}"
-  local leaf
-  local leaves=(
-    "${binary}"
-    "${binary}.build-info.json"
-    "${binary}.candidate.json"
-    "${binary}.cdx.json"
-    "${binary}.cdx.json.sha256"
-    "${binary}.dependency-advisory.json"
-    "${binary}.sha256"
-    "${binary}.size.json"
-    "${binary}.third-party-notices.txt"
-    "${binary}.third-party-notices.txt.sha256"
-    "${binary}.version"
-    "${runtime}.tar.gz"
-    "${runtime}.tar.gz.sha256"
-    "${runtime}.tar.zst"
-    "${runtime}.tar.zst.asset.json"
-    "${runtime}.tar.zst.sha256"
-  )
-  mkdir -p "${candidate}"
-  for leaf in "${leaves[@]}"; do
-    cp "${source_dir}/${leaf}" "${candidate}/${leaf}"
-  done
-  "${real_python3}" -I "${bundle_tool}" seal \
-    --candidate-dir "${candidate}" \
-    --platform "${platform}" \
-    --source-commit "${commit}" >/dev/null
-  cp "${candidate}/ctx-${platform}.release-complete.json" "${source_dir}/"
-}
 
 seal_core_fixture() {
   local candidate="$1"
@@ -311,9 +260,6 @@ os.chmod(marker, 0o600)
 PY
 }
 
-seal_linux_fixture linux-x64 ctx "${runtime_source}" "${source_commit}" head
-seal_linux_fixture \
-  linux-aarch64 ctx-linux-aarch64 "${runtime_source}" "${source_commit}" head
 "${real_python3}" - "${matrix}/ctx-release-factory.json" \
   "${source_commit}" <<'PY'
 import hashlib
@@ -368,11 +314,17 @@ forged_matrix="${tmp_dir}/forged-source"
 cp -a "${matrix}" "${forged_matrix}"
 
 completed_fixture="${tmp_dir}/candidate-linux-x64-head"
+mkdir "${completed_fixture}"
+for archive in tar.gz tar.zst; do
+  printf 'completed runtime %s\n' "${archive}" \
+    >"${completed_fixture}/ctx-onnxruntime-linux-x64.${archive}"
+done
+printf '{}\n' >"${completed_fixture}/ctx-core.release-complete.json"
 completed_before="$(
   sha256sum \
     "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.gz" \
     "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.zst" \
-    "${completed_fixture}/ctx-linux-x64.release-complete.json"
+    "${completed_fixture}/ctx-core.release-complete.json"
 )"
 if /bin/bash "${stage}" --transcode-runtime linux-x64 \
   "${completed_fixture}" \
@@ -387,7 +339,7 @@ test "${completed_before}" = "$(
   sha256sum \
     "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.gz" \
     "${completed_fixture}/ctx-onnxruntime-linux-x64.tar.zst" \
-    "${completed_fixture}/ctx-linux-x64.release-complete.json"
+    "${completed_fixture}/ctx-core.release-complete.json"
 )"
 
 default_assets=(
