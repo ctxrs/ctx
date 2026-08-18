@@ -51,7 +51,7 @@ An unsigned, non-promotable local diagnostic:
 scripts/release/build-public-candidate-on-linux.sh \
   --source-commit "$(git rev-parse HEAD)" \
   --macos-sdk /private/path/MacOSX.sdk.tar.gz \
-  --diagnostic-unsigned --skip-runtimes
+  --diagnostic-unsigned
 ```
 
 The factory refuses a dirty checkout, an unsupported official host, an

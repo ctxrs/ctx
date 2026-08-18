@@ -84,7 +84,6 @@ steps:
       scripts/release/build-public-candidate-on-linux.sh \
         --source-commit "$${source_commit}" \
         --macos-sdk "$${CTX_MACOS_SDK_ROOT:?}" \
-        --skip-runtimes \
         --output-dir target/public-cli-artifacts
     agents:
       queue: "release-linux-managed"

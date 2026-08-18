@@ -358,20 +358,19 @@ class LinuxReleaseFactoryTest(unittest.TestCase):
         self.assertIn("verify-windows-authenticode.ps1", validator)
         self.assertNotIn("powershell.exe", launcher.lower())
 
-    def test_factory_requires_complete_core_but_not_runtimes_for_promotion(self) -> None:
+    def test_factory_constructs_only_the_complete_core_candidate(self) -> None:
         source = (ROOT / "scripts" / "release" / "build-public-candidate-on-linux.sh").read_text()
         self.assertIn("selection_complete=1", source)
-        self.assertIn("runtimes_built=0", source)
-        self.assertIn(
-            'if [[ "${official}" == "1" && "${selection_complete}" == "1" && "${build_runtimes}" == "1" ]]; then',
-            source,
-        )
+        self.assertNotIn("build_runtimes", source)
+        self.assertNotIn("runtimes_built", source)
+        self.assertNotIn("build-onnxruntime-sidecar.sh", source)
+        self.assertNotIn("--skip-runtimes", source)
         self.assertIn(
             'if [[ "${official}" == "1" && "${selection_complete}" == "1" ]]; then',
             source,
         )
         self.assertIn('"releasable": official and selection_complete', source)
-        self.assertIn('"runtime_sidecars_included": runtimes_built', source)
+        self.assertIn('"runtime_sidecars_included": False', source)
         self.assertIn("--core-only --candidate-dir", source)
         self.assertIn('"version": version', source)
         self.assertIn('"selected_targets": selected_targets', source)

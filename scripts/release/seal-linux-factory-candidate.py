@@ -87,7 +87,7 @@ def verify_factory_manifest(candidate: Path, source_commit: str) -> dict[str, ob
         or value.get("selected_targets")
         != [target_id for target_id, _, _ in CORE_TARGETS]
         or value.get("releasable") is not True
-        or not isinstance(value.get("runtime_sidecars_included"), bool)
+        or value.get("runtime_sidecars_included") is not False
         or not isinstance(value.get("version"), str)
         or VERSION.fullmatch(value["version"]) is None
     ):

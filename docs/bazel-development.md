@@ -259,9 +259,9 @@ to the five fan-out jobs.
 With no mode flag, the staging helper validates and stages the five CLI
 binaries plus their SBOMs and notices. Semantic models and runtime transports
 are constructed and handed off by the separate Semantic release graph; they
-are not accepted by the Core GitHub staging command. When the factory runs
-with `--skip-runtimes`, Core staging requires its aggregate Core completion
-marker, not per-platform Linux runtime completion identities.
+are not accepted by the Core factory or GitHub staging command. Core staging
+requires its aggregate Core completion marker, not per-platform Linux runtime
+completion identities.
 
 Aggregate staging also writes a separate release-authority handoff directory;
 it does not add those files to the GitHub Release asset set or `SHA256SUMS`.

@@ -154,38 +154,9 @@ cli_sources=(
   ctx-macos-x64
   ctx.exe
 )
-legacy_runtimes=(
-  ctx-onnxruntime-linux-x64.tar.gz
-  ctx-onnxruntime-linux-aarch64.tar.gz
-  ctx-onnxruntime-macos-arm64.tar.gz
-  ctx-onnxruntime-macos-x64.tar.gz
-  ctx-onnxruntime-windows-x64.zip
-)
-semantic_runtimes=(
-  ctx-onnxruntime-linux-x64.tar.zst
-  ctx-onnxruntime-linux-aarch64.tar.zst
-  ctx-onnxruntime-macos-arm64.tar.zst
-  ctx-onnxruntime-macos-x64.tar.zst
-  ctx-windowsml-windows-x64.zip
-)
-extra_semantic_assets=(
-  ctx-multilingual-e5-small-onnx-fp32-1.0.0.tar.xz
-  ctx-multilingual-e5-small-onnx-o4-fp16-1.0.0.tar.xz
-  ctx-multilingual-e5-small-coreml-fp16-1.0.0.tar.xz
-  ctx-onnxruntime-linux-x64-cuda12.tar.zst
-)
-
-for asset in \
-  "${cli_sources[@]}" \
-  "${legacy_runtimes[@]}" \
-  "${semantic_runtimes[@]}" \
-  "${extra_semantic_assets[@]}"
-do
+for asset in "${cli_sources[@]}"; do
   printf 'synthetic %s\n' "${asset}" > "${matrix}/${asset}"
   sha256sum "${matrix}/${asset}" | awk '{print $1}' > "${matrix}/${asset}.sha256"
-done
-for asset in "${semantic_runtimes[@]}" "${extra_semantic_assets[@]}"; do
-  printf '{}\n' >"${matrix}/${asset}.asset.json"
 done
 
 for binary in "${cli_sources[@]}"; do
@@ -207,15 +178,20 @@ for binary in "${cli_sources[@]}"; do
 done
 for platform in macos-arm64 macos-x64; do
   printf '{}\n' > "${matrix}/ctx-${platform}.signing.json"
-  printf '{}\n' > "${matrix}/ctx-onnxruntime-${platform}.signing.json"
   printf '{}\n' > "${matrix}/ctx-${platform}.attestation.json"
   printf 'cms\n' > "${matrix}/ctx-${platform}.attestation.cms"
-  printf '{}\n' > "${matrix}/ctx-onnxruntime-${platform}.attestation.json"
-  printf 'cms\n' > "${matrix}/ctx-onnxruntime-${platform}.attestation.cms"
-  printf '{}\n' \
-    > "${matrix}/ctx-onnxruntime-${platform}.release-attestation.json"
-  printf 'cms\n' \
-    > "${matrix}/ctx-onnxruntime-${platform}.release-attestation.cms"
+done
+runtime_source="${tmp_dir}/runtime-source"
+cp -a "${matrix}" "${runtime_source}"
+for platform in linux-x64 linux-aarch64; do
+  runtime="ctx-onnxruntime-${platform}"
+  for archive in tar.gz tar.zst; do
+    printf 'synthetic %s.%s\n' "${runtime}" "${archive}" \
+      >"${runtime_source}/${runtime}.${archive}"
+    sha256sum "${runtime_source}/${runtime}.${archive}" | awk '{print $1}' \
+      >"${runtime_source}/${runtime}.${archive}.sha256"
+  done
+  printf '{}\n' >"${runtime_source}/${runtime}.tar.zst.asset.json"
 done
 proof_root="${tmp_dir}/native-proofs"
 for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
@@ -335,9 +311,9 @@ os.chmod(marker, 0o600)
 PY
 }
 
-seal_linux_fixture linux-x64 ctx "${matrix}" "${source_commit}" head
+seal_linux_fixture linux-x64 ctx "${runtime_source}" "${source_commit}" head
 seal_linux_fixture \
-  linux-aarch64 ctx-linux-aarch64 "${matrix}" "${source_commit}" head
+  linux-aarch64 ctx-linux-aarch64 "${runtime_source}" "${source_commit}" head
 "${real_python3}" - "${matrix}/ctx-release-factory.json" \
   "${source_commit}" <<'PY'
 import hashlib
@@ -358,7 +334,7 @@ value = {
     "files": files,
     "kind": "ctx-linux-release-factory",
     "releasable": True,
-    "runtime_sidecars_included": True,
+    "runtime_sidecars_included": False,
     "schema_version": 1,
     "selected_targets": [
         "linux-arm64",
@@ -390,13 +366,6 @@ chmod 0644 \
 forged_commit="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 forged_matrix="${tmp_dir}/forged-source"
 cp -a "${matrix}" "${forged_matrix}"
-rm "${forged_matrix}/ctx-linux-x64.release-complete.json" \
-  "${forged_matrix}/ctx-linux-aarch64.release-complete.json" \
-  "${forged_matrix}/ctx-core.release-complete.json"
-seal_linux_fixture linux-x64 ctx \
-  "${forged_matrix}" "${forged_commit}" forged
-seal_linux_fixture linux-aarch64 ctx-linux-aarch64 \
-  "${forged_matrix}" "${forged_commit}" forged
 
 completed_fixture="${tmp_dir}/candidate-linux-x64-head"
 completed_before="$(
@@ -532,62 +501,31 @@ grep -Fq -- "--sbom ${tmp_dir}/.github-release-assets." \
 ! grep -Fq -- "--artifact ${matrix}/" "${default_build_info_log}"
 ! grep -Fq -- "--artifact ${matrix}/" "${default_sbom_log}"
 
-core_only_candidate="${tmp_dir}/core-only-candidate"
-cp -a "${matrix}" "${core_only_candidate}"
-rm -f \
-  "${core_only_candidate}/ctx-core.release-complete.json" \
-  "${core_only_candidate}/ctx-linux-x64.release-complete.json" \
-  "${core_only_candidate}/ctx-linux-aarch64.release-complete.json"
-for sidecar in \
-  "${legacy_runtimes[@]}" \
-  "${semantic_runtimes[@]}" \
-  "${extra_semantic_assets[@]}"; do
-  rm -f \
-    "${core_only_candidate}/${sidecar}" \
-    "${core_only_candidate}/${sidecar}.sha256" \
-    "${core_only_candidate}/${sidecar}.asset.json"
-done
-rm -f "${core_only_candidate}"/ctx-onnxruntime-macos-*.signing.json \
-  "${core_only_candidate}"/ctx-onnxruntime-macos-*.attestation.json \
-  "${core_only_candidate}"/ctx-onnxruntime-macos-*.attestation.cms \
-  "${core_only_candidate}"/ctx-onnxruntime-macos-*.release-attestation.json \
-  "${core_only_candidate}"/ctx-onnxruntime-macos-*.release-attestation.cms
-"${real_python3}" - "${core_only_candidate}/ctx-release-factory.json" <<'PY'
-import hashlib
+runtime_claim_candidate="${tmp_dir}/runtime-claim-candidate"
+cp -a "${matrix}" "${runtime_claim_candidate}"
+rm "${runtime_claim_candidate}/ctx-core.release-complete.json"
+"${real_python3}" - "${runtime_claim_candidate}/ctx-release-factory.json" <<'PY'
 import json
 import sys
-from pathlib import Path
 
 path = sys.argv[1]
 with open(path, encoding="utf-8") as source:
     value = json.load(source)
-value["runtime_sidecars_included"] = False
-root = Path(path).parent
-files = []
-for leaf in sorted(root.iterdir(), key=lambda item: item.name):
-    if (
-        leaf.is_file()
-        and not leaf.name.startswith(".")
-        and leaf.name not in {Path(path).name, "ctx-core.release-complete.json"}
-    ):
-        raw = leaf.read_bytes()
-        files.append(
-            {"file": leaf.name, "sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)}
-        )
-value["files"] = files
+value["runtime_sidecars_included"] = True
 with open(path, "w", encoding="utf-8") as output:
     json.dump(value, output, sort_keys=True, separators=(",", ":"))
     output.write("\n")
 PY
-seal_core_fixture "${core_only_candidate}" "${source_commit}"
-core_only_output="${tmp_dir}/core-only-output"
-CTX_FAKE_SBOM_LOG="${tmp_dir}/core-only-sbom.log" \
-  CTX_FAKE_BUILD_INFO_LOG="${tmp_dir}/core-only-build-info.log" \
-  CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
-  /bin/bash "${stage}" "${core_only_candidate}" "${core_only_output}"
-assert_exact_assets "${core_only_output}" 15 "${default_assets[@]}"
-test -z "$(find "${core_only_output}" "${core_only_output}.authority" \
-  -maxdepth 1 -type f -name '*runtime*' -print -quit)"
+seal_core_fixture "${runtime_claim_candidate}" "${source_commit}"
+if CTX_REAL_PYTHON3="${real_python3}" PATH="${fake_bin}:${PATH}" \
+  /bin/bash "${stage}" "${runtime_claim_candidate}" \
+  "${tmp_dir}/runtime-claim-output" \
+  >"${tmp_dir}/runtime-claim.out" 2>"${tmp_dir}/runtime-claim.err"; then
+  printf 'GitHub stager accepted a Core factory claiming Semantic runtimes\n' >&2
+  exit 1
+fi
+grep -Fq 'not the exact releasable five-target source' \
+  "${tmp_dir}/runtime-claim.err"
 
 nonreleasable_candidate="${tmp_dir}/nonreleasable-candidate"
 cp -a "${matrix}" "${nonreleasable_candidate}"

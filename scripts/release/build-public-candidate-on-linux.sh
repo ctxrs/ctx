@@ -19,7 +19,7 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: scripts/release/build-public-candidate-on-linux.sh [OPTIONS]
 
-Builds the selected public ctx CLI binaries on Linux x86_64 and writes one
+Builds the selected public ctx CLI binaries on Linux x86_64 and writes one Core
 candidate directory. By default all five targets are selected. Native platform
 jobs validate these exact bytes; they do not rebuild them.
 
@@ -32,7 +32,6 @@ Options:
   --jobs N                 Cargo jobs per target (default: 2)
   --build-parallelism N    Concurrent target builds (default: 2)
   --diagnostic-unsigned    Build and inspect, but do not sign or emit releasable manifests
-  --skip-runtimes          Do not build the four Linux-hostable runtime sidecars
 
 Official mode requires CTX_OSV_SCANNER, CTX_OSV_DATABASE_DIR,
 CTX_OSV_DATABASE_METADATA, and the Ubuntu 24.04 x86_64 host declared in
@@ -40,8 +39,9 @@ contracts/release-factory-inputs-v1.json. Selecting a macOS target also
 requires --macos-sdk; official macOS selection signs and notarizes those
 selected binaries. Official Windows selection applies Azure Artifact Signing
 on this Linux host before checksums and manifests are sealed. A filtered
-candidate is non-promotable. --skip-runtimes still emits the sealed five-target
-Core candidate; it omits only independently published semantic sidecars.
+candidate is non-promotable. Semantic models and runtime transports are
+constructed only by the separate Semantic release graph; this factory never
+constructs or seals them.
 The host may be a direct installation, VM, container, or Buildkite image.
 USAGE
 }
@@ -89,7 +89,6 @@ cargo_jobs="${CTX_RELEASE_CARGO_JOBS:-2}"
 build_parallelism="${CTX_RELEASE_BUILD_PARALLELISM:-2}"
 target_specs=()
 official=1
-build_runtimes=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source-commit) shift; source_commit="${1:-}" ;;
@@ -104,7 +103,6 @@ while [[ $# -gt 0 ]]; do
     --jobs) shift; cargo_jobs="${1:-}" ;;
     --build-parallelism) shift; build_parallelism="${1:-}" ;;
     --diagnostic-unsigned) official=0 ;;
-    --skip-runtimes) build_runtimes=0 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -512,39 +510,21 @@ for target_id in "${target_ids[@]}"; do
   fi
 done
 
-runtimes_built=0
-if [[ "${official}" == "1" && "${selection_complete}" == "1" && "${build_runtimes}" == "1" ]]; then
-  export CTX_MACOS_RELEASE_SIGNING=required
-  for runtime_platform in linux-x64 linux-aarch64 macos-arm64 windows-x64; do
-    scripts/build-onnxruntime-sidecar.sh "${runtime_platform}" "${artifact_stage}"
-    case "${runtime_platform}" in
-      linux-*|macos-*) scripts/stage-github-release-assets.sh --transcode-runtime "${runtime_platform}" "${artifact_stage}" ;;
-    esac
-  done
-  runtimes_built=1
-fi
-
-if [[ "${runtimes_built}" == "1" ]]; then
-  python3 -I scripts/release/seal-linux-factory-candidate.py \
-    --candidate-dir "${artifact_stage}" --source-commit "${source_commit}"
-fi
-
 candidate_releasable=0
 if [[ "${official}" == "1" && "${selection_complete}" == "1" ]]; then
   candidate_releasable=1
 fi
 
 python3 - "${artifact_stage}" "${source_commit}" "${official}" \
-  "${selection_complete}" "${runtimes_built}" "${version}" "${target_ids[@]}" <<'PY'
+  "${selection_complete}" "${version}" "${target_ids[@]}" <<'PY'
 import hashlib, json, os, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 commit = sys.argv[2]
 official = sys.argv[3] == "1"
 selection_complete = sys.argv[4] == "1"
-runtimes_built = sys.argv[5] == "1"
-version = sys.argv[6]
-selected_targets = sys.argv[7:]
+version = sys.argv[5]
+selected_targets = sys.argv[6:]
 files=[]
 for path in sorted(root.iterdir(), key=lambda item: item.name):
     if path.is_file() and not path.name.startswith("."):
@@ -556,7 +536,7 @@ doc={
     "version": version,
     "selected_targets": selected_targets,
     "releasable": official and selection_complete,
-    "runtime_sidecars_included": runtimes_built,
+    "runtime_sidecars_included": False,
     "files": files,
 }
 (root/"ctx-release-factory.json").write_text(json.dumps(doc,sort_keys=True,separators=(",",":"))+"\n")

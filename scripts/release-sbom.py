@@ -307,7 +307,7 @@ def factory_manifest_records(
         or value.get("source_commit") != source_commit
         or value.get("selected_targets") != target_ids
         or value.get("releasable") is not True
-        or not isinstance(value.get("runtime_sidecars_included"), bool)
+        or value.get("runtime_sidecars_included") is not False
         or not isinstance(value.get("version"), str)
         or VERSION.fullmatch(value["version"]) is None
     ):

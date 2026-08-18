@@ -197,7 +197,7 @@ if factory.get("if") != core_release_condition:
 if (
     factory_command.count("build-public-candidate-on-linux.sh") != 1
     or factory_command.count("--macos-sdk") != 1
-    or factory_command.count("--skip-runtimes") != 1
+    or "--skip-runtimes" in factory_command
 ):
     fail("factory must invoke one five-target Core-only Linux construction route")
 if "build-onnxruntime-sidecar.sh" in factory_command or "semantic" in factory_command.lower():
