@@ -75,8 +75,9 @@ five native lanes. The validator checks the factory checksum, executes the
 native candidate, and checks that validation did not mutate it. macOS
 additionally performs strict native codesign verification. Windows requires
 `Get-AuthenticodeSignature` to accept the exact factory bytes and match the
-factory certificate evidence. Semantic runtime smokes use the same CLI bytes.
-Only after all five jobs pass does the staging job assemble GitHub assets.
+factory certificate evidence. Semantic runtime smokes run in their independent
+graph and do not consume Core factory artifacts. Only after all five Core jobs
+pass does the staging job assemble GitHub assets.
 
 Bazel remains available for hermetic development and qualification checks. It
 does not construct or publish public CLI candidates; the Linux factory is the

@@ -120,6 +120,37 @@ class ReleaseDirectoryTests(unittest.TestCase):
             BUNDLE.commit_directory(stage, self.parent / "output")
         self.assertEqual(outside.read_text(), "sentinel\n")
 
+    def test_publication_rolls_back_if_the_second_commit_fails(self) -> None:
+        authority_stage = self.stage(".authority-stage")
+        assets_stage = self.stage(".assets-stage")
+        authority = self.parent / "authority"
+        assets = self.parent / "assets"
+        rename = BUNDLE._rename_bound_directory_noreplace
+        calls = 0
+
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected second publication failure")
+            return rename(*args, **kwargs)
+
+        with mock.patch.object(
+            BUNDLE,
+            "_rename_bound_directory_noreplace",
+            side_effect=fail_second,
+        ), self.assertRaisesRegex(OSError, "injected second publication failure"):
+            BUNDLE.commit_publication(
+                [(authority_stage, authority), (assets_stage, assets)]
+            )
+
+        self.assertFalse(authority.exists())
+        self.assertFalse(assets.exists())
+        self.assertEqual(
+            (authority_stage / "nested/asset").read_text(), "asset\n"
+        )
+        self.assertEqual((assets_stage / "nested/asset").read_text(), "asset\n")
+
     def test_commit_fails_if_bound_parent_is_detached_after_rename(self) -> None:
         stage = self.stage()
         output = self.parent / "output"

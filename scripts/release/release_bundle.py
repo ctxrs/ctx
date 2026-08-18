@@ -350,24 +350,106 @@ def preflight_publication_directories(
 
 
 def commit_directory(stage: Path, output: Path) -> None:
-    stage = _absolute(stage)
-    output = _absolute(output)
-    _require_directory(stage, "release stage")
-    if stage.parent != output.parent or stage == output:
-        raise BundleError("release stage must be a sibling of its final destination")
-    parent = _open_bound_directory(output.parent, "release destination parent")
+    commit_publication([(stage, output)])
+
+
+def commit_publication(pairs: list[tuple[Path, Path]]) -> None:
+    """Publish several staged trees as one rollback-safe transaction.
+
+    The last pair is the externally visible publication boundary. Earlier
+    pairs are committed first and moved back to their exact staged names if a
+    later no-replace rename fails.
+    """
+    if not pairs:
+        raise BundleError("release publication must contain at least one directory")
+    normalized = [(_absolute(stage), _absolute(output)) for stage, output in pairs]
+    all_paths = [path for pair in normalized for path in pair]
+    if len(set(all_paths)) != len(all_paths):
+        raise BundleError("release publication directories are invalid")
+
+    prepared: list[tuple[int, Path, Path, Path, tuple[int, int]]] = []
     try:
-        stage_identity = _durable_tree(stage, "release staged tree")
-        _rename_bound_directory_noreplace(
-            parent,
-            output.parent,
-            stage,
-            output,
-            stage_identity,
-            "release output",
-        )
+        for stage, output in normalized:
+            _require_directory(stage, "release stage")
+            if stage.parent != output.parent or stage == output:
+                raise BundleError(
+                    "release stage must be a sibling of its final destination"
+                )
+            parent = _open_bound_directory(
+                output.parent, "release destination parent"
+            )
+            try:
+                identity = _durable_tree(stage, "release staged tree")
+                _require_bound_child(
+                    parent,
+                    output.parent,
+                    stage,
+                    identity,
+                    "release stage",
+                )
+                if _entry_binding(
+                    parent, _valid_leaf_name(output.name, "release destination")
+                ) is not None:
+                    raise DestinationExists(
+                        f"release destination already exists: {output}"
+                    )
+            except BaseException:
+                os.close(parent)
+                raise
+            prepared.append((parent, output.parent, stage, output, identity))
+
+        try:
+            for parent, parent_path, stage, output, identity in prepared:
+                _rename_bound_directory_noreplace(
+                    parent,
+                    parent_path,
+                    stage,
+                    output,
+                    identity,
+                    "release output",
+                )
+        except BaseException as publication_error:
+            rollback_errors: list[str] = []
+            for parent, parent_path, stage, output, identity in reversed(prepared):
+                staged = _entry_binding(parent, stage.name)
+                published = _entry_binding(parent, output.name)
+                if (
+                    staged is not None
+                    and stat.S_ISDIR(staged.st_mode)
+                    and (staged.st_dev, staged.st_ino) == identity
+                    and published is None
+                ):
+                    continue
+                if (
+                    staged is None
+                    and published is not None
+                    and stat.S_ISDIR(published.st_mode)
+                    and (published.st_dev, published.st_ino) == identity
+                ):
+                    try:
+                        _rename_bound_directory_noreplace(
+                            parent,
+                            parent_path,
+                            output,
+                            stage,
+                            identity,
+                            "release rollback",
+                        )
+                    except BaseException as rollback_error:
+                        rollback_errors.append(f"{output}: {rollback_error}")
+                    continue
+                rollback_errors.append(
+                    f"{output}: publication identity became ambiguous"
+                )
+            if rollback_errors:
+                raise BundleError(
+                    "release publication failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from publication_error
+            raise
     finally:
-        os.close(parent)
+        for parent, *_ in prepared:
+            os.close(parent)
 
 
 def main() -> int:
@@ -385,6 +467,13 @@ def main() -> int:
     commit_dir = commands.add_parser("commit-directory")
     commit_dir.add_argument("--stage-dir", type=Path, required=True)
     commit_dir.add_argument("--output-dir", type=Path, required=True)
+    commit_publication_parser = commands.add_parser("commit-publication")
+    commit_publication_parser.add_argument(
+        "--stage-dir", type=Path, action="append", required=True
+    )
+    commit_publication_parser.add_argument(
+        "--output-dir", type=Path, action="append", required=True
+    )
     args = parser.parse_args()
     try:
         if args.command == "preflight-publication":
@@ -404,8 +493,14 @@ def main() -> int:
                 )
             finally:
                 os.close(descriptor)
-        else:
+        elif args.command == "commit-directory":
             commit_directory(args.stage_dir, args.output_dir)
+        else:
+            if len(args.stage_dir) != len(args.output_dir):
+                raise BundleError(
+                    "release publication stage and output counts must match"
+                )
+            commit_publication(list(zip(args.stage_dir, args.output_dir)))
     except (BundleError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

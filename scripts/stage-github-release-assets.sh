@@ -653,12 +653,11 @@ stage_complete_candidate \
   "${artifact_dir}" "${staged_out}" \
   "${source_commit}" "${repo_root}" "${staged_authority}" \
   "${requested_native_proof_dir}"
-python3 -I "${bundle_tool}" commit-directory \
+python3 -I "${bundle_tool}" commit-publication \
+  --stage-dir "${staged_authority}" \
+  --output-dir "${authority_dir}" \
   --stage-dir "${staged_out}" \
   --output-dir "${out_dir}"
-python3 -I "${bundle_tool}" commit-directory \
-  --stage-dir "${staged_authority}" \
-  --output-dir "${authority_dir}"
 trap - EXIT
 printf 'staged GitHub release assets in %s; candidate authority handoff in %s\n' \
   "${out_dir}" "${authority_dir}"
