@@ -240,6 +240,50 @@ class ReleaseAdvisoryInputsTest(unittest.TestCase):
             "v2.4.0/osv-scanner_linux_arm64",
         )
 
+    def test_prepares_every_requested_database_ecosystem_once(self) -> None:
+        task_root = self.root / "mixed-task"
+        task_root.mkdir()
+        observed_command = []
+
+        def fake_run(argv, **kwargs):
+            observed_command.extend(argv)
+            return self.fake_run(argv, **kwargs)
+
+        with mock.patch.object(
+            MODULE.urllib.request,
+            "urlopen",
+            return_value=Response(self.scanner_bytes),
+        ), mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            side_effect=fake_run,
+        ):
+            MODULE.prepare_inputs(
+                self.root,
+                task_root,
+                "linux-x64",
+                ("npm", "crates.io", "npm"),
+            )
+
+        ecosystem_arguments = [
+            observed_command[index + 1]
+            for index, value in enumerate(observed_command)
+            if value == "--ecosystem"
+        ]
+        self.assertEqual(ecosystem_arguments, ["crates.io", "npm"])
+
+    def test_rejects_an_empty_database_ecosystem_set(self) -> None:
+        task_root = self.root / "empty-task"
+        task_root.mkdir()
+        with mock.patch.object(
+            MODULE.urllib.request,
+            "urlopen",
+            return_value=Response(self.scanner_bytes),
+        ), mock.patch.object(MODULE.subprocess, "run") as run:
+            with self.assertRaisesRegex(MODULE.InputError, "ecosystem is invalid"):
+                MODULE.prepare_inputs(self.root, task_root, "linux-x64", ())
+        run.assert_not_called()
+
     def test_cached_ordinary_endpoint_cannot_certify_latest(self) -> None:
         with mock.patch.object(
             UPDATE_MODULE.urllib.request,

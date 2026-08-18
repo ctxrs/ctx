@@ -25,6 +25,7 @@ SCANNER_ASSETS = {
     "macos-x64": "osv-scanner_darwin_amd64",
     "windows-x64": "osv-scanner_windows_amd64.exe",
 }
+DATABASE_ECOSYSTEMS = ("crates.io", "npm")
 HEX_64 = re.compile(r"[0-9a-f]{64}")
 VERSION = re.compile(r"[0-9]+[.][0-9]+[.][0-9]+")
 
@@ -126,6 +127,7 @@ def prepare_inputs(
     repo_root: Path,
     task_root: Path,
     target_id: str,
+    ecosystems: tuple[str, ...] = ("crates.io",),
 ) -> tuple[Path, Path, Path, str]:
     version, expected_sha256, asset = load_scanner_spec(
         repo_root / "security/release-advisory-policy-v1.json",
@@ -137,18 +139,24 @@ def prepare_inputs(
 
     database = task_root / "database"
     metadata = task_root / "database-metadata.json"
+    selected_ecosystems = tuple(sorted(set(ecosystems)))
+    if not selected_ecosystems or any(
+        ecosystem not in DATABASE_ECOSYSTEMS for ecosystem in selected_ecosystems
+    ):
+        raise InputError("release advisory database ecosystem is invalid")
+    update_command = [
+        sys.executable,
+        "-I",
+        str(repo_root / "scripts/update-release-advisory-db.py"),
+        "--database-root",
+        str(database),
+        "--metadata",
+        str(metadata),
+    ]
+    for ecosystem in selected_ecosystems:
+        update_command.extend(["--ecosystem", ecosystem])
     update = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(repo_root / "scripts/update-release-advisory-db.py"),
-            "--database-root",
-            str(database),
-            "--metadata",
-            str(metadata),
-            "--ecosystem",
-            "crates.io",
-        ],
+        update_command,
         capture_output=True,
         check=False,
         env=acquisition_environment(),
@@ -174,6 +182,12 @@ def prepare_inputs(
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("--target", choices=sorted(SCANNER_ASSETS), required=True)
+    result.add_argument(
+        "--ecosystem",
+        action="append",
+        choices=DATABASE_ECOSYSTEMS,
+        help="OSV ecosystem snapshot to provision (default: crates.io)",
+    )
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result
 
@@ -195,6 +209,7 @@ def main() -> int:
             ROOT,
             task_root,
             args.target,
+            tuple(args.ecosystem or ("crates.io",)),
         )
         print(
             "release advisory inputs prepared: "
