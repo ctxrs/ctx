@@ -12,6 +12,7 @@ pub(super) fn project_output(body: &Value, effective_type: &str) -> OpenCodeJson
             role: body
                 .get("role")
                 .and_then(Value::as_str)
+                .filter(|role| !role.is_empty())
                 .unwrap_or("tool")
                 .to_owned(),
             body: body.clone(),

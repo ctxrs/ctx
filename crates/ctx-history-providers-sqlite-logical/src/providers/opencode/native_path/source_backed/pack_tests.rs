@@ -255,6 +255,54 @@ fn strict_native_tool_call_preserves_exact_target_range_and_lexical_prefix() {
 }
 
 #[test]
+fn empty_command_fact_does_not_reject_the_opencode_source() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("empty-command-opencode.db");
+    let body = json!({
+        "type": "tool",
+        "callID": "call-empty-command",
+        "tool": "bash",
+        "state": {
+            "status": "error",
+            "input": {
+                "command": "",
+                "path": "src/noop.rs",
+                "description": "noop"
+            }
+        }
+    });
+    drop(write_current_schema(&database, temp.path(), &body));
+
+    let (_, _, records) = scan_current_schema(&database);
+    let [record] = records.as_slice() else {
+        panic!("expected the empty-command call to remain a Core record");
+    };
+    let activity = record.content.activity.as_ref().unwrap();
+    let invocation = activity.invocation.as_ref().unwrap();
+    assert_eq!(invocation.tool, "bash");
+    assert_eq!(
+        invocation.arguments,
+        ActivityJsonCapture::Present {
+            value: json!({
+                "command": "",
+                "path": "src/noop.rs",
+                "description": "noop"
+            })
+        }
+    );
+    assert!(activity.facts.iter().all(|fact| !fact.value.is_empty()));
+    assert!(activity
+        .facts
+        .iter()
+        .any(|fact| fact.kind == LiteralFactKind::File && fact.value == "src/noop.rs"));
+    assert!(!activity
+        .facts
+        .iter()
+        .any(|fact| fact.kind == LiteralFactKind::Command));
+    record.validate_contract().unwrap();
+}
+
+#[test]
 fn strict_native_tool_call_ambiguity_and_overflow_abstain_without_cross_call_inference() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let database = temp.path().join("ambiguous-tool-opencode.db");

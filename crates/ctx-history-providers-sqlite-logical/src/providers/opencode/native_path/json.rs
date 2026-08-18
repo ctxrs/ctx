@@ -193,6 +193,21 @@ mod tests {
         };
         assert_eq!(diagnostic.body["exit_code"], 7);
         assert_eq!(diagnostic.body["command"], "false");
+
+        let (empty_role, _) = project(
+            r#"{"type":"tool_result","role":"","output":"ok"}"#,
+            "result",
+            None,
+            OpenCodeNativeSchemaFamily::SessionMessageSeq,
+        );
+        let OpenCodeJsonProjection::Output(OpenCodeOutputJson {
+            diagnostic: Some(diagnostic),
+        }) = empty_role
+        else {
+            panic!("empty output role did not retain a diagnostic");
+        };
+        assert_eq!(diagnostic.role, "tool");
+        assert_eq!(diagnostic.body["role"], "");
     }
 
     #[test]

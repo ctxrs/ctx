@@ -494,10 +494,12 @@ fn collect_opencode_fact_values(
         return;
     }
     match value {
-        serde_json::Value::String(value) => facts.push(ProviderDeclaredFact {
-            kind,
-            value: value.clone(),
-        }),
+        serde_json::Value::String(value) if !value.is_empty() => {
+            facts.push(ProviderDeclaredFact {
+                kind,
+                value: value.clone(),
+            });
+        }
         serde_json::Value::Array(values) => {
             for value in values {
                 collect_opencode_fact_values(kind, value, facts, maximum);
@@ -579,6 +581,9 @@ fn unique_opencode_string(body: &serde_json::Value, pointers: &[&str]) -> Option
         let Some(value) = body.pointer(pointer).and_then(serde_json::Value::as_str) else {
             continue;
         };
+        if value.is_empty() {
+            continue;
+        }
         if selected.is_some_and(|selected| selected != value) {
             return None;
         }
@@ -608,6 +613,16 @@ fn opencode_json_alias_capture(body: &serde_json::Value, pointers: &[&str]) -> A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_string_treats_empty_aliases_as_absent() {
+        let body = serde_json::json!({"callID": "", "call_id": "call-valid"});
+        assert_eq!(
+            unique_opencode_string(&body, &["/callID", "/call_id"]),
+            Some("call-valid".to_owned())
+        );
+        assert_eq!(unique_opencode_string(&body, &["/callID"]), None);
+    }
 
     #[test]
     fn relationship_rejection_precedes_payload_and_timestamp_rejections() {
