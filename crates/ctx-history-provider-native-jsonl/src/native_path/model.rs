@@ -27,6 +27,8 @@ pub(crate) struct DirectJsonlEvent {
     pub(crate) raw_ordinal: u64,
     pub(crate) sub_ordinal: u32,
     pub(crate) native_record_id: Option<String>,
+    #[serde(default)]
+    pub(crate) native_parent_id: Option<String>,
     pub(crate) stable_retry_discriminator: Option<DirectJsonlRetryDiscriminator>,
     pub(crate) provider_event_sequence_index: u64,
     pub(crate) provider_event_hash: String,
@@ -47,6 +49,16 @@ pub(crate) struct DirectJsonlEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum DirectJsonlRetryDiscriminator {
     FactoryDroidToolResult { tool_use_id: String },
+    FactoryDroidRepeatedRecord {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        occurrence: u32,
+    },
+}
+
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

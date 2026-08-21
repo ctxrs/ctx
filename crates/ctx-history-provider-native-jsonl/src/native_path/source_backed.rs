@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -22,6 +23,7 @@ use crate::{
     NativeJsonlError as CaptureError, NativeJsonlRuntime, ProviderJsonlInventoryLimit, Result,
 };
 use ctx_history_capture_model::ProviderSourceFailureKind;
+use ctx_history_capture_runtime::BaseEventLookup;
 use ctx_history_jsonl::{
     fit_jsonl_activity, observe_opened_file, probe_first_record, FallbackEventIdentityState,
     JsonlActivityObservedBytes, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyError,
@@ -540,6 +542,8 @@ fn bind_opened_leaf<R: NativeJsonlRuntime>(
     Ok(())
 }
 
+type RepeatedRecordKey = (String, u32);
+
 struct DirectJsonlFamilyProjector<R: NativeJsonlRuntime> {
     adapter: DirectJsonlFamilyAdapter<R>,
     source: SourceKey,
@@ -548,6 +552,13 @@ struct DirectJsonlFamilyProjector<R: NativeJsonlRuntime> {
     projector: DirectJsonlProjector,
     fallback_identities: FallbackEventIdentityState<JsonlRuntimeLookup<R>, CaptureError>,
     rejected_records: u64,
+    /// Per-scan occurrence counter for a given native `(record_id, sub_ordinal)`.
+    repeated_record_occurrence: BTreeMap<RepeatedRecordKey, u32>,
+    /// Per-scan occurrence counter for a given native `(record_id, sub_ordinal,
+    /// parent_id)` used to mint distinct identities for repeats under the same
+    /// parent.
+    repeated_record_parent_occurrence: BTreeMap<(String, u32, String), u32>,
+    base_event_lookup: Option<JsonlRuntimeLookup<R>>,
 }
 
 impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
@@ -577,7 +588,7 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             format!("{}.direct-jsonl-fallback", adapter.provider.as_str()),
             DIRECT_JSONL_EVENT_IDENTITY_REVISION,
             mode.into(),
-            base_event_lookup,
+            base_event_lookup.clone(),
         )?;
         Ok(Self {
             adapter,
@@ -587,7 +598,94 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             projector,
             fallback_identities,
             rejected_records: 0,
+            repeated_record_occurrence: BTreeMap::new(),
+            repeated_record_parent_occurrence: BTreeMap::new(),
+            base_event_lookup,
         })
+    }
+
+    /// Factory AI Droid sometimes emits one message id more than once without
+    /// self-parented retry evidence (observed: one tool_result message written
+    /// under different parents, or with and without parent linkage). The first
+    /// scanned occurrence of a native record id keeps the base identity. Every
+    /// later occurrence is discriminated by its parent linkage (`None` when
+    /// there is none) and a per-parent occurrence index, so no repeat collides
+    /// with the base or with another repeat. Repeats are rare and limited to
+    /// FactoryAiDroid; other providers keep upstream behavior.
+    ///
+    /// This is intentionally scan-order dependent: the first occurrence keeps
+    /// the base identity. FactoryAiDroid sources use CertifiedSuffix append
+    /// semantics and do not reorder an already-imported prefix, so the base
+    /// is stable across normal re-imports and appends.
+    fn apply_repeated_record_discriminator(
+        &mut self,
+        event: &mut DirectJsonlEvent,
+    ) -> DirectJsonlAdapterResult<()> {
+        if self.adapter.provider != CaptureProvider::FactoryAiDroid
+            || event.stable_retry_discriminator.is_some()
+        {
+            return Ok(());
+        }
+        let Some(native_record_id) = event.native_record_id.as_deref() else {
+            return Ok(());
+        };
+        let key = (native_record_id.to_owned(), event.sub_ordinal);
+        let scan_occurrence = self
+            .repeated_record_occurrence
+            .entry(key.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(0);
+        if *scan_occurrence == 0 && !self.base_identity_exists(event)? {
+            return Ok(());
+        }
+        let parent_id = event.native_parent_id.clone();
+        let parent_occurrence = self
+            .repeated_record_parent_occurrence
+            .entry((
+                native_record_id.to_owned(),
+                event.sub_ordinal,
+                parent_id.clone().unwrap_or_default(),
+            ))
+            .and_modify(|count| *count += 1)
+            .or_insert(0);
+        event.stable_retry_discriminator =
+            Some(DirectJsonlRetryDiscriminator::FactoryDroidRepeatedRecord {
+                parent_id,
+                occurrence: *parent_occurrence,
+            });
+        Ok(())
+    }
+
+    fn base_identity_exists(&self, event: &DirectJsonlEvent) -> DirectJsonlAdapterResult<bool> {
+        let Some(base_lookup) = self.base_event_lookup.as_ref() else {
+            return Ok(false);
+        };
+        let Some(native_record_id) = event.native_record_id.as_deref() else {
+            return Ok(false);
+        };
+        let native_item_key = NativeItemKey::native_id(
+            format!("{}.direct-jsonl-event", self.adapter.provider.as_str()),
+            TypedKey::utf8(native_record_id)?,
+        )?;
+        let subrecord_selector = (event.sub_ordinal != 0)
+            .then(|| {
+                SubrecordSelector::certified_position(
+                    "direct-jsonl-subrecord",
+                    TypedKey::U64(u64::from(event.sub_ordinal)),
+                    PositionStability::StableSlot,
+                )
+            })
+            .transpose()?;
+        let candidate = derive_event_id(EventIdentityInput {
+            source: &self.source,
+            session_id: self.session_id,
+            logical_item_kind: "direct-jsonl-event",
+            native_item_key: &native_item_key,
+            subrecord_selector: subrecord_selector.as_ref(),
+        })?;
+        base_lookup
+            .contains(candidate.as_uuid())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()).into())
     }
 
     fn validate_session(&self) -> DirectJsonlAdapterResult<&DirectJsonlSession> {
@@ -626,6 +724,9 @@ impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<
         }
         let session = self.validate_session().map_err(capture_error)?.clone();
         for event in projected.events {
+            let mut event = event;
+            self.apply_repeated_record_discriminator(&mut event)
+                .map_err(capture_error)?;
             emit(
                 project_event(
                     self.adapter,
@@ -682,6 +783,23 @@ fn project_event<R: NativeJsonlRuntime>(
                 TypedKey::utf8(tool_use_id)?,
             )?)
         }
+        Some(DirectJsonlRetryDiscriminator::FactoryDroidRepeatedRecord {
+            parent_id,
+            occurrence,
+        }) => {
+            let parent_key = match parent_id {
+                Some(id) => TypedKey::utf8(id)?,
+                None => TypedKey::Null,
+            };
+            Some(SubrecordSelector::native_id(
+                "factory-ai-droid.repeated-record",
+                TypedKey::composite(vec![
+                    parent_key,
+                    TypedKey::U64(u64::from(event.sub_ordinal)),
+                    TypedKey::U64(u64::from(*occurrence)),
+                ])?,
+            )?)
+        }
         None if event.sub_ordinal != 0 => Some(SubrecordSelector::certified_position(
             "direct-jsonl-subrecord",
             TypedKey::U64(u64::from(event.sub_ordinal)),
@@ -720,6 +838,21 @@ fn project_event<R: NativeJsonlRuntime>(
             TypedKey::composite(vec![
                 TypedKey::utf8("factory-ai-droid.retry-tool-result")?,
                 TypedKey::utf8(tool_use_id)?,
+            ])?
+        }
+        Some(DirectJsonlRetryDiscriminator::FactoryDroidRepeatedRecord {
+            parent_id,
+            occurrence,
+        }) => {
+            let parent_key = match parent_id {
+                Some(id) => TypedKey::utf8(id)?,
+                None => TypedKey::Null,
+            };
+            TypedKey::composite(vec![
+                TypedKey::utf8("factory-ai-droid.repeated-record")?,
+                parent_key,
+                TypedKey::U64(u64::from(event.sub_ordinal)),
+                TypedKey::U64(u64::from(*occurrence)),
             ])?
         }
         None => TypedKey::U64(u64::from(event.sub_ordinal)),

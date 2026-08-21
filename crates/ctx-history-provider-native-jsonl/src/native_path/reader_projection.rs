@@ -488,6 +488,14 @@ fn direct_event(
     }
     let positional_event_index = direct_jsonl_event_sequence(raw_ordinal, sub_ordinal)?;
     let native_record_id = direct_jsonl_native_event_identity(provider, value);
+    let native_parent_id = match provider {
+        CaptureProvider::FactoryAiDroid => value
+            .get("parentId")
+            .and_then(Value::as_str)
+            .filter(|parent_id| !parent_id.trim().is_empty())
+            .map(str::to_owned),
+        _ => None,
+    };
     let stable_retry_discriminator = match provider {
         CaptureProvider::FactoryAiDroid if result.is_some() => {
             factory_droid_retry_discriminator(value, sub_ordinal).map_err(|_| {
@@ -526,6 +534,7 @@ fn direct_event(
         raw_ordinal,
         sub_ordinal,
         native_record_id,
+        native_parent_id,
         stable_retry_discriminator,
         provider_event_sequence_index,
         provider_event_hash,
