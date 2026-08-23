@@ -255,3 +255,44 @@ fn claude_route_publishes_cold_append_and_recovers_from_carried_checkpoint() {
         ),
     );
 }
+
+#[test]
+fn claude_route_indexes_repeated_native_record_id_as_distinct_events() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let native_session_id = "repeated-uuid-claude-session";
+    let transcript = projects
+        .join("project")
+        .join(format!("{native_session_id}.jsonl"));
+    // Claude Code can re-emit a record that reuses an earlier `uuid`; both rows
+    // stay distinct events, so neither may be dropped or collapsed.
+    write_transcript(
+        &transcript,
+        &[
+            claude_message("user", "repeated-uuid", native_session_id, "literal first"),
+            claude_message(
+                "assistant",
+                "repeated-uuid",
+                native_session_id,
+                "literal second",
+            ),
+        ],
+    );
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+    let index = temp.path().join("claude-repeated-uuid-index");
+
+    let published = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+
+    assert!(
+        published.failed_routes.is_empty(),
+        "{:?}",
+        published.failed_routes
+    );
+    let records = indexed_records(&index, CaptureProvider::Claude, native_session_id);
+    assert_literal_bodies(&records, &["literal first", "literal second"]);
+    assert_ne!(records[0].event_id, records[1].event_id);
+}

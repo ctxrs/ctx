@@ -48,9 +48,10 @@ const SESSION_KEY_NAMESPACE: &str = "claude.session";
 const NATIVE_EVENT_KEY_NAMESPACE: &str = "claude.event";
 const FALLBACK_EVENT_ID_VERSION: &str = "claude.fallback-event.v1";
 const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
+const NATIVE_EVENT_OCCURRENCE_DOMAIN: &[u8] = b"ctx-claude-native-event-occurrence-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
-const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
+const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v7";
 const PARSER_REVISION: &str = "claude-shared-jsonl-core-activity-v1";
 
 mod binding;
@@ -184,7 +185,7 @@ where
             binding,
             identities,
             rejected_records: 0,
-            fallback_identities: match (mode, base_event_lookup) {
+            event_occurrences: match (mode, base_event_lookup) {
                 (JsonlFamilyProjectionMode::CertifiedAppend, Some(base_lookup)) => {
                     JsonlAppendOccurrenceState::for_append(base_lookup)
                 }
@@ -208,12 +209,16 @@ struct ClaudeProjector<B: ProviderRuntimeBinding> {
     identities: Identities,
     session: ClaudeSessionMetadata,
     rejected_records: u64,
-    fallback_identities: JsonlAppendOccurrenceState<[u8; 32], ProviderBaseEventLookup<B>>,
+    event_occurrences: JsonlAppendOccurrenceState<[u8; 32], ProviderBaseEventLookup<B>>,
 }
 
+/// Occurrence-resolved event key material for one retained row.
+///
+/// `fallback_digest` is present only for rows without a native record id;
+/// `duplicate_occurrence` separates exact repeats in either case.
 #[derive(Debug, Clone, Copy)]
-struct FallbackEventIdentity {
-    digest: [u8; 32],
+struct ClaudeEventOccurrence {
+    fallback_digest: Option<[u8; 32]>,
     duplicate_occurrence: u64,
 }
 
@@ -244,7 +249,7 @@ where
     fn retry_replacement(&mut self) {
         self.session = ClaudeSessionMetadata::new(self.binding.key.clone());
         self.rejected_records = 0;
-        self.fallback_identities = JsonlAppendOccurrenceState::default();
+        self.event_occurrences = JsonlAppendOccurrenceState::default();
     }
 
     fn project(
@@ -292,18 +297,18 @@ where
             let normalized_body = lexical_body(&row);
             let annotation =
                 claude_annotation(&row, parsed.cwd.as_deref(), parsed.git_branch.as_deref())?;
-            let fallback_identity = next_fallback_event_identity::<B>(
+            let occurrence = next_event_occurrence::<B>(
                 &row,
                 &self.source,
                 self.identities.session_id,
-                &mut self.fallback_identities,
+                &mut self.event_occurrences,
             )?;
             let core = core_record(
                 &self.source,
                 &self.binding,
                 &self.identities,
                 row,
-                fallback_identity,
+                occurrence,
                 normalized_body,
                 annotation,
             )?;
@@ -467,11 +472,11 @@ fn core_record(
     binding: &Binding,
     identities: &Identities,
     row: ClaudeRetainedRow,
-    fallback_identity: Option<FallbackEventIdentity>,
+    occurrence: ClaudeEventOccurrence,
     normalized_body: String,
     annotation: CoreRecordAnnotation,
 ) -> Result<CoreRecord> {
-    let native_item_key = native_item_key(&row, fallback_identity)?;
+    let native_item_key = native_item_key(&row, occurrence)?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id: identities.session_id,
@@ -480,7 +485,7 @@ fn core_record(
         subrecord_selector: None,
     })
     .map_err(contract)?;
-    let native_event_id = native_event_typed_key(&row, fallback_identity)?;
+    let native_event_id = native_event_typed_key(&row, occurrence)?;
     let event_sequence = row_event_sequence(&row)?;
     let mut record = CoreRecord::new_selected(
         event_id,
@@ -626,85 +631,87 @@ fn session_identity(source: &SourceKey, native_key: TypedKey) -> Result<StableEn
 
 fn native_item_key(
     row: &ClaudeRetainedRow,
-    fallback_identity: Option<FallbackEventIdentity>,
+    occurrence: ClaudeEventOccurrence,
 ) -> Result<NativeItemKey> {
-    if let Some(native_record_id) = row.native_record_id.as_deref() {
-        return NativeItemKey::composite(
-            NATIVE_EVENT_KEY_NAMESPACE,
-            vec![
-                TypedKey::utf8(native_record_id).map_err(contract)?,
-                TypedKey::U64(row.identity.source_subrecord_index),
-            ],
-        )
-        .map_err(contract);
-    }
-    let fallback_identity = fallback_identity.ok_or(CaptureError::SystemInvariant(
-        "Claude fallback event identity was not assigned",
-    ))?;
-    NativeItemKey::composite(
-        NATIVE_EVENT_KEY_NAMESPACE,
-        fallback_event_key_parts(fallback_identity)?,
-    )
-    .map_err(contract)
+    NativeItemKey::composite(NATIVE_EVENT_KEY_NAMESPACE, event_key_parts(row, occurrence)?)
+        .map_err(contract)
 }
 
 fn native_event_typed_key(
     row: &ClaudeRetainedRow,
-    fallback_identity: Option<FallbackEventIdentity>,
+    occurrence: ClaudeEventOccurrence,
 ) -> Result<TypedKey> {
-    if let Some(native_record_id) = row.native_record_id.as_deref() {
-        return TypedKey::composite(vec![
-            TypedKey::utf8(native_record_id).map_err(contract)?,
-            TypedKey::U64(row.identity.source_subrecord_index),
-        ])
-        .map_err(contract);
-    }
-    let fallback_identity = fallback_identity.ok_or(CaptureError::SystemInvariant(
-        "Claude fallback native event key was not assigned",
-    ))?;
-    TypedKey::composite(fallback_event_key_parts(fallback_identity)?).map_err(contract)
+    TypedKey::composite(event_key_parts(row, occurrence)?).map_err(contract)
 }
 
-fn next_fallback_event_identity<B: ProviderRuntimeBinding>(
+fn event_key_parts(
+    row: &ClaudeRetainedRow,
+    occurrence: ClaudeEventOccurrence,
+) -> Result<Vec<TypedKey>> {
+    match (row.native_record_id.as_deref(), occurrence.fallback_digest) {
+        (Some(native_record_id), None) => Ok(vec![
+            TypedKey::utf8(native_record_id).map_err(contract)?,
+            TypedKey::U64(row.identity.source_subrecord_index),
+            TypedKey::U64(occurrence.duplicate_occurrence),
+        ]),
+        (None, Some(digest)) => Ok(vec![
+            TypedKey::utf8(FALLBACK_EVENT_ID_VERSION).map_err(contract)?,
+            TypedKey::bytes(digest.to_vec()).map_err(contract)?,
+            TypedKey::U64(occurrence.duplicate_occurrence),
+        ]),
+        _ => Err(CaptureError::SystemInvariant(
+            "Claude event occurrence does not match its row identity",
+        )),
+    }
+}
+
+fn next_event_occurrence<B: ProviderRuntimeBinding>(
     row: &ClaudeRetainedRow,
     source: &SourceKey,
     session_id: StableEntityId,
     state: &mut JsonlAppendOccurrenceState<[u8; 32], ProviderBaseEventLookup<B>>,
-) -> Result<Option<FallbackEventIdentity>> {
-    if row.native_record_id.is_some() {
-        return Ok(None);
-    }
-    let digest = fallback_event_digest(row)?;
-    let occurrence = state.next(
-        digest,
-        || CaptureError::SystemInvariant("Claude fallback duplicate occurrence overflowed"),
-        |base_lookup, occurrence| {
-            base_occurrence_exists::<B>(base_lookup, source, session_id, digest, occurrence)
+) -> Result<ClaudeEventOccurrence> {
+    // Claude Code can re-emit a record that reuses an earlier native record id,
+    // so every row needs an occurrence - not just the ones without an id.
+    let fallback_digest = if row.native_record_id.is_some() {
+        None
+    } else {
+        Some(fallback_event_digest(row)?)
+    };
+    let occurrence_key = match fallback_digest {
+        Some(digest) => digest,
+        None => native_occurrence_digest(row)?,
+    };
+    let duplicate_occurrence = state.next(
+        occurrence_key,
+        || CaptureError::SystemInvariant("Claude duplicate event occurrence overflowed"),
+        |base_lookup, duplicate_occurrence| {
+            base_occurrence_exists::<B>(
+                base_lookup,
+                source,
+                session_id,
+                row,
+                ClaudeEventOccurrence {
+                    fallback_digest,
+                    duplicate_occurrence,
+                },
+            )
         },
     )?;
-    let identity = FallbackEventIdentity {
-        digest,
-        duplicate_occurrence: occurrence,
-    };
-    Ok(Some(identity))
+    Ok(ClaudeEventOccurrence {
+        fallback_digest,
+        duplicate_occurrence,
+    })
 }
 
 fn base_occurrence_exists<B: ProviderRuntimeBinding>(
     base_lookup: &ProviderBaseEventLookup<B>,
     source: &SourceKey,
     session_id: StableEntityId,
-    digest: [u8; 32],
-    occurrence: u64,
+    row: &ClaudeRetainedRow,
+    occurrence: ClaudeEventOccurrence,
 ) -> Result<bool> {
-    let identity = FallbackEventIdentity {
-        digest,
-        duplicate_occurrence: occurrence,
-    };
-    let native_item_key = NativeItemKey::composite(
-        NATIVE_EVENT_KEY_NAMESPACE,
-        fallback_event_key_parts(identity)?,
-    )
-    .map_err(contract)?;
+    let native_item_key = native_item_key(row, occurrence)?;
     let event_id = derive_event_id(EventIdentityInput {
         source,
         session_id,
@@ -716,6 +723,21 @@ fn base_occurrence_exists<B: ProviderRuntimeBinding>(
     base_lookup
         .contains(event_id.as_uuid())
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
+}
+
+fn native_occurrence_digest(row: &ClaudeRetainedRow) -> Result<[u8; 32]> {
+    let native_record_id =
+        row.native_record_id
+            .as_deref()
+            .ok_or(CaptureError::SystemInvariant(
+                "Claude native record id was not assigned",
+            ))?;
+    let mut hasher = Sha256::new();
+    hasher.update(NATIVE_EVENT_OCCURRENCE_DOMAIN);
+    hasher.update((native_record_id.len() as u64).to_be_bytes());
+    hasher.update(native_record_id.as_bytes());
+    hasher.update(row.identity.source_subrecord_index.to_be_bytes());
+    Ok(hasher.finalize().into())
 }
 
 fn fallback_event_digest(row: &ClaudeRetainedRow) -> Result<[u8; 32]> {
@@ -735,14 +757,6 @@ fn fallback_event_digest(row: &ClaudeRetainedRow) -> Result<[u8; 32]> {
     hasher.update((logical.len() as u64).to_be_bytes());
     hasher.update(logical);
     Ok(hasher.finalize().into())
-}
-
-fn fallback_event_key_parts(identity: FallbackEventIdentity) -> Result<Vec<TypedKey>> {
-    Ok(vec![
-        TypedKey::utf8(FALLBACK_EVENT_ID_VERSION).map_err(contract)?,
-        TypedKey::bytes(identity.digest.to_vec()).map_err(contract)?,
-        TypedKey::U64(identity.duplicate_occurrence),
-    ])
 }
 
 fn contract(error: impl std::fmt::Display) -> CaptureError {
