@@ -51,7 +51,8 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-claude-fallback-event-id-v1\0";
 const NATIVE_EVENT_OCCURRENCE_DOMAIN: &[u8] = b"ctx-claude-native-event-occurrence-v1\0";
 const LOGICAL_SESSION_KIND: &str = "claude-session";
 const LOGICAL_EVENT_KIND: &str = "claude-event";
-const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v7";
+const SOURCE_SCHEMA_VARIANT: &str = "claude-nativepath-jsonl-v6";
+const EVENT_IDENTITY_REVISION: &str = "claude-native-record-occurrence-v1";
 const PARSER_REVISION: &str = "claude-shared-jsonl-core-activity-v1";
 
 mod binding;
@@ -91,6 +92,10 @@ where
 
     fn parser_revision(&self) -> &'static str {
         PARSER_REVISION
+    }
+
+    fn event_identity_revision(&self) -> &'static str {
+        EVENT_IDENTITY_REVISION
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
