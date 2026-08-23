@@ -296,3 +296,106 @@ fn claude_route_indexes_repeated_native_record_id_as_distinct_events() {
     assert_literal_bodies(&records, &["literal first", "literal second"]);
     assert_ne!(records[0].event_id, records[1].event_id);
 }
+
+fn claude_hook_attachment(uuid: &str, session_id: &str, slug: Option<&str>) -> Value {
+    let mut row = json!({
+        "type": "attachment",
+        "uuid": uuid,
+        "sessionId": session_id,
+        "parentUuid": "attachment-parent",
+        "attachment": {
+            "type": "hook_success",
+            "hookName": "PreToolUse:ToolSearch",
+            "hookEvent": "PreToolUse",
+            "toolUseID": "toolu_repeated",
+        }
+    });
+    if let Some(slug) = slug {
+        row["slug"] = json!(slug);
+    }
+    row
+}
+
+#[test]
+fn claude_route_indexes_re_emitted_attachment_uuid_as_distinct_events() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let native_session_id = "re-emitted-attachment-claude-session";
+    let transcript = projects
+        .join("project")
+        .join(format!("{native_session_id}.jsonl"));
+    // Observed shape: Claude Code re-emits a hook attachment under the same
+    // `uuid`, the second copy carrying one extra field.
+    write_transcript(
+        &transcript,
+        &[
+            claude_hook_attachment("repeated-attachment-uuid", native_session_id, None),
+            claude_hook_attachment(
+                "repeated-attachment-uuid",
+                native_session_id,
+                Some("re-emitted"),
+            ),
+        ],
+    );
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+    let index = temp.path().join("claude-attachment-index");
+
+    let published = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+
+    assert!(
+        published.failed_routes.is_empty(),
+        "{:?}",
+        published.failed_routes
+    );
+    let records = indexed_records(&index, CaptureProvider::Claude, native_session_id);
+    assert_eq!(records.len(), 2);
+    assert_ne!(records[0].event_id, records[1].event_id);
+}
+
+fn claude_message_without_uuid(kind: &str, session_id: &str, text: &str) -> Value {
+    json!({
+        "type": kind,
+        "sessionId": session_id,
+        "message": {"role": kind, "content": text}
+    })
+}
+
+#[test]
+fn claude_route_keeps_separating_repeated_rows_without_a_native_record_id() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let native_session_id = "no-uuid-claude-session";
+    let transcript = projects
+        .join("project")
+        .join(format!("{native_session_id}.jsonl"));
+    // Rows without a native record id keep using the content-digest fallback,
+    // whose occurrence still separates byte-identical repeats.
+    write_transcript(
+        &transcript,
+        &[
+            claude_message_without_uuid("user", native_session_id, "identical body"),
+            claude_message_without_uuid("user", native_session_id, "identical body"),
+        ],
+    );
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+    let index = temp.path().join("claude-no-uuid-index");
+
+    let published = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+
+    assert!(
+        published.failed_routes.is_empty(),
+        "{:?}",
+        published.failed_routes
+    );
+    let records = indexed_records(&index, CaptureProvider::Claude, native_session_id);
+    assert_literal_bodies(&records, &["identical body", "identical body"]);
+    assert_ne!(records[0].event_id, records[1].event_id);
+}
