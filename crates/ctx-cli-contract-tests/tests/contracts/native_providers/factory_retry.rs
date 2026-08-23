@@ -15,6 +15,9 @@ fn factory_header(session_id: &str) -> Value {
     })
 }
 
+/// Minimal Factory Droid `message` row with synthetic ids. Used to construct
+/// in-memory test sessions; for an authentic captured double-write shape see
+/// `factory_droid_repeated_record_ids_from_authentic_fixture`.
 fn factory_result(message_id: &str, parent_id: Option<&str>, results: &[(&str, &str)]) -> Value {
     let content = results
         .iter()
@@ -658,4 +661,44 @@ fn factory_droid_repeated_record_mixed_parent_shapes_fail_closed() {
             "{label}: {stderr}"
         );
     }
+}
+
+/// Authentic provider-evidence test for the Factory Droid double-write shape
+/// fixed in ctxrs/ctx#648 / #649.
+///
+/// The pinned fixture at `tests/fixtures/provider/factory_ai_droid_repeated_record_evidence.jsonl`
+/// is a minimized, anonymized export from real Factory Droid session output.
+/// It contains one `message` record id emitted twice under two different
+/// `parentId` values with identical `tool_use_id` linkage. Prior to #649 the
+/// native JSONL provider failed closed on this file; after #649 both copies are
+/// retained as distinct events via the `factory-ai-droid.repeated-record`
+/// subrecord selector derived from the parent id.
+#[test]
+fn factory_droid_repeated_record_ids_from_authentic_fixture() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/provider/factory_ai_droid_repeated_record_evidence.jsonl");
+    let root = temp
+        .path()
+        .join("native-droid-repeated-evidence/sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    fs::copy(&fixture, root.join("droid-repeated-evidence.jsonl")).unwrap();
+    let path = root.parent().unwrap().display().to_string();
+    let _daemon = start_isolated_provider_daemon(&temp);
+
+    let imported = import_factory(&temp, &path);
+    assert_eq!(imported["totals"]["current_rejected_records"], 0);
+    let records = provider_core_records(&data_root(&temp), "factory_ai_droid");
+    assert_eq!(
+        records.len(),
+        7,
+        "expected 7 imported core records (session_start + 4 messages, with duplicated message collapsed to one parent-linked subrecord): {imported:#}"
+    );
+
+    let no_op = import_factory(&temp, &path);
+    assert_noop_publication(&no_op);
 }
