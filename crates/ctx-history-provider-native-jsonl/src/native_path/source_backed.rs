@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,7 +23,10 @@ use crate::{
     NativeJsonlError as CaptureError, NativeJsonlRuntime, ProviderJsonlInventoryLimit, Result,
 };
 use ctx_history_capture_model::ProviderSourceFailureKind;
-use ctx_history_capture_runtime::BaseEventLookup;
+use ctx_history_capture_runtime::{
+    BaseEventLookup, SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
+    SourceBackedRecordRejectionDrafts,
+};
 use ctx_history_jsonl::{
     fit_jsonl_activity, observe_opened_file, probe_first_record, FallbackEventIdentityState,
     JsonlActivityObservedBytes, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyError,
@@ -36,13 +39,6 @@ use ctx_history_source_io::{
     open_provider_source_path_mapped as open_provider_source_path,
     PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
     PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
-};
-
-mod factory_repeated_records;
-
-use factory_repeated_records::{
-    factory_repeated_record_selector, RepeatedRecordKey, RepeatedRecordObservation,
-    RepeatedRecordPlan,
 };
 
 const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
@@ -65,14 +61,6 @@ enum DirectJsonlAdapterError {
     NativeSessionChanged,
     #[error("direct JSONL record expansion does not reconcile")]
     CountMismatch,
-    #[error(
-        "Factory Droid repeated record {native_record_id:?} subrecord {sub_ordinal} is ambiguous: {reason}"
-    )]
-    AmbiguousFactoryRepeatedRecord {
-        native_record_id: String,
-        sub_ordinal: u32,
-        reason: &'static str,
-    },
 }
 
 type DirectJsonlAdapterResult<T> = std::result::Result<T, DirectJsonlAdapterError>;
@@ -253,18 +241,12 @@ impl<R: NativeJsonlRuntime> JsonlFamilyAdapter for DirectJsonlFamilyAdapter<R> {
     }
 
     fn event_identity_revision(&self) -> &'static str {
-        // Repeated Factory records were not publishable under this revision, so
-        // accepting them does not invalidate any admitted event identity. Keep
-        // the prior checkpoint valid: its certified prefix is the authority for
-        // assigning an existing singleton's base identity when a duplicate is
-        // appended after upgrade.
         DIRECT_JSONL_EVENT_IDENTITY_REVISION
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         match self.provider {
             CaptureProvider::CopilotCli => JsonlFamilyAppendMode::Replacement,
-            CaptureProvider::FactoryAiDroid => JsonlFamilyAppendMode::ProjectorPreflight(true),
             _ => JsonlFamilyAppendMode::CertifiedSuffix,
         }
     }
@@ -571,11 +553,10 @@ struct DirectJsonlFamilyProjector<R: NativeJsonlRuntime> {
     projector: DirectJsonlProjector,
     fallback_identities: FallbackEventIdentityState<JsonlRuntimeLookup<R>, CaptureError>,
     rejected_records: u64,
-    repeated_record_observations: BTreeMap<RepeatedRecordKey, Vec<RepeatedRecordObservation>>,
-    repeated_record_plan: BTreeMap<RepeatedRecordKey, RepeatedRecordPlan>,
-    repeated_record_plan_prepared: bool,
-    repeated_record_preflight_error: Option<String>,
-    base_event_lookup: Option<JsonlRuntimeLookup<R>>,
+    record_rejections: SourceBackedRecordRejectionDrafts,
+    accepted_event_ids: HashSet<StableEntityId>,
+    append_base_event_lookup: Option<JsonlRuntimeLookup<R>>,
+    source_selector: String,
 }
 
 impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
@@ -598,6 +579,9 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             imported_at,
             Some(binding.session.clone()),
         )?;
+        let append_base_event_lookup = (mode == JsonlFamilyProjectionMode::CertifiedAppend)
+            .then(|| base_event_lookup.clone())
+            .flatten();
         let fallback_identities = FallbackEventIdentityState::new(
             source.clone(),
             session_id,
@@ -605,7 +589,7 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             format!("{}.direct-jsonl-fallback", adapter.provider.as_str()),
             DIRECT_JSONL_EVENT_IDENTITY_REVISION,
             mode.into(),
-            base_event_lookup.clone(),
+            base_event_lookup,
         )?;
         Ok(Self {
             adapter,
@@ -615,11 +599,10 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             projector,
             fallback_identities,
             rejected_records: 0,
-            repeated_record_observations: BTreeMap::new(),
-            repeated_record_plan: BTreeMap::new(),
-            repeated_record_plan_prepared: adapter.provider != CaptureProvider::FactoryAiDroid,
-            repeated_record_preflight_error: None,
-            base_event_lookup,
+            record_rejections: SourceBackedRecordRejectionDrafts::default(),
+            accepted_event_ids: HashSet::new(),
+            append_base_event_lookup,
+            source_selector: leaf.source_path().display().to_string(),
         })
     }
 
@@ -633,56 +616,48 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
         }
         Ok(session)
     }
+
+    fn reject_record(&mut self, raw_ordinal: u64, detail: String) -> Result<()> {
+        self.rejected_records = self
+            .rejected_records
+            .checked_add(1)
+            .ok_or_else(|| capture_error(DirectJsonlAdapterError::CountMismatch))?;
+        self.record_rejections
+            .record(SourceBackedRecordRejectionDraft {
+                source: self.source.clone(),
+                provider: self.adapter.provider,
+                source_selector: self.source_selector.clone(),
+                line_number: raw_ordinal.saturating_add(1),
+                payload_type: None,
+                class: SourceBackedRecordRejectionClass::MalformedRecord,
+                detail,
+            });
+        Ok(())
+    }
+
+    fn conflicts_with_accepted_identity(&self, records: &[CoreRecord]) -> Result<bool> {
+        let mut record_event_ids = HashSet::with_capacity(records.len());
+        for record in records {
+            if !record_event_ids.insert(record.event_id)
+                || self.accepted_event_ids.contains(&record.event_id)
+            {
+                return Ok(true);
+            }
+            if let Some(base_event_lookup) = self.append_base_event_lookup.as_ref() {
+                let exists = base_event_lookup
+                    .contains(record.event_id.as_uuid())
+                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                if exists {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<R> {
     type Runtime = R;
-
-    fn preflight(
-        &mut self,
-        reader: &mut ctx_history_jsonl::JsonlReader<CaptureError>,
-        certified_prefix_end: Option<u64>,
-    ) -> Result<bool> {
-        if self.adapter.provider != CaptureProvider::FactoryAiDroid {
-            return Ok(false);
-        }
-        self.repeated_record_observations.clear();
-        self.repeated_record_plan.clear();
-        self.repeated_record_plan_prepared = false;
-        loop {
-            let page = reader.visit_page(&mut |record| -> Result<()> {
-                let in_certified_prefix = certified_prefix_end
-                    .is_some_and(|prefix_end| record.evidence().byte_end_exclusive() <= prefix_end);
-                let projected = self.projector.project_record(record)?;
-                if !projected.rejections.is_empty() && !projected.events.is_empty() {
-                    return Err(capture_error(DirectJsonlAdapterError::CountMismatch));
-                }
-                for event in &projected.events {
-                    self.observe_repeated_record(event, in_certified_prefix)
-                        .map_err(capture_error)?;
-                }
-                Ok(())
-            })?;
-            if page.is_none() {
-                break;
-            }
-        }
-        self.validate_session().map_err(capture_error)?;
-        self.prepare_repeated_record_plan(certified_prefix_end.is_some())
-            .map_err(capture_error)?;
-        Ok(false)
-    }
-
-    fn retry_replacement(&mut self) {
-        if self.adapter.provider != CaptureProvider::FactoryAiDroid {
-            return;
-        }
-        self.repeated_record_plan.clear();
-        self.repeated_record_plan_prepared = false;
-        if let Err(error) = self.prepare_repeated_record_plan(false) {
-            self.repeated_record_preflight_error = Some(error.to_string());
-        }
-    }
 
     fn project(
         &mut self,
@@ -690,34 +665,28 @@ impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<
         _worker: &mut JsonlFamilyWorkerContext<R>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
-        if let Some(error) = self.repeated_record_preflight_error.as_ref() {
-            return Err(CaptureError::InvalidPayload(error.clone()));
-        }
-        if !self.repeated_record_plan_prepared {
-            return Err(CaptureError::SystemInvariant(
-                "Factory Droid projection did not prepare repeated-record identities",
-            ));
-        }
-        self.repeated_record_observations.clear();
         let projected = self.projector.project_record(record)?;
         if !projected.rejections.is_empty() {
             if !projected.events.is_empty() {
                 return Err(capture_error(DirectJsonlAdapterError::CountMismatch));
             }
-            let rejected = u64::try_from(projected.rejections.len())
-                .map_err(|_| capture_error(DirectJsonlAdapterError::CountMismatch))?;
-            self.rejected_records = self
-                .rejected_records
-                .checked_add(rejected)
-                .ok_or_else(|| capture_error(DirectJsonlAdapterError::CountMismatch))?;
+            for rejection in projected.rejections {
+                self.reject_record(rejection.raw_ordinal, rejection.reason)?;
+            }
             return Ok(());
         }
         let session = self.validate_session().map_err(capture_error)?.clone();
+        let raw_ordinal = projected.events.first().map(|event| event.raw_ordinal);
+        if projected
+            .events
+            .iter()
+            .any(|event| Some(event.raw_ordinal) != raw_ordinal)
+        {
+            return Err(capture_error(DirectJsonlAdapterError::CountMismatch));
+        }
+        let mut records = Vec::with_capacity(projected.events.len());
         for event in projected.events {
-            let mut event = event;
-            self.apply_repeated_record_discriminator(&mut event)
-                .map_err(capture_error)?;
-            emit(
+            records.push(
                 project_event(
                     self.adapter,
                     &self.source,
@@ -727,26 +696,37 @@ impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<
                     event,
                 )
                 .map_err(capture_error)?,
+            );
+        }
+        if self.conflicts_with_accepted_identity(&records)? {
+            let raw_ordinal =
+                raw_ordinal.ok_or_else(|| capture_error(DirectJsonlAdapterError::CountMismatch))?;
+            self.reject_record(
+                raw_ordinal,
+                "provider record reused an event identity already accepted from this source"
+                    .to_owned(),
             )?;
+            return Ok(());
+        }
+        self.accepted_event_ids
+            .extend(records.iter().map(|record| record.event_id));
+        for record in records {
+            emit(record)?;
         }
         Ok(())
     }
 
     fn finish(&mut self) -> Result<()> {
-        if let Some(error) = self.repeated_record_preflight_error.as_ref() {
-            return Err(CaptureError::InvalidPayload(error.clone()));
-        }
-        if !self.repeated_record_plan_prepared {
-            return Err(CaptureError::SystemInvariant(
-                "Factory Droid projection did not prepare repeated-record identities",
-            ));
-        }
         self.validate_session().map_err(capture_error)?;
         self.fallback_identities.finish()
     }
 
     fn rejected_records(&self) -> u64 {
         self.rejected_records
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        std::mem::take(&mut self.record_rejections)
     }
 }
 
@@ -781,9 +761,6 @@ fn project_event<R: NativeJsonlRuntime>(
                 TypedKey::utf8(tool_use_id)?,
             )?)
         }
-        Some(DirectJsonlRetryDiscriminator::FactoryDroidRepeatedRecord { parent_id }) => Some(
-            factory_repeated_record_selector(parent_id, event.sub_ordinal)?,
-        ),
         None if event.sub_ordinal != 0 => Some(SubrecordSelector::certified_position(
             "direct-jsonl-subrecord",
             TypedKey::U64(u64::from(event.sub_ordinal)),
@@ -822,13 +799,6 @@ fn project_event<R: NativeJsonlRuntime>(
             TypedKey::composite(vec![
                 TypedKey::utf8("factory-ai-droid.retry-tool-result")?,
                 TypedKey::utf8(tool_use_id)?,
-            ])?
-        }
-        Some(DirectJsonlRetryDiscriminator::FactoryDroidRepeatedRecord { parent_id }) => {
-            TypedKey::composite(vec![
-                TypedKey::utf8("factory-ai-droid.repeated-record")?,
-                TypedKey::utf8(parent_id)?,
-                TypedKey::U64(u64::from(event.sub_ordinal)),
             ])?
         }
         None => TypedKey::U64(u64::from(event.sub_ordinal)),
