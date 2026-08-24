@@ -1,5 +1,6 @@
 use std::{
-    collections::BTreeSet,
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap},
     fs, io,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -130,7 +131,10 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
             ));
         }
         let authority = shared_authority(root, &metadata, &discovery.transcripts)?;
-        let mut leaves = Vec::with_capacity(discovery.transcripts.len());
+        // Read each transcript's native session header and validate that every
+        // discovered file shares this inventory's root authority before mapping
+        // files onto source identities.
+        let mut observed = Vec::with_capacity(discovery.transcripts.len());
         for transcript in discovery.transcripts {
             if transcript.authority.named_path() != authority.named_path()
                 || transcript.authority.authority_fingerprint() != authority.authority_fingerprint()
@@ -138,7 +142,19 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
                 return Err(GeminiError::SourceChangedDuringCapture);
             }
             let session = read_gemini_session_header(&transcript).map_err(capture_scan_error)?;
-            let source = gemini_source_key(&session.native_session_id).map_err(capture_error)?;
+            observed.push((transcript, session));
+        }
+        // Gemini reuses a single `sessionId` across multiple transcript files
+        // when a session is resumed: the resumed snapshot is written to a new
+        // file that keeps the same native session id. Each logical session must
+        // therefore map to exactly one source identity, otherwise the
+        // source-backed refresh would try to replace the same source twice and
+        // fail with "source replacement has already started". Collapse files
+        // that share a session id into a single leaf, keeping the most complete
+        // file so the canonical snapshot retains every event.
+        let collapsed = gemini_collapse_session_leaves(observed)?;
+        let mut leaves = Vec::with_capacity(collapsed.len());
+        for (source, transcript, session) in collapsed {
             let binding = GeminiFamilyBinding {
                 relative_path: transcript.relative_path.clone(),
                 layout: transcript.layout.clone(),
@@ -198,6 +214,60 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
             emitted_event_digests: BTreeSet::new(),
             runtime: PhantomData,
         }))
+    }
+}
+
+/// Collapses the discovered `(transcript, session)` pairs into one entry per
+/// native `sessionId`.
+///
+/// When two transcript files share a `sessionId` (Gemini resuming an existing
+/// session), both would otherwise derive the same `SourceKey` and the
+/// source-backed refresh would attempt a duplicate source replacement. We keep
+/// a single authoritative transcript per session id; the chosen file is the one
+/// most likely to contain the complete conversation (the resumed snapshot
+/// re-dumps the prior turns), so no events are dropped.
+fn gemini_collapse_session_leaves(
+    observed: Vec<(GeminiTranscriptSource, GeminiSession)>,
+) -> GeminiResult<Vec<(SourceKey, GeminiTranscriptSource, GeminiSession)>> {
+    let mut collapsed: Vec<(SourceKey, GeminiTranscriptSource, GeminiSession)> = Vec::new();
+    let mut index: HashMap<SourceKey, usize> = HashMap::new();
+    for (transcript, session) in observed {
+        let source = gemini_source_key(&session.native_session_id).map_err(capture_error)?;
+        match index.get(&source).copied() {
+            Some(existing) => {
+                if gemini_transcript_is_authoritative(&transcript, &collapsed[existing].1) {
+                    collapsed[existing] = (source, transcript, session);
+                }
+            }
+            None => {
+                index.insert(source.clone(), collapsed.len());
+                collapsed.push((source, transcript, session));
+            }
+        }
+    }
+    Ok(collapsed)
+}
+
+/// Returns `true` when `candidate` is strictly more complete than `current` and
+/// should therefore become the authoritative transcript for a shared
+/// `sessionId`. Completeness is proxied by file size, then by modification time;
+/// identical files are left unchanged so the decision is deterministic and never
+/// discards events that the other copy already holds.
+fn gemini_transcript_is_authoritative(
+    candidate: &GeminiTranscriptSource,
+    current: &GeminiTranscriptSource,
+) -> bool {
+    match candidate
+        .observation
+        .length
+        .cmp(&current.observation.length)
+    {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => matches!(
+            candidate.observation.modified.cmp(&current.observation.modified),
+            Ordering::Greater
+        ),
     }
 }
 
@@ -627,5 +697,216 @@ mod neutral_preflight_tests {
         assert!(checkpoint.terminal());
         assert_eq!(checkpoint.next_physical_ordinal(), 3);
         assert_eq!(checkpoint.complete_prefix_end(), bytes.len() as u64);
+    }
+}
+
+#[cfg(test)]
+mod duplicate_session_tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    use serde_json::{json, Value};
+    use tempfile::TempDir;
+
+    use super::{
+        discover_gemini_transcripts, gemini_collapse_session_leaves, project_gemini_test_events,
+        read_gemini_session_header,
+    };
+    use crate::nativepath::dto::{GeminiRetainedEvent, GeminiScanOutcome, GeminiTranscriptSource};
+    use crate::nativepath::parser::read_gemini_transcript_pages;
+
+    fn header(session_id: &str) -> Value {
+        json!({
+            "sessionId": session_id,
+            "startTime": "2026-01-01T00:00:00.000Z",
+            "lastUpdated": "2026-01-01T00:00:00.000Z",
+            "kind": "main",
+            "directories": ["/workspace/project"]
+        })
+    }
+
+    fn jsonl(values: &[Value]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for value in values {
+            serde_json::to_writer(&mut bytes, value).unwrap();
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    fn write_chat(root: &Path, name: &str, values: &[Value]) -> PathBuf {
+        let path = root.join("tmp/project/chats").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, jsonl(values)).unwrap();
+        path
+    }
+
+    fn scan_collect(
+        source: &GeminiTranscriptSource,
+    ) -> (GeminiScanOutcome, Vec<GeminiRetainedEvent>) {
+        let mut reader = read_gemini_transcript_pages(source, None).unwrap();
+        let mut rows = Vec::new();
+        while let Some(page) = reader.next_page().unwrap() {
+            rows.extend(page.events);
+        }
+        let outcome = reader.outcome().cloned().unwrap();
+        (outcome, rows)
+    }
+
+    /// Reproduces #659: two Gemini chat files in one directory that share a
+    /// `sessionId` (a resumed session) must collapse to a single source identity
+    /// so the source-backed refresh does not attempt a duplicate replacement.
+    #[test]
+    fn gemini_resumed_session_files_collapse_into_one_source() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".gemini");
+
+        // Original session file: fewer events.
+        let _original = write_chat(
+            &root,
+            "session-original.jsonl",
+            &[
+                header("shared-session"),
+                json!({
+                    "id": "user-1",
+                    "timestamp": "2026-01-01T00:00:01.000Z",
+                    "type": "user",
+                    "content": "alpha"
+                }),
+            ],
+        );
+        // Resumed session file: re-dumps the prior turn and adds a new one, so it
+        // is the more complete (larger) snapshot of the same logical session.
+        write_chat(
+            &root,
+            "session-resumed.jsonl",
+            &[
+                header("shared-session"),
+                json!({
+                    "id": "user-1",
+                    "timestamp": "2026-01-01T00:00:01.000Z",
+                    "type": "user",
+                    "content": "alpha"
+                }),
+                json!({
+                    "id": "assistant-2",
+                    "timestamp": "2026-01-01T00:00:02.000Z",
+                    "type": "gemini",
+                    "content": "beta"
+                }),
+            ],
+        );
+
+        let discovery = discover_gemini_transcripts(&root).unwrap();
+        assert_eq!(
+            discovery.transcripts.len(),
+            2,
+            "both files should be discovered"
+        );
+
+        let observed: Vec<_> = discovery
+            .transcripts
+            .iter()
+            .map(|transcript| {
+                let session = read_gemini_session_header(transcript).unwrap();
+                (transcript.clone(), session)
+            })
+            .collect();
+        let collapsed = gemini_collapse_session_leaves(observed).unwrap();
+
+        // The duplicate sessionId must collapse to a single source identity.
+        assert_eq!(
+            collapsed.len(),
+            1,
+            "two files sharing a sessionId must map to one source identity"
+        );
+        // The most complete transcript is authoritative and retains every event.
+        assert_eq!(
+            collapsed[0]
+                .1
+                .path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("session-resumed.jsonl"),
+            "the richer resumed file must be the authoritative transcript"
+        );
+
+        // Scanning the authoritative leaf yields the full union of events.
+        let (_outcome, rows) = scan_collect(&collapsed[0].1);
+        let records = project_gemini_test_events(&collapsed[0].1, rows).unwrap();
+        assert_eq!(
+            records.len(),
+            2,
+            "no events lost when collapsing duplicates"
+        );
+    }
+
+    /// Each file on its own still imports to exactly one source.
+    #[test]
+    fn gemini_single_session_file_imports_to_one_source() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".gemini");
+        write_chat(
+            &root,
+            "only.jsonl",
+            &[
+                header("solo-session"),
+                json!({
+                    "id": "user-1",
+                    "timestamp": "2026-01-01T00:00:01.000Z",
+                    "type": "user",
+                    "content": "alpha"
+                }),
+            ],
+        );
+
+        let discovery = discover_gemini_transcripts(&root).unwrap();
+        let observed: Vec<_> = discovery
+            .transcripts
+            .iter()
+            .map(|transcript| {
+                let session = read_gemini_session_header(transcript).unwrap();
+                (transcript.clone(), session)
+            })
+            .collect();
+        let collapsed = gemini_collapse_session_leaves(observed).unwrap();
+        assert_eq!(collapsed.len(), 1);
+    }
+
+    /// Distinct session ids must not be collapsed together.
+    #[test]
+    fn gemini_distinct_session_files_keep_separate_sources() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".gemini");
+        write_chat(
+            &root,
+            "a.jsonl",
+            &[
+                header("session-a"),
+                json!({"id":"a-1","type":"user","content":"a"}),
+            ],
+        );
+        write_chat(
+            &root,
+            "b.jsonl",
+            &[
+                header("session-b"),
+                json!({"id":"b-1","type":"user","content":"b"}),
+            ],
+        );
+
+        let discovery = discover_gemini_transcripts(&root).unwrap();
+        let observed: Vec<_> = discovery
+            .transcripts
+            .iter()
+            .map(|transcript| {
+                let session = read_gemini_session_header(transcript).unwrap();
+                (transcript.clone(), session)
+            })
+            .collect();
+        let collapsed = gemini_collapse_session_leaves(observed).unwrap();
+        assert_eq!(collapsed.len(), 2);
     }
 }
