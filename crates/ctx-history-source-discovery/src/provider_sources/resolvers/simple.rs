@@ -117,6 +117,32 @@ fn resolve_codex(
     context: &DiscoveryContext,
     spec: &ProviderSourceSpec,
 ) -> DiscoveryReport {
+    let mut report = if context.automatic_provider_inference_enabled() {
+        resolve_inferred_codex(probes, context, spec)
+    } else {
+        DiscoveryReport::default()
+    };
+    for configured in context
+        .configured_provider_roots()
+        .iter()
+        .filter(|root| root.provider == CaptureProvider::Codex)
+    {
+        add_codex_root_sources(
+            probes,
+            &mut report,
+            spec,
+            &configured.path,
+            SourceSelectionAuthority::Configured,
+        );
+    }
+    report
+}
+
+fn resolve_inferred_codex(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> DiscoveryReport {
     let root = match context.env("CODEX_HOME").and_then(OsStr::to_str) {
         Some("") | None => match supported_default(context, spec) {
             Ok(()) => context.home().join(".codex"),
@@ -140,21 +166,109 @@ fn resolve_codex(
     };
 
     let mut report = DiscoveryReport::default();
-    for tree in [root.join("sessions"), root.join("archived_sessions")] {
-        add_source(probes, &mut report, spec, tree, "codex_session_jsonl_tree");
-    }
-    add_source(
+    add_codex_root_sources(
         probes,
         &mut report,
         spec,
-        root.join("history.jsonl"),
-        "codex_history_jsonl",
+        &root,
+        SourceSelectionAuthority::Inferred,
     );
-
     report
 }
 
+pub fn released_provider_home(
+    context: &DiscoveryContext,
+    provider: CaptureProvider,
+) -> Option<PathBuf> {
+    match provider {
+        CaptureProvider::Claude => match context.env("CLAUDE_CONFIG_DIR") {
+            Some(value) if !value.is_empty() => {
+                let path = PathBuf::from(value);
+                path.is_absolute().then_some(path)
+            }
+            _ if context.home_directory_available()
+                && context.platform() != DiscoveryPlatform::OtherUnix =>
+            {
+                Some(context.home().join(".claude"))
+            }
+            _ => None,
+        },
+        CaptureProvider::Codex => match context.env("CODEX_HOME").and_then(OsStr::to_str) {
+            Some("") | None
+                if context.home_directory_available()
+                    && context.platform() != DiscoveryPlatform::OtherUnix =>
+            {
+                Some(context.home().join(".codex"))
+            }
+            Some(value) => resolve_from_cwd(context, PathBuf::from(value))
+                .filter(|path| matches!(source_path_kind(path), Ok(SourcePathKind::Directory))),
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceSelectionAuthority {
+    Inferred,
+    Configured,
+}
+
+fn add_codex_root_sources(
+    probes: &StaticProviderProbeCatalog,
+    report: &mut DiscoveryReport,
+    spec: &ProviderSourceSpec,
+    root: &Path,
+    authority: SourceSelectionAuthority,
+) {
+    for tree in [root.join("sessions"), root.join("archived_sessions")] {
+        add_source_with_authority(
+            probes,
+            report,
+            spec,
+            tree,
+            "codex_session_jsonl_tree",
+            authority,
+        );
+    }
+    add_source_with_authority(
+        probes,
+        report,
+        spec,
+        root.join("history.jsonl"),
+        "codex_history_jsonl",
+        authority,
+    );
+}
+
 fn resolve_claude(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> DiscoveryReport {
+    let mut report = if context.automatic_provider_inference_enabled() {
+        resolve_inferred_claude(probes, context, spec)
+    } else {
+        DiscoveryReport::default()
+    };
+    for configured in context
+        .configured_provider_roots()
+        .iter()
+        .filter(|root| root.provider == CaptureProvider::Claude)
+    {
+        add_source_with_authority(
+            probes,
+            &mut report,
+            spec,
+            configured.path.join("projects"),
+            "claude_projects_jsonl_tree",
+            SourceSelectionAuthority::Configured,
+        );
+    }
+    report
+}
+
+fn resolve_inferred_claude(
     probes: &StaticProviderProbeCatalog,
     context: &DiscoveryContext,
     spec: &ProviderSourceSpec,
@@ -639,7 +753,25 @@ fn add_source(
     path: PathBuf,
     source_format: &'static str,
 ) {
-    add_source_inner(probes, report, None, spec, path, source_format);
+    add_source_with_authority(
+        probes,
+        report,
+        spec,
+        path,
+        source_format,
+        SourceSelectionAuthority::Inferred,
+    );
+}
+
+fn add_source_with_authority(
+    probes: &StaticProviderProbeCatalog,
+    report: &mut DiscoveryReport,
+    spec: &ProviderSourceSpec,
+    path: PathBuf,
+    source_format: &'static str,
+    authority: SourceSelectionAuthority,
+) {
+    add_source_inner(probes, report, None, spec, path, source_format, authority);
 }
 
 fn add_source_with_data_root(
@@ -657,6 +789,7 @@ fn add_source_with_data_root(
         spec,
         path,
         source_format,
+        SourceSelectionAuthority::Inferred,
     );
 }
 
@@ -667,6 +800,7 @@ fn add_source_inner(
     spec: &ProviderSourceSpec,
     path: PathBuf,
     source_format: &'static str,
+    authority: SourceSelectionAuthority,
 ) {
     if !encoded_path_within_limit(&path) {
         push_issue_once(
@@ -687,7 +821,9 @@ fn add_source_inner(
                 DiscoveryIssueKind::SelectorUnreconstructible,
                 path_presence_unknown_reason(kind),
             );
-            return;
+            if authority != SourceSelectionAuthority::Configured {
+                return;
+            }
         }
         PathPresence::Unsupported => {
             push_issue_once(

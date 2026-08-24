@@ -187,6 +187,9 @@ pub(super) fn require_complete_base_source_ownership(
         if covered_by_missing_route
             || carried_routes.contains(snapshot.route_identity())
             || partial_routes.contains(snapshot.route_identity())
+            || registry
+                .provider_root_route_retirements
+                .contains(snapshot.route_identity())
         {
             continue;
         }

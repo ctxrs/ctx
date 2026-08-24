@@ -73,6 +73,19 @@ rust_library(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
+rust_library(
+    name = "test_support_lib",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_history_capture_composition",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal = True, normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + COMPOSITION_TEST_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,

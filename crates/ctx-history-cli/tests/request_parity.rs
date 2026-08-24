@@ -4,8 +4,8 @@ use ctx_history_cli::{
     list_events_selection_from_request, ContentScopeArg, EventContentProjection,
     EventContentProjectionArg, EventQueryDirection, EventQueryScope, EventQueryWireRequest,
     JsonOutputFormat, ListEventsArgs, ListEventsContentProjection, ListEventsDirection,
-    ListEventsRequest, ListEventsScope, RefreshMode, SearchArgs, SearchBackend, SearchBackendArg,
-    SearchRequest,
+    ListEventsRequest, ListEventsScope, LocateRequest, OutputFormat, RefreshMode, SearchArgs,
+    SearchBackend, SearchBackendArg, SearchRequest, ShowRequest, TranscriptMode,
 };
 use ctx_history_index::{CoreEventRangeDirection, CoreEventRangeScope, SearchContentScope};
 use ctx_history_read_application::SearchBackend as ExecutionSearchBackend;
@@ -32,6 +32,8 @@ fn search_request_preserves_every_content_scope_and_backend_into_execution() {
                 provider_key: Some("key".to_owned()),
                 source_id: Some("source".to_owned()),
                 source_format: Some("jsonl".to_owned()),
+                source_roots: vec!["personal".to_owned()],
+                source_groups: vec!["work".to_owned()],
                 workspace: Some("workspace".to_owned()),
                 since: Some("2026-01-01".to_owned()),
                 primary_only: true,
@@ -51,6 +53,8 @@ fn search_request_preserves_every_content_scope_and_backend_into_execution() {
             let execution = ctx_history_read_application::SearchRequest::from(neutral);
             assert_eq!(execution.content_scope, expected_scope);
             assert_eq!(execution.backend, Some(expected_backend));
+            assert_eq!(execution.source_roots, ["personal"]);
+            assert_eq!(execution.source_groups, ["work"]);
             assert!(execution.events);
         }
     }
@@ -144,6 +148,8 @@ fn neutral_search_backend_is_explicit_and_not_reconstructed_from_defaults() {
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: None,
         since: None,
         primary_only: false,
@@ -163,4 +169,44 @@ fn neutral_search_backend_is_explicit_and_not_reconstructed_from_defaults() {
     let execution = ctx_history_read_application::SearchRequest::from(request);
     assert_eq!(execution.backend, Some(ExecutionSearchBackend::Semantic));
     assert_eq!(execution.content_scope, SearchContentScope::Calls);
+}
+
+#[test]
+fn show_and_locate_requests_preserve_custom_route_qualifiers() {
+    let show = ShowRequest::Session {
+        id: None,
+        provider: None,
+        provider_session: Some("provider-session".to_owned()),
+        provider_key: Some("amp".to_owned()),
+        source_id: Some("threads".to_owned()),
+        mode: TranscriptMode::Lite,
+        max_events: None,
+        format: OutputFormat::Json,
+        out: None,
+    };
+    assert!(matches!(
+        show,
+        ShowRequest::Session {
+            provider_key: Some(ref provider_key),
+            source_id: Some(ref source_id),
+            ..
+        } if provider_key == "amp" && source_id == "threads"
+    ));
+
+    let locate = LocateRequest::Session {
+        id: None,
+        provider: None,
+        provider_session: Some("provider-session".to_owned()),
+        provider_key: Some("amp".to_owned()),
+        source_id: Some("threads".to_owned()),
+        format: OutputFormat::Json,
+    };
+    assert!(matches!(
+        locate,
+        LocateRequest::Session {
+            provider_key: Some(ref provider_key),
+            source_id: Some(ref source_id),
+            ..
+        } if provider_key == "amp" && source_id == "threads"
+    ));
 }

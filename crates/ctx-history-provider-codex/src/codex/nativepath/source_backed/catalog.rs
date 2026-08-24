@@ -152,7 +152,7 @@ pub(super) fn bind_source_keys(
                 path: source.source_path.clone(),
             }
         })?;
-        let source_key = codex_source_key(&native_session_id)?;
+        let source_key = codex_source_key_in_root(source.source_root_lineage, &native_session_id)?;
         bound.push((source, source_key, native_session_id));
     }
     Ok(bound)
@@ -173,6 +173,7 @@ pub(crate) fn discover_codex_deferred_session_tree_inventory_v0(
 /// and publication proof.
 pub(super) fn bind_codex_partial_member_v0(
     member: &JsonlFamilyOpenedMember<'_>,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> CodexSourceBackedResultV0<(CodexCatalogSource, SourceKey, String)> {
     if !crate::provider::codex::catalog::is_codex_session_rollout_path(member.source_path()) {
         return Err(CodexSourceBackedErrorV0::IncompleteCatalog {
@@ -205,6 +206,7 @@ pub(super) fn bind_codex_partial_member_v0(
     member.opened().revalidate_same_object()?;
     let source = CodexCatalogSource {
         source_path: member.source_path().to_path_buf(),
+        source_root_lineage,
         catalog_observation: observation,
         carried_jsonl_observation: Some(member.observation().clone()),
         catalog_prefix_sha256: None,
@@ -212,7 +214,7 @@ pub(super) fn bind_codex_partial_member_v0(
         authority_root: Some(member.authority().as_ref().clone()),
         authority_relative_path: Some(member.authority_path().to_path_buf()),
     };
-    let source_key = codex_source_key(&native_session_id)?;
+    let source_key = codex_source_key_in_root(source.source_root_lineage, &native_session_id)?;
     Ok((source, source_key, native_session_id))
 }
 
@@ -228,6 +230,7 @@ struct CodexMetadataInventoryLeafV0 {
 #[derive(Debug, Clone)]
 pub(super) struct CodexRejectedCatalogLeafV0 {
     pub(super) source_path: PathBuf,
+    pub(super) source_root_lineage: Option<[u8; 32]>,
     pub(super) authority_path: PathBuf,
     pub(super) observation: CodexFileObservation,
     pub(super) jsonl_observation: JsonlFileObservation,
@@ -266,6 +269,9 @@ fn discover_codex_session_tree_metadata_inventory_v0(
             | Err(CodexSourceBackedErrorV0::MissingNativeSessionId { .. }) => {
                 rejected_leaves.push(CodexRejectedCatalogLeafV0 {
                     source_path: leaf.source_path,
+                    source_root_lineage: Some(codex_session_tree_source_root_lineage(
+                        leaf.authority.named_path(),
+                    )?),
                     authority_path: leaf.relative_path,
                     observation: leaf.observation,
                     jsonl_observation: leaf.jsonl_observation,
@@ -430,6 +436,9 @@ fn catalog_source_from_path_hint(
         };
     Ok(CodexCatalogSource {
         source_path: leaf.source_path.clone(),
+        source_root_lineage: Some(codex_session_tree_source_root_lineage(
+            leaf.authority.named_path(),
+        )?),
         catalog_observation: leaf.observation.clone(),
         carried_jsonl_observation: Some(leaf.jsonl_observation.clone()),
         catalog_prefix_sha256: None,

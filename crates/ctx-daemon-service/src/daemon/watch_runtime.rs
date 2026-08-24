@@ -6,7 +6,9 @@ use crate::{
         write_degraded_wakeup_receipt, DaemonFileWatcher, DaemonWakeup, DaemonWatchCatalog,
         SourceWatchBatch,
     },
-    source_backed_refresh_coordinator::{source_backed_watch_catalog, CoreRefreshEngine},
+    source_backed_refresh_coordinator::{
+        pin_published_generation, source_backed_watch_catalog, CoreRefreshEngine,
+    },
 };
 use anyhow::Result;
 use ctx_history_capture::SourceBackedWatchCatalog;
@@ -68,6 +70,7 @@ pub(super) struct DaemonWatchRuntime {
     pub(super) catalog: DaemonWatchCatalog,
     pub(super) file_watcher: Option<DaemonFileWatcher>,
     catalog_refresh_pending: bool,
+    provider_root_refresh_pending: bool,
     config: &'static dyn crate::DaemonConfigPort,
 }
 
@@ -81,8 +84,14 @@ impl DaemonWatchRuntime {
             catalog: DaemonWatchCatalog::default(),
             file_watcher: None,
             catalog_refresh_pending: false,
+            provider_root_refresh_pending: false,
             config,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn provider_root_refresh_pending_for_test(&self) -> bool {
+        self.provider_root_refresh_pending
     }
 
     fn schedule_pending_missing_routes(&self, data_root: &Path, refresh: &CoreRefreshEngine) {
@@ -143,11 +152,74 @@ impl DaemonWatchRuntime {
         if self.catalog_refresh_pending && trigger.attempts_pending_catalog() {
             match construct_catalog(data_root) {
                 Ok(catalog) => {
+                    let previous_digest = self.catalog.snapshot().and_then(|catalog| {
+                        catalog.provider_root_config_digest().map(str::to_owned)
+                    });
+                    let current_digest = catalog.provider_root_config_digest().map(str::to_owned);
+                    let provider_root_config_changed =
+                        match (previous_digest.as_deref(), current_digest.as_deref()) {
+                            (Some(previous), Some(current)) => previous != current,
+                            (None, Some(current)) => match pin_published_generation(data_root) {
+                                Ok(Some(published)) => {
+                                    published
+                                        .verified_index()
+                                        .manifest()
+                                        .provider_root_config_digest()
+                                        != current
+                                }
+                                Ok(None) => false,
+                                Err(error) => {
+                                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                                    true
+                                }
+                            },
+                            _ => false,
+                        };
+                    if provider_root_config_changed {
+                        // Root aliases and source_groups are generation metadata, not
+                        // live watch-catalog state. Exact route maintenance
+                        // deliberately preserves the pinned generation's
+                        // aliases, so a config topology change must cross one
+                        // full-refresh publication boundary.
+                        self.provider_root_refresh_pending = true;
+                    }
                     self.catalog.publish(catalog);
                     self.catalog_refresh_pending = false;
                     catalog_published = true;
                 }
                 Err(error) => {
+                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                }
+            }
+        }
+
+        if self.provider_root_refresh_pending {
+            let desired_digest = self
+                .catalog
+                .snapshot()
+                .and_then(|catalog| catalog.provider_root_config_digest().map(str::to_owned));
+            let published_matches = desired_digest.as_deref().is_some_and(|desired| {
+                match pin_published_generation(data_root) {
+                    Ok(Some(published)) => {
+                        published
+                            .verified_index()
+                            .manifest()
+                            .provider_root_config_digest()
+                            == desired
+                    }
+                    Ok(None) => false,
+                    Err(error) => {
+                        let _ = write_degraded_wakeup_receipt(data_root, &error);
+                        false
+                    }
+                }
+            });
+            let refresh_pending =
+                source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
+            if published_matches && !refresh_pending {
+                self.provider_root_refresh_pending = false;
+            } else if let Some(source_refresh) = source_refresh {
+                if let Err(error) = source_refresh.enqueue_periodic(data_root) {
                     let _ = write_degraded_wakeup_receipt(data_root, &error);
                 }
             }

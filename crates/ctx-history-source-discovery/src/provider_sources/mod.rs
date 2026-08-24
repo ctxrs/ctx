@@ -54,6 +54,7 @@ impl StaticProviderProbeCatalog {
 pub use context::{
     DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, DISCOVERY_ENV_ALLOWLIST,
 };
+pub use ctx_history_capture_model::ProviderRootDefinition;
 pub(crate) use ctx_history_source_io::open_ordinary_file_without_following;
 pub use ctx_history_source_io::OrdinaryFileObservation;
 #[cfg(test)]
@@ -82,7 +83,8 @@ pub use lingma::{
 
 pub use resolvers::PathPresence;
 pub use resolvers::{
-    path_presence, resolve_openhands_conversations_root, CrushDiscoveredProjectInventory,
+    path_presence, provider_paths_equivalent, provider_source_belongs_to_configured_root,
+    released_provider_home, resolve_openhands_conversations_root, CrushDiscoveredProjectInventory,
     CrushProjectInventorySelector, CrushProjectInventorySelectorError,
 };
 pub use specs::{provider_source_spec, provider_source_specs};

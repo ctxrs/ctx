@@ -89,6 +89,21 @@ impl JsonlFileObservation {
         self.stable_identity.is_some() && self.change_identity.is_some()
     }
 
+    /// Whether two strong observations differ only in the platform change
+    /// stamp. Unix ctime and Windows ChangeTime can move when a hard link is
+    /// added or removed even though the named ordinary file and its bytes are
+    /// unchanged. This is only a candidate for content authentication: it is
+    /// never proof of equality by itself.
+    pub fn differs_only_by_change_identity(&self, current: &Self) -> bool {
+        self.length == current.length
+            && self.modified == current.modified
+            && self.readonly == current.readonly
+            && self.supports_exact_revalidation()
+            && current.supports_exact_revalidation()
+            && self.same_stable_file(current)
+            && self.change_identity != current.change_identity
+    }
+
     /// Whether `current` is physically eligible to contain the frozen prefix.
     /// Strict callers must still authenticate that prefix. A caller using an
     /// explicit append-only provider contract may instead trust that contract.
@@ -96,7 +111,8 @@ impl JsonlFileObservation {
         self == current
             || (current.length >= self.length
                 && self.supports_exact_revalidation()
-                && self.same_stable_file(current))
+                && self.same_stable_file(current)
+                && self.readonly == current.readonly)
     }
 }
 
@@ -194,6 +210,11 @@ impl JsonlCheckpoint {
     pub fn admitted_eof_sha256(&self) -> Option<[u8; 32]> {
         self.restore_admitted_eof_hasher()
             .map(|hasher| hasher.digest())
+    }
+
+    pub fn authenticates_admitted_eof(&self) -> bool {
+        self.admitted_eof_sha256().is_some()
+            || self.complete_prefix_end == self.source_observation.length
     }
 
     pub fn next_physical_ordinal(&self) -> u64 {
@@ -367,6 +388,61 @@ impl JsonlScanOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn change_identity_only_candidate_requires_all_portable_object_facts_to_match() {
+        let retained =
+            JsonlFileObservation::new(17, UNIX_EPOCH, false, Some([1; 32]), Some([2; 32]));
+        let change_time_only =
+            JsonlFileObservation::new(17, UNIX_EPOCH, false, Some([1; 32]), Some([3; 32]));
+
+        assert!(retained.differs_only_by_change_identity(&change_time_only));
+        assert!(
+            !retained.differs_only_by_change_identity(&JsonlFileObservation::new(
+                17,
+                UNIX_EPOCH,
+                false,
+                Some([4; 32]),
+                Some([3; 32]),
+            ))
+        );
+        assert!(
+            !retained.differs_only_by_change_identity(&JsonlFileObservation::new(
+                18,
+                UNIX_EPOCH,
+                false,
+                Some([1; 32]),
+                Some([3; 32]),
+            ))
+        );
+        assert!(
+            !retained.differs_only_by_change_identity(&JsonlFileObservation::new(
+                17,
+                UNIX_EPOCH + std::time::Duration::from_secs(1),
+                false,
+                Some([1; 32]),
+                Some([3; 32]),
+            ))
+        );
+        assert!(
+            !retained.differs_only_by_change_identity(&JsonlFileObservation::new(
+                17,
+                UNIX_EPOCH,
+                true,
+                Some([1; 32]),
+                Some([3; 32]),
+            ))
+        );
+        assert!(
+            !retained.differs_only_by_change_identity(&JsonlFileObservation::new(
+                17,
+                UNIX_EPOCH,
+                false,
+                None,
+                Some([3; 32]),
+            ))
+        );
+    }
 
     fn continuation_checkpoint() -> JsonlCheckpoint {
         let bytes = b"one complete JSONL record\n";

@@ -122,6 +122,8 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
             "provider_key": filters.provider_key,
             "source_id": filters.source_id,
             "source_format": filters.source_format,
+            "source_root": (!request.source_roots.is_empty()).then_some(&request.source_roots),
+            "source_groups": (!request.source_groups.is_empty()).then_some(&request.source_groups),
             "workspace": request.workspace,
             "since": request.since,
             "content_scope": filters.content_scope.as_str(),
@@ -228,6 +230,8 @@ pub fn search_result_json(
         "more_matches_in_session": (result_scope == "session")
             .then_some(hit.more_matches_in_session),
         "provider": event.provider,
+        "provider_key": event.provider_key,
+        "source_id": event.source_id,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
         "parent_ctx_session_id": event.parent_session_id,

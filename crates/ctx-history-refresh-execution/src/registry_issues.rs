@@ -107,6 +107,32 @@ pub fn automatic_registry_route_failures(
     Ok(failures.into_values().collect())
 }
 
+pub(super) fn terminal_registry_route_failures(
+    failures: Vec<ctx_history_capture::SourceBackedFailedRoute>,
+    registry: &SourceBackedProviderRegistry,
+    scope: &SourceBackedRefreshScope,
+) -> Vec<ctx_history_capture::SourceBackedFailedRoute> {
+    // Discovered-winner identities deliberately coalesce alternate physical
+    // candidates. If any selected candidate registered executable or
+    // certified-missing capture authority, capture owns the route's one
+    // terminal outcome. A registry issue for a losing candidate must not
+    // fabricate a second, overlapping route-level failure.
+    let capture_owned_routes = registry
+        .routes()
+        .filter(|route| route.selection.is_some())
+        .filter_map(|route| route.route_identity.as_ref())
+        .filter(|route| match scope {
+            SourceBackedRefreshScope::All => true,
+            SourceBackedRefreshScope::Exact(selected) => selected.contains(*route),
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    failures
+        .into_iter()
+        .filter(|failure| !capture_owned_routes.contains(&failure.route_identity))
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum AutomaticRegistryAdmissionFailurePolicy<'a> {
     SystemicOnly,

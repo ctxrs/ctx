@@ -4,6 +4,7 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(super) struct Binding {
     pub(super) project_dir: PathBuf,
+    pub(super) source_root_lineage: Option<[u8; 32]>,
     pub(super) key: ClaudeSessionKey,
     pub(super) layout: SessionLayout,
 }

@@ -200,6 +200,8 @@ fn lexical_request() -> SearchRequest {
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: None,
         since: None,
         primary_only: false,
@@ -436,6 +438,54 @@ fn manual_session_exclusions_request_retained_peer_and_render_original_selectors
 }
 
 #[test]
+fn search_rejects_root_and_group_selectors_absent_from_the_pinned_generation() {
+    let temp = tempdir().unwrap();
+    let (_index, _) = publish(temp.path());
+    for (roots, source_groups, expected, secret) in [
+        (
+            vec!["personal".to_owned()],
+            Vec::new(),
+            "unknown provider root",
+            "personal",
+        ),
+        (
+            Vec::new(),
+            vec!["work".to_owned()],
+            "unknown provider root group",
+            "work",
+        ),
+    ] {
+        let mut request = lexical_request();
+        request.source_roots = roots;
+        request.source_groups = source_groups;
+        let plan = plan_search(
+            request,
+            SearchPolicy::lexical_only(SemanticReason::PolicyDisabled),
+        )
+        .unwrap();
+        let mut generation =
+            RecordingGenerationPort::new(VerifiedIndex::open_pinned(temp.path()).unwrap());
+        let error = match execute_search(
+            SearchApplicationRequest {
+                plan,
+                generation_target: GenerationReadTarget::Active,
+                compact_projection: false,
+                active_session: None,
+            },
+            &mut generation,
+            &UnusedSemanticPort,
+        ) {
+            Err(SearchApplicationError::Query(error)) => error,
+            Err(other) => panic!("expected query error, got {other:?}"),
+            Ok(_) => panic!("expected unknown provider-root selector to fail"),
+        };
+        let error = error.to_string();
+        assert!(error.contains(expected));
+        assert!(!error.contains(secret));
+    }
+}
+
+#[test]
 fn locate_application_pins_once_and_assembles_the_neutral_read_model() {
     let temp = tempdir().unwrap();
     let (index, records) = publish(temp.path());
@@ -561,6 +611,8 @@ fn show_operations_pin_once_and_cursor_target_precedes_session_reads() {
             selector: Some(records[0].session_id.to_string()),
             provider_session_id: None,
             provider: None,
+            provider_key: None,
+            source_id: None,
             mode: SessionEventMode::Full,
             cursor: None,
             limit: 1,
@@ -580,6 +632,8 @@ fn show_operations_pin_once_and_cursor_target_precedes_session_reads() {
             selector: Some(records[0].session_id.to_string()),
             provider_session_id: None,
             provider: None,
+            provider_key: None,
+            source_id: None,
             mode: SessionEventMode::Full,
             cursor: Some(encoded_cursor),
             limit: 1,
@@ -617,6 +671,8 @@ fn show_stream_is_page_bounded_and_honors_callback_control() {
             selector: Some(records[0].session_id.to_string()),
             provider_session_id: None,
             provider: None,
+            provider_key: None,
+            source_id: None,
             mode: SessionEventMode::Full,
             cursor: None,
             max_events: None,
@@ -780,6 +836,8 @@ fn one_pin_owns_search_locate_show_and_list_application_workflows() {
             selector: Some(records[0].session_id.to_string()),
             provider_session_id: None,
             provider: None,
+            provider_key: None,
+            source_id: None,
             mode: SessionEventMode::Full,
             cursor: None,
             limit: 2,
@@ -973,6 +1031,8 @@ fn structured_cursor_and_compact_reference_compatibility_are_neutral() {
             selector: Some(records[0].session_id.to_string()),
             provider_session_id: None,
             provider: None,
+            provider_key: None,
+            source_id: None,
             mode: SessionEventMode::Full,
             cursor: None,
             limit: 1,

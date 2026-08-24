@@ -183,7 +183,7 @@ fn render_result(
         push_wrapped(document, context, CARD_INDENT, line, Token::Text);
     }
 
-    let provider = result["provider"].as_str().unwrap_or("unknown");
+    let provider = result_source_label(result);
     let provider_session = result["provider_session_id"]
         .as_str()
         .filter(|value| !value.is_empty());
@@ -421,6 +421,8 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
         ("Event", "ctx_event_id", Token::Reference),
         ("Ctx session", "ctx_session_id", Token::Reference),
         ("Provider session", "provider_session_id", Token::Reference),
+        ("Provider key", "provider_key", Token::Text),
+        ("Source ID", "source_id", Token::Text),
         ("Source", "source_format", Token::Text),
     ] {
         if let Some(value) = result[key].as_str().filter(|value| !value.is_empty()) {
@@ -468,6 +470,16 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
             &format!("{score:.2}"),
             Token::Text,
         );
+    }
+}
+
+fn result_source_label(result: &Value) -> String {
+    match (
+        result["provider_key"].as_str(),
+        result["source_id"].as_str(),
+    ) {
+        (Some(provider_key), Some(source_id)) => format!("{provider_key}/{source_id}"),
+        _ => result["provider"].as_str().unwrap_or("unknown").to_owned(),
     }
 }
 

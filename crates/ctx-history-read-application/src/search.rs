@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
+use std::{collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{
@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod active_session;
+mod fusion;
 mod shaping;
 
 use active_session::excluded_active_session_tree;
@@ -33,6 +34,9 @@ use active_session::{
     resolved_session_tree_ids, resolved_unique_session_tree_root_id, SessionAncestry,
     MAX_ACTIVE_SESSION_ANCESTORS, MAX_ACTIVE_SESSION_TREE_SESSIONS,
 };
+#[cfg(test)]
+use fusion::weighted_rrf_score;
+use fusion::{fuse_source_candidates, search_candidate_order};
 use shaping::root_first_candidate_pool_is_decisive;
 pub use shaping::shape_search_result_window;
 
@@ -89,6 +93,8 @@ pub struct SearchRequest {
     pub provider_key: Option<String>,
     pub source_id: Option<String>,
     pub source_format: Option<String>,
+    pub source_roots: Vec<String>,
+    pub source_groups: Vec<String>,
     pub workspace: Option<String>,
     pub since: Option<String>,
     pub primary_only: bool,
@@ -190,6 +196,8 @@ fn normalized_query_alternative(value: &str) -> Option<String> {
 pub fn validate_search_request(request: &SearchRequest) -> Result<()> {
     validate_lexical_query_limits(request)?;
     validate_manual_session_exclusions(request)?;
+    validate_provider_root_selectors(&request.source_roots, "source root")?;
+    validate_provider_root_selectors(&request.source_groups, "source group")?;
     if request
         .workspace
         .as_deref()
@@ -231,6 +239,8 @@ pub fn validate_search_request(request: &SearchRequest) -> Result<()> {
 pub fn normalize_search_request(request: &mut SearchRequest) -> Result<()> {
     validate_lexical_query_limits(request)?;
     normalize_manual_session_exclusions(request)?;
+    normalize_provider_root_selectors(&mut request.source_roots, "source root")?;
+    normalize_provider_root_selectors(&mut request.source_groups, "source group")?;
     if request.workspace.is_some() {
         request.workspace = normalized_optional_text(request.workspace.as_deref())
             .map(Some)
@@ -240,6 +250,33 @@ pub fn normalize_search_request(request: &mut SearchRequest) -> Result<()> {
         let file = normalized_optional_text(Some(file))
             .ok_or_else(|| anyhow!("query filter file is empty"))?;
         request.file = Some(PathBuf::from(file));
+    }
+    Ok(())
+}
+
+fn normalize_provider_root_selectors(values: &mut Vec<String>, kind: &str) -> Result<()> {
+    for value in values.iter_mut() {
+        *value = value.trim().to_owned();
+    }
+    values.sort();
+    values.dedup();
+    validate_provider_root_selectors(values, kind)
+}
+
+fn validate_provider_root_selectors(values: &[String], kind: &str) -> Result<()> {
+    if values.len() > 64 {
+        return Err(anyhow!("{kind} selectors exceed the maximum of 64"));
+    }
+    if values.iter().any(|value| {
+        value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    }) {
+        return Err(anyhow!(
+            "invalid {kind} selector; expected 1..=64 ASCII letters, digits, hyphens, or underscores"
+        ));
     }
     Ok(())
 }
@@ -383,7 +420,17 @@ pub fn search_filters_with_refs(
         .flatten()
         .map(|active_session| excluded_active_session_tree(index, active_session))
         .transpose()?;
+    let allowed_source_keys = (!request.source_roots.is_empty()
+        || !request.source_groups.is_empty())
+    .then(|| {
+        index
+            .manifest()
+            .provider_root_source_tokens(&request.source_roots, &request.source_groups)
+            .map_err(anyhow::Error::from)
+    })
+    .transpose()?;
     Ok(EventSearchFilters {
+        allowed_source_keys,
         session_id,
         provider: request
             .provider
@@ -479,6 +526,8 @@ pub struct SearchEventMetadata {
     pub session_relationship: Option<ProviderNativeSessionRelationship>,
     pub event_copy: Option<ProviderNativeEventCopy>,
     pub provider: String,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
     pub source_format: String,
     pub provider_session_id: Option<String>,
     pub agent_scope: Option<AgentScope>,
@@ -490,6 +539,11 @@ pub struct SearchEventMetadata {
 
 impl From<&EventRecord> for SearchEventMetadata {
     fn from(event: &EventRecord) -> Self {
+        let (provider_key, source_id) = event
+            .custom_source_identity()
+            .map_or((None, None), |(provider_key, source_id)| {
+                (Some(provider_key.to_owned()), Some(source_id.to_owned()))
+            });
         Self {
             event_id: event.event_id.as_uuid(),
             session_id: event.session_id.as_uuid(),
@@ -498,6 +552,8 @@ impl From<&EventRecord> for SearchEventMetadata {
             session_relationship: event.session_relationship,
             event_copy: event.event_copy.clone(),
             provider: event.provider.clone(),
+            provider_key,
+            source_id,
             source_format: event.source_format.clone(),
             provider_session_id: event.provider_session_id.clone(),
             agent_scope: event.agent_scope,
@@ -880,84 +936,6 @@ fn collect_lexical_search_hits(
             .min(maximum)
             .max(candidate_limit.saturating_add(1));
     }
-}
-
-struct SourceFusionEvidence {
-    event: EventRecord,
-    lexical_rank: Option<usize>,
-    semantic_rank: Option<usize>,
-}
-
-fn fuse_source_candidates(
-    lexical: Vec<EventSearchCandidate>,
-    semantic: Vec<EventSearchCandidate>,
-    semantic_weight: f32,
-) -> Vec<EventSearchCandidate> {
-    let mut evidence = BTreeMap::<Uuid, SourceFusionEvidence>::new();
-    for (rank, candidate) in lexical.into_iter().enumerate() {
-        evidence.insert(
-            candidate.event.event_id.as_uuid(),
-            SourceFusionEvidence {
-                event: candidate.event,
-                lexical_rank: Some(rank.saturating_add(1)),
-                semantic_rank: None,
-            },
-        );
-    }
-    for (rank, candidate) in semantic.into_iter().enumerate() {
-        let semantic_rank = rank.saturating_add(1);
-        evidence
-            .entry(candidate.event.event_id.as_uuid())
-            .and_modify(|entry| entry.semantic_rank = Some(semantic_rank))
-            .or_insert(SourceFusionEvidence {
-                event: candidate.event,
-                lexical_rank: None,
-                semantic_rank: Some(semantic_rank),
-            });
-    }
-    let mut candidates = evidence
-        .into_values()
-        .map(|evidence| EventSearchCandidate {
-            score: weighted_rrf_score(
-                evidence.lexical_rank,
-                evidence.semantic_rank,
-                semantic_weight,
-            ),
-            event: evidence.event,
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(search_candidate_order);
-    candidates
-}
-
-fn search_candidate_order(left: &EventSearchCandidate, right: &EventSearchCandidate) -> Ordering {
-    right
-        .score
-        .total_cmp(&left.score)
-        .then_with(|| {
-            right
-                .event
-                .occurred_at_unix_ms
-                .cmp(&left.event.occurred_at_unix_ms)
-        })
-        .then_with(|| right.event.event_sequence.cmp(&left.event.event_sequence))
-        .then_with(|| {
-            left.event
-                .event_id
-                .as_uuid()
-                .cmp(&right.event.event_id.as_uuid())
-        })
-}
-
-fn weighted_rrf_score(
-    lexical_rank: Option<usize>,
-    semantic_rank: Option<usize>,
-    semantic_weight: f32,
-) -> f32 {
-    let reciprocal_rank = |rank: usize| 1.0 / (60.0 + rank.max(1) as f32);
-    let lexical = lexical_rank.map(reciprocal_rank).unwrap_or(0.0);
-    let semantic = semantic_rank.map(reciprocal_rank).unwrap_or(0.0);
-    ((1.0 - semantic_weight) * lexical) + (semantic_weight * semantic)
 }
 
 #[cfg(test)]

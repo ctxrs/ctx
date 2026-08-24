@@ -22,9 +22,10 @@ use ctx_history_capture::{
     register_nanoclaw_source_backed_route_with_base_sources, register_shelley_source_backed_route,
     register_warp_source_backed_route, source_backed_route_constructor,
     source_backed_route_inventory, validate_provider_source_roots_outside_data_root,
-    SourceBackedAutomaticRegistryBuild, SourceBackedProviderRegistry, SourceBackedRouteConstructor,
-    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
-    SourceBackedWatchCatalog,
+    SourceBackedAutomaticRegistryBuild, SourceBackedProviderRegistry,
+    SourceBackedProviderRouteMetadata, SourceBackedRouteConstructor, SourceBackedRouteError,
+    SourceBackedRouteErrorKind, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    SourceBackedWatchCatalog, SourceBackedWatchTargetKind,
 };
 use ctx_history_capture_model::{
     DiscoveryReport, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
@@ -48,7 +49,23 @@ const CATALOG_INTEGRITY_ALGORITHM: &str = "sha256";
 const CATALOG_MAX_ENTRIES: usize = 256;
 const CATALOG_MAX_PATH_BYTES: usize = 16 * 1024;
 const CATALOG_REQUEST_WIRE_MAX_BYTES: usize = 20 * 1024;
-const CUSTOM_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
+const CUSTOM_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
+const RETIRED_CUSTOM_V1_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
+static RETIRED_CUSTOM_V1_ROUTE: SourceBackedProviderRouteMetadata =
+    SourceBackedProviderRouteMetadata {
+        provider: CaptureProvider::Custom,
+        source_format: RETIRED_CUSTOM_V1_SOURCE_FORMAT,
+        // V1 and v2 occupy one replacement authority so a successful v2
+        // publication can atomically retire the old route. This descriptor is
+        // control-plane-only and is never registered for capture.
+        certified_source_format: CUSTOM_SOURCE_FORMAT,
+        automatic: false,
+        explicit_manual: true,
+        selector_authority: SourceBackedSelectorAuthority::CatalogLineage,
+        unsupported_reason: None,
+        constructor: SourceBackedRouteConstructor::CatalogLineage,
+        watch_target_kind: SourceBackedWatchTargetKind::Path,
+    };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplicitSourceCatalogAuthority {
@@ -823,6 +840,9 @@ fn route_metadata(
     provider: CaptureProvider,
     source_format: &str,
 ) -> Result<&'static ctx_history_capture::SourceBackedProviderRouteMetadata> {
+    if provider == CaptureProvider::Custom && source_format == RETIRED_CUSTOM_V1_SOURCE_FORMAT {
+        return Ok(&RETIRED_CUSTOM_V1_ROUTE);
+    }
     source_backed_route_inventory()
         .iter()
         .find(|route| route.provider == provider && route.source_format == source_format)
@@ -840,6 +860,12 @@ fn source_from_catalog_entry(
     require_available: bool,
 ) -> Result<ProviderSource> {
     let provider = entry.provider()?;
+    if provider == CaptureProvider::Custom && entry.source_format == RETIRED_CUSTOM_V1_SOURCE_FORMAT
+    {
+        bail!(
+            "custom history catalog entry uses retired ctx-history-jsonl-v1; rewrite the source as ctx-history-jsonl-v2 and import it again"
+        );
+    }
     let metadata = entry.route_metadata()?;
     let exists = entry
         .path

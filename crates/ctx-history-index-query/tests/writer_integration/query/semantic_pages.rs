@@ -194,6 +194,14 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
     let parity_filters = [
         EventSearchFilters::default(),
         EventSearchFilters {
+            allowed_source_keys: Some(vec![source_token(&source)]),
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            allowed_source_keys: Some(Vec::new()),
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
             session_id: Some(target.session_id.as_uuid()),
             provider: Some("codex".to_owned()),
             source_format: Some("codex_session_jsonl".to_owned()),

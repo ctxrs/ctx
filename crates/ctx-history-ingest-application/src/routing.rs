@@ -115,7 +115,7 @@ pub fn validate_ingest_request(request: &IngestRequest) -> Result<IngestRoute> {
         ));
     }
     if request.path.is_some() && !request.custom_jsonl && request.provider.is_none() {
-        return Err(anyhow!("ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --input-format ctx-history-jsonl-v1 --path <file>"));
+        return Err(anyhow!("ctx import --path requires --provider for native provider history; use `ctx import --provider codex --path <path>` or `ctx import --input-format ctx-history-jsonl-v2 --path <file>"));
     }
     if request.history_source.is_some() || !request.history_source_manifests.is_empty() {
         if request.all {

@@ -15,10 +15,11 @@ use serde::{Deserialize, Serialize};
 use tantivy::{IndexMeta, Searcher};
 
 use crate::{
-    expected_source_generation_policy_hash, is_generation_id, validate_core_contract_fingerprint,
-    CommitPayload, GenerationManifest, IndexError, Result, SourceCoreRecordAggregate,
-    COMMIT_PAYLOAD_VERSION, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
-    LEXICAL_SCHEMA_VERSION, MAX_PUBLICATION_METADATA_BYTES,
+    expected_source_generation_policy_hash, is_generation_id, provider_source_config_digest,
+    validate_core_contract_fingerprint, CommitPayload, GenerationManifest, IndexError, Result,
+    SourceCoreRecordAggregate, SourceRouteSnapshot, COMMIT_PAYLOAD_VERSION,
+    GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
+    MAX_PUBLICATION_METADATA_BYTES,
 };
 
 use ctx_history_core::CertifiedSource;
@@ -30,6 +31,7 @@ const MANIFEST_FLAT_DELTA_STORAGE: &str = "ctx-manifest-flat-delta-v1";
 const MANIFEST_FLAT_DELTA_PREFIX: &[u8] = br#"{"storage_format":"ctx-manifest-flat-delta-v1","#;
 const MAX_MANIFEST_DELTA_CHANGES: usize = 64;
 const MAX_MANIFEST_DELTA_BYTES: usize = 1024 * 1024;
+const PREVIOUS_GENERATION_MANIFEST_VERSION: u32 = 8;
 
 type ManifestCacheKey = (PathBuf, String);
 static MANIFEST_CACHE: OnceLock<Mutex<BTreeMap<ManifestCacheKey, ManifestCacheEntry>>> =
@@ -94,6 +96,28 @@ struct StoredManifestSourceChangeV1 {
     source_identity: [u8; 32],
     source: CertifiedSource,
     aggregate: SourceCoreRecordAggregate,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviousGenerationManifestV8 {
+    manifest_version: u32,
+    identity_version: u16,
+    core_record_version: u32,
+    core_record_contract_fingerprint: String,
+    lexical_schema_version: u32,
+    lexical_analyzer_version: u32,
+    policy_schema_hash: String,
+    indexed_documents: u64,
+    certified_source_bytes: u64,
+    sources: Vec<CertifiedSource>,
+    core_record_aggregates: Vec<SourceCoreRecordAggregate>,
+    source_routes: Vec<SourceRouteSnapshot>,
+}
+
+#[derive(Deserialize)]
+struct StoredManifestVersion {
+    manifest_version: u32,
 }
 
 pub struct PreparedManifest {
@@ -220,10 +244,18 @@ fn load_materialized_manifest(
             delta.changes,
         )?
     } else {
-        let manifest: GenerationManifest = serde_json::from_slice(&bytes)?;
-        if serde_json::to_vec(&manifest)? != bytes {
-            return Err(IndexError::NonCanonicalManifest);
-        }
+        let stored_version: StoredManifestVersion = serde_json::from_slice(&bytes)?;
+        let manifest = match stored_version.manifest_version {
+            GENERATION_MANIFEST_VERSION => {
+                let manifest: GenerationManifest = serde_json::from_slice(&bytes)?;
+                if serde_json::to_vec(&manifest)? != bytes {
+                    return Err(IndexError::NonCanonicalManifest);
+                }
+                manifest
+            }
+            PREVIOUS_GENERATION_MANIFEST_VERSION => migrate_previous_manifest_v8(&bytes)?,
+            version => return Err(IndexError::UnsupportedManifest(version)),
+        };
         validate_manifest_contract(&manifest)?;
         manifest
     };
@@ -241,6 +273,33 @@ fn load_materialized_manifest(
         },
     );
     Ok(manifest)
+}
+
+fn migrate_previous_manifest_v8(bytes: &[u8]) -> Result<GenerationManifest> {
+    let previous: PreviousGenerationManifestV8 = serde_json::from_slice(bytes)?;
+    if previous.manifest_version != PREVIOUS_GENERATION_MANIFEST_VERSION
+        || serde_json::to_vec(&previous)? != bytes
+    {
+        return Err(IndexError::NonCanonicalManifest);
+    }
+    let mut value = serde_json::to_value(previous)?;
+    let object = value
+        .as_object_mut()
+        .ok_or(IndexError::NonCanonicalManifest)?;
+    object.insert(
+        "manifest_version".to_owned(),
+        serde_json::json!(GENERATION_MANIFEST_VERSION),
+    );
+    object.insert(
+        "automatic_provider_discovery".to_owned(),
+        serde_json::json!(true),
+    );
+    object.insert(
+        "provider_root_config_digest".to_owned(),
+        serde_json::json!(provider_source_config_digest(true, &[])),
+    );
+    object.insert("provider_roots".to_owned(), serde_json::json!([]));
+    Ok(serde_json::from_value(value)?)
 }
 
 fn cached_manifest(key: &ManifestCacheKey) -> Result<Option<Arc<GenerationManifest>>> {
@@ -576,6 +635,9 @@ pub fn prepare_successor_manifest(
         || base.lexical_schema_version != manifest.lexical_schema_version
         || base.lexical_analyzer_version != manifest.lexical_analyzer_version
         || base.policy_schema_hash != manifest.policy_schema_hash
+        || base.automatic_provider_discovery() != manifest.automatic_provider_discovery()
+        || base.provider_root_config_digest() != manifest.provider_root_config_digest()
+        || base.provider_roots() != manifest.provider_roots()
     {
         return full();
     }

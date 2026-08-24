@@ -26,6 +26,22 @@ pub(super) fn optional_string(arguments: &Value, key: &str) -> Result<Option<Str
     }
 }
 
+pub(super) fn optional_strings(arguments: &Value, key: &str) -> Result<Vec<String>> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| invalid_tool_request(format!("{key} entries must be strings")))
+            })
+            .collect(),
+        Some(_) => Err(invalid_tool_request(format!("{key} must be an array"))),
+    }
+}
+
 pub(super) fn optional_bool(arguments: &Value, key: &str) -> Result<Option<bool>> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),

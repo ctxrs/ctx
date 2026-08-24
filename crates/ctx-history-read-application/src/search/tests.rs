@@ -145,6 +145,8 @@ fn request() -> SearchRequest {
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: None,
         since: None,
         primary_only: false,
@@ -194,6 +196,30 @@ fn manual_session_exclusions_trim_selectors_and_reject_blanks() {
             .to_string(),
         "exclude_session selector is empty"
     );
+}
+
+#[test]
+fn provider_root_and_group_selectors_are_normalized_and_bounded() {
+    let mut request = request();
+    request.source_roots = vec![
+        " work ".to_owned(),
+        "personal".to_owned(),
+        "work".to_owned(),
+    ];
+    request.source_groups = vec![" personal ".to_owned(), "work".to_owned()];
+    normalize_search_request(&mut request).unwrap();
+    assert_eq!(request.source_roots, vec!["personal", "work"]);
+    assert_eq!(request.source_groups, vec!["personal", "work"]);
+
+    request.source_roots = vec!["bad.root".to_owned()];
+    let error = normalize_search_request(&mut request)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "invalid source root selector; expected 1..=64 ASCII letters, digits, hyphens, or underscores"
+    );
+    assert!(!error.contains("bad.root"));
 }
 
 #[test]

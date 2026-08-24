@@ -73,6 +73,17 @@ where
     claude::nativepath::source_backed::claude_jsonl_adapter::<B>()
 }
 
+pub fn claude_jsonl_adapter_for_named_home<B>(
+    source_root_lineage: Option<[u8; 32]>,
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = ProviderJsonlRuntime<B>>>
+where
+    B: ProviderRuntimeBinding,
+{
+    claude::nativepath::source_backed::claude_jsonl_adapter_with_source_root_lineage::<B>(
+        source_root_lineage,
+    )
+}
+
 pub fn cursor_jsonl_adapter<B>() -> Arc<dyn JsonlFamilyAdapter<Runtime = ProviderJsonlRuntime<B>>>
 where
     B: ProviderRuntimeBinding,

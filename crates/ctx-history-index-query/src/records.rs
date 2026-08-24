@@ -145,12 +145,19 @@ pub(super) struct SessionEventAddressCandidate {
 
 impl From<&EventRecord> for SessionRecord {
     fn from(event: &EventRecord) -> Self {
+        let (provider_key, source_id) = event
+            .custom_source_identity()
+            .map_or((None, None), |(provider_key, source_id)| {
+                (Some(provider_key.to_owned()), Some(source_id.to_owned()))
+            });
         Self {
             session_id: event.session_id,
             parent_session_id: event.parent_session_id,
             root_session_id: event.root_session_id,
             session_relationship: event.session_relationship,
             provider: event.provider.clone(),
+            provider_key,
+            source_id,
             source_format: event.source_format.clone(),
             provider_session_id: event.provider_session_id.clone(),
             agent_scope: event.agent_scope,

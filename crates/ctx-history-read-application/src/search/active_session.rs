@@ -65,6 +65,8 @@ pub(super) fn excluded_active_session_tree(
     let sessions = index.sessions_by_provider_session_id(
         &active_session.provider_session_id,
         Some(&active_session.provider),
+        None,
+        None,
     )?;
     let ancestries = sessions
         .iter()

@@ -706,7 +706,7 @@ try {
     $lines = @(
         [PSCustomObject]@{
             record_type = "manifest"
-            schema_version = "ctx-history-jsonl-v1"
+            schema_version = "ctx-history-jsonl-v2"
             metadata = [PSCustomObject]@{ exporter = "ctx-release-smoke" }
         },
         [PSCustomObject]@{
@@ -719,18 +719,17 @@ try {
         [PSCustomObject]@{
             record_type = "session"
             source_id = "release-smoke"
-            session_id = "semantic-daemon-smoke"
+            provider_session_id = "semantic-daemon-smoke"
             cwd = "C:\ctx-release-smoke"
             started_at = "2026-07-10T00:00:00Z"
-            agent_type = "primary"
+            agent_scope = "primary"
             role_hint = "developer"
-            is_primary = $true
             status = "completed"
         },
         [PSCustomObject]@{
             record_type = "event"
             source_id = "release-smoke"
-            session_id = "semantic-daemon-smoke"
+            provider_session_id = "semantic-daemon-smoke"
             event_index = 0
             event_type = "message"
             role = "user"
@@ -742,7 +741,7 @@ try {
         [PSCustomObject]@{
             record_type = "event"
             source_id = "release-smoke"
-            session_id = "semantic-daemon-smoke"
+            provider_session_id = "semantic-daemon-smoke"
             event_index = 1
             event_type = "message"
             role = "assistant"
@@ -758,7 +757,7 @@ try {
     Write-Host "ctx semantic smoke: semantic_cache=$semanticCache"
     Write-Host "ctx semantic smoke: packaged_runtime=$runtimeDylib"
     Invoke-CtxChecked -FailureLabel "fixture import" -CommandArgs @(
-        "import", "--no-daemon", "--input-format", "ctx-history-jsonl-v1", "--path", $fixturePath
+        "import", "--no-daemon", "--input-format", "ctx-history-jsonl-v2", "--path", $fixturePath
     ) | Out-Null
 
     $configPath = Join-Path $DataRoot "config.toml"

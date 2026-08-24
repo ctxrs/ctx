@@ -94,6 +94,16 @@ rust_library(
 )
 
 ctx_cli_contract_test(
+    name = "cli_public_help_docs_tests",
+    src = "tests/contracts/cli_public_help_docs.rs",
+    tags = ["cli-contract"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
+)
+
+ctx_cli_contract_test(
     name = "test_targets_minimal_fixture",
     src = "tests/build_support/minimal.rs",
     extra_crates = ["serde_yaml"],

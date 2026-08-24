@@ -278,6 +278,11 @@ ctx_rust_test(
 )
 
 test_suite(
+    name = "cli_public_help_docs_tests",
+    tests = ["//crates/ctx-cli-contract-tests:cli_public_help_docs_tests"],
+)
+
+test_suite(
     name = "test_targets_minimal_fixture",
     tests = ["//crates/ctx-cli-contract-tests:test_targets_minimal_fixture"],
     tags = ["manual"],
@@ -287,16 +292,6 @@ test_suite(
     name = "test_targets_capabilities_fixture",
     tests = ["//crates/ctx-cli-contract-tests:test_targets_capabilities_fixture"],
     tags = ["manual"],
-)
-
-ctx_cli_integration_test(
-    name = "cli_public_help_docs_tests",
-    src = "tests/cli_public_help_docs.rs",
-    tags = ["cli-contract"],
-    test_support = [
-        "base",
-        "fixtures",
-    ],
 )
 
 ctx_cli_integration_test(

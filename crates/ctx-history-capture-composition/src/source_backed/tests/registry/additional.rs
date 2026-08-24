@@ -248,6 +248,181 @@ fn automatic_retirement_candidates_activate_only_for_exhaustive_refresh() {
 }
 
 #[test]
+fn logical_all_publication_retires_removed_root_during_exact_physical_execution() {
+    let temp = tempdir().unwrap();
+    let personal = explicit_route_at(
+        fixture_route_with_body(
+            CaptureProvider::Claude,
+            "claude_projects_jsonl_tree",
+            78,
+            "personalonly".to_owned(),
+        ),
+        temp.path().join("claude-personal/projects"),
+    );
+    let work = explicit_route_at(
+        fixture_route_with_body(
+            CaptureProvider::Claude,
+            "claude_projects_jsonl_tree",
+            79,
+            "workonly".to_owned(),
+        ),
+        temp.path().join("claude-work/projects"),
+    );
+    let personal_id = personal.metadata.route_identity.clone().unwrap();
+    let work_id = work.metadata.route_identity.clone().unwrap();
+    let personal_definition = ctx_history_capture_model::ProviderRootDefinition {
+        id: "personal".to_owned(),
+        provider: CaptureProvider::Claude,
+        path: temp.path().join("claude-personal"),
+        group: Some("personal".to_owned()),
+    };
+    let work_definition = ctx_history_capture_model::ProviderRootDefinition {
+        id: "work".to_owned(),
+        provider: CaptureProvider::Claude,
+        path: temp.path().join("claude-work"),
+        group: Some("work".to_owned()),
+    };
+
+    let mut initial_registry = SourceBackedProviderRegistry::new();
+    initial_registry.register(personal.clone());
+    initial_registry.register(work);
+    let initial_definitions = vec![personal_definition.clone(), work_definition.clone()];
+    initial_registry
+        .set_applied_provider_roots(
+            true,
+            provider_source_config_digest(true, &initial_definitions),
+            vec![
+                AppliedProviderRoot::new(personal_definition.clone(), vec![personal_id.clone()])
+                    .unwrap(),
+                AppliedProviderRoot::new(work_definition, vec![work_id.clone()]).unwrap(),
+            ],
+        )
+        .unwrap();
+    refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
+        .unwrap();
+    assert_eq!(
+        VerifiedIndex::open(temp.path())
+            .unwrap()
+            .manifest()
+            .sources
+            .len(),
+        2
+    );
+
+    let mut current_registry = SourceBackedProviderRegistry::new();
+    current_registry.register(personal);
+    current_registry
+        .set_applied_provider_roots(
+            true,
+            provider_source_config_digest(true, std::slice::from_ref(&personal_definition)),
+            vec![AppliedProviderRoot::new(personal_definition, vec![personal_id.clone()]).unwrap()],
+        )
+        .unwrap();
+    current_registry.set_provider_root_route_retirements([work_id.clone()]);
+
+    SourceBackedRefreshExecutor::new(current_registry, WriterOptions::default())
+        .refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+            temp.path(),
+            SourceBackedRefreshScope::exact([personal_id.clone()]),
+            SourceBackedRefreshScope::All,
+            SourceBackedReconciliationDemand::Exhaustive,
+            BTreeMap::new(),
+            |_| Ok(()),
+            |_| Ok(Vec::new()),
+        )
+        .unwrap();
+
+    let published = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(published.manifest().sources.len(), 1);
+    assert!(published.manifest().source_route(&work_id).is_none());
+    assert!(published.manifest().source_route(&personal_id).is_some());
+    assert_eq!(published.manifest().provider_roots().len(), 1);
+    assert_eq!(
+        published.manifest().provider_roots()[0].definition().id,
+        "personal"
+    );
+}
+
+#[test]
+fn cold_configured_root_scan_failure_does_not_block_healthy_peer_publication() {
+    let temp = tempdir().unwrap();
+    let personal = explicit_route_at(
+        fixture_route_with_body(
+            CaptureProvider::Claude,
+            "claude_projects_jsonl_tree",
+            80,
+            "healthyconfiguredroot".to_owned(),
+        ),
+        temp.path().join("claude-personal/projects"),
+    );
+    let work = fail_route_before_scan(
+        explicit_route_at(
+            fixture_route_with_body(
+                CaptureProvider::Claude,
+                "claude_projects_jsonl_tree",
+                81,
+                "failedconfiguredroot".to_owned(),
+            ),
+            temp.path().join("claude-work/projects"),
+        ),
+        SourceBackedRouteErrorKind::SourceChanged,
+    );
+    let personal_id = personal.metadata.route_identity.clone().unwrap();
+    let work_id = work.metadata.route_identity.clone().unwrap();
+    let definitions = vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: temp.path().join("claude-personal"),
+            group: Some("personal".to_owned()),
+        },
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "work".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: temp.path().join("claude-work"),
+            group: Some("work".to_owned()),
+        },
+    ];
+    let mut registry = SourceBackedProviderRegistry::new();
+    registry.register(personal);
+    registry.register(work);
+    registry
+        .set_applied_provider_roots(
+            false,
+            provider_source_config_digest(false, &definitions),
+            vec![
+                AppliedProviderRoot::new(definitions[0].clone(), vec![personal_id.clone()])
+                    .unwrap(),
+                AppliedProviderRoot::new(definitions[1].clone(), vec![work_id.clone()]).unwrap(),
+            ],
+        )
+        .unwrap();
+
+    let receipt =
+        refresh_source_backed_generation(temp.path(), &registry, WriterOptions::default()).unwrap();
+
+    assert_eq!(receipt.successful_route_ids, vec![personal_id.clone()]);
+    assert!(matches!(
+        receipt.failed_routes.as_slice(),
+        [failure]
+            if failure.route_identity == work_id
+                && failure.class == SourceBackedSourceFailureClass::SourceChanged
+                && !failure.carried_forward
+    ));
+    assert!(receipt
+        .commit
+        .manifest()
+        .source_route(&personal_id)
+        .is_some());
+    assert!(receipt.commit.manifest().source_route(&work_id).is_none());
+    let personal_root = receipt.commit.manifest().provider_root("personal").unwrap();
+    let work_root = receipt.commit.manifest().provider_root("work").unwrap();
+    assert_eq!(personal_root.routes(), std::slice::from_ref(&personal_id));
+    assert!(work_root.routes().is_empty());
+    assert_eq!(receipt.commit.indexed_documents, 1);
+}
+
+#[test]
 fn empty_replacement_cannot_hide_a_cold_route_failure_behind_retired_content() {
     let temp = tempdir().unwrap();
     let retired = explicit_route_at(

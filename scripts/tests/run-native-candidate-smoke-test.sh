@@ -250,7 +250,7 @@ JSON
     ;;
 esac
 EOF
-printf '%s\n' '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}' > "${tmp}/fixture.jsonl"
+printf '%s\n' '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"}' > "${tmp}/fixture.jsonl"
 
 assert_passed_result() {
   local result_path="$1"

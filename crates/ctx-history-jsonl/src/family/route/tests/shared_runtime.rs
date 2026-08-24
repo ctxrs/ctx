@@ -502,9 +502,10 @@ impl CaptureLifecycleSink for TestLifecycle {
     }
 }
 
-macro_rules! capture_test_generation {
-    ($adapter:expr, $root:expr, $index_root:expr, $workers:expr, $capture:expr) => {{
-        capture_test_generation!(
+macro_rules! capture_test_generation_with_resident {
+    ($resident:expr, $adapter:expr, $root:expr, $index_root:expr, $workers:expr, $capture:expr) => {{
+        capture_test_generation_with_resident!(
+            $resident,
             $adapter,
             $root,
             $index_root,
@@ -513,8 +514,7 @@ macro_rules! capture_test_generation {
             $capture
         )
     }};
-    ($adapter:expr, $root:expr, $index_root:expr, $workers:expr, $demand:expr, $capture:expr) => {{
-        let resident = Mutex::new(FamilyResident::default());
+    ($resident:expr, $adapter:expr, $root:expr, $index_root:expr, $workers:expr, $demand:expr, $capture:expr) => {{
         let mut writer = match IndexCaptureLifecycle::open($index_root, ()).unwrap() {
             CaptureLifecycleOpenOutcome::Ready(lifecycle) => lifecycle,
             CaptureLifecycleOpenOutcome::RecoveryRequired { .. } => {
@@ -543,8 +543,36 @@ macro_rules! capture_test_generation {
                 None,
                 None,
             );
-            with_family_scanner_workers($workers, || $capture(&resident, &mut sink))
+            with_family_scanner_workers($workers, || $capture($resident, &mut sink))
         };
+        (writer, result)
+    }};
+}
+
+pub(super) use capture_test_generation_with_resident;
+
+macro_rules! capture_test_generation {
+    ($adapter:expr, $root:expr, $index_root:expr, $workers:expr, $capture:expr) => {{
+        capture_test_generation!(
+            $adapter,
+            $root,
+            $index_root,
+            $workers,
+            SourceBackedReconciliationDemand::Incremental,
+            $capture
+        )
+    }};
+    ($adapter:expr, $root:expr, $index_root:expr, $workers:expr, $demand:expr, $capture:expr) => {{
+        let resident = Mutex::new(FamilyResident::default());
+        let (writer, result) = capture_test_generation_with_resident!(
+            &resident,
+            $adapter,
+            $root,
+            $index_root,
+            $workers,
+            $demand,
+            $capture
+        );
         (writer, resident, result)
     }};
 }

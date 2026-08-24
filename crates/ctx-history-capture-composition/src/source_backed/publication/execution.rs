@@ -17,69 +17,12 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
         discovery_duration,
         work_budget,
     } = execution;
-    if matches!(&plan.scope, SourceBackedRefreshScope::All) {
-        if let Some(unavailable) = registry.routes.iter().find(|route| {
-            route.driver.is_none()
-                && route.certified_missing_paths.is_empty()
-                && route.metadata.source.status == ProviderSourceStatus::Unknown
-        }) {
-            return Err(SourceBackedCoordinatorError::UnavailableRoute {
-                provider: unavailable.metadata.source.provider,
-                detail: unavailable
-                    .metadata
-                    .unsupported_reason
-                    .clone()
-                    .unwrap_or_else(|| "route state is unavailable".to_owned()),
-            });
-        }
-    }
-    let executable_route_ids = registry
-        .routes
-        .iter()
-        .filter(|route| route.driver.is_some() || !route.certified_missing_paths.is_empty())
-        .filter_map(|route| route.metadata.route_identity.clone())
-        .collect::<BTreeSet<_>>();
-    let selected_route_ids = match &plan.scope {
-        SourceBackedRefreshScope::All => executable_route_ids,
-        SourceBackedRefreshScope::Exact(selected) => {
-            if let Some(unknown) = selected.difference(&executable_route_ids).next() {
-                return Err(SourceBackedCoordinatorError::InvalidRefreshScope {
-                    route_id: unknown.as_str().to_owned(),
-                });
-            }
-            selected.clone()
-        }
-    };
-    let scanned_routes = registry
-        .routes
-        .iter()
-        .filter(|route| route.driver.is_some())
-        .filter(|route| {
-            route
-                .metadata
-                .route_identity
-                .as_ref()
-                .is_some_and(|identity| selected_route_ids.contains(identity))
-        })
-        .count();
-    let mut selected_provider_set = HashSet::new();
-    let providers = registry
-        .routes
-        .iter()
-        .filter(|route| route.driver.is_some())
-        .filter(|route| {
-            route
-                .metadata
-                .route_identity
-                .as_ref()
-                .is_some_and(|identity| selected_route_ids.contains(identity))
-        })
-        .filter_map(|route| {
-            selected_provider_set
-                .insert(route.metadata.source.provider)
-                .then_some(route.metadata.source.provider)
-        })
-        .collect::<Vec<_>>();
+    let RefreshPrelude {
+        selected_route_ids,
+        scanned_routes,
+        providers,
+        unsupported_routes,
+    } = prepare_refresh(registry, &plan)?;
     let attempt_history_progress = plan.attempt_history_progress.clone();
     let exact_scan_accounting = std::cell::RefCell::new(AttemptExactScanAccounting::default());
     let exact_scan_accounting_valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -91,30 +34,12 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
         emit_progress(update)
     };
     let refresh_started = Instant::now();
-    report_progress(source_level_progress(SourceBackedRefreshProgress {
-        phase: "discovering",
-        completed_sources: 0,
-        total_sources: scanned_routes,
-        current_source: None,
-        completed_records: None,
-        completed_bytes: None,
-        providers: providers.clone(),
-        processed_sessions: 0,
-        processed_messages: 0,
-        processed_tool_calls: 0,
-        processed_bytes: 0,
-        stage_duration: discovery_duration,
-        elapsed: discovery_duration,
-        certified_source_count: None,
-        certified_source_bytes: None,
-    }))
+    report_progress(discovery_started_progress(
+        scanned_routes,
+        providers.clone(),
+        discovery_duration,
+    ))
     .map_err(SourceBackedCoordinatorError::Progress)?;
-    let unsupported_routes = registry
-        .routes
-        .iter()
-        .filter(|route| route.driver.is_none())
-        .map(|route| route.metadata.clone())
-        .collect();
 
     let scan_started = Instant::now();
     let index_root = index_root.as_ref();
@@ -146,6 +71,7 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                 );
             }
         };
+        // Exact/watch preserves pinned aliases; cold exact commits admitted definitions.
         let base_snapshot = lifecycle.base_snapshot();
         let base_route_content = source_route_content_fingerprints(base_snapshot.as_ref());
         let base_route_ids = lifecycle
@@ -157,18 +83,51 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
-        let automatic_retirements = if matches!(&plan.scope, SourceBackedRefreshScope::All) {
-            let retirements = automatic_carried_route_retirements(
-                registry,
-                &selected_route_ids,
-                &base_route_ids,
+        let configured_route_ids = configured_provider_root_route_ids(registry);
+        if matches!(&plan.publication_scope, SourceBackedRefreshScope::All)
+            || lifecycle.base_snapshot().is_none()
+        {
+            if let Some((automatic, digest, roots)) = provider_roots_for_publication(registry)? {
+                lifecycle.set_applied_provider_roots(automatic, digest, roots)?;
+            }
+        }
+        if matches!(&plan.publication_scope, SourceBackedRefreshScope::All) {
+            // Omitted base routes carry unless a typed topology transition
+            // retires them; certified-missing routes are already selected.
+            carried_unselected_route_ids
+                .extend(base_route_ids.difference(&selected_route_ids).cloned());
+        }
+        let automatic_retirements =
+            if matches!(&plan.publication_scope, SourceBackedRefreshScope::All) {
+                let retirements = automatic_carried_route_retirements(
+                    registry,
+                    &selected_route_ids,
+                    &base_route_ids,
+                )?;
+                carried_unselected_route_ids.extend(retirements.values().flatten().cloned());
+                retirements
+            } else {
+                BTreeMap::new()
+            };
+        if matches!(&plan.publication_scope, SourceBackedRefreshScope::All) {
+            carried_unselected_route_ids.extend(
+                registry
+                    .routes
+                    .iter()
+                    .filter(|route| route.driver.is_some())
+                    .flat_map(|route| route.retire_after_success.iter())
+                    .filter(|route| {
+                        base_route_ids.contains(*route) && !selected_route_ids.contains(*route)
+                    })
+                    .cloned(),
+            );
+            carried_unselected_route_ids
+                .retain(|route| !registry.provider_root_route_retirements.contains(route));
+            lifecycle.set_authorized_topology_route_retirements(
+                registry.provider_root_route_retirements.clone(),
             )?;
-            carried_unselected_route_ids.extend(retirements.values().flatten().cloned());
-            retirements
-        } else {
-            BTreeMap::new()
-        };
-        if matches!(&plan.scope, SourceBackedRefreshScope::Exact(_))
+        }
+        if matches!(&plan.publication_scope, SourceBackedRefreshScope::Exact(_))
             && carried_unselected_route_ids.is_empty()
         {
             carried_unselected_route_ids = base_route_ids
@@ -223,7 +182,12 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                 }
             }
         }
-        let attempt_selected = selected_route_ids.clone();
+        let attempt_selected = publication_selected_route_ids(
+            registry,
+            &selected_route_ids,
+            &base_route_ids,
+            &configured_route_ids,
+        );
         let mut attempt_carried = carried_unselected_route_ids.clone();
         lifecycle.set_route_plan(attempt_selected.clone(), attempt_carried.clone())?;
 
@@ -234,6 +198,36 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
         let mut applied_removals = Vec::new();
         let mut successful_this_attempt = BTreeSet::new();
         let mut completed_routes = 0;
+        for route in registry.routes.iter().filter(|route| {
+            route.metadata.source.status == ProviderSourceStatus::Unknown
+                && route.driver.is_none()
+                && route.certified_missing_paths.is_empty()
+                && route.metadata.route_identity.is_some()
+        }) {
+            let route_identity = route
+                .metadata
+                .route_identity
+                .as_ref()
+                .expect("configured unavailable route identity");
+            if !attempt_selected.contains(route_identity) {
+                continue;
+            }
+            let carried_forward = lifecycle.carry_failed_route(route_identity)?;
+            attempt_carried.insert(route_identity.clone());
+            failed_routes.insert(
+                route_identity.clone(),
+                source_backed_failed_route_from_route(
+                    route,
+                    SourceBackedSourceFailureClass::Unavailable,
+                    carried_forward,
+                    route
+                        .metadata
+                        .unsupported_reason
+                        .as_deref()
+                        .unwrap_or("configured route is unavailable"),
+                )?,
+            );
+        }
         for (route_index, route) in registry.routes.iter().enumerate() {
             let Some(route_identity) = route.metadata.route_identity.as_ref() else {
                 continue;
@@ -422,9 +416,8 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                 .borrow_mut()
                 .finish_route(scan_result.is_ok());
             if scan_result.is_err() {
-                // Parallel workers have joined before scan returns. Their
-                // cumulative scanner facts remain available for this failed
-                // attempt, but no next route may consume their byte debt.
+                // Joined workers retain failed-attempt facts, while later
+                // routes cannot consume their byte debt.
                 attempt_history_progress.reset_parallel_byte_debt();
             } else if attempt_history_progress.parallel_byte_debt() != 0 {
                 return Err(SourceBackedCoordinatorError::RouteScan {
@@ -613,10 +606,12 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             let route_identity = route.metadata.route_identity.as_ref().ok_or_else(|| {
                 index_writer_invariant("certified-missing source route has no route identity")
             })?;
-            if !attempt_selected.contains(route_identity) {
+            if !selected_route_ids.contains(route_identity) {
                 continue;
             }
-            lifecycle.begin_route_stage(route_identity.clone())?;
+            if attempt_selected.contains(route_identity) {
+                lifecycle.begin_route_stage(route_identity.clone())?;
+            }
             let history_progress = attempt_history_progress.snapshot();
             report_progress(source_level_progress(SourceBackedRefreshProgress {
                 phase: "verifying",
@@ -643,9 +638,14 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             {
                 exact_scan_accounting.borrow_mut().revoke();
                 exact_scan_accounting_valid.store(false, std::sync::atomic::Ordering::SeqCst);
-                lifecycle.rollback_route_stage(route_identity)?;
-                let carried_forward = lifecycle.carry_failed_route(route_identity)?;
-                attempt_carried.insert(route_identity.clone());
+                let carried_forward = if attempt_selected.contains(route_identity) {
+                    lifecycle.rollback_route_stage(route_identity)?;
+                    let carried_forward = lifecycle.carry_failed_route(route_identity)?;
+                    attempt_carried.insert(route_identity.clone());
+                    carried_forward
+                } else {
+                    false
+                };
                 failed_routes.insert(
                     route_identity.clone(),
                     source_backed_failed_route_from_route(
@@ -655,6 +655,10 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                         "certified-missing route changed during terminal verification",
                     )?,
                 );
+                continue;
+            }
+            if !attempt_selected.contains(route_identity) {
+                successful_this_attempt.insert(route_identity.clone());
                 continue;
             }
             let accounting_valid = Arc::clone(&exact_scan_accounting_valid);
@@ -674,7 +678,6 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             lifecycle.finish_route_stage(route_identity)?;
             successful_this_attempt.insert(route_identity.clone());
         }
-
         lifecycle.set_present_routes(registry.routes.iter().enumerate().filter_map(
             |(route_index, route)| {
                 let route_identity = route.metadata.route_identity.as_ref()?;
@@ -688,7 +691,12 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                     .values()
                     .filter(|owner| owner.route_index == route_index && owner.present)
                     .map(|owner| owner.source.clone())
-                    .collect();
+                    .collect::<Vec<_>>();
+                if members.is_empty()
+                    && omit_empty_automatic_route(registry, route_identity, &configured_route_ids)
+                {
+                    return None;
+                }
                 Some(PresentCaptureRoute::new(route_identity.clone(), members))
             },
         ))?;
@@ -730,9 +738,8 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                     failed_routes: bounded_source_failures(failed_routes.values()),
                 });
             }
-            // An explicitly quarantined ownership member can leave a
-            // successfully certified route empty without weakening the
-            // ordinary all-logical-failures guard above.
+            // Quarantined ownership may certify an empty route without
+            // weakening the ordinary all-logical-failures guard.
         }
 
         let history_progress = attempt_history_progress.snapshot();
@@ -926,7 +933,6 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             verified_publication,
         )
     };
-
     let successful_route_ids = selected_route_ids
         .iter()
         .filter(|identity| !failed_routes.contains_key(*identity))
@@ -944,23 +950,15 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
     run_after_successful_publication(registry, &successful_route_ids);
     let scan_stage_duration = scan_started.elapsed();
     let history_progress = attempt_history_progress.snapshot();
-    let _ = report_progress(source_level_progress(SourceBackedRefreshProgress {
-        phase: "committed",
-        completed_sources: scanned_routes,
-        total_sources: scanned_routes,
-        current_source: None,
-        completed_records: None,
-        completed_bytes: None,
+    let _ = report_progress(committed_progress(
+        scanned_routes,
         providers,
-        processed_sessions: history_progress.processed_sessions,
-        processed_messages: history_progress.processed_messages,
-        processed_tool_calls: history_progress.processed_tool_calls,
-        processed_bytes: history_progress.processed_bytes,
-        stage_duration: commit_duration,
-        elapsed: discovery_duration.saturating_add(refresh_started.elapsed()),
-        certified_source_count: Some(commit.certified_sources),
-        certified_source_bytes: Some(commit.certified_source_bytes),
-    }));
+        history_progress,
+        commit_duration,
+        discovery_duration.saturating_add(refresh_started.elapsed()),
+        commit.certified_sources,
+        commit.certified_source_bytes,
+    ));
     let certified_source_count = commit.certified_sources;
     let certified_source_bytes = commit.certified_source_bytes;
     let sources = commit.snapshot().sources().to_vec();

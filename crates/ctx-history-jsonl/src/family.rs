@@ -157,7 +157,9 @@ pub use physical::{
 };
 use revalidation::hash_prefix;
 pub use revalidation::revalidate_frozen_prefix;
-pub(crate) use revalidation::revalidate_frozen_prefix_sha256;
+pub(crate) use revalidation::{
+    authenticate_frozen_prefix, authenticate_frozen_prefix_sha256, revalidate_frozen_prefix_sha256,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use revalidation::{
     jsonl_prefix_hash_bytes, reset_jsonl_prefix_hash_bytes, set_after_final_jsonl_prefix_hash_hook,

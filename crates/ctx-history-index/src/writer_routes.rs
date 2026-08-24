@@ -21,6 +21,59 @@ pub(crate) fn route_retirement_membership_probes() -> (u64, u64) {
 }
 
 impl GenerationWriter {
+    /// Installs the provider-root aliases and route membership applied by this
+    /// refresh. This snapshot is committed atomically with the route/source
+    /// manifest so readers never resolve selectors against live config.
+    pub fn set_applied_provider_roots(
+        &mut self,
+        automatic_provider_discovery: bool,
+        config_digest: String,
+        roots: Vec<AppliedProviderRoot>,
+    ) -> Result<()> {
+        if self.writer.is_some()
+            || self.active_source_route_stage.is_some()
+            || !self.pending.is_empty()
+            || !self.deletions.is_empty()
+            || !self.complete_inventories.is_empty()
+            || self.applied_provider_roots.is_some()
+        {
+            return Err(IndexError::InvalidSourceRoutePlan(
+                "applied provider roots must be installed exactly once before staging".to_owned(),
+            ));
+        }
+        self.applied_provider_roots = Some((automatic_provider_discovery, config_digest, roots));
+        Ok(())
+    }
+
+    /// Authorizes exact locked-base routes to disappear as part of a
+    /// provider-root topology transition.
+    ///
+    /// The caller derives these identities from the admitted provider-root
+    /// definitions and the locked generation manifest. The route plan still
+    /// validates that every identity belongs to the base and is neither
+    /// selected nor carried, so this cannot become a general route-deletion
+    /// escape hatch.
+    pub fn set_authorized_topology_route_retirements(
+        &mut self,
+        routes: BTreeSet<SourceRouteIdentity>,
+    ) -> Result<()> {
+        if self.writer.is_some()
+            || self.source_route_plan.is_some()
+            || self.active_source_route_stage.is_some()
+            || !self.pending.is_empty()
+            || !self.deletions.is_empty()
+            || !self.complete_inventories.is_empty()
+            || self.authorized_topology_route_retirements.is_some()
+        {
+            return Err(IndexError::InvalidSourceRoutePlan(
+                "topology route retirements must be installed exactly once before the route plan"
+                    .to_owned(),
+            ));
+        }
+        self.authorized_topology_route_retirements = Some(routes);
+        Ok(())
+    }
+
     /// Defines every route conclusively present in the candidate snapshot.
     /// Missing routes are added separately by `observe_certified_missing_route`.
     pub fn set_present_source_routes(&mut self, routes: Vec<SourceRouteSnapshot>) -> Result<()> {
@@ -146,11 +199,89 @@ impl GenerationWriter {
             .union(&carried_from_base)
             .cloned()
             .collect::<BTreeSet<_>>();
-        if let Some(route) = base_routes.difference(&covered_base_routes).next() {
+        let uncovered_base_routes = base_routes
+            .difference(&covered_base_routes)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let inferred_provider_root_retirements = self
+            .base_publication
+            .as_ref()
+            .zip(self.applied_provider_roots.as_ref())
+            .map(|(base, (_, _, applied_roots))| {
+                let previous = base
+                    .manifest()
+                    .provider_roots()
+                    .iter()
+                    .flat_map(|root| root.routes().iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                let current = applied_roots
+                    .iter()
+                    .flat_map(|root| root.routes().iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                previous
+                    .difference(&current)
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let explicit_topology_retirements = self
+            .authorized_topology_route_retirements
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        if let Some(route) = explicit_topology_retirements
+            .difference(&base_routes)
+            .next()
+        {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "topology retirement route {} is absent from the locked base",
+                route.as_str()
+            )));
+        }
+        if let Some(route) = explicit_topology_retirements
+            .intersection(&covered_base_routes)
+            .next()
+        {
+            return Err(IndexError::InvalidSourceRoutePlan(format!(
+                "topology retirement route {} is also selected or carried",
+                route.as_str()
+            )));
+        }
+        let authorized_provider_root_retirements = inferred_provider_root_retirements
+            .union(&explicit_topology_retirements)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(route) = uncovered_base_routes
+            .difference(&authorized_provider_root_retirements)
+            .next()
+        {
             return Err(IndexError::InvalidSourceRoutePlan(format!(
                 "base route {} is neither selected nor carried",
                 route.as_str()
             )));
+        }
+        if !uncovered_base_routes.is_empty() {
+            let base = self
+                .base_publication
+                .as_ref()
+                .ok_or_else(|| {
+                    IndexError::InvalidSourceRoutePlan(
+                        "provider-root retirement requires a locked base".to_owned(),
+                    )
+                })?
+                .manifest();
+            let retired_sources = uncovered_base_routes
+                .iter()
+                .filter_map(|route| base.source_route(route))
+                .flat_map(SourceRouteSnapshot::sources)
+                .cloned()
+                .collect::<Vec<_>>();
+            for source in retired_sources {
+                // Defer the physical delete until publication. A selected
+                // replacement route may re-own this exact source and retain
+                // its unchanged documents without restaging them.
+                self.route_deletions.insert(source);
+            }
         }
         self.source_route_plan = Some(SourceRoutePlan {
             selected,
@@ -556,6 +687,14 @@ impl GenerationWriter {
                         && !plan.carried_from_base.contains(route.route_identity())
                 })
         });
+        // An uncovered base route can only exist after set_source_route_plan
+        // authenticated it as an exact provider-root topology retirement.
+        // Its source may therefore move directly to the active replacement
+        // route without temporarily publishing both owners.
+        let owner_authorized_for_topology_transfer = base_owner.is_some_and(|route| {
+            !plan.selected.contains(route.route_identity())
+                && !plan.carried_from_base.contains(route.route_identity())
+        });
         if let Some(route) = base_owner {
             if plan.carried_from_base.contains(route.route_identity())
                 && !owner_authorized_for_active
@@ -578,7 +717,10 @@ impl GenerationWriter {
             .clone();
         if let Some(route) = base_owner {
             let owner_is_active = route.route_identity() == &active_route;
-            if !owner_is_active && !owner_authorized_for_active {
+            if !owner_is_active
+                && !owner_authorized_for_active
+                && !owner_authorized_for_topology_transfer
+            {
                 return Err(IndexError::SourceRouteOwnershipMutation {
                     active_route_id: active_route.as_str().to_owned(),
                     owner_route_id: route.route_identity().as_str().to_owned(),

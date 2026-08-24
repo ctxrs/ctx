@@ -1,4 +1,263 @@
 use super::*;
+use ctx_history_core::CaptureProvider;
+
+#[test]
+fn discovery_policy_only_change_publishes_and_preserves_carried_documents() {
+    let temp = tempdir().unwrap();
+    let source = source("automatic-root.jsonl");
+    let route = SourceRouteIdentity::from_sha256("90".repeat(32)).unwrap();
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial
+        .set_applied_provider_roots(true, provider_source_config_digest(true, &[]), Vec::new())
+        .unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "carried automatic history"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route.clone(),
+            vec![source],
+        )
+        .unwrap()])
+        .unwrap();
+    let initial = initial.commit(|_| true).unwrap();
+
+    let mut policy_change = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    policy_change
+        .set_applied_provider_roots(false, provider_source_config_digest(false, &[]), Vec::new())
+        .unwrap();
+    policy_change
+        .set_source_route_plan(BTreeSet::new(), BTreeSet::from([route.clone()]))
+        .unwrap();
+    policy_change.set_present_source_routes(Vec::new()).unwrap();
+    let changed = policy_change.commit(|_| true).unwrap();
+
+    assert_ne!(changed.generation_id, initial.generation_id);
+    let published = VerifiedIndex::open(temp.path()).unwrap();
+    assert!(!published.manifest().automatic_provider_discovery());
+    assert!(published.manifest().source_route(&route).is_some());
+    assert_eq!(published.manifest().indexed_documents, 1);
+    assert_eq!(published.count_term("carried").unwrap(), 1);
+}
+
+#[test]
+fn provider_root_metadata_change_with_source_replacement_reopens_exactly() {
+    let temp = tempdir().unwrap();
+    let source = source("provider-root-metadata.jsonl");
+    let route = SourceRouteIdentity::from_sha256("8f".repeat(32)).unwrap();
+    let definition = |path: &str| ProviderRootDefinition {
+        id: "personal".to_owned(),
+        provider: CaptureProvider::Claude,
+        path: PathBuf::from(path),
+        group: Some("personal".to_owned()),
+    };
+    let initial_definition = definition("/home/example/.claude-personal");
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial
+        .set_applied_provider_roots(
+            true,
+            provider_source_config_digest(true, std::slice::from_ref(&initial_definition)),
+            vec![AppliedProviderRoot::new(initial_definition, vec![route.clone()]).unwrap()],
+        )
+        .unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "initial provider-root document"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route.clone(),
+            vec![source.clone()],
+        )
+        .unwrap()])
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let moved_definition = definition("/mnt/history/.claude-personal");
+    let mut moved = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    moved
+        .set_applied_provider_roots(
+            true,
+            provider_source_config_digest(true, std::slice::from_ref(&moved_definition)),
+            vec![AppliedProviderRoot::new(moved_definition.clone(), vec![route.clone()]).unwrap()],
+        )
+        .unwrap();
+    moved.begin_source(source.clone()).unwrap();
+    moved
+        .add_core_record(document(&source, 2, "moved provider-root document"))
+        .unwrap();
+    moved.certify_source(certificate(&source, 2, 1)).unwrap();
+    moved
+        .set_present_source_routes(vec![
+            SourceRouteSnapshot::present(route, vec![source]).unwrap()
+        ])
+        .unwrap();
+    let committed = moved.commit(|_| true).unwrap();
+
+    let reopened = VerifiedIndex::open(temp.path()).unwrap();
+    assert!(committed.manifest().exact_snapshot_eq(reopened.manifest()));
+    assert_eq!(
+        reopened.manifest().provider_roots()[0].definition(),
+        &moved_definition
+    );
+    assert_eq!(reopened.count_term("moved").unwrap(), 1);
+}
+
+#[test]
+fn valid_provider_root_removal_retires_its_last_route_without_a_replacement() {
+    let temp = tempdir().unwrap();
+    let source = source("configured-root.jsonl");
+    let expected_source_token = source_token(&source);
+    let route = SourceRouteIdentity::from_sha256("91".repeat(32)).unwrap();
+    let definition = ProviderRootDefinition {
+        id: "personal".to_owned(),
+        provider: CaptureProvider::Claude,
+        path: PathBuf::from("/home/example/.claude-personal"),
+        group: Some("personal".to_owned()),
+    };
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial
+        .set_applied_provider_roots(
+            true,
+            provider_source_config_digest(true, std::slice::from_ref(&definition)),
+            vec![AppliedProviderRoot::new(definition, vec![route.clone()]).unwrap()],
+        )
+        .unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "removed provider root"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route.clone(),
+            vec![source],
+        )
+        .unwrap()])
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let pinned = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(
+        pinned
+            .manifest()
+            .provider_root_source_tokens(&["personal".to_owned()], &[])
+            .unwrap(),
+        vec![expected_source_token.clone()]
+    );
+    assert_eq!(
+        pinned
+            .manifest()
+            .provider_root_source_tokens(&[], &["personal".to_owned()])
+            .unwrap(),
+        vec![expected_source_token]
+    );
+
+    let mut removal = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    removal
+        .set_applied_provider_roots(true, provider_source_config_digest(true, &[]), Vec::new())
+        .unwrap();
+    removal
+        .set_source_route_plan(BTreeSet::new(), BTreeSet::new())
+        .unwrap();
+    removal.set_present_source_routes(Vec::new()).unwrap();
+    removal.commit(|_| true).unwrap();
+
+    let published = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(published.count_term("removed").unwrap(), 0);
+    assert!(published.manifest().sources.is_empty());
+    assert!(published.manifest().source_routes().is_empty());
+    assert!(published.manifest().provider_roots().is_empty());
+}
+
+#[test]
+fn authenticated_topology_transfer_reowns_an_unchanged_source_without_deleting_its_documents() {
+    let temp = tempdir().unwrap();
+    let source = source("topology-transfer.jsonl");
+    let old_route = SourceRouteIdentity::from_sha256("92".repeat(32)).unwrap();
+    let new_route = SourceRouteIdentity::from_sha256("93".repeat(32)).unwrap();
+
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "topology transfer retained"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            old_route.clone(),
+            vec![source.clone()],
+        )
+        .unwrap()])
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+
+    let mut unauthorized = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert!(matches!(
+        unauthorized.set_source_route_plan(BTreeSet::from([new_route.clone()]), BTreeSet::new(),),
+        Err(IndexError::InvalidSourceRoutePlan(_))
+    ));
+    drop(unauthorized);
+
+    let mut transfer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    transfer
+        .set_authorized_topology_route_retirements(BTreeSet::from([old_route.clone()]))
+        .unwrap();
+    transfer
+        .set_source_route_plan(BTreeSet::from([new_route.clone()]), BTreeSet::new())
+        .unwrap();
+    transfer
+        .begin_source_route_stage(new_route.clone())
+        .unwrap();
+    transfer.retain_source(certificate(&source, 1, 1)).unwrap();
+    transfer.finish_source_route_stage(&new_route).unwrap();
+    transfer
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            new_route.clone(),
+            vec![source],
+        )
+        .unwrap()])
+        .unwrap();
+    transfer.commit(|_| true).unwrap();
+
+    let published = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(published.count_term("topology").unwrap(), 1);
+    assert!(published.manifest().source_route(&old_route).is_none());
+    assert!(published.manifest().source_route(&new_route).is_some());
+}
 
 #[test]
 fn route_checkpoint_rolls_back_partial_route_and_keeps_prior_route_work() {

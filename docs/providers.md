@@ -29,12 +29,14 @@ codex, grok-build, deepseek-harness, claude, cursor, pi, opencode, github-copilo
 
 Aliases are accepted for common naming differences, for example `grok`, `dsh`, `deepseek_harness`, `claude-code`, `gemini-cli`, `github-copilot`, `droid`, `augment`, `qoder-cn`, and `roo-code`. The shorter name `deepseek` is not a DeepSeek Harness alias.
 
-Custom history is separate: `ctx import --input-format ctx-history-jsonl-v1
+Custom history is separate: `ctx import --input-format ctx-history-jsonl-v2
 --path <file>` reads an explicit JSONL interchange file from any exporter, and
 history-source plugin manifests can register a durable provider-owned file.
 The optional `provider_native_v1` lineage contract accepts typed relationships
-and exact native copied-from selectors; legacy files and command-only plugins
-remain lineage/origin unknown.
+and exact native-event copied-from selectors inside the v2 schema; the proof
+name does not introduce a second session ID. The v1 schema is unsupported and
+is neither accepted as an alias nor translated. Command-only plugins remain
+lineage/origin unknown.
 
 Exact MCP server/tool attribution is a separate, narrower event capability.
 Supported provider import does not automatically qualify it. The complete
@@ -59,6 +61,25 @@ or persistent-config value replaces the lower-priority default; it is not added
 beside it. Multiple roots are emitted only for current coexisting stores such as
 installed clients, persisted profiles, or configured agents. See
 [`provider-support-matrix.json`](provider-support-matrix.json) for every row.
+
+Claude and Codex additionally support explicitly configured named homes for
+the common work/personal or multi-profile case. Use `ctx sources add <name>
+--provider claude|codex --root <home> [--source-group <group>]`, or edit
+`[sources.roots.<name>]` in `config.toml`. Named homes are additive to that
+provider's environment/default winner and do not affect discovery for any
+other provider. A named home that resolves to the inferred physical home
+annotates it rather than duplicating it. Claude homes expand to `projects`;
+Codex homes expand independently to `sessions`, `archived_sessions`, and
+`history.jsonl` so one unavailable path or home cannot hide a healthy peer.
+Set `[sources] automatic = false` only when all automatic provider discovery
+should stop and every active Claude/Codex home should come from named
+configuration; this does not delete already indexed history.
+
+The configured name is the durable local identity of an additional home, not
+only a label. Keep the name and update its path when the same home moves; choose
+a new name for an unrelated home. Reusing a removed name intentionally reuses
+its logical namespace, while changing only its group does not rotate source or
+citation identities.
 
 One-shot flags, API constructor paths, old launch directories, container host
 mounts, copies, and unreconstructible selectors are not automatic. Import one

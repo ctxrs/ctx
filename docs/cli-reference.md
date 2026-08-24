@@ -236,6 +236,9 @@ and manual snippets.
 ```bash
 ctx sources
 ctx sources --format json
+ctx sources add personal --provider claude --root ~/.claude-personal --source-group personal
+ctx sources add work --provider codex --root ~/.codex-work --source-group work
+ctx sources remove personal
 ```
 
 `sources` lists bounded provider history locations selected for this machine.
@@ -243,6 +246,64 @@ Provider precedence is winner-only: an environment or persistent-config
 replacement suppresses its lower-priority default. Current coexisting installed
 surfaces or persisted profiles may produce separate rows. One-shot, old, moved,
 or unreconstructible roots require an exact `--path` and are not remembered.
+Most users need no source configuration. When one machine has multiple Claude
+or Codex homes, `sources add` registers an existing home under a stable local
+name in `config.toml`; `sources remove` removes that definition. Configured
+homes are added to the provider's ordinary environment/default winner, and
+every distinct configured home is indexed. Registering the already inferred
+home gives it a name and optional group without indexing it twice. Other
+providers keep their ordinary discovery behavior.
+
+The equivalent editable configuration is:
+
+```toml
+[sources.roots.personal]
+provider = "claude"
+path = "/absolute/path/to/claude-personal"
+group = "personal"
+
+[sources.roots.work-codex]
+provider = "codex"
+path = "/absolute/path/to/codex-work"
+group = "work"
+```
+
+Names and groups use up to 64 ASCII letters, digits, hyphens, or underscores;
+paths are normalized absolute paths. At most 64 homes may be configured. A
+group is an optional label shared by any number of homes and is used only when
+a search explicitly supplies `--source-group`. For an additional home, the name is
+also its stable local source identity: updating only its path preserves ctx
+session IDs and citations after a move, while removing it and adding a
+different name creates a new logical home. Naming the currently inferred home
+keeps its existing released identities. In automatic indexing mode the daemon
+reloads a valid source change as one full refresh. In manual mode, or when
+immediate publication is desired, run `ctx import --all` or search with
+`--refresh wait`.
+
+Treat the name as a durable local mount key rather than a display label.
+Removing and later reusing the same name intentionally reuses that logical
+namespace, including reconciliation of matching provider-native session ids;
+use a new name for an unrelated home. Editing `path` under the same name is the
+move operation, editing `group` only changes filtering metadata, and changing
+the table name creates new logical identities.
+
+Names and groups are local provenance and query selectors. They are not upload
+consent, access-control boundaries, tenant assignment, or retention policy; a
+future sync product must ask for those decisions separately.
+
+Advanced users can disable all automatic provider discovery while keeping named
+Claude/Codex homes active:
+
+```toml
+[sources]
+automatic = false
+```
+
+This does not erase already indexed history. It stops automatic roots from
+being selected by future refreshes; named roots remain active. `ctx sources`
+labels each row as automatic or configured and reports when automatic discovery
+is disabled. JSON output includes the top-level `automatic_discovery` boolean
+and a per-source `selection` object.
 Current rows include:
 
 - Codex session trees at `~/.codex/sessions`;
@@ -316,7 +377,7 @@ ctx import --provider lingma
 ctx import --provider codebuddy
 ctx import --provider codex --path ~/.codex/sessions
 ctx import --provider pi --path ~/.pi/agent/sessions
-ctx import --input-format ctx-history-jsonl-v1 --path ./history.jsonl
+ctx import --input-format ctx-history-jsonl-v2 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ctx import --history-source-manifest ./ctx-history-plugin.json
 ctx import --resume
@@ -345,7 +406,7 @@ advances independently and does not extend the foreground import boundary. It
 does not write `config.toml` for implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
-manifest declares a durable provider-owned `ctx-history-jsonl-v1` path; the
+manifest declares a durable provider-owned `ctx-history-jsonl-v2` path; the
 importer validates its schema and source identity, registers that same path as
 the custom acquisition route, and waits for daemon-owned Core publication.
 Command-only manifests are reported as unsupported and are never copied into
@@ -390,6 +451,7 @@ ctx show session <ctx-session-id> --mode log --format jsonl
 ctx show session <ctx-session-id> --max-events 4096 --format json
 ctx show session <ctx-session-id> --format markdown --out transcript.md
 ctx show session <ctx-session-id> --mode full --format markdown --out transcript.md
+ctx show session --provider-session <provider-session-id> --provider-key <provider-key> --source-id <source-id>
 ctx show event <ctx-event-id> --window 3 --format text
 ctx show event <ctx-event-id> --before 5 --after 10 --format json
 ```
@@ -449,7 +511,9 @@ import policy, such as binary data or provider-private blobs.
 Provider-owned IDs are metadata, not positional IDs. Positional session and
 event arguments are ctx-owned IDs. To look up a provider-owned session, use an
 explicit provider lookup such as `--provider codex --provider-session
-<provider-session-id>` on commands that support provider lookup.
+<provider-session-id>` on commands that support provider lookup. Custom
+provider-session IDs can repeat across exporters, so add the exporter route
+`--provider-key <provider-key> --source-id <source-id>` to disambiguate them.
 
 JSON output may expose transcript content, MCP arguments/responses, and local
 workspace metadata, so treat it as private local data.
@@ -459,17 +523,21 @@ workspace metadata, so treat it as private local data.
 ```bash
 ctx locate session <ctx-session-id>
 ctx locate session --provider codex --provider-session <provider-session-id> --format json
+ctx locate session --provider-session <provider-session-id> --provider-key <provider-key> --source-id <source-id> --format json
 ctx locate event <ctx-event-id> --format json
 ```
 
 `locate` returns bounded source identity metadata stored in the active verified
 Core/Tantivy generation. Session lookup accepts a ctx-owned ID or the explicit
-provider-session selector; event lookup accepts a ctx-owned event ID. `--format`
-accepts `text` or `json`.
+provider-session selector; custom provider-session lookup also accepts the
+paired `--provider-key`/`--source-id` route selector. Event lookup accepts a
+ctx-owned event ID. `--format` accepts `text` or `json`.
 
 The result identifies the Core source with `ctx_source_id`, `source_format`,
 `schema_variant`, and `provider_identity_version`. It does not expose a provider
 path, reopen provider history, or recreate provider-native locator state.
+Custom history-source results also report their exporter-declared
+`provider_key` and `source_id` beside the canonical `custom` provider.
 Human event output also identifies the owning ctx session, exact event time,
 and stored event sequence. Human session output labels its timestamp `First
 event`: this is the first stored event in the indexed session, not a claimed
@@ -496,6 +564,8 @@ ctx search "mail provider throttled bulk mailbox setup" --backend hybrid
 ctx search "pricing decisions from the launch review" --backend semantic
 ctx search "release notes" --history-source example-agent/default
 ctx search "release notes" --provider-key example-agent --source-id default
+ctx search "weekend prototype" --source-root personal
+ctx search "incident follow-up" --source-group work
 ```
 
 `search` defaults to `--refresh background`, which serves the published
@@ -583,6 +653,14 @@ Custom history imports can be filtered by canonical
 `--source-id`, and `--source-format` values. The plugin/source alias is for
 explicit plugin import selection. These search filters imply
 `--provider custom` and cannot be combined with another provider.
+`--source-root <name>` and `--source-group <group>` are repeatable. Values across both
+flags form one union of configured homes, then intersect with provider,
+workspace, time, event, session, and other filters. Resolution happens against
+the immutable generation being queried, not live config, so lexical, semantic,
+hybrid, CLI, and MCP search select the same source keys. An unknown name or
+group in that pinned generation fails instead of widening the search. All
+homes still share one local Core/Tantivy index; selecting a root does not open
+or switch a separate index.
 Ordinary search uses the all-agent, root-diverse behavior described above. Use
 `--primary-only` only when a deliberately narrow search should exclude
 subagent work.
@@ -715,6 +793,9 @@ forward tool output.
 MCP searches do not automatically exclude the caller's session; the CLI's
 automatic current-session detection and `--include-current-session` behavior
 do not apply to MCP calls.
+
+MCP search accepts repeatable-value arrays named `source_roots` and `source_groups`.
+When both are absent, it searches all indexed roots, matching the CLI.
 
 MCP `show_event`, log-mode `show_session`, and full-content `query_events`
 event rows expose the same optional snake_case `activity` value in

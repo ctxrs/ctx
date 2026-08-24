@@ -62,18 +62,41 @@ impl GenerationWriter {
             .as_ref()
             .map(PinnedPublication::manifest)
         else {
+            self.observed_missing_routes.insert(
+                route_identity.clone(),
+                SourceRouteSnapshot::present(route_identity, Vec::new())?,
+            );
             return Ok(CertifiedMissingRouteOutcome {
                 retained_sources: Vec::new(),
                 deleted: false,
             });
         };
         let Some(base_route) = base.source_route(&route_identity).cloned() else {
+            if self.source_route_plan.is_none() {
+                // A legacy direct replay after a route's completed deletion
+                // must not resurrect an empty route. Production topology
+                // admission installs a selected route plan, which still
+                // records newly configured-but-missing routes as empty exact
+                // authority.
+                return Ok(CertifiedMissingRouteOutcome {
+                    retained_sources: Vec::new(),
+                    deleted: false,
+                });
+            }
+            self.observed_missing_routes.insert(
+                route_identity.clone(),
+                SourceRouteSnapshot::present(route_identity, Vec::new())?,
+            );
             return Ok(CertifiedMissingRouteOutcome {
                 retained_sources: Vec::new(),
                 deleted: false,
             });
         };
         if base_route.sources().is_empty() {
+            self.observed_missing_routes.insert(
+                route_identity.clone(),
+                SourceRouteSnapshot::present(route_identity, Vec::new())?,
+            );
             return Ok(CertifiedMissingRouteOutcome {
                 retained_sources: Vec::new(),
                 deleted: false,

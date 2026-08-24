@@ -4,7 +4,7 @@ fn import_explicit_custom_source(temp: &TempDir, path: &Path) -> Value {
     json_output(ctx(temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         path.to_str().unwrap(),
         "--no-daemon",
@@ -61,7 +61,7 @@ fn explicit_custom_relocation_preserves_route_source_session_and_event_identity(
     let relocated = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--relocate-from",
         old_path.to_str().unwrap(),
         "--path",
@@ -148,7 +148,7 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
     let relocated = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--relocate-from",
         old_path.to_str().unwrap(),
         "--path",
@@ -220,7 +220,7 @@ fn replaced_explicit_custom_route_cannot_reuse_a_stale_relocation_witness() {
     let stderr = failure_stderr(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--relocate-from",
         first_path.to_str().unwrap(),
         "--path",
@@ -256,7 +256,7 @@ fn failed_explicit_relocation_keeps_the_old_generation_authoritative() {
     let stderr = failure_stderr(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--relocate-from",
         old_path.to_str().unwrap(),
         "--path",

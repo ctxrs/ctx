@@ -21,7 +21,7 @@ use crate::{
 
 const OPENCLAW_SOURCE_FORMAT: &str = "openclaw_session_jsonl_tree";
 const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
-const CUSTOM_HISTORY_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
+const CUSTOM_HISTORY_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
 
 fn writer_options() -> WriterOptions {
     WriterOptions {
@@ -99,7 +99,7 @@ fn retrieval_excluded(record: &CoreRecord) -> bool {
 fn custom_manifest() -> Value {
     json!({
         "record_type": "manifest",
-        "schema_version": "ctx-history-jsonl-v1",
+        "schema_version": "ctx-history-jsonl-v2",
         "producer": "source-backed-test",
     })
 }
@@ -118,19 +118,20 @@ fn custom_session(id: &str, parent: Option<&str>, primary: bool) -> Value {
     json!({
         "record_type": "session",
         "source_id": "source-a",
-        "session_id": id,
-        "parent_session_id": parent,
+        "provider_session_id": id,
+        "parent_provider_session_id": parent,
+        "root_provider_session_id": parent,
         "agent_scope": if primary { "primary" } else { "subagent" },
         "started_at": "2026-07-28T12:00:00Z",
         "cwd": "/work/custom-history",
     })
 }
 
-fn custom_event(index: u64, id: &str, session_id: &str, text: &str) -> Value {
+fn custom_event(index: u64, id: &str, provider_session_id: &str, text: &str) -> Value {
     json!({
         "record_type": "event",
         "source_id": "source-a",
-        "session_id": session_id,
+        "provider_session_id": provider_session_id,
         "event_index": index,
         "event_id": id,
         "event_type": "message",
@@ -286,6 +287,9 @@ fn custom_history_registered_route_preserves_lifecycle_and_core_publication() {
     assert_eq!(cold.sources.len(), 1);
     let cold_records = custom_records(&index_root);
     assert_eq!(cold_records.len(), 2);
+    assert!(cold_records
+        .iter()
+        .all(|record| record.provider_session_id.as_deref() == Some("root")));
     assert_eq!(
         cold_records[0].content.normalized_body.as_deref(),
         Some("alpha exact")
@@ -434,7 +438,7 @@ fn custom_history_structural_manifest_failures_retain_generation_and_restore() {
     assert_eq!(initial.commit.indexed_documents, 1);
 
     let mut incompatible_manifest = custom_manifest();
-    incompatible_manifest["schema_version"] = json!("ctx-history-jsonl-v2");
+    incompatible_manifest["schema_version"] = json!("ctx-history-jsonl-v1");
     write_custom_records(
         &path,
         &[

@@ -1,5 +1,8 @@
 use super::*;
-use std::{fs, time::SystemTime};
+use std::fs;
+
+mod fingerprint;
+use fingerprint::{hash_file_metadata, hash_os_str};
 
 /// Provider-neutral result of comparing one exact authorized route target
 /// against the observation bound to the active Core publication.
@@ -47,9 +50,17 @@ enum RouteTargetSample {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceBackedWatchCatalog {
     routes: BTreeMap<SourceRouteIdentity, RouteWatchTargets>,
+    provider_root_config_digest: Option<String>,
 }
 
 impl SourceBackedWatchCatalog {
+    /// Returns the provider-root config snapshot used to construct this
+    /// catalog. Daemons use this value only to decide when exact watch-route
+    /// maintenance must be widened to one full topology refresh.
+    pub fn provider_root_config_digest(&self) -> Option<&str> {
+        self.provider_root_config_digest.as_deref()
+    }
+
     pub fn route_ids(&self) -> impl ExactSizeIterator<Item = &SourceRouteIdentity> {
         self.routes.keys()
     }
@@ -70,10 +81,9 @@ impl SourceBackedWatchCatalog {
             .collect()
     }
 
-    /// Returns the immutable registration roots for one executable automatic
-    /// route. Exact import admission uses this bounded catalog authority to
-    /// select existing routes without rerunning provider-wide discovery.
-    pub fn automatic_route_registration_sources(
+    /// Returns immutable registration roots for one route eligible to satisfy
+    /// explicit catalog coverage without rerunning provider-wide discovery.
+    pub fn catalog_coverage_route_registration_sources(
         &self,
         route: &SourceRouteIdentity,
     ) -> Option<impl ExactSizeIterator<Item = &ProviderSource>> {
@@ -323,7 +333,19 @@ impl SourceBackedProviderRegistry {
 
     /// Derives watcher authority from this exact executable registry snapshot.
     pub fn watch_catalog(&self) -> SourceBackedWatchCatalog {
-        let mut catalog = SourceBackedWatchCatalog::default();
+        let mut catalog = SourceBackedWatchCatalog {
+            provider_root_config_digest: self
+                .applied_provider_roots
+                .as_ref()
+                .map(|(_, digest, _)| digest.clone()),
+            ..SourceBackedWatchCatalog::default()
+        };
+        let configured_route_ids = self
+            .applied_provider_roots
+            .iter()
+            .flat_map(|(_, _, roots)| roots)
+            .flat_map(|root| root.routes().iter().cloned())
+            .collect::<BTreeSet<_>>();
         for route in &self.routes {
             if route.driver.is_none() && route.certified_missing_paths.is_empty() {
                 continue;
@@ -331,6 +353,7 @@ impl SourceBackedProviderRegistry {
             let Some(identity) = route.metadata.route_identity.clone() else {
                 continue;
             };
+            let catalog_coverage_eligible = configured_route_ids.contains(&identity);
             let targets = catalog
                 .routes
                 .entry(identity)
@@ -343,7 +366,10 @@ impl SourceBackedProviderRegistry {
                         .and_then(|driver| driver.route_control_expectation),
                     targets: BTreeSet::new(),
                     admission_sources: route_admission_sources(route),
-                    registration_sources: automatic_executable_registration_sources(route),
+                    registration_sources: catalog_coverage_executable_registration_sources(
+                        route,
+                        catalog_coverage_eligible,
+                    ),
                 });
             if targets.primary != route.metadata.source.path
                 || targets.kind != Some(route.metadata.watch_target_kind)
@@ -370,7 +396,12 @@ impl SourceBackedProviderRegistry {
                 }
                 _ => targets.admission_sources = None,
             }
-            if targets.registration_sources != automatic_executable_registration_sources(route) {
+            if targets.registration_sources
+                != catalog_coverage_executable_registration_sources(
+                    route,
+                    catalog_coverage_eligible,
+                )
+            {
                 targets.registration_sources = None;
             }
             insert_route_watch_targets(
@@ -457,10 +488,11 @@ fn refresh_admission_source_presence(mut source: ProviderSource) -> ProviderSour
     source
 }
 
-fn automatic_executable_registration_sources(
+fn catalog_coverage_executable_registration_sources(
     route: &SourceBackedRoute,
+    configured: bool,
 ) -> Option<Vec<RegisteredSource>> {
-    (route.metadata.selection == Some(SourceBackedRouteSelection::Automatic)
+    ((route.metadata.selection == Some(SourceBackedRouteSelection::Automatic) || configured)
         && route.driver.is_some()
         && route.certified_missing_paths.is_empty()
         && !route.registration_sources.is_empty())
@@ -544,51 +576,6 @@ fn sample_exact_files(targets: &[PathBuf], primary: &Path) -> RouteTargetSample 
         hash_file_metadata(&mut digest, &metadata);
     }
     RouteTargetSample::Available(format!("{:x}", digest.finalize()))
-}
-
-fn hash_file_metadata(digest: &mut Sha256, metadata: &fs::Metadata) {
-    digest.update(metadata.len().to_be_bytes());
-    hash_system_time(digest, metadata.modified().ok());
-    hash_system_time(digest, metadata.created().ok());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        digest.update(metadata.dev().to_be_bytes());
-        digest.update(metadata.ino().to_be_bytes());
-        digest.update(metadata.mode().to_be_bytes());
-        digest.update(metadata.nlink().to_be_bytes());
-        digest.update(metadata.mtime().to_be_bytes());
-        digest.update(metadata.mtime_nsec().to_be_bytes());
-        digest.update(metadata.ctime().to_be_bytes());
-        digest.update(metadata.ctime_nsec().to_be_bytes());
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        digest.update(metadata.file_attributes().to_be_bytes());
-        digest.update(metadata.creation_time().to_be_bytes());
-        digest.update(metadata.last_write_time().to_be_bytes());
-        digest.update(metadata.file_size().to_be_bytes());
-    }
-}
-
-fn hash_system_time(digest: &mut Sha256, value: Option<SystemTime>) {
-    match value.and_then(|value| value.duration_since(SystemTime::UNIX_EPOCH).ok()) {
-        Some(value) => {
-            digest.update([1]);
-            digest.update(value.as_secs().to_be_bytes());
-            digest.update(value.subsec_nanos().to_be_bytes());
-        }
-        None => digest.update([0]),
-    }
-}
-
-fn hash_os_str(digest: &mut Sha256, value: &std::ffi::OsStr) {
-    let bytes = value.as_encoded_bytes();
-    digest.update((bytes.len() as u64).to_be_bytes());
-    digest.update(bytes);
 }
 
 fn is_sha256(value: &str) -> bool {

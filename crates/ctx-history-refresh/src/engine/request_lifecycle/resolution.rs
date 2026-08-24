@@ -10,6 +10,18 @@ impl CoreRefreshEngine {
         if self.active_request_admission_pending() {
             return None;
         }
+        match self.requeue_stale_provider_root_admission(data_root) {
+            Ok(true) => match self.resolve_active_pending_admission(data_root) {
+                Ok(Some(run)) => return Some(run),
+                Ok(None) => {}
+                Err(error) => return self.admission_persistence_retry_run(error),
+            },
+            Ok(false) => {}
+            Err(error) => return self.admission_persistence_retry_run(error),
+        }
+        if self.active_request_admission_pending() {
+            return None;
+        }
         self.run_next_with_verified_index_opener(data_root, |index_root| {
             Ok(Arc::new(open_verified_index(index_root)?))
         })

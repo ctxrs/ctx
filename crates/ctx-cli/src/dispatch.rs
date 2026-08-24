@@ -308,13 +308,17 @@ pub(crate) fn run_cli() -> Result<()> {
         ),
         CommandRoot::Sources(args) => run_sources(
             args,
-            data_root.clone(),
+            crate::commands::sources::SourcesEnvironment {
+                data_root: data_root.clone(),
+                home_dir: crate::identity::home_dir(),
+                automatic_provider_discovery: config.automatic_source_discovery_enabled(),
+                provider_roots: config.provider_root_definitions(),
+            },
             analytics_draft
                 .as_mut()
                 .expect("sources has a telemetry draft")
                 .sources_mut(),
             &mut local_usage_draft,
-            crate::identity::home_dir(),
             &mut ui,
         ),
         CommandRoot::Import(args) => run_import(

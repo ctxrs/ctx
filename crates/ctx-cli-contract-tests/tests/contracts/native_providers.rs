@@ -92,6 +92,22 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             "none",
         ]));
         assert_authoritative_provider_publication_with_rejections(&first, rejected_records);
+        if stored_provider == "qwen_code" {
+            let diagnostic = first["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["status"] == "rejection")
+                .unwrap_or_else(|| panic!("missing Qwen rejection diagnostic in {first:#}"));
+            assert_eq!(diagnostic["provider"], "qwen_code", "{first:#}");
+            assert_eq!(diagnostic["line"], 3, "{first:#}");
+            assert!(
+                diagnostic["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("invalid shape")),
+                "{first:#}"
+            );
+        }
         wait_for_imported_core(&temp, &first);
         assert_eq!(first["totals"]["current_rejected_records"], 1, "{first:#}");
         let (session_count, event_count) = provider_core_counts(&data_root(&temp), stored_provider);

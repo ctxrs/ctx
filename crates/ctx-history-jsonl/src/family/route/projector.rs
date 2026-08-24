@@ -1,3 +1,4 @@
+use ctx_history_capture_runtime::SourceBackedRecordRejectionDrafts;
 use ctx_history_core::{CoreRecord, TypedKey};
 
 use super::super::{
@@ -39,6 +40,10 @@ pub trait JsonlFamilyProjector: Send {
 
     fn rejected_records(&self) -> u64 {
         0
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        SourceBackedRecordRejectionDrafts::default()
     }
 
     /// Opaque, contract-bounded provider state to carry into the next certified

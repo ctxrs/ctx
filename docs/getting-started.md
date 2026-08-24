@@ -177,7 +177,8 @@ import may perform a one-time provider reimport. That rebuilds search content
 with touched-file metadata and local/private transcript text.
 
 Native provider `--path` imports require `--provider`. Custom JSONL imports use
-`--input-format ctx-history-jsonl-v1 --path <file>` instead.
+`--input-format ctx-history-jsonl-v2 --path <file>` instead. The former v1
+schema is unsupported and is not accepted as an alias or translated.
 
 ## 5. Search
 

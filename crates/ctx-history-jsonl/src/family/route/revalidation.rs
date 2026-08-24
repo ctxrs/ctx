@@ -144,10 +144,20 @@ pub(super) fn revalidate_complete_inventory<R: JsonlFamilyRuntime>(
     // work and are never repeated here.
     #[cfg(any(test, feature = "test-support"))]
     run_before_jsonl_terminal_physical_revalidation_hook(root);
-    for evidence in expected_sources.values() {
-        evidence
+    let mut authenticated_source_observations = Vec::new();
+    for (digest, evidence) in &expected_sources {
+        let observation = evidence
             .terminal_proof
             .revalidate_for(evidence.observed_certificate())?;
+        if evidence.terminal_certificate.is_none() {
+            authenticated_source_observations.push((
+                *digest,
+                AuthenticatedSourceObservation {
+                    certificate: evidence.certificate.clone(),
+                    observation,
+                },
+            ));
+        }
     }
     for dependency in &opening_inventory.exact_dependencies {
         dependency.revalidate_dependency()?;
@@ -158,6 +168,28 @@ pub(super) fn revalidate_complete_inventory<R: JsonlFamilyRuntime>(
         }
     }
     opening_inventory.revalidate_terminal_root(root, adapter.inventory_mode())?;
+    let mut resident = resident.lock().map_err(|_| {
+        JsonlRuntimeError::<R>::invalid_payload(
+            "JSONL resident catalog lock was poisoned".to_owned(),
+        )
+    })?;
+    if resident.certified_inventory.as_ref() != Some(expected_inventory) {
+        return Ok(false);
+    }
+    for (digest, authenticated) in authenticated_source_observations {
+        if resident
+            .terminal_sources
+            .get(&digest)
+            .is_some_and(|evidence| {
+                evidence.terminal_certificate.is_none()
+                    && evidence.certificate == authenticated.certificate
+            })
+        {
+            resident
+                .authenticated_source_observations
+                .insert(digest, authenticated);
+        }
+    }
     Ok(true)
 }
 

@@ -14,7 +14,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use ctx_history_capture_model::SourceRouteIdentity;
+use ctx_history_capture_model::{
+    provider_source_config_digest, ProviderRootDefinition, ProviderRootSourceIdentity,
+    SourceRouteIdentity,
+};
 use ctx_history_capture_runtime::{
     CaptureLifecycleSink, CapturePublicationContext, CapturePublicationDisposition,
     CaptureSourceAggregateRef, ImmutableCaptureSnapshot,
@@ -22,7 +25,7 @@ use ctx_history_capture_runtime::{
 use ctx_history_core::{CaptureProvider, CertifiedSource, CertifiedSourceInventory, SourceKey};
 #[cfg(test)]
 use ctx_history_core::{CertifiedSourceAppend, CertifiedSourceDeletion, SourceAnchor, TypedKey};
-use ctx_history_index::{IndexError, PublicationStage, WriterOptions};
+use ctx_history_index::{AppliedProviderRoot, IndexError, PublicationStage, WriterOptions};
 use ctx_history_provider_mistral_mux::{mistral_vibe_jsonl_adapter, mux_jsonl_adapter};
 use sha2::{Digest, Sha256};
 
@@ -41,7 +44,8 @@ pub use ctx_history_providers_sqlite_inventory::{
     CrushProjectDatabaseV0, CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,
 };
 use ctx_history_source_discovery::{
-    path_presence, resolve_openhands_conversations_root, resolve_warp_discovery_authority,
+    path_presence, provider_paths_equivalent, provider_source_belongs_to_configured_root,
+    released_provider_home, resolve_openhands_conversations_root, resolve_warp_discovery_authority,
     CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
     CrushProjectInventorySelectorError, LingmaInventorySelector, PathPresence,
     WarpDiscoveryUnavailable,

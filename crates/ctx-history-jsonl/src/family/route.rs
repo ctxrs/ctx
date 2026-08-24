@@ -72,7 +72,7 @@ pub use membership::{JsonlFamilyAppendTrustContract, JsonlFamilyMembershipObserv
 mod projector;
 pub use projector::JsonlFamilyProjector;
 mod resident;
-use resident::FamilyResident;
+use resident::{AuthenticatedSourceObservation, FamilyResident};
 mod revalidation;
 #[cfg(any(test, feature = "test-support"))]
 pub use revalidation::set_before_jsonl_terminal_physical_revalidation_hook;
@@ -749,6 +749,11 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         if current == self.observation {
             return Ok((self.clone(), Arc::new(opened)));
         }
+        if self.observation.differs_only_by_change_identity(&current) {
+            let mut leaf = self.clone();
+            leaf.observation = current;
+            return Ok((leaf, Arc::new(opened)));
+        }
         if self.whole_record
             || current.length() <= self.observation.length()
             || !self.observation.admits_frozen_prefix_in(&current)
@@ -846,6 +851,15 @@ impl FamilyCheckpoint {
             Err(ProjectionContractError::FieldTooLarge { .. }) => Ok(false),
             Err(error) => Err(E::invalid_payload(error.to_string())),
         }
+    }
+
+    fn exact_admitted_eof_sha256(&self) -> Option<[u8; 32]> {
+        self.admitted_eof_sha256
+            .or_else(|| self.physical.admitted_eof_sha256())
+    }
+
+    fn authenticates_admitted_eof(&self) -> bool {
+        self.exact_admitted_eof_sha256().is_some() || self.physical.authenticates_admitted_eof()
     }
 
     fn valid_for<R: JsonlFamilyRuntime>(

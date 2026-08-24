@@ -94,7 +94,10 @@ fn rejected_owner_leaf_v0(
         "missing or conflicting Codex session owner",
     )?
     .with_logical_source_failure(
-        codex_quarantined_rollout_source_key(&source.catalog_observation)?,
+        codex_quarantined_rollout_source_key(
+            source.source_root_lineage,
+            &source.catalog_observation,
+        )?,
         format!(
             "Codex session ownership is ambiguous or conflicting; quarantined rollout file {}",
             source.source_path.display()
@@ -128,19 +131,32 @@ fn rejected_catalog_leaf_v0(
     ))
 }
 
-fn codex_quarantined_rollout_source_key(observation: &CodexFileObservation) -> Result<SourceKey> {
+fn codex_quarantined_rollout_source_key(
+    source_root_lineage: Option<[u8; 32]>,
+    observation: &CodexFileObservation,
+) -> Result<SourceKey> {
     // This is explicitly a file-observation key, not a claimed Codex session
     // identity. It cannot connect a quarantined file to another rollout.
     let observation = serde_json::to_vec(observation)?;
     let digest = Sha256::digest(observation);
+    let anchor = match source_root_lineage {
+        Some(lineage) => TypedKey::composite(vec![
+            TypedKey::bytes(lineage.to_vec())
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+            TypedKey::bytes(digest.to_vec())
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+        ])
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+        None => TypedKey::bytes(digest.to_vec())
+            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+    };
     SourceKey::derive_provider_native(
         CaptureProvider::Codex.as_str(),
         CODEX_SESSION_SOURCE_FORMAT,
         CODEX_SOURCE_SCHEMA_VARIANT,
         1,
         "codex.quarantined-rollout-file.v1",
-        TypedKey::bytes(digest.to_vec())
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+        anchor,
     )
     .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
 }
@@ -264,7 +280,10 @@ impl<B: ProviderRuntimeBinding> JsonlFamilySemanticExecutor for CodexSessionSema
             .ownership_quarantined_source()
             .map(|source| {
                 Ok::<(SourceKey, String), CaptureError>((
-                    codex_quarantined_rollout_source_key(&source.catalog_observation)?,
+        codex_quarantined_rollout_source_key(
+            source.source_root_lineage,
+            &source.catalog_observation,
+        )?,
                     format!(
                         "Codex session ownership is ambiguous or conflicting; quarantined rollout file {}",
                         source.source_path.display()
@@ -391,7 +410,10 @@ impl<B: ProviderRuntimeBinding> CodexSessionJsonlFamilyAdapterV0<B> {
                 )
                 .and_then(|rejected| {
                     Ok(rejected.with_logical_source_failure(
-                        codex_quarantined_rollout_source_key(&leaf.observation)?,
+                        codex_quarantined_rollout_source_key(
+                            leaf.source_root_lineage,
+                            &leaf.observation,
+                        )?,
                         format!(
                             "Codex session ownership is ambiguous or conflicting; quarantined rollout file {}",
                             leaf.source_path.display()
@@ -605,7 +627,10 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
         if !self.generation.is_session_tree() {
             return Ok(None);
         }
-        let plan = match super::catalog::bind_codex_partial_member_v0(member) {
+        let plan = match super::catalog::bind_codex_partial_member_v0(
+            member,
+            self.generation.source_root_lineage(),
+        ) {
             Ok(plan) => plan,
             Err(_) => return Ok(None),
         };
@@ -652,7 +677,11 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
                         &authority_path,
                     )?
                 {
-                    observation.bind_source_hint(path, codex_source_key(&native_session_id)?);
+                    let source_root_lineage = self.generation.source_root_lineage();
+                    observation.bind_source_hint(
+                        path,
+                        codex_source_key_in_root(source_root_lineage, &native_session_id)?,
+                    );
                 }
             }
             Ok(observation)

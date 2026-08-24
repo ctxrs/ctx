@@ -55,6 +55,29 @@ fn register_claude_source_backed_route(
     Ok(())
 }
 
+pub(in crate::source_backed) fn register_configured_claude_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        ctx_history_provider_claude_cursor::claude_jsonl_adapter_for_named_home::<
+            CaptureProviderRuntime,
+        >(source_root_lineage),
+        source.path.clone(),
+    );
+    let mut route = executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        driver,
+    )?;
+    route.apply_provider_root_route_identity(source_root_lineage)?;
+    registry.register(route);
+    Ok(())
+}
+
 fn register_direct_jsonl_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,

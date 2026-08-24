@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 
 use chrono::{DateTime, Utc};
 use ctx_history_core::{
@@ -95,6 +98,10 @@ fn project(provider: CaptureProvider, value: &Value) -> (Vec<CoreRecord>, u64) {
         session_id,
         projector: direct,
         rejected_records: 0,
+        record_rejections: SourceBackedRecordRejectionDrafts::default(),
+        accepted_event_ids: HashSet::new(),
+        append_base_event_lookup: None,
+        source_selector: "direct-jsonl-result-contract.jsonl".to_owned(),
     };
     let encoded = serde_json::to_vec(value).unwrap();
     let mut records = Vec::new();
@@ -146,6 +153,10 @@ fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>,
         session_id,
         projector: direct,
         rejected_records: 0,
+        record_rejections: SourceBackedRecordRejectionDrafts::default(),
+        accepted_event_ids: HashSet::new(),
+        append_base_event_lookup: None,
+        source_selector: source_path.to_owned(),
     };
     let mut records = Vec::new();
     let mut worker = JsonlFamilyWorkerContext::default();
@@ -627,15 +638,14 @@ fn factory_retry_multi_subrecords_keep_ids_when_content_blocks_reorder() {
 }
 
 #[test]
-fn factory_retry_ambiguity_and_missing_evidence_fail_closed() {
+fn duplicate_final_event_identities_reject_the_later_physical_record() {
     let duplicate = factory_result("shared", Some("shared"), "Execute_same", "duplicate");
     let (records, rejected) = project_all(
         CaptureProvider::FactoryAiDroid,
         &[duplicate.clone(), duplicate],
     );
-    assert_eq!(rejected, 0);
-    assert_eq!(records.len(), 2);
-    assert_eq!(records[0].event_id, records[1].event_id);
+    assert_eq!(rejected, 1);
+    assert_eq!(records.len(), 1);
 
     let missing_tool_use_id = json!({
         "type": "message",
@@ -656,8 +666,12 @@ fn factory_retry_ambiguity_and_missing_evidence_fail_closed() {
         let ambiguous = factory_result("shared", parent_id, "Execute_other", "ambiguous");
         let (records, rejected) =
             project_all(CaptureProvider::FactoryAiDroid, &[anchor, ambiguous]);
-        assert_eq!(rejected, 0);
-        assert_eq!(records[0].event_id, records[1].event_id);
+        assert_eq!(rejected, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].content.normalized_body.as_deref(),
+            Some("anchor")
+        );
     }
 
     let qoder = |call_id: &str, body: &str| {
@@ -678,8 +692,71 @@ fn factory_retry_ambiguity_and_missing_evidence_fail_closed() {
         CaptureProvider::Qoder,
         &[qoder("call-a", "qoder a"), qoder("call-b", "qoder b")],
     );
-    assert_eq!(rejected, 0);
-    assert_eq!(records[0].event_id, records[1].event_id);
+    assert_eq!(rejected, 1);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].content.normalized_body.as_deref(),
+        Some("qoder a")
+    );
+}
+
+#[test]
+fn duplicate_multi_event_record_is_rejected_atomically() {
+    let duplicate = json!({
+        "type": "message",
+        "id": "shared",
+        "timestamp": "2026-07-14T09:30:23Z",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "Execute_A",
+                    "content": "result a"
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "Execute_B",
+                    "content": "result b"
+                }
+            ]
+        }
+    });
+    let rewritten_duplicate = json!({
+        "type": "message",
+        "id": "shared",
+        "timestamp": "2026-07-14T09:30:24Z",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "Execute_A",
+                    "content": "rewritten a"
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "Execute_B",
+                    "content": "rewritten b"
+                }
+            ]
+        }
+    });
+
+    let (records, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[duplicate, rewritten_duplicate],
+    );
+
+    assert_eq!(rejected, 1);
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.content.normalized_body.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["result a", "result b"]
+    );
 }
 
 #[test]

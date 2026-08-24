@@ -9,12 +9,12 @@ use ctx_history_capture::{
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
     ProviderSourceStatus,
 };
-use ctx_history_core::{CaptureProvider, CtxHistoryJsonlRecord};
+use ctx_history_core::{CaptureProvider, CtxHistoryJsonlRecord, CTX_HISTORY_JSONL_SCHEMA_VERSION};
 
 use super::HistorySourcePluginSource;
 
-const ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
-const PUBLIC_HISTORY_SCHEMA_VERSION: &str = "ctx-history-jsonl-v1";
+const ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
+const PUBLIC_HISTORY_SCHEMA_VERSION: &str = CTX_HISTORY_JSONL_SCHEMA_VERSION;
 const MAX_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_HEADER_RECORDS: usize = 64;
 const MAX_HEADER_LINE_BYTES: usize = 256 * 1024;
@@ -119,7 +119,7 @@ fn validate_provider_owned_source(
         }
         let record: CtxHistoryJsonlRecord = serde_json::from_slice(&line).with_context(|| {
             format!(
-                "history source plugin {} durable source has invalid ctx-history-jsonl-v1 at line {line_number}",
+                "history source plugin {} durable source has invalid ctx-history-jsonl-v2 at line {line_number}",
                 source.label()
             )
         })?;
@@ -140,22 +140,11 @@ fn validate_provider_owned_source(
                 }
                 manifest_seen = true;
             }
-            CtxHistoryJsonlRecord::Source(record) => {
-                if record.provider_key != source.provider_key
-                    || record.source_id != source.source_id
-                    || record.source_format != source.source_format
-                {
-                    bail!(
-                        "history source plugin {} durable source declares {}/{}/{} but the manifest declares {}/{}/{}",
-                        source.label(),
-                        record.provider_key,
-                        record.source_id,
-                        record.source_format,
-                        source.provider_key,
-                        source.source_id,
-                        source.source_format
-                    );
-                }
+            CtxHistoryJsonlRecord::Source(record)
+                if record.provider_key == source.provider_key
+                    && record.source_id == source.source_id
+                    && record.source_format == source.source_format =>
+            {
                 source_seen = true;
             }
             _ => {}
@@ -164,9 +153,18 @@ fn validate_provider_owned_source(
             return Ok(());
         }
     }
+    if !manifest_seen {
+        bail!(
+            "history source plugin {} durable source must declare its manifest within the first {MAX_HEADER_RECORDS} records and {MAX_HEADER_BYTES} bytes",
+            source.label()
+        );
+    }
     bail!(
-        "history source plugin {} durable source must declare its manifest and source identity within the first {MAX_HEADER_RECORDS} records and {MAX_HEADER_BYTES} bytes",
-        source.label()
+        "history source plugin {} durable source must declare selected identity {}/{}/{} within the first {MAX_HEADER_RECORDS} records and {MAX_HEADER_BYTES} bytes",
+        source.label(),
+        source.provider_key,
+        source.source_id,
+        source.source_format
     )
 }
 
@@ -219,6 +217,24 @@ mod tests {
     }
 
     #[test]
+    fn durable_multi_route_source_finds_selected_identity_after_other_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"record_type":"manifest","schema_version":PUBLIC_HISTORY_SCHEMA_VERSION})
+        )
+        .unwrap();
+        writeln!(file, "{}", json!({"record_type":"source","provider_key":"other","source_id":"archive","source_format":"other-v1"})).unwrap();
+        writeln!(file, "{}", json!({"record_type":"source","provider_key":"example","source_id":"default","source_format":"example-v1"})).unwrap();
+
+        let prepared = prepare_source_backed_history_source(source(path.clone()), false).unwrap();
+        assert_eq!(prepared.source_path(), path);
+    }
+
+    #[test]
     fn command_only_source_is_typed_unsupported() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history.jsonl");
@@ -230,14 +246,14 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_v2_schema_is_rejected_without_fallback() {
+    fn unsupported_v1_schema_is_rejected_without_fallback() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("history.jsonl");
         let mut file = File::create(&path).unwrap();
         writeln!(
             file,
             "{}",
-            json!({"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"})
+            json!({"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"})
         )
         .unwrap();
         writeln!(file, "{}", json!({"record_type":"source","provider_key":"example","source_id":"default","source_format":"example-v1"})).unwrap();
@@ -246,7 +262,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported schema_version `ctx-history-jsonl-v2`"),
+                .contains("unsupported schema_version `ctx-history-jsonl-v1`"),
             "{error:#}"
         );
     }

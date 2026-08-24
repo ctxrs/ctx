@@ -8,7 +8,13 @@ fn write_durable_plugin(temp: &TempDir) -> (PathBuf, PathBuf) {
     fs::create_dir_all(&provider_root).unwrap();
     let source_path = provider_root.join("history.jsonl");
     let records = [
-        json!({"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}),
+        json!({"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"}),
+        json!({
+            "record_type":"source",
+            "source_id":"other",
+            "provider_key":"other-agent",
+            "source_format":"other-agent-v1"
+        }),
         json!({
             "record_type":"source",
             "source_id":"archive",
@@ -18,16 +24,15 @@ fn write_durable_plugin(temp: &TempDir) -> (PathBuf, PathBuf) {
         json!({
             "record_type":"session",
             "source_id":"archive",
-            "session_id":"session-1",
+            "provider_session_id":"session-1",
             "started_at":"2026-07-30T04:00:00Z",
-            "agent_type":"primary",
-            "is_primary":true,
+            "agent_scope":"primary",
             "status":"completed"
         }),
         json!({
             "record_type":"event",
             "source_id":"archive",
-            "session_id":"session-1",
+            "provider_session_id":"session-1",
             "event_index":0,
             "event_id":"event-1",
             "event_type":"message",
@@ -169,7 +174,8 @@ fn durable_plugin_path_indexes_in_place_and_renders_complete_core_content() {
                 "--format=json",
             ]),
     );
-    assert_explicit_source_publication(&imported, "custom", "example-agent-v1");
+    let receipt = assert_explicit_source_publication(&imported, "custom", "example-agent-v1");
+    assert_eq!(receipt["route_source_format"], "ctx_history_jsonl_v2");
     assert_eq!(imported["sources"][0]["path"], json!(source_path));
     assert_eq!(imported["sources"][0]["provider_source_authority"], true);
     assert!(imported["totals"]["current_indexed_documents"]
@@ -189,6 +195,7 @@ fn durable_plugin_path_indexes_in_place_and_renders_complete_core_content() {
         "--format=json",
     ]));
     let result = &search["results"].as_array().unwrap()[0];
+    assert_eq!(result["provider_session_id"], "session-1", "{result:#}");
     let event_id = result["ctx_event_id"].as_str().unwrap();
     let shown = json_output(ctx(&temp).args(["show", "event", event_id, "--format=json"]));
     assert_eq!(

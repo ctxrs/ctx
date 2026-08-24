@@ -182,6 +182,8 @@ fn render_search_text(value: &Value) -> String {
         push_indented_key_value(&mut out, "ctx_session_id", result.get("ctx_session_id"));
         push_indented_key_value(&mut out, "ctx_event_id", result.get("ctx_event_id"));
         push_indented_key_value(&mut out, "provider", result.get("provider"));
+        push_indented_key_value(&mut out, "provider_key", result.get("provider_key"));
+        push_indented_key_value(&mut out, "source_id", result.get("source_id"));
         push_indented_key_value(&mut out, "timestamp", result.get("timestamp"));
         if let Some(snippet) = value_field(result, "snippet").filter(|snippet| !snippet.is_empty())
         {

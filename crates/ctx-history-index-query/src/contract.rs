@@ -548,6 +548,9 @@ pub struct ExcludedSessionTree {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventSearchFilters {
+    /// Exact source-key terms resolved from the pinned generation. `None`
+    /// means unrestricted; `Some([])` deliberately matches no events.
+    pub allowed_source_keys: Option<Vec<String>>,
     pub session_id: Option<Uuid>,
     pub excluded_session_ids: Vec<Uuid>,
     pub parent_session_id: Option<Uuid>,
@@ -624,6 +627,27 @@ pub struct EventRecord {
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
     pub role: Option<String>,
+}
+
+impl EventRecord {
+    /// Returns the exporter-declared route for a custom JSONL event.
+    ///
+    /// Custom source identity is retained in the native event key so query
+    /// surfaces can display the same route used by exact source filters.
+    pub fn custom_source_identity(&self) -> Option<(&str, &str)> {
+        if self.provider != "custom" {
+            return None;
+        }
+        let Some(TypedKey::Composite(values)) = self.native_event_id.as_ref() else {
+            return None;
+        };
+        let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =
+            values.as_slice()
+        else {
+            return None;
+        };
+        Some((provider_key, source_id))
+    }
 }
 
 /// One direct provider-native event-copy claim targeting the selected event.
@@ -738,6 +762,8 @@ pub struct SessionRecord {
     pub root_session_id: Option<StableEntityId>,
     pub session_relationship: Option<ProviderNativeSessionRelationship>,
     pub provider: String,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
     pub source_format: String,
     pub provider_session_id: Option<String>,
     pub agent_scope: Option<CoreAgentScope>,

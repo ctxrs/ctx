@@ -61,6 +61,8 @@ pub fn mcp_show_session_application(
             selector: Some(id.to_owned()),
             provider_session_id: None,
             provider: None,
+            provider_key: None,
+            source_id: None,
             mode: session_event_mode(mode),
             cursor: cursor.map(str::to_owned),
             limit,

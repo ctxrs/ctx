@@ -2,6 +2,7 @@
 
 use super::*;
 use ctx_history_capture::{SourceBackedRoute, SourceBackedRouteDriver};
+use ctx_history_index::EventSearchFilters;
 use rusqlite::Connection;
 
 #[test]
@@ -524,4 +525,910 @@ fn warm_exact_carries_unselected_routes_while_receipt_stays_selected() {
     let published = VerifiedIndex::open(&index_root).unwrap();
     assert!(published.manifest().source_route(&codex_route).is_some());
     assert!(published.manifest().source_route(&claude_route).is_some());
+}
+
+#[test]
+fn configured_claude_home_is_additive_and_naming_the_automatic_home_deduplicates() {
+    for same_home in [true, false] {
+        for automatic_enabled in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let fixture = fs::canonicalize(temp.path()).unwrap();
+            let data_root = fixture.join("data");
+            let index_root = source_backed_index_root(&data_root);
+            ctx_history_platform::platform_security::establish_private_data_root(&data_root)
+                .unwrap();
+            let (_, _, automatic_discovery) = discovery_fixture(&fixture);
+            let automatic_home = fixture.join("claude-automatic");
+            let automatic_discovery =
+                automatic_discovery.with_env("CLAUDE_CONFIG_DIR", &automatic_home);
+            let automatic_projects = automatic_home.join("projects");
+            let automatic_session = automatic_projects.join("project/session.jsonl");
+            fs::create_dir_all(automatic_session.parent().unwrap()).unwrap();
+            fs::write(
+                &automatic_session,
+                format!(
+                    "{}\n",
+                    json!({
+                        "type": "user",
+                        "uuid": "automatic-message",
+                        "sessionId": "019fb700-0000-7000-8000-000000000711",
+                        "message": {"role": "user", "content": "automatic claude"}
+                    })
+                ),
+            )
+            .unwrap();
+            let automatic_source =
+                provider_source_for_path(CaptureProvider::Claude, automatic_projects.clone());
+            let automatic_route =
+                automatic_source_backed_route_identity(&automatic_source).unwrap();
+            let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+            refresh_all_provider_sources(
+                &automatic_discovery,
+                DiscoveryReport {
+                    sources: vec![automatic_source.clone()],
+                    issues: Vec::new(),
+                },
+                StdDuration::ZERO,
+                &data_root,
+                &index_root,
+                None,
+                SourceBackedRefreshScope::All,
+                &mut progress,
+            )
+            .unwrap();
+            let automatic_source_key = VerifiedIndex::open(&index_root).unwrap().manifest().sources
+                [0]
+            .observation()
+            .source()
+            .clone();
+
+            let configured_home = if same_home {
+                automatic_home.clone()
+            } else {
+                fixture.join("claude-configured")
+            };
+            let configured_projects = configured_home.join("projects");
+            let configured_session = configured_projects.join("project/session.jsonl");
+            if !same_home {
+                fs::create_dir_all(configured_session.parent().unwrap()).unwrap();
+                fs::write(
+                    &configured_session,
+                    format!(
+                        "{}\n",
+                        json!({
+                            "type": "user",
+                            "uuid": "configured-message",
+                            "sessionId": "019fb700-0000-7000-8000-000000000712",
+                            "message": {"role": "user", "content": "configured claude"}
+                        })
+                    ),
+                )
+                .unwrap();
+            }
+            let definition = ctx_history_capture::ProviderRootDefinition {
+                id: "work".to_owned(),
+                provider: CaptureProvider::Claude,
+                path: configured_home,
+                group: Some("work".to_owned()),
+            };
+            let configured_discovery = automatic_discovery
+                .clone()
+                .with_automatic_provider_discovery(automatic_enabled)
+                .with_configured_provider_roots(vec![definition]);
+            let configured_source =
+                provider_source_for_path(CaptureProvider::Claude, configured_projects);
+            let sources = if automatic_enabled && !same_home {
+                vec![automatic_source, configured_source]
+            } else {
+                vec![configured_source]
+            };
+            let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+            refresh_all_provider_sources(
+                &configured_discovery,
+                DiscoveryReport {
+                    sources,
+                    issues: Vec::new(),
+                },
+                StdDuration::ZERO,
+                &data_root,
+                &index_root,
+                None,
+                SourceBackedRefreshScope::All,
+                &mut progress,
+            )
+            .unwrap();
+
+            let published = VerifiedIndex::open(&index_root).unwrap();
+            // Disabling inference changes future selection; it does not use a
+            // config toggle as deletion authority for already indexed history.
+            let expected_route_count = if same_home { 1 } else { 2 };
+            assert!(published
+                .manifest()
+                .source_route(&automatic_route)
+                .is_some());
+            assert_eq!(
+                published.manifest().source_routes().len(),
+                expected_route_count
+            );
+            assert_eq!(published.manifest().sources.len(), expected_route_count);
+            assert_eq!(published.manifest().provider_roots().len(), 1);
+            assert_eq!(
+                published.manifest().provider_roots()[0].source_identity(),
+                if same_home {
+                    ProviderRootSourceIdentity::Released
+                } else {
+                    ProviderRootSourceIdentity::NamedV1
+                }
+            );
+            if same_home {
+                assert!(published.manifest().sources[0]
+                    .observation()
+                    .source()
+                    .exact_descriptor_eq(&automatic_source_key));
+            }
+            assert_eq!(
+                published.manifest().provider_roots()[0].definition().id,
+                "work"
+            );
+            assert_eq!(
+                published.manifest().automatic_provider_discovery(),
+                automatic_enabled
+            );
+        }
+    }
+}
+
+#[test]
+fn watch_catalog_retains_released_identity_after_named_default_home_moves() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let data_root = fixture.join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, discovery) = discovery_fixture(&fixture);
+    let released_home = fixture.join("claude-released");
+    let released_projects = released_home.join("projects");
+    let released_session = released_projects.join("project/session.jsonl");
+    fs::create_dir_all(released_session.parent().unwrap()).unwrap();
+    fs::write(
+        &released_session,
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "uuid": "released-move-message",
+                "sessionId": "019fb700-0000-7000-8000-000000000713",
+                "message": {"role": "user", "content": "released move"}
+            })
+        ),
+    )
+    .unwrap();
+    let definition = |path| ctx_history_capture::ProviderRootDefinition {
+        id: "work".to_owned(),
+        provider: CaptureProvider::Claude,
+        path,
+        group: Some("work".to_owned()),
+    };
+    let initial_discovery = discovery
+        .with_env("CLAUDE_CONFIG_DIR", &released_home)
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![definition(released_home.clone())]);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &initial_discovery,
+        DiscoveryReport {
+            sources: vec![provider_source_for_path(
+                CaptureProvider::Claude,
+                released_projects,
+            )],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+    let published = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(
+        published.manifest().provider_roots()[0].source_identity(),
+        ProviderRootSourceIdentity::Released
+    );
+    let published_route = published.manifest().provider_roots()[0].routes()[0].clone();
+    drop(published);
+
+    let moved_home = fixture.join("claude-moved");
+    fs::rename(&released_home, &moved_home).unwrap();
+    let moved_discovery =
+        initial_discovery.with_configured_provider_roots(vec![definition(moved_home)]);
+    let catalog = source_backed_watch_catalog(&data_root, &moved_discovery).unwrap();
+
+    assert_eq!(
+        catalog.route_ids().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([published_route])
+    );
+}
+
+#[test]
+fn moved_released_root_wins_if_the_old_automatic_location_reappears() {
+    for automatic_first in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = fs::canonicalize(temp.path()).unwrap();
+        let data_root = fixture.join("data");
+        let index_root = source_backed_index_root(&data_root);
+        ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+        let (_, _, discovery) = discovery_fixture(&fixture);
+        let released_home = fixture.join("claude-released");
+        let released_projects = released_home.join("projects");
+        let write_session = |projects: &Path, session: &str, message: &str| {
+            let path = projects.join("project").join(format!("{session}.jsonl"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                path,
+                format!(
+                    "{}\n",
+                    json!({
+                        "type": "user",
+                        "uuid": format!("message-{session}"),
+                        "sessionId": session,
+                        "message": {"role": "user", "content": message}
+                    })
+                ),
+            )
+            .unwrap();
+        };
+        write_session(
+            &released_projects,
+            "019fb700-0000-7000-8000-000000000715",
+            "releasedfirstcanary",
+        );
+        write_session(
+            &released_projects,
+            "019fb700-0000-7000-8000-000000000716",
+            "releasedsecondcanary",
+        );
+        let definition = |path| ctx_history_capture::ProviderRootDefinition {
+            id: "work".to_owned(),
+            provider: CaptureProvider::Claude,
+            path,
+            group: Some("work".to_owned()),
+        };
+        let initial_discovery = discovery
+            .with_env("CLAUDE_CONFIG_DIR", &released_home)
+            .with_automatic_provider_discovery(false)
+            .with_configured_provider_roots(vec![definition(released_home.clone())]);
+        let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+        refresh_all_provider_sources(
+            &initial_discovery,
+            DiscoveryReport {
+                sources: vec![provider_source_for_path(
+                    CaptureProvider::Claude,
+                    released_projects.clone(),
+                )],
+                issues: Vec::new(),
+            },
+            StdDuration::ZERO,
+            &data_root,
+            &index_root,
+            None,
+            SourceBackedRefreshScope::All,
+            &mut progress,
+        )
+        .unwrap();
+
+        let moved_home = fixture.join("claude-moved");
+        fs::rename(&released_home, &moved_home).unwrap();
+        let moved_projects = moved_home.join("projects");
+        let recreated_projects = released_home.join("projects");
+        write_session(
+            &recreated_projects,
+            "019fb700-0000-7000-8000-000000000717",
+            "oldautomaticcanary",
+        );
+        let automatic_source =
+            provider_source_for_path(CaptureProvider::Claude, recreated_projects);
+        let configured_source = provider_source_for_path(CaptureProvider::Claude, moved_projects);
+        let sources = if automatic_first {
+            vec![automatic_source, configured_source]
+        } else {
+            vec![configured_source, automatic_source]
+        };
+        let moved_discovery = initial_discovery
+            .with_automatic_provider_discovery(true)
+            .with_configured_provider_roots(vec![definition(moved_home)]);
+        refresh_all_provider_sources(
+            &moved_discovery,
+            DiscoveryReport {
+                sources,
+                issues: Vec::new(),
+            },
+            StdDuration::ZERO,
+            &data_root,
+            &index_root,
+            None,
+            SourceBackedRefreshScope::All,
+            &mut progress,
+        )
+        .unwrap();
+
+        let published = VerifiedIndex::open(&index_root).unwrap();
+        assert_eq!(published.manifest().sources.len(), 2);
+        assert_eq!(published.manifest().source_routes().len(), 1);
+        assert_eq!(published.manifest().provider_roots().len(), 1);
+        assert_eq!(
+            published.manifest().provider_roots()[0].source_identity(),
+            ProviderRootSourceIdentity::Released
+        );
+        assert_eq!(published.manifest().provider_roots()[0].routes().len(), 1);
+        let allowed_source_keys = published
+            .manifest()
+            .provider_root_source_tokens(&["work".to_owned()], &[])
+            .unwrap();
+        let work_filter = EventSearchFilters {
+            allowed_source_keys: Some(allowed_source_keys),
+            ..EventSearchFilters::default()
+        };
+        assert_eq!(
+            published
+                .search_event_candidates_with_filters("releasedfirstcanary", &work_filter, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            published
+                .search_event_candidates_with_filters("releasedsecondcanary", &work_filter, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(published
+            .search_event_candidates_with_filters("oldautomaticcanary", &work_filter, 10)
+            .unwrap()
+            .is_empty());
+        assert!(published
+            .search_event_candidates("oldautomaticcanary", 10)
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
+fn naming_a_failing_automatic_home_carries_it_while_named_peer_advances() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let data_root = fixture.join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, discovery) = discovery_fixture(&fixture);
+    let automatic_home = fixture.join("claude-automatic-failing");
+    let peer_home = fixture.join("claude-peer");
+    let automatic_projects = automatic_home.join("projects");
+    let peer_projects = peer_home.join("projects");
+    let automatic_session =
+        automatic_projects.join("project/019fb700-0000-7000-8000-000000000714.jsonl");
+    let peer_session = peer_projects.join("project/019fb700-0000-7000-8000-000000000715.jsonl");
+    fs::create_dir_all(automatic_session.parent().unwrap()).unwrap();
+    fs::create_dir_all(peer_session.parent().unwrap()).unwrap();
+    let claude_message = |uuid: &str, session_id: &str, content: &str| {
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "uuid": uuid,
+                "sessionId": session_id,
+                "message": {"role": "user", "content": content}
+            })
+        )
+    };
+    fs::write(
+        &automatic_session,
+        claude_message(
+            "019fb710-0000-7000-8000-000000000714",
+            "019fb700-0000-7000-8000-000000000714",
+            "retainedautomaticfixture",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &peer_session,
+        claude_message(
+            "019fb710-0000-7000-8000-000000000715",
+            "019fb700-0000-7000-8000-000000000715",
+            "peer initial",
+        ),
+    )
+    .unwrap();
+    let definition = |id: &str, path: PathBuf| ctx_history_capture::ProviderRootDefinition {
+        id: id.to_owned(),
+        provider: CaptureProvider::Claude,
+        path,
+        group: Some(id.to_owned()),
+    };
+    let peer_definition = definition("peer", peer_home.clone());
+    let initial_discovery = discovery
+        .with_env("CLAUDE_CONFIG_DIR", &automatic_home)
+        .with_configured_provider_roots(vec![peer_definition.clone()]);
+    let automatic_source =
+        provider_source_for_path(CaptureProvider::Claude, automatic_projects.clone());
+    let automatic_route = automatic_source_backed_route_identity(&automatic_source).unwrap();
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &initial_discovery,
+        DiscoveryReport {
+            sources: vec![
+                automatic_source,
+                provider_source_for_path(CaptureProvider::Claude, peer_projects.clone()),
+            ],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+
+    fs::write(
+        &peer_session,
+        format!(
+            "{}{}",
+            claude_message(
+                "019fb710-0000-7000-8000-000000000715",
+                "019fb700-0000-7000-8000-000000000715",
+                "peer initial",
+            ),
+            claude_message(
+                "019fb710-0000-7000-8000-000000000716",
+                "019fb700-0000-7000-8000-000000000715",
+                "advancedpeerfixture",
+            )
+        ),
+    )
+    .unwrap();
+    let displaced_home = fixture.join("claude-automatic-displaced");
+    fs::rename(&automatic_home, &displaced_home).unwrap();
+    fs::write(&automatic_home, b"temporarily not a directory").unwrap();
+    let automatic_definition = definition("automatic", automatic_home.clone());
+    let configured_discovery = initial_discovery
+        .with_configured_provider_roots(vec![automatic_definition, peer_definition]);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    let publication = refresh_all_provider_sources(
+        &configured_discovery,
+        DiscoveryReport {
+            sources: vec![
+                provider_source_for_path(CaptureProvider::Claude, automatic_projects),
+                provider_source_for_path(CaptureProvider::Claude, peer_projects),
+            ],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+
+    assert!(!publication.route_results.is_empty());
+    let published = VerifiedIndex::open(&index_root).unwrap();
+    let automatic_root = published
+        .manifest()
+        .provider_roots()
+        .iter()
+        .find(|root| root.definition().id == "automatic")
+        .unwrap();
+    assert_eq!(
+        automatic_root.source_identity(),
+        ProviderRootSourceIdentity::Released
+    );
+    assert_eq!(automatic_root.routes(), &[automatic_route]);
+    assert_eq!(
+        published
+            .search_event_candidates("retainedautomaticfixture", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        published
+            .search_event_candidates("advancedpeerfixture", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn removing_last_configured_claude_home_returns_to_one_automatic_route() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let data_root = fixture.join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, automatic_discovery) = discovery_fixture(&fixture);
+    let home = fixture.join("claude-home");
+    let automatic_discovery = automatic_discovery.with_env("CLAUDE_CONFIG_DIR", &home);
+    let projects = home.join("projects");
+    let session = projects.join("project/session.jsonl");
+    fs::create_dir_all(session.parent().unwrap()).unwrap();
+    fs::write(
+        &session,
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "uuid": "fallback-message",
+                "sessionId": "019fb700-0000-7000-8000-000000000713",
+                "message": {"role": "user", "content": "fallback claude"}
+            })
+        ),
+    )
+    .unwrap();
+    let source = provider_source_for_path(CaptureProvider::Claude, projects);
+    let automatic_route = automatic_source_backed_route_identity(&source).unwrap();
+    let configured_discovery = automatic_discovery
+        .clone()
+        .with_configured_provider_roots(vec![ctx_history_capture::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: home,
+            group: Some("personal".to_owned()),
+        }]);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &configured_discovery,
+        DiscoveryReport {
+            sources: vec![source.clone()],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+    let configured_source_key = VerifiedIndex::open(&index_root).unwrap().manifest().sources[0]
+        .observation()
+        .source()
+        .clone();
+
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &automatic_discovery,
+        DiscoveryReport {
+            sources: vec![source],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+
+    let published = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(published.manifest().source_routes().len(), 1);
+    assert!(published
+        .manifest()
+        .source_route(&automatic_route)
+        .is_some());
+    assert!(published.manifest().sources[0]
+        .observation()
+        .source()
+        .exact_descriptor_eq(&configured_source_key));
+    assert!(published.manifest().provider_roots().is_empty());
+}
+
+#[test]
+fn moving_a_named_claude_home_preserves_route_and_source_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let data_root = fixture.join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, discovery) = discovery_fixture(&fixture);
+    let first_home = fixture.join("claude-work-old");
+    let first_projects = first_home.join("projects");
+    let session = first_projects.join("project/session.jsonl");
+    fs::create_dir_all(session.parent().unwrap()).unwrap();
+    fs::write(
+        &session,
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "uuid": "moved-message",
+                "sessionId": "019fb700-0000-7000-8000-000000000715",
+                "message": {"role": "user", "content": "moved claude"}
+            })
+        ),
+    )
+    .unwrap();
+    let definition = |path| ctx_history_capture::ProviderRootDefinition {
+        id: "work".to_owned(),
+        provider: CaptureProvider::Claude,
+        path,
+        group: Some("work".to_owned()),
+    };
+    let first_discovery = discovery
+        .clone()
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![definition(first_home.clone())]);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &first_discovery,
+        DiscoveryReport {
+            sources: vec![provider_source_for_path(
+                CaptureProvider::Claude,
+                first_projects,
+            )],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+    let first = VerifiedIndex::open(&index_root).unwrap();
+    let first_route = first.manifest().provider_roots()[0].routes()[0].clone();
+    let first_source = first.manifest().sources[0].observation().source().clone();
+    drop(first);
+
+    let second_home = fixture.join("claude-work-new");
+    fs::rename(&first_home, &second_home).unwrap();
+    let second_projects = second_home.join("projects");
+    let second_discovery = discovery
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![definition(second_home.clone())]);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &second_discovery,
+        DiscoveryReport {
+            sources: vec![provider_source_for_path(
+                CaptureProvider::Claude,
+                second_projects,
+            )],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+
+    let moved = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(moved.manifest().source_routes().len(), 1);
+    assert_eq!(
+        moved.manifest().provider_roots()[0].routes(),
+        &[first_route]
+    );
+    assert_eq!(
+        moved.manifest().provider_roots()[0].definition().path,
+        second_home
+    );
+    assert_eq!(
+        moved.manifest().provider_roots()[0].source_identity(),
+        ProviderRootSourceIdentity::NamedV1
+    );
+    assert!(moved.manifest().sources[0]
+        .observation()
+        .source()
+        .exact_descriptor_eq(&first_source));
+}
+
+#[test]
+fn moving_a_named_codex_home_preserves_route_and_source_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let data_root = fixture.join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, discovery) = discovery_fixture(&fixture);
+    let first_home = fixture.join("codex-work-old");
+    let first_sessions = first_home.join("sessions");
+    let session = first_sessions.join("rollout.jsonl");
+    fs::create_dir_all(&first_sessions).unwrap();
+    fs::write(
+        &session,
+        format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-08-17T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "019fb700-0000-7000-8000-000000000716",
+                    "timestamp": "2026-08-17T00:00:00Z",
+                    "cwd": "/repo/moved-codex",
+                    "originator": "codex_cli_rs",
+                    "cli_version": "1.0.0",
+                    "source": "cli",
+                    "model_provider": "openai"
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-17T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "moved codex"}]
+                }
+            })
+        ),
+    )
+    .unwrap();
+    let definition = |path| ctx_history_capture::ProviderRootDefinition {
+        id: "work".to_owned(),
+        provider: CaptureProvider::Codex,
+        path,
+        group: Some("work".to_owned()),
+    };
+    let first_discovery = discovery
+        .clone()
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![definition(first_home.clone())]);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &first_discovery,
+        DiscoveryReport {
+            sources: vec![provider_source_for_path(
+                CaptureProvider::Codex,
+                first_sessions,
+            )],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+    let first = VerifiedIndex::open(&index_root).unwrap();
+    let first_route = first.manifest().provider_roots()[0].routes()[0].clone();
+    let first_source = first.manifest().sources[0].observation().source().clone();
+    drop(first);
+
+    let second_home = fixture.join("codex-work-new");
+    fs::rename(&first_home, &second_home).unwrap();
+    let second_sessions = second_home.join("sessions");
+    let second_discovery = discovery
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![definition(second_home.clone())]);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &second_discovery,
+        DiscoveryReport {
+            sources: vec![provider_source_for_path(
+                CaptureProvider::Codex,
+                second_sessions,
+            )],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+
+    let moved = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(moved.manifest().source_routes().len(), 1);
+    assert_eq!(
+        moved.manifest().provider_roots()[0].routes(),
+        &[first_route]
+    );
+    assert_eq!(
+        moved.manifest().provider_roots()[0].definition().path,
+        second_home
+    );
+    assert!(moved.manifest().sources[0]
+        .observation()
+        .source()
+        .exact_descriptor_eq(&first_source));
+}
+
+#[test]
+fn disabling_automatic_discovery_stops_selection_without_deleting_retained_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let data_root = fixture.join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, automatic_discovery) = discovery_fixture(&fixture);
+    let sessions = fixture.join("codex-automatic/sessions");
+    let session = sessions.join("rollout.jsonl");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        &session,
+        format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-08-17T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "019fb700-0000-7000-8000-000000000714",
+                    "timestamp": "2026-08-17T00:00:00Z",
+                    "cwd": "/repo/automatic-disable",
+                    "originator": "codex_cli_rs",
+                    "cli_version": "1.0.0",
+                    "source": "cli",
+                    "model_provider": "openai"
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-17T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "retained automatic history"}]
+                }
+            })
+        ),
+    )
+    .unwrap();
+    let source = provider_source_for_path(CaptureProvider::Codex, sessions);
+    let route = automatic_source_backed_route_identity(&source).unwrap();
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &automatic_discovery,
+        DiscoveryReport {
+            sources: vec![source],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+    assert_eq!(
+        VerifiedIndex::open(&index_root)
+            .unwrap()
+            .manifest()
+            .indexed_documents,
+        1
+    );
+
+    let disabled = automatic_discovery.with_automatic_provider_discovery(false);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &disabled,
+        DiscoveryReport::default(),
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+
+    let published = VerifiedIndex::open(&index_root).unwrap();
+    assert!(!published.manifest().automatic_provider_discovery());
+    assert!(published.manifest().source_route(&route).is_some());
+    assert_eq!(published.manifest().sources.len(), 1);
+    assert_eq!(published.manifest().indexed_documents, 1);
 }

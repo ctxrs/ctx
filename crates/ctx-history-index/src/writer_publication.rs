@@ -396,6 +396,12 @@ impl GenerationWriter {
             return Ok(reused);
         }
 
+        // A provider-source configuration change can be the only manifest
+        // mutation (for example, disabling automatic discovery while carrying
+        // the previously indexed routes). Materialize a candidate so that
+        // this metadata-only successor is published atomically as well.
+        self.writer_mut()?;
+
         // Build opaque owner metadata from the complete staged manifest before
         // the terminal source fence. The bytes are bound only if every source
         // and inventory revalidation below succeeds, so observations sampled
@@ -412,7 +418,7 @@ impl GenerationWriter {
         let publication_metadata =
             metadata_factory(PublicationMetadataContext::new(&generation_id, &manifest))?;
 
-        self.writer_mut()?;
+        self.apply_route_deletions()?;
         let candidate_path = self.candidate_path()?;
         let previous_generation_id = self
             .base_publication
@@ -692,6 +698,20 @@ impl GenerationWriter {
         })
     }
 
+    fn apply_route_deletions(&mut self) -> Result<()> {
+        let source_key_field = self.fields.source_key;
+        let tokens = self
+            .route_deletions
+            .iter()
+            .map(source_token)
+            .collect::<Vec<_>>();
+        let writer = self.writer_mut()?;
+        for token in tokens {
+            writer.delete_term(Term::from_field_text(source_key_field, &token));
+        }
+        Ok(())
+    }
+
     fn ensure_reusable_base_not_invalidated(&self) -> Result<()> {
         let Some(detail) = self.reusable_base_rebuild_detail.as_ref() else {
             return Ok(());
@@ -876,123 +896,9 @@ impl GenerationWriter {
         sync_directory(&self.root.join(INDEX_GENERATIONS_DIRECTORY))?;
         Ok(())
     }
-
-    fn next_manifest(&self) -> Result<GenerationManifest> {
-        self.validate_source_route_plan_complete()?;
-        if let Some(base) = self.base_publication.as_ref() {
-            if self.source_replacement_manifest_is_route_stable(base.manifest()) {
-                #[cfg(any(test, feature = "test-support"))]
-                SOURCE_REPLACEMENT_MANIFESTS
-                    .with(|visits| visits.set(visits.get().saturating_add(1)));
-                return base.successor_manifest_from_source_replacements(
-                    staging::manifest_source_replacements(self)?,
-                );
-            }
-        }
-        let deleted_sources = self
-            .deletions
-            .keys()
-            .chain(&self.route_deletions)
-            .map(|source| source.identity().digest())
-            .collect::<BTreeSet<_>>();
-        let mut source_upserts = BTreeMap::<[u8; 32], CertifiedSource>::new();
-        for pending in self.pending.values() {
-            let certificate = pending.certificate.as_ref().ok_or_else(|| {
-                IndexError::SourceNotCertified(pending.source.identity().to_string())
-            })?;
-            source_upserts.insert(pending.source.identity().digest(), certificate.clone());
-        }
-        let sources = merge_manifest_sources(
-            self.base_manifest().map_or(&[][..], |base| &base.sources),
-            source_upserts,
-            &deleted_sources,
-        );
-        let record_aggregates = staging::manifest_record_aggregates(self, &sources)?;
-        let mut source_routes = if let Some(routes) = &self.present_source_routes {
-            routes.clone()
-        } else {
-            implicit_source_routes(&sources)?
-        };
-        for route in &mut source_routes {
-            let Some(delta) = self.partial_source_route_deltas.get(route.route_identity()) else {
-                continue;
-            };
-            if route.missing_state().is_some() {
-                return Err(IndexError::InvalidSourceRoutePlan(format!(
-                    "partial route {} cannot carry missing state",
-                    route.route_identity().as_str()
-                )));
-            }
-            *route = SourceRouteSnapshot::present(
-                route.route_identity().clone(),
-                merge_partial_route_members(route.sources(), delta),
-            )?;
-        }
-        source_routes.extend(self.observed_missing_routes.values().cloned());
-        GenerationManifest::from_parts_with_record_aggregates(
-            sources,
-            record_aggregates,
-            source_routes,
-        )
-    }
-
-    fn source_replacement_manifest_is_route_stable(&self, base: &GenerationManifest) -> bool {
-        if self.pending.is_empty()
-            || !self.deletions.is_empty()
-            || !self.route_deletions.is_empty()
-            || !self.observed_missing_routes.is_empty()
-        {
-            return false;
-        }
-        let Some(routes) = self.present_source_routes.as_deref() else {
-            return false;
-        };
-        if routes.len() != base.source_routes().len()
-            || routes
-                .iter()
-                .zip(base.source_routes())
-                .any(|(current, base)| !current.exact_snapshot_eq(base))
-        {
-            return false;
-        }
-        for (route_identity, delta) in &self.partial_source_route_deltas {
-            if !delta.deletions.is_empty() {
-                return false;
-            }
-            let Some(base_route) = base.source_route(route_identity) else {
-                return false;
-            };
-            for (digest, source) in &delta.upserts {
-                let Some(base_source) = base_route
-                    .sources()
-                    .binary_search_by_key(digest, |source| source.identity().digest())
-                    .ok()
-                    .and_then(|index| base_route.sources().get(index))
-                else {
-                    return false;
-                };
-                if !base_source.exact_descriptor_eq(source) {
-                    return false;
-                }
-            }
-        }
-        self.pending.values().all(|pending| {
-            base.sources
-                .binary_search_by_key(&pending.source.identity().digest(), |source| {
-                    source.observation().source().identity().digest()
-                })
-                .ok()
-                .and_then(|index| base.sources.get(index))
-                .is_some_and(|source| {
-                    source
-                        .observation()
-                        .source()
-                        .exact_descriptor_eq(&pending.source)
-                })
-        })
-    }
 }
 
 mod manifest_merge;
+mod manifest_planning;
 
 use manifest_merge::{merge_manifest_sources, merge_partial_route_members};

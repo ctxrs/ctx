@@ -157,7 +157,7 @@ pub(crate) fn import_custom_history_fixture_source_backed(
     let imported = json_output(ctx(temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         source.to_str().unwrap(),
         "--no-daemon",

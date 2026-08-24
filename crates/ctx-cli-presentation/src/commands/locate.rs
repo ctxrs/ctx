@@ -30,6 +30,10 @@ pub struct LocateSessionArgs {
     pub provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
     pub provider_session: Option<String>,
+    #[arg(long, requires_all = ["source_id", "provider_session"])]
+    pub provider_key: Option<String>,
+    #[arg(long, requires_all = ["provider_key", "provider_session"])]
+    pub source_id: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub format: JsonOutputFormat,
 }
@@ -55,6 +59,8 @@ pub fn run_locate(
                 id: args.id,
                 provider: args.provider.map(history_provider),
                 provider_session: args.provider_session,
+                provider_key: args.provider_key,
+                source_id: args.source_id,
                 format: history_format(args.format),
             })
         }

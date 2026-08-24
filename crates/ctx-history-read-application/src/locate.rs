@@ -21,6 +21,8 @@ pub enum LocateRequest {
         selector: Option<String>,
         provider_session_id: Option<String>,
         provider: Option<CaptureProvider>,
+        provider_key: Option<String>,
+        source_id: Option<String>,
     },
 }
 
@@ -44,12 +46,16 @@ impl PinnedHistoryQuery<'_> {
                 selector,
                 provider_session_id,
                 provider,
+                provider_key,
+                source_id,
             } => {
                 let session = resolve_show_session_with_refs(
                     &self.references,
                     selector.as_deref(),
                     provider_session_id.as_deref(),
                     *provider,
+                    provider_key.as_deref(),
+                    source_id.as_deref(),
                 )?;
                 let first_event = self
                     .index
@@ -171,6 +177,8 @@ fn locate_session_read_model(session: &SessionRecord, first_event: &EventRecord)
         "payload_type": "session_location",
         "ctx_session_id": session.session_id.as_uuid(),
         "provider": session.provider,
+        "provider_key": session.provider_key,
+        "source_id": session.source_id,
         "provider_session_id": session.provider_session_id,
         "parent_ctx_session_id": session.parent_session_id.map(|id| id.as_uuid()),
         "root_ctx_session_id": session.root_session_id.map(|id| id.as_uuid()),
@@ -180,6 +188,11 @@ fn locate_session_read_model(session: &SessionRecord, first_event: &EventRecord)
 }
 
 fn locate_event_read_model(event: &CoreEventRecord) -> Value {
+    let (provider_key, source_id) = event
+        .custom_source_identity()
+        .map_or((None, None), |(provider_key, source_id)| {
+            (Some(provider_key), Some(source_id))
+        });
     compact_json(json!({
         "schema_version": 1,
         "target": "event",
@@ -187,6 +200,8 @@ fn locate_event_read_model(event: &CoreEventRecord) -> Value {
         "ctx_event_id": event.event_id.as_uuid(),
         "ctx_session_id": event.session_id.as_uuid(),
         "provider": event.provider,
+        "provider_key": provider_key,
+        "source_id": source_id,
         "provider_session_id": event.provider_session_id,
         "provider_event_id": event.native_event_id,
         "sequence": event.event_sequence,

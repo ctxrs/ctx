@@ -161,16 +161,24 @@ fn hash_identity_text(hasher: &mut Sha256, value: &str) {
     hasher.update(value.as_bytes());
 }
 
-pub(in crate::codex::nativepath) fn codex_source_key(
+pub(in crate::codex::nativepath) fn codex_source_key_in_root(
+    source_root_lineage: Option<[u8; 32]>,
     native_session_id: &str,
 ) -> CodexSourceBackedResultV0<SourceKey> {
+    let anchor = match source_root_lineage {
+        Some(lineage) => TypedKey::composite(vec![
+            TypedKey::bytes(lineage.to_vec())?,
+            TypedKey::utf8(native_session_id)?,
+        ])?,
+        None => TypedKey::utf8(native_session_id)?,
+    };
     Ok(SourceKey::derive_provider_native(
         CaptureProvider::Codex.as_str(),
         CODEX_SESSION_SOURCE_FORMAT,
         CODEX_SOURCE_SCHEMA_VARIANT,
         1,
         CODEX_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(native_session_id)?,
+        anchor,
     )?)
 }
 
@@ -203,6 +211,7 @@ pub(super) fn codex_event_identity(
 pub(in crate::codex::nativepath) fn codex_core_record(
     source: &SourceKey,
     session_id: StableEntityId,
+    source_root_lineage: Option<[u8; 32]>,
     owner: &CodexSessionRow,
     row: CodexCoreRecordDraft,
     event_identity_state: &mut CodexEventIdentityStateV0,
@@ -211,12 +220,16 @@ pub(in crate::codex::nativepath) fn codex_core_record(
     let parent_session_id = owner
         .parent_native_session_id
         .as_deref()
-        .map(codex_session_id_for_native_id)
+        .map(|native_session_id| {
+            codex_session_id_for_native_id(source_root_lineage, native_session_id)
+        })
         .transpose()?;
     let root_session_id = owner
         .root_native_session_id
         .as_deref()
-        .map(codex_session_id_for_native_id)
+        .map(|native_session_id| {
+            codex_session_id_for_native_id(source_root_lineage, native_session_id)
+        })
         .transpose()?;
     let (event_id, native_event_id, provider_occurrence) =
         event_identity_state.next_identity(source, session_id, &row)?;
@@ -312,6 +325,7 @@ pub(in crate::codex::nativepath) fn codex_core_record(
                 event_type.as_str(),
                 role.map(|role| role.as_str()),
                 provider_occurrence,
+                source_root_lineage,
             )
         })
         .transpose()?
@@ -362,9 +376,10 @@ pub(in crate::codex::nativepath) fn codex_core_record(
 }
 
 fn codex_session_id_for_native_id(
+    source_root_lineage: Option<[u8; 32]>,
     native_session_id: &str,
 ) -> CodexSourceBackedResultV0<StableEntityId> {
-    let source = codex_source_key(native_session_id)?;
+    let source = codex_source_key_in_root(source_root_lineage, native_session_id)?;
     codex_session_identity(&source, native_session_id)
 }
 
@@ -374,13 +389,15 @@ fn copied_result_event_copy(
     event_type: &str,
     role: Option<&str>,
     provider_occurrence: u64,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> CodexSourceBackedResultV0<Option<ctx_history_core::ProviderNativeEventCopy>> {
     if provider_identity.kind != CodexProviderEventIdentityKindV0::CallId
         || provider_identity.value != copy.result_call_id
     {
         return Ok(None);
     }
-    let ancestor_source = codex_source_key(&copy.ancestor_native_session_id)?;
+    let ancestor_source =
+        codex_source_key_in_root(source_root_lineage, &copy.ancestor_native_session_id)?;
     let ancestor_session_id =
         codex_session_identity(&ancestor_source, &copy.ancestor_native_session_id)?;
     let (_, parts) = provider_event_key_parts(event_type, role, provider_identity)?;

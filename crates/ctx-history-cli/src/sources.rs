@@ -6,11 +6,12 @@ use serde_json::json;
 use ctx_history_capture::{DiscoveryIssue, DiscoveryIssueKind, ProviderSourceStatus};
 use ctx_history_core::CaptureProvider;
 
+use crate::provider_sources::{configured_root_for_source, sources_json_with_selection};
 use crate::{
     discovery_report_issues_json, history_source_plugin_report, manual_path_guidance,
-    plugin_manifest_failures_json, plugin_sources_json, provider_cli_name, sources_json,
-    CliSourceDiscoveryPort, HistorySourcePluginManifestFailure, HistorySourcePluginSource,
-    OutputFormat, SourceInfo, SourcesRequest, DEFAULT_VISIBLE_SOURCE_PROVIDERS,
+    plugin_manifest_failures_json, plugin_sources_json, provider_cli_name, CliSourceDiscoveryPort,
+    HistorySourcePluginManifestFailure, HistorySourcePluginSource, OutputFormat, SourceInfo,
+    SourcesRequest, DEFAULT_VISIBLE_SOURCE_PROVIDERS,
 };
 use ctx_terminal::{
     canonical_human_output_bytes, diagnostic, empty_state, hint, outcome, section, table, Action,
@@ -42,6 +43,8 @@ pub fn run_sources<F>(
     request: SourcesRequest,
     data_root: &Path,
     home: Option<PathBuf>,
+    automatic_provider_discovery: bool,
+    provider_roots: Vec<ctx_history_capture::ProviderRootDefinition>,
     on_discovery: F,
     ui: &mut Ui,
 ) -> Result<SourcesExecutionObservation>
@@ -49,7 +52,9 @@ where
     F: FnOnce(SourcesDiscoveryObservation),
 {
     let provider_filter = request.provider.map(|provider| provider.capture_provider());
-    let discovery = CliSourceDiscoveryPort::new(home.clone(), data_root.to_path_buf());
+    let discovery = CliSourceDiscoveryPort::new(home.clone(), data_root.to_path_buf())
+        .with_automatic_provider_discovery(automatic_provider_discovery)
+        .with_provider_roots(provider_roots.clone());
     let show_all_sources = request.all || request.show_missing || provider_filter.is_some();
     let listing = ctx_history_ingest_application::assemble_source_listing(
         &discovery,
@@ -86,7 +91,7 @@ where
         providers_importable: importable.saturating_add(existing_plugin_sources) as u64,
     });
     let hidden_missing_sources = listing.hidden_missing_sources;
-    let mut canonical_entries = sources_json(sources);
+    let mut canonical_entries = sources_json_with_selection(sources, &provider_roots);
     canonical_entries.extend(plugin_sources_json(&plugin_sources));
     canonical_entries.extend(plugin_manifest_failures_json(&plugin_failures));
     let result_count = canonical_entries.len();
@@ -96,6 +101,7 @@ where
         let value = json!({
             "schema_version": 1,
             "scope": if show_all_sources { "all" } else { "default" },
+            "automatic_discovery": automatic_provider_discovery,
             "hidden_missing_sources": hidden_missing_sources,
             "sources": canonical_entries,
             "issues": issues,
@@ -107,26 +113,19 @@ where
         ctx_terminal::print_json(value)?;
         output_bytes
     } else {
-        let document = render_sources_human(
-            ui.stdout_context(),
+        let render_input = SourcesHumanRenderInput {
             sources,
-            &discovery_report.issues,
-            &plugin_sources,
-            &plugin_failures,
+            issues: &discovery_report.issues,
+            plugin_sources: &plugin_sources,
+            plugin_failures: &plugin_failures,
             hidden_missing_sources,
-            home.as_deref(),
-        );
-        let output_bytes = canonical_human_output_bytes(|context| {
-            render_sources_human(
-                context,
-                sources,
-                &discovery_report.issues,
-                &plugin_sources,
-                &plugin_failures,
-                hidden_missing_sources,
-                home.as_deref(),
-            )
-        });
+            home: home.as_deref(),
+            automatic_provider_discovery,
+            provider_roots: &provider_roots,
+        };
+        let document = render_sources_human(ui.stdout_context(), render_input);
+        let output_bytes =
+            canonical_human_output_bytes(|context| render_sources_human(context, render_input));
         ui.write_stdout(&document)?;
         output_bytes
     };
@@ -140,15 +139,73 @@ where
 #[cfg(test)]
 use ctx_history_ingest_application::{merge_sources, source_identity, source_is_visible};
 
-fn render_sources_human(
-    context: &RenderContext,
-    sources: &[SourceInfo],
-    issues: &[DiscoveryIssue],
-    plugin_sources: &[HistorySourcePluginSource],
-    plugin_failures: &[HistorySourcePluginManifestFailure],
+#[derive(Clone, Copy)]
+struct SourcesHumanRenderInput<'a> {
+    sources: &'a [SourceInfo],
+    issues: &'a [DiscoveryIssue],
+    plugin_sources: &'a [HistorySourcePluginSource],
+    plugin_failures: &'a [HistorySourcePluginManifestFailure],
     hidden_missing_sources: usize,
-    home: Option<&Path>,
-) -> Document {
+    home: Option<&'a Path>,
+    automatic_provider_discovery: bool,
+    provider_roots: &'a [ctx_history_capture::ProviderRootDefinition],
+}
+
+#[cfg(test)]
+impl<'a> SourcesHumanRenderInput<'a> {
+    fn from_sources(sources: &'a [SourceInfo]) -> Self {
+        Self {
+            sources,
+            issues: &[],
+            plugin_sources: &[],
+            plugin_failures: &[],
+            hidden_missing_sources: 0,
+            home: None,
+            automatic_provider_discovery: true,
+            provider_roots: &[],
+        }
+    }
+
+    fn with_issues(mut self, issues: &'a [DiscoveryIssue]) -> Self {
+        self.issues = issues;
+        self
+    }
+
+    fn with_hidden_missing_sources(mut self, hidden_missing_sources: usize) -> Self {
+        self.hidden_missing_sources = hidden_missing_sources;
+        self
+    }
+
+    fn with_home(mut self, home: Option<&'a Path>) -> Self {
+        self.home = home;
+        self
+    }
+
+    fn with_automatic_provider_discovery(mut self, enabled: bool) -> Self {
+        self.automatic_provider_discovery = enabled;
+        self
+    }
+
+    fn with_provider_roots(
+        mut self,
+        provider_roots: &'a [ctx_history_capture::ProviderRootDefinition],
+    ) -> Self {
+        self.provider_roots = provider_roots;
+        self
+    }
+}
+
+fn render_sources_human(context: &RenderContext, input: SourcesHumanRenderInput<'_>) -> Document {
+    let SourcesHumanRenderInput {
+        sources,
+        issues,
+        plugin_sources,
+        plugin_failures,
+        hidden_missing_sources,
+        home,
+        automatic_provider_discovery,
+        provider_roots,
+    } = input;
     if sources.is_empty()
         && issues.is_empty()
         && plugin_sources.is_empty()
@@ -158,7 +215,11 @@ fn render_sources_human(
             context,
             EmptyState {
                 title: "No history sources found",
-                detail: "Select a provider or inspect every known provider location.",
+                detail: if automatic_provider_discovery {
+                    "Select a provider or inspect every known provider location."
+                } else {
+                    "Automatic discovery is disabled and no named roots are available."
+                },
                 action: Some(Action {
                     command: "ctx sources --all",
                 }),
@@ -214,13 +275,21 @@ fn render_sources_human(
     );
 
     if !sources.is_empty() || !plugin_sources.is_empty() {
-        let mut locations = Table::new(["Source", "Status", "Location", "Format"])
-            .keep_columns_intact([0, 1, 2, 3]);
+        let mut locations = Table::new(["Source", "Status", "Location", "Selection", "Format"])
+            .keep_columns_intact([0, 1, 2, 3, 4]);
         for source in sources {
+            let selection = configured_root_for_source(provider_roots, source).map_or_else(
+                || "automatic".to_owned(),
+                |root| match root.group.as_deref() {
+                    Some(group) => format!("{} ({group})", root.id),
+                    None => root.id.clone(),
+                },
+            );
             locations.push_row([
                 source_provider_cli_name(source.provider).to_owned(),
                 source.status.as_str().to_owned(),
                 human_path(&source.path, home),
+                selection,
                 human_source_format(source.source_format),
             ]);
         }
@@ -233,6 +302,7 @@ fn render_sources_human(
                     || "no durable provider path".to_owned(),
                     |path| human_path(path, home),
                 ),
+                "plugin".to_owned(),
                 human_source_format(&source.source_format),
             ]);
         }
@@ -285,7 +355,7 @@ fn render_sources_human(
             Diagnostic {
                 level: DiagnosticLevel::Warning,
                 summary: &summary,
-                detail: Some("Declare a regular provider-owned ctx-history-jsonl-v1 path."),
+                detail: Some("Declare a regular provider-owned ctx-history-jsonl-v2 path."),
                 fields: &[
                     Field::new("Manifest", &manifest),
                     Field::new("Location", &location),
@@ -330,6 +400,16 @@ fn render_sources_human(
             }),
         ));
     }
+    if !automatic_provider_discovery {
+        document.push_blank();
+        document.append(hint(
+            context,
+            Hint {
+                text: "Automatic discovery is disabled; only named roots are active.",
+            },
+            None,
+        ));
+    }
     document
 }
 
@@ -348,7 +428,7 @@ fn human_path(path: &Path, home: Option<&Path>) -> String {
 }
 
 fn human_source_format(format: &str) -> String {
-    if format == "ctx-history-jsonl-v1" {
+    if format == "ctx_history_jsonl_v2" {
         "ctx history".to_owned()
     } else if format.contains("sqlite") || format.contains("database") {
         "Session database".to_owned()
@@ -487,6 +567,71 @@ mod ui_tests {
     }
 
     #[test]
+    fn configured_source_selection_is_visible_and_automatic_disable_is_explicit() {
+        let mut configured_source = source(ProviderSourceStatus::Available, "/tmp/claude/projects");
+        configured_source.provider = CaptureProvider::Claude;
+        configured_source.source_format = "claude_projects_jsonl_tree";
+        let root = ctx_history_capture::ProviderRootDefinition {
+            id: "personal-claude".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: PathBuf::from("/tmp/claude"),
+            group: Some("personal".to_owned()),
+        };
+        assert_eq!(
+            configured_root_for_source(std::slice::from_ref(&root), &configured_source)
+                .map(|root| root.id.as_str()),
+            Some("personal-claude")
+        );
+
+        let context = context(100, ColorMode::Never);
+        let rendered = render_sources_human(
+            &context,
+            SourcesHumanRenderInput::from_sources(&[configured_source])
+                .with_automatic_provider_discovery(false)
+                .with_provider_roots(&[root]),
+        )
+        .render_plain();
+        assert!(
+            rendered.contains("personal-claude (personal)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Automatic discovery is disabled"),
+            "{rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_source_selection_recognizes_physical_path_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let physical = temp.path().join("claude-physical");
+        std::fs::create_dir_all(physical.join("projects")).unwrap();
+        let alias = temp.path().join("claude-alias");
+        symlink(&physical, &alias).unwrap();
+        let mut source = source(
+            ProviderSourceStatus::Available,
+            &physical.join("projects").to_string_lossy(),
+        );
+        source.provider = CaptureProvider::Claude;
+        source.source_format = "claude_projects_jsonl_tree";
+        let root = ctx_history_capture::ProviderRootDefinition {
+            id: "personal-claude".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: alias,
+            group: Some("personal".to_owned()),
+        };
+
+        assert_eq!(
+            configured_root_for_source(std::slice::from_ref(&root), &source)
+                .map(|root| root.id.as_str()),
+            Some("personal-claude")
+        );
+    }
+
+    #[test]
     fn sources_success_is_outcome_first_and_responsive() {
         let home = PathBuf::from("private-capture-root");
         let location = home.join(".codex/sessions/and/a/long/location");
@@ -497,7 +642,12 @@ mod ui_tests {
         let concise_prefix = Path::new("~").join(".codex").display().to_string();
         for width in [32, 48, 80, 100, 120] {
             let context = context(width, ColorMode::Never);
-            let document = render_sources_human(&context, &sources, &[], &[], &[], 2, Some(&home));
+            let document = render_sources_human(
+                &context,
+                SourcesHumanRenderInput::from_sources(&sources)
+                    .with_hidden_missing_sources(2)
+                    .with_home(Some(&home)),
+            );
             let rendered = document.render_plain();
             assert!(rendered.starts_with("✓ 1 history source is ready\n"));
             assert!(rendered.contains("Locations\n"));
@@ -519,7 +669,7 @@ mod ui_tests {
             }
             assert!(rendered.contains("Session history"), "{width}: {rendered}");
             assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
-            if width < 80 {
+            if width < 100 {
                 assert!(
                     rendered.contains("Source\n  codex\nStatus\n  available\n"),
                     "{width}: {rendered}"
@@ -571,7 +721,10 @@ mod ui_tests {
 
         for width in [80, 100, 120] {
             let context = context(width, ColorMode::Never);
-            let document = render_sources_human(&context, &sources, &[], &[], &[], 0, Some(&home));
+            let document = render_sources_human(
+                &context,
+                SourcesHumanRenderInput::from_sources(&sources).with_home(Some(&home)),
+            );
             let rendered = document.render_plain();
             for atom in ["factory-ai-droid", "available", "cursor"] {
                 assert!(
@@ -585,7 +738,7 @@ mod ui_tests {
                 "{width}: {rendered}"
             );
             assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
-            if width == 80 {
+            if width < 120 {
                 assert!(
                     rendered.contains("Source\n  factory-ai-droid\nStatus\n  available\n"),
                     "{rendered}"
@@ -603,7 +756,8 @@ mod ui_tests {
     #[test]
     fn sources_empty_state_is_actionable() {
         let context = context(48, ColorMode::Never);
-        let rendered = render_sources_human(&context, &[], &[], &[], &[], 0, None).render_plain();
+        let rendered = render_sources_human(&context, SourcesHumanRenderInput::from_sources(&[]))
+            .render_plain();
         assert!(rendered.starts_with("No history sources found\n"));
         assert!(rendered.contains("Next\n  ctx sources --all\n"));
     }
@@ -617,7 +771,10 @@ mod ui_tests {
             reason: "selector contained \u{1b}[31mcontrol",
         };
         let context = context(48, ColorMode::Never);
-        let document = render_sources_human(&context, &[], &[issue], &[], &[], 0, None);
+        let document = render_sources_human(
+            &context,
+            SourcesHumanRenderInput::from_sources(&[]).with_issues(&[issue]),
+        );
         let rendered = document.render_plain();
         assert!(rendered.contains("\\x1b[31mcontrol"));
         assert!(rendered.contains("ctx import --provider codex --path <path>"));
@@ -629,7 +786,8 @@ mod ui_tests {
     fn sources_plain_output_matches_ansi_stripped_output() {
         let sources = vec![source(ProviderSourceStatus::Available, "/tmp/codex")];
         let context = context(80, ColorMode::Always);
-        let document = render_sources_human(&context, &sources, &[], &[], &[], 0, None);
+        let document =
+            render_sources_human(&context, SourcesHumanRenderInput::from_sources(&sources));
         assert_eq!(
             strip_ansi(&document.render(&context)),
             document.render_plain()

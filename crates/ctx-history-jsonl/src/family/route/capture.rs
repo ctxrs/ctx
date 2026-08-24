@@ -102,6 +102,57 @@ pub fn jsonl_family_driver<R: JsonlFamilyRuntime>(
     })
 }
 
+/// Restores an authenticatable ctime/ChangeTime ambiguity to the retained
+/// receipt observation. A certificate-bound resident observation may advance
+/// the task-local terminal proof after one successful content authentication;
+/// otherwise the terminal witness must authenticate the exact admitted EOF.
+fn normalize_authenticated_change_time_hints<R: JsonlFamilyRuntime>(
+    adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
+    opening: &mut JsonlFamilyInventory<JsonlRuntimeError<R>>,
+    bases: &HashMap<[u8; 32], &CertifiedSource>,
+    resident: &Mutex<FamilyResident<JsonlRuntimeError<R>>>,
+) -> JsonlResult<HashMap<[u8; 32], JsonlFileObservation>, JsonlRuntimeError<R>> {
+    let authenticated = resident
+        .lock()
+        .map_err(|_| {
+            JsonlRuntimeError::<R>::invalid_payload(
+                "JSONL resident catalog lock was poisoned".to_owned(),
+            )
+        })?
+        .authenticated_source_observations
+        .clone();
+    let mut reusable = HashMap::new();
+    let mut normalized = false;
+    for member in &mut opening.members {
+        let JsonlFamilyInventoryMember::Accepted { leaf, .. } = member else {
+            continue;
+        };
+        let Some(base) = base_for_leaf(bases, leaf) else {
+            continue;
+        };
+        let Ok(checkpoint) = decode_checkpoint(adapter, leaf, base) else {
+            continue;
+        };
+        let retained = checkpoint.physical.source_observation();
+        if retained.differs_only_by_change_identity(&leaf.observation)
+            && checkpoint.authenticates_admitted_eof()
+        {
+            let digest = leaf.source().exact_descriptor_digest();
+            if authenticated.get(&digest).is_some_and(|authenticated| {
+                authenticated.certificate == *base && authenticated.observation == leaf.observation
+            }) {
+                reusable.insert(digest, leaf.observation.clone());
+            }
+            leaf.observation = retained.clone();
+            normalized = true;
+        }
+    }
+    if normalized {
+        opening.rebuild_observation()?;
+    }
+    Ok(reusable)
+}
+
 pub(super) fn capture<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
     root: &Path,
@@ -133,6 +184,14 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     }
     let bases = base_sources_for_root(adapter, &opening, root, sink)?;
     bind_prior_disposition_sources(adapter, &mut opening, &bases)?;
+    let bases_by_descriptor = bases_by_descriptor(&bases)?;
+    let authenticated_change_time_hints = normalize_authenticated_change_time_hints(
+        adapter,
+        &mut opening,
+        &bases_by_descriptor,
+        resident,
+    )
+    .map_err(|error| route_scan(adapter, error))?;
     let opening_membership = adapter
         .observe_terminal_membership(root, &opening)
         .map_err(|error| route_discovery(adapter, error))?;
@@ -215,7 +274,6 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                 .map_err(route_internal)?;
         }
     }
-    let bases_by_descriptor = bases_by_descriptor(&bases)?;
     let base_event_lookup = sink.base_event_lookup();
     let mut scan_selected_leaves = Vec::with_capacity(selected_leaves.len());
     let mut retained_terminal_sources = HashMap::new();
@@ -247,7 +305,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             scan_selected_leaves.push(leaf.clone());
             continue;
         };
-        if !checkpoint.physical.terminal() {
+        if !checkpoint.physical.terminal() && !checkpoint.authenticates_admitted_eof() {
             scan_selected_leaves.push(leaf.clone());
             continue;
         }
@@ -258,7 +316,15 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             scan_selected_leaves.push(leaf.clone());
             continue;
         }
-        let terminal_proof = JsonlFamilyTerminalProof::unchanged(adapter, leaf, base, &checkpoint)
+        let digest = leaf.source().exact_descriptor_digest();
+        let terminal_proof =
+            if let Some(authenticated) = authenticated_change_time_hints.get(&digest) {
+                let mut proof_leaf = leaf.clone();
+                proof_leaf.observation = authenticated.clone();
+                JsonlFamilyTerminalProof::unchanged(adapter, &proof_leaf, base, &checkpoint, true)
+            } else {
+                JsonlFamilyTerminalProof::unchanged(adapter, leaf, base, &checkpoint, false)
+            }
             .map_err(|error| route_scan(adapter, error))?;
         sink.retain_source(base.clone()).map_err(route_internal)?;
         sink.report_completed_bytes_with_exact(
@@ -268,7 +334,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         )
         .map_err(route_internal)?;
         retained_terminal_sources.insert(
-            leaf.source().exact_descriptor_digest(),
+            digest,
             TerminalSourceEvidence {
                 certificate: base.clone(),
                 terminal_certificate: None,
@@ -410,7 +476,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         resident.ownership_initialized = false;
         resident.owned_sources = owned_sources;
         resident.quarantined_sources = quarantined_source_ownership;
-        resident.terminal_sources = terminal_sources;
+        resident.replace_terminal_sources(terminal_sources);
         resident.absent_sources.clear();
         resident.opening_membership = None;
         resident.certified_inventory = None;
@@ -455,7 +521,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     resident.ownership_initialized = true;
     resident.owned_sources = owned_sources;
     resident.quarantined_sources = quarantined_source_ownership;
-    resident.terminal_sources = terminal_sources;
+    resident.replace_terminal_sources(terminal_sources);
     resident.absent_sources = absent_sources;
     resident.opening_membership = Some(opening_membership);
     resident.certified_inventory = Some(inventory);
@@ -759,7 +825,7 @@ fn capture_partial_members<R: JsonlFamilyRuntime>(
     resident.ownership_initialized = false;
     resident.owned_sources = owned_sources;
     resident.quarantined_sources.clear();
-    resident.terminal_sources = terminal_sources;
+    resident.replace_terminal_sources(terminal_sources);
     resident.absent_sources.clear();
     resident.opening_membership = None;
     resident.certified_inventory = None;

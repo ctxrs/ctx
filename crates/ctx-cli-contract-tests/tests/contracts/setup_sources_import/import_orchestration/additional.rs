@@ -10,7 +10,7 @@ fn explicit_import_reports_warm_carried_route_failure() {
     let first = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -26,7 +26,7 @@ fn explicit_import_reports_warm_carried_route_failure() {
     let carried = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -67,10 +67,10 @@ fn all_invalid_custom_source_fails_with_unrelated_history_then_refreshes_after_f
     let _daemon = start_full_source_refresh_daemon(&temp);
     let fixture = temp.path().join("custom-retry.jsonl");
     let records = |event_index: &str| {
-        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}
+        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"}
 {"record_type":"source","source_id":"retry-source","provider_key":"retry-agent","source_format":"retry-jsonl","cursor":{"after":{"stream":"retry-agent:retry-source","cursor":"1","observed_at":"2026-07-13T12:00:00Z"}}}
-{"record_type":"session","source_id":"retry-source","session_id":"retry-session","started_at":"2026-07-13T12:00:00Z","agent_scope":"primary","status":"completed"}
-{"record_type":"event","source_id":"retry-source","session_id":"retry-session","event_index":EVENT_INDEX,"event_id":"retry-event","event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"retry oracle"},"preview":"retry oracle"}
+{"record_type":"session","source_id":"retry-source","provider_session_id":"retry-session","started_at":"2026-07-13T12:00:00Z","agent_scope":"primary","status":"completed"}
+{"record_type":"event","source_id":"retry-source","provider_session_id":"retry-session","event_index":EVENT_INDEX,"event_id":"retry-event","event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"retry oracle"},"preview":"retry oracle"}
 "#
         .replace("EVENT_INDEX", event_index)
     };
@@ -96,7 +96,7 @@ fn all_invalid_custom_source_fails_with_unrelated_history_then_refreshes_after_f
     let failure = failure_stderr(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -118,7 +118,7 @@ fn all_invalid_custom_source_fails_with_unrelated_history_then_refreshes_after_f
     let retry = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -160,7 +160,7 @@ fn import_custom_history_format_is_not_a_native_provider_importer() {
     let stderr = failure_stderr(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         &fixture,
         "--all",

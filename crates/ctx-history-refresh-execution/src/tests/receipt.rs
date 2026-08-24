@@ -46,28 +46,77 @@ fn recovery_receipt_requires_certified_current_facts() {
 }
 
 #[test]
-fn recovery_receipt_catalog_binding_requires_a_receipt_route_and_cold_failure() {
+fn recovery_receipt_catalog_binding_requires_a_receipt_route_and_terminal_failure() {
     let (_temp, mut response, _verified) = terminal_receipt_fixture();
     let route = "56".repeat(32);
     let lineage = "57".repeat(32);
-    response["receipt"]["route_results"] = json!({
-        (route.clone()): ["f", "u", false, 1, []]
-    });
     response["receipt"]["selected_route_total"] = json!(1);
     response["receipt"]["successful_route_total"] = json!(0);
     response["receipt"]["source_failure_total"] = json!(1);
     response["receipt"]["source_failures_omitted"] = json!(1);
     response["receipt"]["catalog_route_bindings"] = json!({
-        (lineage): route
+        (lineage): route.clone()
     });
-    published_refresh_receipt_for_recovery(&response)
-        .expect("a non-retained binding may use a terminal cold failure");
+    for carried_forward in [false, true] {
+        response["receipt"]["route_results"] = json!({
+            (route.clone()): ["f", "u", carried_forward, 1, []]
+        });
+        published_refresh_receipt_for_recovery(&response)
+            .expect("a transient binding may use any consistent terminal route failure");
+    }
 
     response["receipt"]["catalog_route_bindings"] = json!({
         ("58".repeat(32)): "59".repeat(32)
     });
     let error = published_refresh_receipt_for_recovery(&response).unwrap_err();
     assert!(format!("{error:#}").contains("absent from route_results"));
+}
+
+#[test]
+fn verified_receipt_keeps_retryable_binding_for_a_retained_route_failure() {
+    let (_temp, _response, verified) = terminal_receipt_fixture();
+    let route = verified.manifest().source_routes()[0]
+        .route_identity()
+        .as_str()
+        .to_owned();
+    let lineage = "5a".repeat(32);
+    let mut publication = test_publication(verified.generation_id());
+    publication.current =
+        SourceBackedRefreshCurrent::from_sources(&verified.manifest().sources, 0).unwrap();
+    publication.certified_source_count = publication.current.source_count;
+    publication.certified_source_bytes = publication.current.certified_source_bytes;
+    publication.route_results = vec![SourceBackedRefreshRouteResult::failed(
+        route.clone(),
+        "source_changed".to_owned(),
+        true,
+    )];
+    publication.catalog_route_bindings = vec![ExplicitSourceCatalogRouteBinding {
+        catalog_lineage: lineage.clone(),
+        route_identity: route,
+    }];
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        Some(verified.generation_id().to_owned()),
+        verified.generation_id().to_owned(),
+        &publication,
+    )
+    .unwrap();
+    let response = json!({
+        "previous_generation": verified.generation_id(),
+        "published_generation": verified.generation_id(),
+        "generation_changed": false,
+        "certified_source_count": publication.current.source_count,
+        "certified_source_bytes": publication.current.certified_source_bytes,
+        "receipt": receipt.to_json(),
+    });
+
+    let roundtrip = published_refresh_receipt_for_index(&response, &verified).unwrap();
+    let outcome = roundtrip.catalog_route_outcome(&lineage).unwrap();
+    assert_eq!(outcome.outcome, "failed");
+    assert_eq!(outcome.failure_class.as_deref(), Some("source_changed"));
+    assert_eq!(
+        source_backed_route_retry_disposition(&roundtrip.route_results[0]),
+        Some(true)
+    );
 }
 
 #[test]

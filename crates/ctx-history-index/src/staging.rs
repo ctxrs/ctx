@@ -55,6 +55,7 @@ impl GenerationWriter {
             return Err(IndexError::SourceCertificateMismatch);
         }
         self.deletions.remove(source);
+        self.route_deletions.remove(source);
         self.pending.insert(
             token.clone(),
             super::PendingSource {

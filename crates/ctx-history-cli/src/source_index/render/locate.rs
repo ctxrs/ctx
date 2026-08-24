@@ -45,6 +45,20 @@ pub(in crate::source_index) fn render_locate_document(
     push_optional_field(
         &mut document,
         context,
+        "Provider key",
+        value["provider_key"].as_str(),
+        Token::Accent,
+    );
+    push_optional_field(
+        &mut document,
+        context,
+        "Source ID",
+        value["source_id"].as_str(),
+        Token::Accent,
+    );
+    push_optional_field(
+        &mut document,
+        context,
         "Provider session",
         value["provider_session_id"].as_str(),
         Token::Reference,

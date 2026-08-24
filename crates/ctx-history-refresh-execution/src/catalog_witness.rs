@@ -57,17 +57,77 @@ pub(super) fn reconcile_published_catalog_witness(
         let result = route_results_by_identity
             .get(binding.route_identity.as_str())
             .expect("requested route result presence checked above");
-        if !matches!(
-            result.outcome,
-            SourceBackedRefreshRouteOutcome::Failed {
-                carried_forward: false,
-                ..
-            }
-        ) {
-            bail!("unretained explicit catalog route has no terminal cold failure");
+        let SourceBackedRefreshRouteOutcome::Failed {
+            carried_forward, ..
+        } = result.outcome
+        else {
+            bail!("unretained explicit catalog route has no terminal failure");
+        };
+        let route =
+            ctx_history_index::SourceRouteIdentity::from_sha256(binding.route_identity.clone())
+                .context("validate failed requested explicit catalog route")?;
+        if retained_routes.contains(&route) != carried_forward {
+            bail!("failed explicit catalog route retention disagrees with its terminal outcome");
         }
         bindings.push(binding.clone());
     }
     bindings.sort_by(|left, right| left.catalog_lineage.cmp(&right.catalog_lineage));
     Ok((catalog, bindings))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn retained_route_failure_keeps_transient_requested_lineage_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let sessions = temp.path().join("configured-codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let source =
+            ctx_history_capture::provider_source_for_path(CaptureProvider::Codex, sessions);
+        let request = upsert_explicit_source(&data_root, &source).unwrap();
+        let route = ctx_history_capture::SourceBackedRoute::automatic(
+            source,
+            SourceBackedSelectorAuthority::DiscoveredWinner,
+            ctx_history_capture::SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),
+        )
+        .unwrap();
+        let route_identity = route.metadata().route_identity.clone().unwrap();
+        let binding = ExplicitSourceCatalogRouteBinding {
+            catalog_lineage: request.catalog_lineage_hex(),
+            route_identity: route_identity.as_str().to_owned(),
+        };
+        let mut registry = SourceBackedProviderRegistry::new();
+        registry.register(route);
+        let receipt = ctx_history_capture::refresh_source_backed_generation(
+            temp.path().join("index"),
+            &registry,
+            WriterOptions::default(),
+        )
+        .unwrap();
+        let result = SourceBackedRefreshRouteResult::failed(
+            route_identity.as_str().to_owned(),
+            "source_changed".to_owned(),
+            true,
+        );
+
+        let (catalog, bindings) = reconcile_published_catalog_witness(
+            receipt.commit.snapshot(),
+            None,
+            &[],
+            Some(&request.authority),
+            std::slice::from_ref(&binding),
+            &[result],
+        )
+        .unwrap();
+
+        assert!(
+            catalog.is_none(),
+            "a failed request does not become durable authority"
+        );
+        assert_eq!(bindings, vec![binding]);
+    }
 }

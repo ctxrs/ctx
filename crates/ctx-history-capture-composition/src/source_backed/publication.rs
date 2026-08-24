@@ -3,6 +3,7 @@ use super::*;
 mod completion;
 mod exact_scan;
 mod execution;
+mod execution_prelude;
 mod model;
 mod ownership;
 mod route_content;
@@ -18,6 +19,11 @@ pub use ctx_history_capture_model::{
 pub use ctx_history_capture_runtime::SourceBackedCertifiedRemoval;
 use exact_scan::AttemptExactScanAccounting;
 use execution::refresh_source_backed_generation_with_detailed_progress_and_discovery_timing;
+use execution_prelude::{
+    committed_progress, configured_provider_root_route_ids, discovery_started_progress,
+    omit_empty_automatic_route, prepare_refresh, provider_roots_for_publication,
+    publication_selected_route_ids, RefreshPrelude,
+};
 #[cfg(test)]
 pub use model::assert_carried_route_failure;
 pub use model::{
@@ -304,6 +310,30 @@ impl SourceBackedRefreshExecutor {
         reconciliation_demand: SourceBackedReconciliationDemand,
         route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
         report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+        metadata_factory: impl for<'a> FnMut(
+            SourceBackedPublicationMetadataContext<'a>,
+        ) -> ctx_history_index::Result<Vec<u8>>,
+    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+        self.refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+            index_root,
+            scope.clone(),
+            scope,
+            reconciliation_demand,
+            route_worksets,
+            report_progress,
+            metadata_factory,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+        &self,
+        index_root: impl AsRef<Path>,
+        physical_scope: SourceBackedRefreshScope,
+        publication_scope: SourceBackedRefreshScope,
+        reconciliation_demand: SourceBackedReconciliationDemand,
+        route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
+        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
         mut metadata_factory: impl for<'a> FnMut(
             SourceBackedPublicationMetadataContext<'a>,
         ) -> ctx_history_index::Result<Vec<u8>>,
@@ -314,7 +344,8 @@ impl SourceBackedRefreshExecutor {
             self.writer_options.clone(),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
-                SourceBackedRefreshPlan::isolate(scope)
+                SourceBackedRefreshPlan::isolate(physical_scope)
+                    .with_publication_scope(publication_scope)
                     .with_reconciliation_demand(reconciliation_demand)
                     .with_route_worksets(route_worksets)
                     .with_attempt_history_progress(self.attempt_history_progress.clone()),

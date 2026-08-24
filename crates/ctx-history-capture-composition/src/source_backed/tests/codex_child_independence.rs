@@ -1,8 +1,10 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io::Write,
     path::Path,
+    rc::Rc,
 };
 
 use super::*;
@@ -295,6 +297,21 @@ fn register_tree(roots: &[&Path]) -> SourceBackedProviderRegistry {
     registry
 }
 
+fn build_discovered_codex_registry(
+    context: &DiscoveryContext,
+    data_root: &Path,
+) -> SourceBackedAutomaticRegistryBuild {
+    let probes = crate::test_provider_probes();
+    let report = ctx_history_source_discovery::discover_provider_sources_for_provider_with_context(
+        &probes,
+        context,
+        CaptureProvider::Codex,
+    );
+    build_automatic_source_backed_registry_from_report_with_probes(
+        &probes, context, data_root, report,
+    )
+}
+
 fn add_explicit_route(registry: &mut SourceBackedProviderRegistry, path: &Path) {
     register_landed_source_backed_route(
         registry,
@@ -307,6 +324,270 @@ fn add_explicit_route(registry: &mut SourceBackedProviderRegistry, path: &Path) 
         SourceBackedRouteSelection::ExplicitManual,
     )
     .unwrap();
+}
+
+#[test]
+fn configured_codex_homes_with_the_same_native_session_publish_independent_sources() {
+    let temp = tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let personal = fixture.join("personal/sessions");
+    let personal_archive = fixture.join("personal/archived_sessions");
+    let work = fixture.join("work/sessions");
+    fs::create_dir_all(&personal).unwrap();
+    fs::create_dir_all(&personal_archive).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    let native_session_id = "019fb000-0000-7000-8000-000000000099";
+    write_session(
+        &personal,
+        native_session_id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("personal pineapple marker")],
+    );
+    write_session(
+        &work,
+        native_session_id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("work kumquat marker")],
+    );
+    write_session(
+        &personal_archive,
+        native_session_id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("personal archived duplicate should coalesce")],
+    );
+    let mut registry = SourceBackedProviderRegistry::new();
+    for (root, lineage) in [
+        (&personal, [8; 32]),
+        (&personal_archive, [8; 32]),
+        (&work, [9; 32]),
+    ] {
+        super::super::register_configured_codex_session_tree_route(
+            &mut registry,
+            fixture_provider_source_at(
+                CaptureProvider::Codex,
+                "codex_session_jsonl_tree",
+                ProviderImportSupport::Native,
+                root,
+            ),
+            SourceBackedRouteSelection::ExplicitManual,
+            Some(lineage),
+        )
+        .unwrap();
+    }
+
+    let index_root = fixture.join("index");
+    let receipt =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert!(
+        receipt.failed_routes.is_empty(),
+        "{:?}",
+        receipt.failed_routes
+    );
+    assert_eq!(receipt.successful_route_ids.len(), 3);
+
+    let archive_refresh = refresh_source_backed_generation_for_routes(
+        &index_root,
+        &registry,
+        writer_options(),
+        [route_identity(&registry, &personal_archive)],
+    )
+    .unwrap();
+    assert!(
+        archive_refresh.failed_routes.is_empty(),
+        "{:?}",
+        archive_refresh.failed_routes
+    );
+
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let codex_sources = index
+        .manifest()
+        .sources
+        .iter()
+        .filter(|source| source.observation().source().provider() == "codex")
+        .collect::<Vec<_>>();
+    assert_eq!(codex_sources.len(), 2);
+    let mut bodies = codex_sources
+        .into_iter()
+        .flat_map(|source| {
+            index
+                .core_source_event_page(source.observation().source(), None, 16)
+                .unwrap()
+                .items
+                .into_iter()
+                .filter_map(|item| item.core_record.content.normalized_body)
+        })
+        .collect::<Vec<_>>();
+    bodies.sort();
+    assert!(bodies
+        .iter()
+        .any(|body| body == "personal pineapple marker"));
+    assert!(bodies.iter().any(|body| body == "work kumquat marker"));
+    assert!(!bodies
+        .iter()
+        .any(|body| body == "personal archived duplicate should coalesce"));
+}
+
+#[test]
+fn unavailable_configured_codex_home_carries_only_itself_while_peer_refreshes() {
+    let temp = tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let personal_home = fixture.join("personal-codex-home");
+    let work_home = fixture.join("work-codex-home");
+    let personal_sessions = personal_home.join("sessions");
+    let work_sessions = work_home.join("sessions");
+    fs::create_dir_all(&personal_sessions).unwrap();
+    fs::create_dir_all(&work_sessions).unwrap();
+    let personal_session_id = "019fb000-0000-7000-8000-000000000081";
+    let work_session_id = "019fb000-0000-7000-8000-000000000082";
+    write_session(
+        &personal_sessions,
+        personal_session_id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("configured Codex personal initial")],
+    );
+    write_session(
+        &work_sessions,
+        work_session_id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("configured Codex work retained")],
+    );
+    let context = DiscoveryContext::new(
+        &fixture,
+        &fixture,
+        DiscoveryPlatform::Linux,
+        crate::DiscoveryPlatformDirs::default(),
+    )
+    .with_configured_provider_roots(vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: personal_home.clone(),
+            group: Some("personal".to_owned()),
+        },
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "work".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: work_home.clone(),
+            group: Some("work".to_owned()),
+        },
+    ]);
+    let data_root = fixture.join("data");
+    let initial = build_discovered_codex_registry(&context, &data_root);
+    assert!(initial.issues.is_empty(), "{:?}", initial.issues);
+    let index_root = fixture.join("index");
+    let initial_receipt =
+        refresh_source_backed_generation(&index_root, &initial.registry, writer_options()).unwrap();
+    assert!(initial_receipt.failed_routes.is_empty());
+
+    append_event(
+        &session_path(&personal_sessions, personal_session_id),
+        message("configured Codex personal refreshed"),
+    );
+    let displaced_work_home = fixture.join("work-codex-displaced");
+    fs::rename(&work_home, &displaced_work_home).unwrap();
+    fs::write(&work_home, b"temporarily not a directory").unwrap();
+    let current = build_discovered_codex_registry(&context, &data_root);
+    assert_eq!(
+        current
+            .issues
+            .iter()
+            .filter(|issue| matches!(issue, SourceBackedAutomaticRegistryIssue::Discovery(_)))
+            .count(),
+        1,
+        "equivalent physical selector issues are deduplicated while all routes are retained"
+    );
+    fs::remove_file(&work_home).unwrap();
+    fs::rename(&displaced_work_home, &work_home).unwrap();
+
+    let receipt =
+        refresh_source_backed_generation(&index_root, &current.registry, writer_options()).unwrap();
+    assert_eq!(receipt.failed_routes.len(), 3);
+    assert!(receipt.failed_routes.iter().all(|failure| {
+        failure.class == SourceBackedSourceFailureClass::Unavailable && failure.carried_forward
+    }));
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    assert!(source_records_contain(
+        &index,
+        personal_session_id,
+        "configured Codex personal refreshed"
+    ));
+    assert!(source_records_contain(
+        &index,
+        work_session_id,
+        "configured Codex work retained"
+    ));
+    let work_root = index
+        .manifest()
+        .provider_roots()
+        .iter()
+        .find(|root| root.definition().id == "work")
+        .unwrap();
+    assert_eq!(work_root.routes().len(), 3);
+}
+
+#[test]
+fn cold_unavailable_configured_codex_home_does_not_block_healthy_peer() {
+    let temp = tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let personal_home = fixture.join("personal-codex-cold");
+    let work_home = fixture.join("work-codex-cold");
+    let personal_sessions = personal_home.join("sessions");
+    fs::create_dir_all(&personal_sessions).unwrap();
+    fs::write(&work_home, b"temporarily not a directory").unwrap();
+    let personal_session_id = "019fb000-0000-7000-8000-000000000083";
+    write_session(
+        &personal_sessions,
+        personal_session_id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("configured Codex personal cold")],
+    );
+    let context = DiscoveryContext::new(
+        &fixture,
+        &fixture,
+        DiscoveryPlatform::Linux,
+        crate::DiscoveryPlatformDirs::default(),
+    )
+    .with_configured_provider_roots(vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: personal_home,
+            group: Some("personal".to_owned()),
+        },
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "work".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: work_home,
+            group: Some("work".to_owned()),
+        },
+    ]);
+    let build = build_discovered_codex_registry(&context, &fixture.join("data"));
+    let index_root = fixture.join("index");
+    let receipt =
+        refresh_source_backed_generation(&index_root, &build.registry, writer_options()).unwrap();
+    assert_eq!(receipt.failed_routes.len(), 3);
+    assert!(receipt.failed_routes.iter().all(|failure| {
+        failure.class == SourceBackedSourceFailureClass::Unavailable && !failure.carried_forward
+    }));
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    assert!(source_records_contain(
+        &index,
+        personal_session_id,
+        "configured Codex personal cold"
+    ));
+    let work_root = index
+        .manifest()
+        .provider_roots()
+        .iter()
+        .find(|root| root.definition().id == "work")
+        .unwrap();
+    assert!(work_root.routes().is_empty());
 }
 
 #[test]
@@ -378,14 +659,24 @@ fn certificate_for(index: &VerifiedIndex, native_session_id: &str) -> CertifiedS
         .sources
         .iter()
         .find(|certificate| {
-            matches!(
-                certificate.observation().source().anchor(),
-                SourceAnchor::ProviderNative { key: TypedKey::Utf8(value), .. }
-                    if value == native_session_id
-            )
+            source_native_session_id(certificate.observation().source()) == Some(native_session_id)
         })
         .cloned()
         .unwrap_or_else(|| panic!("missing certificate for {native_session_id}"))
+}
+
+fn source_native_session_id(source: &SourceKey) -> Option<&str> {
+    let SourceAnchor::ProviderNative { key, .. } = source.anchor() else {
+        return None;
+    };
+    match key {
+        TypedKey::Utf8(value) => Some(value),
+        TypedKey::Composite(parts) => parts.last().and_then(|part| match part {
+            TypedKey::Utf8(value) => Some(value.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    }
 }
 
 fn provider_checkpoint_envelope(
@@ -930,18 +1221,10 @@ fn codex_rollout_ownership_quarantine_retries_after_file_repair() {
         .into_iter()
         .any(|candidate| candidate.event.provider_session_id.as_deref() == Some(valid_session_id)));
     assert!(index.manifest().sources.iter().any(|certificate| {
-        matches!(
-            certificate.observation().source().anchor(),
-            SourceAnchor::ProviderNative { key: TypedKey::Utf8(value), .. }
-                if value == repairable_session_id
-        )
+        source_native_session_id(certificate.observation().source()) == Some(repairable_session_id)
     }));
     assert!(index.manifest().sources.iter().all(|certificate| {
-        !matches!(
-            certificate.observation().source().anchor(),
-            SourceAnchor::ProviderNative { key: TypedKey::Utf8(value), .. }
-                if value == conflicting_session_id
-        )
+        source_native_session_id(certificate.observation().source()) != Some(conflicting_session_id)
     }));
     assert!(source_records_contain(
         &index,
@@ -1102,327 +1385,8 @@ fn codex_retrieval_exclusion_survives_raw_append_hydration_and_keeps_ids_stable(
     );
 }
 
-#[test]
-fn codex_cold_duplicate_direct_and_mcp_terminals_fail_open() {
-    let temp = tempdir().unwrap();
-    let sessions = temp.path().join("sessions-cold-duplicate-terminals");
-    let index_root = temp.path().join("index-cold-duplicate-terminals");
-    fs::create_dir_all(&sessions).unwrap();
-    let native_session_id = "019fb000-0000-7000-8000-00000000005c";
-    let direct_call_id = "cold-direct-duplicate";
-    let mcp_call_id = "cold-mcp-duplicate";
-    write_session(
-        &sessions,
-        native_session_id,
-        ProviderNativeSessionRelationship::Root,
-        None,
-        [
-            turn_context(),
-            exec_call_with_command(direct_call_id, "ctx search coldduplicatequery"),
-            exact_exec_result(direct_call_id, "colddirectduplicatefirst"),
-            exact_exec_result(direct_call_id, "colddirectduplicatesecond"),
-            exact_mcp_result(mcp_call_id, "coldmcpduplicatefirst"),
-            exact_mcp_result(mcp_call_id, "coldmcpduplicatesecond"),
-        ],
-    );
-    let registry = register_tree(&[&sessions]);
-
-    let receipt =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(receipt.failed_routes.is_empty());
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    let records = records_for(&index, native_session_id);
-    assert_eq!(records.len(), 5);
-    let invocation = records
-        .iter()
-        .find(|record| {
-            record.content.activity.as_ref().is_some_and(|activity| {
-                activity.provider_call_id == Some(TypedKey::Utf8(direct_call_id.to_owned()))
-                    && activity.invocation.is_some()
-                    && activity.result.is_none()
-            })
-        })
-        .unwrap();
-    assert_eq!(
-        invocation.content.discovery_exclusion,
-        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
-    );
-    let terminals = records
-        .iter()
-        .filter(|record| {
-            record.content.activity.as_ref().is_some_and(|activity| {
-                activity.result.is_some()
-                    && matches!(
-                        activity.provider_call_id.as_ref(),
-                        Some(TypedKey::Utf8(call_id))
-                            if call_id == direct_call_id || call_id == mcp_call_id
-                    )
-            })
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(terminals.len(), 4);
-    assert!(terminals
-        .iter()
-        .all(|record| record.content.discovery_exclusion.is_none()));
-    for marker in ["colddirectduplicatefirst", "coldmcpduplicatefirst"] {
-        assert!(index
-            .search_event_candidates(marker, 32)
-            .unwrap()
-            .into_iter()
-            .any(|candidate| candidate.event.provider_session_id.as_deref()
-                == Some(native_session_id)));
-    }
-}
-
-#[test]
-fn codex_appended_duplicate_direct_and_mcp_terminals_retract_exclusion_with_stable_ids() {
-    let temp = tempdir().unwrap();
-    let sessions = temp.path().join("sessions-appended-duplicate-terminals");
-    let index_root = temp.path().join("index-appended-duplicate-terminals");
-    fs::create_dir_all(&sessions).unwrap();
-    let direct_session_id = "019fb000-0000-7000-8000-00000000005d";
-    let mcp_session_id = "019fb000-0000-7000-8000-00000000005e";
-    let direct_call_id = "appended-direct-duplicate";
-    let mcp_call_id = "appended-mcp-duplicate";
-    write_session(
-        &sessions,
-        direct_session_id,
-        ProviderNativeSessionRelationship::Root,
-        None,
-        [
-            turn_context(),
-            exec_call_with_command(direct_call_id, "ctx search appenddirectquery"),
-            exact_exec_result(direct_call_id, "appenddirectfirst"),
-        ],
-    );
-    write_session(
-        &sessions,
-        mcp_session_id,
-        ProviderNativeSessionRelationship::Root,
-        None,
-        [
-            turn_context(),
-            exact_mcp_result(mcp_call_id, "appendmcpfirst"),
-        ],
-    );
-    let registry = register_tree(&[&sessions]);
-
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(cold.failed_routes.is_empty());
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
-    let cold_direct = records_for(&cold_index, direct_session_id);
-    let cold_mcp = records_for(&cold_index, mcp_session_id);
-    assert_eq!(cold_direct.len(), 2);
-    assert_eq!(cold_mcp.len(), 1);
-    assert!(cold_direct.iter().chain(&cold_mcp).all(|record| {
-        record.content.discovery_exclusion == Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
-    }));
-    let direct_invocation_id = cold_direct[0].event_id;
-    let direct_result_id = cold_direct[1].event_id;
-    let mcp_result_id = cold_mcp[0].event_id;
-    drop(cold_index);
-
-    append_event(
-        &session_path(&sessions, direct_session_id),
-        exact_exec_result(direct_call_id, "appenddirectsecond"),
-    );
-    append_event(
-        &session_path(&sessions, mcp_session_id),
-        exact_mcp_result(mcp_call_id, "appendmcpsecond"),
-    );
-    let (appended, _) = incremental_refresh(&index_root, &registry, &cold);
-    assert!(appended.failed_routes.is_empty());
-    let appended_index = VerifiedIndex::open(&index_root).unwrap();
-    let direct = records_for(&appended_index, direct_session_id);
-    let mcp = records_for(&appended_index, mcp_session_id);
-    assert_eq!(direct.len(), 3);
-    assert_eq!(mcp.len(), 2);
-    assert_eq!(direct[0].event_id, direct_invocation_id);
-    assert_eq!(direct[1].event_id, direct_result_id);
-    assert_eq!(mcp[0].event_id, mcp_result_id);
-    assert_ne!(direct[2].event_id, direct_result_id);
-    assert_ne!(mcp[1].event_id, mcp_result_id);
-    assert_eq!(
-        direct[0].content.discovery_exclusion,
-        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
-    );
-    assert!(direct[1..]
-        .iter()
-        .chain(&mcp)
-        .all(|record| record.content.discovery_exclusion.is_none()));
-    for marker in ["appenddirectfirst", "appendmcpfirst"] {
-        assert!(appended_index
-            .search_event_candidates(marker, 32)
-            .unwrap()
-            .into_iter()
-            .any(|candidate| matches!(
-                candidate.event.provider_session_id.as_deref(),
-                Some(session_id) if session_id == direct_session_id || session_id == mcp_session_id
-            )));
-    }
-}
-
-#[test]
-fn codex_incremental_unique_terminal_append_and_restart_stay_suffix_bounded() {
-    let temp = tempdir().unwrap();
-    let sessions = temp.path().join("sessions-incremental-unique-terminals");
-    let index_root = temp.path().join("index-incremental-unique-terminals");
-    fs::create_dir_all(&sessions).unwrap();
-    let native_session_id = "019fb000-0000-7000-8000-00000000005f";
-    let first_call_id = "incremental-unique-first";
-    let second_call_id = "incremental-unique-second";
-    let third_call_id = "incremental-unique-third";
-    let path = session_path(&sessions, native_session_id);
-    let large_prefix_body = "p".repeat(256 * 1024);
-    write_session(
-        &sessions,
-        native_session_id,
-        ProviderNativeSessionRelationship::Root,
-        None,
-        [
-            turn_context(),
-            message(&large_prefix_body),
-            exec_call_with_command(first_call_id, "ctx search incrementalfirstquery"),
-            exact_exec_result(first_call_id, "incrementaluniquefirst"),
-        ],
-    );
-    let registry = register_tree(&[&sessions]);
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(cold.failed_routes.is_empty());
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
-    let cold_records = records_for(&cold_index, native_session_id);
-    let first_event_id = result_record_for_call(&cold_records, first_call_id).event_id;
-    assert_eq!(
-        result_record_for_call(&cold_records, first_call_id)
-            .content
-            .discovery_exclusion,
-        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
-    );
-    drop(cold_index);
-
-    append_event(
-        &path,
-        exact_mcp_result(second_call_id, "incrementaluniquesecond"),
-    );
-    let (appended, completed_records) = incremental_refresh(&index_root, &registry, &cold);
-    assert!(appended.failed_routes.is_empty());
-    assert_eq!(completed_records, 1);
-    let appended_index = VerifiedIndex::open(&index_root).unwrap();
-    let appended_records = records_for(&appended_index, native_session_id);
-    assert_eq!(
-        result_record_for_call(&appended_records, first_call_id).event_id,
-        first_event_id
-    );
-    let second = result_record_for_call(&appended_records, second_call_id);
-    let second_event_id = second.event_id;
-    assert_eq!(
-        second.content.discovery_exclusion,
-        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
-    );
-    let (_, _, _, appended_checkpoint) =
-        provider_checkpoint_envelope(&appended_index, native_session_id);
-    assert_current_provider_checkpoint(&appended_checkpoint);
-    drop(appended_index);
-
-    append_event(
-        &path,
-        exec_call_with_command(third_call_id, "ctx search incrementalthirdquery"),
-    );
-    append_event(
-        &path,
-        exact_exec_result(third_call_id, "incrementaluniquethird"),
-    );
-    let restarted_registry = register_tree(&[&sessions]);
-    let (restarted, restart_completed_records) =
-        incremental_refresh(&index_root, &restarted_registry, &appended);
-    assert!(restarted.failed_routes.is_empty());
-    assert_eq!(restart_completed_records, 2);
-    let restarted_index = VerifiedIndex::open(&index_root).unwrap();
-    let restarted_records = records_for(&restarted_index, native_session_id);
-    assert_eq!(
-        result_record_for_call(&restarted_records, first_call_id).event_id,
-        first_event_id
-    );
-    assert_eq!(
-        result_record_for_call(&restarted_records, second_call_id).event_id,
-        second_event_id
-    );
-    for call_id in [first_call_id, second_call_id, third_call_id] {
-        assert_eq!(
-            result_record_for_call(&restarted_records, call_id)
-                .content
-                .discovery_exclusion,
-            Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
-        );
-    }
-}
-
-#[test]
-fn codex_incremental_4097th_terminal_saturates_and_replaces_fail_open() {
-    let temp = tempdir().unwrap();
-    let sessions = temp.path().join("sessions-incremental-terminal-saturation");
-    let index_root = temp.path().join("index-incremental-terminal-saturation");
-    fs::create_dir_all(&sessions).unwrap();
-    let native_session_id = "019fb000-0000-7000-8000-000000000060";
-    let first_call_id = "capacity-terminal-0";
-    let path = session_path(&sessions, native_session_id);
-    let mut events = Vec::with_capacity(4_098);
-    events.push(turn_context());
-    events.push(exec_call_with_command(
-        first_call_id,
-        "ctx search capacityfirstquery",
-    ));
-    events.extend((0..4_096).map(|index| {
-        exact_exec_result(
-            &format!("capacity-terminal-{index}"),
-            "capacityterminalresult",
-        )
-    }));
-    write_session(
-        &sessions,
-        native_session_id,
-        ProviderNativeSessionRelationship::Root,
-        None,
-        events,
-    );
-    let registry = register_tree(&[&sessions]);
-    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(cold.failed_routes.is_empty());
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
-    let cold_records = records_for(&cold_index, native_session_id);
-    let first = result_record_for_call(&cold_records, first_call_id);
-    let first_event_id = first.event_id;
-    assert_eq!(
-        first.content.discovery_exclusion,
-        Some(CoreDiscoveryExclusion::CtxRetrievalDerived)
-    );
-    let (_, _, _, cold_checkpoint) = provider_checkpoint_envelope(&cold_index, native_session_id);
-    assert_current_provider_checkpoint(&cold_checkpoint);
-    drop(cold_index);
-
-    append_event(
-        &path,
-        exact_exec_result("capacity-terminal-4096", "capacityterminaloverflow"),
-    );
-    let (saturated, completed_records) = incremental_refresh(&index_root, &registry, &cold);
-    assert!(saturated.failed_routes.is_empty());
-    let saturated_index = VerifiedIndex::open(&index_root).unwrap();
-    let saturated_records = records_for(&saturated_index, native_session_id);
-    assert!(completed_records > 1);
-    assert_eq!(completed_records, saturated_records.len() as u64);
-    assert_eq!(
-        result_record_for_call(&saturated_records, first_call_id).event_id,
-        first_event_id
-    );
-    assert!(saturated_records.iter().all(|record| {
-        record.content.activity.as_ref().is_none_or(|activity| {
-            activity.result.is_none() || record.content.discovery_exclusion.is_none()
-        })
-    }));
-    let (_, _, _, saturated_checkpoint) =
-        provider_checkpoint_envelope(&saturated_index, native_session_id);
-    assert_current_provider_checkpoint(&saturated_checkpoint);
-}
+#[path = "codex_child_independence/terminal_results.rs"]
+mod terminal_results;
 
 #[path = "codex_child_independence/compressed.rs"]
 mod compressed;

@@ -14,9 +14,22 @@ autotests = false
 name = "mistral_vibe_publication"
 path = "tests/mistral_vibe_publication.rs"
 
+[[test]]
+name = "jsonl_publication"
+path = "tests/jsonl_publication.rs"
+
 [dev-dependencies]
 ctx-history-capture-composition = { path = "../ctx-history-capture-composition" }
+ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-openclaw-schema = { path = "../ctx-history-openclaw-schema", features = ["test-support"] }
+ctx-history-provider-gemini = { path = "../ctx-history-provider-gemini" }
+ctx-history-provider-native-jsonl = { path = "../ctx-history-provider-native-jsonl" }
+ctx-history-provider-openclaw-sqlite = { path = "../ctx-history-provider-openclaw-sqlite", features = ["test-support"] }
+ctx-history-provider-runtime = { path = "../ctx-history-provider-runtime", features = ["test-support"] }
+ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
+ctx-history-source-io = { path = "../ctx-history-source-io", features = ["test-support"] }
+rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

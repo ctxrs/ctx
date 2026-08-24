@@ -849,6 +849,12 @@ fn mcp_search_applies_source_backed_identity_filters() {
         assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
         assert_eq!(search["filters"]["provider"], "custom", "{search:#}");
         assert_eq!(search["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(search["results"][0]["provider_key"], "demo-agent");
+        assert_eq!(search["results"][0]["source_id"], "demo-source");
+        assert_useful_mcp_text(
+            &response["result"],
+            &["provider_key: demo-agent", "source_id: demo-source"],
+        );
     }
     assert_eq!(
         responses[1]["result"]["structuredContent"]["filters"]["history_source"],
@@ -1012,6 +1018,54 @@ fn mcp_invalid_search_session_is_typed_before_source_index_open() {
 }
 
 #[test]
+fn mcp_unknown_source_selector_fails_without_echoing_its_contents() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let (_daemon, _) = import_codex_fixture_through_daemon(&temp, &fixture);
+    let rejected = "Private_Root_Selector_7f98";
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "unknown-root",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "selector privacy",
+                        "source_roots": [rejected],
+                        "backend": "lexical"
+                    }
+                }
+            }),
+        ],
+    );
+
+    let result = &responses[1]["result"];
+    assert_eq!(result["isError"], true, "{result:#}");
+    assert_eq!(
+        result["structuredContent"]["error_code"], "invalid_request",
+        "{result:#}"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"],
+        "source_roots contains an invalid or unavailable selector"
+    );
+    assert!(!serde_json::to_string(result).unwrap().contains(rejected));
+}
+
+#[test]
 fn mcp_sources_matches_cli_discovery_issues() {
     let temp = tempdir();
     let cli = json_output(
@@ -1047,6 +1101,7 @@ fn mcp_sources_matches_cli_discovery_issues() {
     let mcp = &responses[1]["result"]["structuredContent"];
 
     assert_eq!(mcp["schema_version"], cli["schema_version"]);
+    assert_eq!(mcp["automatic_discovery"], cli["automatic_discovery"]);
     assert_eq!(mcp["issues"], cli["issues"]);
     assert_eq!(mcp["issues_truncated"], cli["issues_truncated"]);
     assert_eq!(mcp["read_only"], true);
@@ -1055,6 +1110,74 @@ fn mcp_sources_matches_cli_discovery_issues() {
             && issue["code"] == "selector_unreconstructible"
             && issue["message_truncated"] == false
     }));
+}
+
+#[test]
+fn mcp_sources_matches_cli_configured_selection_and_discovery_policy() {
+    let temp = tempdir();
+    let provider_home = temp.path().join("claude-personal");
+    fs::create_dir_all(provider_home.join("projects")).unwrap();
+    let root = data_root(&temp);
+    fs::create_dir_all(&root).unwrap();
+    let provider_home = fs::canonicalize(provider_home).unwrap();
+    let provider_home_toml = serde_json::to_string(&provider_home.display().to_string()).unwrap();
+    fs::write(
+        root.join("config.toml"),
+        format!(
+            "[sources]\nautomatic = false\n\n[sources.roots.personal]\nprovider = \"claude\"\npath = {provider_home_toml}\ngroup = \"work\"\n"
+        ),
+    )
+    .unwrap();
+
+    let cli = json_output(ctx(&temp).args(["sources", "--format=json"]));
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "sources",
+                "method": "tools/call",
+                "params": {
+                    "name": "sources",
+                    "arguments": {}
+                }
+            }),
+        ],
+    );
+    let mcp = &responses[1]["result"]["structuredContent"];
+
+    assert_eq!(cli["automatic_discovery"], false, "{cli:#}");
+    assert_eq!(mcp["automatic_discovery"], cli["automatic_discovery"]);
+    let configured = |payload: &Value| {
+        payload["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["selection"]["root"] == "personal")
+            .cloned()
+            .expect("configured source should be listed")
+    };
+    let cli_source = configured(&cli);
+    let mcp_source = configured(mcp);
+    assert_eq!(mcp_source, cli_source);
+    assert_eq!(
+        mcp_source["selection"],
+        json!({
+            "kind": "configured",
+            "root": "personal",
+            "group": "work",
+        })
+    );
 }
 
 #[test]

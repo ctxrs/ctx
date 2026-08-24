@@ -28,3 +28,27 @@ ctx_rust_test(
     ],
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
 )
+
+ctx_rust_test(
+    name = "jsonl_publication_tests",
+    testonly = True,
+    srcs = ["tests/jsonl_publication.rs"] + glob(["tests/jsonl_publication/**/*.rs"]),
+    crate_name = "ctx_history_capture_composition_jsonl_qualification",
+    crate_root = "tests/jsonl_publication.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-history-capture-composition:test_support_lib",
+        "//crates/ctx-history-capture-model:lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-openclaw-schema:test_support_lib",
+        "//crates/ctx-history-provider-gemini:test_support_lib",
+        "//crates/ctx-history-provider-native-jsonl:test_support_lib",
+        "//crates/ctx-history-provider-openclaw-sqlite:test_support_lib",
+        "//crates/ctx-history-provider-runtime:test_support_lib",
+        "//crates/ctx-history-source-discovery:lib",
+        "//crates/ctx-history-source-io:test_support_lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+)

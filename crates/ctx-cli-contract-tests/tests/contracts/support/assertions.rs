@@ -167,7 +167,19 @@ pub(crate) fn assert_authoritative_provider_publication_with_rejections(
     let sources = packet["sources"]
         .as_array()
         .unwrap_or_else(|| panic!("missing authoritative refresh receipt in {packet:#}"));
-    assert_eq!(sources.len(), 1, "{packet:#}");
+    assert!(!sources.is_empty(), "{packet:#}");
+    if !has_rejections {
+        assert_eq!(sources.len(), 1, "{packet:#}");
+    } else {
+        assert!(
+            sources[1..].iter().all(|diagnostic| {
+                diagnostic["status"] == "rejection"
+                    && diagnostic["failure_scope"] == "record"
+                    && diagnostic["failure_type"] == "record_rejection"
+            }),
+            "{packet:#}"
+        );
+    }
     let source = &sources[0];
     assert_eq!(
         source["source_format"], "provider_authoritative_all",

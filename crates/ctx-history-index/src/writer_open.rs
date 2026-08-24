@@ -219,6 +219,8 @@ impl GenerationWriter {
                 deletions: HashMap::new(),
                 route_deletions: HashSet::new(),
                 present_source_routes: None,
+                applied_provider_roots: None,
+                authorized_topology_route_retirements: None,
                 observed_missing_routes: HashMap::new(),
                 route_publication_revalidations: Vec::new(),
                 partially_reconciled_routes: BTreeSet::new(),
@@ -308,6 +310,20 @@ impl GenerationWriter {
         let Some(base) = self.base_manifest() else {
             return Ok(None);
         };
+        if self
+            .applied_provider_roots
+            .as_ref()
+            .is_some_and(|(automatic, digest, roots)| {
+                *automatic != base.automatic_provider_discovery()
+                    || digest != base.provider_root_config_digest()
+                    || roots != base.provider_roots()
+            })
+        {
+            // Provider-source policy is part of the durable manifest. Even a
+            // route-empty refresh must publish that policy transition instead
+            // of reusing a byte-identical source generation.
+            return Ok(None);
+        }
         if !self.observed_missing_routes.is_empty() || !self.route_deletions.is_empty() {
             return Ok(None);
         }

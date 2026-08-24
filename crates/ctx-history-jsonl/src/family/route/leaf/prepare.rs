@@ -82,6 +82,11 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
     // reconsidered without replaying already certified records.
     let previous_physical = previous.as_ref().filter(|checkpoint| {
         checkpoint.physical.source_observation() == leaf.observation()
+            || (checkpoint
+                .physical
+                .source_observation()
+                .differs_only_by_change_identity(leaf.observation())
+                && checkpoint.authenticates_admitted_eof())
             || append_mode.certified_suffix()
     });
     let open_reader = |previous| {
@@ -346,6 +351,7 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
         .ok_or_else(|| {
             JsonlRuntimeError::<R>::invalid_payload("JSONL rejected count overflowed".to_owned())
         })?;
+    let record_rejections = projector.take_record_rejections();
     let provider_checkpoint = projector.provider_checkpoint()?;
     if documents != before_finish {
         represented_records = physical_records;
@@ -435,7 +441,7 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
         certificate,
         append,
         terminal_proof,
-        record_rejections: SourceBackedRecordRejectionDrafts::default(),
+        record_rejections,
         logical_source_quarantine: None,
     })
 }

@@ -14,6 +14,7 @@ mod import;
 pub mod normalization;
 mod output;
 mod progress;
+mod provider_root;
 mod record;
 mod route;
 mod source;
@@ -36,6 +37,10 @@ pub use progress::{
     SourceBackedDetailedRefreshProgress, SourceBackedExactScanProgress,
     SourceBackedRecordProgressDelta, SourceBackedRefreshProgress, SourceRecordProgress,
     SourceRecordProgressSnapshot,
+};
+pub use provider_root::{
+    provider_source_config_digest, ProviderRootDefinition, ProviderRootSourceIdentity,
+    MAX_CONFIGURED_PROVIDER_ROOTS, MAX_PROVIDER_ROOT_SELECTOR_BYTES,
 };
 pub use record::RecordDigest;
 pub use route::{SourceRouteIdentity, SourceRouteIdentityError};

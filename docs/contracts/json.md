@@ -341,12 +341,13 @@ Returns:
 
 - `schema_version`;
 - `scope`, either `default` or `all`;
+- `automatic_discovery`, whether inferred provider homes are enabled;
 - `hidden_missing_sources`;
 - `sources[]`;
 - `issues[]`;
 - `issues_truncated`.
 
-Each source includes:
+Each built-in provider source includes:
 
 - `provider`;
 - `path`;
@@ -356,7 +357,14 @@ Each source includes:
 - `import_support`;
 - `native_import`;
 - `importable`;
-- `unsupported_reason`.
+- `unsupported_reason`;
+- `selection`, with `kind` (`automatic` or `configured`), configured `root`,
+  and configured `group`.
+
+For a configured row, `selection.root` is the exact case-sensitive configured
+name and `selection.group` is its configured group or null. For an automatic
+row, both values are null. History-source plugin rows retain their plugin
+identity fields and do not have configured provider-root selection metadata.
 
 `status` is `available`, `empty`, `unknown`, `missing`, or `unsupported`.
 `import_support` is `native`, `explicit`, or `unsupported`. `native_import`
@@ -377,6 +385,23 @@ codes are `no_disk_history`, `selector_unreconstructible`, and
 `insufficient_official_evidence`. `issues_truncated` is true when additional
 issue rows were omitted. Invalid history-source plugin manifests remain
 non-importable rows in `sources[]`; they are not provider discovery issues.
+
+Named provider-root mutations have a separate schema-version-1 JSON result:
+
+```bash
+ctx sources add personal --provider claude --root /path/to/claude --source-group work --format json
+ctx sources remove personal --format json
+```
+
+Both successful shapes contain exactly `schema_version`, `operation`,
+`changed`, and `root`. `operation` is `"add"` or `"remove"`; `root` contains
+`name`, `provider`, canonical absolute `path`, and nullable `group`. Repeating
+an add with the same name and identical canonical settings is idempotent and
+returns `changed: false`. Reusing the name with different settings fails and
+requires an explicit remove first. A successful remove returns `changed: true`
+and the removed root; removing an absent name is an error, not a successful
+no-op. Root names and non-null groups use 1 to 64 ASCII letters, digits,
+hyphens, or underscores and remain case-sensitive.
 
 ## Import
 
@@ -515,6 +540,7 @@ Session JSON is one `session_transcript` object containing:
 - `target: "session"`;
 - `payload_type: "session_transcript"`;
 - `ctx_session_id`, `provider`, and `provider_session_id` when known;
+- `provider_key` and `source_id` for custom history-source sessions;
 - `mode` and `format`;
 - `session` for session output;
 - `events[]`.
@@ -565,10 +591,12 @@ normalized repository evidence already in Core. Event type is an open string;
 unknown normalized values are preserved. See
 [`event-queries.md`](../event-queries.md) for selection details and jq examples.
 
-`session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
-`provider_session_id` when known. For Codex, `provider_session_id` is the resume
-UUID. `event` and `events[]` rows include `ctx_event_id`, `record_type`,
-`ctx_session_id`, `provider`, `provider_session_id`, `source_format`,
+`session` includes the ctx-owned `item_id`, `record_type`, `provider`,
+`provider_session_id` when known, and `provider_key` plus `source_id` for a
+custom history source. For Codex, `provider_session_id` is the resume UUID.
+`event` and `events[]` rows include `ctx_event_id`, `record_type`,
+`ctx_session_id`, `provider`, custom-source `provider_key` and `source_id`,
+`provider_session_id`, `source_format`,
 `sequence`, `event_type`, `role`, `occurred_at`, and exact normalized `text`
 or `structured_content` when policy permits. Each rendered event also includes
 `content.complete`, `content.policy_status`, and an optional
@@ -628,6 +656,7 @@ states are distinct from a genuinely missing Core generation.
 ```bash
 ctx locate session <ctx-session-id> --format json
 ctx locate session --provider codex --provider-session <provider-session-id> --format json
+ctx locate session --provider-session <provider-session-id> --provider-key <provider-key> --source-id <source-id> --format json
 ctx locate event <ctx-event-id> --format json
 ```
 
@@ -639,6 +668,7 @@ Session JSON is one `session_location` object containing:
 - `schema_version: 1`, `target: "session"`, and
   `payload_type: "session_location"`;
 - `ctx_session_id`, `provider`, and `provider_session_id` when known;
+- `provider_key` and `source_id` for custom history-source sessions;
 - nullable `parent_ctx_session_id`, `root_ctx_session_id`, and `started_at`;
 - `source` with `ctx_source_id`, `source_format`, `schema_variant`, and
   `provider_identity_version`.
@@ -649,6 +679,7 @@ Event JSON is one `event_location` object containing:
   `payload_type: "event_location"`;
 - `ctx_event_id`, `ctx_session_id`, `provider`, `provider_session_id`, and
   `provider_event_id` when known;
+- `provider_key` and `source_id` for custom history-source events;
 - `sequence`, `event_type`, `role`, and `occurred_at`;
 - the same bounded `source` identity object as session locate.
 
@@ -692,6 +723,17 @@ index generation. `content_scope` and the exact `event_type` filter cannot
 appear in the same successful request because those inputs conflict
 unconditionally.
 
+When supplied, repeatable CLI root selectors are echoed as `source_root` and
+group selectors as `source_groups`, each an array of normalized names. MCP accepts the
+equivalent request arrays `source_roots` and `source_groups`. Both selector families
+resolve against the pinned Core generation. Every root and group value forms
+one OR selection set before that set intersects with independent filters using
+AND semantics. Names are case-sensitive, and unknown selectors are typed
+request errors; they are never ignored or resolved from live config against an
+older generation. Each selector is 1 to 64 ASCII letters, digits, hyphens, or
+underscores, and each MCP array contains at most 64 entries. Selector
+validation diagnostics remain generic and do not echo rejected contents.
+
 `result_window` has exactly `limit`, `returned`, and `more_available`.
 `returned` is at most `limit`. `more_available` is `true` only when the same
 bounded search pass finds one additional fully shaped result: an event for
@@ -734,6 +776,7 @@ Each result can include:
   alias of the diagnostic `retrieval_score` rather than an ordering contract;
 - `more_matches_in_session` for default session results;
 - `provider`;
+- `provider_key` and `source_id` for custom history-source results;
 - `timestamp`;
 - `cwd`;
 - `why_matched`;
@@ -910,6 +953,9 @@ error, and zero semantic weight performs no vector work. MCP search does not
 itself import provider history and does not automatically exclude the caller's
 session. Direct CLI current-session detection and
 `--include-current-session` do not apply to MCP calls.
+Its optional `source_roots` and `source_groups` arrays use the same generation-pinned
+source-key filter as CLI search. If both arrays are absent, all indexed roots
+are searched.
 
 MCP `show_event`, `show_session`, and full-content `query_events` structured
 event rows reuse the same snake_case `activity` value. Text fallback is
@@ -922,8 +968,13 @@ dedicated selector or SQL field. Paginated MCP callers filter each returned page
 client-side and continue with the existing opaque cursor; `show_session`
 requires `mode: "log"` for ordinary tool events.
 
-The MCP `sources` tool includes the same bounded `issues` and
-`issues_truncated` fields as `ctx sources --format json`.
+The MCP `sources` tool returns `schema_version`, `automatic_discovery`,
+`sources`, `issues`, `issues_truncated`, and `read_only: true`. Its built-in
+provider rows use the same `selection` objects as CLI JSON, so configured
+`root` values and non-null configured `group` values enumerate candidates for
+MCP search `source_roots` and `source_groups`. Automatic rows have null `root` and
+`group`; plugin rows do not participate in configured provider-root selection.
+The bounded `issues` and `issues_truncated` fields retain the CLI contract.
 
 Tool-level argument validation failures set `isError: true`, preserve the
 diagnostic `error`, and add stable `error_code: "invalid_request"` in

@@ -152,12 +152,30 @@ pub fn build_automatic_source_backed_registry_from_report_with_probes(
     data_root: &Path,
     report: DiscoveryReport,
 ) -> SourceBackedAutomaticRegistryBuild {
+    build_automatic_source_backed_registry_from_report_with_probes_and_root_identities(
+        probes,
+        discovery,
+        data_root,
+        report,
+        &BTreeMap::new(),
+    )
+}
+
+#[doc(hidden)]
+pub fn build_automatic_source_backed_registry_from_report_with_probes_and_root_identities(
+    probes: &StaticProviderProbeCatalog,
+    discovery: &DiscoveryContext,
+    data_root: &Path,
+    report: DiscoveryReport,
+    provider_root_identities: &BTreeMap<String, ProviderRootSourceIdentity>,
+) -> SourceBackedAutomaticRegistryBuild {
     build_automatic_source_backed_registry_from_parts_with_probes(
         probes,
         discovery,
         data_root,
         report.sources,
         report.issues,
+        provider_root_identities,
     )
 }
 
@@ -167,7 +185,10 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
     data_root: &Path,
     sources: Vec<ProviderSource>,
     discovery_issues: Vec<DiscoveryIssue>,
+    provider_root_identities: &BTreeMap<String, ProviderRootSourceIdentity>,
 ) -> SourceBackedAutomaticRegistryBuild {
+    let provider_root_identities =
+        normalized_provider_root_identities(discovery, provider_root_identities);
     let mut registry = SourceBackedProviderRegistry::new();
     let mut issues = discovery_issues
         .into_iter()
@@ -175,8 +196,23 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
         .collect::<Vec<_>>();
     let mut compound_provider_registered = HashSet::new();
     let mut codex_session_tree_sources = Vec::new();
+    let mut released_configured_codex_session_tree_sources =
+        BTreeMap::<String, Vec<ProviderSource>>::new();
 
-    for source in sources {
+    // A configured home is explicit desired state. Register those routes
+    // before inferred routes so a retained released identity cannot make an
+    // old automatic location win merely because discovery returned it first.
+    let (configured_sources, automatic_sources): (Vec<_>, Vec<_>) = sources
+        .into_iter()
+        .partition(|source| configured_provider_root_for_source(discovery, source).is_some());
+    for source in configured_sources.into_iter().chain(automatic_sources) {
+        let configured_root = configured_provider_root_for_source(discovery, &source);
+        let configured_source_identity = configured_root.map(|root| {
+            provider_root_identities
+                .get(&root.id)
+                .copied()
+                .unwrap_or_else(|| default_provider_root_source_identity(discovery, root))
+        });
         if let Err(error) =
             validate_provider_source_roots_outside_data_root(data_root, std::iter::once(&source))
         {
@@ -196,7 +232,9 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
         if source.import_support == ProviderImportSupport::Unsupported
             || source.source_kind == ProviderSourceKind::DetectionOnly
             || source.status == ProviderSourceStatus::Unsupported
-            || (source.unsupported_reason.is_some() && source.status != ProviderSourceStatus::Empty)
+            || (source.unsupported_reason.is_some()
+                && source.status != ProviderSourceStatus::Empty
+                && !(configured_root.is_some() && source.status == ProviderSourceStatus::Unknown))
         {
             let detail = source
                 .unsupported_reason
@@ -206,10 +244,37 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
         }
         if source.status == ProviderSourceStatus::Unknown {
             let reason = SourceBackedAutomaticUnavailableReason::SourceStatus(source.status);
-            registry.register(SourceBackedRoute::unsupported(
-                source.clone(),
-                automatic_unavailable_detail(&reason),
-            ));
+            let mut route = if configured_root.is_some() {
+                SourceBackedRoute::unavailable_explicit(
+                    source.clone(),
+                    automatic_unavailable_detail(&reason),
+                )
+                .unwrap_or_else(|_| {
+                    SourceBackedRoute::unsupported(
+                        source.clone(),
+                        automatic_unavailable_detail(&reason),
+                    )
+                })
+            } else {
+                SourceBackedRoute::unsupported(
+                    source.clone(),
+                    automatic_unavailable_detail(&reason),
+                )
+            };
+            if let Some(configured_root) = configured_root {
+                let source_root_lineage = configured_source_identity
+                    .and_then(|identity| identity.lineage(configured_root));
+                if let Err(error) = route.apply_provider_root_route_identity(source_root_lineage) {
+                    let reason = automatic_registration_rejected(error);
+                    registry.register(SourceBackedRoute::unsupported(
+                        source.clone(),
+                        automatic_unavailable_detail(&reason),
+                    ));
+                    issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { reason, source });
+                    continue;
+                }
+            }
+            registry.register(route);
             issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { reason, source });
             continue;
         }
@@ -238,10 +303,26 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
         }
 
         if source.status == ProviderSourceStatus::Missing {
-            match SourceBackedRoute::certified_missing(
-                source.clone(),
-                format_route.selector_authority,
-            ) {
+            let route = if configured_root.is_some() {
+                SourceBackedRoute::certified_explicit_missing(
+                    source.clone(),
+                    SourceBackedSelectorAuthority::ExplicitPath,
+                )
+            } else {
+                SourceBackedRoute::certified_missing(
+                    source.clone(),
+                    format_route.selector_authority,
+                )
+            };
+            let route = route.and_then(|mut route| {
+                if let Some(configured_root) = configured_root {
+                    let source_root_lineage = configured_source_identity
+                        .and_then(|identity| identity.lineage(configured_root));
+                    route.apply_provider_root_route_identity(source_root_lineage)?;
+                }
+                Ok(route)
+            });
+            match route {
                 Ok(route) => registry.register(route),
                 Err(error) => {
                     let reason = automatic_registration_rejected(error);
@@ -273,6 +354,64 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
             // Resolver diagnostics explain why a present root is empty; they do
             // not make its landed adapter unsupported.
             source.unsupported_reason = None;
+        }
+        if let Some(configured_root) = configured_root {
+            if source.provider == CaptureProvider::Codex
+                && source.source_format == "codex_session_jsonl_tree"
+                && configured_source_identity == Some(ProviderRootSourceIdentity::Released)
+            {
+                released_configured_codex_session_tree_sources
+                    .entry(configured_root.id.clone())
+                    .or_default()
+                    .push(source);
+                continue;
+            }
+            let source_root_lineage =
+                configured_source_identity.and_then(|identity| identity.lineage(configured_root));
+            let registration = match (source.provider, source.source_format) {
+                (CaptureProvider::Claude, "claude_projects_jsonl_tree") => {
+                    register_configured_claude_source_backed_route(
+                        &mut registry,
+                        source.clone(),
+                        SourceBackedRouteSelection::ExplicitManual,
+                        source_root_lineage,
+                    )
+                }
+                (CaptureProvider::Codex, "codex_session_jsonl_tree") => {
+                    register_configured_codex_session_tree_route(
+                        &mut registry,
+                        source.clone(),
+                        SourceBackedRouteSelection::ExplicitManual,
+                        source_root_lineage,
+                    )
+                }
+                (CaptureProvider::Codex, "codex_history_jsonl") => {
+                    register_configured_codex_prompt_history_source_backed_route(
+                        &mut registry,
+                        source.clone(),
+                        SourceBackedRouteSelection::ExplicitManual,
+                        source_root_lineage,
+                    )
+                }
+                _ => register_landed_source_backed_route_with_data_root(
+                    &mut registry,
+                    source.clone(),
+                    SourceBackedRouteSelection::ExplicitManual,
+                    data_root,
+                ),
+            };
+            match registration {
+                Ok(()) => {}
+                Err(error) => {
+                    let reason = automatic_registration_rejected(error);
+                    registry.register(SourceBackedRoute::unsupported(
+                        source.clone(),
+                        automatic_unavailable_detail(&reason),
+                    ));
+                    issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { source, reason });
+                }
+            }
+            continue;
         }
         if source.provider == CaptureProvider::Codex
             && source.source_format == "codex_session_jsonl_tree"
@@ -316,6 +455,24 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
         }
     }
 
+    for sources in released_configured_codex_session_tree_sources.into_values() {
+        let source = sources.first().cloned();
+        let registration = register_configured_codex_session_tree_routes(
+            &mut registry,
+            sources,
+            SourceBackedRouteSelection::ExplicitManual,
+            None,
+        );
+        if let (Some(source), Err(error)) = (source, registration) {
+            let reason = automatic_registration_rejected(error);
+            registry.register(SourceBackedRoute::unsupported(
+                source.clone(),
+                automatic_unavailable_detail(&reason),
+            ));
+            issues.push(SourceBackedAutomaticRegistryIssue::Unavailable { source, reason });
+        }
+    }
+
     if !codex_session_tree_sources.is_empty() {
         codex_session_tree_sources.sort_by(|left, right| {
             codex_automatic_session_root_rank(&left.path)
@@ -339,11 +496,134 @@ fn build_automatic_source_backed_registry_from_parts_with_probes(
         }
     }
 
+    let definitions = discovery.configured_provider_roots().to_vec();
+    let applied_roots = definitions
+        .iter()
+        .map(|definition| {
+            let routes = registry
+                .routes
+                .iter()
+                .filter(|route| {
+                    configured_provider_root_for_source(discovery, &route.metadata.source)
+                        .is_some_and(|root| root.id == definition.id)
+                })
+                .filter_map(|route| route.metadata.route_identity.clone())
+                .collect::<Vec<_>>();
+            AppliedProviderRoot::with_source_identity(
+                definition.clone(),
+                provider_root_identities
+                    .get(&definition.id)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        default_provider_root_source_identity(discovery, definition)
+                    }),
+                routes,
+            )
+            .map_err(SourceBackedCoordinatorError::Index)
+        })
+        .collect::<SourceBackedCoordinatorResult<Vec<_>>>();
+    match applied_roots {
+        Ok(applied_roots) => {
+            if let Err(error) = registry.set_applied_provider_roots(
+                discovery.automatic_provider_discovery_enabled(),
+                provider_source_config_digest(
+                    discovery.automatic_provider_discovery_enabled(),
+                    &definitions,
+                ),
+                applied_roots,
+            ) {
+                if let Some(source) = registry
+                    .routes
+                    .first()
+                    .map(|route| route.metadata.source.clone())
+                {
+                    issues.push(SourceBackedAutomaticRegistryIssue::Unavailable {
+                        source,
+                        reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                            kind: SourceBackedRouteErrorKind::Internal,
+                            detail: error.to_string(),
+                        },
+                    });
+                }
+            }
+        }
+        Err(error) => {
+            if let Some(source) = registry
+                .routes
+                .first()
+                .map(|route| route.metadata.source.clone())
+            {
+                issues.push(SourceBackedAutomaticRegistryIssue::Unavailable {
+                    source,
+                    reason: SourceBackedAutomaticUnavailableReason::RegistrationRejected {
+                        kind: SourceBackedRouteErrorKind::Internal,
+                        detail: error.to_string(),
+                    },
+                });
+            }
+        }
+    }
+
     SourceBackedAutomaticRegistryBuild {
         registry,
         issues,
         discovery_duration: Duration::ZERO,
     }
+}
+
+fn normalized_provider_root_identities(
+    discovery: &DiscoveryContext,
+    retained: &BTreeMap<String, ProviderRootSourceIdentity>,
+) -> BTreeMap<String, ProviderRootSourceIdentity> {
+    let mut released_owner = BTreeMap::<String, String>::new();
+    let mut identities = BTreeMap::new();
+    for root in discovery.configured_provider_roots() {
+        let provider = root.provider.as_str().to_owned();
+        let identity = match retained.get(&root.id).copied() {
+            Some(ProviderRootSourceIdentity::Released)
+                if !released_owner.contains_key(&provider) =>
+            {
+                released_owner.insert(provider, root.id.clone());
+                ProviderRootSourceIdentity::Released
+            }
+            Some(_) => ProviderRootSourceIdentity::NamedV1,
+            None if !released_owner.contains_key(&provider)
+                && released_provider_home(discovery, root.provider)
+                    .as_deref()
+                    .is_some_and(|home| provider_paths_equivalent(home, &root.path)) =>
+            {
+                released_owner.insert(provider, root.id.clone());
+                ProviderRootSourceIdentity::Released
+            }
+            None => ProviderRootSourceIdentity::NamedV1,
+        };
+        identities.insert(root.id.clone(), identity);
+    }
+    identities
+}
+
+fn default_provider_root_source_identity(
+    discovery: &DiscoveryContext,
+    root: &ProviderRootDefinition,
+) -> ProviderRootSourceIdentity {
+    if released_provider_home(discovery, root.provider)
+        .as_deref()
+        .is_some_and(|home| provider_paths_equivalent(home, &root.path))
+    {
+        ProviderRootSourceIdentity::Released
+    } else {
+        ProviderRootSourceIdentity::NamedV1
+    }
+}
+
+fn configured_provider_root_for_source<'a>(
+    discovery: &'a DiscoveryContext,
+    source: &ProviderSource,
+) -> Option<&'a ctx_history_capture_model::ProviderRootDefinition> {
+    discovery
+        .configured_provider_roots()
+        .iter()
+        .find(|root| provider_source_belongs_to_configured_root(root, source))
 }
 
 #[cfg(test)]
@@ -359,6 +639,7 @@ pub(in crate::source_backed) fn build_automatic_source_backed_registry_from_part
         data_root,
         sources,
         discovery_issues,
+        &BTreeMap::new(),
     )
 }
 

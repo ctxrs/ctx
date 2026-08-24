@@ -34,8 +34,14 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         catalog_route_bindings: previous_catalog_route_bindings,
         route_controls: previous_route_controls,
     } = published_state.open_published_state(data_root)?;
-    let mut build =
-        build_automatic_source_backed_registry_from_report(discovery, data_root, report);
+    let provider_root_identities =
+        configured_provider_root_identities(discovery, retained_generation.as_ref());
+    let mut build = build_automatic_source_backed_registry_from_report_with_root_identities(
+        discovery,
+        data_root,
+        report,
+        &provider_root_identities,
+    );
     build.discovery_duration = discovery_duration;
     let requested_catalog_route_bindings = explicit_source_catalog
         .map(|catalog| {
@@ -85,6 +91,40 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
             .registry
             .retire_routes_after_success(&replacement, retired)?;
     }
+    let previous_provider_root_routes = retained_generation
+        .as_ref()
+        .map(|generation| {
+            generation
+                .manifest()
+                .provider_roots()
+                .iter()
+                .flat_map(|root| root.routes().iter().cloned())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let current_provider_root_routes = build
+        .registry
+        .applied_provider_roots()
+        .map(|(_, _, roots)| {
+            roots
+                .iter()
+                .flat_map(|root| root.routes().iter().cloned())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let current_executable_routes = build
+        .registry
+        .executable_route_identities()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let retired_provider_root_routes = previous_provider_root_routes
+        .difference(&current_provider_root_routes)
+        .filter(|route| !current_executable_routes.contains(*route))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    build
+        .registry
+        .set_provider_root_route_retirements(retired_provider_root_routes);
     Ok(MergedSourceBackedRegistry {
         build,
         reactivated_automatic_routes,
@@ -95,4 +135,26 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         requested_catalog_route_bindings,
         previous_route_controls,
     })
+}
+
+pub(super) fn provider_root_publication_scope(
+    requested: &SourceBackedRefreshScope,
+    physical: &SourceBackedRefreshScope,
+    registry: &ctx_history_capture::SourceBackedProviderRegistry,
+    retained: Option<&VerifiedIndex>,
+) -> SourceBackedRefreshScope {
+    let changed = matches!(requested, SourceBackedRefreshScope::All)
+        && retained.zip(registry.applied_provider_roots()).is_some_and(
+            |(retained, (automatic, digest, roots))| {
+                let manifest = retained.manifest();
+                *automatic != manifest.automatic_provider_discovery()
+                    || digest != manifest.provider_root_config_digest()
+                    || roots != manifest.provider_roots()
+            },
+        );
+    if changed {
+        SourceBackedRefreshScope::All
+    } else {
+        physical.clone()
+    }
 }

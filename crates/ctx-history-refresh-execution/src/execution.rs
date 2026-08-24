@@ -13,7 +13,9 @@ use publication::{
     validate_recertified_metadata, ProviderPublicationFacts,
 };
 pub(super) use registry_merge::build_merged_source_backed_registry;
-use registry_merge::build_merged_source_backed_registry_with_automatic_routes;
+use registry_merge::{
+    build_merged_source_backed_registry_with_automatic_routes, provider_root_publication_scope,
+};
 pub(super) struct MergedSourceBackedRegistry {
     pub(super) build: ctx_history_capture::SourceBackedAutomaticRegistryBuild,
     reactivated_automatic_routes: BTreeSet<SourceRouteIdentity>,
@@ -146,7 +148,14 @@ where
         &mut dyn FnMut(CaptureSourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
     ) -> Result<SourceBackedRefreshPublication>,
 {
-    let discovery = discovery.clone().with_data_root(execution.data_root);
+    let mut discovery = discovery.clone().with_data_root(execution.data_root);
+    let admitted_discovery = execution.admitted_refresh().discovery();
+    if let Some(roots) = admitted_discovery.configured_provider_roots() {
+        discovery = discovery.with_configured_provider_roots(roots.to_vec());
+    }
+    if let Some(enabled) = admitted_discovery.automatic_provider_discovery() {
+        discovery = discovery.with_automatic_provider_discovery(enabled);
+    }
     if source_backed_index_state_exists(execution.index_root)? {
         establish_source_backed_index_privacy(execution.data_root, execution.index_root)?;
     }
@@ -498,14 +507,16 @@ fn refresh_all_provider_sources_route_local_with_reconciliation(
     {
         return Err(registration_failures.into());
     }
-    let registry_failures = if matches!(scope, SourceBackedRefreshScope::All) {
+    let registry_route_failures = if matches!(scope, SourceBackedRefreshScope::All) {
         reject_blocking_automatic_registry_issues(&build.issues)?;
         automatic_registry_route_failures(&build.issues, retained_generation.as_ref())?
     } else {
         Vec::new()
     };
     let route_less_blockers =
-        automatic_registry_route_less_blockers(&build.issues, &registry_failures);
+        automatic_registry_route_less_blockers(&build.issues, &registry_route_failures);
+    let registry_failures =
+        terminal_registry_route_failures(registry_route_failures, &build.registry, &physical_scope);
     let previous_nonempty_routes = retained_generation
         .as_ref()
         .map(|generation| {
@@ -560,6 +571,12 @@ fn refresh_all_provider_sources_route_local_with_reconciliation(
     } else {
         WriterOptions::default()
     };
+    let publication_scope = provider_root_publication_scope(
+        &scope,
+        &physical_scope,
+        &build.registry,
+        retained_generation.as_ref(),
+    );
     let (executor, _issues) = build.into_refresh_executor(writer_options);
     let executor = executor
         .with_base_route_controls(previous_route_controls.clone())
@@ -576,9 +593,10 @@ fn refresh_all_provider_sources_route_local_with_reconciliation(
     let mut terminal_coverage_error = None;
     let mut reconciliation_required = false;
     let refresh_result = executor
-        .refresh_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+        .refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
             index_root,
             physical_scope,
+            publication_scope,
             reconciliation_demand,
             route_worksets.clone(),
             &mut report_attempt_progress,

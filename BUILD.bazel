@@ -83,6 +83,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-daemon-service:cargo_package_data",
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-capture-composition:cargo_package_data",
+    "//crates/ctx-history-capture-composition-qualification:cargo_package_data",
     "//crates/ctx-history-capture-model:cargo_package_data",
     "//crates/ctx-history-provider-native-jsonl:cargo_package_data",
     "//crates/ctx-history-providers-jsonl-shared:cargo_package_data",

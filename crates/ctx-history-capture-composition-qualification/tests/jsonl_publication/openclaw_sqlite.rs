@@ -6,10 +6,10 @@ use ctx_history_provider_openclaw_sqlite::test_support::set_before_openclaw_sqli
 use rusqlite::{params, Connection};
 use serde_json::json;
 
-use super::super::*;
 use crate::{
     ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind, ProviderSourceStatus,
 };
+use ctx_history_capture_composition::*;
 
 fn writer_options() -> WriterOptions {
     WriterOptions {

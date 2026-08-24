@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::AtomicUsize;
 
 fn private_data_root() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().expect("temporary data root");
@@ -38,6 +39,139 @@ fn scoped_runtime(root: &Path) -> Arc<dyn RefreshRuntime> {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cwd).unwrap();
     Arc::new(ScopedAdmissionRuntime { home, cwd })
+}
+
+#[derive(Debug, Clone)]
+struct MutableProviderRootRuntime {
+    home: PathBuf,
+    cwd: PathBuf,
+    roots: Arc<Mutex<Vec<ctx_history_capture_model::ProviderRootDefinition>>>,
+}
+
+impl RefreshRuntime for MutableProviderRootRuntime {
+    fn metadata(&self, _data_root: &Path, operation: RefreshOperation) -> RefreshRuntimeMetadata {
+        RefreshRuntimeMetadata {
+            operation,
+            ..RefreshRuntimeMetadata::default()
+        }
+    }
+
+    fn discovery_context(&self, _data_root: &Path) -> Result<DiscoveryContext> {
+        Ok(DiscoveryContext::new(
+            &self.home,
+            &self.cwd,
+            ctx_history_capture::DiscoveryPlatform::Linux,
+            ctx_history_capture::DiscoveryPlatformDirs::default(),
+        )
+        .with_configured_provider_roots(self.roots.lock().unwrap().clone()))
+    }
+}
+
+#[test]
+fn queued_complete_catalog_is_readmitted_when_provider_roots_change() {
+    let (temp, data_root) = private_data_root();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    let definition = |id: &str| ctx_history_capture_model::ProviderRootDefinition {
+        id: id.to_owned(),
+        provider: CaptureProvider::Codex,
+        path: temp.path().join(format!("codex-{id}")),
+        group: Some(id.to_owned()),
+    };
+    let roots = Arc::new(Mutex::new(vec![definition("personal")]));
+    let runtime = Arc::new(MutableProviderRootRuntime {
+        home,
+        cwd,
+        roots: Arc::clone(&roots),
+    });
+    let route = SourceRouteIdentity::from_sha256("52".repeat(32)).unwrap();
+    let admission_calls = Arc::new(AtomicUsize::new(0));
+    let fence_calls = Arc::clone(&admission_calls);
+    let fence_route = route.clone();
+    let seen_roots = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+    let executor_seen_roots = Arc::clone(&seen_roots);
+    let executor = Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+        executor_seen_roots.lock().unwrap().push(
+            execution
+                .admitted_refresh()
+                .discovery()
+                .configured_provider_roots()
+                .unwrap()
+                .iter()
+                .map(|root| root.id.clone())
+                .collect(),
+        );
+        let selected = execution
+            .admitted_refresh()
+            .exact_routes()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let commit = ctx_history_index::GenerationWriter::open(
+            execution.index_root,
+            ctx_history_index::WriterOptions::default(),
+        )?
+        .into_writer()
+        .map_err(crate::committed_generation_recovery_error)?
+        .commit(|_| true)?;
+        Ok(SourceBackedRefreshPublication {
+            route_results: selected
+                .iter()
+                .map(|route| {
+                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true)
+                })
+                .collect(),
+            zero_source_authority: selected
+                .into_iter()
+                .map(|route| SourceBackedZeroSourceAuthority {
+                    generation_id: commit.generation_id.clone(),
+                    route_identity: route,
+                    kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                })
+                .collect(),
+            catalog_route_bindings: Vec::new(),
+            verified_index: None,
+            generation_id: commit.generation_id,
+            published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
+            unsupported_routes: 0,
+            certified_source_count: 0,
+            certified_source_bytes: 0,
+            current: SourceBackedRefreshCurrent::default(),
+            timings: SourceBackedRefreshTimings::default(),
+        })
+    });
+    let coordinator = CoreRefreshEngine::with_runtime_for_test(
+        Arc::new(TestRefreshJournal::default()),
+        runtime,
+        executor,
+        Arc::new(move |_, _, _, _| {
+            fence_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(BTreeMap::from([(
+                fence_route.clone(),
+                Some("53".repeat(32)),
+            )]))
+        }),
+    );
+    let request_id = "019fcaaa-0000-7000-8000-000000000505";
+    let admission = coordinator
+        .submit(&data_root, test_refresh_submission(request_id))
+        .unwrap();
+    release_pending_admission(&coordinator, admission);
+    assert!(coordinator
+        .prepare_next_pending_admission(&data_root)
+        .unwrap());
+    assert_eq!(admission_calls.load(Ordering::SeqCst), 1);
+
+    *roots.lock().unwrap() = vec![definition("work")];
+    let run = coordinator
+        .run_next(&data_root)
+        .expect("stale complete catalog should be readmitted");
+
+    assert!(!run.failed, "{:#}", run.job);
+    assert_eq!(admission_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*seen_roots.lock().unwrap(), vec![vec!["work".to_owned()]]);
 }
 
 fn write_codex_session_fixture(sessions: &Path) {

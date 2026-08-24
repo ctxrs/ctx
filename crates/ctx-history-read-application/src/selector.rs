@@ -204,6 +204,14 @@ pub enum SelectorError {
     ConflictingSessionSelectors,
     #[error("a session selector is required")]
     MissingSessionSelector,
+    #[error("provider_key and source_id must be supplied together")]
+    IncompleteCustomSourceSelector,
+    #[error("{field} selector is empty")]
+    EmptyCustomSourceSelector { field: &'static str },
+    #[error("provider_key/source_id requires a provider session selector")]
+    CustomSourceSelectorRequiresProviderSession,
+    #[error("provider_key/source_id can only select custom history")]
+    CustomSourceSelectorRequiresCustomProvider,
     #[error("provider session {provider_session_id:?} was not found in the Core generation")]
     ProviderSessionNotFound { provider_session_id: String },
     #[error(
@@ -213,6 +221,8 @@ pub enum SelectorError {
         provider_session_id: String,
         first: Uuid,
         second: Uuid,
+        first_route: Option<String>,
+        second_route: Option<String>,
     },
     #[error("Core session {session_id} belongs to provider {actual}, not {requested}")]
     ProviderMismatch {
@@ -338,9 +348,18 @@ pub fn resolve_show_session(
     id: Option<&str>,
     provider_session_id: Option<&str>,
     provider: Option<CaptureProvider>,
+    provider_key: Option<&str>,
+    source_id: Option<&str>,
 ) -> Result<SessionRecord> {
     let references = CompactRefResolver::new(index, None);
-    resolve_show_session_with_refs(&references, id, provider_session_id, provider)
+    resolve_show_session_with_refs(
+        &references,
+        id,
+        provider_session_id,
+        provider,
+        provider_key,
+        source_id,
+    )
 }
 
 pub fn resolve_show_session_with_refs(
@@ -348,16 +367,26 @@ pub fn resolve_show_session_with_refs(
     id: Option<&str>,
     provider_session_id: Option<&str>,
     provider: Option<CaptureProvider>,
+    provider_key: Option<&str>,
+    source_id: Option<&str>,
 ) -> Result<SessionRecord> {
     let index = references.current_index();
     validate_session_selector(id, provider_session_id)?;
+    validate_custom_source_selector(id, provider_session_id, provider, provider_key, source_id)?;
+    let effective_provider = if provider_key.is_some() {
+        Some(CaptureProvider::Custom)
+    } else {
+        provider
+    };
     let session = match (id, provider_session_id) {
         (Some(id), None) => resolve_session_with_refs(references, id)?,
         (None, Some(provider_session_id)) => select_show_provider_session(
             provider_session_id,
             index.sessions_by_provider_session_id(
                 provider_session_id,
-                provider.map(CaptureProvider::as_str),
+                effective_provider.map(CaptureProvider::as_str),
+                provider_key,
+                source_id,
             )?,
         )?,
         (Some(_), Some(_)) => return Err(SelectorError::ConflictingSessionSelectors.into()),
@@ -376,6 +405,32 @@ pub fn resolve_show_session_with_refs(
     Ok(session)
 }
 
+fn validate_custom_source_selector(
+    id: Option<&str>,
+    provider_session_id: Option<&str>,
+    provider: Option<CaptureProvider>,
+    provider_key: Option<&str>,
+    source_id: Option<&str>,
+) -> Result<()> {
+    let (provider_key, source_id) = match (provider_key, source_id) {
+        (None, None) => return Ok(()),
+        (Some(provider_key), Some(source_id)) => (provider_key, source_id),
+        _ => return Err(SelectorError::IncompleteCustomSourceSelector.into()),
+    };
+    for (field, value) in [("provider_key", provider_key), ("source_id", source_id)] {
+        if value.trim().is_empty() {
+            return Err(SelectorError::EmptyCustomSourceSelector { field }.into());
+        }
+    }
+    if id.is_some() || provider_session_id.is_none() {
+        return Err(SelectorError::CustomSourceSelectorRequiresProviderSession.into());
+    }
+    if provider.is_some_and(|provider| provider != CaptureProvider::Custom) {
+        return Err(SelectorError::CustomSourceSelectorRequiresCustomProvider.into());
+    }
+    Ok(())
+}
+
 fn select_show_provider_session(
     provider_session_id: &str,
     matches: Vec<SessionRecord>,
@@ -390,9 +445,19 @@ fn select_show_provider_session(
             provider_session_id: provider_session_id.to_owned(),
             first: matches[0].session_id.as_uuid(),
             second: matches[1].session_id.as_uuid(),
+            first_route: custom_session_route(&matches[0]),
+            second_route: custom_session_route(&matches[1]),
         }
         .into()),
     }
+}
+
+fn custom_session_route(session: &SessionRecord) -> Option<String> {
+    session
+        .provider_key
+        .as_deref()
+        .zip(session.source_id.as_deref())
+        .map(|(provider_key, source_id)| format!("{provider_key}/{source_id}"))
 }
 
 fn resolve_compact_id_for_lookup(

@@ -46,6 +46,18 @@ pub struct SearchArgs {
     )]
     pub source_format: Option<String>,
     #[arg(
+        long = "source-root",
+        value_name = "NAME",
+        help = "Search one configured provider root; repeat to union roots"
+    )]
+    pub source_roots: Vec<String>,
+    #[arg(
+        long = "source-group",
+        value_name = "GROUP",
+        help = "Search configured provider roots in this group; repeat to union groups"
+    )]
+    pub source_groups: Vec<String>,
+    #[arg(
         long,
         help = "Filter by stored workspace, cwd, source path, or repo-name text"
     )]
@@ -183,6 +195,8 @@ pub fn adapt(args: SearchArgs) -> ctx_history_cli::SearchArgs {
         provider_key: args.provider_key,
         source_id: args.source_id,
         source_format: args.source_format,
+        source_roots: args.source_roots,
+        source_groups: args.source_groups,
         workspace: args.workspace,
         since: args.since,
         primary_only: args.primary_only,
@@ -424,6 +438,23 @@ mod tests {
         .search;
         assert!(matches!(args.content_scope, Some(ContentScopeArg::Calls)));
         assert!(args.events && args.include_current_session);
+    }
+
+    #[test]
+    fn search_clap_accepts_source_groups_and_rejects_the_unreleased_scope_spelling() {
+        let args = TestCli::try_parse_from([
+            "ctx",
+            "needle",
+            "--source-group",
+            "personal",
+            "--source-group=work",
+        ])
+        .unwrap()
+        .search;
+        assert_eq!(args.source_groups, ["personal", "work"]);
+
+        let error = TestCli::try_parse_from(["ctx", "needle", "--scope", "work"]).unwrap_err();
+        assert!(error.to_string().contains("--scope"));
     }
 
     #[test]

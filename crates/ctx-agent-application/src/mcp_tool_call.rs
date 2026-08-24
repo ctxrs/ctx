@@ -69,6 +69,7 @@ where
 fn source_catalog_outcome(catalog: SourceCatalog) -> ToolOutcome {
     ToolOutcome::plain(json!({
         "schema_version": 1,
+        "automatic_discovery": catalog.automatic_discovery,
         "sources": catalog.sources,
         "issues": catalog.issues,
         "issues_truncated": catalog.issues_truncated,

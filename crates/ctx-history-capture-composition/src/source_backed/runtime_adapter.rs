@@ -11,11 +11,12 @@ use ctx_history_core::{
     CoreRecord, SourceKey,
 };
 use ctx_history_index::{
-    BaseEventIdentityLookup, CommitReceipt, CoreRecordPreparer, GenerationBaseCertifiedSource,
-    GenerationManifest, GenerationWriter, GenerationWriterOpenOutcome, IndexError,
-    PreparedCoreRecord, PreparedCoreRecordDraft, PreparedCoreRecordMaterialization,
-    PublicationDisposition, PublicationMetadataContext, PublicationStage, PublishedGeneration,
-    RevalidationTarget, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
+    AppliedProviderRoot, BaseEventIdentityLookup, CommitReceipt, CoreRecordPreparer,
+    GenerationBaseCertifiedSource, GenerationManifest, GenerationWriter,
+    GenerationWriterOpenOutcome, IndexError, PreparedCoreRecord, PreparedCoreRecordDraft,
+    PreparedCoreRecordMaterialization, PublicationDisposition, PublicationMetadataContext,
+    PublicationStage, PublishedGeneration, RevalidationTarget, SourceRouteSnapshot, VerifiedIndex,
+    WriterOptions,
 };
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use uuid::Uuid;
@@ -441,6 +442,23 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
 }
 
 impl IndexCaptureLifecycle {
+    pub(crate) fn set_applied_provider_roots(
+        &mut self,
+        automatic_provider_discovery: bool,
+        config_digest: String,
+        roots: Vec<AppliedProviderRoot>,
+    ) -> Result<(), IndexError> {
+        self.0
+            .set_applied_provider_roots(automatic_provider_discovery, config_digest, roots)
+    }
+
+    pub(crate) fn set_authorized_topology_route_retirements(
+        &mut self,
+        routes: BTreeSet<ctx_history_capture_model::SourceRouteIdentity>,
+    ) -> Result<(), IndexError> {
+        self.0.set_authorized_topology_route_retirements(routes)
+    }
+
     pub(crate) fn commit_with_metadata_and_progress<F, I, M, P>(
         self,
         mut revalidate: F,

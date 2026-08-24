@@ -29,8 +29,9 @@ pub use provider_sources::{
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
     discover_provider_sources_with_context, discover_provider_sources_with_context_and_work_budget,
     discover_provider_sources_with_projects, discover_warp_sources_with_authority,
-    observe_ordinary_file, provider_source_for_path, provider_source_for_path_with_data_root,
-    provider_source_spec, provider_source_specs, provider_source_status_reason,
+    observe_ordinary_file, provider_paths_equivalent, provider_source_belongs_to_configured_root,
+    provider_source_for_path, provider_source_for_path_with_data_root, provider_source_spec,
+    provider_source_specs, provider_source_status_reason, released_provider_home,
     resolve_lingma_discovery_authority, resolve_warp_discovery_authority,
     validate_provider_source_roots_outside_data_root, DiscoveredLingmaDatabase,
     DiscoveredWarpSource, DiscoveryContext, DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform,
@@ -44,9 +45,10 @@ pub use provider_sources::{
 };
 
 pub use ctx_history_capture_model::{
-    stable_capture_uuid, CatalogSummary, OutputObservationKind, OutputOutcome,
-    OutputOutcomeMetadata, ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult,
-    ProviderSourceFailureKind,
+    provider_source_config_digest, stable_capture_uuid, CatalogSummary, OutputObservationKind,
+    OutputOutcome, OutputOutcomeMetadata, ProviderImportFailure, ProviderImportSummary,
+    ProviderImportWorkResult, ProviderRootDefinition, ProviderRootSourceIdentity,
+    ProviderSourceFailureKind, MAX_CONFIGURED_PROVIDER_ROOTS, MAX_PROVIDER_ROOT_SELECTOR_BYTES,
 };
 mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, Result};
@@ -88,8 +90,10 @@ pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderIm
 pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
     automatic_source_backed_route_identity, build_automatic_source_backed_registry,
-    build_automatic_source_backed_registry_from_report, explicit_source_catalog_lineage,
-    refresh_source_backed_generation, refresh_source_backed_generation_for_routes,
+    build_automatic_source_backed_registry_from_report,
+    build_automatic_source_backed_registry_from_report_with_root_identities,
+    explicit_source_catalog_lineage, refresh_source_backed_generation,
+    refresh_source_backed_generation_for_routes,
     refresh_source_backed_generation_with_detailed_progress,
     refresh_source_backed_generation_with_progress, register_astrbot_source_backed_route,
     register_codex_prompt_history_source_backed_route, register_crush_source_backed_route,

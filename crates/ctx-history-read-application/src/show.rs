@@ -68,6 +68,8 @@ pub struct ShowSessionPageRequest {
     pub selector: Option<String>,
     pub provider_session_id: Option<String>,
     pub provider: Option<CaptureProvider>,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
     pub mode: SessionEventMode,
     pub cursor: Option<SessionEventCursor>,
     pub limit: usize,
@@ -170,6 +172,8 @@ pub struct ShowSessionApplicationRequest {
     pub selector: Option<String>,
     pub provider_session_id: Option<String>,
     pub provider: Option<CaptureProvider>,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
     pub mode: SessionEventMode,
     pub cursor: Option<String>,
     pub limit: usize,
@@ -284,6 +288,8 @@ pub fn execute_show_session_page<Generation: GenerationReadPort>(
             selector: request.selector,
             provider_session_id: request.provider_session_id,
             provider: request.provider,
+            provider_key: request.provider_key,
+            source_id: request.source_id,
             mode: request.mode,
             cursor,
             limit: request.limit,
@@ -303,6 +309,8 @@ pub struct ShowSessionStreamRequest {
     pub selector: Option<String>,
     pub provider_session_id: Option<String>,
     pub provider: Option<CaptureProvider>,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
     pub mode: SessionEventMode,
     pub cursor: Option<String>,
     pub max_events: Option<usize>,
@@ -407,6 +415,8 @@ where
             request.selector.as_deref(),
             request.provider_session_id.as_deref(),
             request.provider,
+            request.provider_key.as_deref(),
+            request.source_id.as_deref(),
         )
         .map_err(ShowReadApplicationError::Query)?;
     let projection = ShowReadModelProjection {
@@ -438,6 +448,8 @@ where
                 selector: Some(session.session_id.to_string()),
                 provider_session_id: None,
                 provider: None,
+                provider_key: None,
+                source_id: None,
                 mode: request.mode,
                 cursor: cursor.clone(),
                 limit: remaining.min(request.page_items),
@@ -519,6 +531,8 @@ impl PinnedHistoryQuery<'_> {
             request.selector.as_deref(),
             request.provider_session_id.as_deref(),
             request.provider,
+            request.provider_key.as_deref(),
+            request.source_id.as_deref(),
         )?;
         let mut selector = SessionEventSelector::new(request.mode);
         let mut selected = Vec::with_capacity(request.limit);
@@ -582,8 +596,17 @@ impl PinnedHistoryQuery<'_> {
         selector: Option<&str>,
         provider_session_id: Option<&str>,
         provider: Option<CaptureProvider>,
+        provider_key: Option<&str>,
+        source_id: Option<&str>,
     ) -> Result<SessionRecord> {
-        resolve_show_session_with_refs(&self.references, selector, provider_session_id, provider)
+        resolve_show_session_with_refs(
+            &self.references,
+            selector,
+            provider_session_id,
+            provider,
+            provider_key,
+            source_id,
+        )
     }
 }
 

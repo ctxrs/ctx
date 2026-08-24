@@ -24,6 +24,7 @@ pub struct SearchReadOutcome {
 /// Provider and extension source inventory before wire-response assembly.
 #[derive(Debug)]
 pub struct SourceCatalog {
+    pub automatic_discovery: bool,
     pub sources: Vec<Value>,
     pub issues: Vec<Value>,
     pub issues_truncated: bool,

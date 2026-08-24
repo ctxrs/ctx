@@ -644,6 +644,8 @@ impl VerifiedIndex {
         &self,
         provider_session_id: &str,
         provider: Option<&str>,
+        provider_key: Option<&str>,
+        source_id: Option<&str>,
     ) -> Result<Vec<SessionRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let provider_session_id =
@@ -661,6 +663,26 @@ impl VerifiedIndex {
                 Occur::Must,
                 Box::new(TermQuery::new(
                     Term::from_field_text(fields.provider, provider),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        if let Some(provider_key) = provider_key {
+            let provider_key = validated_filter_text("provider_key", provider_key)?;
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_provider_key, provider_key),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        if let Some(source_id) = source_id {
+            let source_id = validated_filter_text("source_id", source_id)?;
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_source_id, source_id),
                     IndexRecordOption::Basic,
                 )),
             ));

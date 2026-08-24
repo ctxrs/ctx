@@ -145,7 +145,7 @@ fn import_request(args: &ImportArgs) -> ctx_history_cli::ImportRequest {
         reset_cursor: args.reset_cursor,
         input_format: args
             .input_format
-            .map(|_| ctx_history_cli::ImportFormat::CtxHistoryJsonlV1),
+            .map(|_| ctx_history_cli::ImportFormat::CtxHistoryJsonlV2),
         all: args.all,
         resume: args.resume,
         partial: args.partial,

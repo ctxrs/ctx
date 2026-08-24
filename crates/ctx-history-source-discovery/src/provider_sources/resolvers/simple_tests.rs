@@ -109,6 +109,242 @@ fn codex_official_root_includes_active_and_compressed_archive_history() {
 }
 
 #[test]
+fn configured_codex_roots_add_to_scalar_selection_and_expand_independently() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let personal = temp.path().join("codex-personal");
+    let work = temp.path().join("codex-work");
+    let ignored_env = temp.path().join("codex-env");
+    for root in [&personal, &work, &ignored_env] {
+        fs::create_dir_all(root.join("sessions")).unwrap();
+    }
+    let configured = vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: personal.clone(),
+            group: Some("personal".to_owned()),
+        },
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "work".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: work.clone(),
+            group: Some("work".to_owned()),
+        },
+    ];
+    let report = resolve_provider(
+        &base
+            .with_env("CODEX_HOME", ignored_env.as_os_str())
+            .with_configured_provider_roots(configured),
+        CaptureProvider::Codex,
+    );
+
+    assert_eq!(
+        paths(&report),
+        vec![
+            ignored_env.join("sessions"),
+            ignored_env.join("archived_sessions"),
+            ignored_env.join("history.jsonl"),
+            personal.join("sessions"),
+            personal.join("archived_sessions"),
+            personal.join("history.jsonl"),
+            work.join("sessions"),
+            work.join("archived_sessions"),
+            work.join("history.jsonl"),
+        ]
+    );
+    assert!(report
+        .sources
+        .iter()
+        .any(|source| source.path.starts_with(&ignored_env)));
+}
+
+#[test]
+fn configured_claude_roots_add_to_automatic_discovery() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let claude_personal = temp.path().join("claude-personal");
+    let claude_work = temp.path().join("claude-work");
+    let codex_default = base.home().join(".codex");
+    fs::create_dir_all(claude_personal.join("projects")).unwrap();
+    fs::create_dir_all(claude_work.join("projects")).unwrap();
+    fs::create_dir_all(codex_default.join("sessions")).unwrap();
+    let configured = vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: claude_personal.clone(),
+            group: Some("personal".to_owned()),
+        },
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "work".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: claude_work.clone(),
+            group: Some("work".to_owned()),
+        },
+    ];
+    let context = base.clone().with_configured_provider_roots(configured);
+
+    assert_eq!(
+        paths(&resolve_provider(&context, CaptureProvider::Claude)),
+        vec![
+            base.home().join(".claude/projects"),
+            claude_personal.join("projects"),
+            claude_work.join("projects")
+        ]
+    );
+    assert_eq!(
+        paths(&resolve_provider(&context, CaptureProvider::Codex)),
+        vec![
+            codex_default.join("sessions"),
+            codex_default.join("archived_sessions"),
+            codex_default.join("history.jsonl"),
+        ]
+    );
+}
+
+#[test]
+fn global_automatic_disable_keeps_only_named_provider_roots() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let automatic_claude = base.home().join(".claude/projects");
+    let automatic_codex = base.home().join(".codex/sessions");
+    let named_claude = temp.path().join("claude-personal");
+    fs::create_dir_all(&automatic_claude).unwrap();
+    fs::create_dir_all(&automatic_codex).unwrap();
+    fs::create_dir_all(named_claude.join("projects")).unwrap();
+
+    let context = base
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: named_claude.clone(),
+            group: Some("personal".to_owned()),
+        }]);
+
+    assert_eq!(
+        paths(&resolve_provider(&context, CaptureProvider::Claude)),
+        vec![named_claude.join("projects")]
+    );
+    assert!(resolve_provider(&context, CaptureProvider::Codex)
+        .sources
+        .is_empty());
+    assert!(crate::discover_provider_sources_for_provider_with_context(
+        &crate::provider_sources::TEST_PROVIDER_PROBES,
+        &context,
+        CaptureProvider::Gemini,
+    )
+    .sources
+    .is_empty());
+}
+
+#[test]
+fn naming_the_automatic_home_deduplicates_the_physical_source() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let home = base.home().join(".claude");
+    fs::create_dir_all(home.join("projects")).unwrap();
+    let context = base.with_configured_provider_roots(vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: home.clone(),
+            group: Some("personal".to_owned()),
+        },
+    ]);
+
+    let report = crate::discover_provider_sources_for_provider_with_context(
+        &crate::provider_sources::TEST_PROVIDER_PROBES,
+        &context,
+        CaptureProvider::Claude,
+    );
+
+    assert_eq!(paths(&report), vec![home.join("projects")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn naming_the_automatic_home_through_a_symlink_deduplicates_the_physical_source() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let home = base.home().join(".claude");
+    let alias = temp.path().join("claude-alias");
+    fs::create_dir_all(home.join("projects")).unwrap();
+    symlink(&home, &alias).unwrap();
+    let context = base.with_configured_provider_roots(vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: alias,
+            group: Some("personal".to_owned()),
+        },
+    ]);
+
+    let report = crate::discover_provider_sources_for_provider_with_context(
+        &crate::provider_sources::TEST_PROVIDER_PROBES,
+        &context,
+        CaptureProvider::Claude,
+    );
+
+    assert_eq!(paths(&report), vec![home.join("projects")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_roots_retain_unknown_physical_routes() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let unavailable_claude = temp.path().join("claude-unavailable");
+    let unavailable_codex = temp.path().join("codex-unavailable");
+    fs::write(&unavailable_claude, b"not a directory").unwrap();
+    fs::write(&unavailable_codex, b"not a directory").unwrap();
+    let configured = vec![
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "claude-unavailable".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: unavailable_claude.clone(),
+            group: None,
+        },
+        ctx_history_capture_model::ProviderRootDefinition {
+            id: "codex-unavailable".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: unavailable_codex.clone(),
+            group: None,
+        },
+    ];
+    let context = base
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(configured);
+
+    let claude = resolve_provider(&context, CaptureProvider::Claude);
+    assert_eq!(paths(&claude), vec![unavailable_claude.join("projects")]);
+    assert_eq!(claude.sources[0].status, ProviderSourceStatus::Unknown);
+    assert_eq!(claude.issues.len(), 1);
+
+    let codex = resolve_provider(&context, CaptureProvider::Codex);
+    assert_eq!(
+        paths(&codex),
+        vec![
+            unavailable_codex.join("sessions"),
+            unavailable_codex.join("archived_sessions"),
+            unavailable_codex.join("history.jsonl"),
+        ]
+    );
+    assert!(codex
+        .sources
+        .iter()
+        .all(|source| source.status == ProviderSourceStatus::Unknown));
+    assert_eq!(
+        codex.issues.len(),
+        1,
+        "equivalent configured-home selector failures are deduplicated"
+    );
+}
+
+#[test]
 fn grok_build_absolute_home_override_replaces_default_and_selects_updates() {
     let temp = tempdir();
     let base = context(&temp, DiscoveryPlatform::Linux);

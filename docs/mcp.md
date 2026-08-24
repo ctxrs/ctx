@@ -37,6 +37,15 @@ search `structuredContent` always reports that resolved value in
 `filters.content_scope`. `content_scope` conflicts unconditionally with the
 exact `event_type` input.
 
+`search` also accepts `source_roots` and `source_groups` arrays. Each array has at
+most 64 entries, and every entry must be 1 to 64 ASCII letters, digits,
+hyphens, or underscores. Names are case-sensitive. All root and group entries
+form one OR source-selection set, which combines with independent search
+filters using AND semantics. Values resolve against the pinned Core
+generation; an unknown root or group fails closed as a typed request error.
+Selector validation diagnostics are generic and do not echo the rejected
+contents. When both arrays are omitted, search includes every indexed source.
+
 The class mapping matches CLI search: `all` weights messages at 1.0, summaries
 at 0.9, tool calls and command starts at 0.8, tool outputs, command outputs,
 and command finishes at 0.6, and other or future searchable events at 0.8.
@@ -155,8 +164,16 @@ state, typed failure for semantic-only unavailability, and no vector work when
 the semantic weight is zero. The MCP process does not import provider history,
 initialize storage, or write provider data.
 
-The `sources` tool returns the same bounded provider discovery `issues` as
-`ctx sources --format json`, including stable issue codes and truncation markers.
+The `sources` tool returns `automatic_discovery` plus the same source selection
+metadata and bounded provider discovery `issues` as `ctx sources --format
+json`. Each built-in provider source has a `selection` object. Configured rows
+report `kind: "configured"`, their case-sensitive `root`, and nullable `group`;
+automatic rows report `kind: "automatic"` with null `root` and `group`. Agents
+can use those configured root and non-null group values as valid
+`search.source_roots` and `search.source_groups` candidates. `automatic_discovery`
+states whether inferred provider homes are enabled; stable issue codes and
+truncation markers retain the CLI JSON semantics. Plugin source rows do not
+participate in configured provider-root selection.
 
 Ordinary MCP search includes primary and subagent sessions, matching `ctx
 search`. Sessions with the same exact root-session claim are grouped together;

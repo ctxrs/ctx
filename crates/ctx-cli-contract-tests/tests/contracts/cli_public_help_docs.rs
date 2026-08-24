@@ -72,6 +72,33 @@ fn bootstrap_colors_clap_help_and_parse_errors_before_dispatch() {
 }
 
 #[test]
+fn sources_mutations_accept_global_json_format_after_the_subcommand() {
+    let temp = tempdir();
+    let provider_home = temp.path().join("claude-personal");
+    fs::create_dir_all(&provider_home).unwrap();
+
+    let output = ctx(&temp)
+        .args([
+            "sources",
+            "add",
+            "personal",
+            "--provider",
+            "claude",
+            "--root",
+            provider_home.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["operation"], "add");
+    assert_eq!(value["root"]["name"], "personal");
+}
+
+#[test]
 fn release_cli_does_not_expose_or_invoke_the_index_dashboard_fixture() {
     const FIXTURE_COMMAND: &str = "_index-dashboard-renderer-fixture";
 

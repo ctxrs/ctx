@@ -19,8 +19,8 @@ use super::{
     },
     source::{CodexCatalogSource, CodexFileObservation},
     source_backed::{
-        codex_core_record, codex_session_identity, codex_source_key, CodexEventIdentityStateV0,
-        CodexSourceBackedErrorV0,
+        codex_core_record, codex_session_identity, codex_source_key_in_root,
+        CodexEventIdentityStateV0, CodexSourceBackedErrorV0,
     },
 };
 use crate::{

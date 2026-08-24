@@ -3,13 +3,16 @@
 use std::path::{Path, PathBuf};
 
 use ctx_history_core::CaptureProvider;
-use ctx_history_provider_claude_cursor::{discover_cursor_transcripts, CursorDiscoveryIssueKind};
+use ctx_history_provider_claude_cursor::cursor::{
+    probe_cursor_transcript_availability, CursorTranscriptAvailability,
+};
 use ctx_history_source_discovery::{
     CursorProbeFragment, CursorTranscriptProbeOutcome, StaticProviderProbeCatalog,
 };
 
 pub use ctx_history_source_discovery::{
-    path_presence, CrushDiscoveredProjectInventory, CrushProjectInventorySelectorError,
+    path_presence, provider_paths_equivalent, provider_source_belongs_to_configured_root,
+    released_provider_home, CrushDiscoveredProjectInventory, CrushProjectInventorySelectorError,
 };
 pub use ctx_history_source_discovery::{
     validate_provider_source_roots_outside_data_root, DiscoveredLingmaDatabase,
@@ -29,27 +32,13 @@ pub(crate) static BUILTIN_PROVIDER_PROBES: StaticProviderProbeCatalog =
     StaticProviderProbeCatalog::new(CursorProbeFragment::new(probe_cursor_transcripts));
 
 fn probe_cursor_transcripts(path: &Path) -> CursorTranscriptProbeOutcome {
-    let input = if path.is_dir() && path.join("projects").is_dir() {
-        path.join("projects")
-    } else {
-        path.to_path_buf()
-    };
-    let inventory = discover_cursor_transcripts(&input);
-    if !inventory.completed() {
-        if inventory.has_issue_kind(CursorDiscoveryIssueKind::LimitExceeded) {
-            return CursorTranscriptProbeOutcome::BudgetExhausted;
+    match probe_cursor_transcript_availability(path) {
+        CursorTranscriptAvailability::Found => CursorTranscriptProbeOutcome::Found,
+        CursorTranscriptAvailability::NotFound => CursorTranscriptProbeOutcome::NotFound,
+        CursorTranscriptAvailability::BudgetExhausted => {
+            CursorTranscriptProbeOutcome::BudgetExhausted
         }
-        if inventory.has_issue_kind(CursorDiscoveryIssueKind::Io)
-            || inventory.has_issue_kind(CursorDiscoveryIssueKind::Symlink)
-        {
-            return CursorTranscriptProbeOutcome::IoError;
-        }
-        return CursorTranscriptProbeOutcome::NotFound;
-    }
-    if !inventory.has_transcripts() {
-        CursorTranscriptProbeOutcome::NotFound
-    } else {
-        CursorTranscriptProbeOutcome::Found
+        CursorTranscriptAvailability::IoError => CursorTranscriptProbeOutcome::IoError,
     }
 }
 
@@ -291,6 +280,38 @@ mod extraction_regression_tests {
         assert_eq!(
             discover_provider_sources_for_provider(empty.path(), CaptureProvider::Cursor)[0].status,
             ProviderSourceStatus::Empty
+        );
+    }
+
+    #[test]
+    fn capture_provider_cursor_missing_probe_is_typed_not_found() {
+        let temp = tempdir();
+        let missing = temp.path().join(".cursor/projects");
+
+        assert_eq!(
+            probe_cursor_transcripts(&missing),
+            CursorTranscriptProbeOutcome::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_catalog_cursor_availability_is_existential() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir();
+        let projects = temp.path().join(".cursor/projects");
+        let target = temp.path().join("linked-project-target");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        symlink(&target, projects.join("a-linked-project")).unwrap();
+        let transcript = projects.join("z-valid-project/agent-transcripts/session/session.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(transcript, b"{}\n").unwrap();
+
+        assert_eq!(
+            discover_provider_sources_for_provider(temp.path(), CaptureProvider::Cursor)[0].status,
+            ProviderSourceStatus::Available
         );
     }
 

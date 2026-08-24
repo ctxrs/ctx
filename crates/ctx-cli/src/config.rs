@@ -6,13 +6,27 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use ctx_history_platform::platform_security::establish_private_data_root;
+use ctx_history_capture::{ProviderRootDefinition, MAX_CONFIGURED_PROVIDER_ROOTS};
+use ctx_history_core::CaptureProvider;
+use ctx_history_platform::platform_security::{
+    establish_private_data_root, validate_provider_source_outside_data_root,
+};
 
 mod durable_write;
+mod mutation;
+mod provider_roots;
 mod toml_subset;
 
+pub(crate) use mutation::{
+    add_provider_root, persisted_daemon_enabled, remove_provider_root, set_daemon_enabled,
+    set_semantic_search_enabled, write_default_config,
+};
+
 use crate::deprecated_controls::DeprecatedControls;
-use durable_write::write_config_durably;
+use durable_write::{write_config_durably, ConfigMutationLock};
+use provider_roots::{
+    validate_provider_root_path, validate_provider_root_support, validate_root_selector,
+};
 use toml_subset::*;
 
 pub const CONFIG_FILE: &str = "config.toml";
@@ -111,6 +125,8 @@ pub struct AppConfig {
     pub indexing: IndexingConfig,
     pub daemon: DaemonConfig,
     pub search: SearchConfig,
+    pub sources: SourcesConfig,
+    pub provider_roots: BTreeMap<String, ProviderRootDefinition>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +290,11 @@ pub struct SearchConfig {
     pub semantic: Option<bool>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SourcesConfig {
+    pub automatic: bool,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -299,6 +320,8 @@ impl Default for AppConfig {
                 mode: DaemonMode::Full,
             },
             search: SearchConfig { semantic: None },
+            sources: SourcesConfig { automatic: true },
+            provider_roots: BTreeMap::new(),
         }
     }
 }
@@ -334,6 +357,10 @@ impl AppConfig {
         }
     }
 
+    pub const fn automatic_source_discovery_enabled(&self) -> bool {
+        self.sources.automatic
+    }
+
     pub fn load(data_root: &Path) -> Result<Self> {
         let deprecated_controls = DeprecatedControls::detect();
         Self::load_with_deprecated_controls(data_root, &deprecated_controls)
@@ -362,6 +389,9 @@ impl AppConfig {
                 config
                     .apply_values(&parsed)
                     .with_context(|| format!("load {}", path.display()))?;
+                config
+                    .validate_provider_root_data_root(data_root)
+                    .with_context(|| format!("load {}", path.display()))?;
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
@@ -372,7 +402,45 @@ impl AppConfig {
     fn apply_values(&mut self, values: &BTreeMap<String, ConfigValue>) -> Result<()> {
         let mut legacy_daemon_enabled = None;
         let mut indexing_mode = None;
+        let mut provider_roots =
+            BTreeMap::<String, (Option<CaptureProvider>, Option<PathBuf>, Option<String>)>::new();
         for (key, value) in values {
+            if let Some(dynamic) = key.strip_prefix("sources.roots.") {
+                let Some((id, field)) = dynamic.rsplit_once('.') else {
+                    bail!(
+                        "provider root config key `{key}` at line {} must name a field",
+                        value.line
+                    );
+                };
+                validate_root_selector("provider root name", id)?;
+                let draft = provider_roots.entry(id.to_owned()).or_default();
+                match field {
+                    "provider" => {
+                        let provider = parse_non_empty_string(key, value)?
+                            .parse::<CaptureProvider>()
+                            .with_context(|| {
+                                format!(
+                                    "sources.roots.{id}.provider at line {} is unknown",
+                                    value.line
+                                )
+                            })?;
+                        validate_provider_root_support(provider)?;
+                        draft.0 = Some(provider);
+                    }
+                    "path" => {
+                        let path = PathBuf::from(parse_non_empty_string(key, value)?);
+                        validate_provider_root_path(&path)?;
+                        draft.1 = Some(path);
+                    }
+                    "group" => {
+                        let group = parse_non_empty_string(key, value)?;
+                        validate_root_selector("source group", &group)?;
+                        draft.2 = Some(group);
+                    }
+                    _ => bail!("unknown config key `{key}` at line {}", value.line),
+                }
+                continue;
+            }
             match key.as_str() {
                 "analytics.enabled" => {
                     self.analytics.enabled = parse_config_bool(key, value)?;
@@ -405,6 +473,9 @@ impl AppConfig {
                 "search.semantic" => {
                     self.search.semantic = Some(parse_config_bool(key, value)?);
                 }
+                "sources.automatic" => {
+                    self.sources.automatic = parse_config_bool(key, value)?;
+                }
                 "cloud.mode" => return Err(RemovedCloudModeConfigError.into()),
                 _ => bail!("unknown config key `{key}` at line {}", value.line),
             }
@@ -414,6 +485,51 @@ impl AppConfig {
                 .map(IndexingMode::from_legacy_daemon_enabled)
                 .unwrap_or(self.indexing.mode)
         });
+        if provider_roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS {
+            bail!(
+                "configured provider roots exceed the maximum of {MAX_CONFIGURED_PROVIDER_ROOTS}"
+            );
+        }
+        self.provider_roots = provider_roots
+            .into_iter()
+            .map(|(id, (provider, path, group))| {
+                let provider = provider
+                    .ok_or_else(|| anyhow::anyhow!("sources.roots.{id}.provider is required"))?;
+                let path =
+                    path.ok_or_else(|| anyhow::anyhow!("sources.roots.{id}.path is required"))?;
+                Ok((
+                    id.clone(),
+                    ProviderRootDefinition {
+                        id,
+                        provider,
+                        path,
+                        group,
+                    },
+                ))
+            })
+            .collect::<Result<_>>()?;
+        for root in self.provider_roots.values_mut() {
+            if let Ok(physical_path) = fs::canonicalize(&root.path) {
+                validate_provider_root_path(&physical_path)?;
+                root.path = physical_path;
+            }
+        }
+        let mut physical_roots = BTreeMap::new();
+        for root in self.provider_roots.values() {
+            // Hand-edited config may use a symlink spelling even though the
+            // safe CLI editor records canonical non-symlink homes. Compare
+            // existing paths by their physical target so two aliases cannot
+            // stage the same provider source through distinct routes.
+            let key = (root.provider.as_str(), root.path.clone());
+            if let Some(previous) = physical_roots.insert(key, root.id.as_str()) {
+                bail!(
+                    "provider roots `{previous}` and `{}` select the same {} home {}",
+                    root.id,
+                    root.provider.as_str(),
+                    root.path.display()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -490,6 +606,24 @@ impl AppConfig {
     pub fn config_path(data_root: &Path) -> PathBuf {
         data_root.join(CONFIG_FILE)
     }
+
+    pub fn provider_root_definitions(&self) -> Vec<ProviderRootDefinition> {
+        self.provider_roots.values().cloned().collect()
+    }
+
+    fn validate_provider_root_data_root(&self, data_root: &Path) -> Result<()> {
+        for root in self.provider_roots.values() {
+            validate_provider_source_outside_data_root(data_root, &root.path).with_context(
+                || {
+                    format!(
+                        "configured provider root `{}` must not overlap the ctx data root",
+                        root.id
+                    )
+                },
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -520,74 +654,6 @@ pub(crate) fn count_app_config_loads<T>(operation: impl FnOnce() -> T) -> (T, us
         let observed = count.replace(previous).unwrap_or(0);
         (result, observed)
     })
-}
-
-pub fn write_default_config(data_root: &Path) -> Result<()> {
-    establish_private_data_root(data_root)?;
-    Ok(())
-}
-
-pub fn set_daemon_enabled(data_root: &Path, enabled: bool) -> Result<()> {
-    set_indexing_mode(data_root, IndexingMode::from_legacy_daemon_enabled(enabled))
-}
-
-pub fn persisted_daemon_enabled(data_root: &Path) -> Result<bool> {
-    Ok(AppConfig::load_persisted(data_root)?
-        .indexing
-        .mode
-        .is_automatic())
-}
-
-pub fn set_indexing_mode(data_root: &Path, mode: IndexingMode) -> Result<()> {
-    establish_private_data_root(data_root)?;
-    let path = AppConfig::config_path(data_root);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-    };
-    let parsed = parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
-    let mut config = AppConfig::default();
-    config
-        .apply_values(&parsed)
-        .with_context(|| format!("load {}", path.display()))?;
-
-    let mut document = text
-        .parse::<toml_edit::DocumentMut>()
-        .with_context(|| format!("parse {}", path.display()))?;
-    if document.as_table().get("indexing").is_none() {
-        document
-            .as_table_mut()
-            .insert("indexing", toml_edit::table());
-    }
-    let indexing = document
-        .as_table_mut()
-        .get_mut("indexing")
-        .and_then(toml_edit::Item::as_table_mut)
-        .ok_or_else(|| anyhow::anyhow!("indexing configuration must be a table"))?;
-    indexing.insert("mode", toml_edit::value(mode.as_str()));
-    if let Some(daemon) = document
-        .as_table_mut()
-        .get_mut("daemon")
-        .and_then(toml_edit::Item::as_table_mut)
-    {
-        daemon.remove("enabled");
-    }
-    let updated = document.to_string();
-    let parsed =
-        parse_toml_subset(&updated).with_context(|| format!("parse updated {}", path.display()))?;
-    let mut config = AppConfig::default();
-    config
-        .apply_values(&parsed)
-        .with_context(|| format!("load updated {}", path.display()))?;
-    if updated != text {
-        write_config_durably(&path, updated.as_bytes())?;
-    }
-    Ok(())
-}
-
-pub fn set_semantic_search_enabled(data_root: &Path, enabled: bool) -> Result<()> {
-    set_config_bool(data_root, "search", "semantic", enabled)
 }
 
 pub fn set_local_usage_enabled(data_root: &Path, enabled: bool) -> Result<()> {
@@ -825,6 +891,7 @@ fn decode_basic_key_unicode_escape(
 fn set_config_bool(data_root: &Path, section: &str, key: &str, enabled: bool) -> Result<()> {
     establish_private_data_root(data_root)?;
     let path = AppConfig::config_path(data_root);
+    let _mutation_lock = ConfigMutationLock::acquire(&path)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
@@ -835,12 +902,18 @@ fn set_config_bool(data_root: &Path, section: &str, key: &str, enabled: bool) ->
     config
         .apply_values(&parsed)
         .with_context(|| format!("load {}", path.display()))?;
+    config
+        .validate_provider_root_data_root(data_root)
+        .with_context(|| format!("load {}", path.display()))?;
     let updated = set_toml_bool(&text, section, key, enabled);
     let parsed =
         parse_toml_subset(&updated).with_context(|| format!("parse updated {}", path.display()))?;
     let mut config = AppConfig::default();
     config
         .apply_values(&parsed)
+        .with_context(|| format!("load updated {}", path.display()))?;
+    config
+        .validate_provider_root_data_root(data_root)
         .with_context(|| format!("load updated {}", path.display()))?;
     if updated == text {
         return Ok(());

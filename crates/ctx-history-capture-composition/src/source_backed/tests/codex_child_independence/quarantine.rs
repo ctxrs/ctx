@@ -80,11 +80,7 @@ fn codex_prefix_ownership_quarantine_retains_prior_source_and_repairs() {
     assert_eq!(quarantined.logical_source_failures.total(), 1);
     let index = VerifiedIndex::open(&index_root).unwrap();
     assert!(index.manifest().sources.iter().any(|certificate| {
-        matches!(
-            certificate.observation().source().anchor(),
-            SourceAnchor::ProviderNative { key: TypedKey::Utf8(value), .. }
-                if value == native_session_id
-        )
+        source_native_session_id(certificate.observation().source()) == Some(native_session_id)
     }));
     assert!(source_records_contain(
         &index,
@@ -180,11 +176,7 @@ fn malformed_late_session_meta_quarantines_only_its_rollout() {
         assert_eq!(index.search_event_candidates(marker, 8).unwrap().len(), 1);
     }
     assert!(index.manifest().sources.iter().all(|certificate| {
-        !matches!(
-            certificate.observation().source().anchor(),
-            SourceAnchor::ProviderNative { key: TypedKey::Utf8(value), .. }
-                if value == malformed_id
-        )
+        source_native_session_id(certificate.observation().source()) != Some(malformed_id)
     }));
     assert!(index
         .search_event_candidates("malformedmetaquarantinedmarker", 8)

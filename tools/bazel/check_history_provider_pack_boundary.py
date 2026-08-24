@@ -23,6 +23,7 @@ CAPTURE_BUILD_LABEL = "//crates/ctx-history-capture-composition:BUILD.bazel"
 EVALUATED_REVERSE_BAZEL_CONSUMERS = {
     PACK_LABEL: (
         "//crates/ctx-history-capture-composition:lib",
+        "//crates/ctx-history-capture-composition:test_support_lib",
         "//crates/ctx-history-capture-composition:unit_tests",
         "//crates/ctx-history-providers-task-docs:lib",
     ),

@@ -12,13 +12,53 @@ pub(super) fn register_codex_session_tree_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    register_codex_session_tree_routes(registry, vec![source], selection)
+    register_codex_session_tree_routes_with_identity(registry, vec![source], selection, None, false)
+}
+
+pub(in crate::source_backed) fn register_configured_codex_session_tree_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    register_codex_session_tree_routes_with_identity(
+        registry,
+        vec![source],
+        selection,
+        source_root_lineage,
+        true,
+    )
+}
+
+pub(in crate::source_backed) fn register_configured_codex_session_tree_routes(
+    registry: &mut SourceBackedProviderRegistry,
+    sources: Vec<ProviderSource>,
+    selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    register_codex_session_tree_routes_with_identity(
+        registry,
+        sources,
+        selection,
+        source_root_lineage,
+        true,
+    )
 }
 
 pub(in crate::source_backed) fn register_codex_session_tree_routes(
     registry: &mut SourceBackedProviderRegistry,
+    sources: Vec<ProviderSource>,
+    selection: SourceBackedRouteSelection,
+) -> SourceBackedCoordinatorResult<()> {
+    register_codex_session_tree_routes_with_identity(registry, sources, selection, None, false)
+}
+
+fn register_codex_session_tree_routes_with_identity(
+    registry: &mut SourceBackedProviderRegistry,
     mut sources: Vec<ProviderSource>,
     selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
+    provider_root_identity: bool,
 ) -> SourceBackedCoordinatorResult<()> {
     if sources.is_empty() {
         return Err(invalid_route(
@@ -53,7 +93,7 @@ pub(in crate::source_backed) fn register_codex_session_tree_routes(
         .get_or_insert_with(|| Arc::new(CodexGenerationNormalizationCoordinatorV0::default()))
         .clone();
     let generation = coordinator
-        .register_session_tree(roots)
+        .register_session_tree(roots, source_root_lineage)
         .map_err(|error| invalid_route(CaptureProvider::Codex, error.to_string()))?;
     let participant = generation.participant();
     let adapter = CodexSessionJsonlFamilyAdapterV0::<CaptureProviderRuntime>::new(generation);
@@ -67,6 +107,9 @@ pub(in crate::source_backed) fn register_codex_session_tree_routes(
         SourceBackedSelectorAuthority::DiscoveredWinner,
         driver,
     )?;
+    if provider_root_identity {
+        route.apply_provider_root_route_identity(source_root_lineage)?;
+    }
     route.registration_sources = sources;
     route.codex_generation_participant = Some(participant);
     registry.register(route);
@@ -119,10 +162,14 @@ pub fn register_codex_prompt_history_source_backed_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    let input = CodexPromptHistorySourceBackedInputV0::explicit(
-        source.path.clone(),
-        CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0,
-    );
+    let catalog_lineage = match selection {
+        SourceBackedRouteSelection::Automatic => CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0,
+        SourceBackedRouteSelection::ExplicitManual => {
+            explicit_source_catalog_lineage(source.provider, "codex_history_jsonl", &source.path)
+        }
+    };
+    let input =
+        CodexPromptHistorySourceBackedInputV0::explicit(source.path.clone(), catalog_lineage);
     let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::<CaptureProviderRuntime>::new(input)
         .map_err(|error| invalid_route(source.provider, error.to_string()))?;
     let route_path = adapter.route_path().to_path_buf();
@@ -136,6 +183,34 @@ pub fn register_codex_prompt_history_source_backed_route(
         SourceBackedSelectorAuthority::DiscoveredWinner,
         driver,
     )?);
+    Ok(())
+}
+
+pub(in crate::source_backed) fn register_configured_codex_prompt_history_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    let catalog_lineage =
+        source_root_lineage.unwrap_or(CODEX_PROMPT_HISTORY_DEFAULT_CATALOG_LINEAGE_V0);
+    let input =
+        CodexPromptHistorySourceBackedInputV0::explicit(source.path.clone(), catalog_lineage);
+    let adapter = CodexPromptHistoryJsonlFamilyAdapterV0::<CaptureProviderRuntime>::new(input)
+        .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    let route_path = adapter.route_path().to_path_buf();
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        Arc::new(adapter),
+        route_path,
+    );
+    let mut route = executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        driver,
+    )?;
+    route.apply_provider_root_route_identity(source_root_lineage)?;
+    registry.register(route);
     Ok(())
 }
 

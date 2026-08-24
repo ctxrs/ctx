@@ -16,7 +16,7 @@ use super::{
     context::DiscoveryContext,
     resolvers::{dedupe_report, resolve},
     specs::PROVIDER_SPECS,
-    types::{DiscoveryReport, ProviderSource},
+    types::{DiscoveryReport, ProviderSource, ProviderSourceStatus},
     StaticProviderProbeCatalog,
 };
 
@@ -41,7 +41,8 @@ pub fn validate_provider_source_roots_outside_data_root<'a>(
     sources: impl IntoIterator<Item = &'a ProviderSource>,
 ) -> Result<(), ProviderSourceRootBoundaryError> {
     for source in sources {
-        validate_provider_source_outside_data_root(data_root, &source.path).map_err(|error| {
+        let boundary_root = provider_source_boundary_root(source);
+        validate_provider_source_outside_data_root(data_root, boundary_root).map_err(|error| {
             ProviderSourceRootBoundaryError {
                 data_root: data_root.to_path_buf(),
                 source_root: source.path.clone(),
@@ -50,6 +51,35 @@ pub fn validate_provider_source_roots_outside_data_root<'a>(
         })?;
     }
     Ok(())
+}
+
+fn provider_source_boundary_root(source: &ProviderSource) -> &Path {
+    if source.status != ProviderSourceStatus::Unknown {
+        return &source.path;
+    }
+    // Configured Claude and Codex homes expand into these fixed children. If
+    // the home becomes temporarily unavailable, the child itself cannot be
+    // resolved, but the stable configured home can still be checked against
+    // the ctx data root. Available children continue through the stricter
+    // exact-source validation above.
+    let configured_home_child = match (source.provider, source.source_format) {
+        (CaptureProvider::Claude, "claude_projects_jsonl_tree") => {
+            source.path.file_name().and_then(|name| name.to_str()) == Some("projects")
+        }
+        (CaptureProvider::Codex, "codex_session_jsonl_tree") => matches!(
+            source.path.file_name().and_then(|name| name.to_str()),
+            Some("sessions" | "archived_sessions")
+        ),
+        (CaptureProvider::Codex, "codex_history_jsonl") => {
+            source.path.file_name().and_then(|name| name.to_str()) == Some("history.jsonl")
+        }
+        _ => false,
+    };
+    if configured_home_child {
+        source.path.parent().unwrap_or(&source.path)
+    } else {
+        &source.path
+    }
 }
 
 mod explicit;
@@ -276,6 +306,20 @@ fn discover_with_projects(
 mod boundary_error_tests {
     use super::*;
 
+    fn unknown_configured_claude_source(home: &Path) -> ProviderSource {
+        ProviderSource {
+            provider: CaptureProvider::Claude,
+            path: home.join("projects"),
+            exists: true,
+            source_format: "claude_projects_jsonl_tree",
+            source_kind: super::super::types::ProviderSourceKind::NativeHistory,
+            import_support: super::super::types::ProviderImportSupport::Native,
+            catalog_support: super::super::types::ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Unknown,
+            unsupported_reason: Some("configured home unavailable"),
+        }
+    }
+
     #[test]
     fn public_boundary_error_names_a_concrete_recovery() {
         let error = ProviderSourceRootBoundaryError {
@@ -286,6 +330,23 @@ mod boundary_error_tests {
         let rendered = error.to_string();
         assert!(rendered.contains("choose or move ctx --data-root"));
         assert!(rendered.contains("correct the explicit provider path"));
+    }
+
+    #[test]
+    fn unknown_configured_child_validates_the_home_without_weakening_overlap_rejection() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let home = temp.path().join("claude-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let source = unknown_configured_claude_source(&home);
+        assert_eq!(provider_source_boundary_root(&source), home);
+
+        let disjoint_data = temp.path().join("ctx-data");
+        validate_provider_source_roots_outside_data_root(&disjoint_data, [&source]).unwrap();
+        let nested_data = home.join("ctx-data");
+        assert!(
+            validate_provider_source_roots_outside_data_root(&nested_data, [&source]).is_err(),
+            "configured-home fallback must still reject a nested ctx data root"
+        );
     }
 
     #[test]

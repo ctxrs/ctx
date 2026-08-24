@@ -282,6 +282,8 @@ fn run_show_inner(
                     args.id,
                     args.provider_session,
                     args.provider.map(ProviderArg::capture_provider),
+                    args.provider_key,
+                    args.source_id,
                     args.mode,
                     args.format,
                     args.max_events,
@@ -348,6 +350,8 @@ pub(super) fn stream_cli_session(
     selector: Option<String>,
     provider_session_id: Option<String>,
     provider: Option<ctx_history_core::CaptureProvider>,
+    provider_key: Option<String>,
+    source_id: Option<String>,
     mode: TranscriptMode,
     format: OutputFormat,
     max_events: Option<usize>,
@@ -375,6 +379,8 @@ pub(super) fn stream_cli_session(
             selector,
             provider_session_id,
             provider,
+            provider_key,
+            source_id,
             mode: session_event_mode(mode),
             cursor: None,
             max_events,
@@ -555,6 +561,8 @@ impl<'a> SessionStreamRenderer<'a> {
                     "mode": self.metadata["mode"],
                     "ctx_session_id": self.metadata["ctx_session_id"],
                     "provider": self.metadata["provider"],
+                    "provider_key": self.metadata["provider_key"],
+                    "source_id": self.metadata["source_id"],
                     "provider_session_id": self.metadata["provider_session_id"],
                     "event": value,
                 }));
@@ -644,6 +652,8 @@ impl<'a> SessionStreamRenderer<'a> {
                     "mode": self.metadata["mode"],
                     "ctx_session_id": self.metadata["ctx_session_id"],
                     "provider": self.metadata["provider"],
+                    "provider_key": self.metadata["provider_key"],
+                    "source_id": self.metadata["source_id"],
                     "provider_session_id": self.metadata["provider_session_id"],
                     "events_returned": self.events_returned,
                     "complete": !truncated,
@@ -738,6 +748,12 @@ fn render_stream_text_header(value: &Value) -> String {
     if let Some(provider_session_id) = value["provider_session_id"].as_str() {
         output.push_str(&format!("provider_session_id: {provider_session_id}\n"));
     }
+    if let Some(provider_key) = value["provider_key"].as_str() {
+        output.push_str(&format!("provider_key: {provider_key}\n"));
+    }
+    if let Some(source_id) = value["source_id"].as_str() {
+        output.push_str(&format!("source_id: {source_id}\n"));
+    }
     if let Some(relationship) = value["session"]["session_relationship"].as_str() {
         output.push_str(&format!("session_relationship: {relationship}\n"));
     }
@@ -776,6 +792,12 @@ fn render_stream_markdown_header(value: &Value) -> String {
             .unwrap_or("unknown"),
         value["ctx_session_id"].as_str().unwrap_or("unknown")
     );
+    if let Some(provider_key) = value["provider_key"].as_str() {
+        output.push_str(&format!("- provider_key: `{provider_key}`\n"));
+    }
+    if let Some(source_id) = value["source_id"].as_str() {
+        output.push_str(&format!("- source_id: `{source_id}`\n"));
+    }
     if let Some(relationship) = value["session"]["session_relationship"].as_str() {
         output.push_str(&format!("- session_relationship: `{relationship}`\n"));
     }
@@ -867,6 +889,13 @@ pub(super) fn resolve_show_session(
     provider_session_id: Option<&str>,
     provider: Option<ctx_history_core::CaptureProvider>,
 ) -> Result<SessionRecord> {
-    ctx_history_read_application::resolve_show_session(index, id, provider_session_id, provider)
-        .map_err(externalize_query_error)
+    ctx_history_read_application::resolve_show_session(
+        index,
+        id,
+        provider_session_id,
+        provider,
+        None,
+        None,
+    )
+    .map_err(externalize_query_error)
 }

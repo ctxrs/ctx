@@ -1,103 +1,12 @@
 use super::*;
 use crate::provider::custom_history_jsonl::CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES;
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "record_type", rename_all = "snake_case")]
-enum V1CompatibilityRecord {
-    FileTouch(V1FileTouchRecord),
-}
-
-#[derive(Debug, Deserialize)]
-struct V1SessionScopeFields {
-    #[serde(default)]
-    agent_type: Option<V1AgentType>,
-    #[serde(default)]
-    is_primary: Option<bool>,
-}
-
-impl V1SessionScopeFields {
-    fn agent_scope(self) -> Option<AgentScope> {
-        match self.is_primary {
-            Some(true) => Some(AgentScope::Primary),
-            Some(false) => Some(AgentScope::Subagent),
-            None => match self.agent_type {
-                Some(V1AgentType::Primary) => Some(AgentScope::Primary),
-                Some(
-                    V1AgentType::Subagent
-                    | V1AgentType::AgentTeamMember
-                    | V1AgentType::Reviewer
-                    | V1AgentType::Implementer,
-                ) => Some(AgentScope::Subagent),
-                Some(V1AgentType::Unknown) | None => None,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum V1AgentType {
-    Primary,
-    Subagent,
-    AgentTeamMember,
-    Reviewer,
-    Implementer,
-    Unknown,
-}
-
-#[derive(Debug, Deserialize)]
-struct V1FileTouchRecord {
-    source_id: String,
-    session_id: String,
-    touch_index: u64,
-    #[serde(default)]
-    event_index: Option<u64>,
-    path: String,
-    #[serde(default, rename = "change_kind")]
-    _change_kind: Option<V1FileChangeKind>,
-    #[serde(default, rename = "old_path")]
-    _old_path: Option<String>,
-    #[serde(default, rename = "line_count_delta")]
-    _line_count_delta: Option<i64>,
-    #[serde(default, rename = "confidence")]
-    _confidence: V1Confidence,
-    occurred_at: DateTime<Utc>,
-    #[serde(default = "empty_metadata")]
-    metadata: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum V1FileChangeKind {
-    Read,
-    Created,
-    Modified,
-    Deleted,
-    Renamed,
-    Unknown,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum V1Confidence {
-    Explicit,
-    High,
-    Medium,
-    Low,
-    #[default]
-    Unknown,
-}
-
-fn empty_metadata() -> serde_json::Value {
-    serde_json::Value::Object(serde_json::Map::new())
-}
-
 #[derive(Debug)]
 struct FileReferenceCandidate {
     line_number: usize,
     source_id: String,
-    session_id: String,
-    event_index: Option<u64>,
+    provider_session_id: String,
+    event_index: u64,
     value: String,
 }
 
@@ -105,8 +14,8 @@ struct FileReferenceCandidate {
 struct EdgeCandidate {
     line_number: usize,
     source_id: String,
-    from_session_id: String,
-    to_session_id: String,
+    from_provider_session_id: String,
+    to_provider_session_id: String,
     relationship: Option<ProviderNativeSessionRelationship>,
 }
 
@@ -319,16 +228,16 @@ fn visit_record(
         }
         CtxHistoryJsonlRecord::Session(session) => {
             ensure_retained_key_bound(
-                CustomHistorySourceBackedBound::NativeSessionIdBytes,
-                session.native_session_id.as_deref(),
+                CustomHistorySourceBackedBound::ProviderSessionIdBytes,
+                Some(&session.provider_session_id),
             )?;
             ensure_retained_key_bound(
-                CustomHistorySourceBackedBound::ParentSessionIdBytes,
-                session.parent_session_id.as_deref(),
+                CustomHistorySourceBackedBound::ParentProviderSessionIdBytes,
+                session.parent_provider_session_id.as_deref(),
             )?;
             ensure_retained_key_bound(
-                CustomHistorySourceBackedBound::RootSessionIdBytes,
-                session.root_session_id.as_deref(),
+                CustomHistorySourceBackedBound::RootProviderSessionIdBytes,
+                session.root_provider_session_id.as_deref(),
             )?;
             let failures_before = catalog.summary.failed;
             validate_custom_history_identifier(
@@ -340,15 +249,37 @@ fn visit_record(
             validate_custom_history_identifier(
                 &mut catalog.summary,
                 line.line_number,
-                "session_id",
-                &session.session_id,
+                "provider_session_id",
+                &session.provider_session_id,
             );
-            let key = (session.source_id.clone(), session.session_id.clone());
+            for (field, value) in [
+                (
+                    "parent_provider_session_id",
+                    session.parent_provider_session_id.as_deref(),
+                ),
+                (
+                    "root_provider_session_id",
+                    session.root_provider_session_id.as_deref(),
+                ),
+            ] {
+                if let Some(value) = value {
+                    validate_custom_history_identifier(
+                        &mut catalog.summary,
+                        line.line_number,
+                        field,
+                        value,
+                    );
+                }
+            }
+            let key = (
+                session.source_id.clone(),
+                session.provider_session_id.clone(),
+            );
             if catalog.sessions.contains_key(&key) {
                 push_provider_import_failure(
                     &mut catalog.summary,
                     line.line_number,
-                    "duplicate session record".to_owned(),
+                    "duplicate provider_session_id for source".to_owned(),
                 );
             }
             if catalog.summary.failed == failures_before {
@@ -356,10 +287,15 @@ fn visit_record(
                 let cwd = session.cwd;
                 catalog.budget.admit_metadata(retained_metadata_bytes(&[
                     session.source_id.len().saturating_mul(2),
-                    session.session_id.len().saturating_mul(2),
-                    session.native_session_id.as_ref().map_or(0, String::len),
-                    session.parent_session_id.as_ref().map_or(0, String::len),
-                    session.root_session_id.as_ref().map_or(0, String::len),
+                    session.provider_session_id.len().saturating_mul(2),
+                    session
+                        .parent_provider_session_id
+                        .as_ref()
+                        .map_or(0, String::len),
+                    session
+                        .root_provider_session_id
+                        .as_ref()
+                        .map_or(0, String::len),
                     agent_scope.map_or(0, |scope| scope.as_str().len()),
                     cwd.as_ref().map_or(0, String::len),
                 ]))?;
@@ -367,11 +303,9 @@ fn visit_record(
                     key,
                     CustomSessionCatalogEntry {
                         line_number: line.line_number,
-                        source_id: session.source_id,
-                        session_id: session.session_id,
-                        native_session_id: session.native_session_id,
-                        parent_session_id: session.parent_session_id,
-                        root_session_id: session.root_session_id,
+                        provider_session_id: session.provider_session_id,
+                        parent_provider_session_id: session.parent_provider_session_id,
+                        root_provider_session_id: session.root_provider_session_id,
                         session_relationship: session.session_relationship,
                         agent_scope,
                         cwd,
@@ -386,8 +320,8 @@ fn visit_record(
             )?;
             if let Some(copied_from) = &event.copied_from {
                 ensure_retained_key_bound(
-                    CustomHistorySourceBackedBound::NativeSessionIdBytes,
-                    Some(&copied_from.ancestor_native_session_id),
+                    CustomHistorySourceBackedBound::ProviderSessionIdBytes,
+                    Some(&copied_from.ancestor_provider_session_id),
                 )?;
                 ensure_retained_key_bound(
                     CustomHistorySourceBackedBound::EventIdBytes,
@@ -404,19 +338,41 @@ fn visit_record(
             validate_custom_history_identifier(
                 &mut catalog.summary,
                 line.line_number,
-                "session_id",
-                &event.session_id,
+                "provider_session_id",
+                &event.provider_session_id,
             );
+            if let Some(event_id) = event.event_id.as_deref() {
+                validate_custom_history_identifier(
+                    &mut catalog.summary,
+                    line.line_number,
+                    "event_id",
+                    event_id,
+                );
+            }
+            if let Some(copied_from) = event.copied_from.as_ref() {
+                validate_custom_history_identifier(
+                    &mut catalog.summary,
+                    line.line_number,
+                    "ancestor_provider_session_id",
+                    &copied_from.ancestor_provider_session_id,
+                );
+                validate_custom_history_identifier(
+                    &mut catalog.summary,
+                    line.line_number,
+                    "ancestor_event_id",
+                    &copied_from.ancestor_event_id,
+                );
+            }
             let key = (
                 event.source_id.clone(),
-                event.session_id.clone(),
+                event.provider_session_id.clone(),
                 event.event_index,
             );
             if catalog.events.contains_key(&key) {
                 push_provider_import_failure(
                     &mut catalog.summary,
                     line.line_number,
-                    "duplicate event_index for session".to_owned(),
+                    "duplicate event_index for provider session".to_owned(),
                 );
             }
             if catalog.summary.failed == failures_before {
@@ -452,11 +408,11 @@ fn visit_record(
                 };
                 catalog.budget.admit_metadata(retained_metadata_bytes(&[
                     event.source_id.len(),
-                    event.session_id.len(),
+                    event.provider_session_id.len(),
                     event.event_id.as_ref().map_or(0, String::len),
                     event.copied_from.as_ref().map_or(0, |selector| {
                         selector
-                            .ancestor_native_session_id
+                            .ancestor_provider_session_id
                             .len()
                             .saturating_add(selector.ancestor_event_id.len())
                     }),
@@ -474,7 +430,7 @@ fn visit_record(
                     event_writer,
                     &SpooledCustomEvent {
                         source_id: event.source_id,
-                        session_id: event.session_id,
+                        provider_session_id: event.provider_session_id,
                         event_index: event.event_index,
                         event_id: event_id.clone(),
                         event_type: event.event_type.as_str().to_owned(),
@@ -514,8 +470,8 @@ fn visit_record(
             validate_custom_history_identifier(
                 &mut catalog.summary,
                 line.line_number,
-                "session_id",
-                &reference.session_id,
+                "provider_session_id",
+                &reference.provider_session_id,
             );
             if reference.value.is_empty() {
                 push_provider_import_failure(
@@ -526,7 +482,7 @@ fn visit_record(
             }
             let key = (
                 reference.source_id.clone(),
-                reference.session_id.clone(),
+                reference.provider_session_id.clone(),
                 reference.reference_index,
             );
             if catalog.reference_keys.contains(&key) {
@@ -539,14 +495,14 @@ fn visit_record(
             if catalog.summary.failed == failures_before {
                 catalog.budget.admit_metadata(retained_metadata_bytes(&[
                     reference.source_id.len().saturating_mul(2),
-                    reference.session_id.len().saturating_mul(2),
+                    reference.provider_session_id.len().saturating_mul(2),
                     reference.value.len(),
                 ]))?;
                 catalog.reference_keys.insert(key);
                 catalog.file_references.push(FileReferenceCandidate {
                     line_number: line.line_number,
                     source_id: reference.source_id,
-                    session_id: reference.session_id,
+                    provider_session_id: reference.provider_session_id,
                     event_index: reference.event_index,
                     value: reference.value,
                 });
@@ -567,28 +523,36 @@ fn visit_record(
             validate_custom_history_identifier(
                 &mut catalog.summary,
                 line.line_number,
-                "from_session_id",
-                &edge.from_session_id,
+                "from_provider_session_id",
+                &edge.from_provider_session_id,
             );
             validate_custom_history_identifier(
                 &mut catalog.summary,
                 line.line_number,
-                "to_session_id",
-                &edge.to_session_id,
+                "to_provider_session_id",
+                &edge.to_provider_session_id,
             );
+            if let Some(edge_id) = edge.edge_id.as_deref() {
+                validate_custom_history_identifier(
+                    &mut catalog.summary,
+                    line.line_number,
+                    "edge_id",
+                    edge_id,
+                );
+            }
             let edge_key = edge.edge_id.clone().unwrap_or_else(|| {
                 format!(
                     "{}:{}:{}",
-                    edge.from_session_id,
-                    edge.to_session_id,
+                    edge.from_provider_session_id,
+                    edge.to_provider_session_id,
                     edge.relationship
                         .map_or("none", |relationship| relationship.as_str())
                 )
             });
             let key = (
                 edge.source_id.clone(),
-                edge.from_session_id.clone(),
-                edge.to_session_id.clone(),
+                edge.from_provider_session_id.clone(),
+                edge.to_provider_session_id.clone(),
                 edge_key,
             );
             if catalog.edge_keys.contains(&key) {
@@ -601,16 +565,16 @@ fn visit_record(
             if catalog.summary.failed == failures_before {
                 catalog.budget.admit_metadata(retained_metadata_bytes(&[
                     edge.source_id.len().saturating_mul(2),
-                    edge.from_session_id.len().saturating_mul(2),
-                    edge.to_session_id.len().saturating_mul(2),
+                    edge.from_provider_session_id.len().saturating_mul(2),
+                    edge.to_provider_session_id.len().saturating_mul(2),
                     key.3.len(),
                 ]))?;
                 catalog.edge_keys.insert(key);
                 catalog.edges.push(EdgeCandidate {
                     line_number: line.line_number,
                     source_id: edge.source_id,
-                    from_session_id: edge.from_session_id,
-                    to_session_id: edge.to_session_id,
+                    from_provider_session_id: edge.from_provider_session_id,
+                    to_provider_session_id: edge.to_provider_session_id,
                     relationship: edge.relationship,
                 });
             }
@@ -620,59 +584,7 @@ fn visit_record(
 }
 
 fn parse_record(bytes: &[u8]) -> Result<CtxHistoryJsonlRecord, String> {
-    match serde_json::from_slice::<CtxHistoryJsonlRecord>(bytes) {
-        Ok(CtxHistoryJsonlRecord::Session(mut session)) => {
-            if session.agent_scope.is_none() {
-                let v1 =
-                    serde_json::from_slice::<V1SessionScopeFields>(bytes).map_err(|error| {
-                        format!("invalid ctx-history-jsonl-v1 session record: {error}")
-                    })?;
-                session.agent_scope = v1.agent_scope();
-            }
-            Ok(CtxHistoryJsonlRecord::Session(session))
-        }
-        Ok(record) => Ok(record),
-        Err(current_error) => {
-            let is_v1_file_touch = serde_json::from_slice::<serde_json::Value>(bytes)
-                .ok()
-                .and_then(|record| {
-                    record
-                        .get("record_type")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|record_type| record_type == "file_touch")
-                })
-                .unwrap_or(false);
-            if !is_v1_file_touch {
-                return Err(current_error.to_string());
-            }
-
-            let V1CompatibilityRecord::FileTouch(touch) = serde_json::from_slice::<
-                V1CompatibilityRecord,
-            >(bytes)
-            .map_err(|error| format!("invalid ctx-history-jsonl-v1 file_touch record: {error}"))?;
-            let V1FileTouchRecord {
-                source_id,
-                session_id,
-                touch_index,
-                event_index,
-                path,
-                occurred_at,
-                metadata,
-                ..
-            } = touch;
-            Ok(CtxHistoryJsonlRecord::FileReference(
-                CtxHistoryJsonlFileReferenceRecord {
-                    source_id,
-                    session_id,
-                    reference_index: touch_index,
-                    event_index,
-                    value: path,
-                    occurred_at,
-                    metadata,
-                },
-            ))
-        }
-    }
+    serde_json::from_slice(bytes).map_err(|error| error.to_string())
 }
 
 mod validation;
@@ -694,7 +606,8 @@ fn session_catalog(
             work.session_nodes = work.session_nodes.saturating_add(1);
         });
         let source_exists = sources.contains_key(&key.0);
-        let has_self_parent = session.parent_session_id.as_deref() == Some(&session.session_id);
+        let has_self_parent =
+            session.parent_provider_session_id.as_deref() == Some(&session.provider_session_id);
         if source_exists && !has_self_parent {
             valid.insert(key.clone());
             continue;
@@ -738,55 +651,27 @@ fn finish_prefix_digest(hasher: &Sha256, prefix_bytes: u64) -> [u8; 32] {
 }
 
 #[cfg(test)]
-mod compatibility_tests {
+mod record_tests {
     use super::*;
 
-    fn session_scope(raw: &[u8]) -> Option<AgentScope> {
-        let CtxHistoryJsonlRecord::Session(session) = parse_record(raw).unwrap() else {
-            panic!("expected session record");
-        };
-        session.agent_scope
-    }
-
     #[test]
-    fn released_v1_session_scope_preserves_primary_search_eligibility() {
-        assert_eq!(
-            session_scope(
-                br#"{"record_type":"session","source_id":"source-a","session_id":"primary","agent_type":"primary","is_primary":true,"started_at":"2026-07-28T12:00:00Z"}"#,
-            ),
-            Some(AgentScope::Primary)
-        );
-        assert_eq!(
-            session_scope(
-                br#"{"record_type":"session","source_id":"source-a","session_id":"primary-fallback","agent_type":"primary","started_at":"2026-07-28T12:00:00Z"}"#,
-            ),
-            Some(AgentScope::Primary)
-        );
-        assert_eq!(
-            session_scope(
-                br#"{"record_type":"session","source_id":"source-a","session_id":"reviewer","agent_type":"reviewer","started_at":"2026-07-28T12:00:00Z"}"#,
-            ),
-            Some(AgentScope::Subagent)
-        );
-        assert_eq!(
-            session_scope(
-                br#"{"record_type":"session","source_id":"source-a","session_id":"explicit-current","agent_type":"subagent","is_primary":false,"agent_scope":"primary","started_at":"2026-07-28T12:00:00Z"}"#,
-            ),
-            Some(AgentScope::Primary)
+    fn v2_session_requires_provider_session_id() {
+        let error = parse_record(
+            br#"{"record_type":"session","source_id":"source-a","started_at":"2026-07-28T12:00:00Z"}"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("missing field `provider_session_id`"),
+            "{error}"
         );
     }
 
     #[test]
-    fn malformed_v1_file_touch_diagnostic_names_the_released_shape() {
+    fn v1_file_touch_has_no_compatibility_parser() {
         let error = parse_record(
             br#"{"record_type":"file_touch","source_id":"source-a","session_id":"child","touch_index":0,"occurred_at":"2026-07-28T12:00:02Z"}"#,
         )
         .unwrap_err();
-
-        assert!(
-            error.contains("invalid ctx-history-jsonl-v1 file_touch record"),
-            "{error}"
-        );
-        assert!(error.contains("missing field `path`"), "{error}");
+        assert!(error.contains("unknown variant `file_touch`"), "{error}");
     }
 }

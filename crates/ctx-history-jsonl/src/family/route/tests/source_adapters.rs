@@ -414,6 +414,7 @@ pub(super) fn expected_state(
             opening_membership: Some(opening_membership),
             certified_inventory: Some(inventory.clone()),
             opening_inventory: Some(observed),
+            authenticated_source_observations: HashMap::new(),
         },
         inventory,
     )

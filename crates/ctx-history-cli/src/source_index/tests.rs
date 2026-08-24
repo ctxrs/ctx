@@ -343,6 +343,8 @@ fn search_reports_query_observation_before_output_failure() {
             provider_key: None,
             source_id: None,
             source_format: None,
+            source_roots: Vec::new(),
+            source_groups: Vec::new(),
             workspace: None,
             since: None,
             primary_only: false,
@@ -423,6 +425,8 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: None,
         since: None,
         primary_only: false,
@@ -515,6 +519,8 @@ fn content_scope_forwards_with_provider_workspace_since_file_agent_and_current_s
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: Some("/workspace/pinned".to_owned()),
         since: Some("30d".to_owned()),
         primary_only: false,
@@ -805,7 +811,7 @@ fn show_schema_v1_reads_complete_normalized_core_content() {
     write_test_generation(temp.path());
     let index = open_index(temp.path()).unwrap();
     let session = index
-        .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"))
+        .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"), None, None)
         .unwrap()
         .into_iter()
         .next()
@@ -1045,7 +1051,7 @@ fn show_provider_session_resolution_is_ambiguous_until_provider_qualified() {
     let index = open_index(temp.path()).unwrap();
 
     let matches = index
-        .sessions_by_provider_session_id(TEST_SESSION_ID, None)
+        .sessions_by_provider_session_id(TEST_SESSION_ID, None, None, None)
         .unwrap();
     assert_eq!(matches.len(), 2);
     let error = resolve_show_session(&index, None, Some(TEST_SESSION_ID), None).unwrap_err();
@@ -1055,7 +1061,9 @@ fn show_provider_session_resolution_is_ambiguous_until_provider_qualified() {
         assert!(detail.contains(&session.session_id.to_string()), "{detail}");
     }
     assert!(
-        detail.contains("pass --provider or a ctx session ID"),
+        detail.contains(
+            "pass --provider, --provider-key/--source-id for custom history, or a ctx session ID"
+        ),
         "{detail}"
     );
 

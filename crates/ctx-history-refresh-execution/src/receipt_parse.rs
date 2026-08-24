@@ -529,19 +529,19 @@ fn required_catalog_route_bindings(
             })?;
             let retained_witness = expected_catalog_lineages.contains(catalog_lineage)
                 && retained.contains(route_identity);
-            let cold_request_failure = !expected_catalog_lineages.contains(catalog_lineage)
+            let transient_request_failure = !expected_catalog_lineages.contains(catalog_lineage)
                 && route_results.iter().any(|result| {
                     result.route_identity == route_identity
                         && matches!(
                             result.outcome,
                             SourceBackedRefreshRouteOutcome::Failed {
-                                carried_forward: false,
+                                carried_forward,
                                 ..
-                            }
+                            } if carried_forward == retained.contains(route_identity)
                         )
                 });
-            if !retained_witness && !cold_request_failure {
-                bail!("published daemon source refresh catalog binding is neither a retained witness nor a cold request failure");
+            if !retained_witness && !transient_request_failure {
+                bail!("published daemon source refresh catalog binding is neither a retained witness nor a consistent request failure");
             }
             Ok(ExplicitSourceCatalogRouteBinding {
                 catalog_lineage: catalog_lineage.clone(),
@@ -589,14 +589,11 @@ fn required_catalog_route_bindings_shape(
             if !expected_catalog_lineages.contains(catalog_lineage)
                 && !matches!(
                     route_result.outcome,
-                    SourceBackedRefreshRouteOutcome::Failed {
-                        carried_forward: false,
-                        ..
-                    }
+                    SourceBackedRefreshRouteOutcome::Failed { .. }
                 )
             {
                 bail!(
-                    "published daemon source refresh unretained catalog binding has no terminal cold failure"
+                    "published daemon source refresh unretained catalog binding has no terminal failure"
                 );
             }
             Ok(ExplicitSourceCatalogRouteBinding {

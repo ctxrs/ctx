@@ -254,6 +254,20 @@ fn render_session_header(document: &mut Document, context: &RenderContext, value
     push_optional_field(
         document,
         context,
+        "Provider key",
+        value["provider_key"].as_str(),
+        Token::Accent,
+    );
+    push_optional_field(
+        document,
+        context,
+        "Source ID",
+        value["source_id"].as_str(),
+        Token::Accent,
+    );
+    push_optional_field(
+        document,
+        context,
         "Provider session",
         value["provider_session_id"].as_str(),
         Token::Reference,
@@ -299,6 +313,20 @@ fn render_event_header(document: &mut Document, context: &RenderContext, value: 
         context,
         "Provider",
         selected["provider"].as_str(),
+        Token::Accent,
+    );
+    push_optional_field(
+        document,
+        context,
+        "Provider key",
+        selected["provider_key"].as_str(),
+        Token::Accent,
+    );
+    push_optional_field(
+        document,
+        context,
+        "Source ID",
+        selected["source_id"].as_str(),
         Token::Accent,
     );
     push_optional_field(

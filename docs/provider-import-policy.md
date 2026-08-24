@@ -16,9 +16,9 @@ not a union of override, default, old channel, migration, and fallback roots.
 Within that selected root, import every bounded canonical history component
 whose format is supported. A recognized unsupported component may coexist with
 supported compatibility history and must not suppress it. Emit multiple roots
-only for finite current stores that genuinely coexist. An unreconstructible
-present replacement suppresses stale-default discovery and requires exact
-`--path`.
+only for finite current stores that genuinely coexist. Within automatic
+selection, an unreconstructible present replacement suppresses stale-default
+discovery and requires exact `--path`.
 
 One-shot flags, API paths, old working directories, copies, and host mounts are
 explicit-path inputs. An explicit path bypasses discovery precedence only; it
@@ -301,7 +301,7 @@ metadata-only runs, complete structured diff/output retention, and stable ctx
 citations with provider/session identity.
 
 Custom history importers and history-source plugins use the public
-`ctx-history-jsonl-v1` contract instead of a native provider storage family, but
+`ctx-history-jsonl-v2` contract instead of a native provider storage family, but
 they should follow the same content policy: complete accepted conversation and
 structured tool content is stored, meaningful text is indexed, and unsupported
 binary/provider-private material is explicitly omitted.

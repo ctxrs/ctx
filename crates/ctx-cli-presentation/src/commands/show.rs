@@ -33,6 +33,10 @@ pub struct ShowSessionArgs {
     pub provider: Option<ProviderArg>,
     #[arg(long = "provider-session")]
     pub provider_session: Option<String>,
+    #[arg(long, requires_all = ["source_id", "provider_session"])]
+    pub provider_key: Option<String>,
+    #[arg(long, requires_all = ["provider_key", "provider_session"])]
+    pub source_id: Option<String>,
     #[arg(long, value_enum, default_value_t = TranscriptMode::Lite)]
     pub mode: TranscriptMode,
     #[arg(long, help = "Return at most this many selected transcript events")]
@@ -84,6 +88,8 @@ pub fn run_show(
                 id: args.id,
                 provider: args.provider.map(history_provider),
                 provider_session: args.provider_session,
+                provider_key: args.provider_key,
+                source_id: args.source_id,
                 mode: match args.mode {
                     TranscriptMode::Full => ctx_history_cli::TranscriptMode::Full,
                     TranscriptMode::Lite => ctx_history_cli::TranscriptMode::Lite,

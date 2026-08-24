@@ -136,7 +136,7 @@ fn import_rejects_nonexistent_explicit_format_path() {
         .args([
             "import",
             "--input-format",
-            "ctx-history-jsonl-v1",
+            "ctx-history-jsonl-v2",
             "--path",
             path,
         ])

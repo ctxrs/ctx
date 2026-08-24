@@ -173,29 +173,35 @@ pub(super) fn finish_projection(
         }
 
         for reference in catalog.file_references.drain(..) {
-            let session_key = (reference.source_id.clone(), reference.session_id.clone());
+            let session_key = (
+                reference.source_id.clone(),
+                reference.provider_session_id.clone(),
+            );
             let error = if !catalog.sessions.contains_key(&session_key) {
                 Some(format!(
-                    "file_reference references unknown session `{}` in source `{}`",
-                    reference.session_id, reference.source_id
+                    "file_reference references unknown provider_session_id `{}` in source `{}`",
+                    reference.provider_session_id, reference.source_id
                 ))
-            } else if let Some(event_index) = reference.event_index {
+            } else {
+                let event_index = reference.event_index;
                 let event_key = (
                     reference.source_id.clone(),
-                    reference.session_id.clone(),
+                    reference.provider_session_id.clone(),
                     event_index,
                 );
                 (!catalog.events.contains_key(&event_key)).then(|| {
                     format!("file_reference references unknown event_index `{event_index}`")
                 })
-            } else {
-                Some("file_reference requires event_index for neutral Core activity".to_owned())
             };
             if let Some(error) = error {
                 push_provider_import_failure(&mut catalog.summary, reference.line_number, error);
-            } else if let Some(event_index) = reference.event_index {
+            } else {
                 file_references
-                    .entry((reference.source_id, reference.session_id, event_index))
+                    .entry((
+                        reference.source_id,
+                        reference.provider_session_id,
+                        reference.event_index,
+                    ))
                     .or_default()
                     .push(ProviderDeclaredFact {
                         kind: ctx_history_core::LiteralFactKind::File,
@@ -225,25 +231,31 @@ pub(super) fn finish_projection(
         }
 
         for edge in catalog.edges.drain(..) {
-            let from_key = (edge.source_id.clone(), edge.from_session_id.clone());
-            let to_key = (edge.source_id.clone(), edge.to_session_id.clone());
+            let from_key = (
+                edge.source_id.clone(),
+                edge.from_provider_session_id.clone(),
+            );
+            let to_key = (edge.source_id.clone(), edge.to_provider_session_id.clone());
             let error = if !catalog.sessions.contains_key(&from_key) {
                 Some(format!(
-                    "edge references unknown from_session_id `{}`",
-                    edge.from_session_id
+                    "edge references unknown from_provider_session_id `{}`",
+                    edge.from_provider_session_id
                 ))
             } else if !catalog.sessions.contains_key(&to_key) {
                 Some(format!(
-                    "edge references unknown to_session_id `{}`",
-                    edge.to_session_id
+                    "edge references unknown to_provider_session_id `{}`",
+                    edge.to_provider_session_id
                 ))
             } else if edge.relationship.is_some() {
                 catalog.sessions.get(&to_key).and_then(|child| {
-                    child.parent_session_id.as_ref().and_then(|parent| {
-                        (parent != &edge.from_session_id).then(|| {
+                    child
+                        .parent_provider_session_id
+                        .as_ref()
+                        .and_then(|parent| {
+                            (parent != &edge.from_provider_session_id).then(|| {
                             format!(
-                                "edge from_session_id `{}` conflicts with session parent_session_id `{parent}`",
-                                edge.from_session_id
+                                "edge from_provider_session_id `{}` conflicts with session parent_provider_session_id `{parent}`",
+                                edge.from_provider_session_id
                             )
                         })
                     })
@@ -255,7 +267,7 @@ pub(super) fn finish_projection(
                 push_provider_import_failure(&mut catalog.summary, edge.line_number, error);
             } else if let Some(relationship) = edge.relationship {
                 if let Some(child) = catalog.sessions.get_mut(&to_key) {
-                    child.parent_session_id = Some(edge.from_session_id.clone());
+                    child.parent_provider_session_id = Some(edge.from_provider_session_id.clone());
                     child.session_relationship = Some(relationship);
                 }
             }
@@ -393,30 +405,32 @@ fn apply_session_lineage_contract(catalog: &mut ProjectionCatalog) {
         };
         let valid = match kind {
             ProviderNativeSessionRelationship::Root => {
-                session.parent_session_id.is_none()
+                session.parent_provider_session_id.is_none()
                     && session
-                        .root_session_id
+                        .root_provider_session_id
                         .as_deref()
-                        .is_none_or(|root| root == session.session_id)
+                        .is_none_or(|root| root == session.provider_session_id)
             }
             ProviderNativeSessionRelationship::Delegated
             | ProviderNativeSessionRelationship::Forked
             | ProviderNativeSessionRelationship::ResumedFrom
-            | ProviderNativeSessionRelationship::WorkflowChild => {
-                session.parent_session_id.as_deref().is_some_and(|parent| {
-                    parent != session.session_id
+            | ProviderNativeSessionRelationship::WorkflowChild => session
+                .parent_provider_session_id
+                .as_deref()
+                .is_some_and(|parent| {
+                    parent != session.provider_session_id
                         && session
-                            .root_session_id
+                            .root_provider_session_id
                             .as_deref()
-                            .is_none_or(|root| root == parent)
-                })
-            }
+                            .is_none_or(|root| root != session.provider_session_id)
+                }),
         };
         if !valid {
             push_provider_import_failure(
                 &mut catalog.summary,
                 session.line_number,
-                "session_relationship conflicts with parent_session_id/root_session_id".to_owned(),
+                "session_relationship conflicts with parent_provider_session_id/root_provider_session_id"
+                    .to_owned(),
             );
             session.session_relationship = None;
         }
@@ -431,22 +445,6 @@ fn validate_copied_origins(
 ) -> BTreeMap<CustomEventKey, ValidatedCopiedFrom> {
     if lineage_contract.is_none() {
         return BTreeMap::new();
-    }
-
-    let mut native_sessions = BTreeMap::<(String, String), Option<String>>::new();
-    for session in sessions.values() {
-        let Some(native_session_id) = session.native_session_id.as_ref() else {
-            continue;
-        };
-        if !stable_lineage_identifier(native_session_id) {
-            continue;
-        }
-        let entry = native_sessions
-            .entry((session.source_id.clone(), native_session_id.clone()))
-            .or_insert_with(|| Some(session.session_id.clone()));
-        if entry.as_deref() != Some(&session.session_id) {
-            *entry = None;
-        }
     }
 
     let mut native_events = BTreeMap::<(String, String, String), Option<(u64, usize)>>::new();
@@ -470,32 +468,26 @@ fn validate_copied_origins(
         let Some(selector) = event.copied_from.as_ref() else {
             continue;
         };
-        if !stable_lineage_identifier(&selector.ancestor_native_session_id)
+        if !stable_lineage_identifier(&selector.ancestor_provider_session_id)
             || !stable_lineage_identifier(&selector.ancestor_event_id)
         {
             push_provider_import_failure(
                 summary,
                 event.line_number,
-                "copied_from native selectors must be non-empty bounded identifiers".to_owned(),
+                "copied_from provider session and native event selectors must be non-empty bounded identifiers"
+                    .to_owned(),
             );
             continue;
         }
         let child_session_key = (key.0.clone(), key.1.clone());
         let child_session = sessions.get(&child_session_key);
-        let child_native_session_is_exact = child_session
-            .and_then(|session| session.native_session_id.as_ref())
-            .and_then(|native_session_id| {
-                native_sessions.get(&(key.0.clone(), native_session_id.clone()))
-            })
-            .and_then(Option::as_deref)
-            == Some(key.1.as_str());
         let child_event_is_exact = event.event_id.as_ref().is_some_and(|event_id| {
             native_events
                 .get(&(key.0.clone(), key.1.clone(), event_id.clone()))
                 .and_then(|entry| *entry)
                 .is_some_and(|(event_index, _)| event_index == key.2)
         });
-        let direct_parent_session_id = child_session.and_then(|session| {
+        let has_typed_ancestor_claim = child_session.is_some_and(|session| {
             matches!(
                 session.session_relationship,
                 Some(
@@ -504,9 +496,7 @@ fn validate_copied_origins(
                         | ProviderNativeSessionRelationship::ResumedFrom
                         | ProviderNativeSessionRelationship::WorkflowChild
                 )
-            )
-            .then_some(session.parent_session_id.as_deref())
-            .flatten()
+            ) && selector.ancestor_provider_session_id != session.provider_session_id
         });
         let proof_identity_is_exact = !matches!(
             selector.proof,
@@ -514,15 +504,11 @@ fn validate_copied_origins(
         ) || event.event_id.as_deref()
             == Some(selector.ancestor_event_id.as_str());
 
-        if !child_native_session_is_exact
-            || !child_event_is_exact
-            || direct_parent_session_id.is_none()
-            || !proof_identity_is_exact
-        {
+        if !child_event_is_exact || !has_typed_ancestor_claim || !proof_identity_is_exact {
             push_provider_import_failure(
                 summary,
                 event.line_number,
-                "copied_from requires unique stable child native session/event IDs, a direct typed parent relationship, and proof-consistent identity"
+                "copied_from requires a unique stable child event ID, a distinct provider-declared ancestor under a typed non-root relationship, and proof-consistent identity"
                     .to_owned(),
             );
             continue;
@@ -531,9 +517,6 @@ fn validate_copied_origins(
         // Derive the durable unresolved IDs from them without consulting the
         // mutable target catalog; target presence is resolution state, not
         // claim validity.
-        let Some(ancestor_session_id) = direct_parent_session_id else {
-            continue;
-        };
         let proof = match selector.proof {
             CtxHistoryJsonlCopyProofKind::NativeEventIdentity => {
                 ProviderNativeCopyProof::NativeEventIdentity
@@ -548,7 +531,7 @@ fn validate_copied_origins(
         admitted.insert(
             key.clone(),
             ValidatedCopiedFrom {
-                ancestor_session_id: ancestor_session_id.to_owned(),
+                ancestor_provider_session_id: selector.ancestor_provider_session_id.clone(),
                 ancestor_event_id: selector.ancestor_event_id.clone(),
                 proof,
             },

@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 impl GenerationManifest {
     #[cfg(any(test, feature = "test-support"))]
@@ -18,9 +19,27 @@ impl GenerationManifest {
     }
 
     pub fn from_parts_with_record_aggregates(
+        sources: Vec<CertifiedSource>,
+        core_record_aggregates: Vec<SourceCoreRecordAggregate>,
+        source_routes: Vec<SourceRouteSnapshot>,
+    ) -> Result<Self> {
+        Self::from_parts_with_record_aggregates_and_provider_roots(
+            sources,
+            core_record_aggregates,
+            source_routes,
+            true,
+            provider_source_config_digest(true, &[]),
+            Vec::new(),
+        )
+    }
+
+    pub fn from_parts_with_record_aggregates_and_provider_roots(
         mut sources: Vec<CertifiedSource>,
         mut core_record_aggregates: Vec<SourceCoreRecordAggregate>,
         mut source_routes: Vec<SourceRouteSnapshot>,
+        automatic_provider_discovery: bool,
+        provider_root_config_digest: String,
+        mut provider_roots: Vec<AppliedProviderRoot>,
     ) -> Result<Self> {
         sources.sort_by(|left, right| {
             source_sort_key(left.observation().source())
@@ -33,6 +52,25 @@ impl GenerationManifest {
             return Err(IndexError::NonCanonicalManifestSources);
         }
         source_routes.sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
+        let retained_route_ids = source_routes
+            .iter()
+            .map(|route| route.route_identity().clone())
+            .collect::<BTreeSet<_>>();
+        provider_roots = provider_roots
+            .into_iter()
+            .map(|root| {
+                AppliedProviderRoot::with_source_identity(
+                    root.definition().clone(),
+                    root.source_identity(),
+                    root.routes()
+                        .iter()
+                        .filter(|route| retained_route_ids.contains(*route))
+                        .cloned()
+                        .collect(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        provider_roots.sort_by(|left, right| left.definition.id.cmp(&right.definition.id));
         core_record_aggregates.sort_by(|left, right| {
             left.source_identity_digest
                 .cmp(&right.source_identity_digest)
@@ -60,6 +98,9 @@ impl GenerationManifest {
             sources,
             core_record_aggregates,
             source_routes,
+            automatic_provider_discovery,
+            provider_root_config_digest,
+            provider_roots,
         };
         manifest.validate_contract()?;
         Ok(manifest)
@@ -90,6 +131,9 @@ impl GenerationManifest {
                 .iter()
                 .zip(&other.source_routes)
                 .all(|(left, right)| left.exact_snapshot_eq(right))
+            && self.automatic_provider_discovery == other.automatic_provider_discovery
+            && self.provider_root_config_digest == other.provider_root_config_digest
+            && self.provider_roots == other.provider_roots
     }
 
     pub(crate) fn apply_validated_source_replacements(
@@ -155,6 +199,9 @@ impl GenerationManifest {
             sources,
             core_record_aggregates: aggregates,
             source_routes: self.source_routes.clone(),
+            automatic_provider_discovery: self.automatic_provider_discovery,
+            provider_root_config_digest: self.provider_root_config_digest.clone(),
+            provider_roots: self.provider_roots.clone(),
         })
     }
 
@@ -172,6 +219,65 @@ impl GenerationManifest {
             .and_then(|index| self.source_routes.get(index))
     }
 
+    pub fn provider_root_config_digest(&self) -> &str {
+        &self.provider_root_config_digest
+    }
+
+    pub const fn automatic_provider_discovery(&self) -> bool {
+        self.automatic_provider_discovery
+    }
+
+    pub fn provider_roots(&self) -> &[AppliedProviderRoot] {
+        &self.provider_roots
+    }
+
+    pub fn provider_root(&self, id: &str) -> Option<&AppliedProviderRoot> {
+        self.provider_roots
+            .binary_search_by(|candidate| candidate.definition.id.as_str().cmp(id))
+            .ok()
+            .and_then(|index| self.provider_roots.get(index))
+    }
+
+    /// Resolves user-facing root/group aliases only through this immutable
+    /// generation. Root and group selectors form one union; all other search
+    /// filters remain independent intersections.
+    pub fn provider_root_source_tokens(
+        &self,
+        root_ids: &[String],
+        source_groups: &[String],
+    ) -> Result<Vec<String>> {
+        if let Some(unknown) = root_ids.iter().find(|id| self.provider_root(id).is_none()) {
+            return Err(IndexError::UnknownProviderRootSelector(unknown.clone()));
+        }
+        if let Some(unknown) = source_groups.iter().find(|group| {
+            !self
+                .provider_roots
+                .iter()
+                .any(|root| root.definition.group.as_ref() == Some(*group))
+        }) {
+            return Err(IndexError::UnknownProviderRootGroup(unknown.clone()));
+        }
+        let mut tokens = self
+            .provider_roots
+            .iter()
+            .filter(|root| {
+                root_ids.iter().any(|id| id == &root.definition.id)
+                    || root
+                        .definition
+                        .group
+                        .as_ref()
+                        .is_some_and(|group| source_groups.contains(group))
+            })
+            .flat_map(|root| root.routes.iter())
+            .filter_map(|route| self.source_route(route))
+            .flat_map(SourceRouteSnapshot::sources)
+            .map(source_token)
+            .collect::<Vec<_>>();
+        tokens.sort();
+        tokens.dedup();
+        Ok(tokens)
+    }
+
     pub(crate) fn validate_contract(&self) -> Result<()> {
         if self.sources.windows(2).any(|pair| {
             source_sort_key(pair[0].observation().source())
@@ -185,6 +291,51 @@ impl GenerationManifest {
             .any(|pair| pair[0].route_identity() >= pair[1].route_identity())
         {
             return Err(IndexError::NonCanonicalSourceRoutes);
+        }
+        if !is_sha256_hex(&self.provider_root_config_digest) {
+            return Err(IndexError::InvalidProviderRootConfigDigest);
+        }
+        if self.provider_roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS
+            || self
+                .provider_roots
+                .windows(2)
+                .any(|pair| pair[0].definition.id >= pair[1].definition.id)
+        {
+            return Err(IndexError::InvalidProviderRoots(
+                "root definitions are not bounded, strictly sorted, and unique".to_owned(),
+            ));
+        }
+        let definitions = self
+            .provider_roots
+            .iter()
+            .map(|root| root.definition.clone())
+            .collect::<Vec<_>>();
+        if provider_source_config_digest(self.automatic_provider_discovery, &definitions)
+            != self.provider_root_config_digest
+        {
+            return Err(IndexError::InvalidProviderRootConfigDigest);
+        }
+        let mut provider_owned_routes = Vec::new();
+        for root in &self.provider_roots {
+            root.validate_contract()?;
+            for route_id in root.routes() {
+                if self.source_route(route_id).is_none() {
+                    return Err(IndexError::ProviderRootRouteNotRetained {
+                        root_id: root.definition.id.clone(),
+                        route_id: route_id.as_str().to_owned(),
+                    });
+                }
+                provider_owned_routes.push(route_id.clone());
+            }
+        }
+        provider_owned_routes.sort();
+        if let Some(duplicate) = provider_owned_routes
+            .windows(2)
+            .find(|pair| pair[0] == pair[1])
+        {
+            return Err(IndexError::SourceRouteOwnedByMultipleProviderRoots {
+                route_id: duplicate[0].as_str().to_owned(),
+            });
         }
         if self
             .core_record_aggregates

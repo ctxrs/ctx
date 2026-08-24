@@ -39,6 +39,18 @@ fn registry_policy_unsupported_warp_source(path: PathBuf) -> ProviderSource {
     source
 }
 
+fn registry_policy_unsupported_codex_source(path: PathBuf) -> ProviderSource {
+    let mut source = registry_policy_source(
+        CaptureProvider::Codex,
+        path,
+        "codex_session_jsonl_tree",
+        true,
+    );
+    source.status = ProviderSourceStatus::Unsupported;
+    source.unsupported_reason = Some("fixture alternate Codex root is intentionally unsupported");
+    source
+}
+
 fn registry_policy_nanoclaw_source(path: PathBuf) -> ProviderSource {
     registry_policy_source(CaptureProvider::NanoClaw, path, "nanoclaw_project", true)
 }
@@ -396,6 +408,44 @@ fn mixed_codex_and_unsupported_warp_routes_continue_with_typed_evidence() {
             .len(),
         1
     );
+}
+
+#[test]
+fn successful_discovered_winner_owns_a_colliding_unusable_candidate_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, discovery) = discovery_fixture(temp.path());
+    let codex_root = temp.path().join("codex-sessions");
+    let unsupported_codex_root = temp.path().join("unsupported-codex-sessions");
+    write_registry_policy_codex_rollout(&codex_root);
+    std::fs::create_dir_all(&unsupported_codex_root).unwrap();
+    let codex_source = provider_source_for_path(CaptureProvider::Codex, codex_root);
+    let unsupported_codex_source = registry_policy_unsupported_codex_source(unsupported_codex_root);
+    assert_eq!(
+        automatic_source_backed_route_identity(&codex_source).unwrap(),
+        automatic_source_backed_route_identity(&unsupported_codex_source).unwrap(),
+    );
+
+    let publication = run_report(
+        &discovery,
+        DiscoveryReport {
+            sources: vec![codex_source, unsupported_codex_source],
+            issues: Vec::new(),
+        },
+        &data_root,
+        &index_root,
+    )
+    .unwrap();
+
+    assert_eq!(publication.route_results.len(), 1);
+    assert!(publication.route_results[0].outcome.is_success());
+    assert!(publication.route_results[0].source_failures.is_empty());
+    // The losing candidate remains counted as unsupported inventory without
+    // becoming a second terminal outcome for the successful logical route.
+    assert_eq!(publication.unsupported_routes, 1);
+    assert_eq!(publication.certified_source_count, 1);
 }
 
 #[test]

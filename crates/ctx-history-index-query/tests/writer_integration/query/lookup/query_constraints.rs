@@ -71,6 +71,50 @@ fn custom_source_filters_use_the_core_native_event_identity() {
 }
 
 #[test]
+fn allowed_source_keys_select_exact_physical_sources_in_one_index() {
+    let temp = tempdir().unwrap();
+    let personal = source("personal-root.jsonl");
+    let work = source("work-root.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (sequence, source) in [(1, &personal), (2, &work)] {
+        writer.begin_source(source.clone()).unwrap();
+        writer
+            .add_core_record(document(source, sequence, "shared root needle"))
+            .unwrap();
+        writer
+            .certify_source(certificate(source, sequence as u8, 1))
+            .unwrap();
+    }
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let personal_only = EventSearchFilters {
+        allowed_source_keys: Some(vec![source_token(&personal)]),
+        ..EventSearchFilters::default()
+    };
+    let hits = index
+        .search_event_candidates_with_filters("needle", &personal_only, 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].event.source.exact_descriptor_eq(&personal));
+
+    let none = index
+        .search_event_candidates_with_filters(
+            "needle",
+            &EventSearchFilters {
+                allowed_source_keys: Some(Vec::new()),
+                ..EventSearchFilters::default()
+            },
+            10,
+        )
+        .unwrap();
+    assert!(none.is_empty());
+}
+
+#[test]
 fn bounded_core_event_batch_stops_after_one_large_record_exceeds_byte_budget() {
     let temp = tempdir().unwrap();
     let source = source("large-bounded-event-batch.jsonl");

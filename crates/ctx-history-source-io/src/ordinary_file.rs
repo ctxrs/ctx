@@ -475,6 +475,56 @@ mod tests {
         assert_eq!(identity.change(), <[u8; 32]>::from(change.finalize()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn shared_jsonl_v1_identity_treats_hardlink_churn_as_change_only() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("source.jsonl");
+        let link = temp.path().join("temporary-link.jsonl");
+        std::fs::write(&path, b"content\n").unwrap();
+        let file = File::open(&path).unwrap();
+        let before_metadata = file.metadata().unwrap();
+        let before = retained_jsonl_file_identity_v1(&path, &file, &before_metadata)
+            .unwrap()
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(2));
+        std::fs::hard_link(&path, &link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+
+        let after_metadata = file.metadata().unwrap();
+        let after = retained_jsonl_file_identity_v1(&path, &file, &after_metadata)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before_metadata.len(), after_metadata.len());
+        assert_eq!(
+            before_metadata.modified().unwrap(),
+            after_metadata.modified().unwrap()
+        );
+        assert_eq!(before.stable(), after.stable());
+        assert_ne!(before.change(), after.change());
+    }
+
+    #[cfg(any(unix, target_os = "windows"))]
+    #[test]
+    fn shared_jsonl_v1_identity_is_repeatable_for_the_same_opened_object() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let path = temp.path().join("source.jsonl");
+        std::fs::write(&path, b"content\n").unwrap();
+        let file = File::open(&path).unwrap();
+        let metadata = file.metadata().unwrap();
+
+        let first = retained_jsonl_file_identity_v1(&path, &file, &metadata)
+            .unwrap()
+            .unwrap();
+        let second = retained_jsonl_file_identity_v1(&path, &file, &file.metadata().unwrap())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.stable(), second.stable());
+        assert_eq!(first.change(), second.change());
+    }
+
     #[test]
     fn observation_token_is_derived_from_the_opened_object_stamp() {
         let temp = crate::test_support_paths::tempdir().unwrap();

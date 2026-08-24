@@ -19,13 +19,15 @@ mod verification;
 mod verification_record;
 
 pub use contracts::{
-    CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount, GenerationManifest,
-    IndexError, Result, SourceCoreRecordAggregate, SourceMissingObservationPoint,
-    SourceRouteMissingState, SourceRouteSnapshot, GENERATION_MANIFEST_VERSION,
-    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
-    MAX_PUBLICATION_METADATA_BYTES,
+    AppliedProviderRoot, CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount,
+    GenerationManifest, IndexError, Result, SourceCoreRecordAggregate,
+    SourceMissingObservationPoint, SourceRouteMissingState, SourceRouteSnapshot,
+    GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION,
+    LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_PUBLICATION_METADATA_BYTES,
 };
-pub use ctx_history_capture_model::SourceRouteIdentity;
+pub use ctx_history_capture_model::{
+    ProviderRootDefinition, ProviderRootSourceIdentity, SourceRouteIdentity,
+};
 #[doc(hidden)]
 pub use policy::is_semantic_candidate;
 pub use policy::{
@@ -53,6 +55,8 @@ pub use core_contract::{
     current_core_record_contract_fingerprint, expected_source_generation_policy_hash,
     validate_core_contract_fingerprint,
 };
+#[doc(hidden)]
+pub use ctx_history_capture_model::provider_source_config_digest;
 #[doc(hidden)]
 pub use index_document::{
     core_content_bytes, EventRangeOrderKey, IndexDocument, SemanticEventOrderKey,

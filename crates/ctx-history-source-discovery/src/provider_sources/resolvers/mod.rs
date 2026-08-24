@@ -1,12 +1,10 @@
 use std::{
-    collections::HashSet,
+    fs,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
 
-#[cfg(test)]
-use std::fs;
-
+use ctx_history_capture_model::{ProviderRootDefinition, ProviderSource};
 use ctx_history_core::CaptureProvider;
 
 use super::{
@@ -22,8 +20,8 @@ use super::{
     },
     types::{
         DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,
-        ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-        ProviderSourceSpec, ProviderSourceStatus,
+        ProviderDefaultLocation, ProviderImportSupport, ProviderSourceKind, ProviderSourceSpec,
+        ProviderSourceStatus,
     },
     StaticProviderProbeCatalog,
 };
@@ -43,6 +41,7 @@ pub use config_project::{
 };
 pub(super) use platform::{resolve_lingma_with_authority, resolve_warp_with_authority};
 pub use profile_project::resolve_openhands_conversations_root;
+pub use simple::released_provider_home;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResolverGroup {
@@ -79,6 +78,43 @@ pub fn path_presence(path: &Path) -> PathPresence {
         Err(SourcePathError::Missing) => PathPresence::Missing,
         Err(SourcePathError::Unsupported) => PathPresence::Unsupported,
         Err(SourcePathError::Unavailable(kind)) => PathPresence::Unknown(kind),
+    }
+}
+
+/// Returns whether two existing provider paths name the same physical object.
+///
+/// Canonical comparison handles symlink and platform namespace aliases. Native
+/// file identity additionally collapses bind-mount and case spellings that
+/// canonical paths alone may not recognize.
+pub fn provider_paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if fs::canonicalize(left)
+        .ok()
+        .zip(fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
+    {
+        return true;
+    }
+    same_file::is_same_file(left, right).unwrap_or(false)
+}
+
+pub fn provider_source_belongs_to_configured_root(
+    root: &ProviderRootDefinition,
+    source: &ProviderSource,
+) -> bool {
+    if source.provider != root.provider {
+        return false;
+    }
+    match root.provider {
+        CaptureProvider::Claude => {
+            provider_paths_equivalent(&source.path, &root.path.join("projects"))
+        }
+        CaptureProvider::Codex => ["history.jsonl", "sessions", "archived_sessions"]
+            .into_iter()
+            .any(|child| provider_paths_equivalent(&source.path, &root.path.join(child))),
+        _ => false,
     }
 }
 
@@ -149,6 +185,13 @@ pub(super) fn resolve(
     context: &DiscoveryContext,
     spec: &ProviderSourceSpec,
 ) -> DiscoveryReport {
+    let has_configured_roots = context
+        .configured_provider_roots()
+        .iter()
+        .any(|root| root.provider == spec.provider);
+    if !context.automatic_provider_inference_enabled() && !has_configured_roots {
+        return DiscoveryReport::default();
+    }
     match resolver_group(spec.provider) {
         Some(ResolverGroup::Simple) => simple::resolve(probes, context, spec),
         Some(ResolverGroup::Platform) => platform::resolve(probes, context, spec),
@@ -338,17 +381,19 @@ pub(super) fn unsupported_source(
 }
 
 pub(super) fn dedupe_report(mut report: DiscoveryReport) -> DiscoveryReport {
-    let mut seen = HashSet::new();
+    let mut seen = Vec::<(CaptureProvider, &'static str, PathBuf)>::new();
     report.sources.retain(|source| {
-        let path = comparison_path(&source.path).unwrap_or_else(|| source.path.clone());
-        seen.insert((source.provider, path, source.source_format))
+        if seen.iter().any(|(provider, source_format, path)| {
+            *provider == source.provider
+                && *source_format == source.source_format
+                && provider_paths_equivalent(path, &source.path)
+        }) {
+            return false;
+        }
+        seen.push((source.provider, source.source_format, source.path.clone()));
+        true
     });
     report
-}
-
-fn comparison_path(path: &Path) -> Option<PathBuf> {
-    source_path_kind(path).ok()?;
-    Some(path.to_path_buf())
 }
 
 #[cfg(test)]
