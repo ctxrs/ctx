@@ -52,8 +52,8 @@ use catalog_witness::reconcile_published_catalog_witness;
 use observation::{admitted_route_observations, run_after_capture_scan_before_metadata_hook};
 use registry_issues::{
     automatic_registry_admission_failures, automatic_registry_route_less_blockers,
-    selected_registry_route_count, AutomaticRegistryAdmissionFailurePolicy,
-    RouteLessRegistryBlockers,
+    selected_registry_route_count, terminal_registry_route_failures,
+    AutomaticRegistryAdmissionFailurePolicy, RouteLessRegistryBlockers,
 };
 type SourceBackedRefreshOperation = RefreshOperation;
 

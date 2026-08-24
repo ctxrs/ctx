@@ -509,7 +509,11 @@ def main() -> None:
     }
     for path in tracked_text_files(root, excluded):
         relative = path.relative_to(root)
-        is_test = "tests" in relative.parts or relative.name.endswith("_tests.rs")
+        is_test = (
+            "tests" in relative.parts
+            or relative.name.endswith("_tests.rs")
+            or relative.name.startswith("test-")
+        )
         if is_test:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")

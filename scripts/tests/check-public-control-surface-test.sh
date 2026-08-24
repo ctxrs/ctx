@@ -31,6 +31,7 @@ cp "${repo_root}/crates/ctx-upgrade-engine/tests/contracts/upgrade.rs" \
   "${fixture}/crates/ctx-upgrade-engine/tests/contracts/"
 cp "${repo_root}/scripts/smoke-daemon-semantic-release.ps1" "${fixture}/scripts/"
 cp "${repo_root}/scripts/smoke-daemon-semantic-release.sh" "${fixture}/scripts/"
+cp "${repo_root}/scripts/test-windows-legacy-daemon-takeover.ps1" "${fixture}/scripts/"
 cp "${repo_root}/docs/storage.md" "${fixture}/docs/"
 
 python3 "${checker}" "${fixture}" > "${tmp}/pass.out"

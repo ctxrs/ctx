@@ -498,14 +498,16 @@ fn refresh_all_provider_sources_route_local_with_reconciliation(
     {
         return Err(registration_failures.into());
     }
-    let registry_failures = if matches!(scope, SourceBackedRefreshScope::All) {
+    let registry_route_failures = if matches!(scope, SourceBackedRefreshScope::All) {
         reject_blocking_automatic_registry_issues(&build.issues)?;
         automatic_registry_route_failures(&build.issues, retained_generation.as_ref())?
     } else {
         Vec::new()
     };
     let route_less_blockers =
-        automatic_registry_route_less_blockers(&build.issues, &registry_failures);
+        automatic_registry_route_less_blockers(&build.issues, &registry_route_failures);
+    let registry_failures =
+        terminal_registry_route_failures(registry_route_failures, &build.registry, &physical_scope);
     let previous_nonempty_routes = retained_generation
         .as_ref()
         .map(|generation| {

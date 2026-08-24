@@ -133,7 +133,7 @@ impl RetainedProcessImage {
         if renamed {
             verify_adjacent_rename(&observed_path, expected_executable)?;
             let current = WindowsProcess::open(process::id(), WindowsProcessAccess::Observe)?
-                .ok_or_else(|| anyhow!("current ctx uninstall candidate is not running"))?;
+                .ok_or_else(|| anyhow!("current ctx candidate is not running"))?;
             verify_exact_process_path(&current, expected_executable)
                 .context("bind installed ctx.exe to the current uninstall candidate")?;
         }
@@ -166,7 +166,7 @@ impl RetainedProcessImage {
         if self.renamed {
             verify_adjacent_rename(&self.observed_path, expected_executable)?;
             let current = WindowsProcess::open(process::id(), WindowsProcessAccess::Observe)?
-                .ok_or_else(|| anyhow!("current ctx uninstall candidate is not running"))?;
+                .ok_or_else(|| anyhow!("current ctx candidate is not running"))?;
             verify_exact_process_path(&current, expected_executable)
                 .context("recheck installed ctx.exe current-self identity")?;
         } else if !same_windows_path(&self.observed_path, expected_executable) {
