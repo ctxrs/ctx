@@ -204,6 +204,44 @@ fn canonical_inventory_rejects_two_dispositions_for_one_physical_leaf() {
 }
 
 #[test]
+fn canonical_inventory_rejects_duplicate_logical_sources_before_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("first.jsonl");
+    let second_path = temp.path().join("second.jsonl");
+    fs::write(&first_path, TEST_RECORD).unwrap();
+    fs::write(&second_path, TEST_RECORD).unwrap();
+    let discovered = TestAdapter.discover(temp.path()).unwrap();
+    let first = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == first_path)
+        .unwrap()
+        .clone();
+    let second = JsonlFamilyLeaf::observe(
+        first.source().clone(),
+        second_path,
+        Arc::clone(first.authority()),
+        PathBuf::from("second.jsonl"),
+        TypedKey::utf8("second-binding").unwrap(),
+    )
+    .unwrap();
+
+    let error = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![first, second],
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("duplicate logical source identity"));
+    assert!(!error
+        .to_string()
+        .contains("source replacement has already started"));
+}
+
+#[test]
 fn nonzero_incomplete_first_record_is_pending_before_provider_projection() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");

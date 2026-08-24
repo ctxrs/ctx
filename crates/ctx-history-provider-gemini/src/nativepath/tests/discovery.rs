@@ -236,7 +236,7 @@ fn gemini_nativepath_completed_empty_inventory_is_an_explicit_zero_source_signal
 }
 
 #[test]
-fn gemini_nativepath_preserves_nested_parent_identity_without_a_header_event() {
+fn gemini_nativepath_preserves_nested_parent_hint_without_inventing_a_parent_recording() {
     let temp = TempDir::new().unwrap();
     let root = fixture_root(&temp);
     let path = root.join("tmp/project/chats/root-session/child-session.jsonl");
@@ -261,6 +261,15 @@ fn gemini_nativepath_preserves_nested_parent_identity_without_a_header_event() {
     let session = outcome.checkpoint.session.unwrap();
     assert_eq!(session.native_session_id, "child-session");
     assert_eq!(
+        session.native_start_time.as_deref(),
+        Some("2026-01-01T00:00:00.000Z")
+    );
+    assert_eq!(
+        session.project_hash.as_deref(),
+        Some("synthetic-project-hash")
+    );
+    assert_eq!(session.native_kind.as_deref(), Some("subagent"));
+    assert_eq!(
         session.parent_native_session_id.as_deref(),
         Some("root-session")
     );
@@ -270,10 +279,8 @@ fn gemini_nativepath_preserves_nested_parent_identity_without_a_header_event() {
     assert_eq!(outcome.metrics.header_records, 1);
     let records = project_gemini_test_events(&source, rows).unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(
-        records[0].session_relationship,
-        Some(ProviderNativeSessionRelationship::Delegated)
-    );
+    assert_eq!(records[0].parent_session_id, None);
+    assert_eq!(records[0].session_relationship, None);
     assert_eq!(records[0].agent_scope, Some(AgentScope::Subagent));
     assert_eq!(records[0].content.meaningful_text(), "child request");
     assert_eq!(

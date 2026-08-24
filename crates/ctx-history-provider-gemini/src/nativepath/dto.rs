@@ -10,7 +10,7 @@ use crate::io::ProviderSourceRoot;
 use crate::GeminiError;
 
 #[cfg(test)]
-pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 8;
+pub(crate) const GEMINI_NATIVEPATH_PARSER_REVISION: u32 = 9;
 #[cfg(test)]
 pub(crate) const GEMINI_NATIVEPATH_POLICY_REVISION: u32 = 5;
 
@@ -66,6 +66,8 @@ pub(crate) struct GeminiDiscovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GeminiSession {
     pub(crate) native_session_id: String,
+    pub(crate) native_start_time: Option<String>,
+    pub(crate) project_hash: Option<String>,
     pub(crate) parent_native_session_id: Option<String>,
     pub(crate) agent_scope: AgentScope,
     pub(crate) started_at: Option<DateTime<Utc>>,

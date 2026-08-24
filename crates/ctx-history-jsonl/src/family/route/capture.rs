@@ -498,11 +498,22 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     let mut absent_sources = Vec::new();
     for base in &bases {
         if !inventory.contains(base.observation().source()) {
-            if let Some(absent) = JsonlFamilyAbsentMember::from_path(
+            let base_path = adapter
+                .base_source_path(base)
+                .map_err(|error| route_scan(adapter, error))?;
+            // An identity/parser migration may retire one descriptor while a
+            // newly certified descriptor owns the same admitted path. Its
+            // terminal source proof and the complete inventory are the fence;
+            // requiring pathname absence would incorrectly reject the atomic
+            // replacement. Truly unrepresented base paths still need an
+            // explicit absence witness.
+            if let Some(absent) = retirement_absence_dependency(
+                adapter,
                 &opening,
-                adapter
-                    .base_source_path(base)
-                    .map_err(|error| route_scan(adapter, error))?,
+                &inventory,
+                &terminal_sources,
+                base.observation().source(),
+                &base_path,
             ) {
                 absent_sources.push(absent);
             }

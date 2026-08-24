@@ -5,8 +5,7 @@ use std::{
 };
 
 use ctx_history_core::{
-    ActivityJsonCapture, ActivityTextCapture, AgentScope, EventType, LiteralFactKind,
-    ProviderNativeSessionRelationship, TypedKey,
+    ActivityJsonCapture, ActivityTextCapture, AgentScope, EventType, LiteralFactKind, TypedKey,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -38,6 +37,7 @@ fn transcript_path(root: &Path) -> PathBuf {
 fn header(session_id: &str, kind: &str) -> Value {
     json!({
         "sessionId": session_id,
+        "projectHash": "synthetic-project-hash",
         "startTime": "2026-01-01T00:00:00.000Z",
         "lastUpdated": "2026-01-01T00:00:00.000Z",
         "kind": kind,

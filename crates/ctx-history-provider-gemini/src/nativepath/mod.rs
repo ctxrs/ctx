@@ -10,6 +10,10 @@ pub(crate) use dto::{
     GeminiSession, GeminiTranscriptSource,
 };
 pub use source_backed::gemini_jsonl_adapter;
+#[cfg(any(test, feature = "test-support"))]
+pub use source_backed::{
+    gemini_legacy_v1_jsonl_adapter_for_test, install_after_gemini_recording_discovery_hook,
+};
 
 #[cfg(test)]
 mod tests;

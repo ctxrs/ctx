@@ -144,3 +144,14 @@ pub fn register_gemini_source_backed_route(
     )?);
     Ok(())
 }
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn gemini_legacy_v1_source_backed_driver_for_test(
+    root: std::path::PathBuf,
+) -> SourceBackedRouteDriver {
+    let adapter = ctx_history_provider_gemini::nativepath::gemini_legacy_v1_jsonl_adapter_for_test::<
+        crate::provider::source_backed::family::jsonl::GeminiCaptureJsonlRuntime,
+    >();
+    crate::provider::source_backed::family::jsonl::gemini_jsonl_family_driver(adapter, root)
+}

@@ -20,6 +20,8 @@ pub(super) fn frontier_wire_bytes(frontier: &GeminiPageFrontier) -> Option<usize
     if let Some(session) = &frontier.session {
         for value in [
             Some(session.native_session_id.as_str()),
+            session.native_start_time.as_deref(),
+            session.project_hash.as_deref(),
             session.parent_native_session_id.as_deref(),
             session.cwd.as_deref(),
             session.native_kind.as_deref(),
@@ -117,6 +119,8 @@ pub(super) fn hash_page_frontier(hasher: &mut Sha256, frontier: &GeminiPageFront
     if let Some(session) = &frontier.session {
         hasher.update([1]);
         hash_page_text(hasher, &session.native_session_id);
+        hash_page_optional_text(hasher, session.native_start_time.as_deref());
+        hash_page_optional_text(hasher, session.project_hash.as_deref());
         hash_page_optional_text(hasher, session.parent_native_session_id.as_deref());
         hash_page_text(hasher, session.agent_scope.as_str());
         hash_page_optional_i64(

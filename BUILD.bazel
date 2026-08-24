@@ -253,6 +253,15 @@ filegroup(
 )
 
 filegroup(
+    name = "gemini_resume_test_fixtures",
+    srcs = [
+        "tests/fixtures/provider-history/gemini/v0.52.0-resume/.gemini/tmp/workspace/chats/session-2026-08-24T18-33-65900000.jsonl",
+        "tests/fixtures/provider-history/gemini/v0.52.0-resume/.gemini/tmp/workspace/chats/session-2026-08-24T18-34-65900000.jsonl",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "upgrade_extractor_contract",
     srcs = ["scripts/test-windows-runtime-upgrade-extractor.ps1"],
     visibility = ["//visibility:public"],

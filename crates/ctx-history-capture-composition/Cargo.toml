@@ -9,6 +9,10 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+test-support = ["ctx-history-provider-gemini/test-support"]
+
 [dependencies]
 chrono.workspace = true
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }

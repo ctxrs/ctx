@@ -212,6 +212,140 @@ fn active_source_family_contract_jsonl_terminal_inventory_rejects_reappearance()
 }
 
 #[test]
+fn same_path_retirement_requires_owned_leaf_and_exact_terminal_source_evidence() {
+    fn source(format: &str, key: &str) -> SourceKey {
+        SourceKey::derive_provider_native(
+            CaptureProvider::Pi.as_str(),
+            format,
+            TEST_SCHEMA,
+            1,
+            "terminal-witness-file",
+            TypedKey::utf8(key).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn evidence_for_source(
+        evidence: &TerminalSourceEvidence,
+        source: SourceKey,
+    ) -> TerminalSourceEvidence {
+        let admitted = evidence.observed_certificate();
+        let observation = ctx_history_core::SourceObservation::new(
+            source,
+            admitted.observation().revision_kind(),
+            admitted.observation().revision().to_vec(),
+        )
+        .unwrap();
+        let certificate = CertifiedSource::certify(
+            observation.clone(),
+            observation,
+            admitted.parser_revision(),
+            *admitted.content_digest(),
+            admitted.counts(),
+        )
+        .unwrap();
+        let mut replacement = evidence.clone();
+        replacement.terminal_certificate = Some(certificate);
+        replacement
+    }
+
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("recording.jsonl");
+    fs::write(&path, TEST_RECORD).unwrap();
+    let adapter = TestAdapter;
+    let (resident, inventory) = expected_state(&adapter, &root);
+    let opening = resident.opening_inventory.as_ref().unwrap();
+    let replacement_leaf = opening.accepted_leaves().next().unwrap();
+    let replacement_evidence = resident
+        .terminal_sources
+        .get(&replacement_leaf.source().exact_descriptor_digest())
+        .unwrap();
+    let old_source = source(TEST_SOURCE_FORMAT, "retired-recording");
+
+    assert!(retirement_absence_dependency(
+        &adapter,
+        opening,
+        &inventory,
+        &resident.terminal_sources,
+        &old_source,
+        &path,
+    )
+    .is_none());
+
+    // An evidence entry under the expected digest is not sufficient when its
+    // admitted certificate describes another source.
+    let other_source = source(TEST_SOURCE_FORMAT, "different-recording");
+    let mut mismatched_evidence = HashMap::new();
+    mismatched_evidence.insert(
+        replacement_leaf.source().exact_descriptor_digest(),
+        evidence_for_source(replacement_evidence, other_source),
+    );
+    let mismatched_absence = retirement_absence_dependency(
+        &adapter,
+        opening,
+        &inventory,
+        &mismatched_evidence,
+        &old_source,
+        &path,
+    )
+    .expect("different-source evidence must not suppress the absence fence");
+    assert!(
+        !mismatched_absence.remains_absent().unwrap(),
+        "the live replacement path must prevent retirement"
+    );
+
+    // Even internally consistent terminal evidence cannot authorize an
+    // adapter to retire a source in favor of an out-of-family leaf.
+    let foreign_source = source("foreign-terminal-witness-jsonl", "foreign-recording");
+    let mut foreign_opening = opening.clone();
+    let foreign_leaf = foreign_opening
+        .members
+        .iter_mut()
+        .find_map(|member| match member {
+            JsonlFamilyInventoryMember::Accepted { leaf, .. } => Some(leaf),
+            JsonlFamilyInventoryMember::Quarantined { .. }
+            | JsonlFamilyInventoryMember::Pending { .. } => None,
+        })
+        .unwrap();
+    foreign_leaf.source = foreign_source.clone();
+    foreign_opening.rebuild_observation().unwrap();
+    let foreign_inventory = foreign_opening
+        .certify_selected_against(&foreign_opening, vec![foreign_source.clone()])
+        .unwrap();
+    let mut foreign_evidence = HashMap::new();
+    foreign_evidence.insert(
+        foreign_source.exact_descriptor_digest(),
+        evidence_for_source(replacement_evidence, foreign_source),
+    );
+    let foreign_absence = retirement_absence_dependency(
+        &adapter,
+        &foreign_opening,
+        &foreign_inventory,
+        &foreign_evidence,
+        &old_source,
+        &path,
+    )
+    .expect("out-of-family evidence must not suppress the absence fence");
+    assert!(
+        !foreign_absence.remains_absent().unwrap(),
+        "the live out-of-family path must prevent retirement"
+    );
+
+    let foreign_old_source = source("foreign-terminal-witness-jsonl", "retired-recording");
+    assert!(retirement_absence_dependency(
+        &adapter,
+        opening,
+        &inventory,
+        &resident.terminal_sources,
+        &foreign_old_source,
+        &path,
+    )
+    .is_some());
+}
+
+#[test]
 fn active_source_family_contract_jsonl_frozen_multi_root_defers_new_leaves() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let first_root = temp.path().join("sessions");
