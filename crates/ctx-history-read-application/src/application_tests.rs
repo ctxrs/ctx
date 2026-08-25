@@ -8,40 +8,44 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, ActivityInvocation, ActivityJsonCapture, ActivityResult,
-    ActivityTextCapture, CertifiedSource, CoreActivity, CoreRecord, EventIdentityInput,
-    LiteralFactKind, NativeItemKey, NativeSessionKey, ProviderDeclaredFact, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
-    CORE_ACTIVITY_REVISION,
+    ActivityTextCapture, CaptureProvider, CertifiedSource, CoreActivity, CoreRecord,
+    EventIdentityInput, LiteralFactKind, NativeItemKey, NativeSessionKey, ProviderDeclaredFact,
+    ProviderNativeCopyProof, ProviderNativeEventCopy, ProviderNativeSessionRelationship,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
+    TypedKey, CORE_ACTIVITY_REVISION,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions};
+use ctx_history_index::{
+    AppliedProviderRoot, GenerationWriter, ProviderRootDefinition, SourceRouteIdentity,
+    SourceRouteSnapshot, WriterOptions,
+};
+use ctx_history_index_format::{provider_source_config_digest, source_token};
 use ctx_history_index_query::{
-    CoreEventPageBudget, CoreEventRangeFilters, CoreEventRangeSelection, SearchContentScope,
-    VerifiedIndex,
+    CoreEventPageBudget, CoreEventRangeFilters, CoreEventRangeSelection, EventSearchCandidate,
+    SearchContentScope, VerifiedIndex,
 };
 use serde_json::json;
 use tempfile::tempdir;
 
 use crate::{
-    copied_lineage_read_model, decode_session_event_cursor, encode_session_event_cursor,
-    event_query_event_read_model, event_query_receipt, event_query_wire_request,
-    event_window_with_lineage_read_model, execute_list_events_stream, execute_locate,
-    execute_search, execute_search_observed, execute_show_event, execute_show_session_page,
-    execute_show_session_stream, normalize_search_request, normalize_uuid_prefix,
-    paginated_session_transcript_read_model, plan_search, render_event_read_model,
-    render_search_json, retain_structured_session_page, search_filters, ActiveSessionExclusion,
-    CompactPresentationProjection, EventContentProjection, EventWindowBudget, GenerationRead,
-    GenerationReadPort, GenerationReadRequest, GenerationReadTarget, HistorySemanticBatch,
-    HistorySemanticError, HistorySemanticPort, HistorySemanticQuery, ListEventsPageRequest,
-    ListEventsRequest, ListEventsStreamCallback, ListEventsStreamCompletion,
-    ListEventsStreamControl, ListEventsStreamPage, LocateApplicationRequest, LocateRequest,
-    LocateResult, PinnedHistoryQuery, RetainedPeerRead, SearchApplicationError,
-    SearchApplicationReadModelInput, SearchApplicationRequest, SearchBackend, SearchFailurePhase,
-    SearchJsonInput, SearchPolicy, SearchRenderMetrics, SearchRequest, SearchResultCommands,
-    SemanticAvailability, SemanticReason, SessionEventMode, ShowEventApplicationRequest,
-    ShowEventRequest, ShowSessionApplicationRequest, ShowSessionPageRequest,
-    ShowSessionStreamCallback, ShowSessionStreamControl, ShowSessionStreamPage,
-    ShowSessionStreamRequest, ShowSessionStreamStart, StructuredOutputFormat,
-    StructuredTranscriptMode, UuidPrefixError,
+    decode_session_event_cursor, encode_session_event_cursor, event_query_event_read_model,
+    event_query_receipt, event_query_wire_request, event_window_with_lineage_read_model,
+    execute_list_events_stream, execute_locate, execute_search, execute_search_observed,
+    execute_show_event, execute_show_session_page, execute_show_session_stream,
+    normalize_search_request, normalize_uuid_prefix, paginated_session_transcript_read_model,
+    plan_search, render_event_read_model, render_search_json, retain_structured_session_page,
+    search_filters, ActiveSessionExclusion, CompactPresentationProjection, EventContentProjection,
+    EventWindowBudget, GenerationRead, GenerationReadPort, GenerationReadRequest,
+    GenerationReadTarget, HistorySemanticBatch, HistorySemanticError, HistorySemanticPort,
+    HistorySemanticQuery, ListEventsPageRequest, ListEventsRequest, ListEventsStreamCallback,
+    ListEventsStreamCompletion, ListEventsStreamControl, ListEventsStreamPage,
+    LocateApplicationRequest, LocateRequest, LocateResult, PinnedHistoryQuery, RetainedPeerRead,
+    SearchApplicationError, SearchApplicationReadModelInput, SearchApplicationRequest,
+    SearchBackend, SearchDiversificationStatus, SearchFailurePhase, SearchJsonInput, SearchPolicy,
+    SearchRenderMetrics, SearchRequest, SearchResultCommands, SemanticAvailability, SemanticReason,
+    SessionEventMode, ShowEventApplicationRequest, ShowEventRequest, ShowSessionApplicationRequest,
+    ShowSessionPageRequest, ShowSessionStreamCallback, ShowSessionStreamControl,
+    ShowSessionStreamPage, ShowSessionStreamRequest, ShowSessionStreamStart,
+    StructuredOutputFormat, StructuredTranscriptMode, UuidPrefixError,
 };
 
 struct UnusedSemanticPort;
@@ -70,24 +74,45 @@ impl HistorySemanticQuery for UnusedSemanticQuery {
     }
 }
 
-fn source() -> SourceKey {
+fn source_named(name: &str) -> SourceKey {
     SourceKey::derive(
         "custom",
         "application_query_test",
         "session",
         1,
-        SourceAnchor::provider_native(
-            "session-file",
-            TypedKey::utf8("application-query.jsonl").unwrap(),
-        )
-        .unwrap(),
+        SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
     )
     .unwrap()
 }
 
+fn provider_root_source(name: &str) -> SourceKey {
+    SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
+    )
+    .unwrap()
+}
+
+fn source() -> SourceKey {
+    source_named("application-query.jsonl")
+}
+
 fn record(source: &SourceKey, sequence: u64, role: &str, body: &str) -> CoreRecord {
+    record_for_session(source, "pinned-session", sequence, role, body)
+}
+
+fn record_for_session(
+    source: &SourceKey,
+    native_session_id: &str,
+    sequence: u64,
+    role: &str,
+    body: &str,
+) -> CoreRecord {
     let native_session_key =
-        NativeSessionKey::native_id("session", TypedKey::utf8("pinned-session").unwrap()).unwrap();
+        NativeSessionKey::native_id("session", TypedKey::utf8(native_session_id).unwrap()).unwrap();
     let session_id = derive_session_id(SessionIdentityInput {
         source,
         logical_session_kind: "thread",
@@ -113,7 +138,7 @@ fn record(source: &SourceKey, sequence: u64, role: &str, body: &str) -> CoreReco
         body,
     )
     .unwrap();
-    record.provider_session_id = Some("pinned-session".to_owned());
+    record.provider_session_id = Some(native_session_id.to_owned());
     record.occurred_at_unix_ms = Some(1_000 + sequence as i64);
     record.role = Some(role.to_owned());
     record.agent_scope = Some(ctx_history_core::AgentScope::Primary);
@@ -186,6 +211,152 @@ fn publish(root: &Path) -> (VerifiedIndex, Vec<CoreRecord>) {
     }
     writer
         .certify_source(certificate(&source, records.len()))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    (VerifiedIndex::open_pinned(root).unwrap(), records)
+}
+
+fn publish_grouped_search(root: &Path) -> (VerifiedIndex, Vec<CoreRecord>) {
+    let source = source_named("coalesced-grouping.jsonl");
+    let mut family_root = record_for_session(&source, "family-root", 1, "user", "root body");
+    family_root.root_session_id = Some(family_root.session_id);
+    family_root.session_relationship = Some(ProviderNativeSessionRelationship::Root);
+    let child_absent = record_for_session(&source, "family-child", 1, "assistant", "child body");
+    let mut child_positive =
+        record_for_session(&source, "family-child", 2, "assistant", "child witness");
+    child_positive.parent_session_id = Some(family_root.session_id);
+    child_positive.root_session_id = Some(family_root.session_id);
+    child_positive.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+    let mut sibling = record_for_session(&source, "family-sibling", 1, "assistant", "sibling body");
+    sibling.parent_session_id = Some(family_root.session_id);
+    sibling.root_session_id = Some(family_root.session_id);
+    sibling.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+    let independent =
+        record_for_session(&source, "independent", 1, "assistant", "independent body");
+    let records = vec![
+        family_root,
+        child_absent,
+        child_positive,
+        sibling,
+        independent,
+    ];
+    let mut writer = GenerationWriter::open(root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in &records {
+        writer.add_core_record(record.clone()).unwrap();
+    }
+    writer
+        .certify_source(certificate(&source, records.len()))
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    (VerifiedIndex::open_pinned(root).unwrap(), records)
+}
+
+fn publish_provider_root_search(root: &Path) -> (VerifiedIndex, Vec<CoreRecord>) {
+    let personal_source = provider_root_source("personal-history.jsonl");
+    let archive_source = provider_root_source("archive-history.jsonl");
+    let mut family_root = record_for_session(
+        &personal_source,
+        "personal-family-root",
+        1,
+        "user",
+        "root context",
+    );
+    family_root.root_session_id = Some(family_root.session_id);
+    family_root.session_relationship = Some(ProviderNativeSessionRelationship::Root);
+    let mut family_strong = record_for_session(
+        &personal_source,
+        "personal-family-strong",
+        4,
+        "user",
+        "parityneedle",
+    );
+    family_strong.root_session_id = Some(family_root.session_id);
+    family_strong.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+    let mut family_repeat = record_for_session(
+        &personal_source,
+        "personal-family-repeat",
+        3,
+        "user",
+        "parityneedle",
+    );
+    family_repeat.root_session_id = Some(family_root.session_id);
+    family_repeat.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+    let independent = record_for_session(
+        &personal_source,
+        "personal-independent",
+        2,
+        "user",
+        "parityneedle",
+    );
+    let archive = record_for_session(
+        &archive_source,
+        "archive-higher-ranked",
+        100,
+        "user",
+        "parityneedle",
+    );
+    let records = vec![
+        family_root,
+        family_strong,
+        family_repeat,
+        independent,
+        archive,
+    ];
+
+    let archive_route = SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap();
+    let personal_route = SourceRouteIdentity::from_sha256("b2".repeat(32)).unwrap();
+    let definitions = vec![
+        ProviderRootDefinition {
+            id: "archive".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: root.join("archive"),
+            group: Some("cold".to_owned()),
+            kind: None,
+        },
+        ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: root.join("personal"),
+            group: Some("work".to_owned()),
+            kind: None,
+        },
+    ];
+    let applied_roots = vec![
+        AppliedProviderRoot::new(definitions[0].clone(), vec![archive_route.clone()]).unwrap(),
+        AppliedProviderRoot::new(definitions[1].clone(), vec![personal_route.clone()]).unwrap(),
+    ];
+    let mut writer = GenerationWriter::open(root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer
+        .set_applied_provider_roots(
+            false,
+            provider_source_config_digest(false, &definitions),
+            applied_roots,
+        )
+        .unwrap();
+    writer.begin_source(personal_source.clone()).unwrap();
+    for record in &records[..4] {
+        writer.add_core_record(record.clone()).unwrap();
+    }
+    writer
+        .certify_source(certificate(&personal_source, 4))
+        .unwrap();
+    writer.begin_source(archive_source.clone()).unwrap();
+    writer.add_core_record(records[4].clone()).unwrap();
+    writer
+        .certify_source(certificate(&archive_source, 1))
+        .unwrap();
+    writer
+        .set_present_source_routes(vec![
+            SourceRouteSnapshot::present(archive_route, vec![archive_source]).unwrap(),
+            SourceRouteSnapshot::present(personal_route, vec![personal_source]).unwrap(),
+        ])
         .unwrap();
     writer.commit(|_| true).unwrap();
     (VerifiedIndex::open_pinned(root).unwrap(), records)
@@ -283,6 +454,35 @@ impl HistorySemanticQuery for CountingSemanticQuery {
     }
 }
 
+struct FixedSemanticPort(Vec<EventSearchCandidate>);
+
+struct FixedSemanticQuery<'a>(&'a [EventSearchCandidate]);
+
+impl HistorySemanticPort for FixedSemanticPort {
+    type Query<'a> = FixedSemanticQuery<'a>;
+
+    fn begin_query<'a>(
+        &'a self,
+        _index: &'a VerifiedIndex,
+    ) -> Result<Self::Query<'a>, HistorySemanticError> {
+        Ok(FixedSemanticQuery(&self.0))
+    }
+}
+
+impl HistorySemanticQuery for FixedSemanticQuery<'_> {
+    fn candidates(
+        &mut self,
+        _query: &str,
+        _filters: &ctx_history_index_query::EventSearchFilters,
+        _candidate_limit: usize,
+    ) -> Result<HistorySemanticBatch, HistorySemanticError> {
+        Ok(HistorySemanticBatch {
+            candidates: self.0.to_vec(),
+            diagnostics: json!({"adapter": "fixed-test"}),
+        })
+    }
+}
+
 #[test]
 fn search_application_pins_once_opens_semantics_once_and_requests_peer_lazily() {
     let temp = tempdir().unwrap();
@@ -316,6 +516,10 @@ fn search_application_pins_once_opens_semantics_once_and_requests_peer_lazily() 
     assert_eq!(generation.retained_peer.get(), Some(RetainedPeerRead::Omit));
     assert_eq!(semantic.0.load(Ordering::Relaxed), 1);
     assert_eq!(result.query().collection.result_window.hits.len(), 3);
+    assert_eq!(
+        result.query().collection.diversification.status,
+        SearchDiversificationStatus::NotApplicable
+    );
     assert_eq!(
         result.receipt().generation_id,
         result.index().generation_id()
@@ -416,6 +620,377 @@ fn decode_failure_reaches_the_application_terminal_error_with_partial_work() {
 }
 
 #[test]
+fn explicit_session_lexical_search_is_dense_and_never_diversified() {
+    let temp = tempdir().unwrap();
+    let (index, records) = publish(temp.path());
+    let mut request = lexical_request();
+    request.events = false;
+    request.session = Some(records[0].session_id.to_string());
+    let filters = search_filters(&request, &index, None).unwrap();
+    let collection = crate::collect_search_hits(
+        &request,
+        &index,
+        &filters,
+        SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled),
+        &UnusedSemanticPort,
+    )
+    .unwrap();
+
+    assert_eq!(collection.result_window.hits.len(), 3);
+    assert!(collection
+        .result_window
+        .hits
+        .iter()
+        .all(|hit| hit.more_matches_in_session == 0));
+    assert_eq!(
+        collection.diversification.status,
+        SearchDiversificationStatus::NotApplicable
+    );
+}
+
+#[test]
+fn semantic_and_hybrid_share_coalesced_family_shaping_and_remain_indeterminate() {
+    let temp = tempdir().unwrap();
+    let (index, records) = publish_grouped_search(temp.path());
+    let child_absent = index
+        .event_by_id(records[1].event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    let sibling = index
+        .event_by_id(records[3].event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    let independent = index
+        .event_by_id(records[4].event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    let semantic_candidates = vec![
+        EventSearchCandidate {
+            event: child_absent,
+            score: 100.0,
+        },
+        EventSearchCandidate {
+            event: sibling,
+            score: 90.0,
+        },
+        EventSearchCandidate {
+            event: independent,
+            score: 80.0,
+        },
+    ];
+    let filters = ctx_history_index_query::EventSearchFilters::default();
+
+    for backend in [SearchBackend::Semantic, SearchBackend::Hybrid] {
+        let mut request = lexical_request();
+        request.query = "zzzz-backend-only-token".to_owned();
+        request.events = false;
+        request.limit = 3;
+        request.backend = Some(backend);
+        request.semantic_weight = 1.0;
+        let collection = crate::collect_search_hits_using(
+            &request,
+            &index,
+            &filters,
+            SemanticAvailability::Available,
+            |_, _, _| {
+                Ok(HistorySemanticBatch {
+                    candidates: semantic_candidates.clone(),
+                    diagnostics: json!({"candidate_count": 3}),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            collection
+                .result_window
+                .hits
+                .iter()
+                .map(|hit| hit.event.provider_session_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["family-child", "independent", "family-sibling"]
+        );
+        assert_eq!(
+            collection.diversification.status,
+            SearchDiversificationStatus::Indeterminate
+        );
+        assert_eq!(collection.diversification.changed_final_top_n, None);
+    }
+}
+
+#[test]
+fn provider_root_and_group_selectors_share_one_source_predicate_across_backends() {
+    let temp = tempdir().unwrap();
+    let (index, records) = publish_provider_root_search(temp.path());
+    let semantic_candidates = [(4, 400.0), (1, 300.0), (2, 200.0), (3, 100.0)]
+        .into_iter()
+        .map(|(record, score)| EventSearchCandidate {
+            event: index
+                .event_by_id(records[record].event_id.as_uuid())
+                .unwrap()
+                .unwrap(),
+            score,
+        })
+        .collect::<Vec<_>>();
+    let expected_sources = vec![source_token(&records[0].source)];
+    let mut expected_events = vec![records[1].event_id.as_uuid(), records[3].event_id.as_uuid()];
+    expected_events.sort();
+    let mut expected_sessions = vec![
+        records[1].session_id.as_uuid(),
+        records[3].session_id.as_uuid(),
+    ];
+    expected_sessions.sort();
+
+    for (source_roots, source_groups) in [
+        (vec!["personal".to_owned()], Vec::new()),
+        (Vec::new(), vec!["work".to_owned()]),
+    ] {
+        for backend in [
+            SearchBackend::Lexical,
+            SearchBackend::Semantic,
+            SearchBackend::Hybrid,
+        ] {
+            let mut request = lexical_request();
+            request.query = "parityneedle".to_owned();
+            request.limit = 2;
+            request.events = false;
+            request.backend = Some(backend);
+            request.semantic_weight = 0.5;
+            request.source_roots.clone_from(&source_roots);
+            request.source_groups.clone_from(&source_groups);
+            let filters = search_filters(&request, &index, None).unwrap();
+            assert_eq!(
+                filters.allowed_source_keys.as_ref(),
+                Some(&expected_sources)
+            );
+
+            let collection = crate::collect_search_hits_using(
+                &request,
+                &index,
+                &filters,
+                SemanticAvailability::Available,
+                |_, semantic_filters, _| {
+                    assert_eq!(
+                        semantic_filters.allowed_source_keys.as_ref(),
+                        Some(&expected_sources)
+                    );
+                    let projection = index.semantic_filter_projection(semantic_filters).unwrap();
+                    assert!(projection.contains(records[1].event_id.as_uuid()));
+                    assert!(!projection.contains(records[4].event_id.as_uuid()));
+                    Ok(HistorySemanticBatch {
+                        candidates: semantic_candidates
+                            .iter()
+                            .filter(|candidate| {
+                                projection.contains(candidate.event.event_id.as_uuid())
+                            })
+                            .cloned()
+                            .collect(),
+                        diagnostics: json!({"adapter": "semantic-filter-projection-test"}),
+                    })
+                },
+            )
+            .unwrap();
+
+            let mut selected_events = collection
+                .result_window
+                .hits
+                .iter()
+                .map(|hit| hit.event.event_id)
+                .collect::<Vec<_>>();
+            selected_events.sort();
+            assert_eq!(selected_events, expected_events);
+            let mut selected_sessions = collection
+                .result_window
+                .hits
+                .iter()
+                .map(|hit| hit.event.session_id)
+                .collect::<Vec<_>>();
+            selected_sessions.sort();
+            assert_eq!(selected_sessions, expected_sessions);
+            match backend {
+                SearchBackend::Lexical => {
+                    assert_eq!(
+                        collection.diversification.status,
+                        SearchDiversificationStatus::Applied
+                    );
+                    assert_eq!(collection.diversification.changed_final_top_n, Some(false));
+                }
+                SearchBackend::Semantic | SearchBackend::Hybrid => {
+                    assert_eq!(
+                        collection.diversification.status,
+                        SearchDiversificationStatus::Indeterminate
+                    );
+                    assert_eq!(collection.diversification.changed_final_top_n, None);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rendered_semantic_result_preserves_exact_ids() {
+    let temp = tempdir().unwrap();
+    let source = source_named("semantic-rendered-identities.jsonl");
+    let semantic_event = record_for_session(
+        &source,
+        "semantic-result",
+        1,
+        "user",
+        "recalled semantic event",
+    );
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(semantic_event.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let candidate = index
+        .event_by_id(semantic_event.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    let semantic = FixedSemanticPort(vec![EventSearchCandidate {
+        event: candidate,
+        score: 1.0,
+    }]);
+    let mut request = lexical_request();
+    request.query = "semantic meaning".to_owned();
+    request.limit = 1;
+    request.events = false;
+    request.backend = Some(SearchBackend::Semantic);
+    request.semantic_weight = 1.0;
+    let query = PinnedHistoryQuery::new(&index, None);
+    let search = query
+        .search(
+            plan_search(
+                request,
+                SearchPolicy {
+                    default_backend: SearchBackend::Semantic,
+                    semantic: SemanticAvailability::Available,
+                },
+            )
+            .unwrap(),
+            None,
+            &semantic,
+        )
+        .unwrap();
+
+    assert_eq!(search.collection.result_window.hits.len(), 1);
+    assert_eq!(
+        search.collection.result_window.hits[0].event.event_id,
+        semantic_event.event_id.as_uuid()
+    );
+    assert_eq!(
+        search.collection.result_window.hits[0].event.session_id,
+        semantic_event.session_id.as_uuid()
+    );
+    assert_eq!(
+        search.collection.diversification.status,
+        SearchDiversificationStatus::Indeterminate
+    );
+    assert_eq!(search.collection.diversification.changed_final_top_n, None);
+
+    let value = render_search_json(SearchJsonInput {
+        request: &search.request,
+        index: &index,
+        collection: &search.collection,
+        filters: &search.filters,
+        presentations: &search.presentations,
+        commands: &[SearchResultCommands {
+            suggested_next_commands: Vec::new(),
+        }],
+        freshness_mode: "test",
+        generated_at: "2026-08-25T00:00:00.000Z",
+        semantic_fallback_code: None,
+        semantic_fallback_detail: None,
+        metrics: SearchRenderMetrics {
+            refresh_status: "unchanged",
+            refresh_source_count: 1,
+            query_duration: Duration::ZERO,
+        },
+    })
+    .unwrap();
+    assert_eq!(value["diversification"]["status"], "indeterminate");
+    let result = &value["results"][0];
+    assert_eq!(
+        result["item_id"],
+        semantic_event.session_id.as_uuid().to_string()
+    );
+    assert_eq!(
+        result["ctx_event_id"],
+        semantic_event.event_id.as_uuid().to_string()
+    );
+    assert_eq!(
+        result["ctx_session_id"],
+        semantic_event.session_id.as_uuid().to_string()
+    );
+    assert_eq!(
+        result["event_id"],
+        semantic_event.event_id.as_uuid().to_string()
+    );
+    assert_eq!(
+        result["session_id"],
+        semantic_event.session_id.as_uuid().to_string()
+    );
+    let citation = &result["citations"][0];
+    assert_eq!(
+        citation["item_id"],
+        semantic_event.event_id.as_uuid().to_string()
+    );
+    assert_eq!(
+        citation["ctx_event_id"],
+        semantic_event.event_id.as_uuid().to_string()
+    );
+    assert_eq!(
+        citation["ctx_session_id"],
+        semantic_event.session_id.as_uuid().to_string()
+    );
+}
+
+#[test]
+fn explicit_show_keeps_one_hop_direct_lineage() {
+    let temp = tempdir().unwrap();
+    let source = source_named("show-event-copy.jsonl");
+    let mut ancestor = record_for_session(&source, "copy-root", 1, "user", "ancestor body");
+    ancestor.root_session_id = Some(ancestor.session_id);
+    ancestor.session_relationship = Some(ProviderNativeSessionRelationship::Root);
+    let mut copied = record_for_session(&source, "copy-child", 1, "assistant", "copiedneedle body");
+    copied.parent_session_id = Some(ancestor.session_id);
+    copied.root_session_id = Some(ancestor.session_id);
+    copied.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    copied.event_copy = Some(ProviderNativeEventCopy {
+        ancestor_session_id: ancestor.session_id,
+        ancestor_event_id: ancestor.event_id,
+        proof: ProviderNativeCopyProof::NativeEventIdentity,
+    });
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [&ancestor, &copied] {
+        writer.add_core_record(record.clone()).unwrap();
+    }
+    writer.certify_source(certificate(&source, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let query = PinnedHistoryQuery::new(&index, None);
+    let shown = query
+        .show_event(&ShowEventRequest {
+            selector: copied.event_id.to_string(),
+            before: 0,
+            after: 0,
+            window: None,
+            budget: EventWindowBudget::default(),
+        })
+        .unwrap();
+    assert_eq!(shown.copied_lineage.resolution.state_str(), "resolved");
+    assert_eq!(shown.copied_lineage.selected_depth, 1);
+}
+
+#[test]
 fn manual_session_exclusions_resolve_and_dedupe_full_and_compact_ids() {
     let temp = tempdir().unwrap();
     let (index, records) = publish(temp.path());
@@ -427,6 +1002,124 @@ fn manual_session_exclusions_resolve_and_dedupe_full_and_compact_ids() {
 
     let filters = search_filters(&request, &index, None).unwrap();
     assert_eq!(filters.excluded_session_ids, vec![session_id]);
+    assert!(filters.exclude_session_tree.is_none());
+}
+
+#[test]
+fn active_session_exclusion_requires_one_source_scoped_session() {
+    let temp = tempdir().unwrap();
+    let first_source = source_named("duplicate-provider-session-first.jsonl");
+    let second_source = source_named("duplicate-provider-session-second.jsonl");
+    let first = record(&first_source, 1, "user", "needle first root");
+    let second = record(&second_source, 1, "user", "needle second root");
+    assert_ne!(first.session_id, second.session_id);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (source, record) in [
+        (first_source, first.clone()),
+        (second_source, second.clone()),
+    ] {
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_core_record(record).unwrap();
+        writer.certify_source(certificate(&source, 1)).unwrap();
+    }
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    let filters = search_filters(
+        &lexical_request(),
+        &index,
+        Some(&ActiveSessionExclusion {
+            provider: "custom".to_owned(),
+            provider_session_id: "pinned-session".to_owned(),
+        }),
+    )
+    .unwrap();
+    assert!(filters.exclude_session_tree.is_none());
+    assert!(filters.excluded_session_ids.is_empty());
+}
+
+#[test]
+fn active_session_exclusion_contains_only_the_proven_exact_tree() {
+    let temp = tempdir().unwrap();
+    let source = source_named("exact-active-tree.jsonl");
+    let root = record_for_session(&source, "active-root", 1, "user", "needle root");
+    let mut child = record_for_session(&source, "active-child", 2, "user", "needle child");
+    child.parent_session_id = Some(root.session_id);
+    child.root_session_id = Some(root.session_id);
+    child.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [root.clone(), child.clone()] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 2)).unwrap();
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    let filters = search_filters(
+        &lexical_request(),
+        &index,
+        Some(&ActiveSessionExclusion {
+            provider: "custom".to_owned(),
+            provider_session_id: "active-root".to_owned(),
+        }),
+    )
+    .unwrap();
+    let excluded = filters.exclude_session_tree.unwrap();
+    let mut expected = vec![root.session_id.as_uuid(), child.session_id.as_uuid()];
+    expected.sort();
+    assert_eq!(excluded.session_ids, expected);
+}
+
+#[test]
+fn active_session_exclusion_abstains_on_a_foreign_source_claimant() {
+    let temp = tempdir().unwrap();
+    let active_source = source_named("active-source.jsonl");
+    let foreign_source = source_named("foreign-source.jsonl");
+    let active = record_for_session(&active_source, "active-session", 1, "user", "needle active");
+    let mut foreign = record_for_session(
+        &foreign_source,
+        "foreign-session",
+        1,
+        "user",
+        "needle foreign",
+    );
+    foreign.parent_session_id = Some(active.session_id);
+    foreign.root_session_id = Some(active.session_id);
+    foreign.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (source, record) in [
+        (active_source, active.clone()),
+        (foreign_source, foreign.clone()),
+    ] {
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_core_record(record).unwrap();
+        writer.certify_source(certificate(&source, 1)).unwrap();
+    }
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    let filters = search_filters(
+        &lexical_request(),
+        &index,
+        Some(&ActiveSessionExclusion {
+            provider: "custom".to_owned(),
+            provider_session_id: "active-session".to_owned(),
+        }),
+    )
+    .unwrap();
     assert!(filters.exclude_session_tree.is_none());
 }
 
@@ -832,7 +1525,6 @@ fn one_pin_owns_search_locate_show_and_list_application_workflows() {
         .unwrap();
     assert_eq!(search.collection.result_window.hits.len(), 3);
     assert_eq!(search.presentations.len(), 3);
-    assert_eq!(search.copied_lineages.len(), 3);
 
     let excluded = query
         .search(
@@ -934,19 +1626,12 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
             suggested_next_commands: vec![format!("adapter command {}", hit.event.event_id)],
         })
         .collect::<Vec<_>>();
-    let copied_lineages = search
-        .copied_lineages
-        .iter()
-        .map(copied_lineage_read_model)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .unwrap();
     let search_value = render_search_json(SearchJsonInput {
         request: &search.request,
         index: &index,
         collection: &search.collection,
         filters: &search.filters,
         presentations: &search.presentations,
-        copied_lineages: &copied_lineages,
         commands: &commands,
         freshness_mode: "checkpoint",
         generated_at: "2026-08-11T12:00:00.000Z",
@@ -965,6 +1650,11 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
     assert_eq!(search_value["freshness"]["mode"], "checkpoint");
     assert_eq!(search_value["phase_attribution"]["query_seconds"], 0.125);
     assert_eq!(search_value["results"].as_array().unwrap().len(), 3);
+    assert!(search_value["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| result.get("copied_lineage").is_none()));
     assert_eq!(
         search_value["results"][0]["suggested_next_commands"],
         json!([format!(

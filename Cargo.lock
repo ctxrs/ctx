@@ -1124,6 +1124,7 @@ dependencies = [
  "ctx-history-source-io",
  "rusqlite",
  "serde_json",
+ "sha2",
  "tempfile",
  "zstd",
 ]

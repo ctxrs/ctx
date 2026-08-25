@@ -12,7 +12,8 @@ mod manifest;
 pub mod policy;
 mod record_digest;
 mod schema;
-mod search_projection;
+#[doc(hidden)]
+pub mod search_projection;
 mod source_identity;
 mod stored_document;
 mod verification;

@@ -1,6 +1,8 @@
 use ctx_history_core::{
     ActivityJsonCapture, ActivityTextCapture, CoreContent, CoreContentPolicyStatus,
 };
+use std::ops::Range;
+use tantivy::tokenizer::TokenStream as _;
 
 use crate::{IndexError, Result};
 
@@ -10,84 +12,218 @@ use crate::{IndexError, Result};
 /// content order: normalized body, structured content, invocation, result, and
 /// provider-declared literal facts. Capture dispositions and provider call IDs
 /// are not lexical content. A `NormalizedBody` result reference is not repeated.
-pub fn project_body_search(mut content: CoreContent) -> Result<Option<String>> {
+pub fn project_body_search(content: CoreContent) -> Result<Option<String>> {
+    project_search_content(content)
+        .map(|projection| projection.map(SearchContentProjection::into_index_text))
+}
+
+/// Semantic role of one newline-delimited component in `body_search`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFragmentKind {
+    NormalizedBody,
+    StructuredContent,
+    InvocationProtocol,
+    InvocationServer,
+    InvocationTool,
+    InvocationArguments,
+    ResultStatus,
+    ResultText,
+    ResultStructuredContent,
+    LiteralFact,
+}
+
+/// One ordered fragment backed by its byte-exact range in the complete
+/// index text and, for a JSON string scalar, its decoded human display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchContentFragment {
+    kind: SearchFragmentKind,
+    index_range: Range<usize>,
+    decoded_json_string: Option<String>,
+}
+
+impl SearchContentFragment {
+    pub fn kind(&self) -> SearchFragmentKind {
+        self.kind
+    }
+
+    pub fn index_text<'a>(&self, projection: &'a SearchContentProjection) -> &'a str {
+        &projection.index_text[self.index_range.clone()]
+    }
+
+    pub fn display_text<'a>(&'a self, projection: &'a SearchContentProjection) -> &'a str {
+        self.decoded_json_string
+            .as_deref()
+            .unwrap_or_else(|| self.index_text(projection))
+    }
+
+    pub fn has_decoded_json_display(&self) -> bool {
+        self.decoded_json_string.is_some()
+    }
+}
+
+/// Complete byte-exact index text plus its bounded ordered fragment table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchContentProjection {
+    index_text: String,
+    fragments: Vec<SearchContentFragment>,
+}
+
+impl SearchContentProjection {
+    pub fn index_text(&self) -> &str {
+        &self.index_text
+    }
+
+    pub fn fragments(&self) -> &[SearchContentFragment] {
+        &self.fragments
+    }
+
+    pub fn into_index_text(self) -> String {
+        self.index_text
+    }
+}
+
+/// Visits tokens using the exact analyzer that produces `body_search`
+/// postings. Returning `false` stops the bounded scan early.
+pub fn visit_body_analyzer_tokens(text: &str, mut visitor: impl FnMut(&str, Range<usize>) -> bool) {
+    let mut analyzer = crate::analyzer::body_analyzer();
+    let mut stream = analyzer.token_stream(text);
+    while stream.advance() {
+        let token = stream.token();
+        if !visitor(&token.text, token.offset_from..token.offset_to) {
+            break;
+        }
+    }
+}
+
+/// Derives presentation fragments and the canonical index text in one
+/// traversal. Fragment count is capped by the Core activity contract and
+/// all retained text is bounded by the admitted Core record.
+pub fn project_search_content(mut content: CoreContent) -> Result<Option<SearchContentProjection>> {
     if !content.is_discovery_eligible()
         || !matches!(content.policy_status, CoreContentPolicyStatus::Selected)
     {
         return Ok(None);
     }
 
-    let mut projection = content
+    let mut projection = ProjectionBuilder::default();
+    if let Some(body) = content
         .normalized_body
         .take()
-        .filter(|body| !body.is_empty());
+        .filter(|body| !body.is_empty())
+    {
+        projection.append(SearchFragmentKind::NormalizedBody, body, None)?;
+    }
     if let Some(structured_content) = content.structured_content.take() {
-        append_json(&mut projection, structured_content)?;
+        projection.append_json(SearchFragmentKind::StructuredContent, structured_content)?;
     }
 
     if let Some(activity) = content.activity.take() {
         if let Some(invocation) = activity.invocation {
-            append_optional_text(&mut projection, invocation.protocol)?;
-            append_optional_text(&mut projection, invocation.server)?;
-            append_text(&mut projection, invocation.tool)?;
-            append_json_capture(&mut projection, invocation.arguments)?;
+            projection
+                .append_optional(SearchFragmentKind::InvocationProtocol, invocation.protocol)?;
+            projection.append_optional(SearchFragmentKind::InvocationServer, invocation.server)?;
+            projection.append(SearchFragmentKind::InvocationTool, invocation.tool, None)?;
+            projection.append_json_capture(
+                SearchFragmentKind::InvocationArguments,
+                invocation.arguments,
+            )?;
         }
         if let Some(result) = activity.result {
-            append_optional_text(&mut projection, result.status)?;
+            projection.append_optional(SearchFragmentKind::ResultStatus, result.status)?;
             if let ActivityTextCapture::Present { value } = result.text {
-                append_text(&mut projection, value)?;
+                projection.append(SearchFragmentKind::ResultText, value, None)?;
             }
-            append_json_capture(&mut projection, result.structured_content)?;
+            projection.append_json_capture(
+                SearchFragmentKind::ResultStructuredContent,
+                result.structured_content,
+            )?;
         }
         for fact in activity.facts {
-            append_text(&mut projection, fact.value)?;
+            projection.append(SearchFragmentKind::LiteralFact, fact.value, None)?;
         }
     }
 
-    Ok(projection)
+    Ok(projection.finish())
 }
 
-fn append_json_capture(
-    projection: &mut Option<String>,
-    capture: ActivityJsonCapture,
-) -> Result<()> {
-    if let ActivityJsonCapture::Present { value } = capture {
-        append_json(projection, value)?;
-    }
-    Ok(())
+#[derive(Default)]
+struct ProjectionBuilder {
+    index_text: Option<String>,
+    fragments: Vec<SearchContentFragment>,
 }
 
-fn append_json(projection: &mut Option<String>, value: serde_json::Value) -> Result<()> {
-    append_text(projection, serde_json::to_string(&value)?)
-}
-
-fn append_optional_text(projection: &mut Option<String>, value: Option<String>) -> Result<()> {
-    if let Some(value) = value {
-        append_text(projection, value)?;
-    }
-    Ok(())
-}
-
-fn append_text(projection: &mut Option<String>, value: String) -> Result<()> {
-    if value.is_empty() {
-        return Ok(());
-    }
-    match projection {
-        Some(projection) => {
-            projection
-                .len()
-                .checked_add(value.len())
-                .and_then(|bytes| bytes.checked_add(1))
-                .ok_or(IndexError::CountOverflow)?;
-            projection.reserve(value.len() + 1);
-            projection.push('\n');
-            projection.push_str(&value);
+impl ProjectionBuilder {
+    fn append_json_capture(
+        &mut self,
+        kind: SearchFragmentKind,
+        capture: ActivityJsonCapture,
+    ) -> Result<()> {
+        if let ActivityJsonCapture::Present { value } = capture {
+            self.append_json(kind, value)?;
         }
-        None => *projection = Some(value),
+        Ok(())
     }
-    Ok(())
-}
 
+    fn append_json(&mut self, kind: SearchFragmentKind, value: serde_json::Value) -> Result<()> {
+        let index_text = serde_json::to_string(&value)?;
+        let decoded_json_string = match value {
+            serde_json::Value::String(value) => Some(value),
+            _ => None,
+        };
+        self.append(kind, index_text, decoded_json_string)
+    }
+
+    fn append_optional(&mut self, kind: SearchFragmentKind, value: Option<String>) -> Result<()> {
+        if let Some(value) = value {
+            self.append(kind, value, None)?;
+        }
+        Ok(())
+    }
+
+    fn append(
+        &mut self,
+        kind: SearchFragmentKind,
+        value: String,
+        decoded_json_string: Option<String>,
+    ) -> Result<()> {
+        if value.is_empty() {
+            return Ok(());
+        }
+        let index_range = match self.index_text.as_mut() {
+            Some(index_text) => {
+                let start = index_text
+                    .len()
+                    .checked_add(1)
+                    .ok_or(IndexError::CountOverflow)?;
+                let end = start
+                    .checked_add(value.len())
+                    .ok_or(IndexError::CountOverflow)?;
+                index_text.reserve(value.len() + 1);
+                index_text.push('\n');
+                index_text.push_str(&value);
+                start..end
+            }
+            None => {
+                let end = value.len();
+                self.index_text = Some(value);
+                0..end
+            }
+        };
+        self.fragments.push(SearchContentFragment {
+            kind,
+            index_range,
+            decoded_json_string,
+        });
+        Ok(())
+    }
+
+    fn finish(self) -> Option<SearchContentProjection> {
+        self.index_text.map(|index_text| SearchContentProjection {
+            index_text,
+            fragments: self.fragments,
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{
@@ -203,5 +339,60 @@ mod tests {
         assert!(projection.contains("complete terminal text"));
         assert!(!projection.contains("size limit canary"));
         assert!(!projection.contains("998877"));
+    }
+
+    #[test]
+    fn fragment_projection_keeps_exact_index_bytes_and_human_json_display() {
+        let mut content = selected_content(Some("readable body"));
+        content.structured_content = Some(serde_json::json!(
+            "escaped \"wrapper\"\nwith a decisive clause"
+        ));
+        let mut activity = activity();
+        activity.invocation.as_mut().unwrap().arguments = ActivityJsonCapture::Present {
+            value: serde_json::json!(["serialized", "arguments"]),
+        };
+        activity.result.as_mut().unwrap().text = ActivityTextCapture::Present {
+            value: "readable result".to_owned(),
+        };
+        content.activity = Some(activity);
+
+        let exact = project_body_search(content.clone()).unwrap().unwrap();
+        let projection = project_search_content(content).unwrap().unwrap();
+
+        assert_eq!(projection.index_text(), exact);
+        let fragments = projection.fragments();
+        assert_eq!(
+            fragments
+                .iter()
+                .map(SearchContentFragment::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SearchFragmentKind::NormalizedBody,
+                SearchFragmentKind::StructuredContent,
+                SearchFragmentKind::InvocationProtocol,
+                SearchFragmentKind::InvocationServer,
+                SearchFragmentKind::InvocationTool,
+                SearchFragmentKind::InvocationArguments,
+                SearchFragmentKind::ResultStatus,
+                SearchFragmentKind::ResultText,
+                SearchFragmentKind::ResultStructuredContent,
+                SearchFragmentKind::LiteralFact,
+                SearchFragmentKind::LiteralFact,
+            ]
+        );
+        assert_eq!(
+            fragments[1].index_text(&projection),
+            "\"escaped \\\"wrapper\\\"\\nwith a decisive clause\""
+        );
+        assert_eq!(
+            fragments[1].display_text(&projection),
+            "escaped \"wrapper\"\nwith a decisive clause"
+        );
+        assert!(fragments[1].has_decoded_json_display());
+        assert_eq!(
+            fragments[5].display_text(&projection),
+            "[\"serialized\",\"arguments\"]"
+        );
+        assert!(!fragments[5].has_decoded_json_display());
     }
 }

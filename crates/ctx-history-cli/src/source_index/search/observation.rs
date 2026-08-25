@@ -6,7 +6,7 @@ use ctx_history_read_application::{
 };
 use serde_json::Value;
 
-use super::super::{compact_presentation::generation_read, render::search_json_with_lineages};
+use super::super::{compact_presentation::generation_read, render::search_json_document};
 use super::{
     application_search_failure, index_root, refresh_for_search, HistorySemanticPort, RefreshArg,
     RefreshOutcome, SearchRefreshContext, SourceSearchRequest, SourceSearchResult,
@@ -71,7 +71,7 @@ pub(super) fn observe_search_collection(
     observation.work = collection.work;
     observation.final_candidate_pool = u64::try_from(collection.candidate_pool).ok();
     observation.candidate_pool_truncated = Some(collection.candidate_pool_truncated);
-    observation.stop_reason = Some(collection.stop_reason);
+    observation.stop_reason = collection.stop_reason;
     observation.failure_phase = None;
 }
 
@@ -114,14 +114,13 @@ pub(super) fn search_existing_generation_with_port<P: HistorySemanticPort>(
     let query = result.query();
     observe_search_collection(observation, &query.collection);
     observation.failure_phase = Some(SearchFailurePhase::ResultProjection);
-    let value = search_json_with_lineages(
+    let value = search_json_document(
         &query.request,
         data_root,
         result.index(),
         &query.collection,
         &query.filters,
         &query.presentations,
-        result.copied_lineage_read_models(),
         refresh.mode,
         refresh.status,
         refresh.source_count,

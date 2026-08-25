@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "query/grouping.rs"]
+mod grouping;
 #[path = "query/lexical.rs"]
 mod lexical;
 #[path = "query/lookup.rs"]

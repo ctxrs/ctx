@@ -18,6 +18,7 @@ use crate::{
 };
 
 const MUX_SOURCE_FORMAT: &str = "mux_session_jsonl_tree";
+const MUX_PARSER_REVISION: &str = "mux-source-backed-v16-explicit-root-only";
 
 fn writer_options() -> WriterOptions {
     WriterOptions {
@@ -91,6 +92,30 @@ fn mux_records(index: &Path) -> Vec<CoreRecord> {
         .collect::<Vec<_>>();
     records.sort_by_key(|record| record.event_sequence);
     records
+}
+
+fn write_mux_lineage_session(path: &Path, session_id: &str, root_session_id: Option<&str>) {
+    fs::create_dir_all(path).unwrap();
+    write_jsonl(
+        &path.join("chat.jsonl"),
+        &[mux_message(
+            session_id,
+            &format!("{session_id}-event"),
+            0,
+            session_id,
+        )],
+    );
+    if let Some(root_session_id) = root_session_id {
+        fs::write(
+            path.join("metadata.json"),
+            json!({
+                "workspaceId": session_id,
+                "rootSessionId": root_session_id,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -199,4 +224,46 @@ fn mux_compound_route_cold_noop_companion_replacement_and_deletion() {
     assert!(deleted.sources.is_empty());
     assert_eq!(deleted.removals.len(), 1);
     assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
+}
+
+#[test]
+fn mux_lineage_keeps_direct_parents_and_only_explicit_roots() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let sessions = temp.path().join("mux-sessions");
+    let root = sessions.join("mux-root");
+    let child = root.join("subagent-transcripts/mux-child");
+    let grandchild = child.join("subagent-transcripts/mux-grandchild");
+    let orphan = sessions.join("missing-parent/subagent-transcripts/mux-orphan");
+    write_mux_lineage_session(&root, "mux-root", None);
+    write_mux_lineage_session(&child, "mux-child", None);
+    write_mux_lineage_session(&grandchild, "mux-grandchild", Some("mux-root"));
+    write_mux_lineage_session(&orphan, "mux-orphan", None);
+
+    let index = temp.path().join("index");
+    let published =
+        refresh_source_backed_generation(&index, &mux_registry(&sessions), writer_options())
+            .unwrap();
+    assert!(published.failed_routes.is_empty());
+    let records = mux_records(&index);
+    assert_eq!(records.len(), 4);
+    assert!(records
+        .iter()
+        .all(|record| record.parser_revision == MUX_PARSER_REVISION));
+    let record = |session_id: &str| {
+        records
+            .iter()
+            .find(|record| record.provider_session_id.as_deref() == Some(session_id))
+            .unwrap()
+    };
+    let root = record("mux-root");
+    let child = record("mux-child");
+    let grandchild = record("mux-grandchild");
+    let orphan = record("mux-orphan");
+
+    assert_eq!(child.parent_session_id, Some(root.session_id));
+    assert_eq!(child.root_session_id, None);
+    assert_eq!(grandchild.parent_session_id, Some(child.session_id));
+    assert_eq!(grandchild.root_session_id, Some(root.session_id));
+    assert!(orphan.parent_session_id.is_some());
+    assert_eq!(orphan.root_session_id, None);
 }

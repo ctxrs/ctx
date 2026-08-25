@@ -1,14 +1,16 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
+use std::{collections::HashMap, fmt, path::PathBuf, str::FromStr};
 
 use anyhow::{anyhow, Result};
 use ctx_history_core::{
     AgentScope, CaptureProvider, EventType, ProviderNativeEventCopy,
-    ProviderNativeSessionRelationship,
+    ProviderNativeSessionRelationship, StableEntityId,
 };
 use ctx_history_index_query::{
-    EventRecord, EventSearchCandidate, EventSearchFilters, IndexError, SearchAgentScope,
-    SearchContentScope, VerifiedIndex, LEXICAL_QUERY_LIMITS, MAX_LEXICAL_QUERY_RESULTS,
+    EventRecord, EventSearchCandidate, EventSearchFilters, IndexError, LexicalSearchBatch,
+    LexicalSearchError, LexicalSearchResult, SearchAgentScope, SearchContentScope, SearchFamilyKey,
+    SessionGroupingClaims, VerifiedIndex, LEXICAL_QUERY_LIMITS, MAX_LEXICAL_QUERY_RESULTS,
 };
+pub use ctx_history_index_query::{SearchDiversificationDecision, SearchDiversificationStatus};
 use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
@@ -32,21 +34,23 @@ use active_session::{
 };
 #[cfg(test)]
 use active_session::{
-    resolved_session_tree_ids, resolved_unique_session_tree_root_id, SessionAncestry,
-    MAX_ACTIVE_SESSION_ANCESTORS, MAX_ACTIVE_SESSION_TREE_SESSIONS,
+    proven_active_session_tree_ids, resolved_session_tree_ids,
+    resolved_unique_session_tree_root_id, SessionAncestry, MAX_ACTIVE_SESSION_ANCESTORS,
+    MAX_ACTIVE_SESSION_TREE_SESSIONS,
 };
 pub(crate) use execution_receipt::{collect_search_hits_observed, ObservedSearchExecutionError};
-use execution_receipt::{lexical_terminal_state, record_candidate_batch, SearchWorkTracker};
+use execution_receipt::{lexical_terminal_state, record_lexical_batch, SearchWorkTracker};
 pub use execution_receipt::{SearchFailurePhase, SearchStopReason, SearchWorkReceipt};
+use fusion::fuse_source_candidates;
 #[cfg(test)]
 use fusion::weighted_rrf_score;
-use fusion::{fuse_source_candidates, search_candidate_order};
-use shaping::root_first_candidate_pool_is_decisive;
 pub use shaping::shape_search_result_window;
+use shaping::{
+    dense_result_window, session_champions, shape_family_result_window, FamilyShapingOutcome,
+};
 
-const MAX_ROOT_DIVERSITY_CANDIDATES: usize = 64 * 1024;
-const MIN_CANDIDATE_BATCH: usize = 256;
-const CANDIDATE_OVERSAMPLE: usize = 8;
+/// Evidence-tunable fixed horizon for one ordinary lexical session search.
+const LEXICAL_SESSION_CANDIDATE_HORIZON: usize = 256;
 const SOURCE_FUSION_CANDIDATES: usize = 1_600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,8 +426,7 @@ pub fn search_filters_with_refs(
     let exclude_session_tree = (!request.include_current_session && session_id.is_none())
         .then_some(active_session)
         .flatten()
-        .map(|active_session| excluded_active_session_tree(index, active_session))
-        .transpose()?;
+        .and_then(|active_session| excluded_active_session_tree(index, active_session));
     let allowed_source_keys = (!request.source_roots.is_empty()
         || !request.source_groups.is_empty())
     .then(|| {
@@ -483,6 +486,8 @@ pub enum SearchExecutionError {
     #[error(transparent)]
     Index(#[from] IndexError),
     #[error(transparent)]
+    Lexical(#[from] LexicalSearchError),
+    #[error(transparent)]
     Application(#[from] anyhow::Error),
 }
 
@@ -493,6 +498,8 @@ pub struct SearchCollection {
     pub result_window: SearchResultWindow,
     pub candidate_pool: usize,
     pub candidate_pool_truncated: bool,
+    pub lexical_diagnostics: Option<SearchLexicalDiagnostics>,
+    pub diversification: SearchDiversificationDecision,
     pub requested_backend: SearchBackend,
     pub effective_backend: SearchBackend,
     pub semantic_weight: f32,
@@ -500,7 +507,21 @@ pub struct SearchCollection {
     pub semantic_fallback: Option<SemanticFallbackDiagnostics>,
     pub semantic_diagnostics: Option<Value>,
     pub work: SearchWorkReceipt,
-    pub stop_reason: SearchStopReason,
+    pub stop_reason: Option<SearchStopReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchLexicalDiagnostics {
+    pub work_complete: bool,
+    pub candidate_set_exhaustive: bool,
+    pub exhaustion: Option<SearchLexicalExhaustionDiagnostics>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchLexicalExhaustionDiagnostics {
+    pub counter: &'static str,
+    pub used: u64,
+    pub limit: u64,
 }
 
 #[derive(Debug)]
@@ -821,7 +842,7 @@ where
 {
     tracker.set_phase(SearchFailurePhase::SemanticRetrieval);
     let queries = normalized_query.texts();
-    let mut semantic_by_event = BTreeMap::<Uuid, EventSearchCandidate>::new();
+    let mut semantic_by_event = HashMap::<StableEntityId, EventSearchCandidate>::new();
     let mut semantic_query_diagnostics = Vec::with_capacity(queries.len());
     for query in &queries {
         tracker.record_retrieval_round()?;
@@ -845,12 +866,11 @@ where
             Err(error) => return Err(error.into()),
         };
         semantic_query_diagnostics.push(json!({
-            "query": query,
             "diagnostics": diagnostics,
         }));
         for candidate in candidates {
             semantic_by_event
-                .entry(candidate.event.event_id.as_uuid())
+                .entry(candidate.event.event_id)
                 .and_modify(|existing| {
                     if candidate.score > existing.score {
                         *existing = candidate.clone();
@@ -861,45 +881,74 @@ where
     }
     let mut semantic_candidates = semantic_by_event.into_values().collect::<Vec<_>>();
     semantic_candidates.sort_by(|left, right| {
-        right.score.total_cmp(&left.score).then_with(|| {
-            left.event
-                .event_id
-                .as_uuid()
-                .cmp(&right.event.event_id.as_uuid())
-        })
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| {
+                left.event
+                    .event_id
+                    .as_uuid()
+                    .cmp(&right.event.event_id.as_uuid())
+            })
+            .then_with(|| {
+                left.event
+                    .event_id
+                    .digest()
+                    .cmp(&right.event.event_id.digest())
+            })
     });
     semantic_candidates.truncate(SOURCE_FUSION_CANDIDATES);
+    let semantic_candidates_truncated = semantic_candidates.len() == SOURCE_FUSION_CANDIDATES;
     let semantic_diagnostics = json!({
         "query_count": queries.len(),
         "queries": semantic_query_diagnostics,
     });
 
-    let candidates = if requested_backend == SearchBackend::Semantic {
-        semantic_candidates
-    } else {
-        tracker.set_phase(SearchFailurePhase::IndexQueryDecode);
-        let lexical_candidates = record_candidate_batch(
-            tracker,
-            index.search_event_candidates_any_with_filters_diagnosed(
-                &queries,
-                filters,
-                SOURCE_FUSION_CANDIDATES,
-            ),
-        )?;
-        fuse_source_candidates(
-            lexical_candidates,
-            semantic_candidates,
-            request.semantic_weight,
-        )
-    };
+    let (candidates, lexical_diagnostics, candidate_pool_truncated) =
+        if requested_backend == SearchBackend::Semantic {
+            (semantic_candidates, None, semantic_candidates_truncated)
+        } else {
+            tracker.set_phase(SearchFailurePhase::IndexQueryDecode);
+            let lexical_batch = record_lexical_batch(
+                tracker,
+                index.search_event_candidates_any_with_filters_batch_diagnosed(
+                    &queries,
+                    filters,
+                    SOURCE_FUSION_CANDIDATES,
+                ),
+            )?;
+            let lexical_diagnostics = lexical_diagnostics(&lexical_batch);
+            let lexical_candidates_truncated = !lexical_batch.candidate_set_exhaustive;
+            let lexical_candidates = lexical_batch
+                .candidates
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            (
+                fuse_source_candidates(
+                    lexical_candidates,
+                    semantic_candidates,
+                    request.semantic_weight,
+                ),
+                Some(lexical_diagnostics),
+                lexical_candidates_truncated || semantic_candidates_truncated,
+            )
+        };
     let candidate_pool = candidates.len();
-    let candidate_pool_truncated = candidate_pool >= SOURCE_FUSION_CANDIDATES;
-    let result_window =
-        shape_search_result_window(candidates.iter(), request.limit, request.events);
+    tracker.set_phase(SearchFailurePhase::ResultProjection);
+    let (result_window, diversification) = shape_search_candidates_using(
+        &candidates,
+        request.limit,
+        dense_search(request),
+        DiversificationCompleteness::BackendUnknown,
+        |coordinates| index.session_grouping_claims(coordinates),
+    )?;
     Ok(SearchCollection {
         result_window,
         candidate_pool,
         candidate_pool_truncated,
+        lexical_diagnostics,
+        diversification,
         requested_backend,
         effective_backend: requested_backend,
         semantic_weight: if requested_backend == SearchBackend::Semantic {
@@ -911,7 +960,7 @@ where
         semantic_fallback: None,
         semantic_diagnostics: Some(semantic_diagnostics),
         work: tracker.work,
-        stop_reason: SearchStopReason::FixedPool,
+        stop_reason: Some(SearchStopReason::FixedPool),
     })
 }
 
@@ -929,62 +978,253 @@ fn collect_lexical_search_hits(
     event_results: bool,
     filters: &EventSearchFilters,
     tracker: &mut SearchWorkTracker,
-) -> Result<SearchCollection> {
-    let document_count = usize::try_from(index.document_count()).unwrap_or(usize::MAX);
-    let maximum = document_count
-        .min(MAX_ROOT_DIVERSITY_CANDIDATES)
-        .min(MAX_LEXICAL_QUERY_RESULTS);
-    let mut candidate_limit = limit
-        .saturating_mul(CANDIDATE_OVERSAMPLE)
-        .max(MIN_CANDIDATE_BATCH)
-        .min(maximum.max(1));
-    loop {
-        tracker.set_phase(SearchFailurePhase::IndexQueryDecode);
-        let result = if queries.is_empty() {
-            index.list_event_candidates_with_filters_diagnosed(filters, candidate_limit)
+) -> SearchExecutionResult<SearchCollection> {
+    let dense = event_results || filters.session_id.is_some();
+    if limit == 0 {
+        return Ok(empty_lexical_collection(limit, tracker.work));
+    }
+    let candidate_limit = lexical_candidate_horizon(limit, dense);
+    tracker.set_phase(SearchFailurePhase::IndexQueryDecode);
+    let batch = record_lexical_batch(
+        tracker,
+        if queries.is_empty() {
+            index.list_event_candidates_with_filters_batch_diagnosed(filters, candidate_limit)
         } else {
-            index.search_event_candidates_any_with_filters_diagnosed(
+            index.search_event_candidates_any_with_filters_batch_diagnosed(
                 queries,
                 filters,
                 candidate_limit,
             )
-        };
-        let candidates = record_candidate_batch(tracker, result)?;
-        let source_candidate_pool = candidates.len();
-        let exhausted =
-            source_candidate_pool < candidate_limit || candidate_limit >= document_count;
-        let source_tail_score = candidates
-            .iter()
-            .map(|candidate| candidate.score)
-            .min_by(f32::total_cmp);
-        let result_window = shape_search_result_window(candidates.iter(), limit, event_results);
-        let decisive_window = result_window.more_available
-            && (event_results
-                || source_tail_score.is_some_and(|tail_score| {
-                    root_first_candidate_pool_is_decisive(&candidates, limit, tail_score)
-                }));
-        if let Some((stop_reason, candidate_pool_truncated)) =
-            lexical_terminal_state(decisive_window, exhausted, candidate_limit >= maximum)
-        {
-            return Ok(SearchCollection {
-                result_window,
-                candidate_pool: candidates.len(),
-                candidate_pool_truncated,
-                requested_backend: SearchBackend::Lexical,
-                effective_backend: SearchBackend::Lexical,
-                semantic_weight: 0.0,
-                semantic_status: "skipped",
-                semantic_fallback: None,
-                semantic_diagnostics: None,
-                work: tracker.work,
-                stop_reason,
-            });
-        }
-        candidate_limit = candidate_limit
-            .saturating_mul(2)
-            .min(maximum)
-            .max(candidate_limit.saturating_add(1));
+        },
+    )?;
+    tracker.set_phase(SearchFailurePhase::ResultProjection);
+    shape_lexical_batch_using(
+        batch,
+        limit,
+        dense,
+        |coordinates| index.session_grouping_claims(coordinates),
+        tracker.work,
+    )
+}
+
+#[cfg(test)]
+fn collect_lexical_search_hits_using<LexicalSearch, GroupingClaims>(
+    limit: usize,
+    dense: bool,
+    lexical_search: LexicalSearch,
+    grouping_claims: GroupingClaims,
+) -> SearchExecutionResult<SearchCollection>
+where
+    LexicalSearch: FnOnce(usize) -> LexicalSearchResult<LexicalSearchBatch>,
+    GroupingClaims: FnOnce(
+        &[(StableEntityId, StableEntityId)],
+    ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>>,
+{
+    if limit == 0 {
+        return Ok(empty_lexical_collection(
+            limit,
+            SearchWorkReceipt::default(),
+        ));
     }
+    let candidate_limit = lexical_candidate_horizon(limit, dense);
+    let batch = lexical_search(candidate_limit)?;
+    shape_lexical_batch_using(
+        batch,
+        limit,
+        dense,
+        grouping_claims,
+        SearchWorkReceipt::default(),
+    )
+}
+
+fn shape_lexical_batch_using<GroupingClaims>(
+    batch: LexicalSearchBatch,
+    limit: usize,
+    dense: bool,
+    grouping_claims: GroupingClaims,
+    work: SearchWorkReceipt,
+) -> SearchExecutionResult<SearchCollection>
+where
+    GroupingClaims: FnOnce(
+        &[(StableEntityId, StableEntityId)],
+    ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>>,
+{
+    let candidate_pool = batch.candidates.len();
+    let candidate_pool_truncated = !batch.candidate_set_exhaustive;
+    let stop_reason = lexical_terminal_state(&batch);
+    let completeness = DiversificationCompleteness::Lexical {
+        work_complete: batch.complete,
+        candidate_set_exhaustive: batch.candidate_set_exhaustive,
+    };
+    let lexical_diagnostics = lexical_diagnostics(&batch);
+    let candidates = batch
+        .candidates
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    let (mut result_window, diversification) =
+        shape_search_candidates_using(&candidates, limit, dense, completeness, grouping_claims)?;
+    if dense && batch.complete && !batch.candidate_set_exhaustive && candidate_pool == limit {
+        // At the maximum retained horizon, completed heap truncation proves an
+        // additional event even though no lookahead slot can be retained.
+        result_window.more_available = true;
+    }
+    Ok(SearchCollection {
+        result_window,
+        candidate_pool,
+        candidate_pool_truncated,
+        lexical_diagnostics: Some(lexical_diagnostics),
+        diversification,
+        requested_backend: SearchBackend::Lexical,
+        effective_backend: SearchBackend::Lexical,
+        semantic_weight: 0.0,
+        semantic_status: "skipped",
+        semantic_fallback: None,
+        semantic_diagnostics: None,
+        work,
+        stop_reason,
+    })
+}
+
+fn empty_lexical_collection(limit: usize, work: SearchWorkReceipt) -> SearchCollection {
+    SearchCollection {
+        result_window: SearchResultWindow {
+            limit,
+            hits: Vec::new(),
+            more_available: false,
+        },
+        candidate_pool: 0,
+        candidate_pool_truncated: false,
+        lexical_diagnostics: None,
+        diversification: SearchDiversificationDecision {
+            status: SearchDiversificationStatus::NotApplicable,
+            top_n: limit,
+            changed_final_top_n: None,
+        },
+        requested_backend: SearchBackend::Lexical,
+        effective_backend: SearchBackend::Lexical,
+        semantic_weight: 0.0,
+        semantic_status: "skipped",
+        semantic_fallback: None,
+        semantic_diagnostics: None,
+        work,
+        stop_reason: None,
+    }
+}
+
+fn lexical_candidate_horizon(limit: usize, dense: bool) -> usize {
+    let lookahead = limit.saturating_add(1);
+    if dense {
+        lookahead.min(MAX_LEXICAL_QUERY_RESULTS)
+    } else {
+        lookahead.clamp(LEXICAL_SESSION_CANDIDATE_HORIZON, MAX_LEXICAL_QUERY_RESULTS)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DiversificationCompleteness {
+    Lexical {
+        work_complete: bool,
+        candidate_set_exhaustive: bool,
+    },
+    BackendUnknown,
+}
+
+fn shape_search_candidates_using<GroupingClaims>(
+    candidates: &[EventSearchCandidate],
+    limit: usize,
+    dense: bool,
+    completeness: DiversificationCompleteness,
+    grouping_claims: GroupingClaims,
+) -> SearchExecutionResult<(SearchResultWindow, SearchDiversificationDecision)>
+where
+    GroupingClaims: FnOnce(
+        &[(StableEntityId, StableEntityId)],
+    ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>>,
+{
+    if dense || limit == 0 {
+        return Ok((
+            dense_result_window(candidates, limit),
+            SearchDiversificationDecision {
+                status: SearchDiversificationStatus::NotApplicable,
+                top_n: limit,
+                changed_final_top_n: None,
+            },
+        ));
+    }
+
+    let champions = session_champions(candidates);
+    let coordinates = champions
+        .iter()
+        .map(|champion| {
+            (
+                champion.candidate.event.session_id,
+                champion.candidate.event.source.identity(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let claims = grouping_claims(&coordinates)?;
+    validate_grouping_claims(&coordinates, &claims)?;
+    let families = claims.iter().map(SearchFamilyKey::from).collect::<Vec<_>>();
+    let FamilyShapingOutcome {
+        result_window,
+        distinct_families,
+        changed_final_top_n,
+    } = shape_family_result_window(&champions, &families, limit);
+    let status = match completeness {
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive,
+        } if candidate_set_exhaustive || distinct_families >= limit => {
+            SearchDiversificationStatus::Applied
+        }
+        DiversificationCompleteness::Lexical { .. }
+        | DiversificationCompleteness::BackendUnknown => SearchDiversificationStatus::Indeterminate,
+    };
+    Ok((
+        result_window,
+        SearchDiversificationDecision {
+            status,
+            top_n: limit,
+            changed_final_top_n: (status == SearchDiversificationStatus::Applied)
+                .then_some(changed_final_top_n),
+        },
+    ))
+}
+
+fn validate_grouping_claims(
+    coordinates: &[(StableEntityId, StableEntityId)],
+    claims: &[SessionGroupingClaims],
+) -> ctx_history_index_query::Result<()> {
+    if coordinates.len() != claims.len()
+        || coordinates
+            .iter()
+            .zip(claims)
+            .any(|(&(session_id, source_owner), claims)| {
+                claims.session_id != session_id || claims.source_owner != source_owner
+            })
+    {
+        return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+    }
+    Ok(())
+}
+
+fn lexical_diagnostics(batch: &LexicalSearchBatch) -> SearchLexicalDiagnostics {
+    SearchLexicalDiagnostics {
+        work_complete: batch.complete,
+        candidate_set_exhaustive: batch.candidate_set_exhaustive,
+        exhaustion: batch.exhaustion.as_ref().map(|exhaustion| {
+            SearchLexicalExhaustionDiagnostics {
+                counter: exhaustion.counter.as_str(),
+                used: exhaustion.used,
+                limit: exhaustion.limit,
+            }
+        }),
+    }
+}
+
+fn dense_search(request: &SearchRequest) -> bool {
+    request.events || request.session.is_some()
 }
 
 #[cfg(test)]

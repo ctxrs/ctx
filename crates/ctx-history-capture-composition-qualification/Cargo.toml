@@ -30,6 +30,10 @@ path = "tests/provider_lifecycle.rs"
 name = "openclaw_configured_root_lifecycle"
 path = "tests/openclaw_configured_root_lifecycle.rs"
 
+[[test]]
+name = "custom_history_core_fixture"
+path = "tests/custom_history_core_fixture.rs"
+
 [dev-dependencies]
 ctx-history-capture-composition = { path = "../ctx-history-capture-composition", features = ["test-support"] }
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
@@ -47,5 +51,6 @@ ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
 ctx-history-source-io = { path = "../ctx-history-source-io", features = ["test-support"] }
 rusqlite.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 zstd.workspace = true

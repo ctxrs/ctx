@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use ctx_history_index_query::{EventSearchFilters, VerifiedIndex};
+use ctx_history_index_query::{EventSearchFilters, SearchDiversificationStatus, VerifiedIndex};
 use serde_json::{json, Value};
 
 use crate::json::{compact_json, event_copy_json, timestamp_json};
@@ -16,7 +16,6 @@ pub struct SearchJsonInput<'input> {
     pub collection: &'input SearchCollection,
     pub filters: &'input EventSearchFilters,
     pub presentations: &'input [SearchPresentation],
-    pub copied_lineages: &'input [Value],
     pub commands: &'input [SearchResultCommands],
     pub freshness_mode: &'input str,
     pub generated_at: &'input str,
@@ -47,7 +46,6 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         collection,
         filters,
         presentations,
-        copied_lineages,
         commands,
         freshness_mode,
         generated_at,
@@ -56,19 +54,16 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         metrics,
     } = input;
     let normalized_query = NormalizedSearchQuery::from_request(request);
-    let result_scope = if request.events { "event" } else { "session" };
+    let result_scope = if request.events || request.session.is_some() {
+        "event"
+    } else {
+        "session"
+    };
     let expected = collection.result_window.hits.len();
     if presentations.len() != expected {
         return Err(anyhow!(
             "pinned Core lookup returned {} search presentations for {} hits",
             presentations.len(),
-            expected
-        ));
-    }
-    if copied_lineages.len() != expected {
-        return Err(anyhow!(
-            "pinned Core lookup returned {} copied-lineage values for {} hits",
-            copied_lineages.len(),
             expected
         ));
     }
@@ -84,27 +79,23 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         .hits
         .iter()
         .zip(presentations)
-        .zip(copied_lineages)
         .zip(commands)
         .enumerate()
-        .map(
-            |(offset, (((hit, presentation), copied_lineage), commands))| {
-                if presentation.event_id != hit.event.event_id {
-                    return Err(anyhow!(
-                        "out-of-order search presentation for event {}",
-                        presentation.event_id
-                    ));
-                }
-                search_result_json(
-                    hit,
-                    presentation,
-                    result_scope,
-                    offset.saturating_add(1),
-                    copied_lineage,
-                    commands,
-                )
-            },
-        )
+        .map(|(offset, ((hit, presentation), commands))| {
+            if presentation.event_id != hit.event.event_id {
+                return Err(anyhow!(
+                    "out-of-order search presentation for event {}",
+                    presentation.event_id
+                ));
+            }
+            search_result_json(
+                hit,
+                presentation,
+                result_scope,
+                offset.saturating_add(1),
+                commands,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let phase_attribution = phase_attribution(metrics.query_duration);
     let semantic_diagnostics = semantic_diagnostics_read_model(
@@ -155,6 +146,11 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         },
         "phase_attribution": phase_attribution,
         "generated_at": generated_at,
+        "diversification": {
+            "status": diversification_status(collection.diversification.status),
+            "top_n": collection.diversification.top_n,
+            "changed_final_top_n": collection.diversification.changed_final_top_n,
+        },
         "results": results,
         "result_window": {
             "limit": collection.result_window.limit,
@@ -164,6 +160,15 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         "truncation": {
             "candidate_pool": collection.candidate_pool,
             "candidate_pool_truncated": collection.candidate_pool_truncated,
+            "lexical": collection.lexical_diagnostics.as_ref().map(|diagnostics| json!({
+                "work_complete": diagnostics.work_complete,
+                "candidate_set_exhaustive": diagnostics.candidate_set_exhaustive,
+                "exhaustion": diagnostics.exhaustion.as_ref().map(|exhaustion| json!({
+                    "counter": exhaustion.counter,
+                    "used": exhaustion.used,
+                    "limit": exhaustion.limit,
+                })),
+            })),
         },
     })))
 }
@@ -195,7 +200,6 @@ pub fn search_result_json(
     presentation: &SearchPresentation,
     result_scope: &str,
     rank: usize,
-    copied_lineage: &Value,
     commands: &SearchResultCommands,
 ) -> Result<Value> {
     let (snippet, snippet_truncated) = search_snippet(presentation);
@@ -238,7 +242,6 @@ pub fn search_result_json(
         "root_ctx_session_id": event.root_session_id,
         "session_relationship": event.session_relationship,
         "event_copy": event_copy_json(event.event_copy.as_ref()),
-        "copied_lineage": copied_lineage,
         "agent_scope": event.agent_scope,
         "timestamp": timestamp_json(event.occurred_at_unix_ms),
         "suggested_next_commands": commands.suggested_next_commands,
@@ -253,6 +256,14 @@ pub fn search_result_json(
         }],
         "visibility": "local",
     })))
+}
+
+fn diversification_status(status: SearchDiversificationStatus) -> &'static str {
+    match status {
+        SearchDiversificationStatus::Applied => "applied",
+        SearchDiversificationStatus::NotApplicable => "not_applicable",
+        SearchDiversificationStatus::Indeterminate => "indeterminate",
+    }
 }
 
 pub fn search_snippet(presentation: &SearchPresentation) -> (&str, bool) {

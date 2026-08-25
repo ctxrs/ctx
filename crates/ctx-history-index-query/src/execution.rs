@@ -1,5 +1,6 @@
 use super::*;
 
+mod grouping;
 mod lineage;
 mod lookup;
 mod pages;
@@ -64,32 +65,6 @@ impl VerifiedIndex {
             IndexRecordOption::Basic,
         );
         u64::try_from(self.searcher.search(&query, &Count)?).map_err(|_| IndexError::CountOverflow)
-    }
-
-    fn body_query_terms(&self, natural_texts: &[&str], fields: Fields) -> Result<Vec<Term>> {
-        let mut analyzer = self
-            .searcher
-            .index()
-            .tokenizers()
-            .get(BODY_ANALYZER)
-            .ok_or(IndexError::MissingAnalyzer(BODY_ANALYZER))?;
-        let mut terms = BTreeSet::new();
-        for natural_text in natural_texts {
-            let mut stream = analyzer.token_stream(natural_text);
-            while stream.advance() {
-                terms.insert(Term::from_field_text(
-                    fields.body_search,
-                    &stream.token().text,
-                ));
-                if terms.len() > LEXICAL_QUERY_LIMITS.maximum_unique_tokens {
-                    return Err(IndexError::LexicalQueryTokensTooMany {
-                        observed: terms.len(),
-                        maximum: LEXICAL_QUERY_LIMITS.maximum_unique_tokens,
-                    });
-                }
-            }
-        }
-        Ok(terms.into_iter().collect())
     }
 
     fn event_records_for_query(

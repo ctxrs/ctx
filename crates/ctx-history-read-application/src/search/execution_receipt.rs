@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use ctx_history_index_query::{
-    DiagnosedEventCandidateQueryResult, EventCandidateQueryReceipt, EventSearchCandidate,
-    EventSearchFilters, VerifiedIndex,
+    DiagnosedLexicalSearchBatchResult, EventCandidateQueryReceipt, EventSearchFilters,
+    LexicalSearchBatch, VerifiedIndex,
 };
 
 use super::{
@@ -118,15 +118,15 @@ pub(crate) fn collect_search_hits_observed<P: HistorySemanticPort>(
     .map_err(|error| ObservedSearchExecutionError::new(error, tracker.work, tracker.failure_phase))
 }
 
-pub(super) fn record_candidate_batch(
+pub(super) fn record_lexical_batch(
     tracker: &mut SearchWorkTracker,
-    result: DiagnosedEventCandidateQueryResult,
-) -> SearchExecutionResult<Vec<EventSearchCandidate>> {
+    result: DiagnosedLexicalSearchBatchResult,
+) -> SearchExecutionResult<LexicalSearchBatch> {
     tracker.record_retrieval_round()?;
     match result {
         Ok(observed) => {
             tracker.record_candidate_batch(observed.receipt)?;
-            Ok(observed.candidates)
+            Ok(observed.batch)
         }
         Err(failure) => {
             tracker.record_candidate_batch(failure.receipt)?;
@@ -135,18 +135,14 @@ pub(super) fn record_candidate_batch(
     }
 }
 
-pub(super) fn lexical_terminal_state(
-    decisive: bool,
-    exhausted: bool,
-    candidate_cap_reached: bool,
-) -> Option<(SearchStopReason, bool)> {
-    if decisive {
-        Some((SearchStopReason::Decisive, false))
-    } else if exhausted {
-        Some((SearchStopReason::Exhausted, false))
-    } else if candidate_cap_reached {
-        Some((SearchStopReason::CandidateCap, true))
-    } else {
+pub(super) fn lexical_terminal_state(batch: &LexicalSearchBatch) -> Option<SearchStopReason> {
+    if !batch.complete {
+        // A work ceiling proves truncation but not why the result set ended.
+        // Do not mislabel arbitrary work exhaustion as the candidate cap.
         None
+    } else if batch.candidate_set_exhaustive {
+        Some(SearchStopReason::Exhausted)
+    } else {
+        Some(SearchStopReason::CandidateCap)
     }
 }

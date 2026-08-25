@@ -676,6 +676,12 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
         },
         candidate_pool: 1,
         candidate_pool_truncated: false,
+        lexical_diagnostics: None,
+        diversification: ctx_history_read_application::SearchDiversificationDecision {
+            status: ctx_history_read_application::SearchDiversificationStatus::Applied,
+            top_n: 1,
+            changed_final_top_n: Some(false),
+        },
         requested_backend: SearchBackendArg::Lexical,
         effective_backend: SearchBackendArg::Lexical,
         semantic_weight: 0.0,
@@ -706,6 +712,7 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
     assert_eq!(
         sorted_json_keys(&value),
         vec![
+            "diversification",
             "filters",
             "freshness",
             "generated_at",
@@ -724,6 +731,15 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
     assert_eq!(value["filters"]["content_scope"], "all");
     assert!(value["results"][0].get("session_relationship").is_none());
     assert!(value["results"][0].get("event_copy").is_none());
+    assert!(value["results"][0].get("copied_lineage").is_none());
+    assert_eq!(
+        value["diversification"],
+        json!({
+            "status": "applied",
+            "top_n": 1,
+            "changed_final_top_n": false,
+        })
+    );
     assert_eq!(
         sorted_json_keys(&value["result_window"]),
         vec!["limit", "more_available", "returned"]
@@ -771,6 +787,8 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
     let second = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 42, 1);
     let first_id = first.event_id.as_uuid();
     let second_id = second.event_id.as_uuid();
+    let first_session_id = first.session_id.as_uuid();
+    let second_session_id = second.session_id.as_uuid();
     let first_core = fixture_core_event(&first, "first shaped result");
     let second_core = fixture_core_event(&second, "second shaped result");
     let mut source_request = request(RefreshArg::Off);
@@ -794,6 +812,12 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
         },
         candidate_pool: 2,
         candidate_pool_truncated: false,
+        lexical_diagnostics: None,
+        diversification: ctx_history_read_application::SearchDiversificationDecision {
+            status: ctx_history_read_application::SearchDiversificationStatus::Applied,
+            top_n: 2,
+            changed_final_top_n: Some(true),
+        },
         requested_backend: SearchBackendArg::Lexical,
         effective_backend: SearchBackendArg::Lexical,
         semantic_weight: 0.0,
@@ -827,6 +851,25 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
     assert_eq!(results[1]["rank"], 2);
     assert_eq!(results[0]["retrieval_score"], 0.25);
     assert_eq!(results[1]["retrieval_score"], 9.5);
+    for (result, event_id, session_id) in [
+        (&results[0], first_id, first_session_id),
+        (&results[1], second_id, second_session_id),
+    ] {
+        assert_eq!(result["item_id"], session_id.to_string());
+        assert_eq!(result["ctx_event_id"], event_id.to_string());
+        assert_eq!(result["ctx_session_id"], session_id.to_string());
+        assert_eq!(result["event_id"], event_id.to_string());
+        assert_eq!(result["session_id"], session_id.to_string());
+        let citation = &result["citations"][0];
+        assert_eq!(citation["item_id"], event_id.to_string());
+        assert_eq!(citation["ctx_event_id"], event_id.to_string());
+        assert_eq!(citation["ctx_session_id"], session_id.to_string());
+        assert_eq!(citation["session_id"], session_id.to_string());
+        assert!(result["suggested_next_commands"][1]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("show event {event_id} --window 10")));
+    }
 
     presentations.swap(0, 1);
     let error = search_json(

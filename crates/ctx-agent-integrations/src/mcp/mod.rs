@@ -797,6 +797,7 @@ mod request_id_tests {
     };
     use crate::tool_backend::{
         OpaqueMcpProxyError, ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome,
+        ToolSearchBackend,
     };
 
     struct UnusedBackend;
@@ -892,18 +893,26 @@ mod request_id_tests {
     }
 
     #[test]
-    fn search_root_and_group_arrays_are_typed_and_forwarded() {
-        let request = search_request(
-            &json!({
-                "query": "fixture",
-                "source_roots": ["personal", "archive"],
-                "source_groups": ["work"]
-            }),
-            &UnusedBackend,
-        )
-        .unwrap();
-        assert_eq!(request.source_roots, ["personal", "archive"]);
-        assert_eq!(request.source_groups, ["work"]);
+    fn search_root_and_group_arrays_are_typed_and_forwarded_across_backends() {
+        for (backend, expected_backend) in [
+            ("lexical", ToolSearchBackend::Lexical),
+            ("semantic", ToolSearchBackend::Semantic),
+            ("hybrid", ToolSearchBackend::Hybrid),
+        ] {
+            let request = search_request(
+                &json!({
+                    "query": "fixture",
+                    "source_roots": ["personal", "archive"],
+                    "source_groups": ["work"],
+                    "backend": backend,
+                }),
+                &UnusedBackend,
+            )
+            .unwrap();
+            assert_eq!(request.source_roots, ["personal", "archive"]);
+            assert_eq!(request.source_groups, ["work"]);
+            assert_eq!(request.backend, Some(expected_backend));
+        }
 
         let error = search_request(
             &json!({"query": "fixture", "source_roots": ["personal", 7]}),

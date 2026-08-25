@@ -180,7 +180,10 @@ fn reverse_preview_preserves_optional_relationships_and_exact_counts() {
     let (_temp, index) = publish_records(&source, &records);
 
     let preview = index
-        .copied_event_lineage(root.event_id.as_uuid(), SEARCH_COPIED_EVENT_LINEAGE_POLICY)
+        .copied_event_lineage(
+            root.event_id.as_uuid(),
+            CopiedEventLineagePolicy::new(3, 64),
+        )
         .unwrap();
     assert_eq!(preview.returned, 3);
     assert_eq!(preview.exact_observed_count(), Some(4));

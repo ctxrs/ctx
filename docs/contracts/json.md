@@ -736,6 +736,7 @@ Returns:
 - `freshness`;
 - `retrieval`;
 - `generated_at`;
+- `diversification`;
 - `results[]`;
 - `result_window`;
 - `truncation`.
@@ -762,15 +763,44 @@ validation diagnostics remain generic and do not echo rejected contents.
 `result_window` has exactly `limit`, `returned`, and `more_available`.
 `returned` is at most `limit`. `more_available` is `true` only when the same
 bounded search pass finds one additional fully shaped result: an event for
-event-scoped search, or a distinct session for the default session-scoped
-search. Search does not expose a cursor, run a second count scan, or claim an
-exact omitted-result total. Text output ends with exactly
+event-scoped search, or an additional session champion for the default
+session-scoped search. A false value does not assert exhaustive backend
+availability; readers must inspect `truncation`. Search does not expose a
+cursor, run a second count scan, or claim an exact omitted-result total. Text
+output ends with exactly
 `More results available.` only when `more_available` is `true`.
 
 `truncation` independently describes backend candidate-pool limits with
-`candidate_pool` and `candidate_pool_truncated`. Candidate-pool truncation does
-not by itself make `more_available` true; that flag requires an additional
-shaped result.
+`candidate_pool` and `candidate_pool_truncated`. For lexical participation it
+also includes `lexical.work_complete`, `lexical.candidate_set_exhaustive`, and,
+only after bounded work exhaustion, `lexical.exhaustion` with the operation
+`counter`, `used`, and `limit`. It does not expose segment identifiers,
+document identifiers, query text, content, scores, or candidate identities.
+`candidate_set_exhaustive` is false when a completed retained heap discarded
+lower-relevance matches and whenever bounded work did not complete.
+`candidate_pool_truncated` is true for that lexical non-exhaustiveness or when
+a backend reaches its fixed candidate cap; it does not claim an exact omitted
+count. Backends without an explicit completeness signal remain conservative in
+`diversification.status` even when no known cap was reached.
+Candidate-pool truncation does not by itself make `more_available` true; that
+flag requires an additional shaped result, except that completed dense heap
+truncation at the maximum retained horizon proves one additional event.
+
+`diversification` has `status`, `top_n`, and conditionally
+`changed_final_top_n`. `status` is `applied`, `not_applicable`, or
+`indeterminate`; `top_n` is the requested limit. Dense `--events`, any explicit
+`--session`, and limit zero are `not_applicable` and omit
+`changed_final_top_n`. Default session search selects one champion per exact
+session, orders families by their strongest champion, and emits one remaining
+champion per family per relevance-stable round. Ordinary lexical session search
+is `applied` only when
+bounded lexical work completed and either the candidate set is exhaustive or
+at least `top_n` distinct coalesced families were observed. Work exhaustion or
+insufficient family coverage is `indeterminate`. Semantic and hybrid candidate
+completeness is not yet explicit, so those backends apply the same coalesced
+family policy but remain `indeterminate`. `changed_final_top_n` is present only
+for `applied` and compares the full event-identity sequence before and after
+family shaping.
 
 `query` is the normalized display of the positional query plus repeatable
 `--term` alternatives: surrounding whitespace is removed and nonempty
@@ -792,7 +822,7 @@ Each result can include:
 - `rank`, the one-based position in the final shaped result window;
 - `retrieval_score`, the backend-provided diagnostic score; this score is not an
   ordering contract and need not be monotonic after query-coverage and
-  session-diversity shaping;
+  family shaping;
 - `result_type`, the concrete hit kind such as `event`, `session`,
   `session_result`, or `indexed_item`;
 - `result_scope`, either `session` for a session-level result or `event` for an
@@ -804,50 +834,54 @@ Each result can include:
 - `provider_key` and `source_id` for custom history-source results;
 - `timestamp`;
 - `cwd`;
-- `why_matched`;
 - `citations[]`;
 - `suggested_next_commands[]`;
-- `copied_lineage`;
 - `visibility`.
 
-`copied_lineage` is the same schema-v2 object on each search result and on an
-event-window envelope. It is an explicit query-time view; its resolution does
-not affect publication. Its current required fields are listed below;
+Ordinary search results do not carry `copied_lineage` and do not run one
+reverse lookup per hit. Their event-local `event_copy`, when present, is the
+selected occurrence's positive direct provider evidence only.
+
+`copied_lineage` is a schema-v2 object on the explicit show-event/event-window
+envelope. It is a bounded, direct one-hop query-time view; its resolution does
+not affect publication, ranking, grouping, recall, or semantic eligibility.
+Its current required fields are listed below;
 schema-v2 readers must ignore additional fields:
 
 - `schema_version: 2`;
-- `resolution`, with `state` equal to `resolved`, `unresolved`, or `cyclic`,
-  the target `ctx_event_id`, and a nullable `ctx_session_id` when the target
-  session is not known;
-- `selected_depth`, the number of forward copied-from edges examined;
+- `resolution`, with `state` equal to `resolved` or `unresolved`, the direct
+  target `ctx_event_id`, and a nullable `ctx_session_id` when the target session
+  is not known;
+- `selected_depth`, zero when the selected event is the anchor and one when its
+  one direct copied-from target is the anchor;
 - `observed_count`, exact when `truncated` is false and otherwise a lower bound;
 - numeric `returned`, the number of retained occurrence rows;
 - `occurrences[]`, each with full `ctx_event_id`, `ctx_session_id`, direct
   `copied_from_ctx_event_id` and `copied_from_ctx_session_id`, parent and
-  child-claimed-root session IDs, `session_relationship`, and BFS `depth`;
+  child-claimed-root session IDs, `session_relationship`, and direct-edge
+  `depth` (currently always one);
 - `relationship_counts`, keyed by relationship kind and subject to the same
   exact-versus-lower-bound rule;
 - `truncated`.
 
-Missing parent/copy targets are unresolved references, and cycles are cyclic
-answers. Reverse lookup can return direct child claims even when the selected
-target event is absent. Neither condition invalidates the immutable generation.
+Missing copy targets are unresolved references. Reverse lookup can return
+direct child claims even when the selected target event is absent. A direct
+self-copy claim is rejected at Core admission, and this surface neither detects
+nor reports transitive cycles. Missing targets do not invalidate the immutable
+generation or hide admitted occurrences.
 
-Search retains at most three occurrences after at most 64 reverse posting
-visits. Show event retains at most 20 after at most 4,096 visits. Both stop at
-depth 1,024. Selected-event, forward-origin, and session-ancestry resolution
+Show event retains at most 20 direct occurrences after at most 4,096 reverse
+posting visits. Selected-event and its one direct copied-from target resolution
 share at most 2,048 exact event-and-session identity posting visits, counting
-live and deleted rows. The query fails with a typed bound error if more work
-would be required. The complete object is limited to 64 KiB. Preview retention
-alone does not make an otherwise complete count truncated. The current writer does
+live and deleted rows. There is no parent, root, copy-component, or transitive
+lineage traversal. The query fails with a typed bound error if more work would
+be required. The complete object is limited to 64 KiB. Preview retention alone
+does not make an otherwise complete count truncated. The current writer does
 not emit `more_available`,
 compact-ID fields, or an exhaustive cursor. CLI JSON and MCP structured content
 always use full UUIDs; compact aliases exist only in the separately rendered
 human/MCP text projection.
 
-`why_matched[]` can include text, metadata, or touched-file reasons. A touched
-file match is backed by normalized touched-file storage and can appear when
-search uses `--file <path>` or when file-path metadata contributes to ranking.
 `citations[]` can cite sessions, events, or files depending on
 which indexed item produced the match.
 
@@ -894,8 +928,8 @@ importer. Off mode sends no maintenance wake.
 - `embedding_model`, nullable/omitted;
 - `coverage`;
 - `worker`, using the same shape as `status.semantic`, nullable/omitted;
-- `diagnostics`, nullable/omitted and present when semantic vector retrieval
-  runs.
+- `semantic_diagnostics`, nullable/omitted and present when semantic vector
+  retrieval runs.
 
 `retrieval.semantic_status` is one of:
 
@@ -939,7 +973,7 @@ part of v1 unless a future CLI JSON shape emits them. Local diagnostic path
 fields such as `vector_path`/`vectorPath` can still appear as additive JSON from
 the local CLI adapter, but they are intentionally not stable SDK fields.
 
-`retrieval.diagnostics` can include `query_embed_ms`, `vector_backend`,
+`retrieval.semantic_diagnostics` can include `query_embed_ms`, `vector_backend`,
 `vector_scan_ms`, `chunks_scanned`, `vector_bytes_read`, `events_scored`, and
 `semantic_candidates`. These fields
 are local performance diagnostics and can reveal corpus size/timing; treat them

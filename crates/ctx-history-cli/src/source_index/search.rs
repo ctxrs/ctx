@@ -258,6 +258,9 @@ impl From<ctx_history_read_application::SearchExecutionError> for SourceSearchFa
                 Self::Semantic(error)
             }
             ctx_history_read_application::SearchExecutionError::Index(error) => Self::from(error),
+            ctx_history_read_application::SearchExecutionError::Lexical(error) => {
+                Self::Other(anyhow::Error::new(error))
+            }
             ctx_history_read_application::SearchExecutionError::Application(error) => {
                 Self::from(error)
             }

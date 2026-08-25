@@ -1,78 +1,19 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
-use ctx_history_core::AgentScope;
-use ctx_history_index_query::EventSearchCandidate;
-use uuid::Uuid;
+use ctx_history_core::StableEntityId;
+use ctx_history_index_query::{EventSearchCandidate, SearchFamilyKey};
 
-use super::{search_candidate_order, SearchEventMetadata, SearchHit, SearchResultWindow};
+use super::{SearchEventMetadata, SearchHit, SearchResultWindow};
 
-pub(super) const PRIMARY_CHAMPION_SCORE_TOLERANCE: f32 = 0.95;
+pub(super) struct SessionChampion<'candidate> {
+    pub(super) candidate: &'candidate EventSearchCandidate,
+    pub(super) match_count: usize,
+}
 
-pub(super) fn root_first_candidate_pool_is_decisive(
-    candidates: &[EventSearchCandidate],
-    limit: usize,
-    source_tail_score: f32,
-) -> bool {
-    if limit == 0 {
-        return true;
-    }
-    let mut roots = BTreeMap::<Uuid, (f32, Option<f32>)>::new();
-    for candidate in candidates {
-        let session_id = candidate.event.session_id.as_uuid();
-        let root_id = candidate
-            .event
-            .root_session_id
-            .map(|id| id.as_uuid())
-            .unwrap_or(session_id);
-        roots
-            .entry(root_id)
-            .and_modify(|(strongest_score, strongest_primary_score)| {
-                if candidate.score.total_cmp(strongest_score).is_gt() {
-                    *strongest_score = candidate.score;
-                }
-                if candidate.event.agent_scope == Some(AgentScope::Primary)
-                    && strongest_primary_score
-                        .is_none_or(|score| candidate.score.total_cmp(&score).is_gt())
-                {
-                    *strongest_primary_score = Some(candidate.score);
-                }
-            })
-            .or_insert((
-                candidate.score,
-                (candidate.event.agent_scope == Some(AgentScope::Primary))
-                    .then_some(candidate.score),
-            ));
-    }
-
-    let mut roots = roots.into_iter().collect::<Vec<_>>();
-    roots.sort_by(|(left_id, (left_score, _)), (right_id, (right_score, _))| {
-        right_score
-            .total_cmp(left_score)
-            .then_with(|| left_id.cmp(right_id))
-    });
-    let selected = roots.iter().take(limit).collect::<Vec<_>>();
-    if selected.len() < limit {
-        return false;
-    }
-
-    let weakest_selected_score = selected
-        .last()
-        .map(|(_, (score, _))| *score)
-        .unwrap_or(f32::INFINITY);
-    if source_tail_score >= weakest_selected_score {
-        return false;
-    }
-
-    selected
-        .iter()
-        .all(|(_, (strongest_score, strongest_primary_score))| {
-            let primary_threshold = *strongest_score * PRIMARY_CHAMPION_SCORE_TOLERANCE;
-            strongest_primary_score
-                .filter(|score| *score >= primary_threshold)
-                .map_or(source_tail_score < primary_threshold, |score| {
-                    source_tail_score < score
-                })
-        })
+pub(super) struct FamilyShapingOutcome {
+    pub(super) result_window: SearchResultWindow,
+    pub(super) distinct_families: usize,
+    pub(super) changed_final_top_n: bool,
 }
 
 pub fn shape_search_result_window<'a>(
@@ -80,21 +21,14 @@ pub fn shape_search_result_window<'a>(
     limit: usize,
     event_results: bool,
 ) -> SearchResultWindow {
-    let shape_limit = limit.saturating_add(1);
+    let candidates = candidates.into_iter().collect::<Vec<_>>();
     let mut hits = if event_results {
-        let mut candidates = candidates.into_iter().collect::<Vec<_>>();
-        candidates.sort_by(|left, right| search_candidate_order(left, right));
-        candidates
-            .into_iter()
-            .take(shape_limit)
-            .map(|candidate| SearchHit {
-                event: SearchEventMetadata::from(&candidate.event),
-                score: candidate.score,
-                more_matches_in_session: 0,
-            })
-            .collect()
+        dense_hits(candidates.iter().copied())
     } else {
-        shape_root_first_session_hits(candidates, shape_limit)
+        session_champions(candidates.iter().copied())
+            .into_iter()
+            .map(|session| session_champion_hit(&session))
+            .collect()
     };
     let more_available = hits.len() > limit;
     hits.truncate(limit);
@@ -105,119 +39,114 @@ pub fn shape_search_result_window<'a>(
     }
 }
 
-struct SessionChampion<'a> {
-    candidate: &'a EventSearchCandidate,
-    match_count: usize,
+pub(super) fn dense_result_window(
+    candidates: &[EventSearchCandidate],
+    limit: usize,
+) -> SearchResultWindow {
+    let mut hits = dense_hits(candidates.iter());
+    let more_available = hits.len() > limit;
+    hits.truncate(limit);
+    SearchResultWindow {
+        limit,
+        hits,
+        more_available,
+    }
 }
 
-struct RootSessionHits {
-    root_id: Uuid,
-    strongest_score: f32,
-    champion: SearchHit,
-    remaining: VecDeque<SearchHit>,
-}
-
-fn shape_root_first_session_hits<'a>(
-    candidates: impl IntoIterator<Item = &'a EventSearchCandidate>,
-    shape_limit: usize,
+fn dense_hits<'candidate>(
+    candidates: impl IntoIterator<Item = &'candidate EventSearchCandidate>,
 ) -> Vec<SearchHit> {
-    let mut sessions = BTreeMap::<Uuid, SessionChampion<'a>>::new();
+    candidates
+        .into_iter()
+        .map(|candidate| SearchHit {
+            event: SearchEventMetadata::from(&candidate.event),
+            score: candidate.score,
+            more_matches_in_session: 0,
+        })
+        .collect()
+}
+
+pub(super) fn session_champions<'candidate>(
+    candidates: impl IntoIterator<Item = &'candidate EventSearchCandidate>,
+) -> Vec<SessionChampion<'candidate>> {
+    let mut session_positions = HashMap::<StableEntityId, usize>::new();
+    let mut champions = Vec::<SessionChampion<'_>>::new();
     for candidate in candidates {
-        let session_id = candidate.event.session_id.as_uuid();
-        sessions
-            .entry(session_id)
-            .and_modify(|session| {
-                session.match_count = session.match_count.saturating_add(1);
-                if search_candidate_order(candidate, session.candidate).is_lt() {
-                    session.candidate = candidate;
-                }
-            })
-            .or_insert(SessionChampion {
-                candidate,
-                match_count: 1,
-            });
-    }
-
-    let mut sessions_by_root = BTreeMap::<Uuid, Vec<SessionChampion<'a>>>::new();
-    for session in sessions.into_values() {
-        let session_id = session.candidate.event.session_id.as_uuid();
-        let root_id = session
-            .candidate
-            .event
-            .root_session_id
-            .map(|id| id.as_uuid())
-            .unwrap_or(session_id);
-        sessions_by_root.entry(root_id).or_default().push(session);
-    }
-
-    let mut roots = Vec::<RootSessionHits>::with_capacity(sessions_by_root.len());
-    for (root_id, mut sessions) in sessions_by_root {
-        sessions.sort_by(|left, right| {
-            search_candidate_order(left.candidate, right.candidate).then_with(|| {
-                left.candidate
-                    .event
-                    .session_id
-                    .as_uuid()
-                    .cmp(&right.candidate.event.session_id.as_uuid())
-            })
-        });
-        let Some(strongest) = sessions.first() else {
-            continue;
-        };
-        let strongest_score = strongest.candidate.score;
-        let preferred_primary = sessions.iter().position(|session| {
-            session.candidate.event.agent_scope == Some(AgentScope::Primary)
-                && session.candidate.score >= strongest_score * PRIMARY_CHAMPION_SCORE_TOLERANCE
-        });
-        let champion_position = preferred_primary.unwrap_or(0);
-        let mut hits = sessions
-            .into_iter()
-            .map(session_champion_hit)
-            .collect::<Vec<_>>();
-        if champion_position >= hits.len() {
+        if let Some(position) = session_positions.get(&candidate.event.session_id).copied() {
+            champions[position].match_count = champions[position].match_count.saturating_add(1);
             continue;
         }
-        let champion = hits.remove(champion_position);
-        roots.push(RootSessionHits {
-            root_id,
-            strongest_score,
-            champion,
-            remaining: hits.into(),
+        session_positions.insert(candidate.event.session_id, champions.len());
+        champions.push(SessionChampion {
+            candidate,
+            match_count: 1,
         });
     }
+    champions
+}
 
-    roots.sort_by(|left, right| {
-        right
-            .strongest_score
-            .total_cmp(&left.strongest_score)
-            .then_with(|| left.root_id.cmp(&right.root_id))
-    });
+pub(super) fn shape_family_result_window(
+    champions: &[SessionChampion<'_>],
+    families: &[SearchFamilyKey],
+    limit: usize,
+) -> FamilyShapingOutcome {
+    debug_assert_eq!(champions.len(), families.len());
+    let mut family_positions = HashMap::<StableEntityId, usize>::new();
+    let mut positions_by_family = Vec::<Vec<usize>>::new();
+    for (position, family) in families.iter().copied().enumerate() {
+        let family_position = match family_positions.get(&family.session_id).copied() {
+            Some(family_position) => family_position,
+            None => {
+                let family_position = positions_by_family.len();
+                family_positions.insert(family.session_id, family_position);
+                positions_by_family.push(Vec::new());
+                family_position
+            }
+        };
+        positions_by_family[family_position].push(position);
+    }
 
-    let mut hits = roots
-        .iter()
-        .take(shape_limit)
-        .map(|root| root.champion.clone())
-        .collect::<Vec<_>>();
-    while hits.len() < shape_limit {
-        let mut added = false;
-        for root in &mut roots {
-            let Some(hit) = root.remaining.pop_front() else {
-                continue;
-            };
-            hits.push(hit);
-            added = true;
-            if hits.len() == shape_limit {
-                break;
+    let mut shaped_positions = Vec::with_capacity(champions.len());
+    let mut next_by_family = vec![0_usize; positions_by_family.len()];
+    let mut active_families = (0..positions_by_family.len()).collect::<VecDeque<_>>();
+    while let Some(family_position) = active_families.pop_front() {
+        let next = next_by_family[family_position];
+        let positions = &positions_by_family[family_position];
+        if let Some(position) = positions.get(next).copied() {
+            shaped_positions.push(position);
+            next_by_family[family_position] = next.saturating_add(1);
+            if next_by_family[family_position] < positions.len() {
+                active_families.push_back(family_position);
             }
         }
-        if !added {
-            break;
-        }
     }
-    hits
+
+    let changed_final_top_n = champions
+        .iter()
+        .take(limit)
+        .map(|champion| champion.candidate.event.event_id)
+        .ne(shaped_positions
+            .iter()
+            .take(limit)
+            .map(|position| champions[*position].candidate.event.event_id));
+    let more_available = shaped_positions.len() > limit;
+    let hits = shaped_positions
+        .into_iter()
+        .take(limit)
+        .map(|position| session_champion_hit(&champions[position]))
+        .collect();
+    FamilyShapingOutcome {
+        result_window: SearchResultWindow {
+            limit,
+            hits,
+            more_available,
+        },
+        distinct_families: positions_by_family.len(),
+        changed_final_top_n,
+    }
 }
 
-fn session_champion_hit(session: SessionChampion<'_>) -> SearchHit {
+fn session_champion_hit(session: &SessionChampion<'_>) -> SearchHit {
     SearchHit {
         event: SearchEventMetadata::from(&session.candidate.event),
         score: session.candidate.score,

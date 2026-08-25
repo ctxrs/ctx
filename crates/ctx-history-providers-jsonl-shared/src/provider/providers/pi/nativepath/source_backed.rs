@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     admit_optional_metadata_text, admit_optional_provider_call_id, admit_provider_declared_fact,
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
-    ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord,
+    ActivityResult, ActivityTextCapture, CaptureProvider, CoreActivity, CoreRecord,
     EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, ProviderDeclaredFact,
     SourceAnchorScope, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
     MAX_CORE_CONTENT_BYTES,
@@ -53,7 +53,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v9-omp-title-slot";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v10-child-local-lineage";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -128,9 +128,6 @@ struct CachedBinding {
 #[serde(deny_unknown_fields)]
 struct Binding {
     native_session_id: String,
-    parent_session_path: Option<PathBuf>,
-    parent_session_id: Option<String>,
-    root_session_id: String,
     cwd: Option<String>,
     header_digest: [u8; 32],
     leading_rejected_records: u64,
@@ -251,8 +248,6 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                 identity_probe,
             });
         }
-        resolve_pi_lineage(&mut discovered)?;
-
         let mut sources = HashMap::<[u8; 32], JsonlFileObservation>::new();
         let mut leaves = Vec::with_capacity(discovered.len());
         for discovered in discovered {
@@ -340,17 +335,8 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
         }
         let binding = decode_binding(leaf)?;
         let session_id = session_identity(leaf.source(), &binding.native_session_id)?;
-        let parent_session_id = binding
-            .parent_session_id
-            .as_deref()
-            .map(|parent| session_identity_for_native(parent, self.source_anchor_scope))
-            .transpose()?;
-        let root_session_id =
-            session_identity_for_native(&binding.root_session_id, self.source_anchor_scope)?;
         Ok(Box::new(PiProjector::<R> {
             source: leaf.source().clone(),
-            root_session_id,
-            parent_session_id,
             session_id,
             binding,
             fallback_identities: FallbackEventIdentityState::<R>::new(
@@ -371,8 +357,6 @@ struct PiProjector<R: JsonlProviderRuntime> {
     source: SourceKey,
     binding: Binding,
     session_id: StableEntityId,
-    parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
     fallback_identities: FallbackEventIdentityState<R>,
     rejected_records: u64,
 }
@@ -467,14 +451,6 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
             body.clone(),
         )
         .map_err(contract)?;
-        core.agent_scope = Some(AgentScope::Primary);
-        if let Some(parent_session_id) = self.parent_session_id {
-            core.parent_session_id = Some(parent_session_id);
-            core.root_session_id = Some(self.root_session_id);
-            core.agent_scope = Some(AgentScope::Subagent);
-        } else {
-            core.agent_scope = Some(AgentScope::Primary);
-        }
         core.provider_session_id = Some(self.binding.native_session_id.clone());
         core.native_event_id = Some(native_event_id);
         core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
@@ -551,14 +527,7 @@ fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {
         return Ok(None);
     }
     Ok(Some(Binding {
-        root_session_id: native_session_id.clone(),
         native_session_id,
-        parent_session_path: value
-            .get("parentSession")
-            .and_then(Value::as_str)
-            .filter(|path| !path.trim().is_empty())
-            .map(PathBuf::from),
-        parent_session_id: None,
         cwd: value.get("cwd").and_then(Value::as_str).map(str::to_owned),
         header_digest: Sha256::digest(record.bytes()).into(),
         leading_rejected_records: 0,
@@ -581,64 +550,6 @@ fn is_omp_title_slot(record: JsonlRecordRef<'_>) -> bool {
             None => true,
             Some(source) => matches!(source.as_str(), Some("auto" | "user")),
         }
-}
-
-fn resolve_pi_lineage(discovered: &mut [DiscoveredPiSource]) -> Result<()> {
-    let by_path = discovered
-        .iter()
-        .enumerate()
-        .map(|(index, source)| (source.path.clone(), index))
-        .collect::<HashMap<_, _>>();
-    let mut parents = Vec::with_capacity(discovered.len());
-    for source in discovered.iter() {
-        let parent = source
-            .binding
-            .parent_session_path
-            .as_ref()
-            .map(|path| {
-                let candidate = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    source
-                        .path
-                        .parent()
-                        .unwrap_or_else(|| Path::new(""))
-                        .join(path)
-                };
-                let canonical = fs::canonicalize(&candidate).map_err(|_| {
-                    CaptureError::InvalidPayload(format!(
-                        "Pi session {:?} declares unresolved parentSession {:?}",
-                        source.binding.native_session_id, path
-                    ))
-                })?;
-                by_path.get(&canonical).copied().ok_or_else(|| {
-                    CaptureError::InvalidPayload(format!(
-                        "Pi session {:?} declares parentSession {:?} outside its bounded inventory",
-                        source.binding.native_session_id, path
-                    ))
-                })
-            })
-            .transpose()?;
-        parents.push(parent);
-    }
-
-    for index in 0..discovered.len() {
-        let mut current = index;
-        let mut visited = BTreeSet::new();
-        while let Some(parent) = parents[current] {
-            if !visited.insert(current) || parent == current {
-                return Err(CaptureError::InvalidPayload(
-                    "Pi session lineage contains a cycle".to_owned(),
-                ));
-            }
-            current = parent;
-        }
-        discovered[index].binding.parent_session_id =
-            parents[index].map(|parent| discovered[parent].binding.native_session_id.clone());
-        discovered[index].binding.root_session_id =
-            discovered[current].binding.native_session_id.clone();
-    }
-    Ok(())
 }
 
 fn projected_body(value: &Value, event_type: EventType) -> String {
@@ -780,6 +691,7 @@ fn session_identity(source: &SourceKey, native_session_id: &str) -> Result<Stabl
     .map_err(contract)
 }
 
+#[cfg(test)]
 fn session_identity_for_native(
     native_session_id: &str,
     source_anchor_scope: SourceAnchorScope,

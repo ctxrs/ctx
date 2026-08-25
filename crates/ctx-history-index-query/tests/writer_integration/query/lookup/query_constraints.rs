@@ -51,6 +51,18 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         Some(&native_event_id)
     );
     assert!(filters.matches_source_identity(&hits[0].event));
+    let listed = index
+        .list_event_candidates_with_filters_batch(&filters, 10)
+        .unwrap();
+    assert!(listed.complete);
+    assert!(listed.candidate_set_exhaustive);
+    assert_eq!(listed.candidates.len(), 1);
+    assert_eq!(listed.candidates[0].event.event_id, event_id);
+    let semantic = index.semantic_filter_projection(&filters).unwrap();
+    assert_eq!(
+        semantic.event_ids().collect::<Vec<_>>(),
+        vec![event_id.as_uuid()]
+    );
     assert_eq!(
         ctx_history_index_query::stored_core_event_record_materializations(),
         0,

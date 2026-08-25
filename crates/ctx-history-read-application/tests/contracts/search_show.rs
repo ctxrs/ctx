@@ -277,6 +277,7 @@ fn codex_ctx_retrieval_echoes_are_hidden_from_search_but_remain_directly_retriev
 fn search_keeps_huge_matching_grapheme_hits_in_json_and_human_output() {
     const SNIPPET_MAX_BYTES: usize = 16 * 1024;
     const SESSION_ID: &str = "019c0000-0000-7000-8000-000000000001";
+    const EXPECTED_FALLBACK: &str = "…/workspace/huge-grapheme";
 
     let temp = tempdir();
     let oversized_cluster = format!("x{}", "\u{301}".repeat(SNIPPET_MAX_BYTES));
@@ -318,10 +319,16 @@ fn search_keeps_huge_matching_grapheme_hits_in_json_and_human_output() {
         Some(1),
         "{first:#}"
     );
-    assert_eq!(first_result["snippet"], "", "{first:#}");
+    assert_eq!(first_result["snippet"], EXPECTED_FALLBACK, "{first:#}");
     assert_eq!(first_result["snippet_truncated"], true, "{first:#}");
     assert!(
-        first_result["snippet"].as_str().unwrap().len() <= SNIPPET_MAX_BYTES,
+        !first_result["snippet"].as_str().unwrap().is_empty()
+            && first_result["snippet"].as_str().unwrap().chars().count() <= 320
+            && !first_result["snippet"]
+                .as_str()
+                .unwrap()
+                .contains('\u{301}')
+            && first_result["snippet"].as_str().unwrap().len() <= SNIPPET_MAX_BYTES,
         "{first:#}"
     );
     assert_eq!(first_result["snippet"], second_result["snippet"]);
@@ -353,7 +360,7 @@ fn search_keeps_huge_matching_grapheme_hits_in_json_and_human_output() {
     let second_human = render_human();
     assert_eq!(first_human, second_human);
     assert!(first_human.contains("1 result"), "{first_human}");
-    assert!(first_human.contains("codex user message"), "{first_human}");
+    assert!(first_human.contains(EXPECTED_FALLBACK), "{first_human}");
     assert!(!first_human.contains('\u{301}'), "{first_human}");
 }
 
@@ -387,6 +394,11 @@ fn search_result_window_is_truthful_in_json_and_human_output() {
     assert!(limited.get("pagination").is_none(), "{limited:#}");
     assert!(limited["truncation"]["candidate_pool"].is_number());
     assert!(limited["truncation"]["candidate_pool_truncated"].is_boolean());
+    assert_eq!(limited["diversification"]["status"], "applied");
+    assert_eq!(limited["diversification"]["top_n"], 1);
+    assert!(limited["diversification"]["changed_final_top_n"].is_boolean());
+    assert_eq!(limited["truncation"]["lexical"]["work_complete"], true);
+    assert!(limited["truncation"]["lexical"]["candidate_set_exhaustive"].is_boolean());
     assert!(limited["result_window"].get("candidate_pool").is_none());
 
     let limited_human = ctx(&temp)
@@ -433,6 +445,7 @@ fn search_result_window_is_truthful_in_json_and_human_output() {
             "more_available": false,
         })
     );
+    assert_eq!(complete["diversification"]["status"], "applied");
 
     let complete_human = ctx(&temp)
         .args([
@@ -466,7 +479,7 @@ fn measured_json_output(command: &mut Command) -> (Value, usize) {
 mod import_paths;
 
 #[test]
-fn search_excludes_active_codex_session_by_default_when_available() {
+fn search_excludes_source_owned_active_session_and_abstains_on_cross_source_tree() {
     let temp = tempdir();
     let fixture = temp.path().join("active-tree-search-fixture");
     copy_dir_all(
@@ -499,10 +512,10 @@ fn search_excludes_active_codex_session_by_default_when_available() {
 
     let excluded = json_output(
         ctx(&temp)
-            .env("CODEX_THREAD_ID", "codex-session-root")
+            .env("CODEX_THREAD_ID", "codex-independent-root")
             .args([
                 "search",
-                "onboarding",
+                "independently",
                 "--provider",
                 "codex",
                 "--refresh",
@@ -526,15 +539,21 @@ fn search_excludes_active_codex_session_by_default_when_available() {
                 "--format=json",
             ]),
     );
+    let excluded_tree_sessions = excluded_tree["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["provider_session_id"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        excluded_tree["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|result| result["provider_session_id"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["codex-independent-root"],
-        "active tree exclusion suppressed an unrelated session or leaked the active tree: {excluded_tree:#}"
+        excluded_tree_sessions,
+        BTreeSet::from([
+            "codex-independent-root",
+            "codex-session-child",
+            "codex-session-grandchild",
+            "codex-session-root",
+        ]),
+        "cross-source active tree did not abstain: {excluded_tree:#}"
     );
 
     let excluded_resumed_tree = json_output(
@@ -550,15 +569,21 @@ fn search_excludes_active_codex_session_by_default_when_available() {
                 "--format=json",
             ]),
     );
+    let excluded_resumed_sessions = excluded_resumed_tree["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["provider_session_id"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        excluded_resumed_tree["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|result| result["provider_session_id"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["codex-independent-root"],
-        "resumed child exclusion did not resolve the complete active tree: {excluded_resumed_tree:#}"
+        excluded_resumed_sessions,
+        BTreeSet::from([
+            "codex-independent-root",
+            "codex-session-child",
+            "codex-session-grandchild",
+            "codex-session-root",
+        ]),
+        "cross-source resumed child did not abstain: {excluded_resumed_tree:#}"
     );
 
     let child_session = json_output(ctx(&temp).args([
@@ -955,7 +980,7 @@ fn codex_cli_resume_is_idempotent_rescan_and_defaults_to_all_agents() {
         "{all_agents_default_text}"
     );
 
-    let root_first = json_output(ctx(&temp).args([
+    let family_shaped = json_output(ctx(&temp).args([
         "search",
         "local history search",
         "--limit",
@@ -965,11 +990,12 @@ fn codex_cli_resume_is_idempotent_rescan_and_defaults_to_all_agents() {
         "--format=json",
     ]));
     assert_eq!(
-        root_first["results"][0]["provider_session_id"],
+        family_shaped["results"][0]["provider_session_id"],
         "codex-session-child"
     );
-    assert_eq!(root_first["results"][0]["agent_scope"], "subagent");
-    assert_eq!(root_first["result_window"]["more_available"], true);
+    assert_eq!(family_shaped["results"][0]["agent_scope"], "subagent");
+    assert_eq!(family_shaped["result_window"]["more_available"], true);
+    assert_eq!(family_shaped["diversification"]["status"], "applied");
 
     let default_events = json_output(ctx(&temp).args([
         "search",
@@ -980,6 +1006,10 @@ fn codex_cli_resume_is_idempotent_rescan_and_defaults_to_all_agents() {
         "--format=json",
     ]));
     assert!(default_events["filters"].get("include_subagents").is_none());
+    assert_eq!(
+        default_events["diversification"]["status"],
+        "not_applicable"
+    );
     let default_events_text = serde_json::to_string(&default_events).unwrap();
     assert!(
         default_events_text.contains("codex-session-child"),
@@ -1014,6 +1044,15 @@ fn codex_cli_resume_is_idempotent_rescan_and_defaults_to_all_agents() {
     assert!(serde_json::to_string(&explicit_child_session)
         .unwrap()
         .contains("codex-session-child"));
+    assert_eq!(
+        explicit_child_session["diversification"]["status"],
+        "not_applicable"
+    );
+    for result in explicit_child_session["results"].as_array().unwrap() {
+        assert_eq!(result["result_scope"], "event");
+        assert!(result.get("more_matches_in_session").is_none());
+        assert!(result.get("copied_lineage").is_none());
+    }
 
     let primary_only = json_output(ctx(&temp).args([
         "search",

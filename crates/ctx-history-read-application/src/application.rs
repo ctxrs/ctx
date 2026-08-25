@@ -1,17 +1,15 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ctx_history_index_query::{
-    CopiedEventLineage, EventSearchFilters, VerifiedIndex, SEARCH_COPIED_EVENT_LINEAGE_POLICY,
-};
+use ctx_history_index_query::{EventSearchFilters, VerifiedIndex};
 use serde_json::Value;
 
 use crate::generation::PinnedGenerationRead;
 use crate::presentation::presentations_for_search_hits;
 use crate::search::{collect_search_hits_observed, ObservedSearchExecutionError};
 use crate::{
-    copied_lineage_read_model, normalize_search_request, reference_needs_retained_peer,
-    render_search_json, resolve_search_backend, search_filters_with_refs, validate_search_request,
+    normalize_search_request, reference_needs_retained_peer, render_search_json,
+    resolve_search_backend, search_filters_with_refs, validate_search_request,
     ActiveSessionExclusion, CompactPresentationProjection, CompactRefResolver, GenerationReadError,
     GenerationReadPort, GenerationReadReceipt, GenerationReadRequest, GenerationReadTarget,
     HistorySemanticPort, NormalizedSearchQuery, RetainedPeerRead, SearchCollection,
@@ -78,28 +76,11 @@ impl<'index> PinnedHistoryQuery<'index> {
                 SearchFailurePhase::ResultProjection,
             )
         })?;
-        let copied_lineages = collection
-            .result_window
-            .hits
-            .iter()
-            .map(|hit| {
-                self.index
-                    .copied_event_lineage(hit.event.event_id, SEARCH_COPIED_EVENT_LINEAGE_POLICY)
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| {
-                ObservedSearchExecutionError::new(
-                    error.into(),
-                    collection.work,
-                    SearchFailurePhase::ResultProjection,
-                )
-            })?;
         Ok(SearchQueryResult {
             request,
             filters,
             collection,
             presentations,
-            copied_lineages,
         })
     }
 }
@@ -136,7 +117,6 @@ pub struct SearchQueryResult {
     pub filters: EventSearchFilters,
     pub collection: SearchCollection,
     pub presentations: Vec<SearchPresentation>,
-    pub copied_lineages: Vec<CopiedEventLineage>,
 }
 
 pub struct SearchApplicationRequest {
@@ -203,7 +183,6 @@ impl<GenerationError> ObservedSearchApplicationError<GenerationError> {
 pub struct SearchApplicationResult {
     generation: PinnedGenerationRead,
     query: SearchQueryResult,
-    copied_lineage_read_models: Vec<Value>,
     query_duration: Duration,
 }
 
@@ -220,10 +199,6 @@ impl SearchApplicationResult {
         &self.query
     }
 
-    pub fn copied_lineage_read_models(&self) -> &[Value] {
-        &self.copied_lineage_read_models
-    }
-
     pub const fn query_duration(&self) -> Duration {
         self.query_duration
     }
@@ -235,7 +210,6 @@ impl SearchApplicationResult {
             collection: &self.query.collection,
             filters: &self.query.filters,
             presentations: &self.query.presentations,
-            copied_lineages: &self.copied_lineage_read_models,
             commands: input.commands,
             freshness_mode: input.freshness_mode,
             generated_at: input.generated_at,
@@ -316,22 +290,9 @@ where
             query_duration: Some(query_started.elapsed()),
         })?;
     let query_duration = query_started.elapsed();
-    let copied_lineage_read_models = query
-        .copied_lineages
-        .iter()
-        .map(copied_lineage_read_model)
-        .collect::<Result<Vec<_>>>()
-        .map_err(SearchExecutionError::from)
-        .map_err(|error| ObservedSearchApplicationError {
-            error: Box::new(SearchApplicationError::Query(error)),
-            work: query.collection.work,
-            failure_phase: SearchFailurePhase::ResultProjection,
-            query_duration: Some(query_duration),
-        })?;
     Ok(SearchApplicationResult {
         generation,
         query,
-        copied_lineage_read_models,
         query_duration,
     })
 }

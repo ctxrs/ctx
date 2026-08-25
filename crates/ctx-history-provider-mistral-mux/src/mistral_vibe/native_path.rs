@@ -16,7 +16,7 @@ use super::{
     schema::{
         mistral_vibe_bounded_metadata_from_bytes, mistral_vibe_event_text, mistral_vibe_event_type,
         mistral_vibe_metadata_pointer_string, mistral_vibe_metadata_string,
-        mistral_vibe_metadata_timestamp,
+        mistral_vibe_metadata_timestamp, MistralVibeBoundedMetadata,
     },
     source::{visit_mistral_vibe_session_sources, MistralVibeSessionSource},
     MISTRAL_VIBE_CAPTURE_REVISION, MISTRAL_VIBE_POLICY_REVISION, MISTRAL_VIBE_SOURCE_FORMAT,
@@ -31,6 +31,7 @@ struct SessionFact {
     started_at: DateTime<Utc>,
     cwd: Option<String>,
     metadata: Value,
+    lineage_ambiguous: bool,
 }
 
 impl SessionFact {
@@ -41,6 +42,10 @@ impl SessionFact {
     ) -> Result<(Self, Option<String>)> {
         let (metadata, failure) =
             mistral_vibe_bounded_metadata_from_bytes(source, imported_at, metadata_bytes)?;
+        let MistralVibeBoundedMetadata {
+            value: metadata,
+            lineage_ambiguous,
+        } = metadata;
         let provider_session_id = mistral_vibe_metadata_string(&metadata, "session_id").ok_or(
             CaptureError::SystemInvariant("Mistral Vibe bounded metadata lost its session id"),
         )?;
@@ -58,6 +63,7 @@ impl SessionFact {
                     &["/environment/working_directory"],
                 ),
                 metadata,
+                lineage_ambiguous,
             },
             failure,
         ))

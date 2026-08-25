@@ -23,7 +23,7 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
     let candidates = index
         .search_event_candidates("atomic:generation", 10)
         .unwrap();
-    let mut expected_search_ids = vec![first.event_id.as_uuid(), second.event_id.as_uuid()];
+    let mut expected_search_ids = vec![second.event_id.as_uuid(), first.event_id.as_uuid()];
     expected_search_ids.sort();
     assert_eq!(
         candidates

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     fs,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -12,10 +12,10 @@ use ctx_history_capture_runtime::BaseEventLookup;
 use ctx_history_core::{
     admit_optional_metadata_text, admit_optional_provider_call_id, admit_provider_declared_fact,
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
-    ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord,
+    ActivityResult, ActivityTextCapture, CaptureProvider, CoreActivity, CoreRecord,
     EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, PositionStability,
-    ProviderDeclaredFact, ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey,
-    StableEntityId, SubrecordSelector, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    ProviderDeclaredFact, SourceAnchorScope, SourceKey, StableEntityId, SubrecordSelector,
+    TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,7 +45,7 @@ const NATIVE_EVENT_REUSED_TOOL_CALL_POSITION_KIND: &str =
     "mistral-vibe-duplicate-tool-call-id-ordinal";
 const LOGICAL_SESSION_KIND: &str = "mistral-vibe-session";
 const LOGICAL_EVENT_KIND: &str = "mistral-vibe-event";
-const PARSER_REVISION: &str = "mistral-vibe-source-backed-v15-optional-admission-record-rejections";
+const PARSER_REVISION: &str = "mistral-vibe-source-backed-v17-exact-parent-admission";
 const EVENT_IDENTITY_REVISION: &str = "mistral-vibe-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.mistral-vibe.fallback-event-fingerprint.v1\0";
 const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.mistral-vibe.source-revision.v1\0";
@@ -88,6 +88,7 @@ struct Draft {
     metadata_relative_path: PathBuf,
     provider_session_id: String,
     parent_provider_session_id: Option<String>,
+    lineage_ambiguous: bool,
     session_id: StableEntityId,
     started_at_unix_ms: i64,
     cwd: Option<String>,
@@ -102,7 +103,7 @@ struct Binding {
     provider_session_id: String,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
+    lineage_ambiguous: bool,
     started_at_unix_ms: i64,
     cwd: Option<String>,
     branch: Option<String>,
@@ -192,6 +193,7 @@ where
                 metadata_relative_path,
                 provider_session_id: session.provider_session_id,
                 parent_provider_session_id: session.parent_provider_session_id,
+                lineage_ambiguous: session.lineage_ambiguous,
                 session_id,
                 started_at_unix_ms: session.started_at.timestamp_millis(),
                 cwd: session.cwd,
@@ -199,10 +201,6 @@ where
                 revision_digest,
             });
         }
-        let by_session = drafts
-            .iter()
-            .map(|draft| (draft.provider_session_id.as_str(), draft))
-            .collect::<BTreeMap<_, _>>();
         let mut leaves = Vec::with_capacity(drafts.len());
         for draft in &drafts {
             let parent_session_id = draft
@@ -210,14 +208,12 @@ where
                 .as_deref()
                 .map(|parent| provider_session_identity(parent, self.source_anchor_scope))
                 .transpose()?;
-            let root_session_id =
-                root_session_identity(draft, &by_session, self.source_anchor_scope)?;
             let binding = Binding {
                 metadata_relative_path: draft.metadata_relative_path.clone(),
                 provider_session_id: draft.provider_session_id.clone(),
                 session_id: draft.session_id,
                 parent_session_id,
-                root_session_id,
+                lineage_ambiguous: draft.lineage_ambiguous,
                 started_at_unix_ms: draft.started_at_unix_ms,
                 cwd: draft.cwd.clone(),
                 branch: draft.branch.clone(),
@@ -448,15 +444,8 @@ where
         body.clone(),
     )
     .map_err(contract)?;
-    record.agent_scope = Some(if binding.parent_session_id.is_some() {
-        AgentScope::Subagent
-    } else {
-        AgentScope::Primary
-    });
-    if let Some(parent_session_id) = binding.parent_session_id {
-        record.parent_session_id = Some(parent_session_id);
-        record.root_session_id = Some(binding.root_session_id);
-        record.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    if !binding.lineage_ambiguous {
+        record.parent_session_id = binding.parent_session_id;
     }
     record.provider_session_id = Some(binding.provider_session_id.clone());
     record.native_event_id = Some(native_event_id);
@@ -725,31 +714,6 @@ fn provider_session_identity(
     session_identity(&source, native_session_id)
 }
 
-fn root_session_identity(
-    lineage: &Draft,
-    lineages: &BTreeMap<&str, &Draft>,
-    source_anchor_scope: SourceAnchorScope,
-) -> Result<StableEntityId> {
-    let mut current = lineage;
-    let mut root = lineage.session_id;
-    let mut visited = HashSet::new();
-    loop {
-        if !visited.insert(current.provider_session_id.as_str()) {
-            return Err(CaptureError::InvalidPayload(
-                "Mistral Vibe session lineage contains a cycle".to_owned(),
-            ));
-        }
-        let Some(parent_id) = current.parent_provider_session_id.as_deref() else {
-            return Ok(root);
-        };
-        root = provider_session_identity(parent_id, source_anchor_scope)?;
-        let Some(parent) = lineages.get(parent_id) else {
-            return Ok(root);
-        };
-        current = parent;
-    }
-}
-
 fn mistral_vibe_output_text(value: &Value) -> Result<Option<String>> {
     let Some(object) = value.as_object() else {
         return Ok(None);
@@ -787,4 +751,248 @@ fn contract(error: impl std::fmt::Display) -> CaptureError {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use ctx_history_jsonl::FallbackEventIdentityMode;
+
+    #[derive(Clone)]
+    struct EmptyLookup;
+
+    impl BaseEventLookup for EmptyLookup {
+        type Error = std::convert::Infallible;
+
+        fn contains(&self, _event_id: uuid::Uuid) -> std::result::Result<bool, Self::Error> {
+            Ok(false)
+        }
+    }
+
+    fn binding() -> (SourceKey, Binding) {
+        let source = source_key("session").unwrap();
+        let session_id = session_identity(&source, "session").unwrap();
+        (
+            source,
+            Binding {
+                metadata_relative_path: PathBuf::from("meta.json"),
+                provider_session_id: "session".to_owned(),
+                session_id,
+                parent_session_id: None,
+                lineage_ambiguous: false,
+                started_at_unix_ms: 0,
+                cwd: None,
+                branch: None,
+                revision_digest: [0; 32],
+            },
+        )
+    }
+
+    fn fallback_identities(
+        source: &SourceKey,
+        binding: &Binding,
+    ) -> FallbackEventIdentityState<EmptyLookup, CaptureError> {
+        FallbackEventIdentityState::new(
+            source.clone(),
+            binding.session_id,
+            LOGICAL_EVENT_KIND,
+            "mistral-vibe.message.fallback",
+            EVENT_IDENTITY_REVISION,
+            FallbackEventIdentityMode::Cold,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn native_parent_metadata_emits_only_the_direct_parent_claim() {
+        let (source, root_binding) = binding();
+        let project = |binding: &Binding| {
+            let mut fallback_identities = fallback_identities(&source, binding);
+            let mut native_identities = MistralNativeIdentityTracker::default();
+            let bytes = br#"{"role":"user","content":"Mistral scope fixture"}"#;
+            core_record(
+                &source,
+                binding,
+                &mut fallback_identities,
+                &mut native_identities,
+                JsonlRecordRef::for_test(bytes, 0),
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        let root = project(&root_binding);
+        assert_eq!(root.agent_scope, None);
+        assert_eq!(root.parent_session_id, None);
+        assert_eq!(root.root_session_id, None);
+        assert_eq!(root.session_relationship, None);
+
+        let parent_session_id = session_identity(&source, "parent").unwrap();
+        let child_binding = Binding {
+            parent_session_id: Some(parent_session_id),
+            ..root_binding
+        };
+        let child = project(&child_binding);
+        assert_eq!(child.parent_session_id, Some(parent_session_id));
+        assert_eq!(child.agent_scope, None);
+        assert_eq!(child.root_session_id, None);
+        assert_eq!(child.session_relationship, None);
+    }
+
+    #[test]
+    fn tool_results_keep_native_statuses_statusless_activity_and_large_content() {
+        let (source, binding) = binding();
+        let mut fallback_identities = fallback_identities(&source, &binding);
+        let mut native_identities = MistralNativeIdentityTracker::default();
+        for (status, expected) in [
+            (Some("success"), "success"),
+            (Some("failure"), "failure"),
+            (None, "unknown"),
+        ] {
+            let mut value = serde_json::json!({
+                "role": "tool",
+                "content": format!("complete-{expected}"),
+                "tool_call_id": "call-1",
+                "name": "write_file",
+            });
+            if let Some(status) = status {
+                value["status"] = Value::String(status.to_owned());
+            }
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let record = core_record(
+                &source,
+                &binding,
+                &mut fallback_identities,
+                &mut native_identities,
+                JsonlRecordRef::for_test(&bytes, 0),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                record.content.meaningful_text(),
+                format!("complete-{expected}")
+            );
+            assert_eq!(
+                record
+                    .content
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get("tool_call_id"))
+                    .and_then(Value::as_str),
+                Some("call-1")
+            );
+            assert_eq!(
+                record
+                    .content
+                    .activity
+                    .as_ref()
+                    .and_then(|activity| activity.result.as_ref())
+                    .and_then(|result| result.status.as_deref()),
+                None
+            );
+        }
+
+        let large = format!("{}tail", "x".repeat(9 * 1024 * 1024));
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "role": "tool",
+            "content": large,
+            "tool_call_id": "large",
+        }))
+        .unwrap();
+        let record = core_record(
+            &source,
+            &binding,
+            &mut fallback_identities,
+            &mut native_identities,
+            JsonlRecordRef::for_test(&bytes, 1),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.content.meaningful_text().len(), 9 * 1024 * 1024 + 4);
+        assert!(record.content.meaningful_text().ends_with("tail"));
+
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "role": "tool",
+            "content": "one",
+            "output": "two",
+        }))
+        .unwrap();
+        assert!(core_record(
+            &source,
+            &binding,
+            &mut fallback_identities,
+            &mut native_identities,
+            JsonlRecordRef::for_test(&bytes, 2),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn composite_name_and_transport_metadata_always_abstain_without_changing_result_capture() {
+        let (source, binding) = binding();
+        let project = |transport: &str| {
+            let mut fallback_identities = fallback_identities(&source, &binding);
+            let mut native_identities = MistralNativeIdentityTracker::default();
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "role": "tool",
+                "content": "terminal result",
+                "name": "docs_server_read_document",
+                "tool_call_id": "call-exact",
+                "status": "success",
+                "tool_result": {
+                    "output": {
+                        "ok": true,
+                        "server": transport,
+                        "tool": "read_document",
+                    },
+                    "cancelled": false,
+                },
+            }))
+            .unwrap();
+            core_record(
+                &source,
+                &binding,
+                &mut fallback_identities,
+                &mut native_identities,
+                JsonlRecordRef::for_test(&bytes, 1),
+            )
+            .unwrap()
+            .unwrap()
+        };
+
+        let url = project("https://mcp.example.test/mcp");
+        let stdio = project("uvx mcp-server-filesystem /tmp");
+
+        for record in [&url, &stdio] {
+            assert_eq!(
+                record
+                    .content
+                    .activity
+                    .as_ref()
+                    .and_then(|activity| activity.result.as_ref())
+                    .and_then(|result| result.status.as_deref()),
+                None
+            );
+            assert_eq!(record.content.meaningful_text(), "terminal result");
+            assert_eq!(record.event_type, EventType::ToolOutput.as_str());
+            assert_eq!(record.parser_revision, PARSER_REVISION);
+            let linkage = record.content.structured_content.as_ref().unwrap();
+            assert_eq!(
+                linkage.get("tool_call_id").and_then(Value::as_str),
+                Some("call-exact")
+            );
+            assert_eq!(
+                linkage.get("name").and_then(Value::as_str),
+                Some("docs_server_read_document")
+            );
+            assert_eq!(
+                linkage.get("status").and_then(Value::as_str),
+                Some("success")
+            );
+        }
+
+        assert_eq!(url.event_id, stdio.event_id);
+        assert_ne!(
+            url.content.structured_content,
+            stdio.content.structured_content
+        );
+    }
+}

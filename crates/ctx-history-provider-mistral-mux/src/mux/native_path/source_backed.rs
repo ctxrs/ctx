@@ -42,8 +42,7 @@ const NATIVE_SESSION_NAMESPACE: &str = "mux.session";
 const LOGICAL_SESSION_KIND: &str = "mux-session";
 const LOGICAL_EVENT_KIND: &str = "mux-event";
 const SOURCE_SCHEMA_VARIANT: &str = "mux-session-tree-source-backed-v2";
-const PARSER_REVISION: &str =
-    "mux-source-backed-v15-multiplicity-aware-archive-seam-bounded-inventory";
+const PARSER_REVISION: &str = "mux-source-backed-v16-explicit-root-only";
 const EVENT_IDENTITY_REVISION: &str = "mux-content-occurrence-v1";
 const COMPOUND_REVISION_DOMAIN: &[u8] = b"ctx.mux.compound-source.v3\0";
 const PARTIAL_EVENT_SEQUENCE_BASE: u64 = 1_u64 << 62;
@@ -76,7 +75,7 @@ struct MuxBinding {
     metadata: MuxBoundedSessionMetadata,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
+    root_session_id: Option<StableEntityId>,
     primary_stream: MuxStreamKind,
     archive: Option<MuxBoundFile>,
     chat: Option<MuxBoundFile>,
@@ -300,9 +299,7 @@ fn bind_source(
         .root_provider_session_id
         .as_deref()
         .map(|root| related_session_identity(root, source_anchor_scope))
-        .transpose()?
-        .or(parent_session_id)
-        .unwrap_or(session_id);
+        .transpose()?;
     let primary_stream = if archive.is_some() {
         MuxStreamKind::Archive
     } else if chat.is_some() {

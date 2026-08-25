@@ -80,7 +80,7 @@ fn machine_show_contract_keeps_lineage_in_existing_nested_fields() {
 }
 
 #[test]
-fn copied_event_show_list_and_search_models_share_typed_lineage() {
+fn copied_event_show_list_and_search_metadata_preserve_direct_claims() {
     let ancestor = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 54, 1);
     let copied = fixture_copied_event(55, &ancestor, &ancestor);
     let copied = fixture_core_event(&copied, "copied body remains directly visible");

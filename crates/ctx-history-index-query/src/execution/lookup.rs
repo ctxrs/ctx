@@ -691,34 +691,6 @@ impl VerifiedIndex {
         self.session_records_for_ambiguity_query(&query)
     }
 
-    /// Returns bounded distinct sessions whose exact stored parent or root
-    /// claim names any supplied session ID.
-    pub fn session_ids_claiming_lineage_to_any(
-        &self,
-        session_ids: &[Uuid],
-        limit: usize,
-    ) -> Result<Vec<Uuid>> {
-        if session_ids.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let queries = [fields.parent_session_id, fields.root_session_id]
-            .into_iter()
-            .map(|field| {
-                Box::new(TermSetQuery::new(
-                    session_ids
-                        .iter()
-                        .map(|session_id| Term::from_field_text(field, &session_id.to_string()))
-                        .collect::<Vec<_>>(),
-                )) as Box<dyn Query>
-            })
-            .collect::<Vec<_>>();
-        Ok(self.searcher.search(
-            &BooleanQuery::union(queries),
-            &SessionIdCollector::new(limit),
-        )?)
-    }
-
     fn session_records_for_ambiguity_query(&self, query: &dyn Query) -> Result<Vec<SessionRecord>> {
         let session_ids = self
             .searcher

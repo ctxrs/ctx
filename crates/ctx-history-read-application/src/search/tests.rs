@@ -3,20 +3,29 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
     SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
 };
+use ctx_history_index_query::{
+    LexicalSearchCandidate, LexicalTermCoverage, LexicalWorkCounter, LexicalWorkCounters,
+    LexicalWorkExhaustion,
+};
+use std::{cell::Cell, collections::BTreeMap};
 
-fn candidate_source() -> SourceKey {
+fn candidate_source_for(provider: &str, name: &str) -> SourceKey {
     SourceKey::derive(
-        "codex",
-        "root_first_search_test",
+        provider,
+        "family_search_test",
         "session",
         1,
-        SourceAnchor::provider_native(
-            "session-file",
-            TypedKey::utf8("root-first-search-test.jsonl").unwrap(),
-        )
-        .unwrap(),
+        SourceAnchor::provider_native("session-file", TypedKey::utf8(name).unwrap()).unwrap(),
     )
     .unwrap()
+}
+
+fn candidate_source_named(name: &str) -> SourceKey {
+    candidate_source_for("codex", name)
+}
+
+fn candidate_source() -> SourceKey {
+    candidate_source_named("family-search-test.jsonl")
 }
 
 fn candidate_session_id(source: &SourceKey, session: u64) -> StableEntityId {
@@ -49,11 +58,31 @@ fn candidate_with_parent(
     event_sequence: u64,
 ) -> EventSearchCandidate {
     let source = candidate_source();
-    let session_id = candidate_session_id(&source, session);
+    candidate_from_source(
+        &source,
+        score,
+        session,
+        parent,
+        root,
+        agent_scope,
+        event_sequence,
+    )
+}
+
+fn candidate_from_source(
+    source: &SourceKey,
+    score: f32,
+    session: u64,
+    parent: Option<u64>,
+    root: Option<u64>,
+    agent_scope: Option<AgentScope>,
+    event_sequence: u64,
+) -> EventSearchCandidate {
+    let session_id = candidate_session_id(source, session);
     let native_item_key =
         NativeItemKey::native_id("message", TypedKey::U64(event_sequence)).unwrap();
     let event_id = derive_event_id(EventIdentityInput {
-        source: &source,
+        source,
         session_id,
         logical_item_kind: "message",
         native_item_key: &native_item_key,
@@ -65,13 +94,13 @@ fn candidate_with_parent(
         event: EventRecord {
             event_id,
             session_id,
-            parent_session_id: parent.map(|parent| candidate_session_id(&source, parent)),
-            root_session_id: root.map(|root| candidate_session_id(&source, root)),
+            parent_session_id: parent.map(|parent| candidate_session_id(source, parent)),
+            root_session_id: root.map(|root| candidate_session_id(source, root)),
             session_relationship: None,
             event_copy: None,
-            source,
-            provider: "codex".to_owned(),
-            source_format: "root_first_search_test".to_owned(),
+            source: source.clone(),
+            provider: source.provider().to_owned(),
+            source_format: source.source_format().to_owned(),
             provider_session_id: Some(format!("session-{session}")),
             native_event_id: None,
             agent_scope,
@@ -87,43 +116,54 @@ fn result_scores(window: &SearchResultWindow) -> Vec<f32> {
     window.hits.iter().map(|hit| hit.score).collect()
 }
 
-fn candidate_tail_score(candidates: &[EventSearchCandidate]) -> f32 {
-    candidates
-        .iter()
-        .map(|candidate| candidate.score)
-        .min_by(f32::total_cmp)
-        .unwrap()
+fn ancestry(
+    session_id: u128,
+    parent_session_id: Option<u128>,
+    claimed_root_session_id: Option<u128>,
+) -> SessionAncestry {
+    ancestry_with_owner(
+        candidate_source().identity(),
+        session_id,
+        parent_session_id,
+        claimed_root_session_id,
+    )
 }
 
 #[test]
 fn lexical_terminal_state_preserves_stop_and_truncation_branches() {
+    let batch = |complete, candidate_set_exhaustive| LexicalSearchBatch {
+        candidates: Vec::new(),
+        complete,
+        candidate_set_exhaustive,
+        exhaustion: (!complete).then_some(LexicalWorkExhaustion {
+            counter: LexicalWorkCounter::CandidateDocs,
+            used: 1,
+            limit: 1,
+            segment: None,
+            next_doc: None,
+        }),
+        counters: LexicalWorkCounters::default(),
+    };
     assert_eq!(
-        lexical_terminal_state(true, false, false),
-        Some((SearchStopReason::Decisive, false))
+        lexical_terminal_state(&batch(true, true)),
+        Some(SearchStopReason::Exhausted)
     );
     assert_eq!(
-        lexical_terminal_state(false, true, false),
-        Some((SearchStopReason::Exhausted, false))
+        lexical_terminal_state(&batch(true, false)),
+        Some(SearchStopReason::CandidateCap)
     );
-    assert_eq!(
-        lexical_terminal_state(false, false, true),
-        Some((SearchStopReason::CandidateCap, true))
-    );
-    assert_eq!(lexical_terminal_state(false, false, false), None);
-    assert_eq!(
-        lexical_terminal_state(true, true, true),
-        Some((SearchStopReason::Decisive, false)),
-        "decisive retrieval remains authoritative over coincident exhaustion/cap"
-    );
+    assert_eq!(lexical_terminal_state(&batch(false, false)), None);
 }
 
-fn ancestry(
+fn ancestry_with_owner(
+    source_owner: StableEntityId,
     session_id: u128,
     parent_session_id: Option<u128>,
     claimed_root_session_id: Option<u128>,
 ) -> SessionAncestry {
     SessionAncestry {
         session_id: Uuid::from_u128(session_id),
+        source_owner,
         parent_session_id: parent_session_id.map(Uuid::from_u128),
         claimed_root_session_id: claimed_root_session_id.map(Uuid::from_u128),
     }
@@ -283,123 +323,214 @@ fn all_agents_are_default_and_primary_only_is_the_sole_narrower_scope() {
     );
 }
 
-#[test]
-fn ordinary_search_is_strictly_root_first() {
-    let candidates = [
-        candidate(90.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(80.0, 3, Some(3), Some(AgentScope::Subagent), 1),
-        candidate(100.0, 1, Some(1), Some(AgentScope::Subagent), 1),
-    ];
-
-    let window = shape_search_result_window(candidates.iter(), 2, false);
-
-    assert_eq!(result_scores(&window), [100.0, 80.0]);
-    assert!(window.more_available);
-}
-
-#[test]
-fn parent_only_claim_falls_back_to_the_session_id() {
-    let candidates = [
-        candidate(100.0, 1, None, Some(AgentScope::Primary), 1),
-        candidate_with_parent(90.0, 2, Some(1), None, Some(AgentScope::Subagent), 1),
-        candidate(80.0, 3, None, Some(AgentScope::Primary), 1),
-    ];
-
-    let window = shape_search_result_window(candidates.iter(), 2, false);
-
-    assert_eq!(result_scores(&window), [100.0, 90.0]);
-    assert!(window.more_available);
-}
-
-#[test]
-fn literal_root_claims_are_used_without_transitive_resolution() {
-    let candidates = [
-        candidate(100.0, 1, Some(9), Some(AgentScope::Subagent), 1),
-        candidate(90.0, 2, Some(9), Some(AgentScope::Subagent), 1),
-    ];
-
-    let window = shape_search_result_window(candidates.iter(), 1, false);
-
-    assert_eq!(result_scores(&window), [100.0]);
-    assert!(window.more_available);
-}
-
-#[test]
-fn primary_tolerance_is_inclusive_at_95_percent() {
-    let candidates = [
-        candidate(100.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(95.0, 1, Some(1), Some(AgentScope::Primary), 1),
-        candidate(97.0, 3, Some(3), Some(AgentScope::Subagent), 1),
-    ];
-
-    let window = shape_search_result_window(candidates.iter(), 2, false);
-
-    assert_eq!(result_scores(&window), [95.0, 97.0]);
-    assert_eq!(window.hits[0].event.agent_scope, Some(AgentScope::Primary));
-}
-
-#[test]
-fn primary_below_tolerance_does_not_displace_a_stronger_child() {
-    let candidates = [
-        candidate(94.99, 1, Some(1), Some(AgentScope::Primary), 1),
-        candidate(100.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-    ];
-
-    let window = shape_search_result_window(candidates.iter(), 1, false);
-
-    assert_eq!(result_scores(&window), [100.0]);
-    assert_eq!(window.hits[0].event.agent_scope, Some(AgentScope::Subagent));
-    assert!(window.more_available);
-}
-
-#[test]
-fn equal_score_roots_use_the_literal_root_id_as_a_stable_tie_break() {
-    let first = candidate(10.0, 1, Some(1), Some(AgentScope::Subagent), 1);
-    let second = candidate(10.0, 2, Some(2), Some(AgentScope::Subagent), 1);
-    let mut expected = [
-        first.event.root_session_id.unwrap().as_uuid(),
-        second.event.root_session_id.unwrap().as_uuid(),
-    ];
-    expected.sort();
-
-    let candidates = [second, first];
-    let window = shape_search_result_window(candidates.iter(), 2, false);
-    let actual = window
-        .hits
+fn same_source_grouping_claims(
+    coordinates: &[(StableEntityId, StableEntityId)],
+    roots: &[(u64, Option<u64>)],
+) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>> {
+    let source = candidate_source();
+    Ok(coordinates
         .iter()
-        .map(|hit| hit.event.root_session_id.unwrap())
-        .collect::<Vec<_>>();
+        .map(|&(session_id, source_owner)| {
+            let root_session_id = roots
+                .iter()
+                .find_map(|&(session, root)| {
+                    (candidate_session_id(&source, session) == session_id).then_some(root)
+                })
+                .flatten()
+                .map(|root| candidate_session_id(&source, root));
+            SessionGroupingClaims {
+                session_id,
+                source_owner,
+                parent_session_id: None,
+                root_session_id,
+                relationship: None,
+            }
+        })
+        .collect())
+}
 
-    assert_eq!(actual, expected);
+fn shape_same_source_with_roots(
+    candidates: &[EventSearchCandidate],
+    roots: &[(u64, Option<u64>)],
+    limit: usize,
+    completeness: DiversificationCompleteness,
+) -> (SearchResultWindow, SearchDiversificationDecision) {
+    shape_search_candidates_using(candidates, limit, false, completeness, |coordinates| {
+        same_source_grouping_claims(coordinates, roots)
+    })
+    .unwrap()
 }
 
 #[test]
-fn additional_sessions_fill_round_robin_in_root_order() {
+fn family_rounds_never_promote_primary_sessions() {
     let candidates = [
-        candidate(50.0, 6, Some(4), Some(AgentScope::Subagent), 1),
-        candidate(80.0, 3, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(100.0, 1, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(60.0, 5, Some(4), Some(AgentScope::Subagent), 1),
-        candidate(90.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(70.0, 4, Some(4), Some(AgentScope::Subagent), 1),
+        candidate(100.0, 1, None, Some(AgentScope::Subagent), 1),
+        candidate(99.0, 2, None, Some(AgentScope::Primary), 1),
+        candidate(98.0, 3, None, Some(AgentScope::Primary), 1),
+        candidate(97.0, 4, None, Some(AgentScope::Subagent), 1),
+    ];
+    let roots = [(1, Some(9)), (2, Some(9)), (3, None), (4, Some(9))];
+
+    let (window, decision) = shape_same_source_with_roots(
+        &candidates,
+        &roots,
+        4,
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: true,
+        },
+    );
+
+    assert_eq!(result_scores(&window), [100.0, 98.0, 99.0, 97.0]);
+    assert_eq!(window.hits[0].event.agent_scope, Some(AgentScope::Subagent));
+    assert_eq!(decision.status, SearchDiversificationStatus::Applied);
+    assert_eq!(decision.changed_final_top_n, Some(true));
+}
+
+#[test]
+fn family_rounds_prefer_the_repeat_of_the_stronger_champion_family() {
+    let candidates = [
+        candidate(100.0, 1, None, None, 1),
+        candidate(99.0, 2, None, None, 1),
+        candidate(98.0, 3, None, None, 1),
+        candidate(97.0, 4, None, None, 1),
+        candidate(96.0, 5, None, None, 1),
+        candidate(95.0, 6, None, None, 1),
+        candidate(94.0, 7, None, None, 1),
+        candidate(93.0, 8, None, None, 1),
+        candidate(92.0, 9, None, None, 1),
+        candidate(91.0, 10, None, None, 1),
+        candidate(90.0, 11, None, None, 1),
+    ];
+    let roots = [
+        (1, Some(20)),
+        (2, Some(30)),
+        (3, Some(30)),
+        (4, Some(20)),
+        (5, None),
+        (6, None),
+        (7, None),
+        (8, None),
+        (9, None),
+        (10, None),
+        (11, None),
     ];
 
-    let window = shape_search_result_window(candidates.iter(), 5, false);
+    let (window, decision) = shape_same_source_with_roots(
+        &candidates,
+        &roots,
+        10,
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: true,
+        },
+    );
 
-    assert_eq!(result_scores(&window), [100.0, 70.0, 90.0, 60.0, 80.0]);
-    assert!(window.more_available);
+    assert_eq!(
+        result_scores(&window),
+        [100.0, 99.0, 96.0, 95.0, 94.0, 93.0, 92.0, 91.0, 90.0, 97.0]
+    );
+    assert_eq!(decision.status, SearchDiversificationStatus::Applied);
+    assert_eq!(decision.changed_final_top_n, Some(true));
+}
+
+#[test]
+fn coalesced_claims_override_winning_event_root_and_candidate_disagreement() {
+    let first_order = [
+        candidate(100.0, 1, None, Some(AgentScope::Subagent), 1),
+        candidate(99.0, 2, Some(9), Some(AgentScope::Subagent), 1),
+        candidate(98.0, 3, None, Some(AgentScope::Subagent), 1),
+        candidate(80.0, 1, Some(9), Some(AgentScope::Subagent), 2),
+    ];
+    let second_order = [
+        candidate(100.0, 1, Some(77), Some(AgentScope::Subagent), 2),
+        candidate(99.0, 2, None, Some(AgentScope::Subagent), 1),
+        candidate(98.0, 3, Some(9), Some(AgentScope::Subagent), 1),
+        candidate(80.0, 1, None, Some(AgentScope::Subagent), 1),
+    ];
+    let roots = [(1, Some(9)), (2, Some(9)), (3, None)];
+    for candidates in [&first_order[..], &second_order[..]] {
+        let (window, _) = shape_same_source_with_roots(
+            candidates,
+            &roots,
+            3,
+            DiversificationCompleteness::BackendUnknown,
+        );
+        assert_eq!(
+            window
+                .hits
+                .iter()
+                .map(|hit| hit.event.session_id)
+                .collect::<Vec<_>>(),
+            vec![
+                candidate_session_id(&candidate_source(), 1).as_uuid(),
+                candidate_session_id(&candidate_source(), 3).as_uuid(),
+                candidate_session_id(&candidate_source(), 2).as_uuid(),
+            ]
+        );
+    }
+}
+
+#[test]
+fn literal_root_and_own_session_fallback_with_the_same_id_share_one_family() {
+    let candidates = [
+        candidate(100.0, 1, None, None, 1),
+        candidate(90.0, 2, None, None, 1),
+        candidate(80.0, 3, None, None, 1),
+    ];
+
+    let (window, decision) = shape_same_source_with_roots(
+        &candidates,
+        &[(1, None), (2, Some(1)), (3, None)],
+        3,
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: true,
+        },
+    );
+
+    assert_eq!(result_scores(&window), [100.0, 80.0, 90.0]);
+    assert_eq!(decision.status, SearchDiversificationStatus::Applied);
+    assert_eq!(decision.changed_final_top_n, Some(true));
+}
+
+#[test]
+fn complete_decisions_report_changed_false_when_family_order_is_already_global() {
+    let candidates = [
+        candidate(100.0, 1, None, None, 1),
+        candidate(90.0, 2, None, None, 1),
+    ];
+    let (window, decision) = shape_same_source_with_roots(
+        &candidates,
+        &[(1, None), (2, None)],
+        2,
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: true,
+        },
+    );
+    assert_eq!(result_scores(&window), [100.0, 90.0]);
+    assert_eq!(decision.changed_final_top_n, Some(false));
 }
 
 #[test]
 fn ordinary_results_keep_one_event_per_session_and_count_other_matches() {
     let candidates = [
-        candidate(90.0, 1, Some(1), Some(AgentScope::Primary), 2),
-        candidate(70.0, 2, Some(2), Some(AgentScope::Primary), 1),
         candidate(100.0, 1, Some(1), Some(AgentScope::Primary), 1),
+        candidate(90.0, 1, Some(1), Some(AgentScope::Primary), 2),
         candidate(80.0, 1, Some(1), Some(AgentScope::Primary), 3),
+        candidate(70.0, 2, Some(2), Some(AgentScope::Primary), 1),
     ];
 
-    let window = shape_search_result_window(candidates.iter(), 2, false);
+    let (window, _) = shape_same_source_with_roots(
+        &candidates,
+        &[(1, None), (2, None)],
+        2,
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: true,
+        },
+    );
 
     assert_eq!(result_scores(&window), [100.0, 70.0]);
     assert_eq!(window.hits[0].more_matches_in_session, 2);
@@ -414,12 +545,19 @@ fn ordinary_results_keep_one_event_per_session_and_count_other_matches() {
 #[test]
 fn dense_event_results_remain_ungrouped_and_score_ordered() {
     let candidates = [
-        candidate(80.0, 1, Some(1), Some(AgentScope::Primary), 3),
         candidate(100.0, 1, Some(1), Some(AgentScope::Primary), 1),
         candidate(90.0, 1, Some(1), Some(AgentScope::Primary), 2),
+        candidate(80.0, 1, Some(1), Some(AgentScope::Primary), 3),
     ];
 
-    let window = shape_search_result_window(candidates.iter(), 2, true);
+    let (window, decision) = shape_search_candidates_using(
+        &candidates,
+        2,
+        true,
+        DiversificationCompleteness::BackendUnknown,
+        |_| unreachable!("dense search must not read grouping claims"),
+    )
+    .unwrap();
 
     assert_eq!(result_scores(&window), [100.0, 90.0]);
     assert_eq!(
@@ -431,86 +569,301 @@ fn dense_event_results_remain_ungrouped_and_score_ordered() {
         .iter()
         .all(|hit| hit.more_matches_in_session == 0));
     assert!(window.more_available);
+    assert_eq!(decision.status, SearchDiversificationStatus::NotApplicable);
+    assert_eq!(decision.changed_final_top_n, None);
 }
 
 #[test]
-fn sibling_heavy_candidate_pool_is_not_decisive_before_enough_roots_arrive() {
+fn lexical_decisiveness_requires_completed_work_and_enough_families_or_exhaustiveness() {
     let candidates = [
-        candidate(100.0, 1, Some(1), Some(AgentScope::Primary), 1),
-        candidate(99.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(98.0, 3, Some(1), Some(AgentScope::Subagent), 1),
+        candidate(100.0, 1, None, None, 1),
+        candidate(90.0, 2, None, None, 1),
+        candidate(80.0, 3, None, None, 1),
     ];
-
-    assert!(!root_first_candidate_pool_is_decisive(
+    let roots = [(1, None), (2, None), (3, None)];
+    let (_, enough_families) = shape_same_source_with_roots(
         &candidates,
+        &roots,
         2,
-        candidate_tail_score(&candidates)
-    ));
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: false,
+        },
+    );
+    assert_eq!(enough_families.status, SearchDiversificationStatus::Applied);
+
+    let same_family = [(1, Some(9)), (2, Some(9)), (3, Some(9))];
+    let (_, insufficient_families) = shape_same_source_with_roots(
+        &candidates,
+        &same_family,
+        2,
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: false,
+        },
+    );
+    assert_eq!(
+        insufficient_families.status,
+        SearchDiversificationStatus::Indeterminate
+    );
+    assert_eq!(insufficient_families.changed_final_top_n, None);
+
+    let (_, work_exhausted) = shape_same_source_with_roots(
+        &candidates,
+        &roots,
+        2,
+        DiversificationCompleteness::Lexical {
+            work_complete: false,
+            candidate_set_exhaustive: false,
+        },
+    );
+    assert_eq!(
+        work_exhausted.status,
+        SearchDiversificationStatus::Indeterminate
+    );
+
+    let (_, exhaustive_small_set) = shape_same_source_with_roots(
+        &candidates[..1],
+        &roots[..1],
+        2,
+        DiversificationCompleteness::Lexical {
+            work_complete: true,
+            candidate_set_exhaustive: true,
+        },
+    );
+    assert_eq!(
+        exhaustive_small_set.status,
+        SearchDiversificationStatus::Applied
+    );
+}
+
+fn lexical_batch(
+    candidates: Vec<EventSearchCandidate>,
+    complete: bool,
+    candidate_set_exhaustive: bool,
+) -> LexicalSearchBatch {
+    LexicalSearchBatch {
+        candidates: candidates
+            .into_iter()
+            .map(|candidate| LexicalSearchCandidate {
+                event: candidate.event,
+                score: candidate.score,
+                coverage: LexicalTermCoverage {
+                    matched_terms: 1,
+                    query_terms: 1,
+                },
+            })
+            .collect(),
+        complete,
+        candidate_set_exhaustive,
+        exhaustion: (!complete).then_some(LexicalWorkExhaustion {
+            counter: LexicalWorkCounter::CandidateDocs,
+            used: 7,
+            limit: 7,
+            segment: None,
+            next_doc: None,
+        }),
+        counters: LexicalWorkCounters::default(),
+    }
 }
 
 #[test]
-fn candidate_pool_waits_until_unseen_primary_cannot_enter_tolerance() {
+fn ordinary_lexical_search_invokes_one_fixed_batch_and_one_grouping_read() {
+    let lexical_calls = Cell::new(0);
+    let grouping_calls = Cell::new(0);
+    let observed_horizon = Cell::new(0);
+    let collection = collect_lexical_search_hits_using(
+        20,
+        false,
+        |horizon| {
+            lexical_calls.set(lexical_calls.get() + 1);
+            observed_horizon.set(horizon);
+            Ok(lexical_batch(Vec::new(), true, true))
+        },
+        |coordinates| {
+            grouping_calls.set(grouping_calls.get() + 1);
+            assert!(coordinates.is_empty());
+            Ok(Vec::new())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(lexical_calls.get(), 1);
+    assert_eq!(grouping_calls.get(), 1);
+    assert_eq!(observed_horizon.get(), LEXICAL_SESSION_CANDIDATE_HORIZON);
+    assert_eq!(
+        collection.diversification.status,
+        SearchDiversificationStatus::Applied
+    );
+}
+
+#[test]
+fn dense_lexical_search_uses_only_limit_plus_one_and_never_groups() {
+    let observed_horizon = Cell::new(0);
+    let collection = collect_lexical_search_hits_using(
+        5,
+        true,
+        |horizon| {
+            observed_horizon.set(horizon);
+            Ok(lexical_batch(Vec::new(), true, true))
+        },
+        |_| unreachable!("dense lexical search must not group"),
+    )
+    .unwrap();
+
+    assert_eq!(observed_horizon.get(), 6);
+    assert_eq!(
+        collection.diversification.status,
+        SearchDiversificationStatus::NotApplicable
+    );
+}
+
+#[test]
+fn zero_limit_is_not_applicable_without_retrieval_or_grouping() {
+    let collection = collect_lexical_search_hits_using(
+        0,
+        false,
+        |_| unreachable!("zero limit must not retrieve candidates"),
+        |_| unreachable!("zero limit must not group candidates"),
+    )
+    .unwrap();
+
+    assert!(collection.result_window.hits.is_empty());
+    assert_eq!(
+        collection.diversification,
+        SearchDiversificationDecision {
+            status: SearchDiversificationStatus::NotApplicable,
+            top_n: 0,
+            changed_final_top_n: None,
+        }
+    );
+}
+
+#[test]
+fn work_exhaustion_returns_a_truthfully_indeterminate_bounded_prefix() {
+    let candidates = vec![
+        candidate(100.0, 1, None, None, 1),
+        candidate(90.0, 2, None, None, 1),
+    ];
+    let collection = collect_lexical_search_hits_using(
+        2,
+        false,
+        |_| Ok(lexical_batch(candidates, false, false)),
+        |coordinates| same_source_grouping_claims(coordinates, &[(1, None), (2, None)]),
+    )
+    .unwrap();
+
+    assert_eq!(collection.result_window.hits.len(), 2);
+    assert!(!collection.result_window.more_available);
+    assert!(collection.candidate_pool_truncated);
+    assert_eq!(
+        collection.diversification.status,
+        SearchDiversificationStatus::Indeterminate
+    );
+    let diagnostics = collection.lexical_diagnostics.unwrap();
+    assert!(!diagnostics.work_complete);
+    assert!(!diagnostics.candidate_set_exhaustive);
+    assert_eq!(diagnostics.exhaustion.unwrap().counter, "candidate_docs");
+}
+
+#[test]
+fn source_filter_precedes_source_owned_grouping_and_preserves_the_selected_event() {
+    let work = candidate_source_named("work-root/session.jsonl");
+    let personal = candidate_source_named("personal-root/session.jsonl");
+    let claude = candidate_source_for("claude", "personal-root/session.jsonl");
+    let excluded = candidate_source_named("excluded-root/session.jsonl");
+    assert_eq!(work.provider(), personal.provider());
+    assert_ne!(personal.provider(), claude.provider());
+    assert_ne!(work.identity(), personal.identity());
+    assert_ne!(personal.identity(), claude.identity());
+    for source in [&personal, &claude] {
+        assert_ne!(
+            candidate_session_id(&work, 1),
+            candidate_session_id(source, 1)
+        );
+        assert_ne!(
+            candidate_session_id(&work, 9),
+            candidate_session_id(source, 9)
+        );
+    }
+
     let candidates = [
-        candidate(100.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(99.0, 3, Some(3), Some(AgentScope::Subagent), 1),
-        candidate(96.0, 4, Some(4), Some(AgentScope::Subagent), 1),
+        candidate_from_source(&excluded, 200.0, 1, None, Some(9), None, 1),
+        candidate_from_source(&work, 100.0, 1, None, Some(9), None, 1),
+        candidate_from_source(&work, 99.0, 1, None, Some(9), None, 2),
+        candidate_from_source(&work, 98.0, 2, None, Some(9), None, 1),
+        candidate_from_source(&personal, 97.0, 1, None, Some(9), None, 1),
+        candidate_from_source(&claude, 96.0, 1, None, Some(9), None, 1),
     ];
+    assert!([&candidates[1], &candidates[4], &candidates[5]]
+        .iter()
+        .all(|candidate| candidate.event.provider_session_id.as_deref() == Some("session-1")));
+    assert_ne!(candidates[1].event.event_id, candidates[4].event.event_id);
+    assert_ne!(candidates[1].event.event_id, candidates[5].event.event_id);
+    let selected = candidates[1].event.clone();
+    let allowed_sources = [work.identity(), personal.identity(), claude.identity()];
+    let filter_applied = Cell::new(false);
 
-    assert!(!root_first_candidate_pool_is_decisive(
-        &candidates,
-        2,
-        candidate_tail_score(&candidates)
-    ));
+    let collection = collect_lexical_search_hits_using(
+        4,
+        false,
+        |_| {
+            filter_applied.set(true);
+            Ok(lexical_batch(
+                candidates
+                    .iter()
+                    .filter(|candidate| {
+                        allowed_sources.contains(&candidate.event.source.identity())
+                    })
+                    .cloned()
+                    .collect(),
+                true,
+                true,
+            ))
+        },
+        |coordinates| {
+            assert!(filter_applied.get());
+            assert_eq!(
+                coordinates,
+                &[
+                    (candidate_session_id(&work, 1), work.identity()),
+                    (candidate_session_id(&work, 2), work.identity()),
+                    (candidate_session_id(&personal, 1), personal.identity()),
+                    (candidate_session_id(&claude, 1), claude.identity()),
+                ]
+            );
+            assert!(coordinates
+                .iter()
+                .all(|coordinate| coordinate.1 != excluded.identity()));
+            Ok(coordinates
+                .iter()
+                .map(|&(session_id, source_owner)| {
+                    let source = [&work, &personal, &claude]
+                        .into_iter()
+                        .find(|source| source.identity() == source_owner)
+                        .unwrap();
+                    SessionGroupingClaims {
+                        session_id,
+                        source_owner,
+                        parent_session_id: None,
+                        root_session_id: Some(candidate_session_id(source, 9)),
+                        relationship: None,
+                    }
+                })
+                .collect())
+        },
+    )
+    .unwrap();
 
-    let mut decisive = candidates.to_vec();
-    decisive.push(candidate(94.0, 5, Some(5), Some(AgentScope::Subagent), 1));
-    assert!(root_first_candidate_pool_is_decisive(
-        &decisive,
-        2,
-        candidate_tail_score(&decisive)
-    ));
-}
-
-#[test]
-fn candidate_pool_is_decisive_when_qualifying_primaries_are_already_visible() {
-    let candidates = [
-        candidate(100.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(99.0, 3, Some(3), Some(AgentScope::Subagent), 1),
-        candidate(98.0, 1, Some(1), Some(AgentScope::Primary), 1),
-        candidate(97.0, 4, Some(3), Some(AgentScope::Primary), 1),
-        candidate(96.0, 5, Some(5), Some(AgentScope::Subagent), 1),
-    ];
-
-    assert!(root_first_candidate_pool_is_decisive(
-        &candidates,
-        2,
-        candidate_tail_score(&candidates)
-    ));
-}
-
-#[test]
-fn candidate_pool_waits_past_an_equal_score_primary_tie() {
-    let tied = [
-        candidate(100.0, 2, Some(1), Some(AgentScope::Subagent), 1),
-        candidate(95.0, 1, Some(1), Some(AgentScope::Primary), 1),
-    ];
-    assert!(!root_first_candidate_pool_is_decisive(&tied, 1, 95.0));
-    assert!(root_first_candidate_pool_is_decisive(&tied, 1, 94.99));
-}
-
-#[test]
-fn equal_score_root_boundary_requires_more_candidates_for_stable_tie_breaking() {
-    let candidates = [
-        candidate(100.0, 1, Some(1), Some(AgentScope::Primary), 1),
-        candidate(90.0, 2, Some(2), Some(AgentScope::Primary), 1),
-        candidate(90.0, 3, Some(3), Some(AgentScope::Primary), 1),
-    ];
-
-    assert!(!root_first_candidate_pool_is_decisive(
-        &candidates,
-        2,
-        candidate_tail_score(&candidates)
-    ));
+    let window = collection.result_window;
+    assert_eq!(result_scores(&window), [100.0, 97.0, 96.0, 98.0]);
+    assert_eq!(window.hits[0].event, SearchEventMetadata::from(&selected));
+    assert_eq!(window.hits[0].more_matches_in_session, 1);
+    assert_eq!(
+        collection.diversification.status,
+        SearchDiversificationStatus::Applied
+    );
+    assert_eq!(collection.diversification.changed_final_top_n, Some(true));
 }
 
 #[test]
@@ -539,19 +892,25 @@ fn active_tree_root_resolves_a_grandchild_with_an_immediate_parent_claim() {
 #[test]
 fn active_tree_claim_closure_includes_nested_descendants() {
     let root = Uuid::from_u128(1);
-    let child = Uuid::from_u128(2);
-    let grandchild = Uuid::from_u128(3);
-    let relations = [(child, root), (grandchild, child)];
+    let source_owner = candidate_source().identity();
+    let child = ancestry(2, Some(1), Some(1));
+    let grandchild = ancestry(3, Some(2), Some(1));
+    let relations = [child, grandchild];
     assert_eq!(
-        resolved_session_tree_ids(root, |anchors| {
+        resolved_session_tree_ids(root, source_owner, |anchors| {
             Ok(relations
                 .iter()
-                .filter(|(_, parent)| anchors.contains(parent))
-                .map(|(session, _)| *session)
+                .filter(|session| {
+                    [session.parent_session_id, session.claimed_root_session_id]
+                        .into_iter()
+                        .flatten()
+                        .any(|claim| anchors.contains(&claim))
+                })
+                .copied()
                 .collect())
         })
         .unwrap(),
-        Some(vec![root, child, grandchild])
+        Some(vec![root, child.session_id, grandchild.session_id])
     );
 }
 
@@ -559,22 +918,33 @@ fn active_tree_claim_closure_includes_nested_descendants() {
 fn active_tree_claim_closure_accepts_the_session_limit() {
     let root = Uuid::from_u128(1);
     let related = (2..=MAX_ACTIVE_SESSION_TREE_SESSIONS as u128)
-        .map(Uuid::from_u128)
+        .map(|session_id| ancestry(session_id, Some(1), Some(1)))
         .collect::<Vec<_>>();
-    let resolved = resolved_session_tree_ids(root, |_| Ok(related.clone()))
-        .unwrap()
-        .unwrap();
+    let resolved =
+        resolved_session_tree_ids(root, candidate_source().identity(), |_| Ok(related.clone()))
+            .unwrap()
+            .unwrap();
     assert_eq!(resolved.len(), MAX_ACTIVE_SESSION_TREE_SESSIONS);
 }
 
 #[test]
 fn active_tree_claim_closure_fails_open_over_the_session_limit() {
     let root = Uuid::from_u128(1);
+    let root_session = ancestry(1, None, None);
     let related = (2..=(MAX_ACTIVE_SESSION_TREE_SESSIONS as u128 + 1))
-        .map(Uuid::from_u128)
+        .map(|session_id| ancestry(session_id, Some(1), Some(1)))
         .collect::<Vec<_>>();
     assert_eq!(
-        resolved_session_tree_ids(root, |_| Ok(related.clone())).unwrap(),
+        resolved_session_tree_ids(root, root_session.source_owner, |_| Ok(related.clone()))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        proven_active_session_tree_ids(
+            &[root_session],
+            |_| unreachable!(),
+            |_| { Ok(related.clone()) }
+        ),
         None
     );
 }
@@ -584,14 +954,42 @@ fn active_tree_claim_closure_fails_open_over_the_depth_limit() {
     let root = Uuid::from_u128(1);
     let mut next = 2_u128;
     assert_eq!(
-        resolved_session_tree_ids(root, |_| {
-            let session_id = Uuid::from_u128(next);
+        resolved_session_tree_ids(root, candidate_source().identity(), |_| {
+            let session = ancestry(next, Some(next - 1), Some(1));
             next += 1;
-            Ok(vec![session_id])
+            Ok(vec![session])
         })
         .unwrap(),
         None
     );
+}
+
+#[test]
+fn active_tree_claim_closure_abstains_on_foreign_source_owner() {
+    let root = ancestry(1, None, None);
+    let foreign_owner = candidate_source_named("foreign-source.jsonl").identity();
+    let foreign = ancestry_with_owner(foreign_owner, 2, Some(1), Some(1));
+    assert_eq!(
+        resolved_session_tree_ids(root.session_id, root.source_owner, |_| Ok(vec![foreign]))
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn active_tree_claim_closure_abstains_on_absent_contradictory_or_cyclic_claims() {
+    let root = ancestry(1, None, None);
+    for candidate in [
+        ancestry(2, None, None),
+        ancestry(2, Some(1), Some(99)),
+        ancestry(2, Some(2), Some(1)),
+    ] {
+        assert_eq!(
+            resolved_session_tree_ids(root.session_id, root.source_owner, |_| Ok(vec![candidate]))
+                .unwrap(),
+            None
+        );
+    }
 }
 
 #[test]
@@ -609,12 +1007,46 @@ fn active_tree_root_rejects_ambiguous_provider_session_matches() {
     let second = ancestry(3, Some(1), Some(1));
     let records = BTreeMap::from([(root.session_id, root)]);
     assert_eq!(resolved_test_root(&[first, second], &records), None);
+    assert_eq!(
+        proven_active_session_tree_ids(
+            &[first, second],
+            |session_id| Ok(records.get(&session_id).copied()),
+            |_| unreachable!(),
+        ),
+        None
+    );
+}
+
+#[test]
+fn active_tree_abstains_when_closure_lookup_fails() {
+    let root = ancestry(1, None, None);
+    assert_eq!(
+        proven_active_session_tree_ids(
+            &[root],
+            |_| unreachable!(),
+            |_| { Err(anyhow!("closure lookup failed")) }
+        ),
+        None
+    );
 }
 
 #[test]
 fn active_tree_root_rejects_a_missing_parent() {
     let child = ancestry(2, Some(1), Some(1));
     assert_eq!(resolved_test_root(&[child], &BTreeMap::new()), None);
+}
+
+#[test]
+fn active_tree_root_rejects_a_foreign_source_parent() {
+    let child = ancestry(2, Some(1), Some(1));
+    let foreign_parent = ancestry_with_owner(
+        candidate_source_named("foreign-parent.jsonl").identity(),
+        1,
+        None,
+        None,
+    );
+    let records = BTreeMap::from([(foreign_parent.session_id, foreign_parent)]);
+    assert_eq!(resolved_test_root(&[child], &records), None);
 }
 
 #[test]
@@ -638,4 +1070,126 @@ fn weighted_rrf_keeps_exact_endpoint_weights() {
     assert_eq!(weighted_rrf_score(Some(1), None, 0.0), 1.0 / 61.0);
     assert_eq!(weighted_rrf_score(None, Some(1), 1.0), 1.0 / 61.0);
     assert_eq!(weighted_rrf_score(Some(1), None, 1.0), 0.0);
+}
+
+#[test]
+fn hybrid_fusion_orders_mixed_lexical_and_semantic_ranks() {
+    let lexical_first = candidate(1_000.0, 1, None, None, 1);
+    let shared_second = candidate(-20.0, 2, None, None, 1);
+    let shared_third = candidate(0.0, 3, None, None, 1);
+    let semantic_only = candidate(f32::MAX, 4, None, None, 1);
+
+    let fused = fuse_source_candidates(
+        vec![
+            lexical_first.clone(),
+            shared_second.clone(),
+            shared_third.clone(),
+        ],
+        vec![
+            shared_third.clone(),
+            shared_second.clone(),
+            semantic_only.clone(),
+        ],
+        0.5,
+    );
+
+    assert_eq!(
+        fused
+            .iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        vec![
+            shared_third.event.event_id,
+            shared_second.event.event_id,
+            lexical_first.event.event_id,
+            semantic_only.event.event_id,
+        ]
+    );
+}
+
+#[test]
+fn hybrid_fusion_ignores_raw_score_scales() {
+    let lexical = vec![
+        candidate(10.0, 1, None, None, 1),
+        candidate(9.0, 2, None, None, 1),
+    ];
+    let semantic = vec![
+        candidate(0.99, 2, None, None, 1),
+        candidate(0.98, 3, None, None, 1),
+    ];
+    let mut rescaled_lexical = lexical.clone();
+    rescaled_lexical[0].score = f32::MIN;
+    rescaled_lexical[1].score = f32::MAX;
+    let mut rescaled_semantic = semantic.clone();
+    rescaled_semantic[0].score = -0.0;
+    rescaled_semantic[1].score = 1_000_000.0;
+
+    let signature = |candidates: Vec<EventSearchCandidate>| {
+        candidates
+            .into_iter()
+            .map(|candidate| (candidate.event.event_id, candidate.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        signature(fuse_source_candidates(lexical, semantic, 0.35)),
+        signature(fuse_source_candidates(
+            rescaled_lexical,
+            rescaled_semantic,
+            0.35,
+        ))
+    );
+}
+
+#[test]
+fn hybrid_fusion_keeps_full_ids_that_share_a_compact_uuid_and_ties_deterministically() {
+    let first = candidate(10.0, 1, None, None, 1);
+    let mut colliding = candidate(20.0, 2, None, None, 1);
+    let mut encoded = first.event.event_id.encode_canonical().unwrap();
+    encoded[20] ^= 1;
+    colliding.event.event_id = StableEntityId::decode_canonical(&encoded).unwrap();
+    assert_eq!(
+        first.event.event_id.as_uuid(),
+        colliding.event.event_id.as_uuid()
+    );
+    assert_ne!(first.event.event_id, colliding.event.event_id);
+
+    let mut expected = vec![first.event.event_id, colliding.event.event_id];
+    expected.sort_by_key(|event_id| event_id.digest());
+    for fused in [
+        fuse_source_candidates(vec![first.clone()], vec![colliding.clone()], 0.5),
+        fuse_source_candidates(vec![colliding], vec![first], 0.5),
+    ] {
+        assert_eq!(
+            fused
+                .into_iter()
+                .map(|candidate| candidate.event.event_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn hybrid_semantic_endpoint_drops_the_lexical_only_zero_score_tail() {
+    let lexical_only = candidate(f32::MAX, 1, None, None, 1);
+    let shared = candidate(1.0, 2, None, None, 1);
+    let semantic_only = candidate(f32::MIN, 3, None, None, 1);
+
+    let fused = fuse_source_candidates(
+        vec![lexical_only.clone(), shared.clone()],
+        vec![semantic_only.clone(), shared.clone()],
+        1.0,
+    );
+
+    assert_eq!(
+        fused
+            .iter()
+            .map(|candidate| candidate.event.event_id)
+            .collect::<Vec<_>>(),
+        vec![semantic_only.event.event_id, shared.event.event_id]
+    );
+    assert!(fused.iter().all(|candidate| candidate.score > 0.0));
+    assert!(!fused
+        .iter()
+        .any(|candidate| candidate.event.event_id == lexical_only.event.event_id));
 }

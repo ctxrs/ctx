@@ -1,5 +1,5 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -112,5 +112,35 @@ ctx_rust_test(
         "//crates/ctx-history-source-discovery:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
+)
+
+CUSTOM_HISTORY_CORE_FIXTURE_DEPS = [
+    "//crates/ctx-history-capture-composition:lib",
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-source-io:lib",
+]
+
+ctx_rust_binary(
+    name = "custom_history_core_fixture",
+    testonly = True,
+    srcs = ["tests/custom_history_core_fixture.rs"],
+    crate_name = "custom_history_core_fixture",
+    crate_root = "tests/custom_history_core_fixture.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True),
+    deps = all_crate_deps(normal_dev = True) + CUSTOM_HISTORY_CORE_FIXTURE_DEPS,
+)
+
+ctx_rust_test(
+    name = "custom_history_core_fixture_tests",
+    srcs = ["tests/custom_history_core_fixture.rs"],
+    crate_name = "custom_history_core_fixture_tests",
+    crate_root = "tests/custom_history_core_fixture.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True),
+    data = ["//:public_test_fixtures"],
+    deps = all_crate_deps(normal_dev = True) + CUSTOM_HISTORY_CORE_FIXTURE_DEPS,
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
 )

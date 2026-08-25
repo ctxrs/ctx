@@ -219,9 +219,14 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
             ..EventSearchFilters::default()
         },
         EventSearchFilters {
+            parent_session_id: Some(target.session_id.as_uuid()),
+            root_session_id: Some(target.session_id.as_uuid()),
+            provider_session_id: Some("subagent-session".to_owned()),
+            agent_scope: AgentScope::Subagent,
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
             exclude_session_tree: Some(ExcludedSessionTree {
-                provider: "codex".to_owned(),
-                provider_session_id: "target-session".to_owned(),
                 session_ids: vec![target.session_id.as_uuid()],
             }),
             ..EventSearchFilters::default()
@@ -230,14 +235,42 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
             excluded_session_ids: vec![target.session_id.as_uuid(), subagent.session_id.as_uuid()],
             ..EventSearchFilters::default()
         },
+        EventSearchFilters {
+            excluded_session_ids: vec![other.session_id.as_uuid()],
+            exclude_session_tree: Some(ExcludedSessionTree {
+                session_ids: vec![target.session_id.as_uuid()],
+            }),
+            ..EventSearchFilters::default()
+        },
     ];
     for filters in parity_filters {
-        let lexical = index
-            .search_event_candidates_with_filters("shared parity needle", &filters, 10)
-            .unwrap()
+        let lexical_batch = index
+            .search_event_candidates_with_filters_batch("shared parity needle", &filters, 10)
+            .unwrap();
+        assert!(lexical_batch.complete);
+        if filters.workspace.is_some() || filters.file.is_some() {
+            assert!(lexical_batch.counters.term_expansions > 0);
+        } else {
+            assert_eq!(lexical_batch.counters.term_expansions, 0);
+        }
+        let lexical = lexical_batch
+            .candidates
             .into_iter()
             .map(|candidate| candidate.event.event_id.as_uuid())
             .collect::<HashSet<_>>();
+        let listed = index
+            .list_event_candidates_with_filters_batch(&filters, 10)
+            .unwrap();
+        assert!(listed.complete);
+        assert_eq!(
+            listed
+                .candidates
+                .into_iter()
+                .map(|candidate| candidate.event.event_id.as_uuid())
+                .collect::<HashSet<_>>(),
+            lexical,
+            "manual body and list candidates must share exact filter semantics"
+        );
         ctx_history_index_query::reset_core_record_decodes();
         let semantic = index.semantic_filter_projection(&filters).unwrap();
         assert_eq!(semantic.generation_id(), index.generation_id());

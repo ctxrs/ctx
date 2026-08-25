@@ -215,24 +215,21 @@ where
             body.clone(),
         )
         .map_err(contract)?;
-        if let Some(parent_session_id) = self
-            .binding
-            .parent_session_id
-            .filter(|_| !self.binding.metadata.lineage_ambiguous)
-        {
-            record.parent_session_id = Some(parent_session_id);
-            record.root_session_id = Some(self.binding.root_session_id);
-            record.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
-            record.agent_scope = Some(AgentScope::Subagent);
-        } else if !self.binding.metadata.lineage_ambiguous
-            && self
+        if !self.binding.metadata.lineage_ambiguous {
+            if let Some(parent_session_id) = self.binding.parent_session_id {
+                record.parent_session_id = Some(parent_session_id);
+                record.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+                record.agent_scope = Some(AgentScope::Subagent);
+            } else if self
                 .binding
                 .metadata
                 .root_provider_session_id
                 .as_deref()
                 .is_none_or(|root| root == self.binding.metadata.provider_session_id)
-        {
-            record.agent_scope = Some(AgentScope::Primary);
+            {
+                record.agent_scope = Some(AgentScope::Primary);
+            }
+            record.root_session_id = self.binding.root_session_id;
         }
         record.provider_session_id = Some(self.binding.metadata.provider_session_id.clone());
         record.native_event_id = Some(native_event_id);
@@ -636,7 +633,7 @@ mod tests {
     }
 
     fn project_relationship_fixture(parent: Option<&str>) -> CoreRecord {
-        project_lineage_fixture(parent, parent)
+        project_lineage_fixture(parent, None)
     }
 
     fn project_lineage_fixture(parent: Option<&str>, root: Option<&str>) -> CoreRecord {
@@ -692,9 +689,7 @@ mod tests {
                 )
             })
             .transpose()
-            .unwrap()
-            .or(parent_session_id)
-            .unwrap_or(session_id);
+            .unwrap();
         let binding = MuxBinding {
             metadata,
             session_id,
@@ -778,15 +773,23 @@ mod tests {
             Some(ProviderNativeSessionRelationship::Delegated)
         );
         assert_eq!(child.agent_scope, Some(AgentScope::Subagent));
+        assert!(child.parent_session_id.is_some());
+        assert_eq!(child.root_session_id, None);
         assert_eq!(
             child.content.meaningful_text(),
             "exact child-owned Mux event"
         );
         assert!(child.native_event_id.is_some());
 
+        let explicit_root = project_lineage_fixture(Some("mux-parent"), Some("mux-explicit-root"));
+        assert_eq!(explicit_root.parent_session_id, child.parent_session_id);
+        assert!(explicit_root.root_session_id.is_some());
+
         let root = project_relationship_fixture(None);
         assert_eq!(root.session_relationship, None);
         assert_eq!(root.agent_scope, Some(AgentScope::Primary));
+        assert_eq!(root.parent_session_id, None);
+        assert_eq!(root.root_session_id, None);
         assert_eq!(
             root.content.meaningful_text(),
             "exact child-owned Mux event"
@@ -796,6 +799,7 @@ mod tests {
         let unresolved_child = project_lineage_fixture(None, Some("mux-foreign-root"));
         assert_eq!(unresolved_child.session_relationship, None);
         assert_eq!(unresolved_child.agent_scope, None);
+        assert!(unresolved_child.root_session_id.is_some());
     }
 
     #[test]

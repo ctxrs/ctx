@@ -1,0 +1,414 @@
+use super::*;
+
+use ctx_history_index_format::{
+    core_document_fast_facts, decode_core_document, unique_required_bytes, SessionAuthorityKey,
+};
+
+const MAX_SESSION_GROUPING_CLAIM_RECORDS: usize = 4_097;
+/// Bounds the fixed segment fan-out before any authority dictionary is opened.
+///
+/// This matches the manual lexical executor's segment ceiling.
+const MAX_SESSION_GROUPING_SEGMENT_PROBES: usize = 512;
+/// Bounds the complete exact `(segment, SessionAuthorityKey)` cross-product.
+const MAX_SESSION_GROUPING_TERM_SEEKS: usize =
+    MAX_SESSION_GROUPING_COORDINATES * MAX_SESSION_GROUPING_SEGMENT_PROBES;
+/// Includes deleted documents, so a delete-heavy posting list cannot evade it;
+/// the cap is twice the maximum possible live witness set.
+const MAX_SESSION_GROUPING_POSTING_VISITS: usize = 65_536;
+/// Limits all preflighted stored Core payloads before any stored document read.
+/// One maximum-sized valid Core witness remains admissible; an ordinary
+/// 256-coordinate horizon has a 1 MiB average-witness allowance.
+const MAX_SESSION_GROUPING_CORE_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Debug)]
+struct SessionGroupingWorkMeter {
+    segment_probes: usize,
+    term_seeks: usize,
+    posting_visits: usize,
+    live_witnesses: usize,
+    core_bytes: usize,
+}
+
+impl SessionGroupingWorkMeter {
+    fn charge(
+        counter: &mut usize,
+        amount: usize,
+        maximum: usize,
+        operation: &'static str,
+    ) -> Result<()> {
+        let next = counter
+            .checked_add(amount)
+            .ok_or(IndexError::SessionGroupingAuthorityWorkLimitExceeded { operation, maximum })?;
+        if next > maximum {
+            return Err(IndexError::SessionGroupingAuthorityWorkLimitExceeded {
+                operation,
+                maximum,
+            });
+        }
+        *counter = next;
+        Ok(())
+    }
+
+    fn segment_probes(&mut self, amount: usize) -> Result<()> {
+        Self::charge(
+            &mut self.segment_probes,
+            amount,
+            MAX_SESSION_GROUPING_SEGMENT_PROBES,
+            "segment probes",
+        )
+    }
+
+    fn term_seeks(&mut self, amount: usize) -> Result<()> {
+        Self::charge(
+            &mut self.term_seeks,
+            amount,
+            MAX_SESSION_GROUPING_TERM_SEEKS,
+            "exact authority term seeks",
+        )
+    }
+
+    fn posting_visit(&mut self) -> Result<()> {
+        Self::charge(
+            &mut self.posting_visits,
+            1,
+            MAX_SESSION_GROUPING_POSTING_VISITS,
+            "authority posting visits",
+        )
+    }
+
+    fn live_witness(&mut self) -> Result<()> {
+        Self::charge(
+            &mut self.live_witnesses,
+            1,
+            MAX_SESSION_GROUPING_WITNESSES,
+            "live authority witnesses",
+        )
+    }
+
+    fn core_bytes(&mut self, amount: usize) -> Result<()> {
+        Self::charge(
+            &mut self.core_bytes,
+            amount,
+            MAX_SESSION_GROUPING_CORE_BYTES,
+            "encoded Core bytes",
+        )
+    }
+}
+
+fn after_segment_preflight<T>(
+    meter: &mut SessionGroupingWorkMeter,
+    segment_count: usize,
+    admitted_work: impl FnOnce() -> T,
+) -> Result<T> {
+    meter.segment_probes(segment_count)?;
+    Ok(admitted_work())
+}
+
+#[derive(Debug, Clone)]
+struct GroupingWitness {
+    key: SessionAuthorityKey,
+    address: DocAddress,
+}
+
+#[derive(Debug)]
+struct GroupingAccumulator {
+    claims: SessionGroupingClaims,
+    witnesses: usize,
+}
+
+impl VerifiedIndex {
+    /// Coalesces the sparse live authority witnesses for unique exact session
+    /// coordinates through an explicit bounded exact-term authority scan.
+    ///
+    /// Results preserve request order. Missing coordinates, duplicate input,
+    /// unexpected authority, duplicate events, more than four witnesses for a
+    /// coordinate, and conflicting positive claims fail the complete batch.
+    pub fn session_grouping_claims(
+        &self,
+        coordinates: &[(StableEntityId, StableEntityId)],
+    ) -> Result<Vec<SessionGroupingClaims>> {
+        if coordinates.len() > MAX_SESSION_GROUPING_COORDINATES {
+            return Err(IndexError::InvalidSessionGroupingCoordinateCount {
+                requested: coordinates.len(),
+                maximum: MAX_SESSION_GROUPING_COORDINATES,
+            });
+        }
+        if coordinates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut requested = BTreeSet::new();
+        let mut ordered_keys = Vec::with_capacity(coordinates.len());
+        for &(session_id, source_owner) in coordinates {
+            let key = SessionAuthorityKey::exact(session_id, source_owner)?;
+            if !requested.insert(key) {
+                return Err(IndexError::DuplicateSessionGroupingCoordinate(format!(
+                    "{session_id}@{source_owner}"
+                )));
+            }
+            ordered_keys.push(key);
+        }
+
+        let mut meter = SessionGroupingWorkMeter {
+            segment_probes: 0,
+            term_seeks: 0,
+            posting_visits: 0,
+            live_witnesses: 0,
+            core_bytes: 0,
+        };
+        let segment_readers = self.searcher.segment_readers();
+        // Reject an over-segmented generation before allocating or sorting a
+        // request-sized segment list, and before opening an authority
+        // dictionary.
+        let mut stable_segments =
+            after_segment_preflight(&mut meter, segment_readers.len(), || {
+                segment_readers.iter().enumerate().collect::<Vec<_>>()
+            })?;
+        stable_segments.sort_by_key(|(_, segment)| segment.segment_id());
+        let term_seek_count = stable_segments
+            .len()
+            .checked_mul(requested.len())
+            .ok_or(IndexError::CountOverflow)?;
+        // Admit the complete cross-product before opening an authority
+        // dictionary, rather than allowing a large request to make partial
+        // unmetered progress across segments.
+        meter.term_seeks(term_seek_count)?;
+
+        let mut live_witness_counts = BTreeMap::<SessionAuthorityKey, usize>::new();
+        let mut witness_events = BTreeSet::new();
+        let mut witnesses = Vec::new();
+        for (segment_ord, segment) in stable_segments {
+            let inverted = segment.inverted_index(fields.session_authority)?;
+            for key in &requested {
+                let term = Term::from_field_bytes(fields.session_authority, key.as_bytes());
+                let Some(term_info) = inverted.get_term_info(&term)? else {
+                    continue;
+                };
+                let mut postings =
+                    inverted.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    meter.posting_visit()?;
+                    if !segment.is_deleted(doc_id) {
+                        let live_witnesses = live_witness_counts.entry(*key).or_default();
+                        *live_witnesses = live_witnesses
+                            .checked_add(1)
+                            .ok_or(IndexError::CountOverflow)?;
+                        if *live_witnesses > MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE {
+                            return Err(IndexError::InvalidStoredDocumentField(
+                                "session_authority",
+                            ));
+                        }
+                        meter.live_witness()?;
+                        let address = DocAddress::new(
+                            u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?,
+                            doc_id,
+                        );
+                        // The fast fields are the only Core metadata consulted
+                        // during admission. This charges aggregate Core bytes
+                        // before any stored document is loaded or decoded.
+                        let facts = core_document_fast_facts(&self.searcher, address)?;
+                        meter.core_bytes(facts.encoded_core_bytes)?;
+                        if !witness_events.insert(facts.event_id) {
+                            return Err(IndexError::DuplicateEventIdentity(
+                                facts.event_id.to_string(),
+                            ));
+                        }
+                        witnesses.push(GroupingWitness { key: *key, address });
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+        }
+
+        let mut grouped = BTreeMap::<SessionAuthorityKey, GroupingAccumulator>::new();
+        for witness in witnesses {
+            let document: TantivyDocument = self.searcher.doc(witness.address)?;
+            let (record, _) =
+                decode_core_document(&self.searcher, witness.address, &document, fields)?;
+            let stored_key = SessionAuthorityKey::decode(unique_required_bytes(
+                &document,
+                fields.session_authority,
+                "session_authority",
+            )?)?;
+            if stored_key != witness.key || !requested.contains(&stored_key) {
+                return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+            }
+            if SessionAuthorityKey::exact(record.session_id, record.source.identity())?
+                != stored_key
+            {
+                return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+            }
+
+            let candidate = SessionGroupingClaims {
+                session_id: record.session_id,
+                source_owner: record.source.identity(),
+                parent_session_id: record.parent_session_id,
+                root_session_id: record.root_session_id,
+                relationship: record.session_relationship,
+            };
+            match grouped.entry(stored_key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(GroupingAccumulator {
+                        claims: candidate,
+                        witnesses: 1,
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let accumulator = entry.get_mut();
+                    accumulator.witnesses = accumulator
+                        .witnesses
+                        .checked_add(1)
+                        .ok_or(IndexError::CountOverflow)?;
+                    if accumulator.witnesses > MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE {
+                        return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+                    }
+                    accumulator.claims = merge_grouping_claims(accumulator.claims, candidate)?;
+                }
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(ordered_keys.len());
+        for (key, &(session_id, source_owner)) in ordered_keys.iter().zip(coordinates) {
+            let Some(accumulator) = grouped.remove(key) else {
+                return Err(IndexError::MissingSessionGroupingCoordinate(format!(
+                    "{session_id}@{source_owner}"
+                )));
+            };
+            if !(1..=MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE).contains(&accumulator.witnesses)
+            {
+                return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+            }
+            ordered.push(accumulator.claims);
+        }
+        if !grouped.is_empty() {
+            return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+        }
+        Ok(ordered)
+    }
+
+    /// Resolves one compact session ID, then reads its exact grouping
+    /// authority. This is retained for the active-session safety exception.
+    pub fn session_grouping_claims_by_id(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<SessionGroupingClaims>> {
+        let Some(coordinate) = self
+            .session_event_coordinate_prefix(session_id, 1)?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let event = self
+            .event_by_id(coordinate.event_id)?
+            .ok_or(IndexError::InvalidStoredDocumentField("session_id"))?;
+        if event.session_id.as_uuid() != session_id {
+            return Err(IndexError::InvalidStoredDocumentField("session_id"));
+        }
+        let mut claims =
+            self.session_grouping_claims(&[(event.session_id, event.source.identity())])?;
+        Ok(claims.pop())
+    }
+
+    /// Returns bounded grouping claims whose indexed direct parent or root
+    /// claim names any supplied session ID.
+    pub fn session_grouping_claims_claiming_lineage_to_any(
+        &self,
+        session_ids: &[Uuid],
+        limit: usize,
+    ) -> Result<Vec<SessionGroupingClaims>> {
+        if session_ids.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        if limit > MAX_SESSION_GROUPING_CLAIM_RECORDS {
+            return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+        }
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let queries = [fields.parent_session_id, fields.root_session_id]
+            .into_iter()
+            .map(|field| {
+                Box::new(TermSetQuery::new(
+                    session_ids
+                        .iter()
+                        .map(|session_id| Term::from_field_text(field, &session_id.to_string()))
+                        .collect::<Vec<_>>(),
+                )) as Box<dyn Query>
+            })
+            .collect();
+        let candidate_ids = self.searcher.search(
+            &BooleanQuery::union(queries),
+            &SessionIdCollector::new(limit),
+        )?;
+        let mut candidates = Vec::with_capacity(candidate_ids.len());
+        for session_id in candidate_ids {
+            let Some(candidate) = self.session_grouping_claims_by_id(session_id)? else {
+                return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+            };
+            candidates.push(candidate);
+        }
+        Ok(candidates)
+    }
+}
+
+fn merge_grouping_claims(
+    existing: SessionGroupingClaims,
+    candidate: SessionGroupingClaims,
+) -> Result<SessionGroupingClaims> {
+    if existing.session_id != candidate.session_id
+        || existing.source_owner != candidate.source_owner
+    {
+        return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+    }
+    Ok(SessionGroupingClaims {
+        session_id: existing.session_id,
+        source_owner: existing.source_owner,
+        parent_session_id: merge_direct_claim(
+            existing.parent_session_id,
+            candidate.parent_session_id,
+        )?,
+        root_session_id: merge_direct_claim(existing.root_session_id, candidate.root_session_id)?,
+        relationship: merge_direct_claim(existing.relationship, candidate.relationship)?,
+    })
+}
+
+fn merge_direct_claim<T: Copy + Eq>(left: Option<T>, right: Option<T>) -> Result<Option<T>> {
+    match (left, right) {
+        (Some(left), Some(right)) if left == right => Ok(Some(left)),
+        (Some(_), Some(_)) => Err(IndexError::ConflictingProviderNativeSessionClaim(
+            "one session has contradictory relationship fields",
+        )),
+        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_preflight_rejects_before_running_admitted_work() {
+        let admitted_work_ran = std::cell::Cell::new(false);
+        let mut meter = SessionGroupingWorkMeter {
+            segment_probes: 0,
+            term_seeks: 0,
+            posting_visits: 0,
+            live_witnesses: 0,
+            core_bytes: 0,
+        };
+
+        assert!(matches!(
+            after_segment_preflight(&mut meter, MAX_SESSION_GROUPING_SEGMENT_PROBES + 1, || {
+                admitted_work_ran.set(true)
+            },),
+            Err(IndexError::SessionGroupingAuthorityWorkLimitExceeded {
+                operation: "segment probes",
+                maximum: MAX_SESSION_GROUPING_SEGMENT_PROBES,
+            })
+        ));
+        assert_eq!(meter.segment_probes, 0);
+        assert!(!admitted_work_ran.get());
+    }
+}

@@ -52,8 +52,7 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
-const PARSER_REVISION: &str =
-    "openclaw-source-backed-v19-source-wide-call-id-admission-agent-scope-raw-lineage-exact-authored-text-record-rejections";
+const PARSER_REVISION: &str = "openclaw-source-backed-v20-direct-parent-explicit-root";
 const MAX_TERMINAL_CALL_IDS: usize = 4096;
 const MAX_TERMINAL_LINKAGE_IDS: usize = MAX_TERMINAL_CALL_IDS * 2;
 const MAX_SELECTOR_CALL_ID_BYTES: usize = 16 * 1024;
@@ -94,10 +93,7 @@ struct Binding {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum OpenClawNativeSessionFamily {
     Absent,
-    Resolved {
-        parent_native_session_id: String,
-        root_native_session_id: String,
-    },
+    Resolved { parent_native_session_id: String },
     Invalid,
 }
 
@@ -550,44 +546,18 @@ fn native_session_family(path: &Path, index: &Value) -> OpenClawNativeSessionFam
     {
         return OpenClawNativeSessionFamily::Invalid;
     }
-    let mut current_key = selected_spawned_by;
-    let mut parent = None;
-    let mut root = None;
-    let mut visited = BTreeSet::new();
-    for depth in 0..16 {
-        if !visited.insert(current_key.to_owned()) {
-            return OpenClawNativeSessionFamily::Invalid;
-        }
-        let Some(entry) = entries.get(current_key) else {
-            return OpenClawNativeSessionFamily::Invalid;
-        };
-        let OpenClawLineageClaim::Valid(session_id) = lineage_claim(entry, "sessionId") else {
-            return OpenClawNativeSessionFamily::Invalid;
-        };
-        let agent = current_key
-            .strip_prefix("agent:")
-            .and_then(|value| value.split(':').next());
-        let qualified = super::qualify_session_id(agent, session_id);
-        if depth == 0 {
-            parent = Some(qualified.clone());
-        }
-        root = Some(qualified);
-        let next = match lineage_claim(entry, "spawnedBy") {
-            OpenClawLineageClaim::Absent => break,
-            OpenClawLineageClaim::Valid(claim) => claim,
-            OpenClawLineageClaim::Invalid => return OpenClawNativeSessionFamily::Invalid,
-        };
-        if depth == 15 {
-            return OpenClawNativeSessionFamily::Invalid;
-        }
-        current_key = next;
-    }
-    let Some(parent_native_session_id) = parent else {
+    let Some(parent_entry) = entries.get(selected_spawned_by) else {
         return OpenClawNativeSessionFamily::Invalid;
     };
+    let OpenClawLineageClaim::Valid(parent_session_id) = lineage_claim(parent_entry, "sessionId")
+    else {
+        return OpenClawNativeSessionFamily::Invalid;
+    };
+    let parent_agent = selected_spawned_by
+        .strip_prefix("agent:")
+        .and_then(|value| value.split(':').next());
     OpenClawNativeSessionFamily::Resolved {
-        root_native_session_id: root.unwrap_or_else(|| parent_native_session_id.clone()),
-        parent_native_session_id,
+        parent_native_session_id: super::qualify_session_id(parent_agent, parent_session_id),
     }
 }
 

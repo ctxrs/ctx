@@ -649,11 +649,17 @@ Core generation until they are explicitly imported through a supported path. Sea
 requires a non-empty query, at least one non-empty `--term`, or
 `--file <path>`; provider, workspace, time, session, event, source, and result
 flags only narrow an actual search. Ordinary results include primary and
-subagent sessions. Sessions with the same exact root-session claim are grouped
-together, while sessions without one remain their own groups; ctx returns one
-best matching span per group before repeats. Primary-session evidence gets a
-slight preference only when nearly as relevant; a stronger child-session match
-can win. Results include `more_matches_in_session` and
+subagent sessions. After filters and active-session exclusion, ctx selects the
+strongest bounded candidate for each exact session, reads all selected
+session/source coordinates in one bounded grouping query, and coalesces sparse
+direct provider claims for each coordinate. Sessions with the same positive
+coalesced root claim form one search family; an unclaimed session is its own
+family. Missing, conflicting, corrupt, or over-bound grouping authority fails
+the query instead of falling back to candidate-event roots or inferred
+lineage. Families are ordered by their strongest session champion, then ctx
+emits one remaining champion per family per relevance-stable round. Agent
+scope does not promote a weaker champion. Results
+include `more_matches_in_session` and
 `session_importance` when more indexed events from the returned session also
 matched. Use `--session <ctx-session-id>` after a default search has identified
 a session to inspect; scoped session search returns dense event hits.
@@ -689,22 +695,24 @@ follow-up commands preserve the positional and repeatable-term argument shape
 with safe shell quoting, plus a shell-quoted `ctx --data-root <path>` prefix when
 search uses a non-default data root. Each result's `rank` is its one-based
 position in the final shaped window. `retrieval_score` preserves the backend's
-diagnostic score, which can be non-monotonic after query-coverage and
-root-diversity shaping.
+diagnostic score, which can be non-monotonic after query-coverage and family
+shaping.
 Human output states `relevance order` and the selected agent scope in the
 result heading. Its compact `Event` row pairs the dynamic event reference with
 the exact matched-event UTC RFC 3339 millisecond time;
 timestamps never re-sort results. `--verbose` additionally renders the stored
 event sequence and available workspace/working-directory, branch, agent, and
 parent/root lineage without repeating equal values.
-Canonical search hits also summarize bounded copied-event lineage after ranking
-is complete. The query reports the selected claim as `resolved`, `unresolved`,
-or `cyclic`; an absent copied-event target is an ordinary unresolved reference,
-and reverse results can still include sessions that directly claim it. Search
-renders at most three inherited-session follow-ups, an exact total when the
-reverse walk completes, or an `at least` lower bound when work is capped.
-`ctx show event` automatically renders up to 20 occurrence details. There is no
-lineage flag or exhaustive cursor.
+Ordinary search does not run a reverse-lineage lookup for each hit. A selected
+event can still expose its own positive direct `event_copy` claim, but that
+claim does not affect recall, ranking, grouping, or semantic eligibility.
+`ctx show event` resolves that selected event or its one direct copied-from
+target and renders up to 20 direct reverse occurrences. The target state is
+`resolved` or `unresolved`; missing targets are ordinary unresolved references
+and do not hide admitted occurrences. Counts are exact when the bounded direct
+posting scan completes and otherwise are an `at least` lower bound. This
+surface performs no parent, root, copy-component, cycle, or transitive lineage
+walk. There is no exhaustive cursor.
 Custom history imports can be filtered by canonical
 `--history-source provider_key/source_id`, or by exact `--provider-key`,
 `--source-id`, and `--source-format` values. The plugin/source alias is for
@@ -718,7 +726,8 @@ lexical, semantic, hybrid, CLI, and MCP search select the same source keys. An
 unknown name or group in that pinned generation fails instead of widening the
 search. All history roots still share one local Core/Tantivy index; selecting a
 root does not open or switch a separate index.
-Ordinary search uses the all-agent, root-diverse behavior described above. Use
+Ordinary search uses the all-agent, coalesced-session, literal-family shaping
+described above. Use
 `--primary-only` only when a deliberately narrow search should exclude
 subagent work.
 
@@ -740,14 +749,19 @@ query service to embed the query from an already-cached model.
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata
 including `provider_session_id` is included when known. For Codex, that value
-is the resume UUID. Results also include title, snippet, rank, result scope, match reasons,
+is the resume UUID. Results also include title, snippet, rank, result scope,
 citations, `suggested_next_commands`, a JSON `freshness` object, a JSON
 `retrieval` object with backend, semantic coverage, worker status, and semantic
 timing/scan diagnostics when vector retrieval runs, a JSON `result_window`
 object with `limit`, `returned`, and shaped-sentinel `more_available`, and
-separate backend candidate-pool `truncation` fields. Search does not expose a
-continuation cursor or run a second count scan. Default text output is compact
-and optimized for agent reading; it ends with exactly
+separate `diversification` and backend candidate-pool `truncation` fields.
+Ordinary lexical session search performs one bounded batch with the fixed
+candidate horizon `max(limit + 1, 256)`, capped by the lexical query maximum;
+it never retries or doubles the pool. Dense `--events` and explicit
+`--session` searches use event relevance with a `limit + 1` lookahead and do
+not query grouping authority. Search does not expose a continuation cursor or
+run a second count scan. Default text output is compact and optimized for agent
+reading; it ends with exactly
 `More results available.` only when one additional shaped result exists. Use
 `--verbose` for expanded text diagnostics.
 
@@ -768,7 +782,7 @@ Filters:
 - repeatable `--exclude-session <ctx-session-id-or-prefix>`, for exact named
   sessions to omit;
 - `--term <query-or-keyword>`, repeatable broadening queries or keywords merged with OR-style semantics;
-- `--events`, for dense event-level results instead of the default root-diverse results;
+- `--events`, for dense event-level results instead of the default family-shaped results;
 - `--backend hybrid|semantic|lexical`, where `lexical` queries
   `search/lexical`, `semantic` queries `search/semantic`, and `hybrid` blends
   both only when semantic coverage is complete and bound to the active lexical

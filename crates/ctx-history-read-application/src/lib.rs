@@ -79,9 +79,10 @@ pub use search::{
     collect_search_hits, collect_search_hits_using, normalize_search_request,
     resolve_search_backend, search_filters, search_filters_with_refs, shape_search_result_window,
     unsupported_semantic_scope, validate_search_request, ActiveSessionExclusion,
-    NormalizedSearchQuery, SearchBackend, SearchCollection, SearchEventMetadata,
-    SearchExecutionError, SearchExecutionResult, SearchFailurePhase, SearchHit, SearchPolicy,
-    SearchRequest, SearchResultWindow, SearchStopReason, SearchWorkReceipt,
+    NormalizedSearchQuery, SearchBackend, SearchCollection, SearchDiversificationDecision,
+    SearchDiversificationStatus, SearchEventMetadata, SearchExecutionError, SearchExecutionResult,
+    SearchFailurePhase, SearchHit, SearchLexicalDiagnostics, SearchLexicalExhaustionDiagnostics,
+    SearchPolicy, SearchRequest, SearchResultWindow, SearchStopReason, SearchWorkReceipt,
     SemanticFallbackDiagnostics,
 };
 pub use search_read_model::{

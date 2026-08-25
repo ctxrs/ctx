@@ -20,6 +20,7 @@ use crate::{
 };
 
 const OPENCLAW_SOURCE_FORMAT: &str = "openclaw_session_jsonl_tree";
+const OPENCLAW_PARSER_REVISION: &str = "openclaw-source-backed-v20-direct-parent-explicit-root";
 const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
 const CUSTOM_HISTORY_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
 
@@ -527,6 +528,80 @@ fn openclaw_cold_noop_and_append_refreshes_preserve_the_source() {
 }
 
 #[test]
+fn openclaw_lineage_stops_at_direct_parent_and_requires_explicit_root() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("openclaw");
+    let sessions = root.join("agents/main/sessions");
+    for session_id in ["root", "parent", "child", "explicit", "orphan"] {
+        write_openclaw_lifecycle_transcript(
+            &sessions.join(format!("{session_id}.jsonl")),
+            &[serde_json::json!({
+                "type": "message",
+                "id": format!("{session_id}-event"),
+                "timestamp": "2026-08-06T12:00:00Z",
+                "message": {"role": "user", "content": session_id},
+            })],
+        );
+    }
+    fs::write(
+        sessions.join("sessions.json"),
+        serde_json::json!({
+            "agent:main:root": {"sessionId": "root"},
+            "agent:main:parent": {
+                "sessionId": "parent",
+                "spawnedBy": "agent:main:root",
+            },
+            "agent:main:child": {
+                "sessionId": "child",
+                "spawnedBy": "agent:main:parent",
+            },
+            "agent:main:explicit": {
+                "sessionId": "explicit",
+                "parentSessionId": "parent",
+                "rootSessionId": "root",
+            },
+            "agent:main:orphan": {
+                "sessionId": "orphan",
+                "spawnedBy": "agent:main:missing",
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let index = temp.path().join("index");
+    let published =
+        refresh_source_backed_generation(&index, &openclaw_registry(&root), writer_options())
+            .unwrap();
+    assert!(published.failed_routes.is_empty());
+    let records = all_indexed_records(&index);
+    assert_eq!(records.len(), 5);
+    assert!(records
+        .iter()
+        .all(|record| record.parser_revision == OPENCLAW_PARSER_REVISION));
+    let record = |session_id: &str| {
+        records
+            .iter()
+            .find(|record| record.provider_session_id.as_deref() == Some(session_id))
+            .unwrap()
+    };
+    let root = record("main/root");
+    let parent = record("main/parent");
+    let child = record("main/child");
+    let explicit = record("main/explicit");
+    let orphan = record("main/orphan");
+
+    assert_eq!(parent.parent_session_id, Some(root.session_id));
+    assert_eq!(parent.root_session_id, None);
+    assert_eq!(child.parent_session_id, Some(parent.session_id));
+    assert_eq!(child.root_session_id, None);
+    assert_eq!(explicit.parent_session_id, Some(parent.session_id));
+    assert_eq!(explicit.root_session_id, Some(root.session_id));
+    assert_eq!(orphan.parent_session_id, None);
+    assert_eq!(orphan.root_session_id, None);
+}
+
+#[test]
 fn openclaw_preflight_preserves_unique_append_and_carries_cross_boundary_duplicate_failure() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("openclaw");
@@ -741,48 +816,80 @@ fn openclaw_unsupported_sqlite_root_failure_is_carried_and_restored() {
 }
 
 #[test]
-fn pi_parent_session_path_preserves_literal_parent_identity() {
+fn pi_parent_target_changes_do_not_affect_child_publication() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_temp = crate::test_support_paths::tempdir().unwrap();
-    let parent_path = temp.path().join("parent.jsonl");
-    let child_path = temp.path().join("child.jsonl");
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent_path = temp.path().join("outside-inventory-parent.jsonl");
+    let child_path = sessions.join("child.jsonl");
     write_pi_session(&parent_path, "pi-parent", None, "parent retained message");
-    let parent_path = fs::canonicalize(parent_path).unwrap();
+    let canonical_parent_path = fs::canonicalize(&parent_path).unwrap();
     write_pi_session(
         &child_path,
         "pi-child",
-        Some(&parent_path),
+        Some(&canonical_parent_path),
         "child retained message",
     );
 
     let index = index_temp.path().join("index");
-    refresh_source_backed_generation(&index, &pi_registry(temp.path()), writer_options()).unwrap();
-    let records = all_indexed_records(&index);
-    let mut parent = published_session(&records, "pi-parent");
-    let mut child = published_session(&records, "pi-child");
-    let parent = parent.remove(0);
+    let registry = pi_registry(&sessions);
+    let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(cold.failed_routes.is_empty());
+    assert_eq!(cold.commit.indexed_documents, 1);
+    let cold_generation = cold.commit.generation_id;
+    let cold_records = all_indexed_records(&index);
+    let mut child = published_session(&cold_records, "pi-child");
+    assert_eq!(child.len(), 1);
     let child = child.remove(0);
 
-    assert_eq!(child.parent_session_id, Some(parent.session_id));
-    assert_eq!(child.root_session_id, Some(parent.session_id));
-    assert!(super::has_literal_fact(
-        &parent,
-        ctx_history_core::LiteralFactKind::SessionCwd,
-        "/tmp/pi"
-    ));
+    assert_eq!(child.parent_session_id, None);
+    assert_eq!(child.root_session_id, None);
+    assert_eq!(child.session_relationship, None);
+    assert_eq!(child.agent_scope, None);
     assert!(super::has_literal_fact(
         &child,
         ctx_history_core::LiteralFactKind::SessionCwd,
         "/tmp/pi"
     ));
     assert_eq!(
-        parent.native_event_id,
+        child.native_event_id,
         Some(TypedKey::utf8("copied-entry").unwrap())
     );
-    assert_eq!(parent.native_event_id, child.native_event_id);
-    assert_ne!(parent.event_id, child.event_id);
+    assert_eq!(
+        child.content.normalized_body.as_deref(),
+        Some("child retained message")
+    );
+    assert_eq!(
+        child.content.structured_content.as_ref().unwrap()["message"]["content"],
+        "child retained message"
+    );
     assert_eq!(child.provider_session_id.as_deref(), Some("pi-child"));
-    assert_eq!(parent.provider_session_id.as_deref(), Some("pi-parent"));
+
+    write_pi_session(
+        &parent_path,
+        "changed-parent",
+        None,
+        "changed parent content",
+    );
+    let changed = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_eq!(changed.commit.generation_id, cold_generation);
+    assert_eq!(all_indexed_records(&index), cold_records);
+
+    fs::remove_file(&parent_path).unwrap();
+    let deleted = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_eq!(deleted.commit.generation_id, cold_generation);
+    assert_eq!(all_indexed_records(&index), cold_records);
+
+    write_pi_session(
+        &parent_path,
+        "restored-parent",
+        None,
+        "restored parent content",
+    );
+    let restored = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert_eq!(restored.commit.generation_id, cold_generation);
+    assert_eq!(all_indexed_records(&index), cold_records);
 }
 
 #[test]
@@ -832,7 +939,7 @@ fn pi_omp_title_slot_cold_repeat_and_rewrite_are_rejection_free() {
 }
 
 #[test]
-fn pi_declared_missing_parent_fails_closed() {
+fn pi_declared_missing_parent_is_accepted_without_normalized_lineage() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_temp = crate::test_support_paths::tempdir().unwrap();
     let child_path = temp.path().join("child.jsonl");
@@ -841,17 +948,25 @@ fn pi_declared_missing_parent_fails_closed() {
         &child_path,
         "pi-child-with-missing-parent",
         Some(&missing_parent),
-        "must not publish as a root",
+        "missing parent keeps exact child content",
     );
 
-    let error = refresh_source_backed_generation(
-        index_temp.path().join("index"),
-        &pi_registry(temp.path()),
-        writer_options(),
-    )
-    .unwrap_err();
-
-    assert!(error
-        .to_string()
-        .contains("declares unresolved parentSession"));
+    let index = index_temp.path().join("index");
+    let publication =
+        refresh_source_backed_generation(&index, &pi_registry(temp.path()), writer_options())
+            .unwrap();
+    assert!(publication.failed_routes.is_empty());
+    assert_eq!(publication.commit.indexed_documents, 1);
+    let records = all_indexed_records(&index);
+    let mut child = published_session(&records, "pi-child-with-missing-parent");
+    assert_eq!(child.len(), 1);
+    let child = child.remove(0);
+    assert_eq!(child.parent_session_id, None);
+    assert_eq!(child.root_session_id, None);
+    assert_eq!(child.session_relationship, None);
+    assert_eq!(child.agent_scope, None);
+    assert_eq!(
+        child.content.normalized_body.as_deref(),
+        Some("missing parent keeps exact child content")
+    );
 }

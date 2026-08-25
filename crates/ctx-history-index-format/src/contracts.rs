@@ -296,6 +296,19 @@ pub enum IndexError {
     InvalidStoredDocumentField(&'static str),
     #[error("one session has conflicting provider-native lineage claims: {0}")]
     ConflictingProviderNativeSessionClaim(&'static str),
+    #[error(
+        "session grouping batch has too many exact coordinates: requested {requested}, maximum {maximum}"
+    )]
+    InvalidSessionGroupingCoordinateCount { requested: usize, maximum: usize },
+    #[error("session grouping batch repeats exact coordinate {0}")]
+    DuplicateSessionGroupingCoordinate(String),
+    #[error("session grouping authority is missing exact coordinate {0}")]
+    MissingSessionGroupingCoordinate(String),
+    #[error("session grouping authority work limit exceeded for {operation}: maximum {maximum}")]
+    SessionGroupingAuthorityWorkLimitExceeded {
+        operation: &'static str,
+        maximum: usize,
+    },
     #[error("lexical index checksum verification failed for one or more active files")]
     ChecksumMismatch,
     #[error("ID prefix must contain 1 to 32 hexadecimal digits, with optional hyphens")]

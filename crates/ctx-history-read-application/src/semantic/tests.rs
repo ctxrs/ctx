@@ -169,7 +169,10 @@ fn fake_port_begins_once_before_ordered_query_calls() -> Result<()> {
     assert_eq!(collection.work.retrieval_rounds, Some(3));
     assert_eq!(collection.candidate_pool, 0);
     assert!(!collection.candidate_pool_truncated);
-    assert_eq!(collection.stop_reason, crate::SearchStopReason::FixedPool);
+    assert_eq!(
+        collection.stop_reason,
+        Some(crate::SearchStopReason::FixedPool)
+    );
     assert_eq!(collection.semantic_diagnostics.unwrap()["query_count"], 2);
     assert_eq!(
         calls.values(),

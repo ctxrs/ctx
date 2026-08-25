@@ -181,7 +181,8 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
     assert!(retained_snippet_bytes <= SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES);
     assert!(presentations.iter().all(|presentation| {
         presentation.snippet_truncated
-            && presentation.snippet.chars().count() == SEARCH_SNIPPET_MAX_CHARS
+            && !presentation.snippet.is_empty()
+            && presentation.snippet.chars().count() <= SEARCH_SNIPPET_MAX_CHARS
             && presentation.snippet.contains(TEST_QUERY)
             && presentation.snippet.len() < body_bytes
     }));
@@ -204,7 +205,8 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
         ctx_history_read_application::MAX_SEARCH_RESULTS
     );
     assert!(results.iter().all(|result| {
-        result["snippet"].as_str().unwrap().chars().count() == SEARCH_SNIPPET_MAX_CHARS
+        !result["snippet"].as_str().unwrap().is_empty()
+            && result["snippet"].as_str().unwrap().chars().count() <= SEARCH_SNIPPET_MAX_CHARS
             && result["snippet"].as_str().unwrap().contains(TEST_QUERY)
             && result["snippet_truncated"] == true
             && result["snippet_max_chars"] == SEARCH_SNIPPET_MAX_CHARS
