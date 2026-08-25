@@ -355,7 +355,7 @@ fn wake_refresh_facts(data_root: &Path) -> Value {
     let config = crate::config::AppConfig::load(data_root);
     let analytics_enabled = config
         .as_ref()
-        .is_ok_and(|config| crate::config::resolved_analytics_consent(config));
+        .is_ok_and(crate::config::resolved_analytics_consent);
     if let Ok(config) = config {
         crate::semantic::maybe_autostart_daemon(
             data_root,

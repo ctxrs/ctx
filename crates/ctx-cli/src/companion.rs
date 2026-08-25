@@ -222,7 +222,7 @@ fn forward_mcp_environment(environment: &mut CompanionEnvironment, data_root: &P
     forward_environment(environment);
     let analytics_enabled = crate::config::AppConfig::load(data_root)
         .as_ref()
-        .is_ok_and(|config| crate::config::resolved_analytics_consent(config));
+        .is_ok_and(crate::config::resolved_analytics_consent);
     environment.set(
         EnvironmentKey::AnalyticsEnabled,
         if analytics_enabled { "true" } else { "false" },
