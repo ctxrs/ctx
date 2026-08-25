@@ -494,7 +494,7 @@ fn assert_noop(source: &Value, expected_generation: &str) {
 }
 
 fn one_matching_result<'a>(search: &'a Value, query: &str) -> &'a Value {
-    assert_eq!(search["schema_version"], 1, "{search:#}");
+    assert_eq!(search["schema_version"], 2, "{search:#}");
     assert_eq!(search["filters"]["provider"], "grok_build", "{search:#}");
     let matches = search["results"]
         .as_array()

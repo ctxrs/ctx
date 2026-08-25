@@ -173,7 +173,7 @@ fn search_codex(temp: &TempDir, query: &str) -> Value {
 }
 
 fn assert_source_backed_codex_search(search: &Value, query: &str) {
-    assert_eq!(search["schema_version"], 1, "{search:#}");
+    assert_eq!(search["schema_version"], 2, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], "codex", "{search:#}");
     assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
