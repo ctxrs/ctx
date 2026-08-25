@@ -136,14 +136,14 @@ pub(crate) fn forward_paid_cli_if_selected(arguments: Vec<OsString>) -> Option<E
 
 pub(crate) fn proxy_paid_mcp(
     request_line: &[u8],
-    _data_root: &Path,
+    data_root: &Path,
 ) -> Result<Vec<u8>, CompanionRouteError> {
     if request_line.len() > MCP_PROXY_MAX_BYTES {
         return Err(CompanionRouteError::Unavailable);
     }
     let companion = installed_companion().map_err(CompanionRouteError::from)?;
     let mut request = McpRequest::new(request_line);
-    forward_environment(request.environment_mut());
+    forward_mcp_environment(request.environment_mut(), data_root);
     let output = CompanionBridge::new(mcp_limits()?)
         .launch_mcp(
             &companion,
@@ -206,6 +206,7 @@ fn forward_paid_cli(arguments: Vec<OsString>) -> Result<ExitCode, CompanionLaunc
     if forwards_core_setup {
         forward_supervisor_environment(request.environment_mut());
     }
+    forward_paid_cli_analytics_override(request.environment_mut());
     forward_terminal_environment(request.environment_mut());
     let exit = CompanionBridge::new(BridgeLimits::default())
         .launch_cli(&companion, request, companion_cancellation()?)
@@ -215,6 +216,26 @@ fn forward_paid_cli(arguments: Vec<OsString>) -> Result<ExitCode, CompanionLaunc
 
 fn forward_environment(environment: &mut CompanionEnvironment) {
     forward_selected_environment(environment, FORWARDED_ENVIRONMENT);
+}
+
+fn forward_mcp_environment(environment: &mut CompanionEnvironment, data_root: &Path) {
+    forward_environment(environment);
+    let analytics_enabled = crate::config::AppConfig::load(data_root)
+        .as_ref()
+        .is_ok_and(|config| crate::config::resolved_analytics_consent(config));
+    environment.set(
+        EnvironmentKey::AnalyticsEnabled,
+        if analytics_enabled { "true" } else { "false" },
+    );
+}
+
+fn forward_paid_cli_analytics_override(environment: &mut CompanionEnvironment) {
+    if let Some(enabled) = crate::config::normalized_analytics_environment_override() {
+        environment.set(
+            EnvironmentKey::AnalyticsEnabled,
+            if enabled { "true" } else { "false" },
+        );
+    }
 }
 
 fn forward_supervisor_environment(environment: &mut CompanionEnvironment) {
@@ -570,6 +591,71 @@ fn cli_launch_error_document(error: &CompanionLaunchError) -> Value {
 mod tests {
     use super::*;
 
+    const ANALYTICS_ENVIRONMENT_NAMES: &[&str] = &[
+        "CTX_ANALYTICS_ENABLED",
+        "CTX_ANALYTICS_ENDPOINT",
+        "CTX_ANALYTICS_OFF",
+        "CTX_DISABLE_ANALYTICS",
+        "CTX_INSTALL_DIAGNOSTICS_OFF",
+    ];
+
+    struct AnalyticsEnvironment {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl AnalyticsEnvironment {
+        fn new() -> Self {
+            let lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = ANALYTICS_ENVIRONMENT_NAMES
+                .iter()
+                .map(|&name| {
+                    let value = std::env::var_os(name);
+                    std::env::remove_var(name);
+                    (name, value)
+                })
+                .collect();
+            Self { _lock: lock, saved }
+        }
+
+        fn set(&self, name: &'static str, value: &str) {
+            std::env::set_var(name, value);
+        }
+
+        fn set_os(&self, name: &'static str, value: &OsStr) {
+            std::env::set_var(name, value);
+        }
+
+        fn remove(&self, name: &'static str) {
+            std::env::remove_var(name);
+        }
+    }
+
+    impl Drop for AnalyticsEnvironment {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+
+    fn paid_cli_environment(forwards_core_setup: bool) -> CompanionEnvironment {
+        let mut environment = CompanionEnvironment::new();
+        forward_environment(&mut environment);
+        if forwards_core_setup {
+            forward_supervisor_environment(&mut environment);
+        }
+        forward_paid_cli_analytics_override(&mut environment);
+        forward_terminal_environment(&mut environment);
+        environment
+    }
+
     #[test]
     fn paid_gate_forwards_the_original_arguments_without_paid_parsing() {
         let arguments = [
@@ -638,6 +724,9 @@ mod tests {
         );
         assert!(FORWARDED_ENVIRONMENT
             .contains(&(EnvironmentKey::LocalUsageEnabled, "CTX_LOCAL_USAGE_ENABLED")));
+        assert!(!FORWARDED_ENVIRONMENT
+            .iter()
+            .any(|(key, _)| *key == EnvironmentKey::AnalyticsEnabled));
         assert!(FORWARDED_ENVIRONMENT.contains(&(
             EnvironmentKey::HostedInstallerSetup,
             "CTX_HOSTED_INSTALLER_SETUP"
@@ -667,6 +756,174 @@ mod tests {
             EnvironmentKey::HostedInstallerSetup,
             OsStr::new("0")
         ));
+    }
+
+    #[test]
+    fn paid_cli_analytics_override_is_normalized_closed_and_optional() {
+        let controls = AnalyticsEnvironment::new();
+        let analytics_name = EnvironmentKey::AnalyticsEnabled.as_str();
+
+        controls.set(
+            "CTX_ANALYTICS_ENDPOINT",
+            "https://ambient.example.test/private",
+        );
+        let absent = paid_cli_environment(false);
+        assert_eq!(absent.get(analytics_name), None);
+        assert_eq!(absent.get("CTX_ANALYTICS_ENDPOINT"), None);
+        controls.remove("CTX_ANALYTICS_ENDPOINT");
+
+        for value in ["false", " 0 ", "NO", "off"] {
+            controls.set("CTX_ANALYTICS_ENABLED", value);
+            let environment = paid_cli_environment(false);
+            assert_eq!(environment.get(analytics_name), Some(OsStr::new("false")));
+        }
+        for value in ["true", " 1 ", "YES", "on"] {
+            controls.set("CTX_ANALYTICS_ENABLED", value);
+            let environment = paid_cli_environment(false);
+            assert_eq!(environment.get(analytics_name), Some(OsStr::new("true")));
+        }
+        for value in ["", "malformed", "2"] {
+            controls.set("CTX_ANALYTICS_ENABLED", value);
+            let environment = paid_cli_environment(false);
+            assert_eq!(environment.get(analytics_name), Some(OsStr::new("false")));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            let non_unicode = OsString::from_vec(vec![0xff]);
+            controls.set_os("CTX_ANALYTICS_ENABLED", &non_unicode);
+            let environment = paid_cli_environment(false);
+            assert_eq!(environment.get(analytics_name), Some(OsStr::new("false")));
+        }
+
+        controls.remove("CTX_ANALYTICS_ENABLED");
+        for alias in [
+            "CTX_ANALYTICS_OFF",
+            "CTX_DISABLE_ANALYTICS",
+            "CTX_INSTALL_DIAGNOSTICS_OFF",
+        ] {
+            controls.set(alias, "yes");
+            let environment = paid_cli_environment(false);
+            assert_eq!(environment.get(analytics_name), Some(OsStr::new("false")));
+            controls.remove(alias);
+        }
+
+        controls.set("CTX_ANALYTICS_ENABLED", "YES");
+        controls.set("CTX_ANALYTICS_OFF", "1");
+        controls.set(
+            "CTX_ANALYTICS_ENDPOINT",
+            "https://ambient.example.test/private",
+        );
+        let setup = paid_cli_environment(true);
+        assert_eq!(setup.get(analytics_name), Some(OsStr::new("false")));
+        assert_eq!(setup.get("CTX_ANALYTICS_ENDPOINT"), None);
+    }
+
+    #[test]
+    fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
+        let controls = AnalyticsEnvironment::new();
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(crate::config::CONFIG_FILE),
+            "[analytics]\nenabled = true\n",
+        )
+        .unwrap();
+        let mut enabled = CompanionEnvironment::new();
+        forward_mcp_environment(&mut enabled, root.path());
+        assert_eq!(
+            enabled.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+            Some(OsStr::new("true"))
+        );
+        assert_eq!(enabled.get("CTX_ANALYTICS_ENDPOINT"), None);
+
+        std::env::set_var("CTX_ANALYTICS_ENABLED", "false");
+        let mut overridden = CompanionEnvironment::new();
+        forward_mcp_environment(&mut overridden, root.path());
+        assert_eq!(
+            overridden.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+            Some(OsStr::new("false"))
+        );
+
+        std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
+        let mut explicitly_enabled = CompanionEnvironment::new();
+        forward_mcp_environment(&mut explicitly_enabled, root.path());
+        assert_eq!(
+            explicitly_enabled.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+            Some(OsStr::new("true"))
+        );
+
+        std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
+        std::fs::write(
+            root.path().join(crate::config::CONFIG_FILE),
+            "[analytics]\nenabled = false\n",
+        )
+        .unwrap();
+        let mut persisted_disabled = CompanionEnvironment::new();
+        forward_mcp_environment(&mut persisted_disabled, root.path());
+        assert_eq!(
+            persisted_disabled.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+            Some(OsStr::new("false"))
+        );
+
+        std::fs::write(
+            root.path().join(crate::config::CONFIG_FILE),
+            "[analytics]\nenabled = true\n",
+        )
+        .unwrap();
+        for value in ["", "malformed", "2"] {
+            controls.set("CTX_ANALYTICS_ENABLED", value);
+            let mut malformed_override = CompanionEnvironment::new();
+            forward_mcp_environment(&mut malformed_override, root.path());
+            assert_eq!(
+                malformed_override.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+                Some(OsStr::new("false")),
+                "override {value:?} must fail closed"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            controls.set_os("CTX_ANALYTICS_ENABLED", &OsString::from_vec(vec![0xff]));
+            let mut non_unicode_override = CompanionEnvironment::new();
+            forward_mcp_environment(&mut non_unicode_override, root.path());
+            assert_eq!(
+                non_unicode_override.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+                Some(OsStr::new("false"))
+            );
+        }
+
+        controls.remove("CTX_ANALYTICS_ENABLED");
+        for alias in [
+            "CTX_ANALYTICS_OFF",
+            "CTX_DISABLE_ANALYTICS",
+            "CTX_INSTALL_DIAGNOSTICS_OFF",
+        ] {
+            controls.set(alias, "yes");
+            let mut deprecated_opt_out = CompanionEnvironment::new();
+            forward_mcp_environment(&mut deprecated_opt_out, root.path());
+            assert_eq!(
+                deprecated_opt_out.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+                Some(OsStr::new("false")),
+                "deprecated alias {alias} must fail closed"
+            );
+            controls.remove(alias);
+        }
+
+        std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
+        std::fs::write(
+            root.path().join(crate::config::CONFIG_FILE),
+            "[analytics]\nenabled = malformed\n",
+        )
+        .unwrap();
+        let mut malformed = CompanionEnvironment::new();
+        forward_mcp_environment(&mut malformed, root.path());
+        assert_eq!(
+            malformed.get(EnvironmentKey::AnalyticsEnabled.as_str()),
+            Some(OsStr::new("false"))
+        );
     }
 
     #[test]

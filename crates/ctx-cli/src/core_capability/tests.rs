@@ -15,6 +15,119 @@ fn fingerprint_is_the_sha256_of_the_canonical_inventory() {
         format!("{:x}", Sha256::digest(API_INVENTORY.as_bytes())),
         API_FINGERPRINT
     );
+    std::println!("CTX_MANAGED_PAIR_CORE_CAPABILITY_FINGERPRINT={API_FINGERPRINT}");
+}
+
+#[test]
+fn wake_refresh_reports_resolved_analytics_consent_fail_closed() {
+    let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let names = [
+        "CTX_ANALYTICS_ENABLED",
+        "CTX_ANALYTICS_ENDPOINT",
+        "CTX_ANALYTICS_OFF",
+        "CTX_DISABLE_ANALYTICS",
+        "CTX_INSTALL_DIAGNOSTICS_OFF",
+    ];
+    let saved = names
+        .iter()
+        .map(|name| (*name, std::env::var_os(name)))
+        .collect::<Vec<_>>();
+    for name in names {
+        std::env::remove_var(name);
+    }
+    struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+    let _restore = Restore(saved);
+
+    let root = tempfile::tempdir().unwrap();
+    let receipt = |config: &str| {
+        std::fs::write(root.path().join(crate::config::CONFIG_FILE), config).unwrap();
+        execute(
+            Request {
+                data_root: root.path().to_path_buf(),
+                operation: Operation::WakeRefresh,
+                options: Options::Empty,
+            },
+            &mut IgnoreEvents,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        receipt("[analytics]\nenabled = true\n[indexing]\nmode = \"manual\"\n")["facts"],
+        json!({"accepted": true, "analytics_enabled": true})
+    );
+    assert_eq!(
+        receipt("[analytics]\nenabled = false\n[indexing]\nmode = \"manual\"\n")["facts"],
+        json!({"accepted": true, "analytics_enabled": false})
+    );
+
+    std::env::set_var("CTX_ANALYTICS_ENABLED", "false");
+    assert_eq!(
+        receipt("[analytics]\nenabled = true\n[indexing]\nmode = \"manual\"\n")["facts"],
+        json!({"accepted": true, "analytics_enabled": false})
+    );
+
+    std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
+    assert_eq!(
+        receipt("[analytics]\nenabled = true\n[indexing]\nmode = \"manual\"\n")["facts"],
+        json!({"accepted": true, "analytics_enabled": true})
+    );
+
+    for value in ["", "malformed", "2"] {
+        std::env::set_var("CTX_ANALYTICS_ENABLED", value);
+        assert_eq!(
+            receipt("[analytics]\nenabled = true\n[indexing]\nmode = \"manual\"\n")["facts"],
+            json!({"accepted": true, "analytics_enabled": false}),
+            "override {value:?} must fail closed"
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        std::env::set_var(
+            "CTX_ANALYTICS_ENABLED",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+        assert_eq!(
+            receipt("[analytics]\nenabled = true\n[indexing]\nmode = \"manual\"\n")["facts"],
+            json!({"accepted": true, "analytics_enabled": false})
+        );
+    }
+
+    std::env::remove_var("CTX_ANALYTICS_ENABLED");
+    for alias in [
+        "CTX_ANALYTICS_OFF",
+        "CTX_DISABLE_ANALYTICS",
+        "CTX_INSTALL_DIAGNOSTICS_OFF",
+    ] {
+        std::env::set_var(alias, "yes");
+        assert_eq!(
+            receipt("[analytics]\nenabled = true\n[indexing]\nmode = \"manual\"\n")["facts"],
+            json!({"accepted": true, "analytics_enabled": false}),
+            "deprecated alias {alias} must fail closed"
+        );
+        std::env::remove_var(alias);
+    }
+
+    std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
+    assert_eq!(
+        receipt("[analytics]\nenabled = malformed\n")["facts"],
+        json!({"accepted": true, "analytics_enabled": false})
+    );
 }
 
 #[test]

@@ -35,6 +35,19 @@ pub const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
 
+pub(crate) fn normalized_analytics_environment_override() -> Option<bool> {
+    let deprecated_controls = DeprecatedControls::detect();
+    if deprecated_controls.disables_analytics() {
+        return Some(false);
+    }
+    env::var_os("CTX_ANALYTICS_ENABLED")
+        .map(|value| value.to_str().and_then(parse_bool_value).unwrap_or(false))
+}
+
+pub(crate) fn resolved_analytics_consent(config: &AppConfig) -> bool {
+    config.analytics.enabled && normalized_analytics_environment_override() != Some(false)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum IndexingMode {
     #[default]
