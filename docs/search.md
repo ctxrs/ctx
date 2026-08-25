@@ -141,6 +141,16 @@ Ordinary search uses the all-agent, root-diverse behavior described above. Use
 `--primary-only` only when a deliberately narrow search should exclude
 subagent work.
 
+`--include-subagents` is an obsolete pre-1.0 option because subagent work is
+already included by default. Remove it from older command templates. If a
+managed ctx skill still recommends it after a CLI upgrade, inspect and refresh
+that skill with:
+
+```bash
+ctx integrations status skills --agent <agent>
+ctx integrations install skills --agent <agent>
+```
+
 Direct CLI searches automatically exclude the current session tree for Codex,
 DeepSeek Harness, Grok Build, Pi, Claude Code, Goose, Hermes, Shelley, Qwen
 Code, and Mux when the current session can be identified unambiguously.

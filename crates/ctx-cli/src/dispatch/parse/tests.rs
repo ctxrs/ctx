@@ -168,6 +168,30 @@ fn removed_idle_exit_has_persistent_foreground_recovery() {
 }
 
 #[test]
+fn removed_include_subagents_explains_the_all_agent_default() {
+    const RECOVERY: &str = "  ctx search --help";
+    for width in [32, 80] {
+        let output = human_output(&["ctx", "search", "incident", "--include-subagents"], width);
+        let normalized = normalized(&output);
+        assert!(
+            normalized.contains("The --include-subagents option has been removed"),
+            "{output}"
+        );
+        assert!(
+            normalized.contains("ctx search already includes primary and subagent sessions"),
+            "{output}"
+        );
+        assert!(
+            normalized.contains("Use --primary-only only when you want to exclude subagent work"),
+            "{output}"
+        );
+        assert!(output.contains(RECOVERY), "{output}");
+        assert!(!output.contains("--include-current-session"), "{output}");
+        assert_width_safe(&output, width, &[]);
+    }
+}
+
+#[test]
 fn retired_once_recommends_foreground_import() {
     const RECOVERY: &str = "  ctx import --help";
     for width in [32, 80] {
@@ -191,6 +215,16 @@ fn retired_once_recommends_foreground_import() {
 #[test]
 fn machine_parse_errors_remain_raw_clap_bytes() {
     for (arguments, expected_fragment) in [
+        (
+            &[
+                "ctx",
+                "search",
+                "incident",
+                "--include-subagents",
+                "--format=json",
+            ][..],
+            "unexpected argument '--include-subagents'",
+        ),
         (
             &["ctx", "daemon", "run", "--once", "--format=json"][..],
             "--force",

@@ -104,6 +104,20 @@ fn human_clap_document(
             )
         }
         ErrorKind::UnknownArgument
+            if leaf.as_deref() == Some("ctx search")
+                && arguments_select_option(arguments, "--include-subagents") =>
+        {
+            (
+                "The --include-subagents option has been removed".to_owned(),
+                Some(
+                    "ctx search already includes primary and subagent sessions. Use --primary-only only when you want to exclude subagent work."
+                        .to_owned(),
+                ),
+                Some("ctx search [OPTIONS] [QUERY]".to_owned()),
+                Some("ctx search --help"),
+            )
+        }
+        ErrorKind::UnknownArgument
             if leaf.as_deref() == Some("ctx daemon run")
                 && arguments_select_option(arguments, "--idle-exit-seconds") =>
         {
