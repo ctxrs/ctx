@@ -355,12 +355,24 @@ pub struct ForegroundProviderRefreshV1 {
     pub performance: Option<ProviderRefreshPerformanceV1>,
 }
 
+/// Optional bucketed health facts from the daemon's durable terminal job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRefreshTerminalHealthV1 {
+    pub queue_wait_duration: Option<DurationBucket>,
+    pub discovery_duration: Option<DurationBucket>,
+    pub scan_stage_duration: Option<DurationBucket>,
+    pub commit_duration: Option<DurationBucket>,
+    pub coalesced_request_count: Option<CountBucket>,
+    pub successor_pending: bool,
+}
+
 #[derive(Debug)]
 pub struct ProviderRefreshCompletedV1 {
     pub surface: Surface,
     pub outcome: Outcome,
     pub duration: DurationBucket,
     pub foreground: Option<ForegroundProviderRefreshV1>,
+    pub terminal_health: Option<ProviderRefreshTerminalHealthV1>,
 }
 
 impl ProviderRefreshCompletedV1 {
@@ -371,6 +383,7 @@ impl ProviderRefreshCompletedV1 {
             outcome,
             duration: duration_bucket(duration),
             foreground: None,
+            terminal_health: None,
         }
     }
 
@@ -385,6 +398,7 @@ impl ProviderRefreshCompletedV1 {
             outcome,
             duration: duration_bucket(duration),
             foreground: Some(foreground),
+            terminal_health: None,
         }
     }
 
@@ -407,7 +421,16 @@ impl ProviderRefreshCompletedV1 {
             outcome,
             duration,
             foreground: Some(foreground),
+            terminal_health: None,
         }
+    }
+
+    pub fn with_terminal_health(
+        mut self,
+        terminal_health: ProviderRefreshTerminalHealthV1,
+    ) -> Self {
+        self.terminal_health = Some(terminal_health);
+        self
     }
 }
 
@@ -506,30 +529,40 @@ mod tests {
     }
 
     #[test]
-    fn daemon_setup_refresh_serializes_sparse_receipt_facts_without_cli_defaults() {
-        let event = PublicEventV1::ProviderRefreshCompleted(ProviderRefreshCompletedV1::bucketed(
-            Surface::Daemon,
-            Outcome::Success,
-            duration_bucket(Duration::from_secs(2)),
-            ForegroundProviderRefreshV1 {
-                provider: Some(CaptureProvider::Codex),
-                trigger: ProviderRefreshTrigger::Setup,
-                source_mode: Some(ProviderRefreshSourceMode::Discovered),
-                change: ProviderRefreshChange::Changed,
-                content_evidence: ProviderRefreshContentEvidence::Unknown,
-                work_kind: Some(ProviderRefreshWorkKind::Fresh),
-                refresh_result: ProviderRefreshResult::Complete,
-                core_result: ProviderCoreResult::Complete,
-                failure_scope: ProviderRefreshFailureScope::None,
-                failure_type: ProviderRefreshFailureType::None,
-                work_remaining: false,
-                retired_records: None,
-                counts: Some(ProviderRefreshCountsV1::from_refresh_receipt(
-                    2, 7, 0, 0, 4096,
-                )),
-                performance: None,
-            },
-        ));
+    fn daemon_setup_refresh_serializes_sparse_receipt_facts_and_present_zero_health() {
+        let event = PublicEventV1::ProviderRefreshCompleted(
+            ProviderRefreshCompletedV1::bucketed(
+                Surface::Daemon,
+                Outcome::Success,
+                duration_bucket(Duration::from_secs(2)),
+                ForegroundProviderRefreshV1 {
+                    provider: Some(CaptureProvider::Codex),
+                    trigger: ProviderRefreshTrigger::Setup,
+                    source_mode: Some(ProviderRefreshSourceMode::Discovered),
+                    change: ProviderRefreshChange::Changed,
+                    content_evidence: ProviderRefreshContentEvidence::Unknown,
+                    work_kind: Some(ProviderRefreshWorkKind::Fresh),
+                    refresh_result: ProviderRefreshResult::Complete,
+                    core_result: ProviderCoreResult::Complete,
+                    failure_scope: ProviderRefreshFailureScope::None,
+                    failure_type: ProviderRefreshFailureType::None,
+                    work_remaining: false,
+                    retired_records: None,
+                    counts: Some(ProviderRefreshCountsV1::from_refresh_receipt(
+                        2, 7, 0, 0, 4096,
+                    )),
+                    performance: None,
+                },
+            )
+            .with_terminal_health(ProviderRefreshTerminalHealthV1 {
+                queue_wait_duration: Some(duration_bucket(Duration::ZERO)),
+                discovery_duration: None,
+                scan_stage_duration: Some(duration_bucket(Duration::from_secs(2))),
+                commit_duration: Some(duration_bucket(Duration::from_secs(6))),
+                coalesced_request_count: Some(count_bucket(0)),
+                successor_pending: true,
+            }),
+        );
         let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
@@ -541,6 +574,23 @@ mod tests {
         assert_eq!(serialized["properties"]["work_kind"], "fresh");
         assert_eq!(serialized["properties"]["sessions_bucket"], "6-20");
         assert_eq!(serialized["properties"]["bytes_bucket"], "lt_100kb");
+        assert_eq!(
+            serialized["properties"]["refresh_queue_wait_duration_bucket"],
+            "lt_100ms"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_scan_stage_duration_bucket"],
+            "lt_5s"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_commit_duration_bucket"],
+            "lt_30s"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_coalesced_request_count_bucket"],
+            "0"
+        );
+        assert_eq!(serialized["properties"]["refresh_successor_pending"], true);
         let properties = serialized["properties"].as_object().unwrap();
         for absent in [
             "source_files_bucket",
@@ -550,6 +600,7 @@ mod tests {
             "retired_records_bucket",
             "cpu_duration_bucket",
             "observed_process_peak_rss_bucket",
+            "refresh_discovery_duration_bucket",
         ] {
             assert!(!properties.contains_key(absent));
         }

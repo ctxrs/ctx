@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "repository": "ctxrs/ctx",
-  "base_commit": "b33107ed37ead44e20df85da789258826f9724ae",
+  "base_commit": "cccd67b6f653f85862acdb48a4924e18a5c4fcbe",
   "provenance_kind": "content_addressed_candidate",
   "scope": "selected_typed_telemetry_contract_inventory",
   "files": {
@@ -11,9 +11,9 @@
     "crates/ctx-client-observability/src/analytics/mcp.rs": "66d95252fe028e45d9df9769cd9b9eccc2282c6957e3fc2286e8c36623bebe86",
     "crates/ctx-client-observability/src/analytics/runtime.rs": "b48a7abde2457c047f843e808214685a50d324881a7d8b7b7315c5615213e2c4",
     "crates/ctx-client-observability/src/analytics/buckets.rs": "09fe640f4ccf24ab0a816616ca78561119a497cc9acacb152612c78ae32d1a99",
-    "crates/ctx-client-observability/src/analytics/provider.rs": "7bf6c6f082adddf62f87309c68ccea24a7f81465aba5719cd2c22d00360fb1ff",
+    "crates/ctx-client-observability/src/analytics/provider.rs": "c9075696c951e77a4a45b60705e482101c49bc02f168648781ca56f693f3d1f7",
     "crates/ctx-client-observability/src/analytics/product.rs": "b484e53d7ca99d788f6cfdee93b595f527363c41ac6855c07f7855e09b5cc577",
-    "crates/ctx-client-observability/src/analytics/sender.rs": "c50a45a1db9554a4fe6000e97baf731d3bc25a1536f6d950450b141f50661eb2",
+    "crates/ctx-client-observability/src/analytics/sender.rs": "2d01f9c68c7c701c4c807afa833b565f900053f4d2761c7b0c077377e2861f21",
     "crates/ctx-cli/src/upgrade/command.rs": "d3dabb8e56d33f41903181acd917cda8407f78d3f180252bb1792c0846d433e5",
     "crates/ctx-cli/src/upgrade/ports.rs": "08e16fd1d1ad294cad261d0355d0a63ae24c0c9420b127d9739505fbb5696650",
     "crates/ctx-upgrade-engine/src/upgrade/command/daemon.rs": "e9dc563d7581bdc3d43c51371c192f83d20113600c05578eac7a81e2f83044da",

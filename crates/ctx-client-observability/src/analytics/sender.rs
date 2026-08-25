@@ -142,6 +142,9 @@ pub(super) fn serialize_event(
             if let Some(foreground) = event.foreground {
                 insert_provider_refresh_properties(&mut properties, &foreground);
             }
+            if let Some(health) = event.terminal_health {
+                insert_provider_refresh_terminal_health_properties(&mut properties, &health);
+            }
             (
                 "provider_refresh_completed",
                 event.surface,
@@ -281,6 +284,42 @@ fn insert_provider_refresh_properties(
             performance.observed_process_peak_rss,
         );
     }
+}
+
+fn insert_provider_refresh_terminal_health_properties(
+    properties: &mut Map<String, Value>,
+    health: &ProviderRefreshTerminalHealthV1,
+) {
+    insert_optional_duration(
+        properties,
+        "refresh_queue_wait_duration_bucket",
+        health.queue_wait_duration,
+    );
+    insert_optional_duration(
+        properties,
+        "refresh_discovery_duration_bucket",
+        health.discovery_duration,
+    );
+    insert_optional_duration(
+        properties,
+        "refresh_scan_stage_duration_bucket",
+        health.scan_stage_duration,
+    );
+    insert_optional_duration(
+        properties,
+        "refresh_commit_duration_bucket",
+        health.commit_duration,
+    );
+    insert_optional_count(
+        properties,
+        "refresh_coalesced_request_count_bucket",
+        health.coalesced_request_count,
+    );
+    insert_bool(
+        properties,
+        "refresh_successor_pending",
+        health.successor_pending,
+    );
 }
 
 fn insert_client_operation_properties(

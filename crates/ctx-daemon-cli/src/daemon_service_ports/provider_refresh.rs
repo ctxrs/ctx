@@ -9,11 +9,12 @@ use ctx_history_refresh::{
 use serde_json::Value;
 
 use ctx_client_observability::analytics::{
-    duration_bucket, DurationBucket, ForegroundProviderRefreshV1, Outcome, ProviderCoreResult,
-    ProviderRefreshChange, ProviderRefreshCompletedV1, ProviderRefreshContentEvidence,
-    ProviderRefreshCountsV1, ProviderRefreshFailureScope, ProviderRefreshFailureType,
-    ProviderRefreshResult, ProviderRefreshSourceMode, ProviderRefreshTrigger,
-    ProviderRefreshWorkKind, PublicEventV1, Surface,
+    count_bucket, duration_bucket, DurationBucket, ForegroundProviderRefreshV1, Outcome,
+    ProviderCoreResult, ProviderRefreshChange, ProviderRefreshCompletedV1,
+    ProviderRefreshContentEvidence, ProviderRefreshCountsV1, ProviderRefreshFailureScope,
+    ProviderRefreshFailureType, ProviderRefreshResult, ProviderRefreshSourceMode,
+    ProviderRefreshTerminalHealthV1, ProviderRefreshTrigger, ProviderRefreshWorkKind,
+    PublicEventV1, Surface,
 };
 
 pub(super) fn provider_refresh_event(
@@ -115,7 +116,8 @@ pub(super) fn provider_refresh_event(
             // observations around only this shared engine call.
             performance: None,
         },
-    );
+    )
+    .with_terminal_health(refresh_terminal_health(job, successor_pending));
     Some(PublicEventV1::ProviderRefreshCompleted(event))
 }
 
@@ -168,8 +170,44 @@ fn failed_provider_refresh_event(
                 counts,
                 performance: None,
             },
-        ),
+        )
+        .with_terminal_health(refresh_terminal_health(job, successor_pending)),
     ))
+}
+
+fn refresh_terminal_health(
+    job: &Value,
+    successor_pending: bool,
+) -> ProviderRefreshTerminalHealthV1 {
+    ProviderRefreshTerminalHealthV1 {
+        queue_wait_duration: elapsed_millis(job, "requested_at_ms", "started_at_ms")
+            .map(duration_bucket),
+        discovery_duration: timing_duration(job, "discovery").map(duration_bucket),
+        scan_stage_duration: timing_duration(job, "scan_stage").map(duration_bucket),
+        commit_duration: timing_duration(job, "commit").map(duration_bucket),
+        coalesced_request_count: job
+            .get("coalesced_requests")
+            .and_then(Value::as_u64)
+            .map(count_bucket),
+        successor_pending,
+    }
+}
+
+fn elapsed_millis(job: &Value, started_field: &str, finished_field: &str) -> Option<Duration> {
+    job.get(finished_field)
+        .and_then(Value::as_i64)
+        .zip(job.get(started_field).and_then(Value::as_i64))
+        .and_then(|(finished, started)| finished.checked_sub(started))
+        .and_then(|millis| u64::try_from(millis).ok())
+        .map(Duration::from_millis)
+}
+
+fn timing_duration(job: &Value, field: &str) -> Option<Duration> {
+    job.get("timings_us")
+        .and_then(Value::as_object)
+        .and_then(|timings| timings.get(field))
+        .and_then(Value::as_u64)
+        .map(Duration::from_micros)
 }
 
 fn completed_failure(
@@ -337,8 +375,15 @@ mod tests {
             "operation": "refresh",
             "trigger": trigger,
             "source_count": 1,
+            "requested_at_ms": 500,
             "started_at_ms": 1_000,
             "finished_at_ms": 3_500,
+            "coalesced_requests": 3,
+            "timings_us": {
+                "discovery": 100_000,
+                "scan_stage": 2_000_000,
+                "commit": 6_000_000,
+            },
             "previous_generation": previous_generation,
             "published_generation": published_generation,
             "generation_changed": generation_changed,
@@ -387,6 +432,25 @@ mod tests {
         assert_eq!(facts.failure_scope, ProviderRefreshFailureScope::Mixed);
         assert_eq!(facts.failure_type, ProviderRefreshFailureType::Mixed);
         assert_eq!(facts.retired_records, None);
+        let health = event.terminal_health.expect("terminal health");
+        assert_eq!(
+            health.queue_wait_duration,
+            Some(duration_bucket(Duration::from_millis(500)))
+        );
+        assert_eq!(
+            health.discovery_duration,
+            Some(duration_bucket(Duration::from_micros(100_000)))
+        );
+        assert_eq!(
+            health.scan_stage_duration,
+            Some(duration_bucket(Duration::from_micros(2_000_000)))
+        );
+        assert_eq!(
+            health.commit_duration,
+            Some(duration_bucket(Duration::from_micros(6_000_000)))
+        );
+        assert_eq!(health.coalesced_request_count, Some(count_bucket(3)));
+        assert!(!health.successor_pending);
         assert_eq!(
             event.duration,
             duration_bucket(Duration::from_millis(2_500))
@@ -421,6 +485,8 @@ mod tests {
         assert_eq!(facts.work_kind, Some(ProviderRefreshWorkKind::NoOp));
         assert_eq!(facts.core_result, ProviderCoreResult::NoOp);
         assert!(facts.work_remaining);
+        let health = event.terminal_health.expect("terminal health");
+        assert!(health.successor_pending);
     }
 
     #[test]
@@ -544,6 +610,7 @@ mod tests {
             "physical_attempt_state": "failed",
             "progress_owner_request_id": request_id,
             "progress_owner_attempt_state": "failed",
+            "requested_at_ms": 500,
             "started_at_ms": 1_000,
             "finished_at_ms": 3_500,
             "progress": {
@@ -591,6 +658,8 @@ mod tests {
         );
         assert!(facts.work_remaining);
         assert_eq!(facts.retired_records, None);
+        let health = event.terminal_health.expect("terminal health");
+        assert!(health.successor_pending);
         assert_eq!(
             facts.counts.expect("known failed-run counts").sources,
             Some(count_bucket(2))
@@ -609,5 +678,41 @@ mod tests {
             true,
         )
         .is_none());
+    }
+
+    #[test]
+    fn malformed_optional_health_fields_do_not_suppress_the_base_event() {
+        let mut job = completed_job("periodic", Some("generation-a"), true);
+        job["requested_at_ms"] = json!(2_000);
+        job["started_at_ms"] = json!(1_000);
+        job["coalesced_requests"] = json!("invalid");
+        job["timings_us"]["discovery"] = json!("invalid");
+        job["timings_us"]["scan_stage"] = Value::Null;
+
+        let event = refresh(provider_refresh_event(&job, false).expect("base refresh event"));
+        let health = event.terminal_health.expect("terminal health");
+
+        assert_eq!(health.queue_wait_duration, None);
+        assert_eq!(health.discovery_duration, None);
+        assert_eq!(health.scan_stage_duration, None);
+        assert!(health.commit_duration.is_some());
+        assert_eq!(health.coalesced_request_count, None);
+    }
+
+    #[test]
+    fn explicit_zero_terminal_health_remains_present() {
+        let mut job = completed_job("periodic", Some("generation-a"), true);
+        job["requested_at_ms"] = json!(1_000);
+        job["started_at_ms"] = json!(1_000);
+        job["coalesced_requests"] = json!(0);
+
+        let event = refresh(provider_refresh_event(&job, false).expect("base refresh event"));
+        let health = event.terminal_health.expect("terminal health");
+
+        assert_eq!(
+            health.queue_wait_duration,
+            Some(duration_bucket(Duration::ZERO))
+        );
+        assert_eq!(health.coalesced_request_count, Some(count_bucket(0)));
     }
 }
