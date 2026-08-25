@@ -151,7 +151,10 @@ fn pi_cli_import_search_flow() {
         second["sources"][0]["published_generation"], legacy_generation,
         "an unchanged Pi source must not reuse a v9 projection: {second:#}"
     );
-    assert_eq!(pi_parser_revision(&data_root(&temp)), PI_V10_PARSER_REVISION);
+    assert_eq!(
+        pi_parser_revision(&data_root(&temp)),
+        PI_V10_PARSER_REVISION
+    );
 
     let records = provider_core_records(&data_root(&temp), "pi");
     assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (1, 6));
@@ -164,17 +167,18 @@ fn pi_cli_import_search_flow() {
     assert_eq!(
         records
             .iter()
-            .filter(
-                |record| record.event_type == "message" && record.role.as_deref() == Some("user")
-            )
+            .filter(|record| {
+                record.event_type == "message" && record.role.as_deref() == Some("user")
+            })
             .count(),
         1
     );
     assert_eq!(
         records
             .iter()
-            .filter(|record| record.event_type == "message"
-                && record.role.as_deref() == Some("assistant"))
+            .filter(|record| {
+                record.event_type == "message" && record.role.as_deref() == Some("assistant")
+            })
             .count(),
         1
     );

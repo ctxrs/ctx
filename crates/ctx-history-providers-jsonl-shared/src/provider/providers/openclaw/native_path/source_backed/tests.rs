@@ -204,6 +204,7 @@ fn resolved_family_emits_only_an_explicit_generic_root() {
         },
         DateTime::<Utc>::UNIX_EPOCH,
         session_id,
+        SourceAnchorScope::Unqualified,
     )
     .unwrap();
     let with_root = SessionState::new(
@@ -215,6 +216,7 @@ fn resolved_family_emits_only_an_explicit_generic_root() {
         },
         DateTime::<Utc>::UNIX_EPOCH,
         session_id,
+        SourceAnchorScope::Unqualified,
     )
     .unwrap();
 
@@ -335,11 +337,27 @@ fn equal_positive_duplicate_keys_and_route_qualified_aliases_remain_exact() {
     assert_eq!(session.relationship, None);
     assert_eq!(
         session.parent_session_id,
-        Some(related_session_identity("main/parent", "main/child", direct_session_id).unwrap())
+        Some(
+            related_session_identity(
+                "main/parent",
+                "main/child",
+                direct_session_id,
+                SourceAnchorScope::Unqualified,
+            )
+            .unwrap()
+        )
     );
     assert_eq!(
         session.root_session_id,
-        Some(related_session_identity("main/root", "main/child", direct_session_id).unwrap())
+        Some(
+            related_session_identity(
+                "main/root",
+                "main/child",
+                direct_session_id,
+                SourceAnchorScope::Unqualified,
+            )
+            .unwrap()
+        )
     );
 }
 

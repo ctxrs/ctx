@@ -1,8 +1,10 @@
 use super::*;
 use ctx_history_core::{
     ActivityInvocation, ActivityJsonCapture, ActivityResult, ActivityTextCapture, CoreActivity,
-    CoreContent, CoreContentPolicyStatus, CORE_ACTIVITY_REVISION, CORE_CONTENT_POLICY_REVISION,
+    CoreContent, CoreContentPolicyStatus, LiteralFactKind, ProviderDeclaredFact,
+    CORE_ACTIVITY_REVISION, CORE_CONTENT_POLICY_REVISION,
 };
+
 fn selected_projection(
     body: Option<String>,
     structured_content: Option<serde_json::Value>,
@@ -232,6 +234,28 @@ fn snippet_byte_bounds_pathological_grapheme_clusters() {
         (String::new(), true)
     );
 }
+
+#[test]
+fn fragment_excerpt_does_not_fall_through_from_an_unrenderable_better_match() {
+    let oversized_cluster = format!("x{}", "\u{301}".repeat(SEARCH_SNIPPET_MAX_BYTES));
+    let activity = CoreActivity {
+        revision: CORE_ACTIVITY_REVISION,
+        provider_call_id: None,
+        invocation: None,
+        result: None,
+        facts: vec![ProviderDeclaredFact {
+            kind: LiteralFactKind::Workspace,
+            value: "x metadata fallback".to_owned(),
+        }],
+    };
+    let projection = selected_projection(Some(oversized_cluster), None, Some(activity));
+
+    assert_eq!(
+        fragment_aware_search_excerpt(&projection, &["x"]),
+        (String::new(), true)
+    );
+}
+
 #[test]
 fn snippet_handles_a_maximum_valid_core_body_without_offset_vectors() {
     let suffix = " NeEdLe";

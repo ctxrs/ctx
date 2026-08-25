@@ -689,7 +689,7 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
         semantic_fallback: None,
         semantic_diagnostics: None,
         work: ctx_history_read_application::SearchWorkReceipt::default(),
-        stop_reason: ctx_history_read_application::SearchStopReason::FixedPool,
+        stop_reason: Some(ctx_history_read_application::SearchStopReason::FixedPool),
     };
     let follow_up_root = std::path::Path::new("/tmp/ctx root/owner's history");
     let value = search_json(
@@ -825,7 +825,7 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
         semantic_fallback: None,
         semantic_diagnostics: None,
         work: ctx_history_read_application::SearchWorkReceipt::default(),
-        stop_reason: ctx_history_read_application::SearchStopReason::FixedPool,
+        stop_reason: Some(ctx_history_read_application::SearchStopReason::FixedPool),
     };
     let mut presentations = [
         fixture_search_presentation(&collection.result_window.hits[0].event, first_core, false),

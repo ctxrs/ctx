@@ -304,6 +304,7 @@ fn custom_provider_source(path: &Path) -> ProviderSource {
         catalog_support: ProviderCatalogSupport::None,
         status: ProviderSourceStatus::Available,
         unsupported_reason: None,
+        route_provenance: Default::default(),
     }
 }
 

@@ -1,218 +1,34 @@
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
-    fmt,
+    collections::{HashMap, VecDeque},
     ops::Range,
 };
 
-use anyhow::{anyhow, Result};
-use ctx_history_core::{MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
+#[cfg(test)]
+use ctx_history_core::MAX_CORE_CONTENT_BYTES;
+#[cfg(test)]
+use ctx_history_index_format::search_projection::project_search_content;
 use ctx_history_index_format::search_projection::{
-    project_search_content, visit_body_analyzer_tokens, SearchContentProjection, SearchFragmentKind,
+    visit_body_analyzer_tokens, SearchContentProjection, SearchFragmentKind,
 };
-use ctx_history_index_query::{
-    CoreEventPageBudget, CoreEventRecord, VerifiedIndex, LEXICAL_QUERY_LIMITS,
-};
+use ctx_history_index_query::LEXICAL_QUERY_LIMITS;
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation as _};
-use uuid::Uuid;
 
-use crate::{NormalizedSearchQuery, SearchEventMetadata, SearchHit};
+mod hydration;
+
+pub(crate) use hydration::presentations_for_search_hits;
+pub use hydration::{
+    presentations_for_search_hits_with_budget, SearchPresentation,
+    SearchPresentationHydrationBudget, SearchPresentationRetentionBudgetExceeded,
+    SEARCH_PRESENTATION_HYDRATION_BUDGET, SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
+};
 
 pub const MAX_SEARCH_RESULTS: usize = 200;
 pub const SEARCH_SNIPPET_MAX_CHARS: usize = 320;
 pub const SEARCH_SNIPPET_MAX_BYTES: usize = 16 * 1024;
-const SEARCH_CORE_RECORD_BUDGET: CoreEventPageBudget =
-    CoreEventPageBudget::new(MAX_ENCODED_CORE_RECORD_BYTES, MAX_CORE_CONTENT_BYTES);
-pub const SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES: usize =
-    MAX_SEARCH_RESULTS * SEARCH_SNIPPET_MAX_BYTES;
 
 const SEARCH_EXCERPT_ELLIPSIS: &str = "…";
 const SEARCH_EXCERPT_MAX_QUERY_TERMS: usize = 32;
 const SEARCH_EXCERPT_MAX_LOCAL_OCCURRENCES: usize = SEARCH_SNIPPET_MAX_CHARS;
-
-/// Bounded query result state derived from one complete stored Core record.
-#[derive(Debug, PartialEq, Eq)]
-pub struct SearchPresentation {
-    pub event_id: Uuid,
-    pub snippet: String,
-    pub snippet_truncated: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SearchPresentationHydrationBudget {
-    pub maximum_retained_snippet_bytes: usize,
-}
-
-pub const SEARCH_PRESENTATION_HYDRATION_BUDGET: SearchPresentationHydrationBudget =
-    SearchPresentationHydrationBudget {
-        maximum_retained_snippet_bytes: SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
-    };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchPresentationRetentionBudgetExceeded {
-    pub event_id: Uuid,
-    pub retained_snippet_bytes: usize,
-    pub maximum_retained_snippet_bytes: usize,
-}
-
-impl fmt::Display for SearchPresentationRetentionBudgetExceeded {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Core search event {} cannot fit the bounded search presentation retention budget (retained snippets: {}/{})",
-            self.event_id,
-            self.retained_snippet_bytes,
-            self.maximum_retained_snippet_bytes,
-        )
-    }
-}
-
-impl std::error::Error for SearchPresentationRetentionBudgetExceeded {}
-
-pub(crate) fn presentations_for_search_hits(
-    index: &VerifiedIndex,
-    hits: &[SearchHit],
-    query: &NormalizedSearchQuery,
-) -> Result<Vec<SearchPresentation>> {
-    presentations_for_search_hits_with_budget(
-        index,
-        hits,
-        query,
-        SEARCH_PRESENTATION_HYDRATION_BUDGET,
-    )
-}
-
-pub fn presentations_for_search_hits_with_budget(
-    index: &VerifiedIndex,
-    hits: &[SearchHit],
-    query: &NormalizedSearchQuery,
-    budget: SearchPresentationHydrationBudget,
-) -> Result<Vec<SearchPresentation>> {
-    if hits.len() > MAX_SEARCH_RESULTS {
-        return Err(anyhow!(
-            "search presentation cannot hydrate more than {MAX_SEARCH_RESULTS} hits"
-        ));
-    }
-    if budget.maximum_retained_snippet_bytes == 0 {
-        return Err(anyhow!(
-            "search presentation hydration budget must be positive"
-        ));
-    }
-
-    let mut requested = BTreeSet::new();
-    for hit in hits {
-        if !requested.insert(hit.event.event_id) {
-            return Err(anyhow!(
-                "search result duplicated Core event {}",
-                hit.event.event_id
-            ));
-        }
-    }
-    let event_ids = hits
-        .iter()
-        .map(|hit| hit.event.event_id)
-        .collect::<Vec<_>>();
-
-    // Execute one generation-pinned Tantivy selection. The returned iterator
-    // decodes exactly one complete Core record at a time, allowing each body
-    // to be projected and discarded before the next record is materialized.
-    let mut records = index
-        .stream_core_events_by_ids_with_strict_per_record_budget(
-            &event_ids,
-            hits.len(),
-            SEARCH_CORE_RECORD_BUDGET,
-        )?
-        .ok_or_else(|| {
-            anyhow!(
-                "pinned Core lookup omitted search event {}",
-                event_ids.first().copied().unwrap_or_else(Uuid::nil)
-            )
-        })?;
-
-    // The query is analyzed once for the whole hydrated page with the same
-    // analyzer used for body_search. Every result reuses this fixed term map.
-    let query_texts = query.texts();
-    let query_terms = analyzed_query_terms(&query_texts);
-    let mut presentations = Vec::with_capacity(hits.len());
-    let mut retained_snippet_bytes = 0_usize;
-    for hit in hits {
-        let event_id = hit.event.event_id;
-        let record = records
-            .next()
-            .transpose()?
-            .ok_or_else(|| anyhow!("pinned Core lookup omitted search event {event_id}"))?;
-        let (presentation, snippet_bytes) =
-            search_presentation_projection(record, &hit.event, &query_terms)?;
-        let next_retained_snippet_bytes = retained_snippet_bytes
-            .checked_add(snippet_bytes)
-            .ok_or_else(|| {
-                search_presentation_retention_budget_error(event_id, retained_snippet_bytes, budget)
-            })?;
-        if next_retained_snippet_bytes > budget.maximum_retained_snippet_bytes {
-            return Err(search_presentation_retention_budget_error(
-                event_id,
-                next_retained_snippet_bytes,
-                budget,
-            ));
-        }
-        retained_snippet_bytes = next_retained_snippet_bytes;
-        presentations.push(presentation);
-    }
-    if records.next().transpose()?.is_some() {
-        return Err(anyhow!(
-            "pinned Core lookup returned more search records than requested"
-        ));
-    }
-    Ok(presentations)
-}
-
-fn search_presentation_projection(
-    record: CoreEventRecord,
-    expected_event: &SearchEventMetadata,
-    query_terms: &AnalyzedQueryTerms,
-) -> Result<(SearchPresentation, usize)> {
-    let CoreEventRecord { event, core_record } = record;
-    if event.event_id != core_record.event_id
-        || event.session_id != core_record.session_id
-        || SearchEventMetadata::from(&event) != *expected_event
-    {
-        return Err(anyhow!(
-            "pinned Core lookup returned misaligned metadata for search event {}",
-            expected_event.event_id
-        ));
-    }
-    let projection = project_search_content(core_record.content)?.ok_or_else(|| {
-        anyhow!(
-            "Core search event {} has no searchable body projection",
-            event.event_id
-        )
-    })?;
-    let (snippet, snippet_truncated) = search_excerpt(&projection, query_terms);
-    let retained_snippet_bytes = snippet.len();
-    // Neither the complete searchable projection nor the remainder of Core
-    // crosses the search presentation boundary.
-    drop(projection);
-    drop(event);
-    Ok((
-        SearchPresentation {
-            event_id: expected_event.event_id,
-            snippet,
-            snippet_truncated,
-        },
-        retained_snippet_bytes,
-    ))
-}
-
-fn search_presentation_retention_budget_error(
-    event_id: Uuid,
-    retained_snippet_bytes: usize,
-    budget: SearchPresentationHydrationBudget,
-) -> anyhow::Error {
-    anyhow::Error::new(SearchPresentationRetentionBudgetExceeded {
-        event_id,
-        retained_snippet_bytes,
-        maximum_retained_snippet_bytes: budget.maximum_retained_snippet_bytes,
-    })
-}
 
 #[derive(Debug, Default)]
 struct AnalyzedQueryTerms {
@@ -305,15 +121,25 @@ struct ExcerptWorkStats {
 
 #[derive(Debug, Clone)]
 struct PreparedExcerpt {
+    display_range: Range<usize>,
+    leading_ellipsis: bool,
+    trailing_ellipsis: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExcerptRank {
     fragment_index: usize,
     source: ExcerptTextSource,
     coverage: usize,
     readability: u8,
     tight_graphemes: usize,
     match_byte_start: usize,
-    display_range: Range<usize>,
-    leading_ellipsis: bool,
-    trailing_ellipsis: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RankedExcerpt {
+    rank: ExcerptRank,
+    prepared: Option<PreparedExcerpt>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -353,20 +179,18 @@ fn search_excerpt_with_work(
             true,
             work,
         );
-        retain_prepared_excerpt(
+        retain_ranked_excerpt(
             &mut best,
-            prepare_excerpt(
-                exact_text,
-                &exact,
-                ExcerptContext {
-                    kind: fragment.kind(),
-                    fragment_index,
-                    fragment_count,
-                    source: ExcerptTextSource::Exact,
-                    include_ellipses: true,
-                },
-                work,
-            ),
+            exact_text,
+            &exact,
+            ExcerptContext {
+                kind: fragment.kind(),
+                fragment_index,
+                fragment_count,
+                source: ExcerptTextSource::Exact,
+                include_ellipses: true,
+            },
+            work,
         );
 
         if fragment.has_decoded_json_display()
@@ -386,20 +210,18 @@ fn search_excerpt_with_work(
             work.decoded_analyzed_tokens = work
                 .decoded_analyzed_tokens
                 .saturating_add(work.analyzed_tokens.saturating_sub(analyzed_tokens_before));
-            retain_prepared_excerpt(
+            retain_ranked_excerpt(
                 &mut best,
-                prepare_excerpt(
-                    display_text,
-                    &decoded,
-                    ExcerptContext {
-                        kind: fragment.kind(),
-                        fragment_index,
-                        fragment_count,
-                        source: ExcerptTextSource::DecodedJsonString,
-                        include_ellipses: true,
-                    },
-                    work,
-                ),
+                display_text,
+                &decoded,
+                ExcerptContext {
+                    kind: fragment.kind(),
+                    fragment_index,
+                    fragment_count,
+                    source: ExcerptTextSource::DecodedJsonString,
+                    include_ellipses: true,
+                },
+                work,
             );
         }
     }
@@ -407,12 +229,15 @@ fn search_excerpt_with_work(
     let Some(best) = best else {
         return (String::new(), true);
     };
-    let fragment = &projection.fragments()[best.fragment_index];
-    let text = match best.source {
+    let Some(prepared) = best.prepared else {
+        return (String::new(), true);
+    };
+    let fragment = &projection.fragments()[best.rank.fragment_index];
+    let text = match best.rank.source {
         ExcerptTextSource::Exact => fragment.index_text(projection),
         ExcerptTextSource::DecodedJsonString => fragment.display_text(projection),
     };
-    render_prepared_excerpt(text, &best, true)
+    render_prepared_excerpt(text, &prepared, true)
 }
 
 fn decoded_display_fits_local_bound(text: &str, work: &mut ExcerptWorkStats) -> bool {
@@ -632,12 +457,6 @@ fn prepare_excerpt(
     let trailing_ellipsis =
         context.fragment_index + 1 < context.fragment_count || display_range.end < text.len();
     Some(PreparedExcerpt {
-        fragment_index: context.fragment_index,
-        source: context.source,
-        coverage: selection.coverage,
-        readability: fragment_readability(context.kind, context.source),
-        tight_graphemes: selection.grapheme_range.len(),
-        match_byte_start: selection.byte_range.start,
         display_range,
         leading_ellipsis,
         trailing_ellipsis,
@@ -965,19 +784,43 @@ fn fragment_readability(kind: SearchFragmentKind, source: ExcerptTextSource) -> 
     }
 }
 
-fn retain_prepared_excerpt(best: &mut Option<PreparedExcerpt>, candidate: Option<PreparedExcerpt>) {
-    let Some(candidate) = candidate else {
+fn excerpt_rank(selection: &TextSelection, context: ExcerptContext) -> ExcerptRank {
+    ExcerptRank {
+        fragment_index: context.fragment_index,
+        source: context.source,
+        coverage: selection.coverage,
+        readability: fragment_readability(context.kind, context.source),
+        tight_graphemes: selection.grapheme_range.len(),
+        match_byte_start: selection.byte_range.start,
+    }
+}
+
+fn retain_ranked_excerpt(
+    best: &mut Option<RankedExcerpt>,
+    text: &str,
+    selection: &TextSelection,
+    context: ExcerptContext,
+    work: &mut ExcerptWorkStats,
+) {
+    let prepared = prepare_excerpt(text, selection, context, work);
+    if selection.coverage == 0 && prepared.is_none() {
         return;
+    }
+    let candidate = RankedExcerpt {
+        rank: excerpt_rank(selection, context),
+        prepared,
     };
-    if best
-        .as_ref()
-        .is_none_or(|current| prepared_excerpt_is_preferred(&candidate, current))
-    {
+    if best.as_ref().is_none_or(|current| {
+        excerpt_rank_is_preferred(&candidate.rank, &current.rank)
+            || (candidate.rank == current.rank
+                && candidate.prepared.is_some()
+                && current.prepared.is_none())
+    }) {
         *best = Some(candidate);
     }
 }
 
-fn prepared_excerpt_is_preferred(candidate: &PreparedExcerpt, current: &PreparedExcerpt) -> bool {
+fn excerpt_rank_is_preferred(candidate: &ExcerptRank, current: &ExcerptRank) -> bool {
     candidate.coverage > current.coverage
         || (candidate.coverage == current.coverage && candidate.readability < current.readability)
         || (candidate.coverage == current.coverage
@@ -1058,5 +901,4 @@ fn fragment_aware_search_excerpt_with_work(
 }
 
 #[cfg(test)]
-#[path = "presentation_tests.rs"]
 mod tests;
