@@ -992,6 +992,11 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         expected,
         "full rank ties must use the stable identity key, not segment order"
     );
+    assert_eq!(
+        index.manual_event_range_order_decodes_for_test(),
+        SEGMENTS,
+        "an exhaustive result decodes one order key per retained finalist"
+    );
     let simultaneous = index.maximum_simultaneous_manual_postings_for_test();
     assert_eq!(
         simultaneous,
@@ -1004,9 +1009,16 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         "cumulative opens prove the working-set observation spans every segment"
     );
 
+    index.reset_manual_lexical_io_observability_for_test();
     let top_three = index.search_event_candidates_batch(&query, 3).unwrap();
     assert!(top_three.complete);
     assert!(!top_three.candidate_set_exhaustive);
+    assert_eq!(top_three.counters.candidate_docs, SEGMENTS as u64);
+    assert_eq!(
+        index.manual_event_range_order_decodes_for_test(),
+        3,
+        "the hot loop must not decode discarded candidates' order keys"
+    );
     assert_eq!(
         top_three
             .candidates

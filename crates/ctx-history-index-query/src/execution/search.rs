@@ -50,11 +50,13 @@ thread_local! {
     static MANUAL_POSTING_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MANUAL_LIVE_POSTINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MANUAL_MAXIMUM_LIVE_POSTINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MANUAL_EVENT_RANGE_ORDER_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 const EVENT_RANGE_ORDER_FAST_FIELD: &str = "event_range_order";
 
 mod executor;
+use executor::CompactEventIdentity;
 
 #[derive(Debug, Clone, Copy)]
 enum ManualLexicalMode<'a> {
@@ -75,6 +77,7 @@ struct PreparedSegment {
     fieldnorms: Option<FieldNormReader>,
     filters: SegmentFilters,
     classes: SegmentClasses,
+    candidate_fields: ManualCandidateFastFields,
 }
 
 impl PreparedSegment {
@@ -84,6 +87,7 @@ impl PreparedSegment {
         fieldnorms: Option<FieldNormReader>,
         filters: SegmentFilters,
         classes: SegmentClasses,
+        candidate_fields: ManualCandidateFastFields,
     ) -> Self {
         #[cfg(any(test, feature = "test-support"))]
         record_live_postings_added(
@@ -97,6 +101,7 @@ impl PreparedSegment {
             fieldnorms,
             filters,
             classes,
+            candidate_fields,
         }
     }
 
@@ -181,6 +186,58 @@ impl SegmentFilters {
 struct SegmentBitmap {
     words: Vec<u64>,
     any: bool,
+}
+
+/// Existing scalar fast fields sufficient for exact hot-loop filtering and a
+/// deterministic retained heap. The compact event UUID is derived from the
+/// full 256-bit identity digest used by the production final order.
+struct ManualCandidateFastFields {
+    occurred_at_unix_ms: tantivy::columnar::Column<i64>,
+    event_id_high: tantivy::columnar::Column<u64>,
+    event_id_low: tantivy::columnar::Column<u64>,
+}
+
+impl ManualCandidateFastFields {
+    fn open(reader: &SegmentReader) -> Result<Self> {
+        Ok(Self {
+            occurred_at_unix_ms: reader.fast_fields().i64(OCCURRED_AT_UNIX_MS_FIELD)?,
+            event_id_high: reader.fast_fields().u64(EVENT_ID_HIGH_FIELD)?,
+            event_id_low: reader.fast_fields().u64(EVENT_ID_LOW_FIELD)?,
+        })
+    }
+
+    fn occurred_at_unix_ms(&self, doc: DocId) -> Result<Option<i64>> {
+        let mut values = self.occurred_at_unix_ms.values_for_doc(doc);
+        let value = values.next();
+        if values.next().is_some() {
+            return Err(IndexError::InvalidStoredDocumentField(
+                OCCURRED_AT_UNIX_MS_FIELD,
+            ));
+        }
+        Ok(value)
+    }
+
+    fn compact_identity(&self, doc: DocId) -> Result<CompactEventIdentity> {
+        Ok(CompactEventIdentity {
+            high: unique_manual_fast_u64(&self.event_id_high, doc, EVENT_ID_HIGH_FIELD)?,
+            low: unique_manual_fast_u64(&self.event_id_low, doc, EVENT_ID_LOW_FIELD)?,
+        })
+    }
+}
+
+fn unique_manual_fast_u64(
+    column: &tantivy::columnar::Column<u64>,
+    doc: DocId,
+    field_name: &'static str,
+) -> Result<u64> {
+    let mut values = column.values_for_doc(doc);
+    let value = values
+        .next()
+        .ok_or(IndexError::InvalidStoredDocumentField(field_name))?;
+    if values.next().is_some() {
+        return Err(IndexError::InvalidStoredDocumentField(field_name));
+    }
+    Ok(value)
 }
 
 impl SegmentBitmap {
@@ -334,12 +391,14 @@ fn open_manual_segment(
     else {
         return Ok(None);
     };
+    let candidate_fields = ManualCandidateFastFields::open(reader)?;
     Ok(Some(PreparedSegment::new(
         context,
         body_postings,
         fieldnorms,
         filters,
         classes,
+        candidate_fields,
     )))
 }
 
@@ -716,6 +775,8 @@ fn event_range_order(
             EVENT_RANGE_ORDER_FAST_FIELD,
         ));
     }
+    #[cfg(any(test, feature = "test-support"))]
+    MANUAL_EVENT_RANGE_ORDER_DECODES.set(MANUAL_EVENT_RANGE_ORDER_DECODES.get().saturating_add(1));
     ctx_history_index_format::EventRangeOrderKey::decode(&encoded)
 }
 
@@ -734,51 +795,6 @@ fn validate_materialized_event(
         ));
     }
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct RankedAddressCandidate {
-    coverage: u8,
-    query_terms: u8,
-    score: Score,
-    order: ctx_history_index_format::EventRangeOrderKey,
-    address: DocAddress,
-    segment: LexicalSegmentContext,
-}
-
-impl PartialEq for RankedAddressCandidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for RankedAddressCandidate {}
-
-impl PartialOrd for RankedAddressCandidate {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RankedAddressCandidate {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.coverage
-            .cmp(&other.coverage)
-            .then_with(|| self.score.total_cmp(&other.score))
-            // Smaller full stable identity is better.
-            .then_with(|| {
-                compare_identity_ascending(
-                    self.order.event_identity_digest(),
-                    other.order.event_identity_digest(),
-                )
-            })
-    }
-}
-
-fn compare_identity_ascending(left: [u8; 32], right: [u8; 32]) -> Ordering {
-    // `Ord` reports the better candidate as greater, so reverse this final
-    // comparison while retaining every byte of the stable identity digest.
-    right.cmp(&left)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -859,28 +875,5 @@ mod tests {
         assert!((score - expected).abs() < f32::EPSILON * 8.0);
         assert_eq!(lexical_query_constructions(), 0);
         assert_eq!(lexical_query_executions(), 0);
-    }
-
-    #[test]
-    fn ranking_identity_tiebreak_uses_bytes_beyond_the_uuid_prefix() {
-        let mut lower_full_identity = [7_u8; 32];
-        let mut higher_full_identity = lower_full_identity;
-        lower_full_identity[31] = 1;
-        higher_full_identity[31] = 2;
-
-        assert_eq!(
-            &lower_full_identity[..16],
-            &higher_full_identity[..16],
-            "the compact UUID material is intentionally identical"
-        );
-        assert_eq!(
-            compare_identity_ascending(lower_full_identity, higher_full_identity),
-            Ordering::Greater,
-            "the lexicographically smaller full identity must rank first"
-        );
-        assert_eq!(
-            compare_identity_ascending(higher_full_identity, lower_full_identity),
-            Ordering::Less
-        );
     }
 }
