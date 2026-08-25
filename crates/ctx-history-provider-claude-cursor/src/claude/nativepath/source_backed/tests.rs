@@ -1,7 +1,8 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use ctx_history_core::{
-    ActivityJsonCapture, ActivityTextCapture, LiteralFactKind, ProjectionContractError, TypedKey,
+    derive_event_id, ActivityJsonCapture, ActivityTextCapture, EventIdentityInput, LiteralFactKind,
+    ProjectionContractError, TypedKey,
 };
 use sha2::{Digest, Sha256};
 
@@ -12,8 +13,8 @@ use super::preflight::{
     ClaudeRowValidationError, MAX_PREFLIGHT_EVENT_IDENTITIES,
 };
 use super::{
-    claude_annotation, parse_native_record, session_identity, session_typed_key, source_key,
-    ClaudePhysicalLocator, ClaudeSessionKey,
+    claude_annotation, native_item_key, parse_native_record, session_identity, session_typed_key,
+    source_key, ClaudePhysicalLocator, ClaudeSessionKey, LOGICAL_EVENT_KIND,
 };
 
 #[test]
@@ -167,6 +168,42 @@ fn repeated_native_uuid_and_subrecord_index_repeat_the_stable_event_identity() {
     assert_eq!(
         stable_native_event_identity(&parse("first"), &source, session_id).unwrap(),
         stable_native_event_identity(&parse("second"), &source, session_id).unwrap()
+    );
+}
+
+#[test]
+fn preflight_and_projection_agree_on_the_native_event_identity() {
+    let key = ClaudeSessionKey {
+        root_session_id: "session".to_owned(),
+        workflow_run_id: None,
+        agent_id: None,
+    };
+    let source = source_key(None, &key).unwrap();
+    let session_id = session_identity(&source, session_typed_key(&key).unwrap()).unwrap();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "user",
+        "uuid": "shared",
+        "message": {"role": "user", "content": "body"}
+    }))
+    .unwrap();
+    let row = parse_native_record(&bytes, 0, &locator(&bytes))
+        .unwrap()
+        .rows
+        .remove(0);
+
+    let projected = derive_event_id(EventIdentityInput {
+        source: &source,
+        session_id,
+        logical_item_kind: LOGICAL_EVENT_KIND,
+        native_item_key: &native_item_key(&row, None).unwrap(),
+        subrecord_selector: None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        stable_native_event_identity(&row, &source, session_id).unwrap(),
+        Some(projected),
+        "preflight quarantines a source on identities the projection never produces"
     );
 }
 

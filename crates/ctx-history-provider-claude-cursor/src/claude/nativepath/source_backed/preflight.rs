@@ -11,7 +11,7 @@ use ctx_history_provider_runtime::CaptureError;
 use sha2::{Digest, Sha256};
 
 use super::{
-    claude_annotation, contract, Binding, JsonlReader, LOGICAL_EVENT_KIND,
+    claude_annotation, contract, native_event_key_parts, Binding, JsonlReader, LOGICAL_EVENT_KIND,
     NATIVE_EVENT_KEY_NAMESPACE,
 };
 use crate::claude::nativepath::{
@@ -237,10 +237,7 @@ pub(super) fn stable_native_event_identity(
     )?;
     let native_item_key = NativeItemKey::composite(
         NATIVE_EVENT_KEY_NAMESPACE,
-        vec![
-            native_record_id,
-            TypedKey::U64(row.identity.source_subrecord_index),
-        ],
+        native_event_key_parts(native_record_id, row.identity.source_subrecord_index),
     )
     .map_err(|error| ClaudeRowValidationError::Fatal(contract(error)))?;
     derive_event_id(EventIdentityInput {

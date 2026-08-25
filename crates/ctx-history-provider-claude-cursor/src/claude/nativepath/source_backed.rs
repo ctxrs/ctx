@@ -872,6 +872,15 @@ fn session_identity(source: &SourceKey, native_key: TypedKey) -> Result<StableEn
     .map_err(contract)
 }
 
+/// Key parts for a row that carries a native record id.
+///
+/// The preflight audit and the projection below must derive byte-identical
+/// event identities for the same row. Building the parts once is what stops the
+/// two from drifting apart.
+fn native_event_key_parts(native_record_id: TypedKey, subrecord_index: u64) -> Vec<TypedKey> {
+    vec![native_record_id, TypedKey::U64(subrecord_index)]
+}
+
 fn native_item_key(
     row: &ClaudeRetainedRow,
     fallback_identity: Option<FallbackEventIdentity>,
@@ -879,10 +888,10 @@ fn native_item_key(
     if let Some(native_record_id) = row.native_record_id.as_deref() {
         return NativeItemKey::composite(
             NATIVE_EVENT_KEY_NAMESPACE,
-            vec![
+            native_event_key_parts(
                 TypedKey::utf8(native_record_id).map_err(contract)?,
-                TypedKey::U64(row.identity.source_subrecord_index),
-            ],
+                row.identity.source_subrecord_index,
+            ),
         )
         .map_err(contract);
     }
@@ -901,10 +910,10 @@ fn native_event_typed_key(
     fallback_identity: Option<FallbackEventIdentity>,
 ) -> Result<TypedKey> {
     if let Some(native_record_id) = row.native_record_id.as_deref() {
-        return TypedKey::composite(vec![
+        return TypedKey::composite(native_event_key_parts(
             TypedKey::utf8(native_record_id).map_err(contract)?,
-            TypedKey::U64(row.identity.source_subrecord_index),
-        ])
+            row.identity.source_subrecord_index,
+        ))
         .map_err(contract);
     }
     let fallback_identity = fallback_identity.ok_or(CaptureError::SystemInvariant(
