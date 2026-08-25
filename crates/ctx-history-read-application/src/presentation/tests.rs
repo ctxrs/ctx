@@ -236,7 +236,7 @@ fn snippet_byte_bounds_pathological_grapheme_clusters() {
 }
 
 #[test]
-fn fragment_excerpt_does_not_fall_through_from_an_unrenderable_better_match() {
+fn fragment_excerpt_skips_an_unrenderable_match_for_a_bounded_alternative() {
     let oversized_cluster = format!("x{}", "\u{301}".repeat(SEARCH_SNIPPET_MAX_BYTES));
     let activity = CoreActivity {
         revision: CORE_ACTIVITY_REVISION,
@@ -250,10 +250,9 @@ fn fragment_excerpt_does_not_fall_through_from_an_unrenderable_better_match() {
     };
     let projection = selected_projection(Some(oversized_cluster), None, Some(activity));
 
-    assert_eq!(
-        fragment_aware_search_excerpt(&projection, &["x"]),
-        (String::new(), true)
-    );
+    let (snippet, truncated) = fragment_aware_search_excerpt(&projection, &["x"]);
+    assert_eq!(snippet, "…x metadata fallback");
+    assert!(truncated);
 }
 
 #[test]

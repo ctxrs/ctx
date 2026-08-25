@@ -1080,7 +1080,7 @@ fn active_session_exclusion_contains_only_the_proven_exact_tree() {
 }
 
 #[test]
-fn active_session_exclusion_abstains_on_a_foreign_source_claimant() {
+fn active_session_exclusion_follows_exact_claims_across_session_sources() {
     let temp = tempdir().unwrap();
     let active_source = source_named("active-source.jsonl");
     let foreign_source = source_named("foreign-source.jsonl");
@@ -1120,7 +1120,10 @@ fn active_session_exclusion_abstains_on_a_foreign_source_claimant() {
         }),
     )
     .unwrap();
-    assert!(filters.exclude_session_tree.is_none());
+    let excluded = filters.exclude_session_tree.unwrap();
+    let mut expected = vec![active.session_id.as_uuid(), foreign.session_id.as_uuid()];
+    expected.sort();
+    assert_eq!(excluded.session_ids, expected);
 }
 
 #[test]

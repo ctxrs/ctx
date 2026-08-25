@@ -104,7 +104,7 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         semantic_fallback_detail,
     );
     Ok(compact_json(json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "payload_type": "search_results",
         "query": normalized_query.display(),
         "filters": {

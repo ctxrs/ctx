@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, Result};
-use ctx_history_core::StableEntityId;
 use ctx_history_index_query::{ExcludedSessionTree, SessionGroupingClaims, VerifiedIndex};
 use uuid::Uuid;
 
@@ -115,29 +114,27 @@ where
     F: FnMut(Uuid) -> Result<Option<SessionAncestry>>,
     G: FnMut(&[Uuid]) -> Result<Vec<SessionAncestry>>,
 {
-    let [active_session] = sessions else {
+    let [_active_session] = sessions else {
         return None;
     };
     let root_session_id = resolved_unique_session_tree_root_id(sessions, session_by_id)
         .ok()
         .flatten()?;
-    resolved_session_tree_ids(
-        root_session_id,
-        active_session.source_owner,
-        related_session_ids,
-    )
-    .ok()
-    .flatten()
+    resolved_session_tree_ids(root_session_id, related_session_ids)
+        .ok()
+        .flatten()
 }
 
 pub(super) fn resolved_session_tree_ids<F>(
     root_session_id: Uuid,
-    source_owner: StableEntityId,
     mut related_session_ids: F,
 ) -> Result<Option<Vec<Uuid>>>
 where
     F: FnMut(&[Uuid]) -> Result<Vec<SessionAncestry>>,
 {
+    // Parent/root claims name exact provider-root-scoped session identities.
+    // Do not compare source owners here: providers such as Codex own one
+    // source per session, so a valid tree necessarily crosses source owners.
     let mut session_ids = BTreeSet::from([root_session_id]);
     for _ in 0..=MAX_ACTIVE_SESSION_ANCESTORS {
         let anchors = session_ids.iter().copied().collect::<Vec<_>>();
@@ -150,9 +147,7 @@ where
             if session_ids.contains(&candidate.session_id) {
                 continue;
             }
-            if candidate.source_owner != source_owner
-                || discovered.insert(candidate.session_id, candidate).is_some()
-            {
+            if discovered.insert(candidate.session_id, candidate).is_some() {
                 return Ok(None);
             }
             let claims = [
@@ -211,7 +206,6 @@ where
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SessionAncestry {
     pub(super) session_id: Uuid,
-    pub(super) source_owner: StableEntityId,
     pub(super) parent_session_id: Option<Uuid>,
     pub(super) claimed_root_session_id: Option<Uuid>,
 }
@@ -220,7 +214,6 @@ impl From<&SessionGroupingClaims> for SessionAncestry {
     fn from(session: &SessionGroupingClaims) -> Self {
         Self {
             session_id: session.session_id.as_uuid(),
-            source_owner: session.source_owner,
             parent_session_id: session.parent_session_id.map(|id| id.as_uuid()),
             claimed_root_session_id: session.root_session_id.map(|id| id.as_uuid()),
         }
@@ -254,9 +247,6 @@ where
     let mut visited = BTreeSet::new();
     let mut ancestry = Vec::with_capacity(MAX_ACTIVE_SESSION_ANCESTORS + 1);
     let root_id = loop {
-        if current.source_owner != session.source_owner {
-            return Ok(None);
-        }
         if !visited.insert(current.session_id) {
             return Ok(None);
         }

@@ -515,7 +515,7 @@ fn mcp_search_returns_structured_json_without_refresh() {
         "wait",
         "--format=json",
     ]));
-    assert_eq!(initial["schema_version"], 1, "{initial:#}");
+    assert_eq!(initial["schema_version"], 2, "{initial:#}");
     assert_eq!(initial["results"].as_array().map(Vec::len), Some(1));
     let killed_pid = daemon.kill_and_wait();
 
@@ -579,7 +579,7 @@ fn mcp_search_returns_structured_json_without_refresh() {
     );
     let recovered = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     let search = &search_responses[1]["result"]["structuredContent"];
-    assert_eq!(search["schema_version"], 1, "{search:#}\n{recovered:#}");
+    assert_eq!(search["schema_version"], 2, "{search:#}\n{recovered:#}");
     assert_eq!(search["payload_type"], "search_results");
     assert_eq!(search["query"], "onboarding");
     assert_eq!(search["freshness"]["mode"], "off");
@@ -746,7 +746,12 @@ fn mcp_search_keeps_a_hit_whose_matching_grapheme_exceeds_the_snippet_cap() {
         Some(1),
         "{first:#}"
     );
-    assert_eq!(first_result["snippet"], "", "{first:#}");
+    assert!(
+        first_result["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.ends_with("/workspace/huge-grapheme")),
+        "{first:#}"
+    );
     assert_eq!(first_result["snippet_truncated"], true, "{first:#}");
     assert!(
         first_result["snippet"].as_str().unwrap().len() <= SNIPPET_MAX_BYTES,

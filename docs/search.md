@@ -23,10 +23,10 @@ enumeration still return the complete excluded records.
 Ordinary results include primary and subagent sessions. When history carries an
 exact root-session claim, ctx groups sessions by that claim and returns one best
 result per root task before repeating a root; a session without that claim is
-its own group. Primary-session evidence gets a slight preference only when it
-is nearly as relevant; stronger child-session evidence can win. Human output
-labels the result window as relevance ordered and identifies the selected
-agent scope. Each result's `Event` row shows the short ctx event ID and the
+its own group. Agent scope is result metadata or an explicit filter; it does
+not silently rerank relevance. Human output labels the result window as
+relevance ordered and identifies the selected agent scope. Each result's
+`Event` row shows the short ctx event ID and the
 matched event's exact
 UTC RFC 3339 millisecond timestamp; an indexed event without a timestamp says
 `time unavailable`. These timestamps do not change result ordering.

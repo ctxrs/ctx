@@ -104,7 +104,7 @@ fn start_source_refresh_daemon_with_env(
 }
 
 fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
-    assert_eq!(search["schema_version"], 1, "{search:#}");
+    assert_eq!(search["schema_version"], 2, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
     assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
@@ -318,7 +318,12 @@ fn search_keeps_huge_matching_grapheme_hits_in_json_and_human_output() {
         Some(1),
         "{first:#}"
     );
-    assert_eq!(first_result["snippet"], "", "{first:#}");
+    assert!(
+        first_result["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.ends_with("/workspace/huge-grapheme")),
+        "{first:#}"
+    );
     assert_eq!(first_result["snippet_truncated"], true, "{first:#}");
     assert!(
         first_result["snippet"].as_str().unwrap().len() <= SNIPPET_MAX_BYTES,
@@ -353,7 +358,10 @@ fn search_keeps_huge_matching_grapheme_hits_in_json_and_human_output() {
     let second_human = render_human();
     assert_eq!(first_human, second_human);
     assert!(first_human.contains("1 result"), "{first_human}");
-    assert!(first_human.contains("codex user message"), "{first_human}");
+    assert!(
+        first_human.contains("/workspace/huge-grapheme"),
+        "{first_human}"
+    );
     assert!(!first_human.contains('\u{301}'), "{first_human}");
 }
 
@@ -472,7 +480,7 @@ fn measured_json_output(command: &mut Command) -> (Value, usize) {
 mod import_paths;
 
 #[test]
-fn search_excludes_source_owned_active_session_and_abstains_on_cross_source_tree() {
+fn search_excludes_the_exact_active_tree_across_codex_session_sources() {
     let temp = tempdir();
     let fixture = temp.path().join("active-tree-search-fixture");
     copy_dir_all(
@@ -540,13 +548,8 @@ fn search_excludes_source_owned_active_session_and_abstains_on_cross_source_tree
         .collect::<BTreeSet<_>>();
     assert_eq!(
         excluded_tree_sessions,
-        BTreeSet::from([
-            "codex-independent-root",
-            "codex-session-child",
-            "codex-session-grandchild",
-            "codex-session-root",
-        ]),
-        "cross-source active tree did not abstain: {excluded_tree:#}"
+        BTreeSet::from(["codex-independent-root"]),
+        "cross-source active tree was not excluded: {excluded_tree:#}"
     );
 
     let excluded_resumed_tree = json_output(
@@ -570,13 +573,8 @@ fn search_excludes_source_owned_active_session_and_abstains_on_cross_source_tree
         .collect::<BTreeSet<_>>();
     assert_eq!(
         excluded_resumed_sessions,
-        BTreeSet::from([
-            "codex-independent-root",
-            "codex-session-child",
-            "codex-session-grandchild",
-            "codex-session-root",
-        ]),
-        "cross-source resumed child did not abstain: {excluded_resumed_tree:#}"
+        BTreeSet::from(["codex-independent-root"]),
+        "cross-source resumed child tree was not excluded: {excluded_resumed_tree:#}"
     );
 
     let child_session = json_output(ctx(&temp).args([

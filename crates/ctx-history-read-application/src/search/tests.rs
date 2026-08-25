@@ -121,12 +121,11 @@ fn ancestry(
     parent_session_id: Option<u128>,
     claimed_root_session_id: Option<u128>,
 ) -> SessionAncestry {
-    ancestry_with_owner(
-        candidate_source().identity(),
-        session_id,
-        parent_session_id,
-        claimed_root_session_id,
-    )
+    SessionAncestry {
+        session_id: Uuid::from_u128(session_id),
+        parent_session_id: parent_session_id.map(Uuid::from_u128),
+        claimed_root_session_id: claimed_root_session_id.map(Uuid::from_u128),
+    }
 }
 
 #[test]
@@ -153,20 +152,6 @@ fn lexical_terminal_state_preserves_stop_and_truncation_branches() {
         Some(SearchStopReason::CandidateCap)
     );
     assert_eq!(lexical_terminal_state(&batch(false, false)), None);
-}
-
-fn ancestry_with_owner(
-    source_owner: StableEntityId,
-    session_id: u128,
-    parent_session_id: Option<u128>,
-    claimed_root_session_id: Option<u128>,
-) -> SessionAncestry {
-    SessionAncestry {
-        session_id: Uuid::from_u128(session_id),
-        source_owner,
-        parent_session_id: parent_session_id.map(Uuid::from_u128),
-        claimed_root_session_id: claimed_root_session_id.map(Uuid::from_u128),
-    }
 }
 
 fn resolved_test_root(
@@ -892,12 +877,11 @@ fn active_tree_root_resolves_a_grandchild_with_an_immediate_parent_claim() {
 #[test]
 fn active_tree_claim_closure_includes_nested_descendants() {
     let root = Uuid::from_u128(1);
-    let source_owner = candidate_source().identity();
     let child = ancestry(2, Some(1), Some(1));
     let grandchild = ancestry(3, Some(2), Some(1));
     let relations = [child, grandchild];
     assert_eq!(
-        resolved_session_tree_ids(root, source_owner, |anchors| {
+        resolved_session_tree_ids(root, |anchors| {
             Ok(relations
                 .iter()
                 .filter(|session| {
@@ -920,10 +904,9 @@ fn active_tree_claim_closure_accepts_the_session_limit() {
     let related = (2..=MAX_ACTIVE_SESSION_TREE_SESSIONS as u128)
         .map(|session_id| ancestry(session_id, Some(1), Some(1)))
         .collect::<Vec<_>>();
-    let resolved =
-        resolved_session_tree_ids(root, candidate_source().identity(), |_| Ok(related.clone()))
-            .unwrap()
-            .unwrap();
+    let resolved = resolved_session_tree_ids(root, |_| Ok(related.clone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(resolved.len(), MAX_ACTIVE_SESSION_TREE_SESSIONS);
 }
 
@@ -935,8 +918,7 @@ fn active_tree_claim_closure_fails_open_over_the_session_limit() {
         .map(|session_id| ancestry(session_id, Some(1), Some(1)))
         .collect::<Vec<_>>();
     assert_eq!(
-        resolved_session_tree_ids(root, root_session.source_owner, |_| Ok(related.clone()))
-            .unwrap(),
+        resolved_session_tree_ids(root, |_| Ok(related.clone())).unwrap(),
         None
     );
     assert_eq!(
@@ -954,7 +936,7 @@ fn active_tree_claim_closure_fails_open_over_the_depth_limit() {
     let root = Uuid::from_u128(1);
     let mut next = 2_u128;
     assert_eq!(
-        resolved_session_tree_ids(root, candidate_source().identity(), |_| {
+        resolved_session_tree_ids(root, |_| {
             let session = ancestry(next, Some(next - 1), Some(1));
             next += 1;
             Ok(vec![session])
@@ -965,14 +947,12 @@ fn active_tree_claim_closure_fails_open_over_the_depth_limit() {
 }
 
 #[test]
-fn active_tree_claim_closure_abstains_on_foreign_source_owner() {
+fn active_tree_claim_closure_accepts_exact_cross_source_session_ids() {
     let root = ancestry(1, None, None);
-    let foreign_owner = candidate_source_named("foreign-source.jsonl").identity();
-    let foreign = ancestry_with_owner(foreign_owner, 2, Some(1), Some(1));
+    let child = ancestry(2, Some(1), Some(1));
     assert_eq!(
-        resolved_session_tree_ids(root.session_id, root.source_owner, |_| Ok(vec![foreign]))
-            .unwrap(),
-        None
+        resolved_session_tree_ids(root.session_id, |_| Ok(vec![child])).unwrap(),
+        Some(vec![root.session_id, child.session_id])
     );
 }
 
@@ -985,8 +965,7 @@ fn active_tree_claim_closure_abstains_on_absent_contradictory_or_cyclic_claims()
         ancestry(2, Some(2), Some(1)),
     ] {
         assert_eq!(
-            resolved_session_tree_ids(root.session_id, root.source_owner, |_| Ok(vec![candidate]))
-                .unwrap(),
+            resolved_session_tree_ids(root.session_id, |_| Ok(vec![candidate])).unwrap(),
             None
         );
     }
@@ -1037,16 +1016,14 @@ fn active_tree_root_rejects_a_missing_parent() {
 }
 
 #[test]
-fn active_tree_root_rejects_a_foreign_source_parent() {
+fn active_tree_root_accepts_an_exact_cross_source_parent_id() {
     let child = ancestry(2, Some(1), Some(1));
-    let foreign_parent = ancestry_with_owner(
-        candidate_source_named("foreign-parent.jsonl").identity(),
-        1,
-        None,
-        None,
+    let parent = ancestry(1, None, None);
+    let records = BTreeMap::from([(parent.session_id, parent)]);
+    assert_eq!(
+        resolved_test_root(&[child], &records),
+        Some(parent.session_id)
     );
-    let records = BTreeMap::from([(foreign_parent.session_id, foreign_parent)]);
-    assert_eq!(resolved_test_root(&[child], &records), None);
 }
 
 #[test]

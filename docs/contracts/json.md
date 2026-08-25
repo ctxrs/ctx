@@ -5,8 +5,8 @@ arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
 Command result JSON uses `schema_version: 1` except for
-`ctx setup --format json`, `ctx stats --format json`, and
-`ctx import --format json`.
+`ctx setup --format json`, `ctx stats --format json`,
+`ctx import --format json`, and `ctx search --format json`.
 Progress-event JSON is stderr progress output and does not include
 `schema_version`.
 
@@ -729,7 +729,7 @@ ctx search <query>|--term <term>|--file <path> --format json
 
 Returns:
 
-- `schema_version`;
+- `schema_version: 2`;
 - `payload_type: "search_results"`;
 - `query`;
 - `filters`;
@@ -841,6 +841,8 @@ Each result can include:
 Ordinary search results do not carry `copied_lineage` and do not run one
 reverse lookup per hit. Their event-local `event_copy`, when present, is the
 selected occurrence's positive direct provider evidence only.
+Search schema v2 removes the schema-v1 per-result `copied_lineage`; explicit
+show-event/event-window reads remain the public direct-lineage surface.
 
 `copied_lineage` is a schema-v2 object on the explicit show-event/event-window
 envelope. It is a bounded, direct one-hop query-time view; its resolution does

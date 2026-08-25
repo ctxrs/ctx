@@ -30,6 +30,56 @@ impl ListEventsStreamCallback for RecordingListStream {
     }
 }
 
+struct ProjectedSemanticPort {
+    candidates: Vec<EventSearchCandidate>,
+    allowed_source_keys: Vec<String>,
+}
+
+struct ProjectedSemanticQuery<'a> {
+    index: &'a VerifiedIndex,
+    candidates: &'a [EventSearchCandidate],
+    allowed_source_keys: &'a [String],
+}
+
+impl HistorySemanticPort for ProjectedSemanticPort {
+    type Query<'a> = ProjectedSemanticQuery<'a>;
+
+    fn begin_query<'a>(
+        &'a self,
+        index: &'a VerifiedIndex,
+    ) -> Result<Self::Query<'a>, HistorySemanticError> {
+        Ok(ProjectedSemanticQuery {
+            index,
+            candidates: &self.candidates,
+            allowed_source_keys: &self.allowed_source_keys,
+        })
+    }
+}
+
+impl HistorySemanticQuery for ProjectedSemanticQuery<'_> {
+    fn candidates(
+        &mut self,
+        _query: &str,
+        filters: &ctx_history_index_query::EventSearchFilters,
+        _candidate_limit: usize,
+    ) -> Result<HistorySemanticBatch, HistorySemanticError> {
+        assert_eq!(
+            filters.allowed_source_keys.as_deref(),
+            Some(self.allowed_source_keys)
+        );
+        let projection = self.index.semantic_filter_projection(filters).unwrap();
+        Ok(HistorySemanticBatch {
+            candidates: self
+                .candidates
+                .iter()
+                .filter(|candidate| projection.contains(candidate.event.event_id.as_uuid()))
+                .cloned()
+                .collect(),
+            diagnostics: json!({"adapter": "projected-test"}),
+        })
+    }
+}
+
 #[test]
 fn list_stream_pins_cursor_generation_once_and_summarizes_pages() {
     let temp = tempdir().unwrap();
@@ -76,6 +126,234 @@ fn list_stream_pins_cursor_generation_once_and_summarizes_pages() {
     assert_eq!(result.pages, 2);
     assert!(result.terminal);
     assert!(!result.truncated);
+}
+
+#[test]
+fn semantic_and_hybrid_recall_filtered_copy_with_absent_ancestor_end_to_end() {
+    let temp = tempdir().unwrap();
+    let personal_source = provider_root_source("copy-personal.jsonl");
+    let archive_source = provider_root_source("copy-archive.jsonl");
+    let absent_ancestor = record_for_session(
+        &personal_source,
+        "absent-copy-ancestor",
+        1,
+        "user",
+        "not published",
+    );
+    let mut copied = record_for_session(
+        &personal_source,
+        "copied-occurrence",
+        4,
+        "user",
+        "recalled copied occurrence",
+    );
+    copied.parent_session_id = Some(absent_ancestor.session_id);
+    copied.root_session_id = Some(absent_ancestor.session_id);
+    copied.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    copied.event_copy = Some(ProviderNativeEventCopy {
+        ancestor_session_id: absent_ancestor.session_id,
+        ancestor_event_id: absent_ancestor.event_id,
+        proof: ProviderNativeCopyProof::NativeEventIdentity,
+    });
+    let mut family_peer = record_for_session(
+        &personal_source,
+        "same-copy-family",
+        3,
+        "user",
+        "same family semantic peer",
+    );
+    family_peer.parent_session_id = Some(absent_ancestor.session_id);
+    family_peer.root_session_id = Some(absent_ancestor.session_id);
+    family_peer.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    let independent = record_for_session(
+        &personal_source,
+        "independent-copy-recall",
+        2,
+        "user",
+        "independent semantic peer",
+    );
+    let filtered_stronger = record_for_session(
+        &archive_source,
+        "filtered-stronger-copy",
+        5,
+        "user",
+        "strongest semantic peer",
+    );
+
+    let archive_route = SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap();
+    let personal_route = SourceRouteIdentity::from_sha256("b2".repeat(32)).unwrap();
+    let definitions = vec![
+        ProviderRootDefinition {
+            id: "archive".to_owned(),
+            provider: "codex".parse().unwrap(),
+            path: temp.path().join("archive"),
+            group: Some("cold".to_owned()),
+            kind: None,
+        },
+        ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: "codex".parse().unwrap(),
+            path: temp.path().join("personal"),
+            group: Some("work".to_owned()),
+            kind: None,
+        },
+    ];
+    let applied_roots = vec![
+        AppliedProviderRoot::new(definitions[0].clone(), vec![archive_route.clone()]).unwrap(),
+        AppliedProviderRoot::new(definitions[1].clone(), vec![personal_route.clone()]).unwrap(),
+    ];
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer
+        .set_applied_provider_roots(
+            false,
+            provider_source_config_digest(false, &definitions),
+            applied_roots,
+        )
+        .unwrap();
+    writer.begin_source(personal_source.clone()).unwrap();
+    for record in [&copied, &family_peer, &independent] {
+        writer.add_core_record(record.clone()).unwrap();
+    }
+    writer
+        .certify_source(certificate(&personal_source, 3))
+        .unwrap();
+    writer.begin_source(archive_source.clone()).unwrap();
+    writer.add_core_record(filtered_stronger.clone()).unwrap();
+    writer
+        .certify_source(certificate(&archive_source, 1))
+        .unwrap();
+    writer
+        .set_present_source_routes(vec![
+            SourceRouteSnapshot::present(archive_route, vec![archive_source]).unwrap(),
+            SourceRouteSnapshot::present(personal_route, vec![personal_source.clone()]).unwrap(),
+        ])
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    assert!(index
+        .event_by_id(absent_ancestor.event_id.as_uuid())
+        .unwrap()
+        .is_none());
+    let candidate = |record: &CoreRecord, score| EventSearchCandidate {
+        event: index
+            .event_by_id(record.event_id.as_uuid())
+            .unwrap()
+            .unwrap(),
+        score,
+    };
+    let semantic = ProjectedSemanticPort {
+        candidates: vec![
+            candidate(&filtered_stronger, 400.0),
+            candidate(&copied, 300.0),
+            candidate(&family_peer, 200.0),
+            candidate(&independent, 100.0),
+        ],
+        allowed_source_keys: vec![source_token(&personal_source)],
+    };
+
+    for backend in [SearchBackend::Semantic, SearchBackend::Hybrid] {
+        let mut request = lexical_request();
+        request.query = "backend-only-copy-phantom".to_owned();
+        request.limit = 2;
+        request.events = false;
+        request.backend = Some(backend);
+        request.semantic_weight = 1.0;
+        request.source_roots = vec!["personal".to_owned()];
+        let plan = plan_search(
+            request,
+            SearchPolicy {
+                default_backend: SearchBackend::Hybrid,
+                semantic: SemanticAvailability::Available,
+            },
+        )
+        .unwrap();
+        let mut generation =
+            RecordingGenerationPort::new(VerifiedIndex::open_pinned(temp.path()).unwrap());
+        let application = execute_search(
+            SearchApplicationRequest {
+                plan,
+                generation_target: GenerationReadTarget::Active,
+                compact_projection: false,
+                active_session: None,
+            },
+            &mut generation,
+            &semantic,
+        )
+        .unwrap();
+
+        assert_eq!(generation.calls.get(), 1);
+        assert_eq!(
+            application.query().filters.allowed_source_keys.as_ref(),
+            Some(&semantic.allowed_source_keys)
+        );
+        assert_eq!(application.query().collection.candidate_pool, 3);
+        assert_eq!(
+            application.query().collection.diversification.status,
+            SearchDiversificationStatus::Indeterminate
+        );
+        let hits = &application.query().collection.result_window.hits;
+        assert_eq!(hits.len(), 2);
+        assert!(application.query().collection.result_window.more_available);
+        assert_eq!(hits[0].event.event_id, copied.event_id.as_uuid());
+        assert_eq!(hits[0].event.session_id, copied.session_id.as_uuid());
+        assert_eq!(
+            hits[0].event.provider_session_id.as_deref(),
+            Some("copied-occurrence")
+        );
+        assert_eq!(
+            hits[0].event.event_copy.as_ref(),
+            copied.event_copy.as_ref()
+        );
+        assert_eq!(hits[1].event.event_id, independent.event_id.as_uuid());
+        assert_eq!(hits[1].event.session_id, independent.session_id.as_uuid());
+
+        let commands = hits
+            .iter()
+            .map(|_| SearchResultCommands {
+                suggested_next_commands: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let value = application
+            .render_read_model(SearchApplicationReadModelInput {
+                commands: &commands,
+                freshness_mode: "test",
+                generated_at: "2026-08-25T00:00:00.000Z",
+                semantic_fallback_code: None,
+                semantic_fallback_detail: None,
+                metrics: SearchRenderMetrics {
+                    refresh_status: "unchanged",
+                    refresh_source_count: 2,
+                    query_duration: application.query_duration(),
+                },
+            })
+            .unwrap();
+        assert_eq!(value["filters"]["source_root"], json!(["personal"]));
+        let rendered = &value["results"][0];
+        assert_eq!(rendered["item_id"], copied.session_id.as_uuid().to_string());
+        assert_eq!(
+            rendered["ctx_event_id"],
+            copied.event_id.as_uuid().to_string()
+        );
+        assert_eq!(
+            rendered["ctx_session_id"],
+            copied.session_id.as_uuid().to_string()
+        );
+        assert_eq!(
+            rendered["event_copy"]["ancestor_ctx_event_id"],
+            absent_ancestor.event_id.as_uuid().to_string()
+        );
+        assert_eq!(rendered["event_copy"]["proof"], "native_event_identity");
+        let citation = &rendered["citations"][0];
+        assert_eq!(citation["item_id"], copied.event_id.as_uuid().to_string());
+        assert_eq!(
+            citation["ctx_session_id"],
+            copied.session_id.as_uuid().to_string()
+        );
+    }
 }
 
 #[test]
@@ -216,7 +494,7 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
         },
     })
     .unwrap();
-    assert_eq!(search_value["schema_version"], 1);
+    assert_eq!(search_value["schema_version"], 2);
     assert_eq!(search_value["payload_type"], "search_results");
     assert_eq!(search_value["generated_at"], "2026-08-11T12:00:00.000Z");
     assert_eq!(search_value["freshness"]["mode"], "checkpoint");

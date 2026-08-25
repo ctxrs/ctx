@@ -139,7 +139,7 @@ struct ExcerptRank {
 #[derive(Debug, Clone)]
 struct RankedExcerpt {
     rank: ExcerptRank,
-    prepared: Option<PreparedExcerpt>,
+    prepared: PreparedExcerpt,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -229,15 +229,12 @@ fn search_excerpt_with_work(
     let Some(best) = best else {
         return (String::new(), true);
     };
-    let Some(prepared) = best.prepared else {
-        return (String::new(), true);
-    };
     let fragment = &projection.fragments()[best.rank.fragment_index];
     let text = match best.rank.source {
         ExcerptTextSource::Exact => fragment.index_text(projection),
         ExcerptTextSource::DecodedJsonString => fragment.display_text(projection),
     };
-    render_prepared_excerpt(text, &prepared, true)
+    render_prepared_excerpt(text, &best.prepared, true)
 }
 
 fn decoded_display_fits_local_bound(text: &str, work: &mut ExcerptWorkStats) -> bool {
@@ -802,20 +799,17 @@ fn retain_ranked_excerpt(
     context: ExcerptContext,
     work: &mut ExcerptWorkStats,
 ) {
-    let prepared = prepare_excerpt(text, selection, context, work);
-    if selection.coverage == 0 && prepared.is_none() {
+    let Some(prepared) = prepare_excerpt(text, selection, context, work) else {
         return;
-    }
+    };
     let candidate = RankedExcerpt {
         rank: excerpt_rank(selection, context),
         prepared,
     };
-    if best.as_ref().is_none_or(|current| {
-        excerpt_rank_is_preferred(&candidate.rank, &current.rank)
-            || (candidate.rank == current.rank
-                && candidate.prepared.is_some()
-                && current.prepared.is_none())
-    }) {
+    if best
+        .as_ref()
+        .is_none_or(|current| excerpt_rank_is_preferred(&candidate.rank, &current.rank))
+    {
         *best = Some(candidate);
     }
 }
