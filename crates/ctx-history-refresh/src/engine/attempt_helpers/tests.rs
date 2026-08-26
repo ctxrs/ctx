@@ -42,7 +42,7 @@ fn unclaimed_base_source_is_terminal_and_not_retryable() {
         source_id: "fixture-source".into(),
         route_identity: route.clone(),
         route_failures: Vec::new(),
-        logical_source_failures: Default::default(),
+        logical_source_failures: Box::default(),
     }
     .into();
 
@@ -78,7 +78,7 @@ fn unclaimed_base_source_preserves_peer_route_dispositions() {
         source_id: "fixture-source".into(),
         route_identity: culprit.clone(),
         route_failures: vec![(&failed_route).into()],
-        logical_source_failures: Default::default(),
+        logical_source_failures: Box::default(),
     }
     .into();
 
