@@ -20,6 +20,10 @@ pub(super) enum CodexRetainedKind {
     Reasoning,
     Compacted,
     ToolCall,
+    /// The paginated thread-history completion envelope. Its nested TurnItem
+    /// discriminator is decoded by the semantic projector, not this shallow
+    /// envelope classifier.
+    ItemCompleted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +206,7 @@ struct CodexEnvelopeProbe<'a> {
     payload: Option<CodexPayloadProbe<'a>>,
     relationship_escaped: bool,
     lineage_malformed: bool,
+    item_completed_discriminator: bool,
 }
 
 impl<'de> Deserialize<'de> for CodexEnvelopeProbe<'de> {
@@ -234,6 +239,7 @@ impl<'de> Visitor<'de> for CodexEnvelopeProbeVisitor {
         let mut saw_payload = false;
         let mut relationship_escaped = false;
         let mut lineage_malformed = false;
+        let mut item_completed_discriminator = false;
         while let Some(key) = map.next_key::<CodexText<'de>>()? {
             let key_escaped = key.escaped;
             match key.as_str() {
@@ -256,6 +262,7 @@ impl<'de> Visitor<'de> for CodexEnvelopeProbeVisitor {
                     if let Some(value) = value.as_ref() {
                         relationship_escaped |= value.relationship_escaped;
                         lineage_malformed |= value.lineage_malformed;
+                        item_completed_discriminator |= value.item_completed_discriminator;
                     }
                     lineage_malformed |= duplicate;
                     if !duplicate {
@@ -283,6 +290,7 @@ impl<'de> Visitor<'de> for CodexEnvelopeProbeVisitor {
             payload,
             relationship_escaped,
             lineage_malformed,
+            item_completed_discriminator,
         })
     }
 }
@@ -297,6 +305,7 @@ struct CodexPayloadProbe<'a> {
     lineage_malformed: bool,
     activity_relationship_escaped: bool,
     activity_lineage_malformed: bool,
+    item_completed_discriminator: bool,
 }
 
 fn empty_codex_payload_probe<'a>() -> CodexPayloadProbe<'a> {
@@ -309,6 +318,7 @@ fn empty_codex_payload_probe<'a>() -> CodexPayloadProbe<'a> {
         lineage_malformed: false,
         activity_relationship_escaped: false,
         activity_lineage_malformed: false,
+        item_completed_discriminator: false,
     }
 }
 
@@ -346,6 +356,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
         let mut lineage_malformed = false;
         let mut activity_relationship_escaped = false;
         let mut activity_lineage_malformed = false;
+        let mut item_completed_discriminator = false;
         while let Some(key) = map.next_key::<CodexText<'de>>()? {
             let key_escaped = key.escaped;
             match key.as_str() {
@@ -356,6 +367,10 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
                     relationship_escaped |=
                         key_escaped || value.value.as_ref().is_some_and(|value| value.escaped);
                     lineage_malformed |= duplicate || value.malformed;
+                    item_completed_discriminator |= value
+                        .value
+                        .as_ref()
+                        .is_some_and(|value| value.as_str() == "item_completed");
                     if !duplicate {
                         item_type = value.value;
                     }
@@ -409,6 +424,7 @@ impl<'de> Visitor<'de> for CodexPayloadProbeVisitor {
             lineage_malformed,
             activity_relationship_escaped,
             activity_lineage_malformed,
+            item_completed_discriminator,
         })
     }
 
@@ -463,11 +479,16 @@ pub(super) struct CodexRecordProbe<'a> {
     pub(super) timestamp: Option<Cow<'a, str>>,
     pub(super) call_id: Option<Cow<'a, str>>,
     lineage_malformed: bool,
+    item_completed_discriminator: bool,
 }
 
 impl CodexRecordProbe<'_> {
     pub(super) const fn lineage_malformed(&self) -> bool {
         self.lineage_malformed
+    }
+
+    pub(super) const fn item_completed_discriminator(&self) -> bool {
+        self.item_completed_discriminator
     }
 }
 
@@ -512,6 +533,7 @@ pub(super) fn classify_codex_record(line: &[u8]) -> serde_json::Result<CodexReco
             .payload
             .and_then(|payload| payload.call_id.map(|call_id| call_id.value)),
         lineage_malformed,
+        item_completed_discriminator: envelope.item_completed_discriminator,
     })
 }
 
@@ -539,6 +561,7 @@ pub(super) fn classify_after_selector_ambiguity(line: &[u8]) -> Option<CodexReco
         timestamp,
         call_id,
         lineage_malformed: false,
+        item_completed_discriminator: item_type == Some("item_completed"),
     })
 }
 
@@ -584,6 +607,7 @@ fn classify_response_item(item_type: Option<&str>) -> CodexRecordClass {
 
 fn classify_event_message(item_type: Option<&str>) -> CodexRecordClass {
     match item_type {
+        Some("item_completed") => CodexRecordClass::Retained(CodexRetainedKind::ItemCompleted),
         Some("sub_agent_activity") => CodexRecordClass::DescendantActivity,
         Some(
             "patch_apply_end" | "web_search_end" | "exec_command_end" | "command_complete"

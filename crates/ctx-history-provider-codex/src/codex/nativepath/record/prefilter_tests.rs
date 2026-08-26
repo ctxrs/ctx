@@ -1,4 +1,6 @@
-use super::super::{classify_codex_record, codex_skip_projection};
+use super::super::{
+    classify_codex_record, codex_skip_projection, CodexRecordClass, CodexRetainedKind,
+};
 use super::*;
 
 /// Every envelope discriminator the reader's class function branches on, plus
@@ -38,6 +40,7 @@ const PAYLOAD_TYPES: &[&str] = &[
     "context_compacted",
     "token_count",
     "sub_agent_activity",
+    "item_completed",
     "agent_message",
     "agent_reasoning",
     "user_message",
@@ -120,6 +123,19 @@ fn prefilter_probes_only_candidate_descendant_start_activity() {
             "malformed activity authority must reach the shared structural probe: {malformed}"
         );
     }
+}
+
+#[test]
+fn prefilter_probes_item_completed_for_its_nested_turn_item_decoder() {
+    let raw = r#"{"type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-1","turn_id":"turn-1","item":{"id":"plan-1","type":"Plan","text":"plan"},"started_at_ms":1787738400000,"completed_at_ms":1787738401000}}"#;
+    assert_eq!(
+        prefilter_codex_record(raw.as_bytes()),
+        CodexRecordAdmission::Probe
+    );
+    assert_eq!(
+        classify_codex_record(raw.as_bytes()).unwrap().class,
+        CodexRecordClass::Retained(CodexRetainedKind::ItemCompleted)
+    );
 }
 
 #[test]

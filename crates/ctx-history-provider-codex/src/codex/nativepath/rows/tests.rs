@@ -1,5 +1,384 @@
 use super::*;
 
+const ITEM_COMPLETED_SESSION_ID: &str = "019fb000-0000-7000-8000-0000000000a1";
+
+fn completed_item_record(turn_id: &str, item: Value) -> (CodexDecodedRecord, Vec<u8>) {
+    let payload = serde_json::json!({
+        "type": "item_completed",
+        "thread_id": ITEM_COMPLETED_SESSION_ID,
+        "turn_id": turn_id,
+        "item": item,
+    });
+    let raw = serde_json::to_vec(&serde_json::json!({
+        "timestamp": "2026-08-26T10:00:00Z",
+        "type": "event_msg",
+        "payload": payload,
+    }))
+    .unwrap();
+    (
+        CodexDecodedRecord {
+            occurred_at: DateTime::parse_from_rfc3339("2026-08-26T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            payload,
+        },
+        raw,
+    )
+}
+
+#[test]
+fn item_completed_plan_preserves_outer_payload_and_qualifies_identity_by_turn() {
+    let first_item = serde_json::json!({
+        "id": "reused-plan",
+        "type": "Plan",
+        "text": "first plan",
+    });
+    let second_item = serde_json::json!({
+        "id": "reused-plan",
+        "type": "Plan",
+        "text": "second plan",
+    });
+    let (first, first_raw) = completed_item_record("turn-one", first_item);
+    let (mut second, _) = completed_item_record("turn-two", second_item);
+    second.payload["completed_at_ms"] = serde_json::json!(1787738460000_i64);
+    let second_raw = serde_json::to_vec(&serde_json::json!({
+        "timestamp": "2026-08-26T10:00:00Z",
+        "type": "event_msg",
+        "payload": second.payload.clone(),
+    }))
+    .unwrap();
+    let first = build_source_backed_event_row(
+        7,
+        CodexRetainedKind::ItemCompleted,
+        ITEM_COMPLETED_SESSION_ID,
+        &first,
+        &first_raw,
+    )
+    .unwrap()
+    .unwrap();
+    let second = build_source_backed_event_row(
+        8,
+        CodexRetainedKind::ItemCompleted,
+        ITEM_COMPLETED_SESSION_ID,
+        &second,
+        &second_raw,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(first.row.event_type, EventType::Summary);
+    assert_eq!(first.row.role, Some(EventRole::Assistant));
+    assert_eq!(first.row.lexical_body, "first plan");
+    assert_eq!(
+        first.row.structured_content,
+        Some(serde_json::json!({
+            "type": "item_completed",
+            "thread_id": ITEM_COMPLETED_SESSION_ID,
+            "turn_id": "turn-one",
+            "item": {"id": "reused-plan", "type": "Plan", "text": "first plan"},
+        }))
+    );
+    assert_eq!(
+        first.row.provider_event_identity.as_ref().unwrap().kind,
+        CodexProviderEventIdentityKindV0::CompletedItem
+    );
+    assert_ne!(
+        first.row.provider_event_identity, second.row.provider_event_identity,
+        "same item id in another turn must have a distinct canonical key"
+    );
+    assert_eq!(
+        first.row.occurred_at,
+        DateTime::parse_from_rfc3339("2026-08-26T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        "legacy Plan safely falls back to the envelope timestamp"
+    );
+    assert_eq!(
+        second.row.occurred_at,
+        DateTime::parse_from_rfc3339("2026-08-26T10:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    );
+}
+
+#[test]
+fn item_completed_known_unknown_and_malformed_variants_have_distinct_outcomes() {
+    let cases = [
+        (
+            serde_json::json!({"id": "user", "type": "UserMessage", "content": "raw-owned"}),
+            CodexRetainedNonMaterialized::KnownNonMaterialized,
+        ),
+        (
+            serde_json::json!({"id": "future", "type": "FutureTurnItem", "content": "future"}),
+            CodexRetainedNonMaterialized::Unsupported,
+        ),
+        (
+            serde_json::json!({"id": "lowercase", "type": "plan", "text": "not native"}),
+            CodexRetainedNonMaterialized::Unsupported,
+        ),
+        (
+            serde_json::json!({"id": "generic", "type": "ToolCall"}),
+            CodexRetainedNonMaterialized::Unsupported,
+        ),
+        (
+            serde_json::json!({"id": "bad-plan", "type": "Plan", "content": []}),
+            CodexRetainedNonMaterialized::Malformed,
+        ),
+        (
+            serde_json::json!({"id": "bad-plan-text", "type": "Plan", "text": ["not native"]}),
+            CodexRetainedNonMaterialized::Malformed,
+        ),
+    ];
+    for (item, expected) in cases {
+        let (record, raw) = completed_item_record("turn-one", item);
+        assert_eq!(
+            build_source_backed_event_row(
+                7,
+                CodexRetainedKind::ItemCompleted,
+                ITEM_COMPLETED_SESSION_ID,
+                &record,
+                &raw,
+            )
+            .unwrap()
+            .unwrap_err(),
+            expected
+        );
+    }
+
+    let (record, _) = completed_item_record(
+        "turn-one",
+        serde_json::json!({"id": "ambiguous", "type": "AgentMessage", "text": "plan"}),
+    );
+    let raw = br#"{"timestamp":"2026-08-26T10:00:00Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-one","item":{"id":"ambiguous","type":"Plan","type":"AgentMessage","text":"plan"}}}"#;
+    assert_eq!(
+        build_source_backed_event_row(
+            7,
+            CodexRetainedKind::ItemCompleted,
+            ITEM_COMPLETED_SESSION_ID,
+            &record,
+            raw,
+        )
+        .unwrap()
+        .unwrap_err(),
+        CodexRetainedNonMaterialized::Malformed
+    );
+}
+
+#[test]
+fn item_completed_distinguishes_raw_overlaps_from_lifecycle_only_variants() {
+    // These minimal items exercise the closed discriminator table. The narrow
+    // Plan projector deliberately leaves their variant-specific fields alone;
+    // response_item remains authoritative where it is available.
+    for item_type in [
+        "UserMessage",
+        "HookPrompt",
+        "AgentMessage",
+        "Reasoning",
+        "CommandExecution",
+        "DynamicToolCall",
+        "CollabAgentToolCall",
+        "WebSearch",
+        "ImageView",
+        "ImageGeneration",
+        "FileChange",
+        "McpToolCall",
+        "ContextCompaction",
+    ] {
+        let (record, raw) = completed_item_record(
+            "turn-one",
+            serde_json::json!({"id": "known", "type": item_type}),
+        );
+        assert_eq!(
+            build_source_backed_event_row(
+                7,
+                CodexRetainedKind::ItemCompleted,
+                ITEM_COMPLETED_SESSION_ID,
+                &record,
+                &raw,
+            )
+            .unwrap()
+            .unwrap_err(),
+            CodexRetainedNonMaterialized::KnownNonMaterialized,
+            "{item_type} is a current TurnItem variant"
+        );
+    }
+
+    for item_type in ["SubAgentActivity", "EnteredReviewMode", "ExitedReviewMode"] {
+        let (record, raw) = completed_item_record(
+            "turn-one",
+            serde_json::json!({"id": "known-lifecycle-only", "type": item_type}),
+        );
+        assert_eq!(
+            build_source_backed_event_row(
+                7,
+                CodexRetainedKind::ItemCompleted,
+                ITEM_COMPLETED_SESSION_ID,
+                &record,
+                &raw,
+            )
+            .unwrap()
+            .unwrap_err(),
+            CodexRetainedNonMaterialized::Unsupported,
+            "{item_type} has no duplicate raw response record"
+        );
+    }
+
+    for kind in ["image_gen.generation", "clock.sleep", "web.search"] {
+        let (record, raw) = completed_item_record(
+            "turn-one",
+            serde_json::json!({"id": "known", "type": "Extension", "kind": kind}),
+        );
+        assert_eq!(
+            build_source_backed_event_row(
+                7,
+                CodexRetainedKind::ItemCompleted,
+                ITEM_COMPLETED_SESSION_ID,
+                &record,
+                &raw,
+            )
+            .unwrap()
+            .unwrap_err(),
+            CodexRetainedNonMaterialized::Unsupported,
+            "{kind} is lifecycle-only and must remain observably unsupported"
+        );
+    }
+
+    let (record, raw) = completed_item_record(
+        "turn-one",
+        serde_json::json!({
+            "id": "opaque-mcp",
+            "type": "McpToolCall",
+            "arguments": {"input": {"left": 1}, "args": {"right": 2}}
+        }),
+    );
+    assert_eq!(
+        build_source_backed_event_row(
+            7,
+            CodexRetainedKind::ItemCompleted,
+            ITEM_COMPLETED_SESSION_ID,
+            &record,
+            &raw,
+        )
+        .unwrap()
+        .unwrap_err(),
+        CodexRetainedNonMaterialized::KnownNonMaterialized,
+        "opaque tool arguments must not participate in item selector auditing"
+    );
+
+    let (record, raw) = completed_item_record(
+        "turn-one",
+        serde_json::json!({"id": "future", "type": "Extension", "kind": "future.item"}),
+    );
+    assert_eq!(
+        build_source_backed_event_row(
+            7,
+            CodexRetainedKind::ItemCompleted,
+            ITEM_COMPLETED_SESSION_ID,
+            &record,
+            &raw,
+        )
+        .unwrap()
+        .unwrap_err(),
+        CodexRetainedNonMaterialized::Unsupported
+    );
+}
+
+#[test]
+fn item_completed_rejects_missing_or_mismatched_thread_and_malformed_timestamps() {
+    for mutation in ["missing-thread", "mismatched-thread", "string-timestamp"] {
+        let (mut record, raw) = completed_item_record(
+            "turn-one",
+            serde_json::json!({"id": "plan", "type": "Plan", "text": "plan"}),
+        );
+        match mutation {
+            "missing-thread" => {
+                record.payload.as_object_mut().unwrap().remove("thread_id");
+            }
+            "mismatched-thread" => {
+                record.payload["thread_id"] = serde_json::json!("another-session");
+            }
+            "string-timestamp" => {
+                record.payload["completed_at_ms"] = serde_json::json!("not-a-number");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            build_source_backed_event_row(
+                7,
+                CodexRetainedKind::ItemCompleted,
+                ITEM_COMPLETED_SESSION_ID,
+                &record,
+                &raw,
+            )
+            .unwrap()
+            .unwrap_err(),
+            CodexRetainedNonMaterialized::Malformed,
+            "{mutation} must not materialize"
+        );
+    }
+}
+
+#[test]
+fn item_completed_rejects_duplicate_keys_for_every_consumed_selector() {
+    let (record, _) = completed_item_record(
+        "turn-one",
+        serde_json::json!({"id": "plan", "type": "Plan", "text": "plan"}),
+    );
+    let raws = [
+        (
+            "payload",
+            r#"{"type":"event_msg","payload":{},"payload":{"type":"item_completed"}}"#,
+        ),
+        (
+            "timestamp",
+            r#"{"timestamp":"2026-08-26T10:00:00Z","timestamp":"2026-08-26T10:00:01Z","type":"event_msg","payload":{"type":"item_completed"}}"#,
+        ),
+        (
+            "thread_id",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","thread_id":"first","thread_id":"second"}}"#,
+        ),
+        (
+            "turn_id",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"first","turn_id":"second"}}"#,
+        ),
+        (
+            "item",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{},"item":{"id":"plan","type":"Plan","text":"plan"}}}"#,
+        ),
+        (
+            "item id",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"id":"first","id":"second","type":"Plan","text":"plan"}}}"#,
+        ),
+        (
+            "Plan text",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"id":"plan","type":"Plan","text":"first","text":"second"}}}"#,
+        ),
+        (
+            "started_at_ms",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","started_at_ms":1,"started_at_ms":2}}"#,
+        ),
+        (
+            "completed_at_ms",
+            r#"{"type":"event_msg","payload":{"type":"item_completed","completed_at_ms":1,"completed_at_ms":2}}"#,
+        ),
+    ];
+    for (selector, raw) in raws {
+        assert_eq!(
+            build_source_backed_event_row(
+                7,
+                CodexRetainedKind::ItemCompleted,
+                ITEM_COMPLETED_SESSION_ID,
+                &record,
+                raw.as_bytes(),
+            )
+            .unwrap()
+            .unwrap_err(),
+            CodexRetainedNonMaterialized::Malformed,
+            "duplicate {selector} must not reach durable identity or content"
+        );
+    }
+}
+
 #[test]
 fn mcp_terminal_activity_preserves_exact_server_tool_and_linkage() {
     let occurred_at = DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")

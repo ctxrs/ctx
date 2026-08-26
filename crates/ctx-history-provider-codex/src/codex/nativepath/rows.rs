@@ -12,7 +12,7 @@ use ctx_history_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::raw_json::{audit_json, RawJsonAudit, SelectorGroup};
+use super::raw_json::{audit_item_completed_selectors, audit_json, RawJsonAudit, SelectorGroup};
 use super::record::{CodexDecodedRecord, CodexRetainedKind};
 use crate::provider::codex::events::codex_content_text;
 use crate::Result as CaptureResult;
@@ -126,6 +126,7 @@ impl CodexCoreRecordDraft {
 pub(crate) enum CodexProviderEventIdentityKindV0 {
     Id,
     CallId,
+    CompletedItem,
 }
 
 impl CodexProviderEventIdentityKindV0 {
@@ -133,6 +134,7 @@ impl CodexProviderEventIdentityKindV0 {
         match self {
             Self::Id => "id",
             Self::CallId => "call_id",
+            Self::CompletedItem => "item_completed",
         }
     }
 }
@@ -152,31 +154,68 @@ pub(crate) struct CodexProviderNativeEventCopyV0 {
     pub(crate) result_call_id: String,
 }
 
+#[derive(Debug)]
 pub(super) struct CodexSourceBackedBuiltRowV0 {
     pub(super) row: CodexCoreRecordDraft,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CodexRetainedNonMaterialized {
     ValidUnmaterializable,
+    KnownNonMaterialized,
+    Unsupported,
     Malformed,
 }
 
 pub(super) fn build_source_backed_event_row(
     raw_ordinal: u64,
     kind: CodexRetainedKind,
+    expected_native_session_id: &str,
     retained: &CodexDecodedRecord,
     raw_record: &[u8],
 ) -> CaptureResult<std::result::Result<CodexSourceBackedBuiltRowV0, CodexRetainedNonMaterialized>> {
     let audit = audit_codex_record(raw_record)?;
-    let semantic = match source_backed_semantic_projection(kind, &retained.payload) {
-        SourceBackedSemanticProjection::Materialized(semantic) => *semantic,
-        SourceBackedSemanticProjection::ValidUnmaterializable => {
-            return Ok(Err(CodexRetainedNonMaterialized::ValidUnmaterializable));
-        }
-        SourceBackedSemanticProjection::Malformed => {
-            return Ok(Err(CodexRetainedNonMaterialized::Malformed));
-        }
-    };
+    let (semantic, provider_event_identity, occurred_at) =
+        if kind == CodexRetainedKind::ItemCompleted {
+            if audit_item_completed_selectors(raw_record)? {
+                return Ok(Err(CodexRetainedNonMaterialized::Malformed));
+            }
+            match source_backed_completed_item(
+                &retained.payload,
+                expected_native_session_id,
+                retained.occurred_at,
+            ) {
+                CompletedItemProjection::Materialized(projection) => (
+                    projection.semantic,
+                    Some(projection.provider_event_identity),
+                    projection.occurred_at,
+                ),
+                CompletedItemProjection::KnownNonMaterialized => {
+                    return Ok(Err(CodexRetainedNonMaterialized::KnownNonMaterialized));
+                }
+                CompletedItemProjection::Unsupported => {
+                    return Ok(Err(CodexRetainedNonMaterialized::Unsupported));
+                }
+                CompletedItemProjection::Malformed => {
+                    return Ok(Err(CodexRetainedNonMaterialized::Malformed));
+                }
+            }
+        } else {
+            let semantic = match source_backed_semantic_projection(kind, &retained.payload) {
+                SourceBackedSemanticProjection::Materialized(semantic) => *semantic,
+                SourceBackedSemanticProjection::ValidUnmaterializable => {
+                    return Ok(Err(CodexRetainedNonMaterialized::ValidUnmaterializable));
+                }
+                SourceBackedSemanticProjection::Malformed => {
+                    return Ok(Err(CodexRetainedNonMaterialized::Malformed));
+                }
+            };
+            (
+                semantic,
+                provider_event_identity(&retained.payload),
+                retained.occurred_at,
+            )
+        };
     let lexical_body = if kind == CodexRetainedKind::ToolCall {
         serde_json::to_string(&retained.payload)?
     } else {
@@ -190,10 +229,10 @@ pub(super) fn build_source_backed_event_row(
         row: CodexCoreRecordDraft {
             raw_ordinal,
             provider_event_identity: (!audit.selector_ambiguous(SelectorGroup::CallId))
-                .then(|| provider_event_identity(&retained.payload))
+                .then_some(provider_event_identity)
                 .flatten(),
             provider_event_copy: None,
-            occurred_at: retained.occurred_at,
+            occurred_at,
             event_type: semantic.event_type,
             role: semantic.role,
             session_cwd: None,
@@ -521,6 +560,159 @@ enum SourceBackedSemanticProjection {
     Malformed,
 }
 
+struct CompletedItemMaterialized {
+    semantic: SourceBackedSemantic,
+    provider_event_identity: CodexProviderEventIdentityV0,
+    occurred_at: DateTime<Utc>,
+}
+
+enum CompletedItemProjection {
+    Materialized(CompletedItemMaterialized),
+    /// Response-item records remain the authority for known overlapping
+    /// message and model/tool variants. They are intentionally accounted for
+    /// as nonmaterialized rather than malformed, retaining historical raw-row
+    /// identities and preventing duplicate semantic events.
+    KnownNonMaterialized,
+    /// A future nested TurnItem variant. It is observable without preventing
+    /// later known siblings in the same rollout from importing.
+    Unsupported,
+    Malformed,
+}
+
+fn source_backed_completed_item(
+    payload: &Value,
+    expected_native_session_id: &str,
+    fallback_occurred_at: DateTime<Utc>,
+) -> CompletedItemProjection {
+    const MAX_PROVIDER_EVENT_ID_BYTES: usize = 64 * 1024;
+
+    let Some(payload) = payload.as_object() else {
+        return CompletedItemProjection::Malformed;
+    };
+    let Some(thread_id) = payload
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_PROVIDER_EVENT_ID_BYTES
+                && *value == expected_native_session_id
+        })
+    else {
+        return CompletedItemProjection::Malformed;
+    };
+    let Some(turn_id) = payload
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return CompletedItemProjection::Malformed;
+    };
+    let Some(item) = payload.get("item").and_then(Value::as_object) else {
+        return CompletedItemProjection::Malformed;
+    };
+    let Some(item_id) = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return CompletedItemProjection::Malformed;
+    };
+    // The length-prefixed thread and turn prefixes make this injective for
+    // arbitrary JSON strings, including values containing delimiters. Source
+    // identity also scopes the session; retaining the validated thread id here
+    // keeps the provider-native identity self-describing, while turn
+    // qualification prevents repeated item ids from colliding.
+    let qualified_id = format!(
+        "{}:{thread_id}{}:{turn_id}{item_id}",
+        thread_id.len(),
+        turn_id.len()
+    );
+    if qualified_id.len() > MAX_PROVIDER_EVENT_ID_BYTES {
+        return CompletedItemProjection::Malformed;
+    }
+    let Some(item_type) = item.get("type").and_then(Value::as_str) else {
+        return CompletedItemProjection::Malformed;
+    };
+    let item_occurred_at = match completed_item_timestamp(payload) {
+        Ok(occurred_at) => occurred_at.unwrap_or(fallback_occurred_at),
+        Err(()) => return CompletedItemProjection::Malformed,
+    };
+
+    match item_type {
+        // Plan has no response_item equivalent. It is the narrow, first-class
+        // completed-item projection; legacy Plan records may lack timestamps.
+        "Plan" => {
+            let text = item.get("text").and_then(Value::as_str).map(str::to_owned);
+            let Some(text) = text else {
+                return CompletedItemProjection::Malformed;
+            };
+            CompletedItemProjection::Materialized(CompletedItemMaterialized {
+                semantic: SourceBackedSemantic {
+                    event_type: EventType::Summary,
+                    role: Some(EventRole::Assistant),
+                    lexical_body: source_backed_lexical_body(
+                        EventType::Summary,
+                        Some(EventRole::Assistant),
+                        &text,
+                    ),
+                },
+                provider_event_identity: CodexProviderEventIdentityV0 {
+                    kind: CodexProviderEventIdentityKindV0::CompletedItem,
+                    value: qualified_id,
+                },
+                occurred_at: item_occurred_at,
+            })
+        }
+        // These items have persisted raw response/tool-call equivalents and
+        // remain raw-authority until a bounded canonical replacement can cover
+        // their lifecycle updates without an unbounded seen-key checkpoint.
+        "UserMessage"
+        | "HookPrompt"
+        | "AgentMessage"
+        | "Reasoning"
+        | "CommandExecution"
+        | "DynamicToolCall"
+        | "CollabAgentToolCall"
+        | "WebSearch"
+        | "ImageView"
+        | "ImageGeneration"
+        | "FileChange"
+        | "McpToolCall"
+        | "ContextCompaction" => CompletedItemProjection::KnownNonMaterialized,
+        // These current variants are lifecycle-only in paginated rollouts.
+        // Until they gain a semantic projection, reject them observably rather
+        // than treating them as duplicated raw response items.
+        "SubAgentActivity" | "EnteredReviewMode" | "ExitedReviewMode" => {
+            CompletedItemProjection::Unsupported
+        }
+        "Extension" => CompletedItemProjection::Unsupported,
+        _ => CompletedItemProjection::Unsupported,
+    }
+}
+
+fn completed_item_timestamp(
+    payload: &serde_json::Map<String, Value>,
+) -> Result<Option<DateTime<Utc>>, ()> {
+    for field in ["completed_at_ms", "started_at_ms"] {
+        let Some(value) = payload.get(field) else {
+            continue;
+        };
+        let Some(timestamp) = value.as_i64() else {
+            return Err(());
+        };
+        if timestamp == 0 {
+            continue;
+        }
+        if timestamp < 0 {
+            return Err(());
+        }
+        return DateTime::<Utc>::from_timestamp_millis(timestamp)
+            .map(Some)
+            .ok_or(());
+    }
+    Ok(None)
+}
+
 fn source_backed_semantic_projection(
     kind: CodexRetainedKind,
     payload: &Value,
@@ -530,6 +722,9 @@ fn source_backed_semantic_projection(
         CodexRetainedKind::Reasoning => source_backed_reasoning(payload),
         CodexRetainedKind::Compacted => source_backed_compacted(payload),
         CodexRetainedKind::ToolCall => source_backed_tool_call(payload),
+        // ItemCompleted is decoded by source_backed_completed_item before this
+        // raw response-item projection is reached.
+        CodexRetainedKind::ItemCompleted => SourceBackedSemanticProjection::Malformed,
     }
 }
 

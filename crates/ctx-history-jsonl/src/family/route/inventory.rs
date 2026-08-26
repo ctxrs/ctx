@@ -132,6 +132,7 @@ impl<E: JsonlFamilyError> JsonlFamilyInventory<E> {
         }
         members.sort_by(|left, right| left.source_path().cmp(right.source_path()));
         validate_unique_members(&members)?;
+        let exact_dependencies = reconcile_duplicate_accepted_sources(&mut members)?;
         validate_unique_accepted_sources(&members)?;
         let observation = inventory_observation(provider, root, false, &authorities, &members)?;
         Ok(Self {
@@ -141,7 +142,7 @@ impl<E: JsonlFamilyError> JsonlFamilyInventory<E> {
             observation,
             authorities,
             members,
-            exact_dependencies: Vec::new(),
+            exact_dependencies,
         })
     }
 
@@ -160,9 +161,9 @@ impl<E: JsonlFamilyError> JsonlFamilyInventory<E> {
 
     pub fn with_exact_dependencies(
         mut self,
-        exact_dependencies: Vec<JsonlFamilyTerminalProof<E>>,
+        mut exact_dependencies: Vec<JsonlFamilyTerminalProof<E>>,
     ) -> Self {
-        self.exact_dependencies = exact_dependencies;
+        self.exact_dependencies.append(&mut exact_dependencies);
         self
     }
 
@@ -392,4 +393,112 @@ fn validate_unique_accepted_sources<E: JsonlFamilyError>(
         }
     }
     Ok(())
+}
+
+/// Collapses byte-identical physical aliases without weakening publication.
+///
+/// The lowest path remains the accepted leaf. Every discarded copy becomes an
+/// exact terminal dependency, so a mutation anywhere in the duplicate group
+/// invalidates publication. Divergent bytes remain an adapter error: only the
+/// provider can decide whether distinct encodings are semantically equivalent,
+/// one is a strict extension, or one copy is otherwise preferable.
+fn reconcile_duplicate_accepted_sources<E: JsonlFamilyError>(
+    members: &mut Vec<JsonlFamilyInventoryMember<E>>,
+) -> JsonlResult<Vec<JsonlFamilyTerminalProof<E>>, E> {
+    let mut groups: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+    for (index, member) in members.iter().enumerate() {
+        if let JsonlFamilyInventoryMember::Accepted { leaf, .. } = member {
+            groups
+                .entry(leaf.source().exact_descriptor_digest())
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut aliases = HashMap::<usize, JsonlFamilyTerminalProof<E>>::new();
+    for indices in groups.values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        let representative = match &members[indices[0]] {
+            JsonlFamilyInventoryMember::Accepted { leaf, .. } => leaf.source().clone(),
+            _ => unreachable!("duplicate group references an accepted member"),
+        };
+        let all_equal = indices.iter().all(|&index| match &members[index] {
+            JsonlFamilyInventoryMember::Accepted { leaf, .. } => {
+                leaf.source().exact_descriptor_eq(&representative)
+            }
+            _ => false,
+        });
+        if !all_equal {
+            return Err(E::invalid_payload(
+                "JSONL physical inventory contains a source descriptor digest collision".to_owned(),
+            ));
+        }
+        let mut content_digest = None;
+        let mut observed = Vec::with_capacity(indices.len());
+        for &index in indices {
+            let leaf = match &members[index] {
+                JsonlFamilyInventoryMember::Accepted { leaf, .. } => leaf,
+                _ => unreachable!("duplicate group references an accepted member"),
+            };
+            let (digest, proof) = authenticated_leaf_content(leaf)?;
+            match content_digest {
+                Some(expected) if expected != digest => {
+                    return Err(E::invalid_payload(format!(
+                        "JSONL physical leaves claim logical source identity {} but their contents differ; the provider must resolve divergent copies semantically",
+                        representative.identity(),
+                    )));
+                }
+                Some(_) => {}
+                None => content_digest = Some(digest),
+            }
+            observed.push((index, proof));
+        }
+        for (index, proof) in observed.into_iter().skip(1) {
+            aliases.insert(index, proof);
+        }
+    }
+
+    if aliases.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let original = std::mem::take(members);
+    let mut rebuilt = Vec::with_capacity(original.len());
+    let mut exact_dependencies = Vec::with_capacity(aliases.len());
+    for (index, member) in original.into_iter().enumerate() {
+        if let Some(proof) = aliases.remove(&index) {
+            debug_assert!(matches!(
+                member,
+                JsonlFamilyInventoryMember::Accepted { .. }
+            ));
+            exact_dependencies.push(proof);
+        } else {
+            rebuilt.push(member);
+        }
+    }
+    *members = rebuilt;
+    Ok(exact_dependencies)
+}
+
+fn authenticated_leaf_content<E: JsonlFamilyError>(
+    leaf: &JsonlFamilyLeaf<E>,
+) -> JsonlResult<([u8; 32], JsonlFamilyTerminalProof<E>), E> {
+    let opened = leaf.authority().open_file(leaf.authority_path())?;
+    let before = observe_opened_file(leaf.source_path(), &opened)?;
+    if &before != leaf.observation() {
+        return Err(E::source_changed());
+    }
+    let digest = opened_file_prefix_sha256(opened.file(), before.length())?;
+    if observe_opened_file(leaf.source_path(), &opened)? != before {
+        return Err(E::source_changed());
+    }
+    let proof = JsonlFamilyTerminalProof::exact_opened_path(
+        leaf.source_path().to_path_buf(),
+        Arc::clone(leaf.authority()),
+        leaf.authority_path().to_path_buf(),
+        &opened,
+    )?;
+    Ok((digest, proof))
 }

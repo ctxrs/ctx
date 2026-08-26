@@ -81,14 +81,6 @@ fn topology_paths(root: &Path) -> Result<(PathBuf, PathBuf, BTreeSet<PathBuf>), 
     Ok((predecessor, candidate, predecessor_payload))
 }
 
-pub(super) fn first_payload_pair(root: &Path) -> Result<(PathBuf, PathBuf), String> {
-    let (predecessor, candidate, payload) = topology_paths(root)?;
-    let relative = payload
-        .first()
-        .ok_or_else(|| "generation has no payload file".to_owned())?;
-    Ok((predecessor.join(relative), candidate.join(relative)))
-}
-
 pub(super) fn verify_clone_topology(
     root: &Path,
     mode: CloneMode,

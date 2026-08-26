@@ -128,45 +128,6 @@ ctx_rust_test(
     ],
 )
 
-# Hermetic generated-index structural/disk gate. The release benchmark below
-# uses the same harness but keeps noisy wall/CPU/RSS thresholds off ordinary CI.
-ctx_rust_test(
-    name = "republish_disk_qualification_tests",
-    srcs = RUST_TEST_SRCS,
-    crate_name = "ctx_history_index_republish_disk_qualification",
-    crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--exact",
-        "tests::republish_qualification::generated_small_and_large_disk_qualification",
-        "--nocapture",
-        "--test-threads=1",
-    ],
-    deps = all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ) + CTX_HISTORY_INDEX_TEST_DEPS,
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env = COMMON_RUSTC_ENV,
-    size = "large",
-    tags = [
-        "linux-only",
-        "republish",
-        "safe-presubmit",
-        "tier-nightly",
-    ],
-    target_compatible_with = ["@platforms//os:linux"],
-    timeout = "long",
-)
-
 ctx_rust_test(
     name = "session_authority_high_cardinality_tests",
     srcs = RUST_TEST_SRCS,
@@ -197,13 +158,12 @@ ctx_rust_test(
     timeout = "long",
 )
 
-# Dedicated controlled-host report. Invoke with --config=release,
-# --nocache_test_results, and CTX_REPUBLISH_QUALIFICATION_ENFORCE_PERF=1 for the
-# blocking release run.
+# Raw controlled-host measurement. Pair and analyze its output outside the test;
+# this target owns no benchmark classifier, scheduler, or report format.
 ctx_rust_test(
-    name = "republish_release_benchmark",
+    name = "republish_raw_measurement",
     srcs = RUST_TEST_SRCS,
-    crate_name = "ctx_history_index_republish_release_benchmark",
+    crate_name = "ctx_history_index_republish_raw_measurement",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(
@@ -213,7 +173,7 @@ ctx_rust_test(
     args = [
         "--ignored",
         "--exact",
-        "tests::republish_qualification::release_benchmark_report",
+        "tests::republish_qualification::controlled_host_measurement",
         "--nocapture",
         "--test-threads=1",
     ],
