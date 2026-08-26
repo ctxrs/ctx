@@ -25,5 +25,4 @@ uuid.workspace = true
 [dev-dependencies]
 ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-index-query = { path = "../ctx-history-index-query", features = ["test-support"] }
-ctx-history-platform = { path = "../ctx-history-platform" }
 tempfile.workspace = true

@@ -23,13 +23,10 @@ ctx-history-index-format = { path = "../ctx-history-index-format" }
 ctx-history-index-generation = { path = "../ctx-history-index-generation" }
 ctx-history-index-query = { path = "../ctx-history-index-query" }
 ctx-history-platform = { path = "../ctx-history-platform" }
-ctx-semantic-model = { path = "../ctx-semantic-model" }
-memmap2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tantivy.workspace = true
-thiserror.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 

@@ -83,6 +83,11 @@ quarter of available CPUs (maximum eight), bounds default Rust test threads to
 four, and uses `debug=0` unless `CTX_CARGO_DIAGNOSTIC_DEBUG=1`. Cargo diagnostic
 output does not replace the owning Bazel test.
 
+`scripts/cargo-fixit.sh` is the only supported mutating compiler-repair path;
+the strict Bazel Clippy aspect remains the read-only merge gate.
+`scripts/cargo-shear.sh` runs the pinned offline dependency-hygiene test
+`//:cargo_shear_check`, which is part of routine CI.
+
 ## Upgrade Compatibility
 
 Importer identity, cursor, dedupe-key, and source-root changes must be tested as

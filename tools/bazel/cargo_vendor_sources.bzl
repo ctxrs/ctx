@@ -7,7 +7,8 @@ def _cargo_vendor_sources_impl(ctx):
     source_sets = []
     crate_infos = []
 
-    for target in ctx.attr.crates:
+    targets = list(ctx.attr.crates) + list(ctx.attr.platform_crates)
+    for target in targets:
         crate_infos.append(target[rust_common.crate_info])
         crate_infos.extend(target[rust_common.dep_info].transitive_crates.to_list())
 
@@ -53,6 +54,9 @@ cargo_vendor_sources = rule(
     attrs = {
         "crates": attr.label_list(
             mandatory = True,
+            providers = [[rust_common.crate_info, rust_common.dep_info]],
+        ),
+        "platform_crates": attr.label_list(
             providers = [[rust_common.crate_info, rust_common.dep_info]],
         ),
     },

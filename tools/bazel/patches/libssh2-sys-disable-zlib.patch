@@ -1,0 +1,19 @@
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -145,8 +145,6 @@ fn main() {
+     /* Enable newer diffie-hellman-group-exchange-sha1 syntax */
+     cfg.define("LIBSSH2_DH_GEX_NEW", None);
+ 
+-    cfg.define("LIBSSH2_HAVE_ZLIB", None);
+-
+     if profile.contains("debug") {
+         cfg.define("LIBSSH2DEBUG", None);
+     }
+@@ -154,6 +152,3 @@ fn main() {
+     println!("cargo:rerun-if-env-changed=DEP_Z_INCLUDE");
+-    if let Some(path) = env::var_os("DEP_Z_INCLUDE") {
+-        cfg.include(path);
+-    }
+ 
+     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_INCLUDE");

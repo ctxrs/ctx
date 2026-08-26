@@ -15,7 +15,6 @@ test-support = ["ctx-history-refresh-execution/test-support"]
 
 [dependencies]
 anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true

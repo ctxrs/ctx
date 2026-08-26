@@ -9,6 +9,10 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
+[package.metadata.cargo-shear]
+# The Bazel-only v0.25 upgrade fixture consumes this dependency.
+ignored = ["fs2"]
+
 [features]
 test-support = []
 

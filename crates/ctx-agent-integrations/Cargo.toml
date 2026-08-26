@@ -19,7 +19,6 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 sha2.workspace = true
-thiserror.workspace = true
 toml_edit = "0.22"
 uuid.workspace = true
 

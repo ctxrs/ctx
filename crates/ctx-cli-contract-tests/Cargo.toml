@@ -10,6 +10,10 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
+[package.metadata.cargo-shear]
+# The minimal Bazel-only test-target fixture consumes this dependency.
+ignored = ["serde_yaml"]
+
 # Cargo preserves cross-platform all-target compilation for these final-binary
 # contracts. Bazel remains the execution authority and supplies the ctx binary.
 [[test]]
@@ -41,7 +45,6 @@ name = "setup_sources_import"
 path = "tests/contracts/setup_sources_import.rs"
 
 [dev-dependencies]
-anstream.workspace = true
 assert_cmd.workspace = true
 base64.workspace = true
 chrono.workspace = true
