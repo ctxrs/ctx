@@ -182,7 +182,7 @@ pub(super) fn provider_route_results<S: ImmutableCaptureSnapshot + ?Sized>(
     {
         bail!("capture-owned source refresh receipt has an incomplete or overlapping terminal route-result partition");
     }
-    let committed_rejections = committed_route_rejected_records(facts.snapshot)?;
+    let committed_rejections = committed_rejected_records(facts.snapshot)?;
     let successful_route_rejections = facts
         .successful_route_outcomes
         .iter()
@@ -191,7 +191,7 @@ pub(super) fn provider_route_results<S: ImmutableCaptureSnapshot + ?Sized>(
                 outcome.route_identity.as_str().to_owned(),
                 committed_rejections
                     .get(&outcome.route_identity)
-                    .copied()
+                    .map(|rejections| rejections.total)
                     .unwrap_or_default(),
             )
         })
@@ -227,7 +227,26 @@ pub(super) fn provider_route_results<S: ImmutableCaptureSnapshot + ?Sized>(
             });
     }
     let mut rejections_by_route = BTreeMap::<String, Vec<_>>::new();
+    let mut reported_rejections_by_source = HashMap::new();
     for rejection in facts.record_rejections.rejections() {
+        if !rejection.is_committed() {
+            continue;
+        }
+        let source_digest = rejection.source.exact_descriptor_digest();
+        let committed_total = committed_rejections
+            .get(&rejection.route_identity)
+            .and_then(|route| route.by_source.get(&source_digest))
+            .copied()
+            .ok_or_else(|| anyhow!("committed rejection has no exact certified source"))?;
+        let reported = reported_rejections_by_source
+            .entry((rejection.route_identity.clone(), source_digest))
+            .or_insert(0_u64);
+        *reported = reported
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("committed source rejection diagnostic total overflow"))?;
+        if *reported > committed_total {
+            bail!("committed source has more rejection diagnostics than rejected records");
+        }
         let route_identity = rejection.route_identity.as_str().to_owned();
         rejections_by_route
             .entry(route_identity.clone())
@@ -304,34 +323,47 @@ fn source_key_identity(source: &ctx_history_core::SourceKey) -> String {
         .collect()
 }
 
-fn committed_route_rejected_records(
+struct CommittedRouteRejectedRecords {
+    total: u64,
+    by_source: HashMap<[u8; 32], u64>,
+}
+
+fn committed_rejected_records(
     snapshot: &(impl ImmutableCaptureSnapshot + ?Sized),
-) -> Result<HashMap<SourceRouteIdentity, u64>> {
+) -> Result<HashMap<SourceRouteIdentity, CommittedRouteRejectedRecords>> {
     let certificates = snapshot
         .sources()
         .iter()
         .map(|source| (source.observation().source().identity().digest(), source))
         .collect::<HashMap<_, _>>();
-    snapshot
-        .source_routes()
-        .map(|route| {
-            let total = route.sources().iter().try_fold(0_u64, |total, source| {
-                let certificate = certificates
-                    .get(&source.identity().digest())
-                    .filter(|candidate| {
-                        candidate.observation().source().exact_descriptor_eq(source)
-                    })
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "committed route {} names a source without an exact certificate",
-                            route.route_identity().as_str()
-                        )
-                    })?;
-                total
-                    .checked_add(certificate.counts().rejected_records)
-                    .ok_or_else(|| anyhow!("committed route rejected-record total overflow"))
-            })?;
-            Ok((route.route_identity().clone(), total))
-        })
-        .collect()
+    let mut by_route = HashMap::new();
+    for route in snapshot.source_routes() {
+        let mut by_source = HashMap::new();
+        let total = route.sources().iter().try_fold(0_u64, |total, source| {
+            let certificate = certificates
+                .get(&source.identity().digest())
+                .filter(|candidate| candidate.observation().source().exact_descriptor_eq(source))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "committed route {} names a source without an exact certificate",
+                        route.route_identity().as_str()
+                    )
+                })?;
+            let rejected_records = certificate.counts().rejected_records;
+            if by_source
+                .insert(source.exact_descriptor_digest(), rejected_records)
+                .is_some()
+            {
+                bail!("committed route contains a duplicate exact source");
+            }
+            total
+                .checked_add(rejected_records)
+                .ok_or_else(|| anyhow!("committed route rejected-record total overflow"))
+        })?;
+        by_route.insert(
+            route.route_identity().clone(),
+            CommittedRouteRejectedRecords { total, by_source },
+        );
+    }
+    Ok(by_route)
 }

@@ -53,6 +53,126 @@ fn codex_valid_custom_tool_result_over_16_mib_is_retained() {
 }
 
 #[test]
+fn codex_core_envelope_rejection_preserves_siblings_and_their_ids() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions-core-envelope-rejection");
+    let index_root = temp.path().join("index-core-envelope-rejection");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fb000-0000-7000-8000-000000000075";
+    let path = session_path(&sessions, native_session_id);
+    let before_marker = "core-envelope-before";
+    let after_marker = "core-envelope-after";
+    let oversized_body = "x".repeat(ctx_history_core::MAX_CORE_CONTENT_BYTES);
+    let repeated_native_id = "core-envelope-repeated-native-id";
+    let mut before = message(before_marker);
+    before["payload"]["id"] = serde_json::json!(repeated_native_id);
+    let mut oversized = message(&oversized_body);
+    oversized["payload"]["id"] = serde_json::json!(repeated_native_id);
+    let mut after = message(after_marker);
+    after["payload"]["id"] = serde_json::json!(repeated_native_id);
+    fs::write(
+        &path,
+        jsonl_bytes([
+            session_meta(
+                native_session_id,
+                ProviderNativeSessionRelationship::Root,
+                None,
+            ),
+            before.clone(),
+            oversized,
+            after.clone(),
+        ]),
+    )
+    .unwrap();
+    let registry = register_tree(&[&sessions]);
+
+    let rejected =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    assert!(rejected.failed_routes.is_empty());
+    assert!(rejected.logical_source_failures.is_empty());
+    assert_eq!(rejected.record_rejections.total(), 1);
+    let counts = rejected.sources[0].counts();
+    assert_eq!(counts.complete_records, 4);
+    assert_eq!(counts.retained_records, 2);
+    assert_eq!(counts.rejected_records, 1);
+    assert_eq!(counts.ignored_records, 1);
+    let [diagnostic] = rejected.record_rejections.rejections() else {
+        panic!("one bounded Codex rejection diagnostic expected");
+    };
+    assert_eq!(diagnostic.provider, CaptureProvider::Codex);
+    assert_eq!(diagnostic.source_selector, path.display().to_string());
+    assert_eq!(diagnostic.line_number, 3);
+    assert_eq!(
+        diagnostic.class,
+        ctx_history_capture_runtime::SourceBackedRecordRejectionClass::UnsupportedRecord
+    );
+    assert_eq!(
+        diagnostic.detail,
+        "Codex retained record exceeds the Core selected-content envelope"
+    );
+    let rejected_index = VerifiedIndex::open(&index_root).unwrap();
+    let sibling_ids = [before_marker, after_marker].map(|marker| {
+        rejected_index
+            .search_event_candidates(marker, 8)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| {
+                candidate.event.provider_session_id.as_deref() == Some(native_session_id)
+            })
+            .unwrap_or_else(|| panic!("missing retained sibling {marker}"))
+            .event
+            .event_id
+    });
+    drop(rejected_index);
+
+    fs::write(
+        &path,
+        jsonl_bytes([
+            session_meta(
+                native_session_id,
+                ProviderNativeSessionRelationship::Root,
+                None,
+            ),
+            before,
+            after,
+        ]),
+    )
+    .unwrap();
+    let (repaired, _) = incremental_refresh(&index_root, &registry, &rejected);
+    assert!(repaired.failed_routes.is_empty());
+    assert!(repaired.logical_source_failures.is_empty());
+    assert!(repaired.record_rejections.is_empty());
+    let repaired_index = VerifiedIndex::open(&index_root).unwrap();
+    for (marker, event_id) in [before_marker, after_marker]
+        .into_iter()
+        .zip(sibling_ids.iter().copied())
+    {
+        assert!(repaired_index
+            .search_event_candidates(marker, 8)
+            .unwrap()
+            .into_iter()
+            .any(|candidate| candidate.event.event_id == event_id));
+    }
+    drop(repaired_index);
+
+    let (replayed, _) = incremental_refresh(&index_root, &registry, &repaired);
+    assert_eq!(replayed.commit.generation_id, repaired.commit.generation_id);
+    assert!(replayed.record_rejections.is_empty());
+    let replayed_index = VerifiedIndex::open(&index_root).unwrap();
+    for (marker, event_id) in [before_marker, after_marker]
+        .into_iter()
+        .zip(sibling_ids.iter().copied())
+    {
+        assert!(replayed_index
+            .search_event_candidates(marker, 8)
+            .unwrap()
+            .into_iter()
+            .any(|candidate| candidate.event.event_id == event_id));
+    }
+}
+
+#[test]
 fn inherited_codex_session_metadata_is_admitted_in_both_provider_orders() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-inherited-metadata-orders");

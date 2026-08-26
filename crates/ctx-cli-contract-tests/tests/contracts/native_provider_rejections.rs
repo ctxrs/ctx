@@ -615,6 +615,42 @@ fn codex_mixed_session_replay_preserves_source_backed_rejection_counts() {
         }
     }
 
+    fs::write(
+        &session,
+        concat!(
+            r#"{"timestamp":"2026-07-13T12:00:00.000Z","type":"session_meta","payload":{"id":"codex-mixed-replay","timestamp":"2026-07-13T12:00:00.000Z","cwd":"/repo","originator":"codex-cli","cli_version":"0.200.0","source":"cli","model_provider":"openai"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-07-13T12:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":{"different_failed_attempt":"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let carried = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        path,
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    assert_eq!(
+        carried["outcome"], "completed_with_rejections_and_source_failures",
+        "{carried:#}"
+    );
+    let carried_source = &carried["sources"][0];
+    assert_eq!(carried_source["status"], "partial", "{carried:#}");
+    assert_eq!(carried_source["carried_forward"], true, "{carried:#}");
+    assert_eq!(carried_source["current_rejected_records"], 1, "{carried:#}");
+    assert_eq!(carried_source["rejected_record_total"], 1, "{carried:#}");
+    assert!(
+        carried_source["rejection_diagnostics"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "failed-attempt rejection must not borrow carried certificate capacity: {carried:#}"
+    );
+
     let search = json_output(ctx(&temp).args([
         "search",
         "codex mixed replay oracle",

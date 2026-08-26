@@ -354,6 +354,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                     .frozen_scan_observation()
                     .map(|observation| observation.length()),
                 record_rejections: SourceBackedRecordRejectionDrafts::default(),
+                record_rejections_committed: true,
             },
         );
     }

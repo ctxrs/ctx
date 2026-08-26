@@ -8,6 +8,7 @@ pub(crate) struct TerminalSourceEvidence<E: JsonlFamilyError> {
     pub(crate) emitted_bytes: u64,
     pub(crate) exact_scan_bytes: Option<u64>,
     pub(crate) record_rejections: SourceBackedRecordRejectionDrafts,
+    pub(crate) record_rejections_committed: bool,
 }
 
 impl<E: JsonlFamilyError> Clone for TerminalSourceEvidence<E> {
@@ -19,6 +20,7 @@ impl<E: JsonlFamilyError> Clone for TerminalSourceEvidence<E> {
             emitted_bytes: self.emitted_bytes,
             exact_scan_bytes: self.exact_scan_bytes,
             record_rejections: self.record_rejections.clone(),
+            record_rejections_committed: self.record_rejections_committed,
         }
     }
 }
