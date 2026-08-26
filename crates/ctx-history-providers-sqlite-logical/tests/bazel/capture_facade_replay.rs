@@ -17,7 +17,9 @@ use ctx_history_capture_runtime::{
     ReplacementDocumentTree,
 };
 use ctx_history_core::{CaptureProvider, SourceAnchorScope};
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_index::{
+    CompiledSearchFilter, LexicalExecution, LexicalMode, VerifiedIndex, WriterOptions,
+};
 use ctx_history_providers_sqlite_logical::{
     logical_sqlite_route_plan_scoped, LogicalSqliteRoutePlan, LogicalSqliteRuntimeBinding,
 };
@@ -190,9 +192,32 @@ where
 }
 
 fn only_matching_event(index: &VerifiedIndex, marker: &str) -> ctx_history_index::EventRecord {
-    let mut matches = index.search_event_candidates(marker, 2).unwrap();
+    let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
+    let queries = [marker];
+    let batch = index
+        .execute_lexical(LexicalExecution::new(
+            LexicalMode::Search(&queries),
+            &filter,
+            2,
+        ))
+        .unwrap()
+        .batch;
+    assert!(
+        batch.complete,
+        "lexical execution must complete: {:?}",
+        batch.exhaustion
+    );
+    let mut matches = batch
+        .candidates
+        .into_iter()
+        .map(ctx_history_index::EventSearchCandidate::from)
+        .collect::<Vec<_>>();
     assert_eq!(matches.len(), 1);
-    matches.remove(0).event
+    let winner = matches.remove(0);
+    index
+        .event_by_id(winner.event.event_id)
+        .unwrap()
+        .expect("selected lexical winner must hydrate")
 }
 
 fn create_deepagents_database(path: &Path, text: &str) {

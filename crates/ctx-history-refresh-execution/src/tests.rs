@@ -453,6 +453,121 @@ fn query_readiness_decodes_metadata_before_certifying_generation() {
 }
 
 #[test]
+fn publication_metadata_versions_preserve_receipt_shape_and_gate_the_v4_ledger() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation_id = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x98));
+    let publication = test_publication(generation_id.clone());
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        None,
+        generation_id.clone(),
+        &publication,
+    )
+    .unwrap();
+    let route_identity = "11".repeat(32);
+    let source_identity = "22".repeat(32);
+    let ledger = json!({
+        (&route_identity): [
+            "s",
+            false,
+            0,
+            0,
+            [],
+            1,
+            [[
+                source_identity,
+                "qwen_code",
+                "/tmp/qwen.jsonl",
+                3,
+                "message",
+                "m",
+                "invalid shape"
+            ]]
+        ]
+    });
+    let metadata = SourceBackedPublicationMetadata {
+        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+        request_id: "metadata-version-ledger".to_owned(),
+        operation: RefreshOperation::Refresh,
+        refresh_scope: SourceBackedRefreshScope::All,
+        receipt: receipt.to_json(),
+        route_observations: BTreeMap::new(),
+        route_controls: BTreeMap::new(),
+    };
+    let current = metadata
+        .encode_with_committed_rejection_diagnostics(&ledger)
+        .unwrap();
+    let republish = |bytes: Vec<u8>| {
+        let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer
+            .republish_current_publication_metadata(&generation_id, bytes)
+            .unwrap()
+    };
+
+    let verified = republish(current.clone());
+    let (decoded, decoded_ledger) =
+        SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(&verified)
+            .unwrap();
+    assert_eq!(decoded.version, SOURCE_REFRESH_PUBLICATION_METADATA_VERSION);
+    assert_eq!(decoded_ledger.unwrap().len(), 1);
+    assert_eq!(decoded.response_value()["receipt"], receipt.to_json());
+    assert!(decoded.response_value()["receipt"]
+        .get(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD)
+        .is_none());
+    assert_eq!(
+        published_refresh_receipt_for_index(&decoded.response_value(), &verified).unwrap(),
+        receipt
+    );
+    drop(verified);
+
+    for version in [1_u64, 2, 3] {
+        let mut legacy: Value = serde_json::from_slice(&current).unwrap();
+        legacy["version"] = json!(version);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD);
+        if version < 3 {
+            legacy.as_object_mut().unwrap().remove("route_controls");
+        }
+        if version == 1 {
+            legacy["receipt"]
+                .as_object_mut()
+                .unwrap()
+                .remove("zero_source_authority");
+        }
+        let verified = republish(serde_json::to_vec(&legacy).unwrap());
+        let (decoded, decoded_ledger) =
+            SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(&verified)
+                .unwrap();
+        assert_eq!(decoded.version, version);
+        assert!(decoded_ledger.is_none());
+        drop(verified);
+    }
+
+    for mutation in ["missing", "unknown"] {
+        let mut invalid: Value = serde_json::from_slice(&current).unwrap();
+        if mutation == "missing" {
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .remove(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD);
+        } else {
+            invalid["unexpected"] = json!(true);
+        }
+        let verified = republish(serde_json::to_vec(&invalid).unwrap());
+        assert!(format!(
+            "{:#}",
+            SourceBackedPublicationMetadata::decode(&verified).unwrap_err()
+        )
+        .contains("unknown or missing fields"));
+        drop(verified);
+    }
+}
+
+#[test]
 fn persisted_metadata_rejects_malformed_route_identity() {
     let temp = tempfile::tempdir().unwrap();
     let generation_id = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x97));

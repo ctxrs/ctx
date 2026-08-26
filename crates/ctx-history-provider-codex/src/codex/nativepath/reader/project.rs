@@ -401,10 +401,50 @@ impl CodexNativeScanner {
         match mutation {
             CodexContextMutation::SourceBackedRow {
                 row,
-                estimated_bytes: _,
+                estimated_bytes,
                 insert_pending_call,
                 remove_pending_call_id,
             } => {
+                let record = if emit_record {
+                    debug_assert!(self.active_core_page.is_some());
+                    let owner = self.owner.as_ref().ok_or(CaptureError::SystemInvariant(
+                        "Codex retained record has no session owner",
+                    ))?;
+                    let raw_ordinal = row.raw_ordinal;
+                    let retained_body_bytes =
+                        u64::try_from(row.lexical_body.len()).unwrap_or(u64::MAX);
+                    let record = codex_core_record(
+                        &self.core_source,
+                        self.core_session_id,
+                        self.source.source_root_lineage,
+                        owner,
+                        row,
+                        &mut self.event_identity_state,
+                    )?;
+                    let Some(record) = record else {
+                        self.counters.retained_records =
+                            self.counters.retained_records.saturating_sub(1);
+                        self.counters.retained_body_bytes = self
+                            .counters
+                            .retained_body_bytes
+                            .saturating_sub(retained_body_bytes);
+                        if let Some(page) = self.active_core_page.as_mut() {
+                            page.serialized_bytes =
+                                page.serialized_bytes.saturating_sub(estimated_bytes);
+                        }
+                        self.reject_record_at_ordinal(
+                            raw_ordinal,
+                            None,
+                            SourceBackedRecordRejectionClass::UnsupportedRecord,
+                            "Codex retained record exceeds the Core selected-content envelope",
+                            false,
+                        );
+                        return Ok(());
+                    };
+                    Some(record)
+                } else {
+                    None
+                };
                 if let Some(call_id) = remove_pending_call_id {
                     self.pending_calls.remove(&call_id);
                 }
@@ -434,22 +474,8 @@ impl CodexNativeScanner {
                         }
                     }
                 }
-                if emit_record {
-                    debug_assert!(self.active_core_page.is_some());
-                    let owner = self.owner.as_ref().ok_or(CaptureError::SystemInvariant(
-                        "Codex retained record has no session owner",
-                    ))?;
-                    let record = codex_core_record(
-                        &self.core_source,
-                        self.core_session_id,
-                        self.source.source_root_lineage,
-                        owner,
-                        row,
-                        &mut self.event_identity_state,
-                    )?;
-                    if let Some(page) = self.active_core_page.as_mut() {
-                        page.records.push(record);
-                    }
+                if let (Some(page), Some(record)) = (self.active_core_page.as_mut(), record) {
+                    page.records.push(record);
                 }
             }
         }
@@ -474,13 +500,24 @@ impl CodexNativeScanner {
         detail: &'static str,
         oversized: bool,
     ) {
+        self.reject_record_at_ordinal(physical.raw_ordinal, payload_type, class, detail, oversized);
+    }
+
+    fn reject_record_at_ordinal(
+        &mut self,
+        raw_ordinal: u64,
+        payload_type: Option<&str>,
+        class: SourceBackedRecordRejectionClass,
+        detail: &'static str,
+        oversized: bool,
+    ) {
         self.reject(oversized);
         self.record_rejections
             .record(SourceBackedRecordRejectionDraft {
                 source: self.core_source.clone(),
                 provider: ctx_history_core::CaptureProvider::Codex,
                 source_selector: self.source.source_path.display().to_string(),
-                line_number: physical.raw_ordinal.saturating_add(1),
+                line_number: raw_ordinal.saturating_add(1),
                 payload_type: payload_type.map(str::to_owned),
                 class,
                 detail: detail.to_owned(),

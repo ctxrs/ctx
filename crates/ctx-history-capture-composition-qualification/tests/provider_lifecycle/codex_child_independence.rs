@@ -700,9 +700,7 @@ fn source_snapshot(
     native_session_id: &str,
     search_marker: &str,
 ) -> SourceSnapshot {
-    let mut search_event_ids = index
-        .search_event_candidates(search_marker, 32)
-        .unwrap()
+    let mut search_event_ids = search_event_candidates(index, search_marker, 32)
         .into_iter()
         .filter(|candidate| {
             candidate.event.provider_session_id.as_deref() == Some(native_session_id)

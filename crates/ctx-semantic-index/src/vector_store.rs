@@ -2,6 +2,8 @@ pub(super) struct SemanticVectorHit {
     pub(super) event_id: Uuid,
     pub(super) similarity: f32,
     #[cfg_attr(not(test), expect(dead_code))]
+    pub(super) query_ordinal: usize,
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) source_text_hash: String,
     #[expect(dead_code)]
     pub(super) start_char: usize,
@@ -17,6 +19,9 @@ pub(super) struct SemanticVectorSearchStats {
     pub(super) chunks_scanned: usize,
     pub(super) vector_bytes_read: usize,
     pub(super) events_scored: usize,
+    pub(super) query_vectors: usize,
+    pub(super) vector_passes: usize,
+    pub(super) dot_products: usize,
 }
 
 #[derive(Default)]

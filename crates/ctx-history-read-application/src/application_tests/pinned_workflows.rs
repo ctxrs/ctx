@@ -57,22 +57,25 @@ impl HistorySemanticPort for ProjectedSemanticPort {
 }
 
 impl HistorySemanticQuery for ProjectedSemanticQuery<'_> {
+    fn prepare_alternative(&mut self, _query: &str) -> Result<Value, HistorySemanticError> {
+        Ok(json!({"adapter": "projected-test-query"}))
+    }
+
     fn candidates(
         &mut self,
-        _query: &str,
-        filters: &ctx_history_index_query::EventSearchFilters,
+        filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {
         assert_eq!(
-            filters.allowed_source_keys.as_deref(),
+            filter.filters().allowed_source_keys.as_deref(),
             Some(self.allowed_source_keys)
         );
-        let projection = self.index.semantic_filter_projection(filters).unwrap();
+        let projection = self.index.semantic_filter_projection(filter).unwrap();
         Ok(HistorySemanticBatch {
             candidates: self
                 .candidates
                 .iter()
-                .filter(|candidate| projection.contains(candidate.event.event_id.as_uuid()))
+                .filter(|candidate| projection.contains(candidate.event.event_id))
                 .cloned()
                 .collect(),
             diagnostics: json!({"adapter": "projected-test"}),
@@ -239,10 +242,12 @@ fn semantic_and_hybrid_recall_filtered_copy_with_absent_ancestor_end_to_end() {
         .unwrap()
         .is_none());
     let candidate = |record: &CoreRecord, score| EventSearchCandidate {
-        event: index
-            .event_by_id(record.event_id.as_uuid())
-            .unwrap()
-            .unwrap(),
+        event: ctx_history_index_query::RankedEventRef::from(
+            &index
+                .event_by_id(record.event_id.as_uuid())
+                .unwrap()
+                .unwrap(),
+        ),
         score,
     };
     let semantic = ProjectedSemanticPort {

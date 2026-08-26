@@ -2,6 +2,8 @@ mod hydration;
 mod observation;
 mod query;
 mod semantic_port;
+#[cfg(test)]
+mod test_support;
 
 use std::{
     collections::BTreeSet,
@@ -10,10 +12,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-#[cfg(test)]
-use ctx_history_index::EventSearchCandidate;
-#[cfg(test)]
-use ctx_history_index::EventSearchFilters;
 use ctx_history_index::VerifiedIndex;
 use serde_json::Value;
 
@@ -44,24 +42,23 @@ use super::{
 use ctx_history_read_application::SearchBackend;
 
 pub(in crate::source_index) use hydration::SearchPresentation;
-#[cfg(test)]
-pub(super) use hydration::{
-    presentations_for_search_hits_with_budget, SearchPresentationHydrationBudget,
-    SearchPresentationRetentionBudgetExceeded, SEARCH_PRESENTATION_HYDRATION_BUDGET,
-    SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
-};
 use observation::{
     initial_search_observation, observed_refresh_for_search, search_existing_generation_with_port,
 };
+#[cfg(test)]
+pub(super) use query::resolve_source_search_backend;
 pub(super) use query::NormalizedSearchQuery;
 pub use query::SourceSearchRequest;
-#[cfg(test)]
-pub(super) use query::{index_search_filters, resolve_source_search_backend};
 use query::{source_search_policy, unsupported_semantic_scope};
-#[cfg(test)]
-use semantic_port::HistorySemanticBatch;
 pub(crate) use semantic_port::{
     HistorySemanticError, HistorySemanticPort, SemanticAvailability, SemanticReason,
+};
+#[cfg(test)]
+use test_support::collect_search_hits_with_port;
+#[cfg(test)]
+pub(super) use test_support::{
+    collect_search_hits_with_backend, collect_search_hits_with_backend_using,
+    search_existing_generation,
 };
 
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
@@ -855,124 +852,16 @@ fn search_pinned_generation<P: HistorySemanticPort>(
 }
 
 #[cfg(test)]
-pub(super) fn search_existing_generation(
+pub(super) fn collect_search_hits_with_semantic_availability(
     request: &SourceSearchRequest,
-    index: VerifiedIndex,
     data_root: &Path,
-    semantic_weight: f32,
-    refresh_status: &str,
-    refresh_source_count: usize,
-) -> Result<(Value, SearchCollection, VerifiedIndex)> {
-    let policy = ctx_history_read_application::SearchPolicy {
-        default_backend: request.backend.unwrap_or(SearchBackend::Lexical),
-        semantic: SemanticAvailability::Available,
-    };
-    let mut request = request.clone();
-    request.semantic_weight = semantic_weight;
-    let plan = ctx_history_read_application::plan_search(request, policy)
-        .map_err(SourceSearchFailure::from)
-        .map_err(SourceSearchFailure::into_anyhow)?;
-    let mut observation = initial_search_observation();
-    let requested_backend = plan.request().backend.unwrap_or(policy.default_backend);
-    observation.backend_requested = Some(requested_backend);
-    search_existing_generation_with_port(
-        plan,
-        index,
-        data_root,
-        SearchRefreshContext {
-            mode: RefreshArg::Off,
-            status: refresh_status,
-            source_count: refresh_source_count,
-        },
-        false,
-        &crate::semantic::SemanticQueryAdapter::new(data_root),
-        None,
-        &mut observation,
-    )
-    .map(|(value, application)| {
-        let (query, index) = application.into_parts();
-        (value, query.collection, index)
-    })
-    .map_err(SourceSearchFailure::into_anyhow)
-}
-
-#[cfg(test)]
-pub(super) fn collect_search_hits_with_backend(
-    request: &SourceSearchRequest,
-    index: &VerifiedIndex,
-    data_root: &Path,
-    semantic_weight: f32,
-    filters: &EventSearchFilters,
+    semantic: SemanticAvailability,
 ) -> Result<SearchCollection> {
     collect_search_hits_with_port(
         request,
-        index,
         data_root,
-        semantic_weight,
-        filters,
+        request.semantic_weight,
+        semantic,
         &crate::semantic::SemanticQueryAdapter::new(data_root),
     )
-    .map_err(SourceSearchFailure::into_anyhow)
 }
-
-#[cfg(test)]
-fn collect_search_hits_with_port<P: HistorySemanticPort>(
-    request: &SourceSearchRequest,
-    index: &VerifiedIndex,
-    _data_root: &Path,
-    semantic_weight: f32,
-    filters: &EventSearchFilters,
-    semantic_port: &P,
-) -> SourceSearchResult<SearchCollection> {
-    let mut planned = request.clone();
-    planned.semantic_weight = semantic_weight;
-    ctx_history_read_application::collect_search_hits(
-        &planned,
-        index,
-        filters,
-        SemanticAvailability::Available,
-        semantic_port,
-    )
-    .map_err(SourceSearchFailure::from)
-}
-
-#[cfg(test)]
-pub(super) fn collect_search_hits_with_backend_using<SemanticSearch>(
-    request: &SourceSearchRequest,
-    index: &VerifiedIndex,
-    data_root: &Path,
-    semantic_weight: f32,
-    filters: &EventSearchFilters,
-    mut semantic_search: SemanticSearch,
-) -> Result<SearchCollection>
-where
-    SemanticSearch: FnMut(
-        &VerifiedIndex,
-        &Path,
-        &str,
-        &EventSearchFilters,
-        usize,
-    ) -> Result<(Vec<EventSearchCandidate>, Value)>,
-{
-    let mut planned = request.clone();
-    planned.semantic_weight = semantic_weight;
-    ctx_history_read_application::collect_search_hits_using(
-        &planned,
-        index,
-        filters,
-        SemanticAvailability::Available,
-        |query, filters, candidate_limit| {
-            semantic_search(index, data_root, query, filters, candidate_limit)
-                .map(|(candidates, diagnostics)| HistorySemanticBatch {
-                    candidates,
-                    diagnostics,
-                })
-                .map_err(|error| HistorySemanticError::failed(format!("{error:#}")))
-        },
-    )
-    .map_err(SourceSearchFailure::from)
-    .map_err(SourceSearchFailure::into_anyhow)
-}
-
-#[cfg(test)]
-pub(super) use ctx_history_read_application::shape_search_result_window;

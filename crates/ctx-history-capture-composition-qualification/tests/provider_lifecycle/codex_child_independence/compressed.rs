@@ -97,7 +97,7 @@ fn revert_rollouts_use_embedded_owner_for_raw_and_compressed_tree_and_explicit_r
     let index = VerifiedIndex::open(&tree_index).unwrap();
     for (native_session_id, _, _, marker) in cases {
         assert_eq!(records_for(&index, native_session_id).len(), 1);
-        assert_eq!(index.search_event_candidates(marker, 8).unwrap().len(), 1);
+        assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
     }
 
     let explicit_cases = [
@@ -133,7 +133,7 @@ fn revert_rollouts_use_embedded_owner_for_raw_and_compressed_tree_and_explicit_r
     let index = VerifiedIndex::open(&explicit_index).unwrap();
     for (native_session_id, _, _, marker) in explicit_cases {
         assert_eq!(records_for(&index, native_session_id).len(), 1);
-        assert_eq!(index.search_event_candidates(marker, 8).unwrap().len(), 1);
+        assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
     }
 }
 
@@ -181,10 +181,8 @@ fn exact_compressed_and_raw_rollouts_have_identical_logical_identity() {
         .source
         .exact_descriptor_eq(&compressed_records[0].source));
     assert_eq!(
-        raw.search_event_candidates(marker, 8).unwrap()[0]
-            .event
-            .event_id,
-        compressed.search_event_candidates(marker, 8).unwrap()[0]
+        search_event_candidates(&raw, marker, 8)[0].event.event_id,
+        search_event_candidates(&compressed, marker, 8)[0]
             .event
             .event_id
     );
@@ -211,7 +209,7 @@ fn exact_noncanonical_compressed_rollout_uses_embedded_session_identity() {
     let index = VerifiedIndex::open(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     assert_eq!(records.len(), 1);
-    assert_eq!(index.search_event_candidates(marker, 8).unwrap().len(), 1);
+    assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
     assert_eq!(
         records[0].provider_session_id.as_deref(),
         Some(native_session_id)
@@ -246,10 +244,7 @@ fn mixed_raw_and_compressed_tree_imports_each_native_session() {
     assert_eq!(records_for(&index, raw_id).len(), 1);
     assert_eq!(records_for(&index, compressed_id).len(), 1);
     assert_eq!(
-        index
-            .search_event_candidates("mixedcompressedmarker", 8)
-            .unwrap()
-            .len(),
+        search_event_candidates(&index, "mixedcompressedmarker", 8).len(),
         1
     );
 }
@@ -286,7 +281,7 @@ fn raw_to_compressed_representation_transition_replaces_physical_state_only() {
     let after_records = records_for(&after, native_session_id);
     assert_eq!(logical_identity(&after_records), before_identity);
     assert_eq!(after_records.len(), 1);
-    assert_eq!(after.search_event_candidates(marker, 8).unwrap().len(), 1);
+    assert_eq!(search_event_candidates(&after, marker, 8).len(), 1);
     assert_eq!(
         certificate_for(&after, native_session_id)
             .frontier()
@@ -374,10 +369,7 @@ fn overlapping_raw_and_compressed_representations_coalesce_raw_first_and_keep_id
         logical_identity(&records_for(&raw_index, native_session_id)),
         identity
     );
-    assert_eq!(
-        raw_index.search_event_candidates(marker, 8).unwrap().len(),
-        1
-    );
+    assert_eq!(search_event_candidates(&raw_index, marker, 8).len(), 1);
 }
 
 #[test]
@@ -426,7 +418,7 @@ fn exact_compressed_route_rejects_conflicting_concatenated_frame_owners() {
 }
 
 #[test]
-fn automatic_compressed_route_rejects_later_concatenated_frame_owner() {
+fn automatic_compressed_route_fails_without_a_usable_frame_owner() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index_root = temp.path().join("index");
@@ -458,11 +450,13 @@ fn automatic_compressed_route_rejects_later_concatenated_frame_owner() {
     );
 
     let registry = register_tree(&[&sessions]);
-    let receipt = refresh_source_backed_generation(&index_root, &registry, writer_options())
-        .expect("ambiguous rollout ownership is a leaf-local quarantine");
-    assert!(receipt.failed_routes.is_empty());
-    assert_eq!(receipt.logical_source_failures.total(), 1);
-    assert!(receipt.sources.is_empty());
+    let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect_err("ambiguous ownership leaves no usable logical source");
+    let SourceBackedCoordinatorError::NoUsableLogicalSources { failed_sources } = error else {
+        panic!("unexpected compressed ownership error: {error:?}");
+    };
+    assert_eq!(failed_sources.total(), 1);
+    assert!(VerifiedIndex::open(&index_root).is_err());
 }
 
 #[test]
@@ -495,7 +489,7 @@ fn repeated_consistent_compressed_metadata_across_frames_remains_admissible() {
     assert!(receipt.logical_source_failures.is_empty());
     let index = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(records_for(&index, native_session_id).len(), 1);
-    assert_eq!(index.search_event_candidates(marker, 8).unwrap().len(), 1);
+    assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
 }
 
 #[test]

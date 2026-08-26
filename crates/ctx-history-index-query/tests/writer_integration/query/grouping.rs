@@ -25,11 +25,8 @@ fn publish_records(
 }
 
 fn authority_document(record: CoreRecord) -> TantivyDocument {
-    let authority = ctx_history_index_format::SessionAuthorityKey::exact(
-        record.session_id,
-        record.source.identity(),
-    )
-    .unwrap();
+    let authority =
+        ctx_history_index_format::SessionAuthorityKey::for_core_record(&record).unwrap();
     let fields = fields_from_schema(&lexical_schema()).unwrap();
     let mut document = indexed_document(record);
     document.add_bytes(fields.session_authority, authority.as_bytes());
@@ -305,9 +302,9 @@ fn exact_batch_skips_malformed_tombstoned_witnesses() {
 }
 
 #[test]
-fn exact_batch_rejects_preflight_core_byte_exhaustion_before_stored_decode() {
+fn exact_batch_reads_body_free_authority_without_core_decode() {
     let temp = tempdir().unwrap();
-    let source = source("grouping-core-byte-limit.jsonl");
+    let source = source("grouping-body-free.jsonl");
     let records = (0..8)
         .map(|index| {
             document_for_session(
@@ -318,44 +315,18 @@ fn exact_batch_rejects_preflight_core_byte_exhaustion_before_stored_decode() {
             )
         })
         .collect::<Vec<_>>();
-    publish_records(&temp, &source, records.iter().cloned());
-
-    let fields = fields_from_schema(&lexical_schema()).unwrap();
-    let forged = records
-        .iter()
-        .cloned()
-        .map(authority_document)
-        .map(|complete| {
-            let mut forged = TantivyDocument::default();
-            for (field, value) in complete.iter_fields_and_values() {
-                if field != fields.core_record_encoded_bytes {
-                    forged.add_field_value(field, value);
-                }
-            }
-            // Each forged fact remains under the valid per-document maximum,
-            // but the complete eight-witness batch exceeds 256 MiB.
-            forged.add_u64(fields.core_record_encoded_bytes, 32 * 1024 * 1024 + 1);
-            forged
-        })
-        .collect::<Vec<_>>();
-    replace_source_unchecked(&temp, &source, forged);
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let index = publish_records(&temp, &source, records.iter().cloned());
 
     let coordinates = [
         (records[0].session_id, source.identity()),
         (records[4].session_id, source.identity()),
     ];
     ctx_history_index_query::reset_core_record_decodes();
-    assert!(matches!(
-        index.session_grouping_claims(&coordinates),
-        Err(IndexError::SessionGroupingAuthorityWorkLimitExceeded {
-            operation: "encoded Core bytes",
-            ..
-        })
-    ));
+    let claims = index.session_grouping_claims(&coordinates).unwrap();
+    assert_eq!(claims.len(), coordinates.len());
     assert_eq!(
         ctx_history_index_query::core_record_decodes(),
         0,
-        "the byte admission failure must precede stored Core decoding"
+        "grouping authority must never load or decode stored Core records"
     );
 }

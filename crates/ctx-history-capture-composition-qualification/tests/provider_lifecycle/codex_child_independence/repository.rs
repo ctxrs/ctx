@@ -67,10 +67,7 @@ fn destructive_precommit_truncate_and_replacement_preserve_last_good_generation_
             snapshot,
             "{mutation}"
         );
-        assert!(retained
-            .search_event_candidates("replacementuniquetoken", 8)
-            .unwrap()
-            .is_empty());
+        assert!(search_event_candidates(&retained, "replacementuniquetoken", 8).is_empty());
     }
 }
 

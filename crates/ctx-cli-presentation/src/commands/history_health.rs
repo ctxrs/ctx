@@ -1,4 +1,4 @@
-use ctx_history_cli::{format_bytes, provider_display_name};
+use ctx_history_cli::{format_bytes, format_count, provider_display_name};
 use ctx_history_read_application::{HistoryHealthReport, HistoryRootCoverage};
 
 pub(super) fn history_health_fields(
@@ -36,9 +36,9 @@ pub(super) fn history_health_fields(
         values.push(("Roots", coverage));
     }
     values.extend([
-        ("Sessions", grouped_count(health.sessions)),
-        ("Messages", grouped_count(health.messages)),
-        ("Tool calls", grouped_count(health.tool_calls)),
+        ("Sessions", format_count(health.sessions)),
+        ("Messages", format_count(health.messages)),
+        ("Tool calls", format_count(health.tool_calls)),
     ]);
     let mut data = format!("{} processed", format_bytes(health.data.processed));
     if let Some(excluded) = health.data.excluded.filter(|excluded| *excluded > 0) {
@@ -157,19 +157,7 @@ fn nonempty_root_coverage(health: &HistoryHealthReport) -> Option<HistoryRootCov
 
 pub(super) fn counted(count: u64, singular: &str, plural: &str) -> String {
     let noun = if count == 1 { singular } else { plural };
-    format!("{} {noun}", grouped_count(count))
-}
-
-pub(super) fn grouped_count(count: u64) -> String {
-    let digits = count.to_string();
-    let mut reversed = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
-    for (index, character) in digits.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 {
-            reversed.push(',');
-        }
-        reversed.push(character);
-    }
-    reversed.chars().rev().collect()
+    format!("{} {noun}", format_count(count))
 }
 
 #[cfg(test)]

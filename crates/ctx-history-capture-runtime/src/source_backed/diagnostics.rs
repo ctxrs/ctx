@@ -127,12 +127,18 @@ pub struct SourceBackedRecordRejection {
     pub payload_type: Option<String>,
     pub class: SourceBackedRecordRejectionClass,
     pub detail: String,
+    /// Whether this diagnostic belongs to a logical source certified by the
+    /// current attempt. Failed-attempt diagnostics remain available for
+    /// completion classification, but must not be published as committed
+    /// rejection evidence.
+    pub(crate) committed: bool,
 }
 
-/// Bounded record-level diagnostics from routes that still certified and
-/// published their valid records. Entries are kept in canonical route/scan
-/// order. `omitted` counts additional committed-route rejections beyond the
-/// diagnostic bound; diagnostics staged by a rolled-back route are removed.
+/// Bounded record-level diagnostics observed during the refresh attempt.
+/// Entries are kept in canonical route/scan order. `omitted` counts additional
+/// observations beyond the diagnostic bound; diagnostics staged by a
+/// rolled-back route are removed. Publication selects only entries whose
+/// logical source was certified by the current attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SourceBackedRecordRejections {
     rejections: Vec<SourceBackedRecordRejection>,
@@ -175,6 +181,12 @@ impl SourceBackedRecordRejections {
     pub fn truncate(&mut self, retained: usize, omitted: usize) {
         self.rejections.truncate(retained);
         self.omitted = omitted;
+    }
+}
+
+impl SourceBackedRecordRejection {
+    pub fn is_committed(&self) -> bool {
+        self.committed
     }
 }
 
@@ -360,7 +372,6 @@ pub struct SourceBackedLogicalSourceFailure {
     pub class: SourceBackedSourceFailureClass,
     pub carried_forward: bool,
     pub detail: String,
-    pub(super) allows_empty_route: bool,
 }
 
 /// Bounded logical-source failures from provider routes that still committed.
@@ -377,7 +388,6 @@ pub struct SourceBackedLogicalSourceFailures {
     omitted: usize,
     route_totals: BTreeMap<SourceRouteIdentity, usize>,
     route_retryable_totals: BTreeMap<SourceRouteIdentity, usize>,
-    route_allows_empty: BTreeMap<SourceRouteIdentity, bool>,
 }
 
 pub struct SourceBackedLogicalSourceFailureCheckpoint {
@@ -386,7 +396,6 @@ pub struct SourceBackedLogicalSourceFailureCheckpoint {
     route_identity: SourceRouteIdentity,
     route_total: usize,
     route_retryable_total: usize,
-    route_allows_empty: Option<bool>,
 }
 
 impl SourceBackedLogicalSourceFailures {
@@ -407,10 +416,6 @@ impl SourceBackedLogicalSourceFailures {
     }
 
     pub fn record(&mut self, failure: SourceBackedLogicalSourceFailure) {
-        self.route_allows_empty
-            .entry(failure.route_identity.clone())
-            .and_modify(|allowed| *allowed &= failure.allows_empty_route)
-            .or_insert(failure.allows_empty_route);
         *self
             .route_totals
             .entry(failure.route_identity.clone())
@@ -442,12 +447,6 @@ impl SourceBackedLogicalSourceFailures {
             .unwrap_or_default()
     }
 
-    pub fn all_failures_allow_empty_route(&self) -> bool {
-        !self.is_empty()
-            && self.route_allows_empty.len() == self.route_totals.len()
-            && self.route_allows_empty.values().all(|allowed| *allowed)
-    }
-
     pub fn checkpoint(
         &self,
         route_identity: SourceRouteIdentity,
@@ -457,7 +456,6 @@ impl SourceBackedLogicalSourceFailures {
             omitted: self.omitted,
             route_total: self.route_total(&route_identity),
             route_retryable_total: self.route_retryable_total(&route_identity),
-            route_allows_empty: self.route_allows_empty.get(&route_identity).copied(),
             route_identity,
         }
     }
@@ -469,7 +467,6 @@ impl SourceBackedLogicalSourceFailures {
             self.route_totals.remove(&checkpoint.route_identity);
             self.route_retryable_totals
                 .remove(&checkpoint.route_identity);
-            self.route_allows_empty.remove(&checkpoint.route_identity);
         } else {
             self.route_totals
                 .insert(checkpoint.route_identity.clone(), checkpoint.route_total);
@@ -481,10 +478,6 @@ impl SourceBackedLogicalSourceFailures {
                     checkpoint.route_identity.clone(),
                     checkpoint.route_retryable_total,
                 );
-            }
-            if let Some(allows_empty) = checkpoint.route_allows_empty {
-                self.route_allows_empty
-                    .insert(checkpoint.route_identity, allows_empty);
             }
         }
     }

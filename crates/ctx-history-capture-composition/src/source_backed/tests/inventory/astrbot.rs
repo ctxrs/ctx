@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support_paths::complete_lexical_events;
 
 #[test]
 fn released_astrbot_root_scans_only_its_inventory_and_cannot_absorb_named_peer() {
@@ -123,15 +124,9 @@ fn released_astrbot_root_scans_only_its_inventory_and_cannot_absorb_named_peer()
             ..ctx_history_index::EventSearchFilters::default()
         };
         assert_eq!(
-            published
-                .search_event_candidates_with_filters(own, &filters, 10)
-                .unwrap()
-                .len(),
+            complete_lexical_events(&published, own, filters.clone(), 10).len(),
             1
         );
-        assert!(published
-            .search_event_candidates_with_filters(peer, &filters, 10)
-            .unwrap()
-            .is_empty());
+        assert!(complete_lexical_events(&published, peer, filters, 10).is_empty());
     }
 }

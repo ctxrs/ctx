@@ -719,7 +719,9 @@ fn active_source_family_contract_document_cold_all_rejected_is_a_source_failure(
     assert_eq!(failure.class.as_str(), "unreadable");
     assert!(!failure.carried_forward);
     assert_eq!(failed.record_rejections.total(), 1);
-    assert_eq!(failed.record_rejections.rejections()[0].line_number, 1);
+    let rejection = &failed.record_rejections.rejections()[0];
+    assert_eq!(rejection.line_number, 1);
+    assert!(!rejection.is_committed());
 }
 
 #[test]
@@ -733,6 +735,7 @@ fn active_source_family_contract_document_serial_all_rejected_fails_before_publi
     assert!(failed.writer.certified_sources.is_empty());
     assert!(failed.writer.records.is_empty());
     assert_eq!(failed.record_rejections.total(), 1);
+    assert!(!failed.record_rejections.rejections()[0].is_committed());
 }
 
 #[test]
@@ -911,6 +914,7 @@ fn active_source_family_contract_document_mixed_retained_and_rejected_records_pu
     assert_eq!(published.writer.records.len(), 1);
     assert_eq!(published.logical_source_failures.total(), 0);
     assert_eq!(published.record_rejections.total(), 1);
+    assert!(published.record_rejections.rejections()[0].is_committed());
     assert_eq!(
         published.record_rejections.rejections()[0].class,
         SourceBackedRecordRejectionClass::MalformedRecord

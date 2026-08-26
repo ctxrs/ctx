@@ -177,6 +177,7 @@ pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test
                     "receipt": receipt.to_json(),
                     "route_observations": vec![Value::Null; metadata_authority_routes.len()],
                     "route_controls": {},
+                    "committed_rejection_diagnostics": {},
                 }))
                 .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
             },

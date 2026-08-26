@@ -3,6 +3,55 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ctx_history_index::{
+    CompiledSearchFilter, EventRecord, EventSearchFilters, LexicalExecution, LexicalMode,
+    VerifiedIndex,
+};
+
+#[derive(Debug)]
+pub(crate) struct HydratedEventSearchCandidate {
+    pub(crate) event: EventRecord,
+}
+
+pub(crate) fn complete_lexical_events(
+    index: &VerifiedIndex,
+    natural_text: &str,
+    filters: EventSearchFilters,
+    limit: usize,
+) -> Vec<HydratedEventSearchCandidate> {
+    let filter = CompiledSearchFilter::compile(filters).unwrap();
+    let alternatives = [natural_text];
+    let observed = index
+        .execute_lexical(LexicalExecution::new(
+            LexicalMode::Search(&alternatives),
+            &filter,
+            limit,
+        ))
+        .unwrap();
+    assert!(
+        observed.batch.complete,
+        "lexical execution did not complete: {:?}",
+        observed.batch.exhaustion
+    );
+    observed
+        .batch
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            let event = index
+                .event_by_id(candidate.event.event_id)
+                .unwrap()
+                .expect("selected lexical event must hydrate");
+            assert_eq!(
+                event.event_id.digest(),
+                candidate.event.event_identity_digest,
+                "selected lexical event must preserve its exact identity"
+            );
+            HydratedEventSearchCandidate { event }
+        })
+        .collect()
+}
+
 pub(crate) fn tempdir() -> io::Result<tempfile::TempDir> {
     let temp_root = fs::canonicalize(std::env::temp_dir())?;
     tempfile::Builder::new()

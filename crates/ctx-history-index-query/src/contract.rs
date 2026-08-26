@@ -534,6 +534,26 @@ impl EventSearchFilters {
     }
 }
 
+/// One validated logical Search filter shared by every retrieval backend and
+/// final winner hydration. Backend-specific postings and Tantivy queries are
+/// transient adapters compiled from this value; they are not independent
+/// filter authorities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledSearchFilter {
+    filters: EventSearchFilters,
+}
+
+impl CompiledSearchFilter {
+    pub fn compile(filters: EventSearchFilters) -> Result<Self> {
+        validate_manual_filter_inputs(&filters)?;
+        Ok(Self { filters })
+    }
+
+    pub const fn filters(&self) -> &EventSearchFilters {
+        &self.filters
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub event_id: StableEntityId,
@@ -674,17 +694,69 @@ impl std::ops::Deref for CoreEventRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SearchSessionCoordinate {
+    /// Compact session address. Verified generations reject any two distinct
+    /// full session identities that share this UUID.
+    pub session_id: Uuid,
+    /// Full source-identity digest from the exact indexed `source_key`.
+    pub source_owner_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankedEventRef {
+    /// Compact address used only for the final generation-pinned lookup.
+    pub event_id: Uuid,
+    /// Exact full event-identity digest used for equality and ordering.
+    pub event_identity_digest: [u8; 32],
+    /// Compact half of the session-authority coordinate. The exact full
+    /// session identity is resolved once for the candidate batch before
+    /// champion selection.
+    pub session_id: Uuid,
+    /// Exact source-owner digest paired with `session_id` for that resolution.
+    pub source_owner_digest: [u8; 32],
+    pub event_sequence: u64,
+    pub occurred_at_unix_ms: Option<i64>,
+    /// Positive provider evidence only. `false` means no positive claim was
+    /// indexed; it does not assert that the event has no copied ancestor.
+    pub has_event_copy: bool,
+}
+
+impl From<&EventRecord> for RankedEventRef {
+    fn from(event: &EventRecord) -> Self {
+        Self {
+            event_id: event.event_id.as_uuid(),
+            event_identity_digest: event.event_id.digest(),
+            session_id: event.session_id.as_uuid(),
+            source_owner_digest: event.source.identity().digest(),
+            event_sequence: event.event_sequence,
+            occurred_at_unix_ms: event.occurred_at_unix_ms,
+            has_event_copy: event.event_copy.is_some(),
+        }
+    }
+}
+
+impl RankedEventRef {
+    pub const fn session_coordinate(&self) -> SearchSessionCoordinate {
+        SearchSessionCoordinate {
+            session_id: self.session_id,
+            source_owner_digest: self.source_owner_digest,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventSearchCandidate {
-    pub event: EventRecord,
+    pub event: RankedEventRef,
     pub score: f32,
 }
 
 /// Exact, content-free work performed by one low-level candidate query.
 ///
-/// `collector_hits` is the number of retained candidate addresses handed to
-/// materialization. Decoded records and bytes are charged only after a stored
-/// Core record has decoded successfully.
+/// `collector_hits` is the number of retained candidate addresses projected
+/// into thin ranked references. `records_decoded` and
+/// `encoded_core_bytes_decoded` remain zero for successful Search candidate
+/// ranking; final winner hydration is owned by the read application.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EventCandidateQueryReceipt {
     pub query_executions: u64,
@@ -693,22 +765,12 @@ pub struct EventCandidateQueryReceipt {
     pub encoded_core_bytes_decoded: u64,
 }
 
-/// Candidate rows paired with the exact low-level work that produced them.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ObservedEventSearchCandidates {
-    pub candidates: Vec<EventSearchCandidate>,
-    pub receipt: EventCandidateQueryReceipt,
-}
-
 /// A candidate-query failure retaining exact work completed before the error.
 #[derive(Debug)]
 pub struct EventCandidateQueryFailure {
     pub error: IndexError,
     pub receipt: EventCandidateQueryReceipt,
 }
-
-pub type DiagnosedEventCandidateQueryResult =
-    std::result::Result<ObservedEventSearchCandidates, Box<EventCandidateQueryFailure>>;
 
 /// Completeness-aware lexical batch paired with the exact low-level work that
 /// produced it.

@@ -633,29 +633,6 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
         failure: SourceBackedRouteError,
         carried_forward: bool,
     ) -> SourceBackedCoordinatorResult<(), L::Error> {
-        self.record_logical_source_failure_with_empty_admission(
-            source,
-            failure,
-            carried_forward,
-            false,
-        )
-    }
-
-    pub fn record_logical_source_quarantine(
-        &mut self,
-        source: SourceKey,
-        failure: SourceBackedRouteError,
-    ) -> SourceBackedCoordinatorResult<(), L::Error> {
-        self.record_logical_source_failure_with_empty_admission(source, failure, false, true)
-    }
-
-    fn record_logical_source_failure_with_empty_admission(
-        &mut self,
-        source: SourceKey,
-        failure: SourceBackedRouteError,
-        carried_forward: bool,
-        allows_empty_route: bool,
-    ) -> SourceBackedCoordinatorResult<(), L::Error> {
         if !failure.kind.is_logical_source_failure() {
             return Err(SourceBackedCoordinatorError::InvalidLogicalSourceFailure {
                 detail: "non-local failure was reported as a logical-source outcome",
@@ -677,12 +654,15 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
                     &failure.detail,
                     MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES,
                 ),
-                allows_empty_route,
             });
         Ok(())
     }
 
-    pub fn record_rejection(&mut self, rejection: SourceBackedRecordRejectionDraft) {
+    fn record_rejection_with_provenance(
+        &mut self,
+        rejection: SourceBackedRecordRejectionDraft,
+        committed: bool,
+    ) {
         self.record_rejections.record(SourceBackedRecordRejection {
             route_index: self.route_index,
             route_identity: self.route_identity.clone(),
@@ -704,13 +684,29 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
                 &rejection.detail,
                 MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES,
             ),
+            committed,
         });
     }
 
     pub fn record_rejections(&mut self, rejections: SourceBackedRecordRejectionDrafts) {
+        self.record_rejections_with_provenance(rejections, true);
+    }
+
+    pub fn record_failed_attempt_rejections(
+        &mut self,
+        rejections: SourceBackedRecordRejectionDrafts,
+    ) {
+        self.record_rejections_with_provenance(rejections, false);
+    }
+
+    fn record_rejections_with_provenance(
+        &mut self,
+        rejections: SourceBackedRecordRejectionDrafts,
+        committed: bool,
+    ) {
         let (rejections, omitted) = rejections.into_parts();
         for rejection in rejections {
-            self.record_rejection(rejection);
+            self.record_rejection_with_provenance(rejection, committed);
         }
         self.record_omitted_rejections(omitted);
     }

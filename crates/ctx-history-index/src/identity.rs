@@ -16,7 +16,9 @@ use crate::{
 use std::cell::Cell;
 
 pub(crate) const MAX_SESSION_WITNESS_VISITS: usize = 32;
-pub(crate) const MAX_SESSION_WITNESS_SEGMENT_PROBES: usize = 64;
+/// Bounds the fixed segment fan-out before the sparse authority dictionary is
+/// opened. Keep this aligned with the manual lexical query ceiling.
+pub(crate) const MAX_SESSION_WITNESS_SEGMENT_PROBES: usize = 512;
 
 /// Test-only accounting for the bounded base witness lookup.
 #[cfg(test)]
@@ -163,7 +165,9 @@ where
                         fields.core_record,
                         "core_record",
                     )?)?;
-                    if core.session_id.encode_canonical()? != witness_session.encode_canonical()?
+                    if SessionAuthorityKey::for_core_record(&core)? != key
+                        || core.session_id.encode_canonical()?
+                            != witness_session.encode_canonical()?
                         || core.source.identity().encode_canonical()?
                             != witness_owner.encode_canonical()?
                     {
@@ -212,7 +216,10 @@ fn ensure_witness_visit_cap(visits: usize) -> Result<()> {
 
 fn ensure_witness_segment_probe_cap(probes: usize) -> Result<()> {
     if probes > MAX_SESSION_WITNESS_SEGMENT_PROBES {
-        return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+        return Err(IndexError::SessionAuthorityWorkLimitExceeded {
+            operation: "segment probes",
+            maximum: MAX_SESSION_WITNESS_SEGMENT_PROBES,
+        });
     }
     Ok(())
 }
@@ -245,5 +252,27 @@ pub(crate) fn register_compact_identity(
                 new_digest: hex(&digest),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_witness_segment_probe_cap_is_typed_and_inclusive() {
+        assert!(ensure_witness_segment_probe_cap(MAX_SESSION_WITNESS_SEGMENT_PROBES).is_ok());
+        let error =
+            ensure_witness_segment_probe_cap(MAX_SESSION_WITNESS_SEGMENT_PROBES + 1).unwrap_err();
+        assert!(matches!(
+            &error,
+            IndexError::SessionAuthorityWorkLimitExceeded {
+                operation: "segment probes",
+                maximum: MAX_SESSION_WITNESS_SEGMENT_PROBES,
+            }
+        ));
+        assert!(crate::prior_session_identity_lookup_failure_is_passthrough(
+            &error
+        ));
     }
 }

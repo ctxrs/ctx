@@ -63,9 +63,7 @@ fn codex_cold_duplicate_direct_and_mcp_terminals_fail_open() {
         .iter()
         .all(|record| record.content.discovery_exclusion.is_none()));
     for marker in ["colddirectduplicatefirst", "coldmcpduplicatefirst"] {
-        assert!(index
-            .search_event_candidates(marker, 32)
-            .unwrap()
+        assert!(search_event_candidates(&index, marker, 32)
             .into_iter()
             .any(|candidate| candidate.event.provider_session_id.as_deref()
                 == Some(native_session_id)));
@@ -149,9 +147,7 @@ fn codex_appended_duplicate_direct_and_mcp_terminals_retract_exclusion_with_stab
         .chain(&mcp)
         .all(|record| record.content.discovery_exclusion.is_none()));
     for marker in ["appenddirectfirst", "appendmcpfirst"] {
-        assert!(appended_index
-            .search_event_candidates(marker, 32)
-            .unwrap()
+        assert!(search_event_candidates(&appended_index, marker, 32)
             .into_iter()
             .any(|candidate| matches!(
                 candidate.event.provider_session_id.as_deref(),

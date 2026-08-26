@@ -5,7 +5,7 @@ use ctx_history_core::{
     NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
     SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::{CoreEventRecord, GenerationWriter, WriterOptions};
+use ctx_history_index::{CoreEventRecord, EventSearchFilters, GenerationWriter, WriterOptions};
 use ctx_semantic_index::{
     source_backed_semantic_vector_path,
     test_support::{pinned_flat_generation, publish_chunk_replacements, semantic_chunk_document},
@@ -15,6 +15,10 @@ use ctx_semantic_index::{
 use uuid::Uuid;
 
 use super::*;
+
+fn default_compiled_filter() -> CompiledSearchFilter {
+    CompiledSearchFilter::compile(EventSearchFilters::default()).unwrap()
+}
 
 fn semantic_index(root: &Path) -> Result<(VerifiedIndex, Uuid)> {
     semantic_index_revision(root, 1, true)
@@ -231,13 +235,14 @@ fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
         )?;
         let mut adapter = SemanticQuerySession::from_pin(&index, temp.path(), pin);
         let calls = Cell::new(0_u8);
-        let result = adapter.search_with("query", &EventSearchFilters::default(), 1, |_, _| {
+        let result = adapter.prepare_alternative_with("query", |_, _| {
             calls.set(calls.get() + 1);
             Ok(Some((embedding(), 1)))
         });
 
         if generation == index.generation_id() {
-            let (candidates, diagnostics) = result?;
+            assert_eq!(result?, compact_json(json!({"query_embed_ms": null})));
+            let (candidates, diagnostics) = adapter.search(&default_compiled_filter(), 1)?;
             assert!(candidates.is_empty());
             assert_eq!(
                 diagnostics,
@@ -246,11 +251,13 @@ fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
                     "core_generation_id": index.generation_id(),
                     "flat_generation": null,
                     "flat_generation_hash": null,
-                    "query_embed_ms": null,
                     "vector_scan_ms": null,
+                    "query_vectors": null,
+                    "vector_passes": 0,
                     "chunks_scanned": null,
                     "vector_bytes_read": null,
                     "events_scored": null,
+                    "dot_products": null,
                     "initial_k": 1,
                     "final_k": 1,
                     "iterations": 0,
@@ -258,6 +265,8 @@ fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
                     "eligible_candidates": 0,
                     "filtered_candidates": 0,
                     "non_positive_candidates": 0,
+                    "metadata_records_loaded": 0,
+                    "core_records_decoded": 0,
                     "exhausted": true,
                     "cap_reached": false,
                 }))
@@ -279,35 +288,32 @@ fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
 }
 
 #[test]
-fn adapter_embeds_ready_queries_once_and_reuses_one_pin_filter_cache() -> Result<()> {
+fn adapter_embeds_ordered_queries_then_runs_one_scan_with_one_filter_projection() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (index, event_id) = semantic_index(temp.path())?;
     let mut adapter = ready_adapter(&index, temp.path(), event_id, &temp.path().join("vectors"))?;
     let calls = Cell::new(0_u8);
-    let filters = EventSearchFilters::default();
+    let filters = default_compiled_filter();
 
-    let (first, first_diagnostics) =
-        adapter.search_with("first normalized query", &filters, 1, |_, _| {
+    let first_diagnostics =
+        adapter.prepare_alternative_with("first normalized query", |_, _| {
             calls.set(calls.get() + 1);
             Ok(Some((embedding(), 17)))
         })?;
-    assert_eq!(first.len(), 1);
     assert_eq!(first_diagnostics["query_embed_ms"], 17);
-    let first_projection = adapter
-        .pin
-        .filter_projection_identity_for_test()
-        .expect("first query must cache its filter projection");
-    let (second, _) = adapter.search_with("second normalized query", &filters, 1, |_, _| {
-        calls.set(calls.get() + 1);
-        Ok(Some((embedding(), 17)))
-    })?;
-    assert_eq!(second.len(), 1);
+    let second_diagnostics =
+        adapter.prepare_alternative_with("second normalized query", |_, _| {
+            calls.set(calls.get() + 1);
+            Ok(Some((embedding(), 17)))
+        })?;
+    assert_eq!(second_diagnostics["query_embed_ms"], 17);
+    assert_eq!(adapter.pin.filter_projection_identity_for_test(), None);
+    let (candidates, scan_diagnostics) = adapter.search(&filters, 1)?;
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(scan_diagnostics["query_vectors"], 2);
+    assert_eq!(scan_diagnostics["vector_passes"], 1);
     assert_eq!(calls.get(), 2, "each ready query must embed exactly once");
-    assert_eq!(
-        adapter.pin.filter_projection_identity_for_test(),
-        Some(first_projection),
-        "normalized queries must reuse one pin and filter cache"
-    );
+    assert!(adapter.pin.filter_projection_identity_for_test().is_some());
     Ok(())
 }
 
@@ -319,7 +325,7 @@ fn adapter_preserves_daemon_query_service_unavailable_contract() -> Result<()> {
     let calls = Cell::new(0_u8);
 
     let error = adapter
-        .search_with("query", &EventSearchFilters::default(), 1, |_, _| {
+        .prepare_alternative_with("query", |_, _| {
             calls.set(calls.get() + 1);
             Ok(None)
         })
@@ -347,10 +353,8 @@ fn adapter_scores_only_the_active_flat_core_intersection() -> Result<()> {
         &temp.path().join("vectors"),
     )?;
 
-    let (candidates, diagnostics) =
-        adapter.search_with("query", &EventSearchFilters::default(), 1, |_, _| {
-            Ok(Some((embedding(), 1)))
-        })?;
+    adapter.prepare_alternative_with("query", |_, _| Ok(Some((embedding(), 1))))?;
+    let (candidates, diagnostics) = adapter.search(&default_compiled_filter(), 1)?;
 
     assert!(candidates.is_empty());
     assert_eq!(diagnostics["events_scored"], 0);
