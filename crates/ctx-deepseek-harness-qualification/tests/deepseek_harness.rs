@@ -1117,7 +1117,7 @@ fn complete_tail_body_is_searchable_and_tantivy_stores_only_core_record() {
     assert_eq!(hits.len(), 1);
     let expected_event_id = hits[0].event.event_id;
     let stored = index
-        .core_event_by_id(expected_event_id.as_uuid())
+        .core_event_by_id(expected_event_id)
         .expect("load tail record from stored Core")
         .expect("tail record exists in stored Core");
     assert_eq!(
