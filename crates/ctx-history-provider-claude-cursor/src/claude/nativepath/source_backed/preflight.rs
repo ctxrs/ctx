@@ -11,7 +11,7 @@ use ctx_history_provider_runtime::CaptureError;
 use sha2::{Digest, Sha256};
 
 use super::{
-    claude_annotation, contract, native_record_key_parts, Binding, JsonlReader, LOGICAL_EVENT_KIND,
+    claude_annotation, contract, Binding, JsonlReader, LOGICAL_EVENT_KIND,
     NATIVE_EVENT_KEY_NAMESPACE,
 };
 use crate::claude::nativepath::{
@@ -156,6 +156,29 @@ pub(super) fn typed_claude_record_key(
     value: &str,
 ) -> std::result::Result<TypedKey, ClaudeRowValidationError> {
     TypedKey::utf8(value).map_err(|error| classify_typed_record_key_error(field, error))
+}
+
+fn native_record_key_parts(
+    row: &ClaudeRetainedRow,
+) -> std::result::Result<Option<Vec<TypedKey>>, ClaudeRowValidationError> {
+    let Some(native_record_id) = row.native_record_id.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(vec![
+        typed_claude_record_key(ClaudeRecordKeyField::NativeRecordId, native_record_id)?,
+        TypedKey::U64(row.identity.source_subrecord_index),
+    ]))
+}
+
+pub(super) fn prevalidated_native_record_key_parts(
+    row: &ClaudeRetainedRow,
+) -> std::result::Result<Option<Vec<TypedKey>>, CaptureError> {
+    native_record_key_parts(row).map_err(|error| match error {
+        ClaudeRowValidationError::Record(_) => {
+            CaptureError::SystemInvariant("Claude native identity changed after prevalidation")
+        }
+        ClaudeRowValidationError::Fatal(error) => error,
+    })
 }
 
 pub(super) fn scope_claude_row_validation_error(

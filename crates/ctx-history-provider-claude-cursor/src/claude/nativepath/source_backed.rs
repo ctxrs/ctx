@@ -61,9 +61,10 @@ mod preflight;
 use binding::*;
 use normalized_body::{event_kind, lexical_body};
 use preflight::{
-    parsed_record_is_rejected, scope_claude_row_validation_error, stable_native_event_identity,
-    typed_claude_record_key, validate_claude_row_annotation, ClaudeDuplicatePlan,
-    ClaudePreflightError, ClaudeRecordKeyField, ClaudeRowValidationError,
+    parsed_record_is_rejected, prevalidated_native_record_key_parts,
+    scope_claude_row_validation_error, stable_native_event_identity, typed_claude_record_key,
+    validate_claude_row_annotation, ClaudeDuplicatePlan, ClaudePreflightError,
+    ClaudeRecordKeyField, ClaudeRowValidationError,
 };
 
 #[derive(Debug, Default)]
@@ -876,27 +877,6 @@ fn session_identity(source: &SourceKey, native_key: TypedKey) -> Result<StableEn
         native_key,
     )
     .map_err(contract)
-}
-
-fn native_record_key_parts(
-    row: &ClaudeRetainedRow,
-) -> std::result::Result<Option<Vec<TypedKey>>, ClaudeRowValidationError> {
-    let Some(native_record_id) = row.native_record_id.as_deref() else {
-        return Ok(None);
-    };
-    Ok(Some(vec![
-        typed_claude_record_key(ClaudeRecordKeyField::NativeRecordId, native_record_id)?,
-        TypedKey::U64(row.identity.source_subrecord_index),
-    ]))
-}
-
-fn prevalidated_native_record_key_parts(row: &ClaudeRetainedRow) -> Result<Option<Vec<TypedKey>>> {
-    native_record_key_parts(row).map_err(|error| match error {
-        ClaudeRowValidationError::Record(_) => {
-            CaptureError::SystemInvariant("Claude native identity changed after prevalidation")
-        }
-        ClaudeRowValidationError::Fatal(error) => error,
-    })
 }
 
 fn native_item_key(
