@@ -204,7 +204,7 @@ where
         source_id: String,
         route_identity: SourceRouteIdentity,
         route_failures: Vec<SourceBackedFailedRouteOutcome>,
-        logical_source_failures: SourceBackedLogicalSourceFailures,
+        logical_source_failures: Box<SourceBackedLogicalSourceFailures>,
     },
     #[error("source deletion was not certified by its supplied authoritative inventory")]
     InvalidDeletionWitness,

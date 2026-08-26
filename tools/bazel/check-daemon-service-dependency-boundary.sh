@@ -166,9 +166,7 @@ allowed_external = {
     "libc",
     "objc2-foundation",
     "rusqlite",
-    "serde",
     "serde_json",
-    "thiserror",
     "uuid",
 }
 allowed = allowed_internal | allowed_external
@@ -201,7 +199,6 @@ for candidate in sorted((root / "crates").glob("*/Cargo.toml")):
     if candidate != manifest_path and "ctx-daemon-service" in candidate.read_text(encoding="utf-8"):
         reverse.append(candidate.relative_to(root).as_posix())
 if reverse != [
-    "crates/ctx-cli/Cargo.toml",
     "crates/ctx-daemon-application/Cargo.toml",
     "crates/ctx-daemon-cli/Cargo.toml",
 ]:

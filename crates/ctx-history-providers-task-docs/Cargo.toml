@@ -10,16 +10,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-base64.workspace = true
 chrono.workspace = true
 libc.workspace = true
-regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-capture-runtime = { path = "../ctx-history-capture-runtime" }
 ctx-history-core = { path = "../ctx-history-core" }

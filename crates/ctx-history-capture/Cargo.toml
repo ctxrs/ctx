@@ -19,6 +19,4 @@ ctx-history-source-io = { path = "../ctx-history-source-io" }
 ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
 
 [dev-dependencies]
-ctx-history-index = { path = "../ctx-history-index" }
-rusqlite.workspace = true
 tempfile.workspace = true

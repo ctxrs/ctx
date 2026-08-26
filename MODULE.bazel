@@ -205,6 +205,7 @@ crate.annotation(
     crate = "ort",
     patch_args = ["-p1"],
     patches = ["//tools/bazel/patches:ort-freebsd-release-env-order.patch"],
+    repositories = ["crates"],
     version = "2.0.0-rc.12",
 )
 crate.from_cargo(
@@ -231,6 +232,59 @@ crate.render_config(
     repositories = ["crates"],
 )
 use_repo(crate, "crates")
+
+# Keep mutating Cargo repairs and dependency hygiene on repository-owned,
+# reproducible binaries instead of whichever cargo subcommands happen to be
+# installed on a developer machine. These tools are separate from the product
+# dependency graph and therefore do not expand Cargo.lock or crate_universe's
+# shipped Rust closure.
+cargo_tools = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+cargo_tools.spec(
+    package = "cargo-fixit",
+    repositories = ["ctx_cargo_tools"],
+    version = "=0.1.15",
+)
+cargo_tools.spec(
+    package = "cargo-shear",
+    repositories = ["ctx_cargo_tools"],
+    version = "=1.13.4",
+)
+cargo_tools.annotation(
+    crate = "cargo-fixit",
+    gen_all_binaries = True,
+    repositories = ["ctx_cargo_tools"],
+)
+cargo_tools.annotation(
+    build_script_data = [
+        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.2//:libssh2/include/libssh2.h",
+        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.2//:libssh2/include/libssh2_publickey.h",
+        "@@rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.2//:libssh2/include/libssh2_sftp.h",
+        "@@rules_rust++crate+ctx_cargo_tools__libz-sys-1.1.29//:src/zlib/zconf.h",
+        "@@rules_rust++crate+ctx_cargo_tools__libz-sys-1.1.29//:src/zlib/zlib.h",
+    ],
+    crate = "libgit2-sys",
+    patch_args = ["-p1"],
+    patches = ["//tools/bazel/patches:libgit2-sys-bazel-headers.patch"],
+    repositories = ["ctx_cargo_tools"],
+    version = "0.18.8+1.9.7",
+)
+cargo_tools.annotation(
+    # cargo-fixit uses git2 only to inspect the local worktree. Disable
+    # libssh2's optional compression so this developer tool does not depend on
+    # undeclared host zlib headers inside Bazel's hermetic sandbox.
+    crate = "libssh2-sys",
+    patch_args = ["-p1"],
+    patches = ["//tools/bazel/patches:libssh2-sys-disable-zlib.patch"],
+    repositories = ["ctx_cargo_tools"],
+    version = "0.3.2",
+)
+cargo_tools.annotation(
+    crate = "cargo-shear",
+    gen_all_binaries = True,
+    repositories = ["ctx_cargo_tools"],
+)
+cargo_tools.from_specs(name = "ctx_cargo_tools")
+use_repo(cargo_tools, "ctx_cargo_tools")
 
 # The Windows release contract is GNU, not MSVC. Own the complete linker,
 # CRT, C++ runtime, and import-library input instead of inheriting whichever

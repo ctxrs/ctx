@@ -26,4 +26,3 @@ ctx-history-source-io = { path = "../ctx-history-source-io" }
 
 [dev-dependencies]
 ctx-history-source-io = { path = "../ctx-history-source-io", features = ["test-support"] }
-uuid.workspace = true

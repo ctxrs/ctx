@@ -10,6 +10,19 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
+[package.metadata.cargo-shear]
+# These dependencies are consumed by Bazel-only final-binary contracts.
+ignored = [
+    "assert_cmd",
+    "ctx-history-index",
+    "predicates",
+    "rusqlite",
+    "serde_yaml",
+    "sha2",
+    "toml_edit",
+    "uuid",
+]
+
 [dependencies]
 anyhow.workspace = true
 ctx-agent-integrations = { path = "../ctx-agent-integrations" }

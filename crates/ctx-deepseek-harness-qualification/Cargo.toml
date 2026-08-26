@@ -16,10 +16,8 @@ path = "tests/deepseek_harness.rs"
 
 [dev-dependencies]
 assert_cmd.workspace = true
-ctx-history-index-format = { path = "../ctx-history-index-format", features = ["test-support"] }
 ctx-history-index-query = { path = "../ctx-history-index-query", features = ["test-support"] }
 serde_json.workspace = true
-tantivy.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 zstd.workspace = true

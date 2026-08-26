@@ -148,6 +148,9 @@ case "${mode}" in
       CTX_SDK_CARGO_VENDOR_MANIFEST="${4:-}" \
       run bash scripts/sdk-package-dry-run.sh
     ;;
+  cargo_shear_check)
+    run bash scripts/cargo-shear.sh "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}"
+    ;;
   package_audit_release)
     CTX_AUDIT_CTX_BINARY="${2:-}" run bash scripts/audit-search-mvp-package.sh
     ;;

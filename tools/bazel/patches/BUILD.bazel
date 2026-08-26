@@ -1,6 +1,8 @@
 
 exports_files(
     [
+        "libgit2-sys-bazel-headers.patch",
+        "libssh2-sys-disable-zlib.patch",
         "ort-freebsd-release-env-order.patch",
         "rules-rust-freebsd-host.patch",
         "rules-rust-windows-cargo-runfiles.patch",

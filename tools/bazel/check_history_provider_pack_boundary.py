@@ -29,16 +29,13 @@ EVALUATED_REVERSE_BAZEL_CONSUMERS = {
     ),
 }
 EXPECTED_PACK_DEPENDENCIES = {
-    "base64": {"workspace": True},
     "chrono": {"workspace": True},
     "libc": {"workspace": True},
-    "regex": {"workspace": True},
     "rusqlite": {"workspace": True},
     "serde": {"workspace": True},
     "serde_json": {"workspace": True},
     "sha2": {"workspace": True},
     "thiserror": {"workspace": True},
-    "uuid": {"workspace": True},
     "ctx-history-capture-model": {"path": "../ctx-history-capture-model"},
     "ctx-history-capture-runtime": {"path": "../ctx-history-capture-runtime"},
     "ctx-history-core": {"path": "../ctx-history-core"},

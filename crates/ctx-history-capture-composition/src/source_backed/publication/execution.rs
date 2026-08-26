@@ -371,11 +371,13 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             registry,
             &owners,
             &complete_inventory_owners,
-            &attempt_carried,
-            &partial_routes,
-            &successful_this_attempt,
-            &failed_routes,
-            &logical_source_failures,
+            BaseSourceOwnershipEvidence {
+                carried_routes: &attempt_carried,
+                partial_routes: &partial_routes,
+                successful_routes: &successful_this_attempt,
+                failed_routes: &failed_routes,
+                logical_source_failures: &logical_source_failures,
+            },
         )?;
 
         let has_carried_source = lifecycle.base_snapshot().is_some_and(|base| {
