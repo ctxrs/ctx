@@ -919,7 +919,6 @@ mod unix {
         include!("auto_upgrade_acceptance/invocation_driver.rs");
         include!("auto_upgrade_acceptance/invalid_marker.rs");
     }
-
     #[test]
     fn automatic_indexing_foreground_command_defers_to_daemon_driver() {
         let temp = tempdir();
