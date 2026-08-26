@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 
 use super::preflight::{
     checked_preflight_identity_count, classify_typed_record_key_error,
-    scope_claude_row_validation_error, stable_native_event_identity, ClaudePreflightError,
-    ClaudePreflightIdentity, ClaudeRecordKeyField, ClaudeRecordValidationError,
-    ClaudeRowValidationError, MAX_PREFLIGHT_EVENT_IDENTITIES,
+    scope_claude_row_validation_error, stable_native_event_identity, ClaudeDuplicateWinner,
+    ClaudePreflightError, ClaudePreflightIdentity, ClaudeRecordKeyField,
+    ClaudeRecordValidationError, ClaudeRowValidationError, MAX_PREFLIGHT_EVENT_IDENTITIES,
 };
 use super::{
     claude_annotation, parse_native_record, session_identity, session_typed_key, source_key,
@@ -316,11 +316,18 @@ fn preflight_identity_cost_is_bounded_and_cap_failure_is_internal() {
             )
         )
     ));
+    let identity_bytes = MAX_PREFLIGHT_EVENT_IDENTITIES
+        .checked_mul(std::mem::size_of::<ClaudePreflightIdentity>())
+        .unwrap();
+    let maximum_winners = MAX_PREFLIGHT_EVENT_IDENTITIES / 2;
+    let winner_bytes = maximum_winners
+        .checked_mul(std::mem::size_of::<ClaudeDuplicateWinner>())
+        .unwrap();
     assert!(
-        MAX_PREFLIGHT_EVENT_IDENTITIES
-            .checked_mul(std::mem::size_of::<ClaudePreflightIdentity>())
-            .is_some_and(|bytes| bytes <= 40 * 1024 * 1024),
-        "the fixed logical identity payload must remain at or below 40 MiB"
+        identity_bytes
+            .checked_add(winner_bytes)
+            .is_some_and(|bytes| bytes <= 72 * 1024 * 1024),
+        "the fixed duplicate-planning payload must remain at or below 72 MiB"
     );
 }
 

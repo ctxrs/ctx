@@ -743,7 +743,55 @@ fn cold_unavailable_configured_claude_home_does_not_block_healthy_peer() {
 }
 
 #[test]
-fn claude_duplicate_identity_retains_warm_source_atomically_while_sibling_advances_and_repairs() {
+fn claude_compatible_duplicate_identity_keeps_last_observation_cold_and_after_append() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let projects = temp.path().join("projects");
+    let index = temp.path().join("index");
+    let session = "last-observation-claude-session";
+    let transcript = projects.join("project").join(format!("{session}.jsonl"));
+    write_transcript(
+        &transcript,
+        &[
+            claude_message("user", "repeated-event", session, "stale cold observation"),
+            claude_message("user", "repeated-event", session, "fresh cold observation"),
+        ],
+    );
+    let registry = registry(
+        CaptureProvider::Claude,
+        "claude_projects_jsonl_tree",
+        &projects,
+    );
+
+    let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(cold.failed_routes.is_empty());
+    assert!(cold.logical_source_failures.is_empty());
+    let cold_records = indexed_records(&index, CaptureProvider::Claude, session);
+    assert_literal_bodies(&cold_records, &["fresh cold observation"]);
+    let stable_event_id = cold_records[0].event_id;
+
+    append_transcript(
+        &transcript,
+        &claude_message(
+            "user",
+            "repeated-event",
+            session,
+            "fresh append observation",
+        ),
+    );
+    let appended = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+    assert!(appended.failed_routes.is_empty());
+    assert!(appended.logical_source_failures.is_empty());
+    let appended_records = indexed_records(&index, CaptureProvider::Claude, session);
+    assert_literal_bodies(&appended_records, &["fresh append observation"]);
+    assert_eq!(appended_records[0].event_id, stable_event_id);
+    assert_eq!(
+        certified_prefix_bytes(&index, CaptureProvider::Claude),
+        fs::metadata(&transcript).unwrap().len()
+    );
+}
+
+#[test]
+fn claude_incompatible_duplicate_kind_quarantines_only_its_source_and_repairs() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let projects = temp.path().join("projects");
     let index = temp.path().join("index");
@@ -791,7 +839,7 @@ fn claude_duplicate_identity_retains_warm_source_atomically_while_sibling_advanc
     append_transcript(
         &retained_transcript,
         &claude_message(
-            "assistant",
+            "summary",
             "retained-event",
             retained_session,
             "must never publish partially",
@@ -816,7 +864,9 @@ fn claude_duplicate_identity_retains_warm_source_atomically_while_sibling_advanc
     };
     assert!(failure.carried_forward);
     assert_eq!(failure.source.provider(), CaptureProvider::Claude.as_str());
-    assert!(failure.detail.contains("repeats a stable event identity"));
+    assert!(failure
+        .detail
+        .contains("repeats a stable event identity with incompatible event kinds"));
     assert_ne!(
         VerifiedIndex::open(&index).unwrap().generation_id(),
         initial_generation
@@ -863,7 +913,7 @@ fn cold_bad_claude_leaf_does_not_block_sibling_or_cursor_provider() {
             .join(format!("{bad_session}.jsonl")),
         &[
             claude_message("user", "duplicate", bad_session, "bad first"),
-            claude_message("assistant", "duplicate", bad_session, "bad second"),
+            claude_message("summary", "duplicate", bad_session, "bad second"),
         ],
     );
     write_transcript(

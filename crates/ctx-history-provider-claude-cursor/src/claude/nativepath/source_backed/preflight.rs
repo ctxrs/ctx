@@ -11,22 +11,90 @@ use ctx_history_provider_runtime::CaptureError;
 use sha2::{Digest, Sha256};
 
 use super::{
-    claude_annotation, contract, Binding, JsonlReader, LOGICAL_EVENT_KIND,
+    claude_annotation, contract, native_record_key_parts, Binding, JsonlReader, LOGICAL_EVENT_KIND,
     NATIVE_EVENT_KEY_NAMESPACE,
 };
 use crate::claude::nativepath::{
     record::{parse_native_record, ParsedClaudeRecord},
-    rows::{ClaudePhysicalLocator, ClaudeRetainedRow, CLAUDE_MAX_RECORD_ROWS},
+    rows::{
+        ClaudeEventIdentity, ClaudeEventKind, ClaudePhysicalLocator, ClaudeRetainedRow,
+        CLAUDE_MAX_RECORD_ROWS,
+    },
 };
 
 pub(super) const MAX_PREFLIGHT_EVENT_IDENTITIES: usize = 1_048_576;
 
 pub(super) type ClaudePreflightError = JsonlFamilyProjectorPreflightError<CaptureError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ClaudePreflightIdentity {
     event_digest: [u8; 32],
-    line_number: u64,
+    source_record_ordinal: u64,
+    source_subrecord_index: u16,
+    kind: ClaudeEventKind,
+    in_certified_prefix: bool,
+}
+
+impl ClaudePreflightIdentity {
+    fn line_number(self) -> u64 {
+        self.source_record_ordinal + 1
+    }
+
+    fn position(self) -> ClaudeEventIdentity {
+        ClaudeEventIdentity {
+            source_record_ordinal: self.source_record_ordinal,
+            source_subrecord_index: u64::from(self.source_subrecord_index),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ClaudeDuplicateWinner {
+    event_digest: [u8; 32],
+    position: ClaudeEventIdentity,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ClaudeDuplicatePlan {
+    winners: Vec<ClaudeDuplicateWinner>,
+}
+
+impl ClaudeDuplicatePlan {
+    pub(super) fn retains(
+        &self,
+        row: &ClaudeRetainedRow,
+        source: &SourceKey,
+        session_id: StableEntityId,
+    ) -> std::result::Result<bool, ClaudeRowValidationError> {
+        let Some(event_id) = stable_native_event_identity(row, source, session_id)? else {
+            return Ok(true);
+        };
+        Ok(self
+            .winners
+            .binary_search_by_key(&event_id.digest(), |winner| winner.event_digest)
+            .map_or(true, |index| self.winners[index].position == row.identity))
+    }
+
+    fn clear(&mut self) {
+        self.winners.clear();
+    }
+
+    fn insert(
+        &mut self,
+        event_digest: [u8; 32],
+        winner: ClaudeEventIdentity,
+    ) -> std::result::Result<(), ClaudePreflightError> {
+        self.winners.try_reserve(1).map_err(|_| {
+            ClaudePreflightError::internal(CaptureError::SystemInvariant(
+                "Claude duplicate winner allocation failed",
+            ))
+        })?;
+        self.winners.push(ClaudeDuplicateWinner {
+            event_digest,
+            position: winner,
+        });
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -121,8 +189,12 @@ pub(super) fn validate_source(
     binding: &Binding,
     source: &SourceKey,
     session_id: StableEntityId,
+    certified_prefix_end: Option<u64>,
+    duplicate_plan: &mut ClaudeDuplicatePlan,
 ) -> std::result::Result<bool, ClaudePreflightError> {
+    duplicate_plan.clear();
     let mut identities = Vec::new();
+    let mut requires_replacement = false;
     while reader
         .visit_page(
             &mut |record| -> std::result::Result<(), ClaudePreflightError> {
@@ -162,7 +234,18 @@ pub(super) fn validate_source(
                     match stable_native_event_identity(row, source, session_id) {
                         Ok(Some(event_id)) => record_identities.push(ClaudePreflightIdentity {
                             event_digest: event_id.digest(),
-                            line_number,
+                            source_record_ordinal: row.identity.source_record_ordinal,
+                            source_subrecord_index: u16::try_from(
+                                row.identity.source_subrecord_index,
+                            )
+                            .map_err(|_| {
+                                ClaudePreflightError::internal(CaptureError::SystemInvariant(
+                                    "Claude preflight subrecord identity exceeded its parser bound",
+                                ))
+                            })?,
+                            kind: row.kind,
+                            in_certified_prefix: certified_prefix_end
+                                .is_some_and(|end| evidence.byte_end_exclusive() <= end),
                         }),
                         Ok(None) => {}
                         Err(error) => match scope_claude_row_validation_error(error) {
@@ -195,20 +278,46 @@ pub(super) fn validate_source(
         )?
         .is_some()
     {}
-    identities.sort_unstable();
-    if let Some(pair) = identities
-        .windows(2)
-        .find(|pair| pair[0].event_digest == pair[1].event_digest)
-    {
-        return Err(ClaudePreflightError::logical_source_failure(
-            source.clone(),
-            format!(
-                "Claude transcript repeats a stable event identity at lines {} and {}",
-                pair[0].line_number, pair[1].line_number
-            ),
-        ));
+    identities.sort_unstable_by(|left, right| {
+        left.event_digest
+            .cmp(&right.event_digest)
+            .then_with(|| left.source_record_ordinal.cmp(&right.source_record_ordinal))
+            .then_with(|| {
+                left.source_subrecord_index
+                    .cmp(&right.source_subrecord_index)
+            })
+    });
+    let mut group_start = 0;
+    while group_start < identities.len() {
+        let event_digest = identities[group_start].event_digest;
+        let mut group_end = group_start + 1;
+        while group_end < identities.len() && identities[group_end].event_digest == event_digest {
+            group_end += 1;
+        }
+        if group_end - group_start > 1 {
+            let first = identities[group_start];
+            if let Some(incompatible) = identities[group_start + 1..group_end]
+                .iter()
+                .copied()
+                .find(|candidate| candidate.kind != first.kind)
+            {
+                return Err(ClaudePreflightError::logical_source_failure(
+                    source.clone(),
+                    format!(
+                        "Claude transcript repeats a stable event identity with incompatible event kinds at lines {} and {}",
+                        first.line_number(),
+                        incompatible.line_number()
+                    ),
+                ));
+            }
+            let winner = identities[group_end - 1];
+            requires_replacement |=
+                identities[group_start].in_certified_prefix && !winner.in_certified_prefix;
+            duplicate_plan.insert(event_digest, winner.position())?;
+        }
+        group_start = group_end;
     }
-    Ok(false)
+    Ok(requires_replacement)
 }
 
 pub(super) fn parsed_record_is_rejected(parsed: &ParsedClaudeRecord, binding: &Binding) -> bool {
@@ -226,23 +335,11 @@ pub(super) fn stable_native_event_identity(
     source: &SourceKey,
     session_id: StableEntityId,
 ) -> std::result::Result<Option<StableEntityId>, ClaudeRowValidationError> {
-    if row.native_record_id.is_none() {
+    let Some(key_parts) = native_record_key_parts(row)? else {
         return Ok(None);
-    }
-    let native_record_id = typed_claude_record_key(
-        ClaudeRecordKeyField::NativeRecordId,
-        row.native_record_id
-            .as_deref()
-            .expect("native record identity was checked above"),
-    )?;
-    let native_item_key = NativeItemKey::composite(
-        NATIVE_EVENT_KEY_NAMESPACE,
-        vec![
-            native_record_id,
-            TypedKey::U64(row.identity.source_subrecord_index),
-        ],
-    )
-    .map_err(|error| ClaudeRowValidationError::Fatal(contract(error)))?;
+    };
+    let native_item_key = NativeItemKey::composite(NATIVE_EVENT_KEY_NAMESPACE, key_parts)
+        .map_err(|error| ClaudeRowValidationError::Fatal(contract(error)))?;
     derive_event_id(EventIdentityInput {
         source,
         session_id,

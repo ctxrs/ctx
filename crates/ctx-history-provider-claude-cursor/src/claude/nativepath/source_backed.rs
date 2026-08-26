@@ -62,8 +62,8 @@ use binding::*;
 use normalized_body::{event_kind, lexical_body};
 use preflight::{
     parsed_record_is_rejected, scope_claude_row_validation_error, stable_native_event_identity,
-    typed_claude_record_key, validate_claude_row_annotation, ClaudePreflightError,
-    ClaudeRecordKeyField, ClaudeRowValidationError,
+    typed_claude_record_key, validate_claude_row_annotation, ClaudeDuplicatePlan,
+    ClaudePreflightError, ClaudeRecordKeyField, ClaudeRowValidationError,
 };
 
 #[derive(Debug, Default)]
@@ -339,6 +339,7 @@ where
                 CaptureProvider::Claude,
                 leaf.source_path().to_string_lossy(),
             ),
+            duplicate_plan: ClaudeDuplicatePlan::default(),
             fallback_identities: match (mode, base_event_lookup) {
                 (JsonlFamilyProjectionMode::CertifiedAppend, Some(base_lookup)) => {
                     JsonlAppendOccurrenceState::for_append(base_lookup)
@@ -363,6 +364,7 @@ struct ClaudeProjector<B: ProviderRuntimeBinding> {
     identities: Identities,
     session: ClaudeSessionMetadata,
     rejections: JsonlRecordRejections,
+    duplicate_plan: ClaudeDuplicatePlan,
     fallback_identities: JsonlAppendOccurrenceState<[u8; 32], ProviderBaseEventLookup<B>>,
 }
 
@@ -393,7 +395,7 @@ where
     fn preflight_with_failure_scope(
         &mut self,
         reader: &mut JsonlReader,
-        _certified_prefix_end: Option<u64>,
+        certified_prefix_end: Option<u64>,
     ) -> std::result::Result<bool, ClaudePreflightError> {
         preflight::validate_source(
             reader,
@@ -401,10 +403,14 @@ where
             &self.binding,
             &self.source,
             self.identities.session_id,
+            certified_prefix_end,
+            &mut self.duplicate_plan,
         )
     }
 
     fn retry_replacement(&mut self) {
+        // Keep the whole-source duplicate plan produced by preflight: the
+        // replacement pass needs it to suppress superseded observations.
         self.session = ClaudeSessionMetadata::new(self.binding.key.clone());
         self.rejections = JsonlRecordRejections::new(
             self.source.clone(),
@@ -506,6 +512,18 @@ where
             return Ok(());
         }
         for row in parsed.rows {
+            let retained = self
+                .duplicate_plan
+                .retains(&row, &self.source, self.identities.session_id)
+                .map_err(|error| match error {
+                    ClaudeRowValidationError::Record(_) => CaptureError::SystemInvariant(
+                        "Claude native identity changed after prevalidation",
+                    ),
+                    ClaudeRowValidationError::Fatal(error) => error,
+                })?;
+            if !retained {
+                continue;
+            }
             let normalized_body = lexical_body(&row);
             let annotation =
                 claude_annotation(&row, parsed.cwd.as_deref(), parsed.git_branch.as_deref())
@@ -860,19 +878,33 @@ fn session_identity(source: &SourceKey, native_key: TypedKey) -> Result<StableEn
     .map_err(contract)
 }
 
+fn native_record_key_parts(
+    row: &ClaudeRetainedRow,
+) -> std::result::Result<Option<Vec<TypedKey>>, ClaudeRowValidationError> {
+    let Some(native_record_id) = row.native_record_id.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(vec![
+        typed_claude_record_key(ClaudeRecordKeyField::NativeRecordId, native_record_id)?,
+        TypedKey::U64(row.identity.source_subrecord_index),
+    ]))
+}
+
+fn prevalidated_native_record_key_parts(row: &ClaudeRetainedRow) -> Result<Option<Vec<TypedKey>>> {
+    native_record_key_parts(row).map_err(|error| match error {
+        ClaudeRowValidationError::Record(_) => {
+            CaptureError::SystemInvariant("Claude native identity changed after prevalidation")
+        }
+        ClaudeRowValidationError::Fatal(error) => error,
+    })
+}
+
 fn native_item_key(
     row: &ClaudeRetainedRow,
     fallback_identity: Option<FallbackEventIdentity>,
 ) -> Result<NativeItemKey> {
-    if let Some(native_record_id) = row.native_record_id.as_deref() {
-        return NativeItemKey::composite(
-            NATIVE_EVENT_KEY_NAMESPACE,
-            vec![
-                TypedKey::utf8(native_record_id).map_err(contract)?,
-                TypedKey::U64(row.identity.source_subrecord_index),
-            ],
-        )
-        .map_err(contract);
+    if let Some(key_parts) = prevalidated_native_record_key_parts(row)? {
+        return NativeItemKey::composite(NATIVE_EVENT_KEY_NAMESPACE, key_parts).map_err(contract);
     }
     let fallback_identity = fallback_identity.ok_or(CaptureError::SystemInvariant(
         "Claude fallback event identity was not assigned",
@@ -888,12 +920,8 @@ fn native_event_typed_key(
     row: &ClaudeRetainedRow,
     fallback_identity: Option<FallbackEventIdentity>,
 ) -> Result<TypedKey> {
-    if let Some(native_record_id) = row.native_record_id.as_deref() {
-        return TypedKey::composite(vec![
-            TypedKey::utf8(native_record_id).map_err(contract)?,
-            TypedKey::U64(row.identity.source_subrecord_index),
-        ])
-        .map_err(contract);
+    if let Some(key_parts) = prevalidated_native_record_key_parts(row)? {
+        return TypedKey::composite(key_parts).map_err(contract);
     }
     let fallback_identity = fallback_identity.ok_or(CaptureError::SystemInvariant(
         "Claude fallback native event key was not assigned",
