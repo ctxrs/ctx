@@ -12,6 +12,10 @@ rust-version.workspace = true
 publish = false
 autotests = false
 
+[package.metadata.cargo-shear]
+# Shared contract shims compile under Bazel and are not Cargo test targets.
+ignored = ["libc", "sha2", "uuid", "windows-sys"]
+
 [[test]]
 name = "index"
 path = "tests/index.rs"
@@ -27,19 +31,11 @@ path = "tests/grok_build.rs"
 [dev-dependencies]
 anstream.workspace = true
 assert_cmd.workspace = true
-base64.workspace = true
-chrono.workspace = true
-ctx-history-core = { path = "../ctx-history-core" }
-ctx-history-index = { path = "../ctx-history-index" }
-flate2 = "1"
 libc.workspace = true
 predicates.workspace = true
-ring.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 sha2.workspace = true
-tar.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 

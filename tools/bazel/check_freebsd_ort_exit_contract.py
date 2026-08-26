@@ -52,6 +52,7 @@ def validate_module_text(module_text: str) -> None:
         "crate": "ort",
         "patch_args": ["-p1"],
         "patches": [ORT_PATCH],
+        "repositories": ["crates"],
         "version": ORT_VERSION,
     }
     if annotation != expected:

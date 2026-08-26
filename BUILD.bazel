@@ -274,6 +274,62 @@ rustfmt_test(
     targets = RUST_FORMAT_TARGETS,
 )
 
+py_binary(
+    name = "prepare_cargo_vendor",
+    srcs = ["scripts/prepare-cargo-vendor.py"],
+    deps = ["@ctx_tomli//:lib"],
+    main = "scripts/prepare-cargo-vendor.py",
+)
+
+sh_binary(
+    name = "cargo_fixit",
+    srcs = ["scripts/cargo-fixit.sh"],
+    args = [
+        "--ctx-tool-bin",
+        "$(rootpath @ctx_cargo_tools//:cargo-fixit__cargo-fixit)",
+        "$(rootpath //tools/bazel:pinned_cargo)",
+        "$(rootpath //tools/bazel:pinned_rustc)",
+        ".",
+    ],
+    data = [
+        "@ctx_cargo_tools//:cargo-fixit__cargo-fixit",
+        "//tools/bazel:pinned_cargo",
+        "//tools/bazel:pinned_rustc",
+    ],
+    tags = [
+        "manual",
+        "tool",
+    ],
+)
+
+non_rust_gate(
+    name = "cargo_shear_check",
+    args = [
+        "--ctx-tool-bin",
+        "$(rootpath @ctx_cargo_tools//:cargo-shear__cargo-shear)",
+        "$(rootpath //tools/bazel:pinned_cargo)",
+        "$(rootpath //tools/bazel:pinned_rustc)",
+        "$(rootpath :prepare_cargo_vendor)",
+        "$(rootpath //tools/bazel:workspace_cargo_vendor_sources)",
+        ".",
+    ],
+    data = CARGO_WORKSPACE_PACKAGE_DATA + [
+        "Cargo.lock",
+        "Cargo.toml",
+        "scripts/cargo-shear.sh",
+        "scripts/ci-common.sh",
+        "@ctx_cargo_tools//:cargo-shear__cargo-shear",
+        ":prepare_cargo_vendor",
+        "//tools/bazel:pinned_cargo",
+        "//tools/bazel:pinned_rustc",
+        "//tools/bazel:workspace_cargo_vendor_sources",
+    ],
+    tags = [
+        "dependency-hygiene",
+        "quality-gate",
+    ],
+)
+
 py_test(
     name = "rust_target_inventory_check",
     srcs = ["//tools/bazel:check_rust_target_inventory.py"],

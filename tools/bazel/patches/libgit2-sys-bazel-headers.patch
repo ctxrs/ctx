@@ -1,0 +1,35 @@
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -128,7 +128,11 @@ fn main() {
+     let windows = target.contains("windows");
+     let dst = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+     let include = dst.join("include");
+     let mut cfg = cc::Build::new();
++    let runfiles_root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
++        .parent()
++        .unwrap()
++        .to_path_buf();
+     fs::create_dir_all(&include).unwrap();
+ 
+     // Copy over all header files
+@@ -249,6 +253,9 @@ fn main() {
+         if let Some(path) = env::var_os("DEP_SSH2_INCLUDE") {
+             cfg.include(path);
+         }
++        cfg.include(runfiles_root.join(
++            "rules_rust++crate+ctx_cargo_tools__libssh2-sys-0.3.2/libssh2/include",
++        ));
+         features.push_str("#define GIT_SSH 1\n");
+         features.push_str("#define GIT_SSH_LIBSSH2 1\n");
+         features.push_str("#define GIT_SSH_LIBSSH2_MEMORY_CREDENTIALS 1\n");
+@@ -297,6 +304,9 @@ fn main() {
+     if let Some(path) = env::var_os("DEP_Z_INCLUDE") {
+         cfg.include(path);
+     }
++    cfg.include(
++        runfiles_root.join("rules_rust++crate+ctx_cargo_tools__libz-sys-1.1.29/src/zlib"),
++    );
+ 
+     if target.contains("apple") {
+         features.push_str("#define GIT_USE_ICONV 1\n");

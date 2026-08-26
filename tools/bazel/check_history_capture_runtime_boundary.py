@@ -60,7 +60,6 @@ EXPECTED_PROVIDER_DEPENDENCIES = {
     "ctx-history-source-io": {"path": "../ctx-history-source-io"},
     "serde": {"workspace": True},
     "serde_json": {"workspace": True},
-    "sha2": {"workspace": True},
     "thiserror": {"workspace": True},
 }
 EXPECTED_PROVIDER_DEV_DEPENDENCIES = {

@@ -11,6 +11,10 @@ rust-version.workspace = true
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["agent", "cli", "search"]
 
+[package.metadata.cargo-shear]
+# Bazel-only final-binary contracts consume these dev dependencies.
+ignored = ["assert_cmd", "predicates"]
+
 [[bin]]
 name = "ctx"
 path = "src/main.rs"
@@ -19,35 +23,19 @@ path = "src/main.rs"
 anyhow.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
-base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
-clap_mangen.workspace = true
 ctrlc.workspace = true
-ed25519-dalek.workspace = true
-jsonc-parser = { version = "0.33", features = ["serde", "serde_json"] }
-notify.workspace = true
-quick-xml.workspace = true
-ring.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
-semver.workspace = true
 sha2.workspace = true
-supports-unicode.workspace = true
-tar.workspace = true
 terminal_size.workspace = true
 thiserror.workspace = true
 toml_edit = "0.22"
 ureq = { version = "2.10", default-features = true }
 url.workspace = true
 unicode-width.workspace = true
-unicode-segmentation.workspace = true
 uuid.workspace = true
-xz2.workspace = true
-zeroize = { workspace = true, features = ["derive"] }
-zstd.workspace = true
 fs2 = "0.4.3"
 ctx-agent-application = { path = "../ctx-agent-application" }
 ctx-agent-integrations = { path = "../ctx-agent-integrations" }
@@ -68,27 +56,16 @@ ctx-terminal = { path = "../ctx-terminal" }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine" }
 
 [target.'cfg(unix)'.dependencies]
-flate2 = "1"
 libc.workspace = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-secret-service = { version = "5.1", default-features = false, features = ["rt-async-io-crypto-rust"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5", default-features = false, features = ["blocking-api"] }
-
 [target.'cfg(windows)'.dependencies]
-same-file = "1.0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 assert_cmd.workspace = true
 ctx-client-observability = { path = "../ctx-client-observability", features = ["test-support"] }
-ctx-daemon-service = { path = "../ctx-daemon-service", features = ["test-support"] }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine", features = ["test-support"] }
 ctx-history-refresh = { path = "../ctx-history-refresh", features = ["test-support"] }
-ctx-semantic-index = { path = "../ctx-semantic-index", features = ["test-support"] }
-ctx-semantic-model = { path = "../ctx-semantic-model", features = ["test-support"] }
 predicates.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
