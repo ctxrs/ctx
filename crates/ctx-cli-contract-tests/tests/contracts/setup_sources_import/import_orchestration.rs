@@ -10,6 +10,9 @@ use std::{
 #[path = "import_orchestration/relocation.rs"]
 mod relocation;
 
+#[path = "import_orchestration/missing_path.rs"]
+mod missing_path;
+
 struct SourceRefreshDaemon {
     child: Option<Child>,
 }

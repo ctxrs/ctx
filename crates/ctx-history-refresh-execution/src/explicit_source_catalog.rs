@@ -350,6 +350,12 @@ pub fn explicit_source_for_path(
     provider: Option<CaptureProvider>,
     custom_history_jsonl: bool,
 ) -> Result<ProviderSource> {
+    if !path
+        .try_exists()
+        .with_context(|| format!("check explicit source path {}", path.display()))?
+    {
+        return Err(anyhow!("import path does not exist: {}", path.display()));
+    }
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("approve explicit source path {}", path.display()))?;
     if metadata.file_type().is_symlink() {
