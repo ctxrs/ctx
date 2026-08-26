@@ -701,6 +701,10 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         &self.source_path
     }
 
+    pub fn authority_path(&self) -> &Path {
+        &self.authority_path
+    }
+
     pub fn authority(&self) -> &Arc<ProviderSourceRoot<E>> {
         &self.authority
     }

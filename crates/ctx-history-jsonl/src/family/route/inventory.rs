@@ -132,6 +132,7 @@ impl<E: JsonlFamilyError> JsonlFamilyInventory<E> {
         }
         members.sort_by(|left, right| left.source_path().cmp(right.source_path()));
         validate_unique_members(&members)?;
+        reconcile_duplicate_accepted_sources(&mut members)?;
         validate_unique_accepted_sources(&members)?;
         let observation = inventory_observation(provider, root, false, &authorities, &members)?;
         Ok(Self {
@@ -391,5 +392,110 @@ fn validate_unique_accepted_sources<E: JsonlFamilyError>(
             ));
         }
     }
+    Ok(())
+}
+
+/// Reconciles accepted physical leaves that resolve to the same logical source
+/// identity without aborting the whole provider route.
+///
+/// When several accepted leaves claim one logical source (for example two
+/// transcript files an adapter emitted with a colliding `SourceKey`), the
+/// inventory deterministically retains one leaf and quarantines the remaining
+/// duplicates. Retention is chosen by stable physical ordering -- the
+/// lexicographically smallest source path -- so the outcome never depends on
+/// volatile file metadata such as length or modification time, which would make
+/// the choice non-deterministic across separate discovery passes.
+///
+/// A genuine descriptor digest collision (distinct descriptors hashing to the
+/// same digest) remains an error because no member can be chosen safely.
+///
+/// Quarantined duplicates are recorded with a logical-source diagnostic but are
+/// deliberately *not* marked with `quarantined_source`. That marker would enter
+/// `rejected_quarantine_sources` and cause `capture` to filter the retained
+/// accepted leaf out of publication, defeating the purpose of the dedup.
+fn reconcile_duplicate_accepted_sources<E: JsonlFamilyError>(
+    members: &mut Vec<JsonlFamilyInventoryMember<E>>,
+) -> JsonlResult<(), E> {
+    use std::collections::HashMap;
+
+    let mut groups: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+    for (index, member) in members.iter().enumerate() {
+        if let JsonlFamilyInventoryMember::Accepted { leaf, .. } = member {
+            groups
+                .entry(leaf.source().exact_descriptor_digest())
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut duplicates: Vec<usize> = Vec::new();
+    for indices in groups.values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        let representative = match &members[indices[0]] {
+            JsonlFamilyInventoryMember::Accepted { leaf, .. } => leaf.source().clone(),
+            _ => unreachable!("duplicate group references an accepted member"),
+        };
+        let all_equal = indices.iter().all(|&index| match &members[index] {
+            JsonlFamilyInventoryMember::Accepted { leaf, .. } => {
+                leaf.source().exact_descriptor_eq(&representative)
+            }
+            _ => false,
+        });
+        if !all_equal {
+            return Err(E::invalid_payload(
+                "JSONL physical inventory contains a source descriptor digest collision".to_owned(),
+            ));
+        }
+        let mut keeper = indices[0];
+        for &index in &indices[1..] {
+            if members[index].source_path() < members[keeper].source_path() {
+                keeper = index;
+            }
+        }
+        for &index in indices {
+            if index != keeper {
+                duplicates.push(index);
+            }
+        }
+    }
+
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+
+    let mut taken = vec![false; members.len()];
+    for index in duplicates {
+        taken[index] = true;
+    }
+    let original = std::mem::take(members);
+    let mut rebuilt = Vec::with_capacity(original.len());
+    for (index, member) in original.into_iter().enumerate() {
+        if taken[index] {
+            let (identity, leaf) = match member {
+                JsonlFamilyInventoryMember::Accepted { identity, leaf } => (identity, leaf),
+                _ => unreachable!("duplicate index references an accepted member"),
+            };
+            let rejected = JsonlFamilyRejectedLeaf::bind_observed(
+                leaf.source_path().to_path_buf(),
+                leaf.authority_path().to_path_buf(),
+                leaf.observation().clone(),
+                leaf.binding().clone(),
+                0,
+            )
+            .with_logical_source_failure(
+                leaf.source().clone(),
+                "duplicate physical leaf resolved to an already-present logical source identity; quarantined",
+            );
+            rebuilt.push(JsonlFamilyInventoryMember::Quarantined {
+                identity,
+                leaf: rejected,
+            });
+        } else {
+            rebuilt.push(member);
+        }
+    }
+    *members = rebuilt;
     Ok(())
 }
