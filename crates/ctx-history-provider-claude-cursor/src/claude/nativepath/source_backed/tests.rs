@@ -1,5 +1,8 @@
 use std::{collections::HashMap, path::PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use ctx_history_capture_model::{ProviderRootDefinition, ProviderRootSourceIdentity};
 use ctx_history_core::{
     ActivityJsonCapture, ActivityTextCapture, LiteralFactKind, ProjectionContractError, TypedKey,
@@ -16,6 +19,64 @@ use super::{
     claude_annotation, parse_native_record, session_identity, session_typed_key, source_key,
     ClaudePhysicalLocator, ClaudeSessionKey,
 };
+
+#[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "the shared test runtime includes helpers this discovery-only test does not use"
+)]
+#[path = "../../../tests/runtime.rs"]
+mod runtime;
+
+#[test]
+#[cfg(unix)]
+fn claude_discovery_ignores_workflow_alias_with_independently_discovered_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let claude_home = temp.path().join(".claude");
+    let project = claude_home.join("projects/project");
+    let canonical_workflow = project.join("session-a/subagents/workflows/shared-workflow");
+    let canonical_agent = canonical_workflow.join("agent-worker.jsonl");
+    std::fs::create_dir_all(&canonical_workflow).unwrap();
+    std::fs::write(&canonical_agent, b"{\"type\":\"user\"}\n").unwrap();
+
+    let healthy_primary = project.join("session-b.jsonl");
+    std::fs::write(&healthy_primary, b"{\"type\":\"user\"}\n").unwrap();
+    let alias_parent = project.join("session-b/subagents/workflows");
+    std::fs::create_dir_all(&alias_parent).unwrap();
+    // Claude owns this alias, but its canonical target is independently
+    // discovered, so discovery ignores the alias instead of traversing or
+    // presenting it as a quarantined transcript.
+    symlink(&canonical_workflow, alias_parent.join("shared-workflow")).unwrap();
+
+    let inventory = super::claude_jsonl_adapter::<runtime::LowerTestRuntimeBinding>()
+        .discover(&claude_home)
+        .unwrap();
+    let mut accepted = inventory
+        .accepted_leaves()
+        .map(|leaf| {
+            (
+                leaf.source_path().to_path_buf(),
+                super::decode_binding(leaf)
+                    .unwrap()
+                    .key
+                    .provider_session_id(),
+            )
+        })
+        .collect::<Vec<_>>();
+    accepted.sort();
+
+    assert_eq!(
+        accepted,
+        [
+            (
+                canonical_agent,
+                "session-a/subagents/workflows/shared-workflow/agent-worker".to_owned(),
+            ),
+            (healthy_primary, "session-b".to_owned()),
+        ]
+    );
+    assert_eq!(inventory.quarantined_len(), 0);
+}
 
 fn canonical_identity_hex(identity: ctx_history_core::StableEntityId) -> String {
     use std::fmt::Write as _;

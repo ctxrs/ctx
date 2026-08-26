@@ -10,8 +10,9 @@ use std::{
 use tempfile::TempDir;
 
 use crate::{
-    open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
-    ProviderSourceDirectory, SourceIoError, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+    is_non_regular_source_rejection, is_symlink_source_rejection, open_provider_source_path,
+    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory, SourceIoError,
+    PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
 };
 
 const BOUNDED_TREE_MAX_DIRECTORY_DEPTH: usize = 128;
@@ -65,9 +66,15 @@ where
     })
 }
 
-/// Visits a tree while containing admission/read failures for selected child
-/// files. Root and directory-enumeration failures remain fatal because no
-/// independent source boundary has been established for them.
+/// Visits a tree while containing admission/read failures for selected files.
+///
+/// Unselected symlink, reparse, and non-regular children are never followed and
+/// are skipped. Other unselected open failures stay fatal because they may hide
+/// a genuine directory subtree.
+///
+/// Root-open and directory-enumeration failures stay fatal. Neither names a
+/// selected child to contain, and an enumeration that stops early would drop
+/// files silently.
 pub fn visit_bounded_tree_files_isolating_selected<E, Selected>(
     root: &Path,
     selected: &mut Selected,
@@ -151,6 +158,12 @@ where
             Ok(opened) => opened,
             Err(error) if is_selected => {
                 selected_file_error(&child_path, error.into())?;
+                return Ok(());
+            }
+            Err(error)
+                if is_symlink_source_rejection(&error)
+                    || is_non_regular_source_rejection(&error) =>
+            {
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
@@ -829,6 +842,74 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(visited, [OsString::from("a-healthy.jsonl")]);
         assert_eq!(failures, [OsString::from("b-rejected.jsonl")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejected_child_directory_is_isolated_from_healthy_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tree");
+        let reachable = root.join("a-reachable");
+        fs::create_dir_all(&reachable).unwrap();
+        fs::write(reachable.join("kept.jsonl"), b"{}\n").unwrap();
+        // A symlinked directory carries no `.jsonl` extension, so selection
+        // never claims it and the traversal used to fail the entire scan here.
+        symlink(&reachable, root.join("b-linked-dir")).unwrap();
+        fs::write(root.join("c-kept.jsonl"), b"{}\n").unwrap();
+
+        let mut visited = Vec::new();
+        let mut isolated = 0;
+        let count = visit_bounded_tree_files_isolating_selected(
+            &root,
+            &mut |candidate| candidate.path().extension() == Some(OsStr::new("jsonl")),
+            &mut |source_file| {
+                visited.push(source_file.path().file_name().unwrap().to_owned());
+                Ok::<(), SourceIoError>(())
+            },
+            &mut |_path, _error| {
+                isolated += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 2);
+        visited.sort();
+        assert_eq!(
+            visited,
+            [OsString::from("c-kept.jsonl"), OsString::from("kept.jsonl")]
+        );
+        assert_eq!(isolated, 0);
+    }
+
+    #[test]
+    fn ordinary_unselected_child_open_failure_is_fatal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tree");
+        let raced = root.join("raced-away");
+        fs::create_dir_all(&raced).unwrap();
+        let mut isolated = 0;
+
+        let error = visit_bounded_tree_files_isolating_selected(
+            &root,
+            &mut |candidate| {
+                if candidate.path() == raced {
+                    fs::remove_dir(&raced).unwrap();
+                }
+                false
+            },
+            &mut |_| Ok::<(), SourceIoError>(()),
+            &mut |_path, _error| {
+                isolated += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, SourceIoError::Io(error) if error.kind() == io::ErrorKind::NotFound)
+        );
+        assert_eq!(isolated, 0);
     }
 
     #[test]
