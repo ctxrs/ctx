@@ -20,6 +20,10 @@ path = "tests/index.rs"
 name = "stats"
 path = "tests/stats.rs"
 
+[[test]]
+name = "grok_build"
+path = "tests/grok_build.rs"
+
 [dev-dependencies]
 anstream.workspace = true
 assert_cmd.workspace = true
